@@ -42,4 +42,26 @@
   enterShell = ''
     export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v xcbuild | paste -sd: -)
   '';
+
+  # Project tasks. Run with `devenv tasks run <name>`, list with
+  # `devenv tasks list`. All tasks inherit the env + PATH fixes above.
+  tasks = {
+    "optminus:run" = {
+      description = "Run the CLI: enumerate connected Logitech HID++ devices.";
+      exec = "cargo run -p optminus-cli -- list";
+    };
+    "optminus:gui" = {
+      description = "Run the GPUI desktop window.";
+      exec = "cargo run -p optminus-gui";
+    };
+    "optminus:check" = {
+      description = "Pre-commit check: fmt --check, clippy -D warnings, tests. Mirrors CI.";
+      exec = ''
+        set -e
+        cargo fmt --all -- --check
+        cargo clippy --workspace --all-targets -- -D warnings
+        cargo test --workspace
+      '';
+    };
+  };
 }
