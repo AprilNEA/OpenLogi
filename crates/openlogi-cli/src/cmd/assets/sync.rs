@@ -23,8 +23,6 @@ const DEFAULT_BASE: &str = "https://assets.openlogi.org";
 /// is the fallback render when the device's variant isn't cached.
 const REQUIRED_FILES: &[&str] = &["core_metadata.json", "manifest.json", "front_core.png"];
 
-const INDEX_NAME: &str = "index.json";
-
 /// Returns true when `name` is a front-view colour variant PNG
 /// (`front_ext_1.png`, `front_ext_2.png`, …). The depot also ships
 /// `side_*` and `back_*` renders — those stay remote until a future
@@ -52,9 +50,7 @@ pub fn run(args: SyncArgs) -> Result<()> {
     let base = base.trim_end_matches('/').to_string();
     fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
 
-    let (raw, index) = http::fetch_index_raw(&base)?;
-    let index_path = out.join(INDEX_NAME);
-    fs::write(&index_path, &raw).with_context(|| format!("write {}", index_path.display()))?;
+    let index = http::fetch_index_to_dir(&base, &out)?;
     println!("index.json: {} devices", index.devices.len());
 
     // Prune orphans so the bundle stays in sync with the registry.
@@ -102,8 +98,7 @@ pub fn run(args: SyncArgs) -> Result<()> {
                 cache_hits += 1;
                 continue;
             }
-            let bytes = http::fetch_file(&base, &entry.asset_path, &file_entry.name)?;
-            fs::write(&dst, &bytes).with_context(|| format!("write {}", dst.display()))?;
+            http::fetch_file_to_dir(&base, &entry.asset_path, &dir, &file_entry.name)?;
             fetched += 1;
             println!("  {depot}/{} ({} B)", file_entry.name, file_entry.bytes);
         }

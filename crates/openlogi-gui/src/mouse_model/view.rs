@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, Context, ElementId, Entity, FontWeight,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Render, RenderOnce,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, RenderOnce,
     StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, ease_in_out, hsla,
     img, px, rgb,
 };
@@ -466,15 +466,20 @@ impl RenderOnce for HotspotTrigger {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let highlighted = self.hovered || self.selected;
         let view = self.view;
-        let btn = self.hotspot.id;
+        let hotspot = self.hotspot;
+        let btn = hotspot.id;
 
-        // Relative-positioned, fills its parent (the wrapper div in
-        // `hotspot_popover` carries the absolute positioning). Without
-        // explicit width/height the gpui-component popover wrapper would
-        // collapse to 0×0 and never receive clicks.
+        // Explicit pixel dimensions, not `.size_full()`. gpui-component's
+        // Popover wraps the trigger in a `div().child(trigger)` with no
+        // explicit size — that div sizes to its child. If the child is
+        // `.size_full()`, the resolved size is 0×0 (no parent reference
+        // for the percentage) and the popover's `on_mouse_down` never
+        // receives clicks. Painting explicit pixels gives the popover's
+        // wrapper a real hit-test region.
         div()
             .id(self.id)
-            .size_full()
+            .w(px(hotspot.w))
+            .h(px(hotspot.h))
             .rounded_md()
             .border_2()
             .border_color(if highlighted {
@@ -497,6 +502,12 @@ impl RenderOnce for HotspotTrigger {
                     }
                     cx.notify();
                 });
+            })
+            // Diagnostic only — confirms clicks reach the hotspot trigger.
+            // Does not stop_propagation so the surrounding Popover can still
+            // observe the same event and toggle open.
+            .on_mouse_down(MouseButton::Left, move |_ev: &MouseDownEvent, _window, _cx| {
+                tracing::info!(?btn, "hotspot click reached trigger");
             })
     }
 }

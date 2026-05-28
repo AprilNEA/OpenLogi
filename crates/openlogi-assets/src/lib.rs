@@ -16,8 +16,8 @@ pub mod manifest;
 pub mod metadata;
 
 pub use http::{
-    cached_matches, fetch_file, fetch_index, fetch_index_raw, read_bytes, sha256_hex,
-    sha256_of_file,
+    cached_matches, fetch_file, fetch_file_to_dir, fetch_index, fetch_index_raw,
+    fetch_index_to_dir, read_bytes, sha256_hex, sha256_of_file,
 };
 pub use index::{DeviceEntry, FileEntry, Index};
 pub use manifest::{DepotManifest, ManifestDevice, ManifestResource, variant_model_id};

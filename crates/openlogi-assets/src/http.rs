@@ -9,6 +9,7 @@ use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use tracing::debug;
 
@@ -22,6 +23,12 @@ const USER_AGENT: &str = concat!(
 
 /// Filename of the registry at the asset host's root.
 const INDEX_NAME: &str = "index.json";
+
+/// Load and parse a JSON document from disk.
+pub(crate) fn load_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    let bytes = read_bytes(path)?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+}
 
 /// GET `<base>/index.json` and parse it.
 pub fn fetch_index(base: &str) -> Result<Index> {
@@ -40,6 +47,14 @@ pub fn fetch_index_raw(base: &str) -> Result<(Vec<u8>, Index)> {
     Ok((body, parsed))
 }
 
+/// Fetch `<base>/index.json`, write it into `dir`, and return the parsed index.
+pub fn fetch_index_to_dir(base: &str, dir: &Path) -> Result<Index> {
+    let (raw, index) = fetch_index_raw(base)?;
+    let local = dir.join(INDEX_NAME);
+    fs::write(&local, &raw).with_context(|| format!("write {}", local.display()))?;
+    Ok(index)
+}
+
 /// GET a per-depot file, e.g.
 /// `fetch_file("https://assets.openlogi.org", "v1/devices/mx_master_4/", "front_core.png")`.
 pub fn fetch_file(base: &str, asset_path: &str, name: &str) -> Result<Vec<u8>> {
@@ -48,6 +63,14 @@ pub fn fetch_file(base: &str, asset_path: &str, name: &str) -> Result<Vec<u8>> {
     let url = format!("{base}/{asset_path}{name}");
     debug!(%url, "fetching file");
     get_bytes(&url)
+}
+
+/// Fetch a per-depot file into `dir`, returning the number of bytes written.
+pub fn fetch_file_to_dir(base: &str, asset_path: &str, dir: &Path, name: &str) -> Result<usize> {
+    let dst = dir.join(name);
+    let bytes = fetch_file(base, asset_path, name)?;
+    fs::write(&dst, &bytes).with_context(|| format!("write {}", dst.display()))?;
+    Ok(bytes.len())
 }
 
 /// Raw bytes of `path`. Avoid for very large files — held entirely in

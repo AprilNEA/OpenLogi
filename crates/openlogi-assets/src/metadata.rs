@@ -39,6 +39,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::http;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Metadata {
     pub images: Vec<ImageEntry>,
@@ -81,8 +83,7 @@ pub struct Direction {
 
 impl Metadata {
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
-        let bytes = std::fs::read(path)?;
-        Ok(serde_json::from_slice(&bytes)?)
+        http::load_json(path)
     }
 
     /// Image dimensions (use the `device_image` entry — both entries

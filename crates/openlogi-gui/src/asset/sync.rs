@@ -8,11 +8,11 @@
 //! and ultimately to the synthetic silhouette.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use openlogi_assets::http;
-use openlogi_assets::{DepotManifest, DeviceEntry, Index, variant_model_id};
+use openlogi_assets::{DepotManifest, DeviceEntry, variant_model_id};
 use openlogi_core::device::DeviceModelInfo;
 use tracing::{debug, info, warn};
 
@@ -27,8 +27,6 @@ pub const DEFAULT_BASE: &str = "https://assets.openlogi.org";
 /// HID++ `extended_model_id` → colour variant lookup. The variant PNG
 /// itself is fetched in a second pass after the manifest is on disk.
 const FETCH_FILES: &[&str] = &["core_metadata.json", "manifest.json", "front_core.png"];
-
-const INDEX_FILE: &str = "index.json";
 
 /// Whether the startup HTTP sync should run on this launch.
 ///
@@ -56,7 +54,7 @@ pub fn sync(server: &str, models: &[DeviceModelInfo]) -> Result<()> {
     fs::create_dir_all(&cache_root)
         .with_context(|| format!("create cache root {}", cache_root.display()))?;
 
-    let index = match refresh_index(server, &cache_root) {
+    let index = match http::fetch_index_to_dir(server, &cache_root) {
         Ok(idx) => idx,
         Err(e) => {
             warn!(error = ?e, "index.json fetch failed — proceeding with cached files");
@@ -94,14 +92,6 @@ pub fn sync(server: &str, models: &[DeviceModelInfo]) -> Result<()> {
     }
     info!(devices = targets.len(), "asset sync complete");
     Ok(())
-}
-
-fn refresh_index(server: &str, cache_root: &Path) -> Result<Index> {
-    let (raw, index) = http::fetch_index_raw(server)?;
-    let local = cache_root.join(INDEX_FILE);
-    fs::write(&local, &raw).with_context(|| format!("write {}", local.display()))?;
-    debug!(devices = index.devices.len(), "index.json refreshed");
-    Ok(index)
 }
 
 fn sync_depot(
@@ -144,7 +134,7 @@ fn fetch_to_cache(
     entry: &DeviceEntry,
     name: &str,
 ) -> Result<()> {
-    let dst: PathBuf = dir.join(name);
+    let dst = dir.join(name);
     if let Some(file_entry) = entry.files.iter().find(|f| f.name == name) {
         if http::cached_matches(&dst, &file_entry.sha256) {
             debug!(file = name, "cache hit");
@@ -156,9 +146,8 @@ fn fetch_to_cache(
             "registry lists no entry — fetching without sha verify"
         );
     }
-    let bytes = http::fetch_file(server, asset_path, name)?;
-    fs::write(&dst, &bytes).with_context(|| format!("write {}", dst.display()))?;
-    info!(file = name, bytes = bytes.len(), "downloaded");
+    let bytes = http::fetch_file_to_dir(server, asset_path, dir, name)?;
+    info!(file = name, bytes, "downloaded");
     Ok(())
 }
 

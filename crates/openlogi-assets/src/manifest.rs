@@ -41,6 +41,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::http;
+
 /// Top-level `manifest.json` document.
 #[derive(Debug, Deserialize)]
 pub struct DepotManifest {
@@ -67,8 +69,7 @@ pub struct ManifestResource {
 impl DepotManifest {
     /// Load and parse a `manifest.json` from disk.
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
-        let bytes = std::fs::read(path)?;
-        Ok(serde_json::from_slice(&bytes)?)
+        http::load_json(path)
     }
 
     /// Returns the `device_image` filename for the variant matching

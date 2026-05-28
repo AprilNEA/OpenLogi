@@ -27,6 +27,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::http;
+
 #[derive(Debug, Deserialize)]
 pub struct Index {
     pub schema_version: u32,
@@ -54,8 +56,7 @@ pub struct FileEntry {
 
 impl Index {
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
-        let bytes = std::fs::read(path)?;
-        Ok(serde_json::from_slice(&bytes)?)
+        http::load_json(path)
     }
 
     /// Find the depot whose `modelId` matches `model_id` exactly.
