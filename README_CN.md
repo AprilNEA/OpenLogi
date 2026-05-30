@@ -1,11 +1,11 @@
 <h4 align="right"><a href="README.md">English</a> | <strong>简体中文</strong></h4>
 
-<!--<p align="center">
-    <img src= width=138/>
-</p>-->
+<p align="center">
+    <img src="design/icon/openlogi.png" width="138" alt="OpenLogi"/>
+</p>
 
 <h1 align="center">OpenLogi</h1>
-<p align="center"><strong>轻量、本地优先、开源的罗技 HID++ 外设伴侣应用。</strong></p>
+<p align="center"><strong>⚡️ 原生、本地优先的 Logitech Options+ 替代品，用 Rust 编写 🦀 —— 通过 HID++ 重映射按键、调节 DPI 与 SmartShift。无账号、无遥测。</strong></p>
 
 
 <div align="center">

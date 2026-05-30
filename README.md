@@ -1,11 +1,11 @@
 <h4 align="right"><strong>English</strong> | <a href="README_CN.md">简体中文</a></h4>
 
-<!--<p align="center">
-    <img src= width=138/>
-</p>-->
+<p align="center">
+    <img src="design/icon/openlogi.png" width="138" alt="OpenLogi"/>
+</p>
 
 <h1 align="center">OpenLogi</h1>
-<p align="center"><strong>Lightweight, Local-first, alternative to Logi Options+</strong></p>
+<p align="center"><strong>⚡️ A native, local-first alternative to Logitech Options+, written in Rust 🦀 — remap buttons, DPI, and SmartShift over HID++. No account, no telemetry.</strong></p>
 
 
 <div align="center">
