@@ -10,13 +10,18 @@
 //! XDG autostart on Linux and the Windows `Run` registry key are future
 //! work tracked by the broader "P2.2 follow-up" item in PLAN.md.
 
-use std::io;
-use std::path::PathBuf;
+use tracing::debug;
 
-use tracing::{debug, info, warn};
+#[cfg(target_os = "macos")]
+use std::io;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use tracing::{info, warn};
 
 /// Stable launch-agent identifier — matches the bundle id in
 /// `crates/openlogi-gui/Cargo.toml [package.metadata.bundle]`.
+#[cfg(target_os = "macos")]
 const LABEL: &str = "org.openlogi.openlogi";
 
 /// Reconcile the on-disk `LaunchAgent` plist with `enabled`. Idempotent:

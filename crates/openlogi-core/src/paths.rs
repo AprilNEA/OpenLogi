@@ -73,12 +73,11 @@ pub fn data_dir() -> Result<PathBuf, PathsError> {
     xdg_base(std::env::var_os("XDG_DATA_HOME"), &[".local", "share"])
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn absolute_xdg_override_is_used_verbatim() {
         let dir = xdg_base(Some("/tmp/xdg-config".into()), &[".config"])
@@ -86,7 +85,6 @@ mod tests {
         assert_eq!(dir, PathBuf::from("/tmp/xdg-config/openlogi"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn relative_xdg_value_is_ignored_per_spec() {
         // A relative $XDG_*_HOME is invalid, so this must fall back to
