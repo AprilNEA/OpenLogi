@@ -16,22 +16,11 @@ tracing = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { workspace = true }
 core-foundation = { workspace = true }
-# NSWorkspace shim for foreground-app detection (P1.4). cocoa pulls objc
-# transitively; pinning the same version openlogi-gui sees keeps cargo
-# from compiling two `objc` crates.
 cocoa = "0.26"
 objc = "0.2"
 
-# Cannot inherit workspace lints while overriding unsafe_code, so we reproduce
-# the workspace lint set here and change only unsafe_code to "allow". The crate
-# uses a narrow unsafe surface (CGEventTap internals + AX FFI) documented with
-# SAFETY comments.
 [lints.rust]
 unsafe_code = "allow"
-# Suppress `unexpected_cfgs` from objc 0.2's macros: the crate references
-# the obsolete `cfg(feature = "cargo-clippy")` form. Harmless and outside
-# our control — the alternative is bumping to objc2 which is a separate
-# day's work.
 unexpected_cfgs = { level = "allow", check-cfg = [] }
 
 [lints.clippy]

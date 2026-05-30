@@ -1,13 +1,3 @@
-//! Centre-of-screen mouse silhouette with clickable hotspots and side
-//! labels connected by leader lines.
-//!
-//! Per UI.md phases 6 (silhouette + hotspots), 7 (labels + leader lines),
-//! and 8 (breathing). When a [`ResolvedAsset`] is supplied by the asset
-//! cache the synthetic silhouette is replaced by the real device PNG and
-//! the hotspot/label positions come from the Logitech-format
-//! `core_metadata.json`. Without an asset, we fall back to the original
-//! shape-based silhouette plus [`default_hotspots`] / [`default_labels`].
-
 use std::time::Duration;
 
 use gpui::{
@@ -27,43 +17,27 @@ use crate::mouse_model::picker::{action_picker, gesture_picker};
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette};
 
-// Side-gutter geometry. Labels sit on the *left* of the mouse so the right
-// half of the window is free for the DPI / gesture config column.
 const SIDE_W: f32 = 180.;
 const SIDE_GAP: f32 = 24.;
 const LABEL_W: f32 = 156.;
-// 56 px clears the two-line content (text-xs name + text-sm binding plus
-// py-2 padding) without the bottom border slicing through the binding text.
-// 44 was the exact content height and produced a "strikethrough" look on
-// the binding row.
 const LABEL_H: f32 = 56.;
 
-/// Horizontal distance from the mouse silhouette's edge to the nearer
-/// edge of a label card. Leader lines terminate at this offset so they
-/// touch the card without crossing into the text.
 const CARD_EDGE_INSET: f32 = SIDE_GAP + (SIDE_W - LABEL_W);
 
-/// Approx pixel width of each hotspot hit-target. Logitech only gives us a
-/// marker point per button, not a rectangle, so we size by hand.
 const ASSET_HOTSPOT: f32 = 56.;
 
-/// Diameter of the always-visible marker dot at each hotspot's centre. The
-/// surrounding [`ASSET_HOTSPOT`] square stays as a transparent hit area so
-/// clicks remain forgiving.
 const HOTSPOT_DOT: f32 = 12.;
 
-/// Vertical amplitude of the breathing loop. Two pixels reads as a soft
-/// rise/fall without feeling unstable.
 const BREATH_AMPLITUDE: f32 = 2.0;
 
+/// Interactive mouse model with button hotspots.
 pub struct MouseModelView {
     hovered: Option<ButtonId>,
-    /// Repaints when the carousel switches devices. Held by value so the
-    /// subscription stays alive for the entity's lifetime.
     _state_obs: Subscription,
 }
 
 impl MouseModelView {
+    /// Create the mouse model view.
     pub fn new(cx: &mut Context<Self>) -> Self {
         let state_obs = cx.observe_global::<AppState>(|_view, cx| cx.notify());
         Self {
@@ -81,9 +55,6 @@ impl Render for MouseModelView {
                   making any single piece clearer"
     )]
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Pull everything that depends on the active device out of AppState
-        // up front. Cloning is cheap (small structs, single small Vec) and it
-        // releases the global borrow before the GPUI builders below.
         let (asset, active, bindings) = cx
             .try_global::<AppState>()
             .map(|s| {
@@ -115,9 +86,6 @@ impl Render for MouseModelView {
         let hovered = self.hovered;
         let pal = theme::palette(cx);
 
-        // The canvas closure takes ownership of one copy of hotspots/labels;
-        // clone here so the outer label_card and hotspot_popover loops can
-        // iterate over their own.
         let hotspots_outer = hotspots.clone();
         let labels_outer = labels.clone();
         let leader_canvas = canvas(
@@ -140,12 +108,6 @@ impl Render for MouseModelView {
         )
         .size_full();
 
-        // Breathing animation lives on a dedicated layer *behind* the
-        // hotspot popovers. `.with_animation` rebuilds the wrapped
-        // element each frame, which knocks gpui-component Popover's
-        // keyed-state + deferred-anchored painting off the rails. Hotspots
-        // stay in their own non-animated container; only the device PNG
-        // (or synthetic silhouette) breathes.
         let device_art: AnyElement = match asset.as_ref() {
             Some(a) => img(a.image_path.clone())
                 .w(px(mouse_w))
@@ -183,12 +145,6 @@ impl Render for MouseModelView {
                     .map(|(idx, hotspot)| hotspot_popover(idx, *hotspot, hovered, active, &view)),
             );
 
-        // z-order, bottom → top:
-        //   1. device PNG (so leader lines don't disappear under the mouse)
-        //   2. leader_canvas (lines over the PNG)
-        //   3. label cards (so a line that grazes the card terminates
-        //      cleanly behind the label instead of striking through it)
-        //   4. hotspots (top, for hit-testing + popovers)
         div()
             .relative()
             .w(px(canvas_w))
@@ -196,8 +152,6 @@ impl Render for MouseModelView {
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
-                // GestureButton has 5 sub-bindings, not one — surface that
-                // up front so the label isn't lying about what's bound.
                 let binding = if label.id == ButtonId::GestureButton {
                     "5 directions".to_string()
                 } else {
@@ -331,8 +285,6 @@ fn labels_from_hotspots(hotspots: &[Hotspot]) -> Vec<Label> {
     let mouse_h = MOUSE_MODEL_SIZE.1;
     let step = mouse_h / (hotspots.len() as f32 + 1.);
 
-    // Sort indices by hotspot center y; the resulting rank is the slot
-    // each label occupies on the left gutter.
     let mut ranks: Vec<usize> = (0..hotspots.len()).collect();
     ranks.sort_by(|&a, &b| {
         hotspots[a]
@@ -562,12 +514,6 @@ fn hotspot_popover(
     active: Option<ButtonId>,
     view: &Entity<MouseModelView>,
 ) -> AnyElement {
-    // Position the Popover wrapper, not the trigger. gpui-component's
-    // Popover renders its trigger inside a parent div that carries the
-    // `on_mouse_down` handler; if the trigger is `.absolute()`, the
-    // wrapper div collapses to 0×0 and clicks never hit the handler.
-    // The trigger sizes itself in explicit px (see HotspotTrigger),
-    // and the wrapper here carries the absolute positioning.
     let view = view.clone();
     let trigger = HotspotTrigger {
         id: ("hotspot-trigger", idx).into(),
@@ -625,17 +571,6 @@ impl RenderOnce for HotspotTrigger {
         let hotspot = self.hotspot;
         let btn = hotspot.id;
 
-        // Explicit pixel dimensions, not `.size_full()`. gpui-component's
-        // Popover wraps the trigger in a `div().child(trigger)` with no
-        // explicit size — that div sizes to its child. If the child is
-        // `.size_full()`, the resolved size is 0×0 (no parent reference
-        // for the percentage) and the popover's `on_mouse_down` never
-        // receives clicks. Painting explicit pixels gives the popover's
-        // wrapper a real hit-test region.
-        //
-        // The outer 56×56 stays transparent so the cursor finds the
-        // popover from a generous radius; the visible marker is a small
-        // always-on dot centred inside.
         div()
             .id(self.id)
             .flex()
@@ -643,9 +578,6 @@ impl RenderOnce for HotspotTrigger {
             .justify_center()
             .w(px(hotspot.w))
             .h(px(hotspot.h))
-            // Marker dot: dark core + thin light ring. The two-tone helps
-            // it read on both the light grey mouse top and any darker
-            // shadow areas; a plain mid-grey washed out on the light PNG.
             .child(
                 div()
                     .w(px(HOTSPOT_DOT))

@@ -9,16 +9,11 @@ authors.workspace = true
 description = "Asset registry schema + blocking HTTP fetch helpers for the assets.openlogi.org device asset host. Shared by openlogi-cli (bundle sync) and openlogi-gui (runtime cache)."
 
 [dependencies]
-# Registry + per-device metadata are JSON.
 serde = { workspace = true }
 serde_json = { workspace = true }
-# Blocking HTTP for asset fetch. rustls keeps the build hermetic.
 ureq = { workspace = true }
-# SHA-256 for cache validation.
 sha2 = { workspace = true }
-# Single error sink; callers translate as needed.
 anyhow = { workspace = true }
-# Structured logging — no subscriber registered here.
 tracing = { workspace = true }
 
 [lints]

@@ -10,18 +10,11 @@ description = "HID++ device discovery for OpenLogi, wrapping the hidpp crate ove
 
 [dependencies]
 openlogi-core = { path = "../openlogi-core" }
-# HID++ protocol implementation (the reason this project exists).
 hidpp = { workspace = true }
-# HID transport. The hidpp crate is transport-agnostic; this is the well-trodden pairing.
 async-hid = { workspace = true }
-# Async runtime primitives (Mutex). The hidpp crate uses async-channel internally
-# and is runtime-agnostic; we only need tokio for the reader/writer Mutex pair.
 tokio = { workspace = true }
-# StreamExt for HidBackend::enumerate(). Lighter than the full `futures` crate.
 futures-lite = { workspace = true }
-# Typed library errors.
 thiserror = { workspace = true }
-# Structured logging.
 tracing = { workspace = true }
 
 [lints]

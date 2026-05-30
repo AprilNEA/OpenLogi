@@ -52,9 +52,6 @@ use crate::state::{AppState, DpiCycleState};
 fn main() -> Result<()> {
     init_tracing();
 
-    // P2.3: refuse a second copy. If the lock is held we exit non-error so
-    // the user's launcher (Dock click, Spotlight, `open -a OpenLogi`) doesn't
-    // surface a scary crash dialog.
     let _guard = match single_instance::acquire() {
         Ok(g) => g,
         Err(single_instance::InstanceError::AlreadyRunning { path }) => {
@@ -67,9 +64,6 @@ fn main() -> Result<()> {
         Err(e) => return Err(anyhow::Error::from(e).context("single-instance check")),
     };
 
-    // P2.2: keep the LaunchAgent in sync with the user's autostart preference.
-    // Cheap (one fs read + maybe write), failures are logged inside.
-    // P2.8: fire the opt-in update check from the same early-config snapshot.
     let early_config = Config::load_or_default().ok();
     if let Some(cfg) = early_config.as_ref() {
         launch_agent::reconcile(cfg.app_settings.launch_at_login);
@@ -78,10 +72,6 @@ fn main() -> Result<()> {
 
     let inventories = enumerate_blocking().context("HID enumeration failed")?;
 
-    // Refresh / fetch device assets up front so the AssetCache the GUI
-    // reads finds the right files on disk. Release builds normally skip
-    // the sync because the .app ships pre-populated; debug builds always
-    // run it. Either default is overridable via `OPENLOGI_SYNC=on/off`.
     let probe_cache = asset::AssetCache::new();
     if asset::sync::should_run(probe_cache.has_bundle_root()) {
         let server = std::env::var("OPENLOGI_ASSETS")
@@ -93,41 +83,17 @@ fn main() -> Result<()> {
     }
     drop(probe_cache);
 
-    // Build the shared hook state from the on-disk config so the hook sees
-    // saved bindings + DPI presets from the first event, before AppState is
-    // initialised inside the GPUI thread. The Arcs are also handed into the
-    // AppState global (see `cx.open_window` below) so that subsequent
-    // `commit_binding` / `commit_dpi_presets` writes are visible to the hook
-    // callback without GPUI thread involvement.
     let (hook_bindings, dpi_cycle, initial_config) = load_config_and_bindings(&inventories);
-
-    // The OS hook is installed lazily from the drain loop the moment
-    // Accessibility is granted (see `accessibility_rx` below), so a user who
-    // grants permission while the app is running doesn't need to relaunch.
-    // These clones are what that late `start_hook` call captures.
     let hook_arcs = (Arc::clone(&hook_bindings), Arc::clone(&dpi_cycle));
 
-    // P1.6: poll for HID hot-plug / disconnect every 2s. Updates flow
-    // through `inventory_rx` into AppState::refresh_inventories below.
     let mut inventory_rx = inventory_watcher::spawn(std::time::Duration::from_secs(2));
-
-    // P1.4: poll for foreground-app changes every 1s. Empty channel on
-    // non-macOS — the loop below falls through.
     let mut app_rx = app_watcher::spawn(std::time::Duration::from_secs(1));
-
-    // Watch the macOS Accessibility grant so the gate auto-dismisses and the
-    // hook installs the instant the user toggles the checkbox.
     let mut accessibility_rx = accessibility_watcher::spawn(std::time::Duration::from_millis(1200));
 
     gpui_platform::application().run(move |cx| {
         gpui_component::init(cx);
         app_menu::install(cx);
 
-        // First launch without permission: proactively raise the native
-        // macOS Accessibility dialog (it carries an "Open System Settings"
-        // button and registers the app in the list) instead of waiting for
-        // the user to find the gate's button. macOS only shows this once per
-        // trust state, so the in-app gate remains the path on later launches.
         if !Hook::has_accessibility() {
             Hook::prompt_accessibility();
         }
@@ -150,12 +116,6 @@ fn main() -> Result<()> {
                 reason = "failure to open the main window is fatal; nothing useful to recover to"
             )]
             cx.open_window(options, move |window, cx| {
-                // Pre-set AppState with the hook-shared Arc BEFORE AppView::new
-                // runs. AppView::new checks `has_global::<AppState>()` and
-                // skips re-initialisation if the global is already present.
-                // `with_runtime_shared` rebuilds the binding map and writes
-                // back into the shared Arc, so the values match what the hook
-                // was already reading via `load_config_and_bindings`.
                 if !cx.has_global::<AppState>() {
                     let cache = asset::AssetCache::new();
                     cx.set_global(AppState::with_runtime_shared(
@@ -166,16 +126,10 @@ fn main() -> Result<()> {
                         dpi_cycle,
                     ));
                 }
-                // Match the OS appearance up front so the first paint is in
-                // the right mode (gpui_component::init defaults to Light).
-                // Both gpui-component's widgets and our hand-painted surfaces
-                // key off this — see theme::palette.
                 Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
 
                 let view = cx.new(|cx| AppView::new(&inventories, cx));
 
-                // Follow live OS light/dark switches. The subscription is
-                // parked on AppView so it lives as long as the window.
                 let appearance_obs = window.observe_window_appearance(|window, cx| {
                     Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
                 });
@@ -185,19 +139,6 @@ fn main() -> Result<()> {
             })
             .expect("opening the main window should not fail");
 
-            // Drain inventory + foreground-app updates for the lifetime of
-            // the app. Each event rebuilds the relevant slice of AppState
-            // and lets every observer (carousel, mouse model, DPI panel,
-            // hook thread) pick up the change.
-            //
-            // `tokio::select!` is unavailable inside gpui's executor (it
-            // needs the tokio reactor), so the two channels are polled with
-            // a hand-rolled biased race built from `futures_lite`'s pollster.
-            // The two streams produce events at human pace (≤ 1 Hz combined
-            // in steady state), so any reasonable scheduling fairness is
-            // good enough.
-            // Holds the OS hook once Accessibility is granted, keeping its
-            // background run-loop thread alive for the rest of the session.
             let mut hook_handle = None;
             loop {
                 tokio::select! {
@@ -218,11 +159,6 @@ fn main() -> Result<()> {
                     }
                     Some(granted) = accessibility_rx.recv() => {
                         if !granted {
-                            // Revoked while running: drop our handle so the
-                            // stale hook is stopped/joined and a later re-grant
-                            // reinstalls a fresh one. (The hook's own thread
-                            // also self-disables its tap — this is the UI-side
-                            // half: clear the handle + re-show the gate.)
                             hook_handle = None;
                         }
                         cx.update(|cx| {
@@ -231,8 +167,6 @@ fn main() -> Result<()> {
                                     state.accessibility_granted = granted;
                                 });
                             }
-                            // AppView doesn't observe AppState, so nudge a
-                            // repaint to re-evaluate the permission gate.
                             cx.refresh_windows();
                         });
                         if granted && hook_handle.is_none() {
@@ -248,9 +182,6 @@ fn main() -> Result<()> {
         .detach();
     });
 
-    // The OS hook (installed lazily in the drain loop) lives in the detached
-    // task's `_hook_handle`; its run-loop thread keeps running until the
-    // process exits, which is fine for a single-window app.
     Ok(())
 }
 
@@ -289,38 +220,24 @@ fn start_hook(bindings: BindingMap, dpi_cycle: Arc<RwLock<DpiCycleState>>) -> Op
         return None;
     }
 
-    let result = Hook::start(move |event| {
-        match event {
-            MouseEvent::Button { id, pressed } => {
-                // OpenLogi "owns" the side buttons: they're suppressed so the
-                // OS default (browser back/forward) never fires, and we
-                // synthesize the bound action ourselves on press. Primary
-                // clicks pass through to keep the OS default behaviour even
-                // though `default_binding` lists actions for them — rebinding
-                // Left/Middle requires the gesture-button work in P1.5.
-                let owned = matches!(id, ButtonId::Back | ButtonId::Forward);
-                if !owned {
-                    return EventDisposition::PassThrough;
-                }
-                if pressed {
-                    let action = bindings.read().ok().and_then(|g| g.get(&id).cloned());
-                    if let Some(action) = action {
-                        info!(button = %id, action = %action.label(), "button → executing bound action");
-                        dispatch_action(&action, &dpi_cycle);
-                    } else {
-                        info!(button = %id, "button pressed with no binding — suppressed");
-                    }
-                }
-                // Suppress both press and release so foreground apps never see
-                // an orphan event pair.
-                EventDisposition::Suppress
+    let result = Hook::start(move |event| match event {
+        MouseEvent::Button { id, pressed } => {
+            let owned = matches!(id, ButtonId::Back | ButtonId::Forward);
+            if !owned {
+                return EventDisposition::PassThrough;
             }
-            MouseEvent::Scroll { .. } => {
-                // Scroll events have no ButtonId binding yet; pass through.
-                // P1.2 (scroll inversion) will revisit.
-                EventDisposition::PassThrough
+            if pressed {
+                let action = bindings.read().ok().and_then(|g| g.get(&id).cloned());
+                if let Some(action) = action {
+                    info!(button = %id, action = %action.label(), "button → executing bound action");
+                    dispatch_action(&action, &dpi_cycle);
+                } else {
+                    info!(button = %id, "button pressed with no binding — suppressed");
+                }
             }
+            EventDisposition::Suppress
         }
+        MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
     });
 
     match result {
@@ -360,9 +277,6 @@ fn dispatch_action(action: &Action, dpi_cycle: &Arc<RwLock<DpiCycleState>>) {
             }
         },
         Action::ToggleSmartShift => {
-            // P1.1: SmartShift uses the same device target as DPI. Read
-            // the target from the shared cycle state instead of duplicating
-            // a SmartShiftState mirror.
             let target = dpi_cycle.read().ok().and_then(|g| g.target.clone());
             info!("SmartShift toggle → flipping wheel mode");
             toggle_smartshift_in_background(target);

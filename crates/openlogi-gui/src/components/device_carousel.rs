@@ -1,13 +1,3 @@
-//! Horizontally scrolling strip of device cards in the header.
-//!
-//! Each card shows one paired peripheral: name, kind, slot, battery, and a
-//! connectivity dot that breathes (connected), pulses fast (connecting), or
-//! sits still (offline). Clicking a card writes the selected index to
-//! [`AppState::current_device`] so subsequent panels can react.
-//!
-//! gpui-component does not ship a Carousel widget, so this is just an
-//! `h_flex` with horizontal scroll. Per UI.md Phase 3.
-
 use std::time::Duration;
 
 use gpui::{
@@ -55,20 +45,19 @@ struct CardData {
     battery: Option<BatteryInfo>,
 }
 
+/// Header carousel for paired devices.
 pub struct DeviceCarousel {
     cards: Vec<CardData>,
 }
 
 impl DeviceCarousel {
+    /// Build device cards from the current inventories.
     pub fn new(inventories: &[DeviceInventory], _cx: &mut Context<Self>) -> Self {
         let mut cards: Vec<CardData> = inventories
             .iter()
             .flat_map(|inv| inv.paired.iter().map(card_from_paired))
             .collect();
 
-        // UI.md Phase 3 calls for hard-coded placeholders when nothing real
-        // is around — keeps the carousel visible during development without
-        // a paired receiver.
         if cards.is_empty() {
             cards = demo_cards();
         }
@@ -126,10 +115,6 @@ fn card_view(
         .bg(pal.surface)
         .hover(|s| s.bg(pal.surface_hover))
         .on_click(move |_event, _window, cx| {
-            // `set_current_device` is the authoritative path: it reloads the
-            // bindings for the new device and persists the selection to
-            // config.toml. Out-of-range indices are no-ops, so the carousel
-            // doesn't need to bounds-check.
             cx.update_global::<AppState, _>(|state, _| state.set_current_device(idx));
             entity.update(cx, |_, cx| cx.notify());
         })
@@ -163,9 +148,6 @@ fn card_view(
         .into_any_element()
 }
 
-/// Status dot: idle for offline, soft breath for connected, fast blink for
-/// connecting. Animation is driven by `with_animation` and runs continuously
-/// while the card is in the tree.
 fn status_dot(status: Status) -> AnyElement {
     let base = div()
         .size(px(DOT_SIZE))

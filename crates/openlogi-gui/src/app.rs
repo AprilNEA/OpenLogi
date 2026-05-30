@@ -1,10 +1,3 @@
-//! Root view: header (device carousel), body (mouse model + side config),
-//! footer (settings / version).
-//!
-//! The body is now arranged per UI.md §1: the [`MouseModelView`] sits on
-//! the left, and the right column stacks the DPI panel + gesture pad
-//! (placeholders for the eventual multi-tab config panel).
-
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement, IntoElement,
     ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription, Window, div, px,
@@ -24,28 +17,20 @@ use crate::mouse_model::view::MouseModelView;
 use crate::state::AppState;
 use crate::theme::{self, FOOTER_H, HEADER_H, Palette};
 
+/// Root application view.
 pub struct AppView {
     carousel: Entity<DeviceCarousel>,
     mouse_model: Entity<MouseModelView>,
     dpi_panel: Entity<DpiPanel>,
     gesture_pad: Entity<GesturePad>,
-    /// Keeps the OS-appearance observer alive for the window's lifetime.
-    /// Set once by `main` right after the view is constructed (it needs the
-    /// `Window`, which `new` doesn't have). Never read — held only so the
-    /// subscription isn't dropped.
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
-    /// Session-only "skip" for the Accessibility permission gate, so a user
-    /// who only wants the HID++ features (DPI, SmartShift) isn't trapped on
-    /// the gate. Resets on relaunch; ignored once permission is granted.
     accessibility_dismissed: bool,
 }
 
 impl AppView {
+    /// Construct the root view and its child entities.
     pub fn new(inventories: &[DeviceInventory], cx: &mut Context<Self>) -> Self {
-        // Load persisted config first so the initial AppState reflects any
-        // saved bindings + the last-selected device. Malformed/unreadable
-        // files fall back to defaults with a warning rather than crash.
         let config = match Config::load_or_default() {
             Ok(c) => c,
             Err(e) => {
@@ -89,17 +74,11 @@ impl AppView {
         }
     }
 
-    /// Park the OS-appearance observer here so it outlives the call that
-    /// created it. Called once from `main` after the window exists.
+    /// Keep the OS-appearance observer alive.
     pub fn set_appearance_obs(&mut self, sub: Subscription) {
         self.appearance_obs = Some(sub);
     }
 
-    /// Full-window onboarding shown while macOS Accessibility is ungranted.
-    /// Explains why the permission is needed, links to System Settings, and
-    /// offers a session skip. The drain loop flips `accessibility_granted`
-    /// (and repaints) the moment the user toggles the checkbox, so this
-    /// disappears on its own.
     fn accessibility_gate(pal: Palette, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .size_full()
@@ -162,9 +141,6 @@ impl AppView {
     }
 }
 
-/// Raise the macOS Accessibility prompt (registers the app in the list) and
-/// open the matching System Settings pane. macOS-only by construction — the
-/// gate that calls this never shows on platforms where permission is implicit.
 fn open_accessibility_settings() {
     openlogi_hook::Hook::prompt_accessibility();
     if let Err(e) = std::process::Command::new("open")
@@ -179,10 +155,6 @@ impl Render for AppView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
 
-        // Gate the whole UI on Accessibility until granted (or skipped this
-        // session). Without it the OS hook can't capture any button, so
-        // remapping silently does nothing — the gate explains why and links
-        // straight to System Settings.
         let granted = cx
             .try_global::<AppState>()
             .is_none_or(|s| s.accessibility_granted);

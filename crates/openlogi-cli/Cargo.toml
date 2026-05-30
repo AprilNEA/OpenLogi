@@ -15,16 +15,10 @@ path = "src/main.rs"
 [dependencies]
 openlogi-core = { path = "../openlogi-core" }
 openlogi-hid = { path = "../openlogi-hid" }
-# Shared asset registry schema + HTTP fetch helpers (drives `openlogi
-# assets sync`).
 openlogi-assets = { path = "../openlogi-assets" }
-# Command-line parsing with derive.
 clap = { workspace = true }
-# Single error sink for the binary; libraries use thiserror.
 anyhow = { workspace = true }
-# Tokio runtime: drives the async HID enumeration. current-thread flavor is enough for v0.0.1.
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
-# Tracing + a printing subscriber for human-readable stderr output.
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
