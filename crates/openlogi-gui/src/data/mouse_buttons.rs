@@ -72,5 +72,39 @@ pub fn default_hotspots() -> Vec<Hotspot> {
             w: 70.,
             h: 40.,
         },
+        Hotspot {
+            id: ButtonId::GestureButton,
+            x: 8.,
+            y: 380.,
+            w: 44.,
+            h: 80.,
+        },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_hotspots_expose_the_gesture_button() {
+        let hotspots = default_hotspots();
+        assert!(
+            hotspots
+                .iter()
+                .any(|h| matches!(h.id, ButtonId::GestureButton)),
+            "the gesture button must be a mappable hotspot in the synthetic model"
+        );
+    }
+
+    #[test]
+    fn default_hotspots_omit_primary_clicks() {
+        let hotspots = default_hotspots();
+        assert!(
+            !hotspots
+                .iter()
+                .any(|h| matches!(h.id, ButtonId::LeftClick | ButtonId::RightClick)),
+            "primary clicks are not remappable and must stay out of the model"
+        );
+    }
 }

@@ -34,8 +34,25 @@ ureq.workspace = true
 rust-i18n = "4"
 sys-locale = "0.3.2"
 
-[lints]
-workspace = true
+# Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. Same crates the
+# openlogi-hook CGEventTap uses, so the toolchain is already proven here.
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"
+
+# Mirrors [workspace.lints], plus an allow for the legacy `cfg(cargo-clippy)`
+# check emitted by objc 0.2's macros (same as openlogi-hook). unsafe_code stays
+# denied; the menubar module opts in locally with #[expect(unsafe_code)].
+[lints.rust]
+unsafe_code = "deny"
+unexpected_cfgs = { level = "allow", check-cfg = [] }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+missing_errors_doc = "allow"
+doc_markdown = "allow"
 
 [package.metadata.bundle]
 name = "OpenLogi"

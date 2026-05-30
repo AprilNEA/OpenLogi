@@ -42,7 +42,7 @@ pub fn open(cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.settings,
         "Settings",
-        Size::new(px(520.), px(420.)),
+        Size::new(px(520.), px(360.)),
         SettingsView::new,
         cx,
     );
@@ -134,6 +134,8 @@ fn setting_row(
         .gap_4()
         .child(
             v_flex()
+                .flex_1()
+                .min_w(px(0.))
                 .gap_1()
                 .child(div().text_sm().child(title.into()))
                 .child(
@@ -146,11 +148,11 @@ fn setting_row(
         .child(control)
 }
 
-/// The language picker: a muted hint on the left, selectable locale chips on
-/// the right. The leading "Follow system" chip clears the stored preference
-/// (`None`); the rest pin an explicit locale from [`crate::i18n::SUPPORTED`].
-/// Selecting one switches the locale live, then repaints every window and the
-/// menu bar so the whole UI re-renders without a restart.
+/// The language picker: a muted hint above a wrapping row of locale chips. The
+/// leading "Follow system" chip clears the stored preference (`None`); the rest
+/// pin an explicit locale from [`crate::i18n::SUPPORTED`]. Selecting one
+/// switches the locale live, then repaints every window and the menu bar so the
+/// whole UI re-renders without a restart.
 fn language_row(
     current: Option<&str>,
     pal: Palette,
@@ -191,19 +193,18 @@ fn language_row(
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.update_global::<AppState, _>(|s, _| s.set_language(lang.clone()));
                     // `t!` reads the locale at render time, so a repaint is what
-                    // actually applies the switch; the menu bar is rebuilt
-                    // separately since it isn't part of any window's view tree.
+                    // actually applies the switch; the app menu and status item
+                    // aren't in any window's view tree, so re-title them too.
                     cx.refresh_windows();
                     crate::app_menu::rebuild(cx);
+                    crate::platform::menubar::refresh_labels();
                 }))
         })
         .collect();
 
-    h_flex()
+    v_flex()
         .w_full()
-        .items_center()
-        .justify_between()
-        .gap_4()
+        .gap_2()
         .child(
             div()
                 .text_xs()

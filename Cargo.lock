@@ -4411,11 +4411,13 @@ name = "openlogi-gui"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "cocoa 0.26.0",
  "fs4",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
  "gpui_platform",
+ "objc",
  "openlogi-assets",
  "openlogi-core",
  "openlogi-hid",

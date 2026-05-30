@@ -15,6 +15,17 @@ _version: 2
   ja: デバイスが接続されていません
   zh-CN: 未连接设备
   zh-HK: 未連接裝置
+
+# ── Menu-bar status item (platform/menubar.rs) ──────────────────────────────
+"Open OpenLogi":
+  ja: OpenLogi を開く
+  zh-CN: 打开 OpenLogi
+  zh-HK: 開啟 OpenLogi
+"Quit OpenLogi":
+  ja: OpenLogi を終了
+  zh-CN: 退出 OpenLogi
+  zh-HK: 結束 OpenLogi
+
 "Plug in or pair a supported Logitech device — it'll show up here automatically.":
   ja: 対応する Logitech デバイスを接続またはペアリングすると、ここに自動的に表示されます。
   zh-CN: 接入或配对受支持的 Logitech 设备，它会自动显示在这里。

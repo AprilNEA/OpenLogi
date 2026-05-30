@@ -147,7 +147,12 @@ pub fn default_labels() -> Vec<Label> {
         Label {
             id: ButtonId::DpiToggle,
             side: Side::Left,
-            y: 440.,
+            y: 430.,
+        },
+        Label {
+            id: ButtonId::GestureButton,
+            side: Side::Left,
+            y: 510.,
         },
     ]
 }
@@ -166,5 +171,34 @@ fn map_slot_name(name: &str) -> Option<ButtonId> {
         "SLOT_NAME_THUMBWHEEL" => Some(ButtonId::Thumbwheel),
         "SLOT_NAME_GESTURE_BUTTON" => Some(ButtonId::GestureButton),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::mouse_buttons::default_hotspots;
+
+    #[test]
+    fn default_labels_include_the_gesture_button() {
+        let labels = default_labels();
+        assert!(
+            labels
+                .iter()
+                .any(|l| matches!(l.id, ButtonId::GestureButton)),
+            "the gesture button needs a fallback label"
+        );
+    }
+
+    #[test]
+    fn labels_track_hotspots_and_avoid_crossing() {
+        let hotspots = default_hotspots();
+        let labels = labels_from_hotspots(&hotspots);
+        assert_eq!(labels.len(), hotspots.len());
+
+        let mut ys: Vec<f32> = labels.iter().map(|l| l.y).collect();
+        ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        ys.dedup();
+        assert_eq!(ys.len(), labels.len(), "each label gets a distinct slot");
     }
 }

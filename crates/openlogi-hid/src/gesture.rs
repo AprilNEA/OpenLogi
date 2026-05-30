@@ -16,6 +16,7 @@
 //! is therefore only diverted when its click is actually bound.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::time::{Duration, Instant};
 
 use hidpp::{
     channel::HidppChannel,
@@ -80,12 +81,18 @@ pub enum GestureError {
     Hidpp(String),
 }
 
+/// Minimum hold before raw-XY travel counts as a swipe. A quicker tap stays a
+/// plain click even if the cursor was moving when it fired.
+const GESTURE_HOLD_FOR_SWIPE: Duration = Duration::from_millis(160);
+
 /// Movement + button state accumulated across messages. Lives behind a `Mutex`
 /// because the channel's read thread invokes the listener by shared reference.
 #[derive(Default)]
 struct CaptureAccum {
     /// Whether the gesture button is currently held.
     gesture_held: bool,
+    /// When the current hold began — gates swipe vs. click by duration.
+    held_since: Option<Instant>,
     /// Accumulated raw-XY travel since the press began.
     dx: i32,
     dy: i32,
@@ -341,11 +348,13 @@ fn handle_reprog(
             let gesture_held = cids.contains(&reprog_controls::GESTURE_BUTTON_CID);
             if gesture_held && !acc.gesture_held {
                 acc.gesture_held = true;
+                acc.held_since = Some(Instant::now());
                 acc.dx = 0;
                 acc.dy = 0;
                 acc.fired = false;
             } else if !gesture_held && acc.gesture_held {
                 acc.gesture_held = false;
+                acc.held_since = None;
                 // A press that never committed a direction is a plain click.
                 if !acc.fired {
                     debug!("gesture click");
@@ -365,7 +374,12 @@ fn handle_reprog(
             if acc.gesture_held && !acc.fired {
                 acc.dx = acc.dx.saturating_add(i32::from(dx));
                 acc.dy = acc.dy.saturating_add(i32::from(dy));
-                if let Some(direction) = detect_swipe(acc.dx, acc.dy) {
+                // Held long enough to be a deliberate gesture, not a tap whose
+                // cursor happened to be in motion? Only then does travel commit.
+                let held = acc
+                    .held_since
+                    .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
+                if held && let Some(direction) = detect_swipe(acc.dx, acc.dy) {
                     debug!(?direction, dx = acc.dx, dy = acc.dy, "gesture committed");
                     acc.fired = true;
                     let _ = sink.send(CapturedInput::Gesture(direction));
@@ -396,4 +410,85 @@ async fn open_target_channel(target: &GestureTarget) -> Result<Arc<HidppChannel>
         return Ok(channel);
     }
     Err(GestureError::ReceiverNotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn press() -> RawControlEvent {
+        RawControlEvent::DivertedButtons([reprog_controls::GESTURE_BUTTON_CID, 0, 0, 0])
+    }
+
+    fn release() -> RawControlEvent {
+        RawControlEvent::DivertedButtons([0, 0, 0, 0])
+    }
+
+    #[test]
+    fn quick_tap_is_a_click_even_while_the_cursor_moves() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = CaptureAccum::default();
+
+        handle_reprog(&mut acc, press(), &[], &tx);
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::RawXy { dx: 120, dy: 5 },
+            &[],
+            &tx,
+        );
+        handle_reprog(&mut acc, release(), &[], &tx);
+
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::Gesture(GestureDirection::Click))
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a quick tap emits exactly one click"
+        );
+    }
+
+    #[test]
+    fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = CaptureAccum::default();
+
+        handle_reprog(&mut acc, press(), &[], &tx);
+        // Pretend the button has been held well past the swipe gate.
+        acc.held_since = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2);
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::RawXy { dx: 120, dy: 5 },
+            &[],
+            &tx,
+        );
+
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::Gesture(GestureDirection::Right))
+        );
+
+        handle_reprog(&mut acc, release(), &[], &tx);
+        assert!(
+            rx.try_recv().is_err(),
+            "a committed swipe must not also click on release"
+        );
+    }
+
+    #[test]
+    fn a_held_dpi_button_presses_once_on_the_rising_edge() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = CaptureAccum::default();
+        let dpi = reprog_controls::DPI_MODE_SHIFT_CIDS[0];
+        let down = RawControlEvent::DivertedButtons([dpi, 0, 0, 0]);
+
+        handle_reprog(&mut acc, down, &[dpi], &tx);
+        handle_reprog(&mut acc, down, &[dpi], &tx);
+
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle))
+        );
+        assert!(rx.try_recv().is_err(), "a held DPI button presses once");
+    }
 }

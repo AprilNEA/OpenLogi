@@ -116,32 +116,39 @@ fn main() -> Result<()> {
         watchers::accessibility::spawn(std::time::Duration::from_millis(1200));
     let (pairing_ctrl_tx, mut pairing_evt_rx) = watchers::pairing::spawn();
 
+    // Menu-bar click events (Open / Quit), drained by the loop below.
+    let (menubar_tx, mut menubar_rx) =
+        tokio::sync::mpsc::unbounded_channel::<platform::menubar::MenuBarEvent>();
+
     // `with_assets` registers the embedded app logo ([`app_assets`]) plus the
     // lucide SVGs that back `gpui_component::IconName`; without it `img()` /
     // `Icon` would fail to load.
-    gpui_platform::application()
-        .with_assets(app_assets::AppAssets)
-        .run(move |cx| {
-            gpui_component::init(cx);
-            app_menu::install(cx);
+    let app = gpui_platform::application().with_assets(app_assets::AppAssets);
 
-            // Publish the pairing control sender + initial UI state so the Add
-            // Device window's buttons can drive the watcher via globals.
-            cx.set_global(windows::add_device::PairingControl(pairing_ctrl_tx));
-            cx.set_global(windows::add_device::PairingUi::Idle);
+    // Reopen the window when the app is relaunched with none open (dock click).
+    app.on_reopen(|cx| open_main_window(&[], cx));
 
-            if !Hook::has_accessibility() {
-                Hook::prompt_accessibility();
-            }
+    app.run(move |cx| {
+        gpui_component::init(cx);
+        app_menu::install(cx);
 
-            cx.spawn(async move |cx| {
-            let options = cx.update(main_window_options);
+        // Publish the pairing control sender + initial UI state so the Add
+        // Device window's buttons can drive the watcher via globals.
+        cx.set_global(windows::add_device::PairingControl(pairing_ctrl_tx));
+        cx.set_global(windows::add_device::PairingUi::Idle);
 
-            #[allow(
-                clippy::expect_used,
-                reason = "failure to open the main window is fatal; nothing useful to recover to"
-            )]
-            cx.open_window(options, move |window, cx| {
+        if !Hook::has_accessibility() {
+            Hook::prompt_accessibility();
+        }
+
+        // Menu-bar app: this also hides the Dock icon. The window opens at
+        // launch and again on demand from the status-item menu.
+        let menubar: platform::menubar::MenuBarHandle = platform::menubar::install(menubar_tx);
+
+        cx.spawn(async move |cx| {
+            // Install the hook-shared AppState up front, then open the window at
+            // launch; closing it leaves the app live in the menu bar.
+            let status = cx.update(|cx| {
                 if !cx.has_global::<AppState>() {
                     let cache = asset::AssetResolver::new();
                     cx.set_global(AppState::with_runtime_shared(
@@ -153,29 +160,23 @@ fn main() -> Result<()> {
                         dpi_cycle,
                     ));
                 }
-                Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
-
-                let view = cx.new(|cx| AppView::new(&inventories, cx));
-
-                let appearance_obs = window.observe_window_appearance(|window, cx| {
-                    Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
-                });
-                view.update(cx, |v, _| v.set_appearance_obs(appearance_obs));
-
-                cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
-            })
-            .expect("opening the main window should not fail");
+                open_main_window(&inventories, cx);
+                menubar_status(cx)
+            });
+            menubar.set_device_status(&status);
 
             let mut hook_handle = None;
             loop {
                 tokio::select! {
                     Some(new_inv) = inventory_rx.recv() => {
-                        cx.update(|cx| {
+                        let status = cx.update(|cx| {
                             let cache = asset::AssetResolver::new();
                             cx.update_global::<AppState, _>(|state, _| {
                                 state.refresh_inventories(&new_inv, &cache);
                             });
+                            menubar_status(cx)
                         });
+                        menubar.set_device_status(&status);
                     }
                     Some(bundle) = app_rx.recv() => {
                         cx.update(|cx| {
@@ -210,12 +211,18 @@ fn main() -> Result<()> {
                             windows::add_device::apply_event(cx, event);
                         });
                     }
+                    Some(event) = menubar_rx.recv() => {
+                        cx.update(|cx| match event {
+                            platform::menubar::MenuBarEvent::Open => open_main_window(&[], cx),
+                            platform::menubar::MenuBarEvent::Quit => cx.quit(),
+                        });
+                    }
                     else => break,
                 }
             }
         })
         .detach();
-        });
+    });
 
     Ok(())
 }
@@ -252,6 +259,60 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
         }),
         ..WindowOptions::default()
     }
+}
+
+/// Open the main window — or focus the one already open. The handle is parked
+/// in [`windows::WindowRegistry`] so the dock-icon reopen handler (and any
+/// repeat call) re-focuses the live window instead of stacking a duplicate, and
+/// a window closed while the app kept running can be brought back.
+fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
+    let existing = cx.default_global::<windows::WindowRegistry>().main;
+    if let Some(handle) = existing {
+        if handle
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+        {
+            cx.activate(true);
+            return;
+        }
+    }
+
+    let options = main_window_options(cx);
+    let opened = cx.open_window(options, |window, cx| {
+        Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
+
+        let view = cx.new(|cx| AppView::new(inventories, cx));
+
+        let appearance_obs = window.observe_window_appearance(|window, cx| {
+            Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
+        });
+        view.update(cx, |v, _| v.set_appearance_obs(appearance_obs));
+
+        cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
+    });
+
+    match opened {
+        Ok(handle) => {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            cx.default_global::<windows::WindowRegistry>().main = Some(handle);
+            cx.activate(true);
+        }
+        Err(e) => warn!(error = %e, "could not open the main window"),
+    }
+}
+
+/// Format the status-item device line from the live [`AppState`], e.g.
+/// `"MX Master 3S · 80%"`, or a placeholder when nothing is connected.
+fn menubar_status(cx: &gpui::App) -> String {
+    cx.try_global::<AppState>()
+        .and_then(AppState::current_record)
+        .map_or_else(
+            || rust_i18n::t!("No device connected").into_owned(),
+            |record| match &record.battery {
+                Some(battery) => format!("{} · {}%", record.display_name, battery.percentage),
+                None => record.display_name.clone(),
+            },
+        )
 }
 
 /// Load config from disk and build the initial hook-shared state using the

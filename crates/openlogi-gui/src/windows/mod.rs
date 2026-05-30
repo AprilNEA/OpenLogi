@@ -23,6 +23,10 @@ use tracing::warn;
 /// actions and footer links can find an already-open window and focus it.
 #[derive(Default)]
 pub struct WindowRegistry {
+    /// The primary app window. Held so the dock-icon reopen handler can bring
+    /// it back after the user closes it while the app keeps running in the
+    /// background (mouse hook + watchers).
+    pub main: Option<WindowHandle<Root>>,
     pub settings: Option<WindowHandle<Root>>,
     pub about: Option<WindowHandle<Root>>,
     pub add_device: Option<WindowHandle<Root>>,
