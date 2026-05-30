@@ -3,9 +3,9 @@
 //! Translations live in `crates/openlogi-gui/locales/app.yml` and are loaded
 //! at compile time by the `rust_i18n::i18n!` macro in `main.rs`. Call sites use
 //! the [`tr!`](crate::tr) helper (or `rust_i18n::t!`) with the **English string
-//! as the key** — a missing entry still falls back to that English text. Each
-//! entry lists all shipped locales (`en` / `ja` / `zh-CN` / `zh-HK`), with the
-//! `en:` column mirroring the key as the canonical source.
+//! as the key** — a missing entry falls back to that English text, so the file
+//! carries only the translated `ja` / `zh-CN` / `zh-HK` columns; English is the
+//! key itself.
 //!
 //! The current locale is a process-global atomic inside `rust_i18n`. Setting it
 //! re-localizes both our own call sites *and* gpui-component's built-in widget
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(rust_i18n::t!("Settings"), "設定");
         assert_eq!(rust_i18n::t!("Left Click"), "左クリック");
 
-        // The explicit `en:` column resolves back to the English source.
+        // English has no column: every key falls back to the English source.
         rust_i18n::set_locale("en");
         assert_eq!(rust_i18n::t!("Settings"), "Settings");
         assert_eq!(rust_i18n::t!(BLURB), BLURB);

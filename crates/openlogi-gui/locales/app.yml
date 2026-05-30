@@ -1,11 +1,10 @@
 # OpenLogi GUI translations.
 #
-# `_version: 2` packs every shipped locale for one message into a single entry.
-# The **key is the English msgid** (gettext-style): a `t!`/`tr!` lookup that
-# misses still falls back to readable English. The `en:` column mirrors that
-# source text so the file reads as a complete en / ja / zh-CN / zh-HK table —
-# keep it byte-for-byte equal to the key. Keys (and `en:`) must match the code
-# verbatim, and the device/action vocabulary must match
+# `_version: 2` packs every translated locale for one message into a single
+# entry. The **key is the English msgid** (gettext-style): a `t!`/`tr!` lookup
+# that misses the current locale falls back to the key itself, so English needs
+# no column here — only the `ja` / `zh-CN` / `zh-HK` translations. Keys must
+# match the code verbatim, and the device/action vocabulary must match
 # `openlogi_core::binding`'s `label()`.
 #
 # Interpolation uses `%{name}` and must be preserved verbatim in every locale.
@@ -13,445 +12,360 @@ _version: 2
 
 # ── App chrome: accessibility gate, footer (app.rs) ─────────────────────────
 "Accessibility permission required":
-  en: Accessibility permission required
   ja: アクセシビリティ権限が必要です
   zh-CN: 需要「辅助功能」权限
   zh-HK: 需要「輔助使用」權限
 "OpenLogi captures mouse buttons (Back / Forward / gesture button) through the system Accessibility permission and runs the actions you bind. Features that talk to the device directly — DPI, SmartShift — are unaffected.":
-  en: OpenLogi captures mouse buttons (Back / Forward / gesture button) through the system Accessibility permission and runs the actions you bind. Features that talk to the device directly — DPI, SmartShift — are unaffected.
   ja: OpenLogi はシステムの「アクセシビリティ」権限を通じてマウスボタン(戻る / 進む / ジェスチャーボタン)を捕捉し、割り当てた操作を実行します。DPI、SmartShift などデバイスと直接通信する機能には影響しません。
   zh-CN: OpenLogi 通过系统的「辅助功能」权限捕获鼠标按键(后退 / 前进 / 手势按钮)并执行你绑定的操作。DPI、SmartShift 等直接与设备通信的功能不受影响。
   zh-HK: OpenLogi 透過系統的「輔助使用」權限擷取滑鼠按鍵(後退 / 前進 / 手勢按鈕)並執行你綁定的操作。DPI、SmartShift 等直接與裝置通訊的功能不受影響。
 "Open System Settings to grant access":
-  en: Open System Settings to grant access
   ja: システム設定を開いて許可する
   zh-CN: 打开系统设置授权
   zh-HK: 開啟系統設定授權
 "Takes effect automatically once granted — no restart needed.":
-  en: Takes effect automatically once granted — no restart needed.
   ja: 許可すると自動的に反映されます — 再起動は不要です。
   zh-CN: 授权后会自动生效,无需重启。
   zh-HK: 授權後會自動生效,無需重新啟動。
 "Not now (use DPI and other features only)":
-  en: Not now (use DPI and other features only)
   ja: 後で(DPI などの機能のみ使用)
   zh-CN: 稍后再说(仅使用 DPI 等功能)
   zh-HK: 稍後再說(僅使用 DPI 等功能)
 "Settings":
-  en: Settings
   ja: 設定
   zh-CN: 设置
   zh-HK: 設定
 "About":
-  en: About
   ja: 情報
   zh-CN: 关于
   zh-HK: 關於
 "Accessibility granted":
-  en: Accessibility granted
   ja: アクセシビリティは許可済み
   zh-CN: 辅助功能已授权
   zh-HK: 輔助使用已授權
 "Accessibility not granted · click to grant":
-  en: Accessibility not granted · click to grant
   ja: アクセシビリティ未許可 · クリックして許可
   zh-CN: 辅助功能未授权 · 点击授权
   zh-HK: 輔助使用未授權 · 點擊授權
 
 # ── macOS menu bar (app_menu.rs) ────────────────────────────────────────────
 "About OpenLogi":
-  en: About OpenLogi
   ja: OpenLogi について
   zh-CN: 关于 OpenLogi
   zh-HK: 關於 OpenLogi
 "Settings…":
-  en: Settings…
   ja: 設定…
   zh-CN: 设置…
   zh-HK: 設定…
 "Hide OpenLogi":
-  en: Hide OpenLogi
   ja: OpenLogi を隠す
   zh-CN: 隐藏 OpenLogi
   zh-HK: 隱藏 OpenLogi
 "Hide Others":
-  en: Hide Others
   ja: ほかを隠す
   zh-CN: 隐藏其他
   zh-HK: 隱藏其他
 "Show All":
-  en: Show All
   ja: すべてを表示
   zh-CN: 全部显示
   zh-HK: 全部顯示
 "Quit OpenLogi":
-  en: Quit OpenLogi
   ja: OpenLogi を終了
   zh-CN: 退出 OpenLogi
   zh-HK: 結束 OpenLogi
 "Window":
-  en: Window
   ja: ウインドウ
   zh-CN: 窗口
   zh-HK: 視窗
 "Minimize":
-  en: Minimize
   ja: しまう
   zh-CN: 最小化
   zh-HK: 最小化
 "Zoom":
-  en: Zoom
   ja: ズーム
   zh-CN: 缩放
   zh-HK: 縮放
 
 # ── About window (about.rs) ─────────────────────────────────────────────────
 "Open-source Logitech mouse configuration — DPI, SmartShift, button bindings, and gestures.":
-  en: Open-source Logitech mouse configuration — DPI, SmartShift, button bindings, and gestures.
   ja: オープンソースの Logitech マウス設定ツール —— DPI、SmartShift、ボタン割り当て、ジェスチャー。
   zh-CN: 开源的 Logitech 鼠标配置工具 —— DPI、SmartShift、按键绑定与手势。
   zh-HK: 開源的 Logitech 滑鼠設定工具 —— DPI、SmartShift、按鍵綁定與手勢。
 
 # ── Settings window (settings.rs) ───────────────────────────────────────────
 "General":
-  en: General
   ja: 一般
   zh-CN: 通用
   zh-HK: 一般
 "Launch at login":
-  en: Launch at login
   ja: ログイン時に起動
   zh-CN: 开机自启
   zh-HK: 開機自動啟動
 "Automatically start OpenLogi when you log in to macOS.":
-  en: Automatically start OpenLogi when you log in to macOS.
   ja: macOS にログインしたときに OpenLogi を自動的に起動します。
   zh-CN: 登录 macOS 时自动启动 OpenLogi。
   zh-HK: 登入 macOS 時自動啟動 OpenLogi。
 "Check for updates":
-  en: Check for updates
   ja: アップデートを確認
   zh-CN: 检查更新
   zh-HK: 檢查更新
 "Check once per launch for a new version (query only — no automatic download).":
-  en: Check once per launch for a new version (query only — no automatic download).
   ja: 起動ごとに新しいバージョンを一度だけ確認します(確認のみ — 自動ダウンロードはしません)。
   zh-CN: 每次启动检查一次新版本(仅查询,不自动下载)。
   zh-HK: 每次啟動檢查一次新版本(僅查詢,不自動下載)。
 "Language":
-  en: Language
   ja: 言語
   zh-CN: 语言
   zh-HK: 語言
 "Choose the interface language.":
-  en: Choose the interface language.
   ja: インターフェースの言語を選択します。
   zh-CN: 选择界面语言。
   zh-HK: 選擇介面語言。
 "Follow system":
-  en: Follow system
   ja: システムに従う
   zh-CN: 跟随系统
   zh-HK: 跟隨系統
 
 # ── DPI panel (dpi_panel.rs) ────────────────────────────────────────────────
 "PRESETS":
-  en: PRESETS
   ja: プリセット
   zh-CN: 预设
   zh-HK: 預設
 "+ Add":
-  en: + Add
   ja: + 追加
   zh-CN: + 添加
   zh-HK: + 新增
 
 # ── Binding popover scaffolding (mouse_model/picker.rs) ─────────────────────
 "Bind %{name}":
-  en: Bind %{name}
   ja: "%{name} を割り当て"
   zh-CN: 绑定 %{name}
   zh-HK: 綁定 %{name}
 "Gesture %{name}":
-  en: Gesture %{name}
   ja: ジェスチャー %{name}
   zh-CN: 手势 %{name}
   zh-HK: 手勢 %{name}
 
 # ── Buttons (openlogi_core::binding::ButtonId) ──────────────────────────────
 "Left Click":
-  en: Left Click
   ja: 左クリック
   zh-CN: 左键单击
   zh-HK: 左鍵單擊
 "Right Click":
-  en: Right Click
   ja: 右クリック
   zh-CN: 右键单击
   zh-HK: 右鍵單擊
 "Middle Click":
-  en: Middle Click
   ja: 中クリック
   zh-CN: 中键单击
   zh-HK: 中鍵單擊
 "Back":
-  en: Back
   ja: 戻る
   zh-CN: 后退
   zh-HK: 後退
 "Forward":
-  en: Forward
   ja: 進む
   zh-CN: 前进
   zh-HK: 前進
 "DPI Toggle":
-  en: DPI Toggle
   ja: DPI 切り替え
   zh-CN: DPI 切换
   zh-HK: DPI 切換
 "Thumb Wheel":
-  en: Thumb Wheel
   ja: サムホイール
   zh-CN: 拇指滚轮
   zh-HK: 拇指滾輪
 "Gesture Button":
-  en: Gesture Button
   ja: ジェスチャーボタン
   zh-CN: 手势按钮
   zh-HK: 手勢按鈕
 
 # ── Gesture directions (openlogi_core::binding::GestureDirection) ───────────
 "Up":
-  en: Up
   ja: 上
   zh-CN: 上
   zh-HK: 上
 "Down":
-  en: Down
   ja: 下
   zh-CN: 下
   zh-HK: 下
 "Left":
-  en: Left
   ja: 左
   zh-CN: 左
   zh-HK: 左
 "Right":
-  en: Right
   ja: 右
   zh-CN: 右
   zh-HK: 右
 "Click":
-  en: Click
   ja: 押し込み
   zh-CN: 按下
   zh-HK: 按下
 
 # ── Categories (openlogi_core::binding::Category) ───────────────────────────
 "EDITING":
-  en: EDITING
   ja: 編集
   zh-CN: 编辑
   zh-HK: 編輯
 "BROWSER":
-  en: BROWSER
   ja: ブラウザ
   zh-CN: 浏览器
   zh-HK: 瀏覽器
 "MEDIA":
-  en: MEDIA
   ja: メディア
   zh-CN: 媒体
   zh-HK: 媒體
 "MOUSE":
-  en: MOUSE
   ja: マウス
   zh-CN: 鼠标
   zh-HK: 滑鼠
 "SCROLL":
-  en: SCROLL
   ja: スクロール
   zh-CN: 滚动
   zh-HK: 捲動
 "NAVIGATION":
-  en: NAVIGATION
   ja: ナビゲーション
   zh-CN: 导航
   zh-HK: 導覽
 "SYSTEM":
-  en: SYSTEM
   ja: システム
   zh-CN: 系统
   zh-HK: 系統
 
 # ── Actions (openlogi_core::binding::Action) ────────────────────────────────
 "Copy":
-  en: Copy
   ja: コピー
   zh-CN: 复制
   zh-HK: 複製
 "Paste":
-  en: Paste
   ja: ペースト
   zh-CN: 粘贴
   zh-HK: 貼上
 "Cut":
-  en: Cut
   ja: カット
   zh-CN: 剪切
   zh-HK: 剪下
 "Undo":
-  en: Undo
   ja: 取り消す
   zh-CN: 撤销
   zh-HK: 復原
 "Redo":
-  en: Redo
   ja: やり直す
   zh-CN: 重做
   zh-HK: 重做
 "Select All":
-  en: Select All
   ja: すべて選択
   zh-CN: 全选
   zh-HK: 全選
 "Find":
-  en: Find
   ja: 検索
   zh-CN: 查找
   zh-HK: 尋找
 "Save":
-  en: Save
   ja: 保存
   zh-CN: 保存
   zh-HK: 儲存
 "Browser Back":
-  en: Browser Back
   ja: ブラウザで戻る
   zh-CN: 浏览器后退
   zh-HK: 瀏覽器後退
 "Browser Forward":
-  en: Browser Forward
   ja: ブラウザで進む
   zh-CN: 浏览器前进
   zh-HK: 瀏覽器前進
 "New Tab":
-  en: New Tab
   ja: 新規タブ
   zh-CN: 新建标签页
   zh-HK: 新增分頁
 "Close Tab":
-  en: Close Tab
   ja: タブを閉じる
   zh-CN: 关闭标签页
   zh-HK: 關閉分頁
 "Reopen Tab":
-  en: Reopen Tab
   ja: タブを再度開く
   zh-CN: 重开标签页
   zh-HK: 重新開啟分頁
 "Next Tab":
-  en: Next Tab
   ja: 次のタブ
   zh-CN: 下一个标签页
   zh-HK: 下一個分頁
 "Previous Tab":
-  en: Previous Tab
   ja: 前のタブ
   zh-CN: 上一个标签页
   zh-HK: 上一個分頁
 "Reload Page":
-  en: Reload Page
   ja: ページを再読み込み
   zh-CN: 刷新页面
   zh-HK: 重新載入頁面
 "Mission Control":
-  en: Mission Control
   ja: Mission Control
   zh-CN: 调度中心
   zh-HK: 調度中心
 "App Exposé":
-  en: App Exposé
   ja: App Exposé
   zh-CN: 应用程序窗口
   zh-HK: 應用程式視窗
 "Show Desktop":
-  en: Show Desktop
   ja: デスクトップを表示
   zh-CN: 显示桌面
   zh-HK: 顯示桌面
 "Launchpad":
-  en: Launchpad
   ja: Launchpad
   zh-CN: 启动台
   zh-HK: 啟動台
 "Lock Screen":
-  en: Lock Screen
   ja: 画面をロック
   zh-CN: 锁定屏幕
   zh-HK: 鎖定螢幕
 "Screenshot":
-  en: Screenshot
   ja: スクリーンショット
   zh-CN: 截屏
   zh-HK: 截圖
 "Play / Pause":
-  en: Play / Pause
   ja: 再生 / 一時停止
   zh-CN: 播放 / 暂停
   zh-HK: 播放 / 暫停
 "Next Track":
-  en: Next Track
   ja: 次の曲
   zh-CN: 下一首
   zh-HK: 下一首
 "Previous Track":
-  en: Previous Track
   ja: 前の曲
   zh-CN: 上一首
   zh-HK: 上一首
 "Volume Up":
-  en: Volume Up
   ja: 音量を上げる
   zh-CN: 增大音量
   zh-HK: 調高音量
 "Volume Down":
-  en: Volume Down
   ja: 音量を下げる
   zh-CN: 减小音量
   zh-HK: 調低音量
 "Mute":
-  en: Mute
   ja: ミュート
   zh-CN: 静音
   zh-HK: 靜音
 "Cycle DPI Presets":
-  en: Cycle DPI Presets
   ja: DPI プリセットを循環
   zh-CN: 循环 DPI 预设
   zh-HK: 循環 DPI 預設
 "Toggle SmartShift":
-  en: Toggle SmartShift
   ja: SmartShift を切り替え
   zh-CN: 切换 SmartShift
   zh-HK: 切換 SmartShift
 "Scroll Up":
-  en: Scroll Up
   ja: 上にスクロール
   zh-CN: 向上滚动
   zh-HK: 向上捲動
 "Scroll Down":
-  en: Scroll Down
   ja: 下にスクロール
   zh-CN: 向下滚动
   zh-HK: 向下捲動
 "Scroll Left":
-  en: Scroll Left
   ja: 左にスクロール
   zh-CN: 向左滚动
   zh-HK: 向左捲動
 "Scroll Right":
-  en: Scroll Right
   ja: 右にスクロール
   zh-CN: 向右滚动
   zh-HK: 向右捲動
