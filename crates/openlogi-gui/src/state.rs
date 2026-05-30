@@ -23,7 +23,7 @@ use openlogi_core::device::DeviceInventory;
 use openlogi_hook::Hook;
 use tracing::{debug, warn};
 
-use crate::asset::{AssetCache, ResolvedAsset};
+use crate::asset::{AssetResolver, ResolvedAsset};
 use crate::components::dpi_panel::DpiTarget;
 use crate::data::mouse_buttons::{
     Action, ButtonId, GestureDirection, default_binding, default_gesture_binding,
@@ -140,7 +140,7 @@ impl AppState {
     pub fn with_runtime(
         config: Config,
         inventories: &[DeviceInventory],
-        cache: &AssetCache,
+        cache: &AssetResolver,
     ) -> Self {
         let bindings_arc = Arc::new(RwLock::new(BTreeMap::new()));
         let cycle_arc = Arc::new(RwLock::new(DpiCycleState::default()));
@@ -155,7 +155,7 @@ impl AppState {
     pub fn with_runtime_shared(
         config: Config,
         inventories: &[DeviceInventory],
-        cache: &AssetCache,
+        cache: &AssetResolver,
         hook_bindings: Arc<RwLock<BTreeMap<ButtonId, Action>>>,
         dpi_cycle: Arc<RwLock<DpiCycleState>>,
     ) -> Self {
@@ -189,7 +189,7 @@ impl AppState {
     pub fn initial_hook_state(
         config: &Config,
         inventories: &[DeviceInventory],
-        cache: &AssetCache,
+        cache: &AssetResolver,
     ) -> (BTreeMap<ButtonId, Action>, DpiCycleState) {
         let device_list = build_device_list(inventories, cache);
         let current_device = pick_initial_device(&device_list, config.selected_device());
@@ -240,7 +240,7 @@ impl AppState {
     /// No-op when the new list has the same `config_key` sequence as the
     /// current one — avoids spurious `observe_global` notifications during
     /// quiet polling cycles (P1.6).
-    pub fn refresh_inventories(&mut self, inventories: &[DeviceInventory], cache: &AssetCache) {
+    pub fn refresh_inventories(&mut self, inventories: &[DeviceInventory], cache: &AssetResolver) {
         let new_list = build_device_list(inventories, cache);
         let unchanged = new_list.len() == self.device_list.len()
             && new_list
@@ -475,7 +475,7 @@ impl AppState {
 
 impl Global for AppState {}
 
-fn build_device_list(inventories: &[DeviceInventory], cache: &AssetCache) -> Vec<DeviceRecord> {
+fn build_device_list(inventories: &[DeviceInventory], cache: &AssetResolver) -> Vec<DeviceRecord> {
     let mut list = Vec::new();
     for inv in inventories {
         let receiver_uid = inv.receiver.unique_id.clone();

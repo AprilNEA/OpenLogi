@@ -9,7 +9,7 @@ use openlogi_core::device::DeviceInventory;
 use tracing::{info, warn};
 
 use crate::app_menu::{Minimize, Zoom};
-use crate::asset::AssetCache;
+use crate::asset::AssetResolver;
 use crate::components::device_carousel::DeviceCarousel;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::gesture_pad::GesturePad;
@@ -39,7 +39,7 @@ impl AppView {
             }
         };
 
-        let cache = AssetCache::new();
+        let cache = AssetResolver::new();
 
         if !cx.has_global::<AppState>() {
             cx.set_global(AppState::with_runtime(config, inventories, &cache));

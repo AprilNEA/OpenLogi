@@ -12,20 +12,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use clap::Args;
-use openlogi_assets::http;
+use openlogi_assets::{CORE_FILES, FetchOutcome, http};
 
 /// Default origin. Overridable via `--base` / `OPENLOGI_ASSETS`.
 const DEFAULT_BASE: &str = "https://assets.openlogi.org";
-
-/// Files every depot must have — their absence is a real registry problem
-/// worth a warning.
-/// - `core_metadata.json` carries the hotspot percentages
-/// - `manifest.json` maps HID++ `extended_model_id` → colour variant and
-///   each resource key (`device_buttons_image`, …) → filename
-/// - `front_core.png` is the carousel / branding render, and also the
-///   buttons render for simpler devices (trackballs, presenters, entry
-///   mice) whose manifest points `device_buttons_image` straight at it.
-const REQUIRED_FILES: &[&str] = &["core_metadata.json", "manifest.json", "front_core.png"];
 
 /// Returns true when `name` is an *optional* asset OpenLogi fetches when the
 /// registry lists it but never warns about when it's absent:
@@ -99,23 +89,22 @@ pub fn run(args: SyncArgs) -> Result<()> {
         let wanted: Vec<&openlogi_assets::FileEntry> = entry
             .files
             .iter()
-            .filter(|f| REQUIRED_FILES.contains(&f.name.as_str()) || is_optional_asset(&f.name))
+            .filter(|f| CORE_FILES.contains(&f.name.as_str()) || is_optional_asset(&f.name))
             .collect();
-        for required in REQUIRED_FILES {
-            if !wanted.iter().any(|f| f.name == *required) {
+        for required in CORE_FILES {
+            if !wanted.iter().any(|f| f.name == required) {
                 eprintln!("  WARN {depot}: registry missing {required}");
             }
         }
 
-        for file_entry in &wanted {
-            let dst = dir.join(&file_entry.name);
-            if http::cached_matches(&dst, &file_entry.sha256) {
-                cache_hits += 1;
-                continue;
+        for &file_entry in &wanted {
+            match client.fetch_entry_if_stale(&entry.asset_path, &dir, file_entry)? {
+                FetchOutcome::CacheHit => cache_hits += 1,
+                FetchOutcome::Fetched { .. } => {
+                    fetched += 1;
+                    println!("  {depot}/{} ({} B)", file_entry.name, file_entry.bytes);
+                }
             }
-            client.fetch_file_to_dir(&entry.asset_path, &dir, &file_entry.name)?;
-            fetched += 1;
-            println!("  {depot}/{} ({} B)", file_entry.name, file_entry.bytes);
         }
     }
 
@@ -123,7 +112,7 @@ pub fn run(args: SyncArgs) -> Result<()> {
         .devices
         .values()
         .flat_map(|d| d.files.iter())
-        .filter(|f| REQUIRED_FILES.contains(&f.name.as_str()) || is_optional_asset(&f.name))
+        .filter(|f| CORE_FILES.contains(&f.name.as_str()) || is_optional_asset(&f.name))
         .map(|f| f.bytes)
         .sum();
     #[allow(

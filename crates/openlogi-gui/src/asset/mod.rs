@@ -1,6 +1,6 @@
-//! Device asset cache with a two-tier lookup chain.
+//! Render-time device→asset resolver, backed by a two-tier filesystem cache.
 //!
-//! At render time [`AssetCache::resolve`] probes (in order):
+//! At render time [`AssetResolver::resolve`] probes (in order):
 //!
 //! 1. The macOS app bundle's `Contents/Resources/assets/` — populated at
 //!    packaging time by `openlogi assets sync` and shipped with every
@@ -17,7 +17,7 @@ pub mod sync;
 
 use std::path::{Path, PathBuf};
 
-use openlogi_assets::{DepotManifest, DeviceEntry, Index, Metadata, variant_model_id};
+use openlogi_assets::{DepotManifest, DeviceEntry, Index, Metadata};
 use openlogi_core::device::DeviceModelInfo;
 use tracing::{debug, warn};
 
@@ -43,7 +43,7 @@ pub struct ResolvedAsset {
     pub png_height: u32,
 }
 
-pub struct AssetCache {
+pub struct AssetResolver {
     /// Read-time search order. Bundle root (if present) comes first so
     /// release builds never touch the user cache; the user cache comes
     /// second so `sync::sync` writes are immediately visible.
@@ -57,7 +57,7 @@ pub struct AssetCache {
     index: Option<Index>,
 }
 
-impl AssetCache {
+impl AssetResolver {
     pub fn new() -> Self {
         let write_root = user_cache_root();
         let bundle = bundle_assets_root();
@@ -222,12 +222,9 @@ fn read_png_dimensions(path: &Path) -> std::io::Result<(u32, u32)> {
 /// `None` when the manifest is missing / malformed / lacks the variant.
 fn variant_image_for(dir: &Path, base_model_id: &str, ext: u8) -> Option<String> {
     let manifest = load_manifest(dir)?;
-    let model_id = if ext == 0 {
-        base_model_id.to_string()
-    } else {
-        variant_model_id(base_model_id, ext)
-    };
-    manifest.device_image_for(&model_id).map(str::to_string)
+    manifest
+        .resource_for_variant(base_model_id, ext, "device_image")
+        .map(str::to_string)
 }
 
 /// Like [`variant_image_for`] but returns the `device_buttons_image`
@@ -235,13 +232,8 @@ fn variant_image_for(dir: &Path, base_model_id: &str, ext: u8) -> Option<String>
 /// the assignment markers against, so the mouse-model render uses it.
 fn buttons_image_for(dir: &Path, base_model_id: &str, ext: u8) -> Option<String> {
     let manifest = load_manifest(dir)?;
-    let model_id = if ext == 0 {
-        base_model_id.to_string()
-    } else {
-        variant_model_id(base_model_id, ext)
-    };
     manifest
-        .resource_for(&model_id, "device_buttons_image")
+        .resource_for_variant(base_model_id, ext, "device_buttons_image")
         .map(str::to_string)
 }
 
@@ -257,7 +249,7 @@ fn load_manifest(dir: &Path) -> Option<DepotManifest> {
         .ok()
 }
 
-impl Default for AssetCache {
+impl Default for AssetResolver {
     fn default() -> Self {
         Self::new()
     }

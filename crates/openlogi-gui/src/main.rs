@@ -75,7 +75,7 @@ fn main() -> Result<()> {
 
     let inventories = enumerate_blocking().context("HID enumeration failed")?;
 
-    let probe_cache = asset::AssetCache::new();
+    let probe_cache = asset::AssetResolver::new();
     if asset::sync::should_run(probe_cache.has_bundle_root()) {
         let server = std::env::var("OPENLOGI_ASSETS")
             .unwrap_or_else(|_| asset::sync::DEFAULT_BASE.to_string());
@@ -120,7 +120,7 @@ fn main() -> Result<()> {
             )]
             cx.open_window(options, move |window, cx| {
                 if !cx.has_global::<AppState>() {
-                    let cache = asset::AssetCache::new();
+                    let cache = asset::AssetResolver::new();
                     cx.set_global(AppState::with_runtime_shared(
                         initial_config,
                         &inventories,
@@ -147,7 +147,7 @@ fn main() -> Result<()> {
                 tokio::select! {
                     Some(new_inv) = inventory_rx.recv() => {
                         cx.update(|cx| {
-                            let cache = asset::AssetCache::new();
+                            let cache = asset::AssetResolver::new();
                             cx.update_global::<AppState, _>(|state, _| {
                                 state.refresh_inventories(&new_inv, &cache);
                             });
@@ -204,7 +204,7 @@ fn load_config_and_bindings(
         }
     };
 
-    let cache = asset::AssetCache::new();
+    let cache = asset::AssetResolver::new();
     let (bindings, dpi_cycle) = AppState::initial_hook_state(&config, inventories, &cache);
     let bindings_arc = Arc::new(RwLock::new(bindings));
     let dpi_cycle_arc = Arc::new(RwLock::new(dpi_cycle));

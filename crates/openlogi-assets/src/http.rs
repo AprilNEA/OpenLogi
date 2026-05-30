@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use tracing::debug;
 use ureq::Agent;
 
-use crate::index::Index;
+use crate::index::{FileEntry, Index};
 
 const USER_AGENT: &str = concat!(
     "openlogi-assets/",
@@ -44,6 +44,15 @@ pub struct AssetClient {
     /// Normalised origin, trailing slash trimmed once at construction.
     base: String,
     agent: Agent,
+}
+
+/// Outcome of a cache-checked fetch ([`AssetClient::fetch_entry_if_stale`]).
+#[derive(Debug)]
+pub enum FetchOutcome {
+    /// The on-disk file already matched the registry `sha256`; no download.
+    CacheHit,
+    /// The file was (re)downloaded; carries the byte count written.
+    Fetched { bytes: usize },
 }
 
 impl AssetClient {
@@ -99,6 +108,23 @@ impl AssetClient {
         let bytes = self.fetch_file(asset_path, name)?;
         fs::write(&dst, &bytes).with_context(|| format!("write {}", dst.display()))?;
         Ok(bytes.len())
+    }
+
+    /// Fetch `file` into `dir` unless a file already there matches its
+    /// `sha256`. The cache-skip primitive shared by the CLI bundle sync and
+    /// the GUI runtime sync — callers branch on [`FetchOutcome`] to do their
+    /// own progress reporting.
+    pub fn fetch_entry_if_stale(
+        &self,
+        asset_path: &str,
+        dir: &Path,
+        file: &FileEntry,
+    ) -> Result<FetchOutcome> {
+        if cached_matches(&dir.join(&file.name), &file.sha256) {
+            return Ok(FetchOutcome::CacheHit);
+        }
+        let bytes = self.fetch_file_to_dir(asset_path, dir, &file.name)?;
+        Ok(FetchOutcome::Fetched { bytes })
     }
 
     /// GET `url` on the shared agent and read the whole body into memory.

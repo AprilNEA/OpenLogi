@@ -12,28 +12,15 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use openlogi_assets::http;
-use openlogi_assets::{DepotManifest, DeviceEntry, variant_model_id};
+use openlogi_assets::{CORE_FILES, DepotManifest, DeviceEntry, FetchOutcome};
 use openlogi_core::device::DeviceModelInfo;
 use tracing::{debug, info, warn};
 
-use super::AssetCache;
+use super::AssetResolver;
 
 /// Default origin for asset fetches. Overridable via `OPENLOGI_ASSETS`
 /// so dev / staging deployments can point elsewhere without a rebuild.
 pub const DEFAULT_BASE: &str = "https://assets.openlogi.org";
-
-/// Baseline files always fetched per depot. `AssetCache` reads
-/// `core_metadata.json` for hotspot layout, `manifest.json` for the
-/// `extended_model_id` → colour-variant lookup, and `front_core.png` for
-/// the carousel (and, on simpler devices, the buttons view too).
-///
-/// `side_core.png` (the dedicated buttons render that Logi calibrates the
-/// assignment markers against) is *optional* — only MX-class devices ship
-/// one; trackballs / presenters / entry mice point `device_buttons_image`
-/// at `front_core.png` instead. It's fetched separately, only when the
-/// registry lists it, so those devices don't 404. Colour variants are
-/// picked up in a second pass after the manifest lands.
-const FETCH_FILES: &[&str] = &["core_metadata.json", "manifest.json", "front_core.png"];
 
 /// Whether the startup HTTP sync should run on this launch.
 ///
@@ -57,7 +44,7 @@ pub fn should_run(has_bundle: bool) -> bool {
 
 /// Refresh the local cache for every model the host can plausibly want.
 pub fn sync(server: &str, models: &[DeviceModelInfo]) -> Result<()> {
-    let cache_root = AssetCache::new().cache_root().to_path_buf();
+    let cache_root = AssetResolver::new().cache_root().to_path_buf();
     fs::create_dir_all(&cache_root)
         .with_context(|| format!("create cache root {}", cache_root.display()))?;
 
@@ -114,7 +101,7 @@ fn sync_depot(
 
     // Baseline: metadata + manifest + base PNG. Manifest is mandatory
     // so the variant lookup below has something to consult.
-    for name in FETCH_FILES {
+    for name in CORE_FILES {
         fetch_to_cache(client, &entry.asset_path, &dir, entry, name)?;
     }
 
@@ -131,8 +118,8 @@ fn sync_depot(
     // Optional second pass: download the colour variant PNGs matching
     // the connected device's `extended_model_id`, for both the front
     // (carousel) and the side / buttons (mouse-model) views. Failure is
-    // non-fatal — `AssetCache.load_files` falls back to the bare core
-    // PNG that came in with `FETCH_FILES`.
+    // non-fatal — `AssetResolver.load_files` falls back to the bare core
+    // PNG that came in with `CORE_FILES`.
     let manifest_path = dir.join("manifest.json");
     for resource_key in ["device_image", "device_buttons_image"] {
         let Some(variant) =
@@ -161,20 +148,19 @@ fn fetch_to_cache(
     entry: &DeviceEntry,
     name: &str,
 ) -> Result<()> {
-    let dst = dir.join(name);
     if let Some(file_entry) = entry.files.iter().find(|f| f.name == name) {
-        if http::cached_matches(&dst, &file_entry.sha256) {
-            debug!(file = name, "cache hit");
-            return Ok(());
+        match client.fetch_entry_if_stale(asset_path, dir, file_entry)? {
+            FetchOutcome::CacheHit => debug!(file = name, "cache hit"),
+            FetchOutcome::Fetched { bytes } => info!(file = name, bytes, "downloaded"),
         }
     } else {
         warn!(
             file = name,
             "registry lists no entry — fetching without sha verify"
         );
+        let bytes = client.fetch_file_to_dir(asset_path, dir, name)?;
+        info!(file = name, bytes, "downloaded");
     }
-    let bytes = client.fetch_file_to_dir(asset_path, dir, name)?;
-    info!(file = name, bytes, "downloaded");
     Ok(())
 }
 
@@ -194,8 +180,7 @@ fn pick_variant_filename(
     let manifest = DepotManifest::load_from(manifest_path)
         .map_err(|e| warn!(error = %e, path = %manifest_path.display(), "manifest unreadable"))
         .ok()?;
-    let variant = variant_model_id(base_model_id, ext);
     manifest
-        .resource_for(&variant, resource_key)
+        .resource_for_variant(base_model_id, ext, resource_key)
         .map(str::to_string)
 }

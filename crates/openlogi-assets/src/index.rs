@@ -54,6 +54,16 @@ pub struct FileEntry {
     pub bytes: u64,
 }
 
+/// The files every depot must ship, fetched as the per-depot baseline by
+/// both the CLI bundle sync and the GUI runtime sync:
+///
+/// - `core_metadata.json` — hotspot percentages for the buttons overlay
+/// - `manifest.json` — `extended_model_id` → colour-variant + resource-key
+///   filename lookup
+/// - `front_core.png` — the carousel render (and the buttons render on
+///   simpler devices whose manifest points `device_buttons_image` at it)
+pub const CORE_FILES: [&str; 3] = ["core_metadata.json", "manifest.json", "front_core.png"];
+
 impl Index {
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
         http::load_json(path)

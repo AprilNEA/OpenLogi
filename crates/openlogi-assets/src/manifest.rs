@@ -28,7 +28,7 @@
 //! }
 //! ```
 //!
-//! Only `device_image` is consumed today — that's the PNG `AssetCache`
+//! Only `device_image` is consumed today — that's the PNG the GUI
 //! renders. The rest of the schema is parsed permissively so additional
 //! fields don't break older clients.
 
@@ -90,6 +90,21 @@ impl DepotManifest {
             .find(|d| d.model_id.eq_ignore_ascii_case(model_id))
             .and_then(|d| d.resources.iter().find(|r| r.key == resource_key))
             .map(|r| r.src.as_str())
+    }
+
+    /// Resolve `resource_key`'s `src` filename for the colour variant
+    /// identified by `ext` (`0` = the base model). Combines
+    /// [`variant_model_id`] with [`resource_for`] — the
+    /// `(base_model_id, ext, key)` → filename lookup the GUI does at both
+    /// download and render time.
+    #[must_use]
+    pub fn resource_for_variant(
+        &self,
+        base_model_id: &str,
+        ext: u8,
+        resource_key: &str,
+    ) -> Option<&str> {
+        self.resource_for(&variant_model_id(base_model_id, ext), resource_key)
     }
 }
 
