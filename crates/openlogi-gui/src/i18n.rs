@@ -17,11 +17,14 @@
 use openlogi_core::config::AppSettings;
 
 /// Locales the GUI ships, as `(code, native name)`. The codes match the
-/// sub-keys in `locales/app.yml` *and* gpui-component's bundled `ui.yml`, so
-/// choosing one also localizes the framework's own widgets. Order here is the
-/// order shown in the Settings picker (after a leading "Follow system").
+/// sub-keys in `locales/app.yml`; `en` / `zh-CN` / `zh-HK` also match
+/// gpui-component's bundled `ui.yml`, so choosing one localizes the framework's
+/// own widgets too. `ja` is *not* in `ui.yml`, so under Japanese our app strings
+/// localize but the framework's built-in widget strings fall back to English.
+/// Order here is the order shown in the Settings picker (after "Follow system").
 pub const SUPPORTED: &[(&str, &str)] = &[
     ("en", "English"),
+    ("ja", "日本語"),
     ("zh-CN", "简体中文"),
     ("zh-HK", "繁體中文"),
 ];
@@ -41,20 +44,21 @@ pub fn resolve(setting: Option<&str>) -> &'static str {
         .unwrap_or("en")
 }
 
-/// Collapse an arbitrary locale string onto one of [`SUPPORTED`], or `None`.
-/// `zh-Hant` / `zh-TW` / `zh-HK` / `zh-MO` map to Traditional (`zh-HK`); other
-/// `zh*` to Simplified (`zh-CN`); anything starting with `en` to English.
+/// Collapse an arbitrary BCP-47 locale onto one of [`SUPPORTED`], or `None`,
+/// by matching its primary subtag. A `zh` tag resolves to Traditional
+/// (`zh-HK`) when any later subtag marks Hant script or a Traditional-using
+/// region (`tw` / `hk` / `mo`), otherwise Simplified (`zh-CN`).
 fn match_supported(code: &str) -> Option<&'static str> {
     let lower = code.to_ascii_lowercase();
-    if lower.starts_with("zh") {
-        let traditional = ["hant", "-tw", "-hk", "-mo"]
-            .iter()
-            .any(|t| lower.contains(t));
-        Some(if traditional { "zh-HK" } else { "zh-CN" })
-    } else if lower.starts_with("en") {
-        Some("en")
-    } else {
-        None
+    let mut subtags = lower.split(['-', '_']);
+    match subtags.next() {
+        Some("en") => Some("en"),
+        Some("ja") => Some("ja"),
+        Some("zh") => {
+            let traditional = subtags.any(|t| matches!(t, "hant" | "tw" | "hk" | "mo"));
+            Some(if traditional { "zh-HK" } else { "zh-CN" })
+        }
+        _ => None,
     }
 }
 
@@ -69,11 +73,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_chinese_variants_to_script() {
+    fn maps_locale_variants() {
         assert_eq!(match_supported("zh-Hans-CN"), Some("zh-CN"));
         assert_eq!(match_supported("zh-CN"), Some("zh-CN"));
         assert_eq!(match_supported("zh-Hant-TW"), Some("zh-HK"));
         assert_eq!(match_supported("zh-HK"), Some("zh-HK"));
+        assert_eq!(match_supported("ja"), Some("ja"));
+        assert_eq!(match_supported("ja-JP"), Some("ja"));
         assert_eq!(match_supported("en-US"), Some("en"));
         assert_eq!(match_supported("fr-FR"), None);
     }
@@ -102,6 +108,10 @@ mod tests {
         assert_eq!(rust_i18n::t!("Settings"), "设置"); // GUI chrome
         assert_eq!(rust_i18n::t!("Left Click"), "左键单击"); // core enum label
         assert_eq!(rust_i18n::t!("Bind %{name}", name => "X"), "绑定 X"); // interpolation
+
+        rust_i18n::set_locale("ja");
+        assert_eq!(rust_i18n::t!("Settings"), "設定");
+        assert_eq!(rust_i18n::t!("Left Click"), "左クリック");
         // Resolves to *something other than* the English source ⇒ the key hit.
         assert_ne!(
             rust_i18n::t!(BLURB),
