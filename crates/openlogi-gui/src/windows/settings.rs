@@ -194,10 +194,12 @@ fn language_row(
                     cx.update_global::<AppState, _>(|s, _| s.set_language(lang.clone()));
                     // `t!` reads the locale at render time, so a repaint is what
                     // actually applies the switch; the app menu and status item
-                    // aren't in any window's view tree, so re-title them too.
+                    // aren't in any window's view tree, so re-title them too. The
+                    // status item's device line lives on the spawn loop, so ask it
+                    // to re-localize the whole menu rather than writing from here.
                     cx.refresh_windows();
                     crate::app_menu::rebuild(cx);
-                    crate::platform::menubar::refresh_labels();
+                    crate::platform::menubar::request_refresh();
                 }))
         })
         .collect();

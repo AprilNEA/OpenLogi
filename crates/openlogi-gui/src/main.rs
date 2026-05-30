@@ -212,10 +212,23 @@ fn main() -> Result<()> {
                         });
                     }
                     Some(event) = menubar_rx.recv() => {
-                        cx.update(|cx| match event {
-                            platform::menubar::MenuBarEvent::Open => open_main_window(&[], cx),
-                            platform::menubar::MenuBarEvent::Quit => cx.quit(),
+                        let status = cx.update(|cx| match event {
+                            platform::menubar::MenuBarEvent::Open => {
+                                open_main_window(&[], cx);
+                                None
+                            }
+                            platform::menubar::MenuBarEvent::Quit => {
+                                cx.quit();
+                                None
+                            }
+                            platform::menubar::MenuBarEvent::Refresh => {
+                                platform::menubar::refresh_labels();
+                                Some(menubar_status(cx))
+                            }
                         });
+                        if let Some(status) = status {
+                            menubar.set_device_status(&status);
+                        }
                     }
                     else => break,
                 }

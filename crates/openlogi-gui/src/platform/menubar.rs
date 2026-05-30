@@ -2,17 +2,20 @@
 //! no status-bar API. Menu clicks can't reach GPUI's `App`, so they post a
 //! [`MenuBarEvent`] on a channel the `main.rs` watcher loop drains.
 
-/// A request raised by clicking a status-bar menu item.
+/// A request raised by clicking a status-bar menu item, or by a live language
+/// switch asking the spawn loop to re-localize the whole menu.
 #[derive(Debug, Clone, Copy)]
 pub enum MenuBarEvent {
     Open,
     Quit,
+    /// Re-title Open/Quit *and* the device line for the current locale.
+    Refresh,
 }
 
 #[cfg(target_os = "macos")]
-pub use macos::{MenuBarHandle, install, refresh_labels};
+pub use macos::{MenuBarHandle, install, refresh_labels, request_refresh};
 #[cfg(not(target_os = "macos"))]
-pub use stub::{MenuBarHandle, install, refresh_labels};
+pub use stub::{MenuBarHandle, install, refresh_labels, request_refresh};
 
 #[cfg(target_os = "macos")]
 #[expect(
@@ -123,9 +126,10 @@ mod macos {
         }
     }
 
-    /// Re-title the Open/Quit items for the current locale, e.g. after a live
-    /// language switch. Main-thread only, like every status-item write. The
-    /// device line re-localises on its own via the next `set_device_status`.
+    /// Re-title the Open/Quit items for the current locale. Main-thread only,
+    /// like every status-item write. The device line is owned by the spawn
+    /// loop's [`MenuBarHandle`], so [`request_refresh`] drives that side; this
+    /// only touches the items reachable through `MENU_REFS`.
     pub fn refresh_labels() {
         let Some(refs) = MENU_REFS.get() else {
             return;
@@ -138,6 +142,14 @@ mod macos {
             let _: () = msg_send![open, setTitle: nsstring(&open_title)];
             let _: () = msg_send![quit, setTitle: nsstring(&quit_title)];
         }
+    }
+
+    /// Ask the spawn loop to re-localize the whole menu after a live language
+    /// switch. The device line is recomputed from the live `AppState`, which
+    /// only the loop can read, so we post through the same channel as menu
+    /// clicks instead of writing the status item from the settings view.
+    pub fn request_refresh() {
+        post(MenuBarEvent::Refresh);
     }
 
     fn nsstring(s: &str) -> id {
@@ -222,4 +234,6 @@ mod stub {
     }
 
     pub fn refresh_labels() {}
+
+    pub fn request_refresh() {}
 }
