@@ -78,7 +78,20 @@ pub(crate) async fn open_route_channel(
 ) -> Result<Option<Arc<HidppChannel>>, async_hid::HidError> {
     let candidates = enumerate_hidpp_devices().await?;
     for dev in candidates {
-        let Some((info, channel)) = open_hidpp_channel(dev).await? else {
+        // A direct route's vendor/product id is on the unopened `DeviceInfo`
+        // (`async_hid::Device` derefs to it), so skip non-matching nodes before
+        // paying the ~100ms channel-open cost — otherwise every direct write on
+        // a host that also has a Bolt receiver opens the receiver's channel
+        // first. The Bolt branch still needs an open channel for `detect`.
+        if let DeviceRoute::Direct {
+            vendor_id,
+            product_id,
+        } = route
+            && (dev.vendor_id != *vendor_id || dev.product_id != *product_id)
+        {
+            continue;
+        }
+        let Some((_, channel)) = open_hidpp_channel(dev).await? else {
             continue;
         };
         match route {
@@ -92,14 +105,7 @@ pub(crate) async fn open_route_channel(
                     return Ok(Some(channel));
                 }
             }
-            DeviceRoute::Direct {
-                vendor_id,
-                product_id,
-            } => {
-                if info.vendor_id == *vendor_id && info.product_id == *product_id {
-                    return Ok(Some(channel));
-                }
-            }
+            DeviceRoute::Direct { .. } => return Ok(Some(channel)),
         }
     }
     Ok(None)
