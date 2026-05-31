@@ -14,6 +14,8 @@ use gpui::{App, KeyBinding, Menu, MenuItem, actions};
 actions!(
     openlogi,
     [
+        /// Close the focused window.
+        CloseWindow,
         /// Hide the OpenLogi window (macOS).
         Hide,
         /// Hide every other application (macOS).
@@ -55,6 +57,7 @@ pub fn install(cx: &mut App) {
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-alt-h", HideOthers, None),
         KeyBinding::new("cmd-m", Minimize, None),
+        KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
     ]);
 
@@ -100,6 +103,8 @@ fn menus() -> Vec<Menu> {
             name: tr!("Window"),
             disabled: false,
             items: vec![
+                MenuItem::action(tr!("Close Window"), CloseWindow),
+                MenuItem::separator(),
                 MenuItem::action(tr!("Minimize"), Minimize),
                 MenuItem::action(tr!("Zoom"), Zoom),
             ],

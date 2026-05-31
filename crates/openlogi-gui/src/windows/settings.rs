@@ -58,6 +58,63 @@ impl Render for SettingsView {
                     (a.launch_at_login, a.check_for_updates, a.language.clone())
                 });
 
+        let general = GroupBox::new()
+            .title(group_title(IconName::Settings, tr!("General")))
+            .child(setting_row(
+                Switch::new("launch-at-login")
+                    .checked(launch)
+                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
+                        let enabled = *checked;
+                        cx.update_global::<AppState, _>(move |s, _| {
+                            s.set_launch_at_login(enabled);
+                        });
+                        cx.notify();
+                    })),
+                tr!("Launch at login"),
+                tr!("Automatically start OpenLogi when you log in to macOS."),
+                pal,
+            ))
+            .child(setting_row(
+                Switch::new("check-for-updates")
+                    .checked(updates)
+                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
+                        let enabled = *checked;
+                        cx.update_global::<AppState, _>(move |s, _| {
+                            s.set_check_for_updates(enabled);
+                        });
+                        cx.notify();
+                    })),
+                tr!("Check for updates"),
+                tr!(
+                    "Check once per launch for a new version (query only — no automatic download)."
+                ),
+                pal,
+            ));
+
+        // The menu-bar (status item) is macOS-only, so its toggle is too.
+        #[cfg(target_os = "macos")]
+        let general = {
+            let in_menu_bar = cx
+                .try_global::<AppState>()
+                .is_some_and(|s| s.app_settings().show_in_menu_bar);
+            general.child(setting_row(
+                Switch::new("show-in-menu-bar")
+                    .checked(in_menu_bar)
+                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
+                        let enabled = *checked;
+                        cx.update_global::<AppState, _>(move |s, _| {
+                            s.set_show_in_menu_bar(enabled);
+                        });
+                        cx.notify();
+                    })),
+                tr!("Show in menu bar"),
+                tr!(
+                    "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead."
+                ),
+                pal,
+            ))
+        };
+
         v_flex()
             .size_full()
             .bg(pal.bg)
@@ -70,38 +127,7 @@ impl Render for SettingsView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(tr!("Settings")),
             )
-            .child(
-                GroupBox::new()
-                    .title(group_title(IconName::Settings, tr!("General")))
-                    .child(setting_row(
-                        Switch::new("launch-at-login")
-                            .checked(launch)
-                            .on_click(cx.listener(|_, checked: &bool, _, cx| {
-                                let enabled = *checked;
-                                cx.update_global::<AppState, _>(move |s, _| {
-                                    s.set_launch_at_login(enabled);
-                                });
-                                cx.notify();
-                            })),
-                        tr!("Launch at login"),
-                        tr!("Automatically start OpenLogi when you log in to macOS."),
-                        pal,
-                    ))
-                    .child(setting_row(
-                        Switch::new("check-for-updates")
-                            .checked(updates)
-                            .on_click(cx.listener(|_, checked: &bool, _, cx| {
-                                let enabled = *checked;
-                                cx.update_global::<AppState, _>(move |s, _| {
-                                    s.set_check_for_updates(enabled);
-                                });
-                                cx.notify();
-                            })),
-                        tr!("Check for updates"),
-                        tr!("Check once per launch for a new version (query only — no automatic download)."),
-                        pal,
-                    )),
-            )
+            .child(general)
             .child(
                 GroupBox::new()
                     .title(group_title(IconName::Globe, tr!("Language")))

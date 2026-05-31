@@ -13,7 +13,7 @@
 #[cfg(target_os = "macos")]
 pub use macos::{
     TrayEvent, hide_from_dock, install, refresh_labels, request_refresh, set_device_status,
-    show_in_dock,
+    set_visible, show_in_dock,
 };
 
 #[cfg(target_os = "macos")]
@@ -58,6 +58,10 @@ mod macos {
     /// `usize` (a raw `id` is not `Sync`); only ever touched on the main thread.
     static DEVICE_ITEM: OnceLock<usize> = OnceLock::new();
 
+    /// The `NSStatusItem` itself, so [`set_visible`] can show / hide the icon
+    /// without tearing it down. `usize` (a raw `id` isn't `Sync`); main thread.
+    static STATUS_ITEM: OnceLock<usize> = OnceLock::new();
+
     struct MenuRefs {
         open: usize,
         quit: usize,
@@ -79,6 +83,7 @@ mod macos {
             let status_bar: id = msg_send![class!(NSStatusBar), systemStatusBar];
             let status_item: id = msg_send![status_bar, statusItemWithLength: VARIABLE_LENGTH];
             let _: id = msg_send![status_item, retain];
+            let _ = STATUS_ITEM.set(status_item as usize);
 
             let button: id = msg_send![status_item, button];
             set_button_icon(button);
@@ -129,6 +134,18 @@ mod macos {
     /// called when the last window closes (and on a `--minimized` launch).
     pub fn hide_from_dock() {
         set_activation_policy(ACTIVATION_POLICY_ACCESSORY);
+    }
+
+    /// Show or hide the status-item icon without tearing it down — backs the
+    /// "Show in menu bar" setting. A no-op until [`install`] has run.
+    pub fn set_visible(visible: bool) {
+        let Some(item) = STATUS_ITEM.get() else {
+            return;
+        };
+        let flag = if visible { YES } else { NO };
+        unsafe {
+            let _: () = msg_send![*item as id, setVisible: flag];
+        }
     }
 
     fn set_activation_policy(policy: i64) {

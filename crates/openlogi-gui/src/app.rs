@@ -8,7 +8,7 @@ use openlogi_core::config::Config;
 use openlogi_core::device::DeviceInventory;
 use tracing::{info, warn};
 
-use crate::app_menu::{Minimize, Zoom};
+use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::asset::AssetResolver;
 use crate::components::device_carousel::DeviceCarousel;
 use crate::components::dpi_panel::DpiPanel;
@@ -186,6 +186,7 @@ impl Render for AppView {
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
             .child(header(&self.carousel, pal))

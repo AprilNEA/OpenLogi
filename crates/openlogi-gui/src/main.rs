@@ -122,10 +122,16 @@ fn main() -> Result<()> {
     let (tray_tx, mut tray_rx) =
         tokio::sync::mpsc::unbounded_channel::<platform::tray::TrayEvent>();
 
-    // macOS autostart passes `--minimized` (see launch_agent.rs) to come up in
-    // the tray with no window. No tray elsewhere, so the window always opens.
+    // Whether the menu-bar (status item) icon is shown. Read once here for the
+    // initial install/visibility; live toggles go through `set_show_in_menu_bar`.
     #[cfg(target_os = "macos")]
-    let start_minimized = std::env::args().any(|a| a == "--minimized");
+    let show_in_menu_bar = initial_config.app_settings.show_in_menu_bar;
+
+    // macOS autostart passes `--minimized` (see launch_agent.rs) to come up in
+    // the tray with no window — only meaningful when the tray is on. No tray
+    // elsewhere (or with it off), so the window always opens.
+    #[cfg(target_os = "macos")]
+    let start_minimized = show_in_menu_bar && std::env::args().any(|a| a == "--minimized");
     #[cfg(not(target_os = "macos"))]
     let start_minimized = false;
 
@@ -155,17 +161,27 @@ fn main() -> Result<()> {
         // window-opening task below.
         platform::updater::install(cx, &initial_config.app_settings);
 
-        // Status-item / tray (macOS only): also hides the Dock icon. The window
-        // opens at launch and again on demand from the status-item menu.
+        // Status-item / tray (macOS only). Always created so the "Show in menu
+        // bar" setting can show / hide it live; its initial visibility follows
+        // the stored setting. The window opens at launch and on demand from its
+        // menu.
         #[cfg(target_os = "macos")]
-        platform::tray::install(tray_tx);
+        {
+            platform::tray::install(tray_tx);
+            platform::tray::set_visible(show_in_menu_bar);
+        }
 
-        // Keep the activation policy in step with window presence: when the last
-        // window closes, drop back to the tray (accessory, no Dock/menu bar);
-        // `open_main_window` restores Regular whenever a window opens.
+        // Keep the activation policy in step with window presence — but only
+        // while the menu-bar icon is on. Last window closed + tray on → drop to
+        // accessory (no Dock/menu bar); tray off → stay a regular Dock app so
+        // there's still a way back in. `open_main_window` restores Regular
+        // whenever a window opens.
         #[cfg(target_os = "macos")]
         cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
+            let tray_on = cx
+                .try_global::<AppState>()
+                .is_some_and(|s| s.app_settings().show_in_menu_bar);
+            if tray_on && cx.windows().is_empty() {
                 platform::tray::hide_from_dock();
             }
         })

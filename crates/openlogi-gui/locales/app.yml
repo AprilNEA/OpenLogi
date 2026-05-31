@@ -92,10 +92,6 @@ _version: 2
   ja: すべてを表示
   zh-CN: 全部显示
   zh-HK: 全部顯示
-"Quit OpenLogi":
-  ja: OpenLogi を終了
-  zh-CN: 退出 OpenLogi
-  zh-HK: 結束 OpenLogi
 "Window":
   ja: ウインドウ
   zh-CN: 窗口
@@ -108,6 +104,10 @@ _version: 2
   ja: ズーム
   zh-CN: 缩放
   zh-HK: 縮放
+"Close Window":
+  ja: ウインドウを閉じる
+  zh-CN: 关闭窗口
+  zh-HK: 關閉視窗
 
 # ── About window (about.rs) ─────────────────────────────────────────────────
 "Open-source Logitech mouse configuration — DPI, SmartShift, button bindings, and gestures.":
@@ -136,6 +136,14 @@ _version: 2
   ja: 起動ごとに新しいバージョンを一度だけ確認します(確認のみ — 自動ダウンロードはしません)。
   zh-CN: 每次启动检查一次新版本(仅查询,不自动下载)。
   zh-HK: 每次啟動檢查一次新版本(僅查詢,不自動下載)。
+"Show in menu bar":
+  ja: メニューバーに表示
+  zh-CN: 显示在菜单栏
+  zh-HK: 顯示在選單列
+"Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.":
+  ja: OpenLogi のアイコンをメニューバーに表示します。オフにすると Dock に残ります。
+  zh-CN: 在菜单栏保留 OpenLogi 图标；关闭后改为停留在程序坞中。
+  zh-HK: 在選單列保留 OpenLogi 圖示；關閉後改為停留在 Dock 中。
 "Language":
   ja: 言語
   zh-CN: 语言
