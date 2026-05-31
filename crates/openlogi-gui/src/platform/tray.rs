@@ -1,16 +1,17 @@
-//! macOS menu-bar (`NSStatusItem`) presence via raw Cocoa FFI — GPUI exposes
-//! no status-bar API.
+//! System-tray / status-item presence. macOS-only today, via `NSStatusItem`
+//! (which lives in the menu bar) over raw Cocoa FFI — GPUI exposes no
+//! status-bar API.
 //!
-//! This whole feature is macOS-only: there is no cross-platform "menu bar"
-//! status item (Windows has the system tray / notification area, Linux the
-//! StatusNotifierItem spec), so the module carries no non-macOS stub — every
-//! caller gates on `cfg(target_os = "macos")` instead.
+//! `tray` is the cross-platform-neutral name: macOS has the menu-bar status
+//! item, Windows the system tray / notification area, Linux the
+//! StatusNotifierItem spec. Only macOS is implemented, so the module carries no
+//! stub — every caller gates on `cfg(target_os = "macos")` instead.
 //!
-//! Menu clicks can't reach GPUI's `App`, so they post a [`MenuBarEvent`] on a
+//! Menu clicks can't reach GPUI's `App`, so they post a [`TrayEvent`] on a
 //! channel that a dedicated task in `main.rs` drains.
 
 #[cfg(target_os = "macos")]
-pub use macos::{MenuBarEvent, install, refresh_labels, request_refresh, set_device_status};
+pub use macos::{TrayEvent, install, refresh_labels, request_refresh, set_device_status};
 
 #[cfg(target_os = "macos")]
 #[expect(
@@ -31,7 +32,7 @@ mod macos {
     /// A request raised by clicking a status-bar menu item, or by a live
     /// language switch asking the drain task to re-localize the whole menu.
     #[derive(Debug, Clone, Copy)]
-    pub enum MenuBarEvent {
+    pub enum TrayEvent {
         Open,
         Quit,
         /// Re-title Open/Quit *and* the device line for the current locale.
@@ -43,7 +44,7 @@ mod macos {
     const TARGET_CLASS: &str = "OpenLogiMenuTarget";
 
     // Read by the Objective-C action callbacks, which can't capture state.
-    static MENU_TX: OnceLock<mpsc::UnboundedSender<MenuBarEvent>> = OnceLock::new();
+    static MENU_TX: OnceLock<mpsc::UnboundedSender<TrayEvent>> = OnceLock::new();
 
     /// Open/Quit item pointers, kept so a live locale switch can re-title them.
     /// Stored as `usize` because a raw `id` is not `Sync`.
@@ -66,7 +67,7 @@ mod macos {
     /// in particular *must* be retained: `NSMenuItem` does not retain its
     /// target, so without this the action callbacks would fire into freed
     /// memory.
-    pub fn install(tx: mpsc::UnboundedSender<MenuBarEvent>) {
+    pub fn install(tx: mpsc::UnboundedSender<TrayEvent>) {
         let _ = MENU_TX.set(tx);
         ensure_target_class();
 
@@ -151,7 +152,7 @@ mod macos {
     /// (recomputed from the live `AppState`, which only the task can read) is
     /// rewritten on the main thread alongside the static labels.
     pub fn request_refresh() {
-        post(MenuBarEvent::Refresh);
+        post(TrayEvent::Refresh);
     }
 
     fn nsstring(s: &str) -> id {
@@ -183,14 +184,14 @@ mod macos {
     }
 
     extern "C" fn open_action(_this: &Object, _cmd: Sel, _sender: id) {
-        post(MenuBarEvent::Open);
+        post(TrayEvent::Open);
     }
 
     extern "C" fn quit_action(_this: &Object, _cmd: Sel, _sender: id) {
-        post(MenuBarEvent::Quit);
+        post(TrayEvent::Quit);
     }
 
-    fn post(event: MenuBarEvent) {
+    fn post(event: TrayEvent) {
         if let Some(tx) = MENU_TX.get()
             && tx.send(event).is_err()
         {

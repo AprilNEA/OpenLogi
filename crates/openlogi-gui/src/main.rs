@@ -116,11 +116,11 @@ fn main() -> Result<()> {
         watchers::accessibility::spawn(std::time::Duration::from_millis(1200));
     let (pairing_ctrl_tx, mut pairing_evt_rx) = watchers::pairing::spawn();
 
-    // Menu-bar click events (Open / Quit), drained by a dedicated task below.
-    // macOS-only: there is no status item on other platforms.
+    // Status-item (tray) click events (Open / Quit), drained by a dedicated
+    // task below. macOS-only: there is no status item on other platforms.
     #[cfg(target_os = "macos")]
-    let (menubar_tx, mut menubar_rx) =
-        tokio::sync::mpsc::unbounded_channel::<platform::menubar::MenuBarEvent>();
+    let (tray_tx, mut tray_rx) =
+        tokio::sync::mpsc::unbounded_channel::<platform::tray::TrayEvent>();
 
     // `with_assets` registers the embedded app logo ([`app_assets`]) plus the
     // lucide SVGs that back `gpui_component::IconName`; without it `img()` /
@@ -148,10 +148,10 @@ fn main() -> Result<()> {
         // window-opening task below.
         platform::updater::install(cx, &initial_config.app_settings);
 
-        // Menu-bar app (macOS only): also hides the Dock icon. The window opens
-        // at launch and again on demand from the status-item menu.
+        // Status-item / tray (macOS only): also hides the Dock icon. The window
+        // opens at launch and again on demand from the status-item menu.
         #[cfg(target_os = "macos")]
-        platform::menubar::install(menubar_tx);
+        platform::tray::install(tray_tx);
 
         cx.spawn(async move |cx| {
             // Install the hook-shared AppState up front, then open the window at
@@ -170,7 +170,7 @@ fn main() -> Result<()> {
                 }
                 open_main_window(&inventories, cx);
                 #[cfg(target_os = "macos")]
-                platform::menubar::set_device_status(&menubar_status(cx));
+                platform::tray::set_device_status(&tray_status(cx));
             });
 
             // First launch only: offer to opt in to the update check, since it
@@ -194,7 +194,7 @@ fn main() -> Result<()> {
                                 state.refresh_inventories(&new_inv, &cache);
                             });
                             #[cfg(target_os = "macos")]
-                            platform::menubar::set_device_status(&menubar_status(cx));
+                            platform::tray::set_device_status(&tray_status(cx));
                         });
                     }
                     Some(bundle) = app_rx.recv() => {
@@ -241,13 +241,13 @@ fn main() -> Result<()> {
         // and the whole status item is macOS-only anyway.
         #[cfg(target_os = "macos")]
         cx.spawn(async move |cx| {
-            while let Some(event) = menubar_rx.recv().await {
+            while let Some(event) = tray_rx.recv().await {
                 cx.update(|cx| match event {
-                    platform::menubar::MenuBarEvent::Open => open_main_window(&[], cx),
-                    platform::menubar::MenuBarEvent::Quit => cx.quit(),
-                    platform::menubar::MenuBarEvent::Refresh => {
-                        platform::menubar::refresh_labels();
-                        platform::menubar::set_device_status(&menubar_status(cx));
+                    platform::tray::TrayEvent::Open => open_main_window(&[], cx),
+                    platform::tray::TrayEvent::Quit => cx.quit(),
+                    platform::tray::TrayEvent::Refresh => {
+                        platform::tray::refresh_labels();
+                        platform::tray::set_device_status(&tray_status(cx));
                     }
                 });
             }
@@ -334,7 +334,7 @@ fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
 /// Format the status-item device line from the live [`AppState`], e.g.
 /// `"MX Master 3S · 80%"`, or a placeholder when nothing is connected.
 #[cfg(target_os = "macos")]
-fn menubar_status(cx: &gpui::App) -> String {
+fn tray_status(cx: &gpui::App) -> String {
     cx.try_global::<AppState>()
         .and_then(AppState::current_record)
         .map_or_else(

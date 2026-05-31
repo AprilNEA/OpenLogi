@@ -200,7 +200,7 @@ fn language_row(
                     cx.refresh_windows();
                     crate::app_menu::rebuild(cx);
                     #[cfg(target_os = "macos")]
-                    crate::platform::menubar::request_refresh();
+                    crate::platform::tray::request_refresh();
                 }))
         })
         .collect();
