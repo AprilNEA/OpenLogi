@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg class="art" id="dmg-art" viewBox="0 0 760 480" xmlns="http://www.w3.org/2000/svg" width="760" height="480">
+        <defs>
+          <!-- field -->
+          <linearGradient id="g-field" x1="0" y1="0" x2="0" y2="480" gradientUnits="userSpaceOnUse">
+            <stop id="g-field-0" offset="0" stop-color="#1c1c21"/>
+            <stop id="g-field-1" offset="1" stop-color="#151518"/>
+          </linearGradient>
+          <!-- ambient overhead light, biased up-left (the lit surface) -->
+          <radialGradient id="g-ambient" cx="290" cy="62" r="470" gradientUnits="userSpaceOnUse">
+            <stop id="g-ambient-0" offset="0" stop-color="#2a3550" stop-opacity="0.42"/>
+            <stop id="g-ambient-1" offset="1" stop-color="#2a3550" stop-opacity="0"/>
+          </radialGradient>
+          <!-- single faint blue bloom under the app slot -->
+          <radialGradient id="g-bloom" cx="212" cy="250" r="186" gradientUnits="userSpaceOnUse">
+            <stop id="g-bloom-0" offset="0" stop-color="#3b82f6" stop-opacity="0.12"/>
+            <stop id="g-bloom-1" offset="0.46" stop-color="#3b82f6" stop-opacity="0.041"/>
+            <stop offset="1" stop-color="#3b82f6" stop-opacity="0"/>
+          </radialGradient>
+          <!-- floor deepen -->
+          <radialGradient id="g-floor" cx="380" cy="486" r="330" gradientUnits="userSpaceOnUse">
+            <stop id="g-floor-0" offset="0" stop-color="#0f0f12" stop-opacity="0.55"/>
+            <stop offset="1" stop-color="#0f0f12" stop-opacity="0"/>
+          </radialGradient>
+          <!-- vignette: corners only -->
+          <radialGradient id="g-vignette" cx="380" cy="232" r="468" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#000000" stop-opacity="0"/>
+            <stop offset="0.62" stop-color="#000000" stop-opacity="0"/>
+            <stop id="g-vig-1" offset="0.86" stop-color="#000000" stop-opacity="0.28"/>
+            <stop id="g-vig-2" offset="1" stop-color="#000000" stop-opacity="0.42"/>
+          </radialGradient>
+          <!-- arrow: muted grey, opacity ramps tail→head (the soft trace) -->
+          <linearGradient id="g-arrow" x1="312" y1="0" x2="450" y2="0" gradientUnits="userSpaceOnUse">
+            <stop id="g-arrow-0" offset="0" stop-color="#e8e8ec" stop-opacity="0.16"/>
+            <stop id="g-arrow-1" offset="1" stop-color="#e8e8ec" stop-opacity="0.5"/>
+          </linearGradient>
+          <!-- preview grain only -->
+          <filter id="grain" x="0" y="0" width="100%" height="100%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" result="n"/>
+            <feColorMatrix in="n" type="matrix" values="0 0 0 0 0.5  0 0 0 0 0.5  0 0 0 0 0.5  0 0 0 0.5 0"/>
+          </filter>
+        </defs>
+
+        <rect width="760" height="480" fill="url(#g-field)"/>
+        <rect id="ambient-rect" width="760" height="480" fill="url(#g-ambient)"/>
+        <rect width="760" height="480" fill="url(#g-bloom)"/>
+        <rect width="760" height="480" fill="url(#g-floor)"/>
+        <rect width="760" height="480" fill="url(#g-vignette)"/>
+        <rect id="grain-rect" width="760" height="480" filter="url(#grain)" style="mix-blend-mode:soft-light"/>
+
+        <!-- THE single arrow: shaft + open chevron, one stroke gradient -->
+        <path id="arrow-path" d="M312 250 L446 250 M438 241 L450 250 L438 259" fill="none" stroke="url(#g-arrow)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+        <!-- the only drawn text: a whisper-faint disclaimer -->
+        <text id="legal" x="380" y="455" text-anchor="middle" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="9" letter-spacing="1" fill="#e8e8ec" fill-opacity="0.2">Not affiliated with, or endorsed by, Logitech.</text>
+      </svg>

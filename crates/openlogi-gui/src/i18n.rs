@@ -125,6 +125,8 @@ mod tests {
         assert_eq!(rust_i18n::t!("Settings"), "设置"); // GUI chrome
         assert_eq!(rust_i18n::t!("Left Click"), "左键单击"); // core enum label
         assert_eq!(rust_i18n::t!("Bind %{name}", name => "X"), "绑定 X"); // interpolation
+        assert_eq!(rust_i18n::t!("Quit OpenLogi"), "退出 OpenLogi"); // menu-bar status item
+        assert_eq!(rust_i18n::t!("No device connected"), "未连接设备"); // menu-bar device line
         assert_ne!(
             rust_i18n::t!(BLURB),
             BLURB,

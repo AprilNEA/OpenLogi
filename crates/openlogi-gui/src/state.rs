@@ -322,6 +322,31 @@ impl AppState {
         crate::platform::launch_agent::reconcile(enabled);
     }
 
+    /// Toggle the macOS menu-bar (status item) icon, persist it, and apply it
+    /// live. Turning it off hides the item *and* pins the app to Regular
+    /// activation, so it stays an ordinary Dock app rather than being left with
+    /// neither a window, a Dock icon, nor a menu-bar icon. No-op when unchanged.
+    ///
+    /// macOS-only: the toggle that calls it exists only there, so gating avoids
+    /// an unused-method warning on other platforms.
+    #[cfg(target_os = "macos")]
+    pub fn set_show_in_menu_bar(&mut self, enabled: bool) {
+        if self.config.app_settings.show_in_menu_bar == enabled {
+            return;
+        }
+        self.config.app_settings.show_in_menu_bar = enabled;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist show-in-menu-bar setting");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            crate::platform::tray::set_visible(enabled);
+            if !enabled {
+                crate::platform::tray::show_in_dock();
+            }
+        }
+    }
+
     /// Toggle the opt-in update check and persist it. No immediate side
     /// effect beyond the next launch reading the new value. No-op when
     /// unchanged.
@@ -332,6 +357,17 @@ impl AppState {
         self.config.app_settings.check_for_updates = enabled;
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist update-check setting");
+        }
+    }
+
+    /// Record the answer to the first-run update-check prompt: enable (or leave
+    /// disabled) the check, and mark the prompt as seen so it never reappears.
+    /// Persists once.
+    pub fn record_update_consent(&mut self, enabled: bool) {
+        self.config.app_settings.check_for_updates = enabled;
+        self.config.app_settings.update_prompt_seen = true;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist update-check consent");
         }
     }
 

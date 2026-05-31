@@ -42,7 +42,7 @@ pub fn open(cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.settings,
         "Settings",
-        Size::new(px(520.), px(420.)),
+        Size::new(px(520.), px(360.)),
         SettingsView::new,
         cx,
     );
@@ -58,6 +58,63 @@ impl Render for SettingsView {
                     (a.launch_at_login, a.check_for_updates, a.language.clone())
                 });
 
+        let general = GroupBox::new()
+            .title(group_title(IconName::Settings, tr!("General")))
+            .child(setting_row(
+                Switch::new("launch-at-login")
+                    .checked(launch)
+                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
+                        let enabled = *checked;
+                        cx.update_global::<AppState, _>(move |s, _| {
+                            s.set_launch_at_login(enabled);
+                        });
+                        cx.notify();
+                    })),
+                tr!("Launch at login"),
+                tr!("Automatically start OpenLogi when you log in to macOS."),
+                pal,
+            ))
+            .child(setting_row(
+                Switch::new("check-for-updates")
+                    .checked(updates)
+                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
+                        let enabled = *checked;
+                        cx.update_global::<AppState, _>(move |s, _| {
+                            s.set_check_for_updates(enabled);
+                        });
+                        cx.notify();
+                    })),
+                tr!("Check for updates"),
+                tr!(
+                    "Check once per launch for a new version (query only — no automatic download)."
+                ),
+                pal,
+            ));
+
+        // The menu-bar (status item) is macOS-only, so its toggle is too.
+        #[cfg(target_os = "macos")]
+        let general = {
+            let in_menu_bar = cx
+                .try_global::<AppState>()
+                .is_some_and(|s| s.app_settings().show_in_menu_bar);
+            general.child(setting_row(
+                Switch::new("show-in-menu-bar")
+                    .checked(in_menu_bar)
+                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
+                        let enabled = *checked;
+                        cx.update_global::<AppState, _>(move |s, _| {
+                            s.set_show_in_menu_bar(enabled);
+                        });
+                        cx.notify();
+                    })),
+                tr!("Show in menu bar"),
+                tr!(
+                    "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead."
+                ),
+                pal,
+            ))
+        };
+
         v_flex()
             .size_full()
             .bg(pal.bg)
@@ -70,38 +127,7 @@ impl Render for SettingsView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(tr!("Settings")),
             )
-            .child(
-                GroupBox::new()
-                    .title(group_title(IconName::Settings, tr!("General")))
-                    .child(setting_row(
-                        Switch::new("launch-at-login")
-                            .checked(launch)
-                            .on_click(cx.listener(|_, checked: &bool, _, cx| {
-                                let enabled = *checked;
-                                cx.update_global::<AppState, _>(move |s, _| {
-                                    s.set_launch_at_login(enabled);
-                                });
-                                cx.notify();
-                            })),
-                        tr!("Launch at login"),
-                        tr!("Automatically start OpenLogi when you log in to macOS."),
-                        pal,
-                    ))
-                    .child(setting_row(
-                        Switch::new("check-for-updates")
-                            .checked(updates)
-                            .on_click(cx.listener(|_, checked: &bool, _, cx| {
-                                let enabled = *checked;
-                                cx.update_global::<AppState, _>(move |s, _| {
-                                    s.set_check_for_updates(enabled);
-                                });
-                                cx.notify();
-                            })),
-                        tr!("Check for updates"),
-                        tr!("Check once per launch for a new version (query only — no automatic download)."),
-                        pal,
-                    )),
-            )
+            .child(general)
             .child(
                 GroupBox::new()
                     .title(group_title(IconName::Globe, tr!("Language")))
@@ -134,6 +160,8 @@ fn setting_row(
         .gap_4()
         .child(
             v_flex()
+                .flex_1()
+                .min_w(px(0.))
                 .gap_1()
                 .child(div().text_sm().child(title.into()))
                 .child(
@@ -146,11 +174,11 @@ fn setting_row(
         .child(control)
 }
 
-/// The language picker: a muted hint on the left, selectable locale chips on
-/// the right. The leading "Follow system" chip clears the stored preference
-/// (`None`); the rest pin an explicit locale from [`crate::i18n::SUPPORTED`].
-/// Selecting one switches the locale live, then repaints every window and the
-/// menu bar so the whole UI re-renders without a restart.
+/// The language picker: a muted hint above a wrapping row of locale chips. The
+/// leading "Follow system" chip clears the stored preference (`None`); the rest
+/// pin an explicit locale from [`crate::i18n::SUPPORTED`]. Selecting one
+/// switches the locale live, then repaints every window and the menu bar so the
+/// whole UI re-renders without a restart.
 fn language_row(
     current: Option<&str>,
     pal: Palette,
@@ -191,19 +219,21 @@ fn language_row(
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.update_global::<AppState, _>(|s, _| s.set_language(lang.clone()));
                     // `t!` reads the locale at render time, so a repaint is what
-                    // actually applies the switch; the menu bar is rebuilt
-                    // separately since it isn't part of any window's view tree.
+                    // actually applies the switch; the app menu and status item
+                    // aren't in any window's view tree, so re-title them too. The
+                    // status item's device line lives on the spawn loop, so ask it
+                    // to re-localize the whole menu rather than writing from here.
                     cx.refresh_windows();
                     crate::app_menu::rebuild(cx);
+                    #[cfg(target_os = "macos")]
+                    crate::platform::tray::request_refresh();
                 }))
         })
         .collect();
 
-    h_flex()
+    v_flex()
         .w_full()
-        .items_center()
-        .justify_between()
-        .gap_4()
+        .gap_2()
         .child(
             div()
                 .text_xs()

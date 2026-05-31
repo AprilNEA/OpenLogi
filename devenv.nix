@@ -1,12 +1,23 @@
 { pkgs, ... }:
 
+let
+  # gpui's build compiles Metal shaders against the REAL Xcode toolchain.
+  # devenv's Nix apple-sdk setup hook sets DEVELOPER_DIR/SDKROOT to an SDK
+  # that has no `metal`, so anything compiling the GUI must force Xcode.
+  # Non-GUI crates still compile fine under this (the Nix clang wrapper keeps
+  # its own isysroot via NIX_CFLAGS), so applying it broadly is safe.
+  xcodeEnv = ''
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+    export SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+  '';
+in
 {
   env = {
     GREET = "devenv";
     RUSTC_WRAPPER = "sccache";
-
-    DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer";
-    SDKROOT = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk";
+    # DEVELOPER_DIR/SDKROOT are intentionally NOT set here: the Nix apple-sdk
+    # setup hook would override them anyway. Xcode is forced in enterShell and
+    # in the GUI tasks via xcodeEnv (above).
   };
 
   packages = with pkgs; [
@@ -14,6 +25,7 @@
     cmake
     sccache
     prek
+    create-dmg
   ];
 
   languages.rust = {
@@ -31,6 +43,7 @@
 
   enterShell = ''
     export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v xcbuild | paste -sd: -)
+    ${xcodeEnv}
   '';
 
   tasks = {
@@ -40,12 +53,13 @@
     };
     "openlogi:gui" = {
       description = "Run the desktop app.";
-      exec = "cargo run -p openlogi-gui";
+      exec = xcodeEnv + "cargo run -p openlogi-gui";
     };
     "openlogi:check" = {
       description = "Run fmt, clippy, and tests.";
       exec = ''
         set -e
+        ${xcodeEnv}
         cargo fmt --all -- --check
         cargo clippy --workspace --all-targets -- -D warnings
         cargo test --workspace
@@ -59,6 +73,7 @@
       description = "Build OpenLogi.app.";
       exec = ''
         set -e
+        ${xcodeEnv}
         if ! command -v cargo-bundle >/dev/null; then
           CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/cc cargo install cargo-bundle --locked
         fi

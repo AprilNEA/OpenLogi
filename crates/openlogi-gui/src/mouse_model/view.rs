@@ -1,10 +1,7 @@
-use std::time::Duration;
-
 use gpui::{
-    Anchor, Animation, AnimationExt as _, AnyElement, App, Context, DismissEvent, ElementId,
-    Entity, Focusable as _, FontWeight, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Render, RenderOnce, StatefulInteractiveElement as _, Styled, Subscription,
-    Window, canvas, div, ease_in_out, hsla, img, px, rgb,
+    Anchor, AnyElement, App, Context, DismissEvent, ElementId, Entity, Focusable as _, FontWeight,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Render, RenderOnce,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img, px, rgb,
 };
 use gpui_component::{Selectable, menu::PopupMenu, popover::Popover, v_flex};
 
@@ -28,8 +25,6 @@ const LABEL_H: f32 = 56.;
 const CARD_EDGE_INSET: f32 = SIDE_GAP + (SIDE_W - LABEL_W);
 
 const HOTSPOT_DOT: f32 = 12.;
-
-const BREATH_AMPLITUDE: f32 = 2.0;
 
 /// Interactive mouse model with button hotspots.
 pub struct MouseModelView {
@@ -174,16 +169,6 @@ fn breathing_art(
         .w(px(mouse_w))
         .h(px(mouse_h))
         .child(device_art)
-        .with_animation(
-            "mouse-breath",
-            Animation::new(Duration::from_secs(4))
-                .repeat()
-                .with_easing(ease_in_out),
-            |this, delta| {
-                let dy = (delta * std::f32::consts::TAU).sin() * BREATH_AMPLITUDE;
-                this.top(px(dy))
-            },
-        )
 }
 
 fn hotspots_layer(

@@ -55,7 +55,11 @@ impl Default for Config {
 ///
 /// All fields are `#[serde(default)]` so adding a new one is backward
 /// compatible — old config files just keep the default for the new field.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent on/off user preferences, not a state machine"
+)]
 pub struct AppSettings {
     /// When true, a macOS `LaunchAgent` plist at
     /// `~/Library/LaunchAgents/org.openlogi.openlogi.plist` is installed
@@ -71,6 +75,18 @@ pub struct AppSettings {
     /// available — no automatic download.
     #[serde(default)]
     pub check_for_updates: bool,
+    /// True once the first-run "check for updates?" prompt has been answered
+    /// (either way), so it is never shown again. The prompt is how a
+    /// privacy-conscious default of `check_for_updates = false` still lets a
+    /// user opt in on first launch.
+    #[serde(default)]
+    pub update_prompt_seen: bool,
+    /// Whether OpenLogi shows a macOS menu-bar (status item) icon. `true`
+    /// (default) → it lives in the menu bar, dropping the Dock icon while no
+    /// window is open; `false` → it stays an ordinary Dock app with no status
+    /// item. macOS-only; ignored on other platforms.
+    #[serde(default = "default_true")]
+    pub show_in_menu_bar: bool,
     /// UI language as a BCP-47-ish locale code matching the GUI's bundled
     /// locales (`"en"`, `"zh-CN"`, `"zh-HK"`). `None` means "follow the
     /// system locale", which the GUI resolves at startup. Stored here so a
@@ -86,6 +102,24 @@ impl AppSettings {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            launch_at_login: false,
+            check_for_updates: false,
+            update_prompt_seen: false,
+            show_in_menu_bar: true,
+            language: None,
+        }
+    }
+}
+
+/// serde default for [`AppSettings::show_in_menu_bar`]: `true`, so the menu-bar
+/// icon is on out of the box and configs predating the field keep that behavior.
+fn default_true() -> bool {
+    true
 }
 
 /// Settings scoped to a single physical device (keyed by HID++ model+ext).
