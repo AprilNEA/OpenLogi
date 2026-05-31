@@ -122,6 +122,13 @@ fn main() -> Result<()> {
     let (tray_tx, mut tray_rx) =
         tokio::sync::mpsc::unbounded_channel::<platform::tray::TrayEvent>();
 
+    // macOS autostart passes `--minimized` (see launch_agent.rs) to come up in
+    // the tray with no window. No tray elsewhere, so the window always opens.
+    #[cfg(target_os = "macos")]
+    let start_minimized = std::env::args().any(|a| a == "--minimized");
+    #[cfg(not(target_os = "macos"))]
+    let start_minimized = false;
+
     // `with_assets` registers the embedded app logo ([`app_assets`]) plus the
     // lucide SVGs that back `gpui_component::IconName`; without it `img()` /
     // `Icon` would fail to load.
@@ -153,6 +160,17 @@ fn main() -> Result<()> {
         #[cfg(target_os = "macos")]
         platform::tray::install(tray_tx);
 
+        // Keep the activation policy in step with window presence: when the last
+        // window closes, drop back to the tray (accessory, no Dock/menu bar);
+        // `open_main_window` restores Regular whenever a window opens.
+        #[cfg(target_os = "macos")]
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                platform::tray::hide_from_dock();
+            }
+        })
+        .detach();
+
         cx.spawn(async move |cx| {
             // Install the hook-shared AppState up front, then open the window at
             // launch; closing it leaves the app live in the menu bar.
@@ -168,7 +186,14 @@ fn main() -> Result<()> {
                         dpi_cycle,
                     ));
                 }
-                open_main_window(&inventories, cx);
+                if !start_minimized {
+                    open_main_window(&inventories, cx);
+                }
+                #[cfg(target_os = "macos")]
+                if start_minimized {
+                    // Autostart: live in the menu-bar tray with no window.
+                    platform::tray::hide_from_dock();
+                }
                 #[cfg(target_os = "macos")]
                 platform::tray::set_device_status(&tray_status(cx));
             });
@@ -303,6 +328,8 @@ fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
             .is_ok()
         {
             cx.activate(true);
+            #[cfg(target_os = "macos")]
+            platform::tray::show_in_dock();
             return;
         }
     }
@@ -326,6 +353,8 @@ fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             cx.default_global::<windows::WindowRegistry>().main = Some(handle);
             cx.activate(true);
+            #[cfg(target_os = "macos")]
+            platform::tray::show_in_dock();
         }
         Err(e) => warn!(error = %e, "could not open the main window"),
     }
