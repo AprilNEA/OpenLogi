@@ -17,20 +17,18 @@ pub use macos::{
 };
 
 #[cfg(target_os = "macos")]
-#[expect(
-    unsafe_code,
-    reason = "Cocoa NSStatusItem/NSMenu FFI; GPUI has no menu-bar API"
-)]
 mod macos {
-    use std::sync::{Once, OnceLock};
+    use std::sync::OnceLock;
 
-    use cocoa::base::{NO, YES, id, nil};
-    use cocoa::foundation::NSString;
-    use objc::declare::ClassDecl;
-    use objc::runtime::{Class, Object, Sel};
-    use objc::{class, msg_send, sel, sel_impl};
+    use cocoa::base::id;
+    use objc::runtime::{Object, Sel};
+    use objc::{sel, sel_impl};
     use tokio::sync::mpsc;
     use tracing::warn;
+
+    use super::super::status_item::{
+        self, ActionCallback, ActionTarget, ActivationPolicy, Menu, MenuItem, StatusItem,
+    };
 
     /// A request raised by clicking a status-bar menu item, or by a live
     /// language switch asking the drain task to re-localize the whole menu.
@@ -42,29 +40,31 @@ mod macos {
         Refresh,
     }
 
-    const VARIABLE_LENGTH: f64 = -1.0;
-    const ACTIVATION_POLICY_REGULAR: i64 = 0;
-    const ACTIVATION_POLICY_ACCESSORY: i64 = 1;
     const TARGET_CLASS: &str = "OpenLogiMenuTarget";
 
     // Read by the Objective-C action callbacks, which can't capture state.
     static MENU_TX: OnceLock<mpsc::UnboundedSender<TrayEvent>> = OnceLock::new();
 
     /// Open/Quit item pointers, kept so a live locale switch can re-title them.
-    /// Stored as `usize` because a raw `id` is not `Sync`.
+    /// Stored as opaque menu-item handles; only touched on the main thread.
     static MENU_REFS: OnceLock<MenuRefs> = OnceLock::new();
 
-    /// The device-status line item, written by [`set_device_status`]. Stored as
-    /// `usize` (a raw `id` is not `Sync`); only ever touched on the main thread.
-    static DEVICE_ITEM: OnceLock<usize> = OnceLock::new();
+    /// The device-status line item, written by [`set_device_status`]. Only ever
+    /// touched on the main thread.
+    static DEVICE_ITEM: OnceLock<MenuItem> = OnceLock::new();
 
-    /// The `NSStatusItem` itself, so [`set_visible`] can show / hide the icon
-    /// without tearing it down. `usize` (a raw `id` isn't `Sync`); main thread.
-    static STATUS_ITEM: OnceLock<usize> = OnceLock::new();
+    /// The `NSStatusItem` itself, so [`set_visible`] can show / hide the icon.
+    static STATUS_ITEM: OnceLock<StatusItem> = OnceLock::new();
 
     struct MenuRefs {
-        open: usize,
-        quit: usize,
+        open: MenuItem,
+        quit: MenuItem,
+    }
+
+    struct InstalledMenu {
+        menu: Menu,
+        refs: MenuRefs,
+        device_item: MenuItem,
     }
 
     /// Install the status item. Main thread only.
@@ -77,63 +77,66 @@ mod macos {
     /// weak reference to it.
     pub fn install(tx: mpsc::UnboundedSender<TrayEvent>) {
         let _ = MENU_TX.set(tx);
-        ensure_target_class();
 
-        unsafe {
-            let status_bar: id = msg_send![class!(NSStatusBar), systemStatusBar];
-            let status_item: id = msg_send![status_bar, statusItemWithLength: VARIABLE_LENGTH];
-            let _: id = msg_send![status_item, retain];
-            let _ = STATUS_ITEM.set(status_item as usize);
+        let status_item = StatusItem::new();
+        let _ = STATUS_ITEM.set(status_item);
+        status_item.set_symbol_icon("computermouse.fill", "OpenLogi", "OpenLogi");
 
-            let button: id = msg_send![status_item, button];
-            set_button_icon(button);
+        let installed_menu = build_menu();
+        let _ = DEVICE_ITEM.set(installed_menu.device_item);
+        let _ = MENU_REFS.set(installed_menu.refs);
+        status_item.set_menu(installed_menu.menu);
+    }
 
-            let target_cls = Class::get(TARGET_CLASS).unwrap_or_else(|| class!(NSObject));
-            let target: id = msg_send![target_cls, new];
-            // NSMenuItem keeps only a weak reference to its target — retain it so
-            // it outlives this function and the action callbacks stay valid.
-            let _: id = msg_send![target, retain];
+    fn build_menu() -> InstalledMenu {
+        let target = action_target();
+        let menu = Menu::new();
 
-            let menu: id = msg_send![class!(NSMenu), new];
-            let _: id = msg_send![menu, retain];
-            let _: () = msg_send![menu, setAutoenablesItems: NO];
+        let idle = rust_i18n::t!("No device connected");
+        let device_item = MenuItem::disabled(&idle);
+        menu.add_item(device_item);
 
-            let device_item: id = msg_send![class!(NSMenuItem), new];
-            let idle = rust_i18n::t!("No device connected");
-            let _: () = msg_send![device_item, setTitle: nsstring(&idle)];
-            let _: () = msg_send![device_item, setEnabled: NO];
-            let _: () = msg_send![menu, addItem: device_item];
-            let _ = DEVICE_ITEM.set(device_item as usize);
+        menu.add_separator();
 
-            let separator: id = msg_send![class!(NSMenuItem), separatorItem];
-            let _: () = msg_send![menu, addItem: separator];
+        let open_selector = sel!(openOpenLogi:);
+        let quit_selector = sel!(quitOpenLogi:);
+        let open_title = rust_i18n::t!("Open OpenLogi");
+        let open_item = MenuItem::action(&open_title, open_selector, &target);
+        menu.add_item(open_item);
+        let quit_title = rust_i18n::t!("Quit OpenLogi");
+        let quit_item = MenuItem::action(&quit_title, quit_selector, &target);
+        menu.add_item(quit_item);
 
-            let open_title = rust_i18n::t!("Open OpenLogi");
-            let open_item = action_item(&open_title, sel!(openOpenLogi:), target);
-            let _: () = msg_send![menu, addItem: open_item];
-            let quit_title = rust_i18n::t!("Quit OpenLogi");
-            let quit_item = action_item(&quit_title, sel!(quitOpenLogi:), target);
-            let _: () = msg_send![menu, addItem: quit_item];
-
-            let _ = MENU_REFS.set(MenuRefs {
-                open: open_item as usize,
-                quit: quit_item as usize,
-            });
-
-            let _: () = msg_send![status_item, setMenu: menu];
+        InstalledMenu {
+            menu,
+            refs: MenuRefs {
+                open: open_item,
+                quit: quit_item,
+            },
+            device_item,
         }
+    }
+
+    fn action_target() -> ActionTarget {
+        let open_selector = sel!(openOpenLogi:);
+        let quit_selector = sel!(quitOpenLogi:);
+        let target_methods = [
+            (open_selector, open_action as ActionCallback),
+            (quit_selector, quit_action as ActionCallback),
+        ];
+        ActionTarget::new(TARGET_CLASS, &target_methods)
     }
 
     /// Show the app in the Dock + menu bar — called when a window opens, so the
     /// app menu (⌘Q, Settings, …) is available while the window is up.
     pub fn show_in_dock() {
-        set_activation_policy(ACTIVATION_POLICY_REGULAR);
+        status_item::set_activation_policy(ActivationPolicy::Regular);
     }
 
     /// Drop the app out of the Dock + menu bar, leaving only the status item —
     /// called when the last window closes (and on a `--minimized` launch).
     pub fn hide_from_dock() {
-        set_activation_policy(ACTIVATION_POLICY_ACCESSORY);
+        status_item::set_activation_policy(ActivationPolicy::Accessory);
     }
 
     /// Show or hide the status-item icon without tearing it down — backs the
@@ -142,17 +145,7 @@ mod macos {
         let Some(item) = STATUS_ITEM.get() else {
             return;
         };
-        let flag = if visible { YES } else { NO };
-        unsafe {
-            let _: () = msg_send![*item as id, setVisible: flag];
-        }
-    }
-
-    fn set_activation_policy(policy: i64) {
-        unsafe {
-            let app: id = msg_send![class!(NSApplication), sharedApplication];
-            let _: () = msg_send![app, setActivationPolicy: policy];
-        }
+        item.set_visible(visible);
     }
 
     /// Update the device line, e.g. `"MX Master 3S · 80%"`. Main thread only.
@@ -161,10 +154,7 @@ mod macos {
         let Some(item) = DEVICE_ITEM.get() else {
             return;
         };
-        unsafe {
-            let title = nsstring(text);
-            let _: () = msg_send![*item as id, setTitle: title];
-        }
+        item.set_title(text);
     }
 
     /// Re-title the Open/Quit items for the current locale. Main-thread only,
@@ -176,12 +166,8 @@ mod macos {
         };
         let open_title = rust_i18n::t!("Open OpenLogi");
         let quit_title = rust_i18n::t!("Quit OpenLogi");
-        unsafe {
-            let open = refs.open as id;
-            let quit = refs.quit as id;
-            let _: () = msg_send![open, setTitle: nsstring(&open_title)];
-            let _: () = msg_send![quit, setTitle: nsstring(&quit_title)];
-        }
+        refs.open.set_title(&open_title);
+        refs.quit.set_title(&quit_title);
     }
 
     /// Ask the drain task to re-localize the whole menu after a live language
@@ -190,34 +176,6 @@ mod macos {
     /// rewritten on the main thread alongside the static labels.
     pub fn request_refresh() {
         post(TrayEvent::Refresh);
-    }
-
-    fn nsstring(s: &str) -> id {
-        unsafe { NSString::alloc(nil).init_str(s) }
-    }
-
-    fn action_item(title: &str, action: Sel, target: id) -> id {
-        unsafe {
-            let item: id = msg_send![class!(NSMenuItem), alloc];
-            let item: id = msg_send![item, initWithTitle: nsstring(title) action: action keyEquivalent: nsstring("")];
-            let _: () = msg_send![item, setTarget: target];
-            item
-        }
-    }
-
-    // Template image adapts to the light/dark menu bar; text title as fallback.
-    fn set_button_icon(button: id) {
-        unsafe {
-            let symbol = nsstring("computermouse.fill");
-            let description = nsstring("OpenLogi");
-            let image: id = msg_send![class!(NSImage), imageWithSystemSymbolName: symbol accessibilityDescription: description];
-            if image == nil {
-                let _: () = msg_send![button, setTitle: nsstring("OpenLogi")];
-            } else {
-                let _: () = msg_send![image, setTemplate: YES];
-                let _: () = msg_send![button, setImage: image];
-            }
-        }
     }
 
     extern "C" fn open_action(_this: &Object, _cmd: Sel, _sender: id) {
@@ -234,24 +192,5 @@ mod macos {
         {
             warn!(?event, "menu-bar event dropped — GPUI loop gone");
         }
-    }
-
-    fn ensure_target_class() {
-        static REGISTER: Once = Once::new();
-        REGISTER.call_once(|| {
-            if let Some(mut decl) = ClassDecl::new(TARGET_CLASS, class!(NSObject)) {
-                unsafe {
-                    decl.add_method(
-                        sel!(openOpenLogi:),
-                        open_action as extern "C" fn(&Object, Sel, id),
-                    );
-                    decl.add_method(
-                        sel!(quitOpenLogi:),
-                        quit_action as extern "C" fn(&Object, Sel, id),
-                    );
-                }
-                decl.register();
-            }
-        });
     }
 }
