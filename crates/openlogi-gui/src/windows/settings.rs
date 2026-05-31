@@ -11,7 +11,9 @@ use gpui::{
     ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, px, rgb,
 };
-use gpui_component::{Icon, IconName, group_box::GroupBox, h_flex, switch::Switch, v_flex};
+use gpui_component::{
+    Icon, IconName, group_box::GroupBox, h_flex, scroll::ScrollableElement, switch::Switch, v_flex,
+};
 
 use crate::state::AppState;
 use crate::theme::{self, Palette};
@@ -119,19 +121,24 @@ impl Render for SettingsView {
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
-            .p_6()
-            .gap_6()
             .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(tr!("Settings")),
-            )
-            .child(general)
-            .child(
-                GroupBox::new()
-                    .title(group_title(IconName::Globe, tr!("Language")))
-                    .child(language_row(language.as_deref(), pal, cx)),
+                v_flex()
+                    .w_full()
+                    .p_6()
+                    .gap_6()
+                    .overflow_y_scrollbar()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(tr!("Settings")),
+                    )
+                    .child(general)
+                    .child(
+                        GroupBox::new()
+                            .title(group_title(IconName::Globe, tr!("Language")))
+                            .child(language_row(language.as_deref(), pal, cx)),
+                    ),
             )
     }
 }
