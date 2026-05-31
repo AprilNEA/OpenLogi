@@ -88,7 +88,8 @@ fn plist_path() -> io::Result<PathBuf> {
 #[cfg(target_os = "macos")]
 fn render_plist(exe: &str) -> String {
     // launchd accepts both XML and binary plists; XML is human-readable
-    // and small enough that the cost is negligible.
+    // and small enough that the cost is negligible. The `--minimized` arg makes
+    // the login-launched instance come up in the menu-bar tray with no window.
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
@@ -99,7 +100,8 @@ fn render_plist(exe: &str) -> String {
         <string>{LABEL}</string>\n  \
         <key>ProgramArguments</key>\n  \
         <array>\n    \
-        <string>{exe}</string>\n  \
+        <string>{exe}</string>\n    \
+        <string>--minimized</string>\n  \
         </array>\n  \
         <key>RunAtLoad</key>\n  \
         <true/>\n  \
@@ -120,5 +122,6 @@ mod tests {
         assert!(body.contains(LABEL));
         assert!(body.contains("/Applications/OpenLogi.app/Contents/MacOS/openlogi-gui"));
         assert!(body.contains("RunAtLoad"));
+        assert!(body.contains("--minimized"));
     }
 }

@@ -11,7 +11,10 @@
 //! channel that a dedicated task in `main.rs` drains.
 
 #[cfg(target_os = "macos")]
-pub use macos::{TrayEvent, install, refresh_labels, request_refresh, set_device_status};
+pub use macos::{
+    TrayEvent, hide_from_dock, install, refresh_labels, request_refresh, set_device_status,
+    show_in_dock,
+};
 
 #[cfg(target_os = "macos")]
 #[expect(
@@ -40,6 +43,7 @@ mod macos {
     }
 
     const VARIABLE_LENGTH: f64 = -1.0;
+    const ACTIVATION_POLICY_REGULAR: i64 = 0;
     const ACTIVATION_POLICY_ACCESSORY: i64 = 1;
     const TARGET_CLASS: &str = "OpenLogiMenuTarget";
 
@@ -59,22 +63,19 @@ mod macos {
         quit: usize,
     }
 
-    /// Install the status item and switch to accessory activation, dropping the
-    /// app from the Dock and app switcher. Main thread only.
+    /// Install the status item. Main thread only.
     ///
-    /// The status item, its menu, and the click target are all retained for the
-    /// app's lifetime (a status item lives as long as the process). The target
-    /// in particular *must* be retained: `NSMenuItem` does not retain its
-    /// target, so without this the action callbacks would fire into freed
-    /// memory.
+    /// The activation policy (Dock + menu-bar visibility) is *not* set here —
+    /// [`show_in_dock`] / [`hide_from_dock`] manage it as windows open and
+    /// close. The status item, its menu, and the click target are all retained
+    /// for the app's lifetime (a status item lives as long as the process); the
+    /// target in particular *must* be retained, since `NSMenuItem` keeps only a
+    /// weak reference to it.
     pub fn install(tx: mpsc::UnboundedSender<TrayEvent>) {
         let _ = MENU_TX.set(tx);
         ensure_target_class();
 
         unsafe {
-            let app: id = msg_send![class!(NSApplication), sharedApplication];
-            let _: () = msg_send![app, setActivationPolicy: ACTIVATION_POLICY_ACCESSORY];
-
             let status_bar: id = msg_send![class!(NSStatusBar), systemStatusBar];
             let status_item: id = msg_send![status_bar, statusItemWithLength: VARIABLE_LENGTH];
             let _: id = msg_send![status_item, retain];
@@ -115,6 +116,25 @@ mod macos {
             });
 
             let _: () = msg_send![status_item, setMenu: menu];
+        }
+    }
+
+    /// Show the app in the Dock + menu bar — called when a window opens, so the
+    /// app menu (⌘Q, Settings, …) is available while the window is up.
+    pub fn show_in_dock() {
+        set_activation_policy(ACTIVATION_POLICY_REGULAR);
+    }
+
+    /// Drop the app out of the Dock + menu bar, leaving only the status item —
+    /// called when the last window closes (and on a `--minimized` launch).
+    pub fn hide_from_dock() {
+        set_activation_policy(ACTIVATION_POLICY_ACCESSORY);
+    }
+
+    fn set_activation_policy(policy: i64) {
+        unsafe {
+            let app: id = msg_send![class!(NSApplication), sharedApplication];
+            let _: () = msg_send![app, setActivationPolicy: policy];
         }
     }
 
