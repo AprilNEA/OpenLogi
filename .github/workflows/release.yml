@@ -20,7 +20,7 @@ jobs:
     env:
       OPENLOGI_BUNDLE_ASSETS: ${{ vars.OPENLOGI_BUNDLE_ASSETS }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -121,20 +121,23 @@ jobs:
           codesign --verify --verbose=2 "$dmg"
 
       - name: Notarize DMG
-        uses: lando/notarize-action@v2
-        with:
-          product-path: target/release/OpenLogi.dmg
-          appstore-connect-username: ${{ steps.load_secrets.outputs.APPLE_ID }}
-          appstore-connect-password: ${{ steps.load_secrets.outputs.APPLE_PASSWORD }}
-          appstore-connect-team-id: ${{ steps.load_secrets.outputs.APPLE_TEAM_ID }}
-          primary-bundle-id: org.openlogi.openlogi
-          tool: notarytool
-          verbose: true
+        env:
+          APPLE_ID: ${{ steps.load_secrets.outputs.APPLE_ID }}
+          APPLE_PASSWORD: ${{ steps.load_secrets.outputs.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ steps.load_secrets.outputs.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          xcrun notarytool submit target/release/OpenLogi.dmg \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
 
       - name: Staple DMG
-        uses: BoundfoxStudios/action-xcode-staple@v1
-        with:
-          product-path: target/release/OpenLogi.dmg
+        run: |
+          set -euo pipefail
+          xcrun stapler staple target/release/OpenLogi.dmg
+          xcrun stapler validate target/release/OpenLogi.dmg
 
       - name: Collect DMG artifact
         run: |
@@ -144,7 +147,7 @@ jobs:
           cp target/release/OpenLogi.dmg "dist/OpenLogi-${ref_name}-macos.dmg"
           shasum -a 256 dist/*.dmg > dist/SHA256SUMS
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: OpenLogi-macos-dmg
           path: |
@@ -152,7 +155,7 @@ jobs:
             dist/SHA256SUMS
 
       - name: Attach DMG to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.dmg
@@ -175,7 +178,7 @@ jobs:
 
       - name: Mint homebrew-tap token (GitHub App)
         id: tap_token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
           private-key: ${{ steps.app_key.outputs.pem }}
@@ -183,7 +186,7 @@ jobs:
           repositories: homebrew-tap
 
       - name: Dispatch homebrew-tap update
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@v4
         with:
           token: ${{ steps.tap_token.outputs.token }}
           repository: AprilNEA/homebrew-tap
