@@ -22,7 +22,7 @@ jobs:
       group: release-plz-pr-${{ github.ref }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -62,7 +62,7 @@ jobs:
 
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
           private-key: ${{ steps.app_key.outputs.pem }}
@@ -87,12 +87,40 @@ jobs:
             fi
           done
       - name: Run release-plz (release-pr)
+        id: release_pr
         uses: release-plz/action@v0.5
         with:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ steps.load_secrets.outputs.CARGO_REGISTRY_TOKEN }}
+      # `release-plz/action` swallows a release-pr HTTP 422 as a warning and
+      # reports no PR, which silently stalls releases (it looks identical to a
+      # quiet week of commits). Fail loudly when release-plz opened/updated no
+      # release PR, none is already open, yet release-worthy commits exist since
+      # the last tag — that combination means a swallowed failure, not a no-op.
+      - name: Guard against a silently stalled release
+        if: steps.release_pr.outputs.prs_created == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # An already-open release PR is the normal "updated, not created" path.
+          open_release_pr=$(gh pr list --repo "$REPO" --state open --json headRefName \
+            --jq '[.[] | select(.headRefName | startswith("release-plz-"))] | length')
+          if [ "$open_release_pr" != "0" ]; then
+            echo "A release PR is already open — nothing to flag."
+            exit 0
+          fi
+          last_tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          range="${last_tag:+$last_tag..}HEAD"
+          worthy=$(git log "$range" --format='%s' \
+            | grep -cE '^(feat|fix|perf)(\(.+\))?!?:|^[a-z]+(\(.+\))?!:' || true)
+          if [ "$worthy" != "0" ]; then
+            echo "::error::release-plz opened no release PR, but $worthy release-worthy commit(s) exist since ${last_tag:-repo start} and none is open — likely a swallowed release-plz failure (see the release-pr step)."
+            exit 1
+          fi
+          echo "No release PR and no release-worthy commits since ${last_tag:-repo start}; nothing to release."
 
   # On every push to master, publishes any crate whose manifest version is not yet
   # on crates.io — i.e. a no-op until the release PR is merged, at which point it
@@ -104,7 +132,7 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -141,7 +169,7 @@ jobs:
 
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
           private-key: ${{ steps.app_key.outputs.pem }}
