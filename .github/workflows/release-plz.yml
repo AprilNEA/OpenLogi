@@ -66,6 +66,26 @@ jobs:
         with:
           app-id: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
           private-key: ${{ steps.app_key.outputs.pem }}
+      # release-plz leaves its release branch behind after a release PR merges,
+      # and a leftover ref then makes the next `release-pr` fail with HTTP 422
+      # (so no PR is created). Prune any `release-plz-*` branch that no longer
+      # has an open PR — never the active release PR's branch — before running.
+      - name: Prune stale release-plz branches
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          for branch in $(gh api "repos/$REPO/branches" --paginate --jq '.[].name' \
+            | grep '^release-plz-' || true); do
+            open=$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq 'length')
+            if [ "$open" = "0" ]; then
+              echo "Pruning stale release branch: $branch"
+              gh api -X DELETE "repos/$REPO/git/refs/heads/$branch" \
+                || echo "::warning::could not delete $branch"
+            else
+              echo "Keeping $branch (open PR exists)"
+            fi
+          done
       - name: Run release-plz (release-pr)
         uses: release-plz/action@v0.5
         with:
