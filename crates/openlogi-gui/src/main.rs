@@ -141,6 +141,11 @@ fn main() -> Result<()> {
             Hook::prompt_accessibility();
         }
 
+        // Publish the shared updater and, if the user opted in, run one
+        // check on launch. Done before `initial_config` is moved into the
+        // window-opening task below.
+        platform::updater::install(cx, &initial_config.app_settings);
+
         // Menu-bar app: this also hides the Dock icon. The window opens at
         // launch and again on demand from the status-item menu.
         let menubar: platform::menubar::MenuBarHandle = platform::menubar::install(menubar_tx);
@@ -164,6 +169,17 @@ fn main() -> Result<()> {
                 menubar_status(cx)
             });
             menubar.set_device_status(&status);
+
+            // First launch only: offer to opt in to the update check, since it
+            // defaults to off. Marked seen either way so it shows just once.
+            cx.update(|cx| {
+                let show = cx
+                    .try_global::<AppState>()
+                    .is_some_and(|s| !s.app_settings().update_prompt_seen);
+                if show {
+                    windows::update_consent::open(cx);
+                }
+            });
 
             let mut hook_handle = None;
             loop {
@@ -244,7 +260,6 @@ fn reconcile_early_config() {
     let early_config = Config::load_or_default().ok();
     if let Some(cfg) = early_config.as_ref() {
         platform::launch_agent::reconcile(cfg.app_settings.launch_at_login);
-        platform::updater::maybe_check(&cfg.app_settings);
     }
 }
 

@@ -2464,6 +2464,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-updater"
+version = "0.0.2"
+source = "git+https://github.com/AprilNEA/gpui-updater?tag=v0.0.2#b58381994394b2824795dcbc9ddd0df733b3148c"
+dependencies = [
+ "gpui",
+ "minisign-verify",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "gpui_linux"
 version = "0.1.0"
 source = "git+https://github.com/zed-industries/zed#eb2223c0802c4e864caac1687631ac0c45af4dee"
@@ -3830,6 +3846,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
+name = "minisign-verify"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22f9645cb765ea72b8111f36c522475d2daa0d22c957a9826437e97534bc4e9e"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4360,7 +4382,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "openlogi-cli",
@@ -4369,7 +4391,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-assets"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -4381,7 +4403,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -4395,7 +4417,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "core-foundation 0.10.0",
  "core-graphics 0.25.0",
@@ -4408,7 +4430,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-gui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "cocoa 0.26.0",
@@ -4416,6 +4438,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "gpui-updater",
  "gpui_platform",
  "objc",
  "openlogi-assets",
@@ -4433,7 +4456,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hid"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-hid",
  "futures-lite 2.6.1",
@@ -4446,7 +4469,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hook"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cocoa 0.26.0",
  "core-foundation 0.10.0",

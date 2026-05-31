@@ -11,6 +11,7 @@
 pub mod about;
 pub mod add_device;
 pub mod settings;
+pub mod update_consent;
 
 use gpui::{
     App, AppContext as _, Bounds, Context, Global, Pixels, Render, SharedString, Size, Styled as _,
@@ -30,6 +31,7 @@ pub struct WindowRegistry {
     pub settings: Option<WindowHandle<Root>>,
     pub about: Option<WindowHandle<Root>>,
     pub add_device: Option<WindowHandle<Root>>,
+    pub update_consent: Option<WindowHandle<Root>>,
 }
 
 impl Global for WindowRegistry {}

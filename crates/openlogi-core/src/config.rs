@@ -71,6 +71,12 @@ pub struct AppSettings {
     /// available — no automatic download.
     #[serde(default)]
     pub check_for_updates: bool,
+    /// True once the first-run "check for updates?" prompt has been answered
+    /// (either way), so it is never shown again. The prompt is how a
+    /// privacy-conscious default of `check_for_updates = false` still lets a
+    /// user opt in on first launch.
+    #[serde(default)]
+    pub update_prompt_seen: bool,
     /// UI language as a BCP-47-ish locale code matching the GUI's bundled
     /// locales (`"en"`, `"zh-CN"`, `"zh-HK"`). `None` means "follow the
     /// system locale", which the GUI resolves at startup. Stored here so a

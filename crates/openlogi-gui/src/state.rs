@@ -335,6 +335,17 @@ impl AppState {
         }
     }
 
+    /// Record the answer to the first-run update-check prompt: enable (or leave
+    /// disabled) the check, and mark the prompt as seen so it never reappears.
+    /// Persists once.
+    pub fn record_update_consent(&mut self, enabled: bool) {
+        self.config.app_settings.check_for_updates = enabled;
+        self.config.app_settings.update_prompt_seen = true;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist update-check consent");
+        }
+    }
+
     /// The stored UI-language preference: `Some(code)` for an explicit choice,
     /// `None` for "follow system". Distinct from the *active* locale that
     /// `None` resolves to at startup, so the Settings picker can show "Follow
