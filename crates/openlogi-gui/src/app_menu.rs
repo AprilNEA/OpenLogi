@@ -46,6 +46,14 @@ pub fn install(cx: &mut App) {
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
     }
     cx.on_action(|_: &Quit, cx| cx.quit());
+    // App-level so it closes whichever window is focused. Settings / About /
+    // Add Device each have their own view root, so a view-level handler (like
+    // Minimize / Zoom) would only fire for the main window.
+    cx.on_action(|_: &CloseWindow, cx| {
+        if let Some(handle) = cx.active_window() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+    });
     cx.on_action(|_: &OpenSettings, cx| crate::windows::settings::open(cx));
     cx.on_action(|_: &OpenAbout, cx| crate::windows::about::open(cx));
     cx.on_action(|_: &OpenAddDevice, cx| crate::windows::add_device::open(cx));
