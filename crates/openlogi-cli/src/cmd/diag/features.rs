@@ -13,10 +13,10 @@ use crate::cmd::diag::first_online_device;
 pub struct FeaturesArgs {}
 
 pub async fn run(_args: FeaturesArgs) -> Result<()> {
-    let (uid, slot, name) = first_online_device().await?;
-    println!("device: {name} (slot {slot}, receiver {uid})");
+    let (route, name) = first_online_device().await?;
+    println!("device: {name} ({route})");
 
-    let entries = openlogi_hid::dump_features(Some(&uid), slot)
+    let entries = openlogi_hid::dump_features(&route)
         .await
         .context("dump features")?;
 

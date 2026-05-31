@@ -1,14 +1,14 @@
 //! Device-list construction and selection helpers for [`super::AppState`].
 
 use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceKind};
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
 use crate::asset::{AssetResolver, ResolvedAsset};
-use crate::hardware::DpiTarget;
 
 /// One paired device with everything the UI needs to switch to it in O(1):
 /// the config key (for bindings/DPI persistence), a display name, the
 /// resolved asset (PNG + metadata, or `None` for the synthetic fallback),
-/// and the routing target for HID++ DPI writes.
+/// and the [`DeviceRoute`] HID++ writes / capture target.
 ///
 /// The `kind` / `slot` / `online` / `battery` fields mirror the source
 /// [`PairedDevice`](openlogi_core::device::PairedDevice) so the header
@@ -20,7 +20,7 @@ pub struct DeviceRecord {
     pub config_key: String,
     pub display_name: String,
     pub asset: Option<ResolvedAsset>,
-    pub dpi_target: Option<DpiTarget>,
+    pub route: Option<DeviceRoute>,
     pub kind: DeviceKind,
     pub slot: u8,
     pub online: bool,
@@ -33,7 +33,6 @@ pub(super) fn build_device_list(
 ) -> Vec<DeviceRecord> {
     let mut list = Vec::new();
     for inv in inventories {
-        let receiver_uid = inv.receiver.unique_id.clone();
         for paired in &inv.paired {
             let Some(model) = paired.model_info.as_ref() else {
                 continue;
@@ -45,15 +44,11 @@ pub(super) fn build_device_list(
                 .map(|a| a.display_name.clone())
                 .or_else(|| paired.codename.clone())
                 .unwrap_or_else(|| format!("Slot {}", paired.slot));
-            let dpi_target = receiver_uid.as_ref().map(|uid| DpiTarget {
-                receiver_uid: uid.clone(),
-                slot: paired.slot,
-            });
             list.push(DeviceRecord {
                 config_key,
                 display_name,
                 asset,
-                dpi_target,
+                route: device_route(inv, paired.slot),
                 kind: paired.kind,
                 slot: paired.slot,
                 online: paired.online,
@@ -62,6 +57,28 @@ pub(super) fn build_device_list(
         }
     }
     list
+}
+
+/// Build the [`DeviceRoute`] HID++ writes use to reach a device.
+///
+/// A Bolt-paired device routes through its receiver UID + slot. A directly
+/// attached one (USB cable / Bluetooth) carries no receiver UID and sits at
+/// [`DIRECT_DEVICE_INDEX`] — it routes by the HID node's vendor/product id
+/// instead. A Bolt device whose receiver UID couldn't be read gets no route
+/// (`None`), so hardware writes are skipped rather than mis-routed to the
+/// receiver's own pid.
+fn device_route(inv: &DeviceInventory, slot: u8) -> Option<DeviceRoute> {
+    match &inv.receiver.unique_id {
+        Some(receiver_uid) => Some(DeviceRoute::Bolt {
+            receiver_uid: receiver_uid.clone(),
+            slot,
+        }),
+        None if slot == DIRECT_DEVICE_INDEX => Some(DeviceRoute::Direct {
+            vendor_id: inv.receiver.vendor_id,
+            product_id: inv.receiver.product_id,
+        }),
+        None => None,
+    }
 }
 
 pub(super) fn pick_initial_device(list: &[DeviceRecord], saved: Option<&str>) -> usize {

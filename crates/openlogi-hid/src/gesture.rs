@@ -17,36 +17,21 @@
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
-use hidpp::{
-    channel::HidppChannel,
-    device::Device,
-    protocol::v20,
-    receiver::{self, Receiver},
-};
+use hidpp::{channel::HidppChannel, device::Device, protocol::v20};
 use openlogi_core::binding::{ButtonId, GestureDirection, detect_swipe};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
+use crate::route::{DeviceRoute, open_route_channel};
 use crate::thumbwheel::{self, Thumbwheel};
-use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 use crate::write::SharedChannel;
 
 /// Shared slot holding the active capture session's open channel, so DPI /
 /// SmartShift writes can reuse it instead of opening a fresh one. `None`
 /// whenever no session is connected.
 pub type CaptureChannel = Arc<RwLock<Option<SharedChannel>>>;
-
-/// Which device to capture from. Mirrors how DPI / SmartShift writes target a
-/// device: an optional Bolt receiver UID plus a pairing slot.
-#[derive(Debug, Clone)]
-pub struct GestureTarget {
-    /// Bolt receiver unique ID, or `None` to use the first Bolt receiver found.
-    pub receiver_uid: Option<String>,
-    /// Pairing slot of the device on that receiver.
-    pub slot: u8,
-}
 
 /// One input captured from the active device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,11 +54,11 @@ pub enum GestureError {
     /// HID transport-level failure while enumerating or opening the device.
     #[error("HID transport error")]
     Hid(#[from] async_hid::HidError),
-    /// No Bolt receiver matched the target's `receiver_uid`.
-    #[error("no matching receiver for the capture target")]
-    ReceiverNotFound,
-    /// The device on the target slot did not answer HID++.
-    #[error("device on slot {0} did not respond to HID++")]
+    /// No connected device matched the capture route.
+    #[error("no connected device matched the capture route")]
+    DeviceNotFound,
+    /// The device at the target index did not answer HID++.
+    #[error("device at index {0:#04x} did not respond to HID++")]
     DeviceUnreachable(u8),
     /// A HID++ feature call returned an error; inner string carries context.
     #[error("HID++ protocol error: {0}")]
@@ -98,7 +83,7 @@ struct CaptureAccum {
 }
 
 /// Capture the gesture button, DPI/ModeShift button, and (when
-/// `capture_thumbwheel`) the thumb wheel on `target` until `shutdown` resolves,
+/// `capture_thumbwheel`) the thumb wheel on `route` until `shutdown` resolves,
 /// forwarding each event to `sink`.
 ///
 /// Opens and holds one HID++ channel, diverts whichever of those controls the
@@ -106,30 +91,28 @@ struct CaptureAccum {
 /// dropped), after restoring every diverted control. Setup errors are returned;
 /// failures to restore on the way out are logged, not propagated.
 pub async fn run_capture_session(
-    target: GestureTarget,
+    route: DeviceRoute,
     capture_thumbwheel: bool,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
 ) -> Result<(), GestureError> {
-    let chan = open_target_channel(&target).await?;
-    let armed = arm_controls(&chan, target.slot, capture_thumbwheel).await?;
+    let chan = open_route_channel(&route)
+        .await?
+        .ok_or(GestureError::DeviceNotFound)?;
+    let device_index = route.device_index();
+    let armed = arm_controls(&chan, device_index, capture_thumbwheel).await?;
 
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
     if let Ok(mut slot) = channel_slot.write() {
-        *slot = Some(SharedChannel::new(
-            Arc::clone(&chan),
-            target.receiver_uid.clone(),
-            target.slot,
-        ));
+        *slot = Some(SharedChannel::new(Arc::clone(&chan), route.clone()));
     }
 
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
     let reprog_index = armed.reprog.as_ref().map(|(_, idx)| *idx);
     let thumb_index = armed.thumb.as_ref().map(|(_, idx)| *idx);
     let dpi_set = armed.dpi_cids.clone();
-    let device_index = target.slot;
     let hdl = chan.add_msg_listener({
         let accum = Arc::clone(&accum);
         let sink = sink.clone();
@@ -161,7 +144,7 @@ pub async fn run_capture_session(
     });
 
     info!(
-        slot = target.slot,
+        index = device_index,
         gesture = armed.gesture_diverted,
         dpi_buttons = armed.dpi_cids.len(),
         thumbwheel = armed.thumb.is_some(),
@@ -174,7 +157,7 @@ pub async fn run_capture_session(
         *slot = None;
     }
     armed.disarm().await;
-    debug!(slot = target.slot, "control capture stopped");
+    debug!(index = device_index, "control capture stopped");
     Ok(())
 }
 
@@ -373,27 +356,4 @@ fn handle_reprog(
             }
         }
     }
-}
-
-/// Open and return a HID++ channel for `target`, matching the Bolt receiver by
-/// UID when one is given. Mirrors `write::with_device`'s selection, but keeps
-/// the channel open instead of running a closure and dropping it.
-async fn open_target_channel(target: &GestureTarget) -> Result<Arc<HidppChannel>, GestureError> {
-    let candidates = enumerate_hidpp_devices().await?;
-    for dev in candidates {
-        let Some((_, channel)) = open_hidpp_channel(dev).await? else {
-            continue;
-        };
-        let Some(Receiver::Bolt(bolt)) = receiver::detect(Arc::clone(&channel)) else {
-            continue;
-        };
-        if let Some(want) = target.receiver_uid.as_deref() {
-            match bolt.get_unique_id().await {
-                Ok(uid) if uid.eq_ignore_ascii_case(want) => {}
-                _ => continue,
-            }
-        }
-        return Ok(channel);
-    }
-    Err(GestureError::ReceiverNotFound)
 }

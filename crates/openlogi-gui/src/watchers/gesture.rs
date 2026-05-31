@@ -21,11 +21,10 @@ use std::thread;
 use std::time::Duration;
 
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
-use openlogi_hid::{CaptureChannel, CapturedInput, GestureTarget, run_capture_session};
+use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use crate::hardware::DpiTarget;
 use crate::hook_runtime::{self, BindingMap};
 use crate::state::DpiCycleState;
 
@@ -87,7 +86,7 @@ async fn manage(
     capture_channel: CaptureChannel,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
-    let mut current: Option<(DpiTarget, bool)> = None;
+    let mut current: Option<(DeviceRoute, bool)> = None;
     let mut stop: Option<oneshot::Sender<()>> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
 
@@ -109,23 +108,13 @@ async fn manage(
                     let _ = stop.send(());
                 }
                 current.clone_from(&want);
-                if let Some((target, capture_thumbwheel)) = want {
+                if let Some((route, capture_thumbwheel)) = want {
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
-                    let capture_target = GestureTarget {
-                        receiver_uid: Some(target.receiver_uid),
-                        slot: target.slot,
-                    };
                     let slot = Arc::clone(&capture_channel);
                     tokio::spawn(async move {
-                        if let Err(e) = run_capture_session(
-                            capture_target,
-                            capture_thumbwheel,
-                            sink,
-                            stop_rx,
-                            slot,
-                        )
-                        .await
+                        if let Err(e) =
+                            run_capture_session(route, capture_thumbwheel, sink, stop_rx, slot).await
                         {
                             debug!(error = %e, "capture session ended");
                         }

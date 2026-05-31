@@ -6,6 +6,7 @@
 //! - [`enumerate`] — one-shot inventory of receivers + paired devices.
 //! - [`set_dpi`] — write a new sensor DPI to a connected device.
 
+mod route;
 mod transport;
 
 pub mod adjustable_dpi;
@@ -17,14 +18,13 @@ pub mod smartshift;
 pub mod thumbwheel;
 pub mod write;
 
-pub use gesture::{
-    CaptureChannel, CapturedInput, GestureError, GestureTarget, run_capture_session,
-};
+pub use gesture::{CaptureChannel, CapturedInput, GestureError, run_capture_session};
 pub use inventory::{InventoryError, enumerate};
 pub use pairing::{
     Click, DiscoveredDevice, PairingCommand, PairingError, PairingEvent, PairingReceiver,
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
 };
+pub use route::{DIRECT_DEVICE_INDEX, DeviceRoute};
 pub use smartshift::{SmartShiftMode, SmartShiftStatus};
 pub use write::{
     FeatureEntry, SharedChannel, WriteError, dump_features, get_dpi, get_smartshift_status,

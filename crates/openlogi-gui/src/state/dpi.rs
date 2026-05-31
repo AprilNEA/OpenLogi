@@ -1,6 +1,6 @@
 //! DPI-cycle state shared with background action dispatch.
 
-use crate::hardware::DpiTarget;
+use openlogi_hid::DeviceRoute;
 
 /// Shared state consumed by the OS hook thread and the DPI panel UI to
 /// implement DPI preset cycling and direct preset selection actions.
@@ -11,14 +11,14 @@ use crate::hardware::DpiTarget;
 pub struct DpiCycleState {
     pub presets: Vec<u32>,
     pub index: usize,
-    pub target: Option<DpiTarget>,
+    pub target: Option<DeviceRoute>,
 }
 
 impl DpiCycleState {
     /// Advance to the next preset (wrapping last → first) and return the new
     /// DPI + the device target to write to. Returns `None` if `presets` is
     /// empty.
-    pub fn cycle(&mut self) -> Option<(u32, Option<DpiTarget>)> {
+    pub fn cycle(&mut self) -> Option<(u32, Option<DeviceRoute>)> {
         if self.presets.is_empty() {
             return None;
         }
@@ -28,7 +28,7 @@ impl DpiCycleState {
 
     /// Jump to preset `i`, clamping to the list length. Returns the DPI +
     /// target, or `None` if `presets` is empty.
-    pub fn set(&mut self, i: usize) -> Option<(u32, Option<DpiTarget>)> {
+    pub fn set(&mut self, i: usize) -> Option<(u32, Option<DeviceRoute>)> {
         if self.presets.is_empty() {
             return None;
         }

@@ -8,6 +8,7 @@
 
 use anyhow::Result;
 use clap::Subcommand;
+use openlogi_hid::DeviceRoute;
 
 pub mod dpi;
 pub mod features;
@@ -33,21 +34,31 @@ impl DiagCmd {
     }
 }
 
-/// Shared device picker: enumerate inventories, return the first online
-/// paired device with a receiver `unique_id` (i.e. the same selection rule
-/// the GUI uses for its initial DPI target).
-pub(crate) async fn first_online_device() -> Result<(String, u8, String)> {
+/// Shared device picker: enumerate inventories, return the [`DeviceRoute`] +
+/// display name of the first online paired device (the same selection rule the
+/// GUI uses for its initial target). Builds a Bolt route when the device is
+/// behind a receiver, a direct route otherwise (USB cable / Bluetooth).
+pub(crate) async fn first_online_device() -> Result<(DeviceRoute, String)> {
     use anyhow::anyhow;
     let inventories = openlogi_hid::enumerate().await?;
     inventories
         .into_iter()
         .find_map(|inv| {
-            let uid = inv.receiver.unique_id?;
             let paired = inv.paired.into_iter().find(|p| p.online)?;
+            let route = match inv.receiver.unique_id {
+                Some(receiver_uid) => DeviceRoute::Bolt {
+                    receiver_uid,
+                    slot: paired.slot,
+                },
+                None => DeviceRoute::Direct {
+                    vendor_id: inv.receiver.vendor_id,
+                    product_id: inv.receiver.product_id,
+                },
+            };
             let name = paired
                 .codename
                 .unwrap_or_else(|| format!("Slot {}", paired.slot));
-            Some((uid, paired.slot, name))
+            Some((route, name))
         })
         .ok_or_else(|| anyhow!("no online HID++ device found — is a Logi mouse paired?"))
 }

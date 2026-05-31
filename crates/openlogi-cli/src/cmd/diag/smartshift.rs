@@ -14,10 +14,10 @@ pub struct SmartshiftArgs {
 }
 
 pub async fn run(args: SmartshiftArgs) -> Result<()> {
-    let (uid, slot, name) = first_online_device().await?;
-    println!("device: {name} (slot {slot}, receiver {uid})");
+    let (route, name) = first_online_device().await?;
+    println!("device: {name} ({route})");
 
-    let before = openlogi_hid::get_smartshift_status(Some(&uid), slot)
+    let before = openlogi_hid::get_smartshift_status(&route)
         .await
         .context("read SmartShift status")?;
     println!(
@@ -25,12 +25,12 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
         before.mode, before.sensitivity
     );
 
-    let new_mode = openlogi_hid::toggle_smartshift(Some(&uid), slot)
+    let new_mode = openlogi_hid::toggle_smartshift(&route)
         .await
         .context("toggle SmartShift")?;
     println!("  toggled to: {new_mode:?}");
 
-    let after = openlogi_hid::get_smartshift_status(Some(&uid), slot)
+    let after = openlogi_hid::get_smartshift_status(&route)
         .await
         .context("read SmartShift after toggle")?;
     println!(
@@ -51,7 +51,7 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
     }
 
     println!("  restoring mode: {:?}", before.mode);
-    openlogi_hid::toggle_smartshift(Some(&uid), slot)
+    openlogi_hid::toggle_smartshift(&route)
         .await
         .context("restore SmartShift")?;
 

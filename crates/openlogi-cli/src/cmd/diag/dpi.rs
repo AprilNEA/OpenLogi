@@ -14,10 +14,10 @@ pub struct DpiArgs {
 }
 
 pub async fn run(args: DpiArgs) -> Result<()> {
-    let (uid, slot, name) = first_online_device().await?;
-    println!("device: {name} (slot {slot}, receiver {uid})");
+    let (route, name) = first_online_device().await?;
+    println!("device: {name} ({route})");
 
-    let before = openlogi_hid::get_dpi(Some(&uid), slot)
+    let before = openlogi_hid::get_dpi(&route)
         .await
         .context("read current DPI")?;
     println!("  current DPI: {before}");
@@ -37,11 +37,11 @@ pub async fn run(args: DpiArgs) -> Result<()> {
     }
 
     println!("  writing DPI: {target}");
-    openlogi_hid::set_dpi(Some(&uid), slot, target)
+    openlogi_hid::set_dpi(&route, target)
         .await
         .context("write DPI")?;
 
-    let after = openlogi_hid::get_dpi(Some(&uid), slot)
+    let after = openlogi_hid::get_dpi(&route)
         .await
         .context("read DPI after write")?;
     println!("  read-back DPI: {after}");
@@ -54,7 +54,7 @@ pub async fn run(args: DpiArgs) -> Result<()> {
     }
 
     println!("  restoring DPI: {before}");
-    openlogi_hid::set_dpi(Some(&uid), slot, before)
+    openlogi_hid::set_dpi(&route, before)
         .await
         .context("restore DPI")?;
 

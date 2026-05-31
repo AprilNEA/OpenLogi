@@ -12,28 +12,21 @@
 //! transient open is kept as a fallback for callers (e.g. the CGEventTap hook)
 //! firing while no session is connected.
 
-use openlogi_hid::{CaptureChannel, SharedChannel};
+use openlogi_hid::{CaptureChannel, DeviceRoute, SharedChannel};
 use tracing::{debug, warn};
 
-/// Clone out the capture session's channel when it points at `target`. `None`
-/// when no slot is supplied (e.g. the DPI slider, where a transient open is
-/// fine) or the open channel targets a different device.
-fn reusable_channel(capture: Option<&CaptureChannel>, target: &DpiTarget) -> Option<SharedChannel> {
+/// Clone out the capture session's channel when it reaches `route`. `None` when
+/// no capture session is connected or the open channel points at a different
+/// device.
+fn reusable_channel(
+    capture: Option<&CaptureChannel>,
+    route: &DeviceRoute,
+) -> Option<SharedChannel> {
     capture?
         .read()
         .ok()
         .and_then(|slot| (*slot).clone())
-        .filter(|chan| chan.matches(Some(&target.receiver_uid), target.slot))
-}
-
-/// Identifies which physical device hardware-side writes should target.
-/// `receiver_uid` is the Bolt receiver's unique id (so writes route
-/// correctly when more than one receiver is plugged in); `slot` is the
-/// device's pairing slot on that receiver.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DpiTarget {
-    pub receiver_uid: String,
-    pub slot: u8,
+        .filter(|chan| chan.matches(route))
 }
 
 /// Spawn an OS thread that toggles SmartShift (free ↔ ratchet) on the
@@ -42,7 +35,7 @@ pub struct DpiTarget {
 /// logged.
 pub fn toggle_smartshift_in_background(
     capture: Option<&CaptureChannel>,
-    target: Option<DpiTarget>,
+    target: Option<DeviceRoute>,
 ) {
     let Some(target) = target else {
         debug!("no target device — SmartShift toggle skipped");
@@ -64,13 +57,12 @@ pub fn toggle_smartshift_in_background(
         let result = rt.block_on(async {
             match &shared {
                 Some(shared) => openlogi_hid::toggle_smartshift_on(shared).await,
-                None => {
-                    openlogi_hid::toggle_smartshift(Some(&target.receiver_uid), target.slot).await
-                }
+                None => openlogi_hid::toggle_smartshift(&target).await,
             }
         });
+        let index = target.device_index();
         match result {
-            Ok(mode) => debug!(slot = target.slot, ?mode, reused, "SmartShift toggled"),
+            Ok(mode) => debug!(index, ?mode, reused, "SmartShift toggled"),
             Err(e) => warn!(error = ?e, "SmartShift toggle failed"),
         }
     });
@@ -82,7 +74,7 @@ pub fn toggle_smartshift_in_background(
 /// `target == None` is a no-op (dev environment without a real device).
 pub fn write_dpi_in_background(
     capture: Option<&CaptureChannel>,
-    target: Option<DpiTarget>,
+    target: Option<DeviceRoute>,
     dpi: u32,
 ) {
     let Some(target) = target else {
@@ -109,14 +101,12 @@ pub fn write_dpi_in_background(
         let result = rt.block_on(async {
             match &shared {
                 Some(shared) => openlogi_hid::set_dpi_on(shared, dpi_u16).await,
-                None => {
-                    openlogi_hid::set_dpi(Some(&target.receiver_uid), target.slot, dpi_u16).await
-                }
+                None => openlogi_hid::set_dpi(&target, dpi_u16).await,
             }
         });
         match result {
             Ok(()) => debug!(
-                slot = target.slot,
+                index = target.device_index(),
                 dpi = dpi_u16,
                 reused,
                 "DPI written to device"

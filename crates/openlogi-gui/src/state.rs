@@ -170,7 +170,7 @@ impl AppState {
         let presets = record
             .map(|r| config.dpi_presets(&r.config_key))
             .unwrap_or_default();
-        let target = record.and_then(|r| r.dpi_target.clone());
+        let target = record.and_then(|r| r.route.clone());
         (
             bindings,
             gesture_bindings,
@@ -481,7 +481,7 @@ impl AppState {
             .current_record()
             .map(|r| self.config.dpi_presets(&r.config_key))
             .unwrap_or_default();
-        let target = self.current_record().and_then(|r| r.dpi_target.clone());
+        let target = self.current_record().and_then(|r| r.route.clone());
         match self.dpi_cycle.write() {
             Ok(mut guard) => {
                 *guard = DpiCycleState {

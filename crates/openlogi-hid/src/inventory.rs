@@ -26,6 +26,7 @@ use thiserror::Error;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
+use crate::route::DIRECT_DEVICE_INDEX;
 use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
 /// How long to wait for device-arrival event bursts before assuming the
@@ -173,23 +174,29 @@ async fn probe_direct(
     channel: Arc<HidppChannel>,
     info: &async_hid::DeviceInfo,
 ) -> Option<DeviceInventory> {
-    const DIRECT_DEVICE_INDEX: u8 = 0xff;
-
     let (battery, model_info) = probe_features(&channel, DIRECT_DEVICE_INDEX).await;
-    // Require BatteryInfo before treating this as a direct-paired device.
-    // Bolt receivers also answer HID++ at slot 0xff with DeviceInformation
-    // (their own metadata) but do not expose UnifiedBattery — battery
-    // therefore distinguishes a peripheral from a receiver's secondary
-    // HID interface. Without this guard, a Bolt setup ends up with two
-    // entries in `device_list`: the real mouse (via the Bolt path) and a
-    // fake "direct device" pointing at the receiver, which sits at
-    // index 0 and steals every DPI / SmartShift write attempt.
-    if battery.is_none() {
+    // Hybrid peripheral discriminator. A genuine directly-attached device is
+    // either wireless/Bluetooth — which reports a battery — or wired, which
+    // reports none but still exposes a control feature (adjustable DPI or
+    // reprogrammable buttons). A Bolt receiver's secondary HID interface also
+    // answers DeviceInformation at 0xff, but exposes neither battery nor those
+    // control features, so it's filtered out here. Without this guard a Bolt
+    // setup ends up with two entries in `device_list`: the real mouse (via the
+    // Bolt path) and a phantom "direct device" pointing at the receiver, which
+    // sits at index 0 and steals every DPI / SmartShift write attempt.
+    //
+    // Battery is the fast path (no extra round-trips); the feature probe only
+    // runs for battery-less devices, so wired mice cost one more lookup while
+    // the common wireless case is unaffected.
+    let is_peripheral =
+        battery.is_some() || exposes_peripheral_feature(&channel, DIRECT_DEVICE_INDEX).await;
+    if !is_peripheral {
         debug!(
             vid = format_args!("{:04x}", info.vendor_id),
             pid = format_args!("{:04x}", info.product_id),
             has_model = model_info.is_some(),
-            "no battery at slot 0xff — likely a receiver secondary interface; skipping"
+            "slot 0xff exposes no battery or control feature — likely a receiver \
+             secondary interface; skipping"
         );
         return None;
     }
@@ -312,6 +319,38 @@ async fn probe_features(
     };
 
     (battery, model_info)
+}
+
+/// HID++ feature IDs that mark a device as a controllable peripheral rather
+/// than a bare receiver interface: adjustable DPI (both encodings) and
+/// reprogrammable controls. Used by [`probe_direct`]'s hybrid discriminator
+/// to admit wired mice, which report no battery.
+const PERIPHERAL_FEATURE_IDS: [u16; 3] = [
+    0x2201, // AdjustableDpi
+    0x2202, // ExtendedAdjustableDpi
+    0x1b04, // ReprogControlsV4
+];
+
+/// Whether the device at `index` announces any [`PERIPHERAL_FEATURE_IDS`].
+/// Looks each up through the device root — hidpp 0.2's feature registry
+/// doesn't carry these, so `enumerate_features` wouldn't surface them (see
+/// `write::open_feature`).
+async fn exposes_peripheral_feature(channel: &Arc<HidppChannel>, index: u8) -> bool {
+    let device = match Device::new(Arc::clone(channel), index).await {
+        Ok(d) => d,
+        Err(e) => {
+            debug!(index, error = ?e, "Device::new failed during peripheral probe");
+            return false;
+        }
+    };
+    for id in PERIPHERAL_FEATURE_IDS {
+        match device.root().get_feature(id).await {
+            Ok(Some(_)) => return true,
+            Ok(None) => {}
+            Err(e) => debug!(index, id, error = ?e, "root feature probe failed"),
+        }
+    }
+    false
 }
 
 fn map_kind(k: BoltDeviceKind) -> DeviceKind {
