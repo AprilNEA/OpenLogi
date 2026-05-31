@@ -1,21 +1,16 @@
 //! macOS menu-bar (`NSStatusItem`) presence via raw Cocoa FFI — GPUI exposes
-//! no status-bar API. Menu clicks can't reach GPUI's `App`, so they post a
-//! [`MenuBarEvent`] on a channel the `main.rs` watcher loop drains.
-
-/// A request raised by clicking a status-bar menu item, or by a live language
-/// switch asking the spawn loop to re-localize the whole menu.
-#[derive(Debug, Clone, Copy)]
-pub enum MenuBarEvent {
-    Open,
-    Quit,
-    /// Re-title Open/Quit *and* the device line for the current locale.
-    Refresh,
-}
+//! no status-bar API.
+//!
+//! This whole feature is macOS-only: there is no cross-platform "menu bar"
+//! status item (Windows has the system tray / notification area, Linux the
+//! StatusNotifierItem spec), so the module carries no non-macOS stub — every
+//! caller gates on `cfg(target_os = "macos")` instead.
+//!
+//! Menu clicks can't reach GPUI's `App`, so they post a [`MenuBarEvent`] on a
+//! channel that a dedicated task in `main.rs` drains.
 
 #[cfg(target_os = "macos")]
-pub use macos::{MenuBarHandle, install, refresh_labels, request_refresh};
-#[cfg(not(target_os = "macos"))]
-pub use stub::{MenuBarHandle, install, refresh_labels, request_refresh};
+pub use macos::{MenuBarEvent, install, refresh_labels, request_refresh, set_device_status};
 
 #[cfg(target_os = "macos")]
 #[expect(
@@ -33,7 +28,15 @@ mod macos {
     use tokio::sync::mpsc;
     use tracing::warn;
 
-    use super::MenuBarEvent;
+    /// A request raised by clicking a status-bar menu item, or by a live
+    /// language switch asking the drain task to re-localize the whole menu.
+    #[derive(Debug, Clone, Copy)]
+    pub enum MenuBarEvent {
+        Open,
+        Quit,
+        /// Re-title Open/Quit *and* the device line for the current locale.
+        Refresh,
+    }
 
     const VARIABLE_LENGTH: f64 = -1.0;
     const ACTIVATION_POLICY_ACCESSORY: i64 = 1;
@@ -46,34 +49,24 @@ mod macos {
     /// Stored as `usize` because a raw `id` is not `Sync`.
     static MENU_REFS: OnceLock<MenuRefs> = OnceLock::new();
 
+    /// The device-status line item, written by [`set_device_status`]. Stored as
+    /// `usize` (a raw `id` is not `Sync`); only ever touched on the main thread.
+    static DEVICE_ITEM: OnceLock<usize> = OnceLock::new();
+
     struct MenuRefs {
         open: usize,
         quit: usize,
     }
 
-    /// Cocoa objects retained for the app's lifetime; only ever touched on the
-    /// main thread, so the raw `id`s never cross threads.
-    pub struct MenuBarHandle {
-        device_item: id,
-        _status_item: id,
-        _target: id,
-        _menu: id,
-    }
-
-    impl MenuBarHandle {
-        /// Update the device line, e.g. `"MX Master 3S · 80%"`. Main thread only.
-        pub fn set_device_status(&self, text: &str) {
-            unsafe {
-                let title = nsstring(text);
-                let _: () = msg_send![self.device_item, setTitle: title];
-            }
-        }
-    }
-
     /// Install the status item and switch to accessory activation, dropping the
-    /// app from the Dock and app switcher.
-    #[must_use]
-    pub fn install(tx: mpsc::UnboundedSender<MenuBarEvent>) -> MenuBarHandle {
+    /// app from the Dock and app switcher. Main thread only.
+    ///
+    /// The status item, its menu, and the click target are all retained for the
+    /// app's lifetime (a status item lives as long as the process). The target
+    /// in particular *must* be retained: `NSMenuItem` does not retain its
+    /// target, so without this the action callbacks would fire into freed
+    /// memory.
+    pub fn install(tx: mpsc::UnboundedSender<MenuBarEvent>) {
         let _ = MENU_TX.set(tx);
         ensure_target_class();
 
@@ -90,8 +83,12 @@ mod macos {
 
             let target_cls = Class::get(TARGET_CLASS).unwrap_or_else(|| class!(NSObject));
             let target: id = msg_send![target_cls, new];
+            // NSMenuItem keeps only a weak reference to its target — retain it so
+            // it outlives this function and the action callbacks stay valid.
+            let _: id = msg_send![target, retain];
 
             let menu: id = msg_send![class!(NSMenu), new];
+            let _: id = msg_send![menu, retain];
             let _: () = msg_send![menu, setAutoenablesItems: NO];
 
             let device_item: id = msg_send![class!(NSMenuItem), new];
@@ -99,6 +96,7 @@ mod macos {
             let _: () = msg_send![device_item, setTitle: nsstring(&idle)];
             let _: () = msg_send![device_item, setEnabled: NO];
             let _: () = msg_send![menu, addItem: device_item];
+            let _ = DEVICE_ITEM.set(device_item as usize);
 
             let separator: id = msg_send![class!(NSMenuItem), separatorItem];
             let _: () = msg_send![menu, addItem: separator];
@@ -116,20 +114,24 @@ mod macos {
             });
 
             let _: () = msg_send![status_item, setMenu: menu];
+        }
+    }
 
-            MenuBarHandle {
-                device_item,
-                _status_item: status_item,
-                _target: target,
-                _menu: menu,
-            }
+    /// Update the device line, e.g. `"MX Master 3S · 80%"`. Main thread only.
+    /// A no-op until [`install`] has published the item.
+    pub fn set_device_status(text: &str) {
+        let Some(item) = DEVICE_ITEM.get() else {
+            return;
+        };
+        unsafe {
+            let title = nsstring(text);
+            let _: () = msg_send![*item as id, setTitle: title];
         }
     }
 
     /// Re-title the Open/Quit items for the current locale. Main-thread only,
-    /// like every status-item write. The device line is owned by the spawn
-    /// loop's [`MenuBarHandle`], so [`request_refresh`] drives that side; this
-    /// only touches the items reachable through `MENU_REFS`.
+    /// like every status-item write. The device line is refreshed separately via
+    /// [`set_device_status`].
     pub fn refresh_labels() {
         let Some(refs) = MENU_REFS.get() else {
             return;
@@ -144,10 +146,10 @@ mod macos {
         }
     }
 
-    /// Ask the spawn loop to re-localize the whole menu after a live language
-    /// switch. The device line is recomputed from the live `AppState`, which
-    /// only the loop can read, so we post through the same channel as menu
-    /// clicks instead of writing the status item from the settings view.
+    /// Ask the drain task to re-localize the whole menu after a live language
+    /// switch. Posts through the same channel as menu clicks so the device line
+    /// (recomputed from the live `AppState`, which only the task can read) is
+    /// rewritten on the main thread alongside the static labels.
     pub fn request_refresh() {
         post(MenuBarEvent::Refresh);
     }
@@ -214,26 +216,4 @@ mod macos {
             }
         });
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-mod stub {
-    use tokio::sync::mpsc;
-
-    use super::MenuBarEvent;
-
-    pub struct MenuBarHandle;
-
-    impl MenuBarHandle {
-        pub fn set_device_status(&self, _text: &str) {}
-    }
-
-    #[must_use]
-    pub fn install(_tx: mpsc::UnboundedSender<MenuBarEvent>) -> MenuBarHandle {
-        MenuBarHandle
-    }
-
-    pub fn refresh_labels() {}
-
-    pub fn request_refresh() {}
 }

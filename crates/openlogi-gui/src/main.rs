@@ -116,7 +116,9 @@ fn main() -> Result<()> {
         watchers::accessibility::spawn(std::time::Duration::from_millis(1200));
     let (pairing_ctrl_tx, mut pairing_evt_rx) = watchers::pairing::spawn();
 
-    // Menu-bar click events (Open / Quit), drained by the loop below.
+    // Menu-bar click events (Open / Quit), drained by a dedicated task below.
+    // macOS-only: there is no status item on other platforms.
+    #[cfg(target_os = "macos")]
     let (menubar_tx, mut menubar_rx) =
         tokio::sync::mpsc::unbounded_channel::<platform::menubar::MenuBarEvent>();
 
@@ -146,14 +148,15 @@ fn main() -> Result<()> {
         // window-opening task below.
         platform::updater::install(cx, &initial_config.app_settings);
 
-        // Menu-bar app: this also hides the Dock icon. The window opens at
-        // launch and again on demand from the status-item menu.
-        let menubar: platform::menubar::MenuBarHandle = platform::menubar::install(menubar_tx);
+        // Menu-bar app (macOS only): also hides the Dock icon. The window opens
+        // at launch and again on demand from the status-item menu.
+        #[cfg(target_os = "macos")]
+        platform::menubar::install(menubar_tx);
 
         cx.spawn(async move |cx| {
             // Install the hook-shared AppState up front, then open the window at
             // launch; closing it leaves the app live in the menu bar.
-            let status = cx.update(|cx| {
+            cx.update(|cx| {
                 if !cx.has_global::<AppState>() {
                     let cache = asset::AssetResolver::new();
                     cx.set_global(AppState::with_runtime_shared(
@@ -166,9 +169,9 @@ fn main() -> Result<()> {
                     ));
                 }
                 open_main_window(&inventories, cx);
-                menubar_status(cx)
+                #[cfg(target_os = "macos")]
+                platform::menubar::set_device_status(&menubar_status(cx));
             });
-            menubar.set_device_status(&status);
 
             // First launch only: offer to opt in to the update check, since it
             // defaults to off. Marked seen either way so it shows just once.
@@ -185,14 +188,14 @@ fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     Some(new_inv) = inventory_rx.recv() => {
-                        let status = cx.update(|cx| {
+                        cx.update(|cx| {
                             let cache = asset::AssetResolver::new();
                             cx.update_global::<AppState, _>(|state, _| {
                                 state.refresh_inventories(&new_inv, &cache);
                             });
-                            menubar_status(cx)
+                            #[cfg(target_os = "macos")]
+                            platform::menubar::set_device_status(&menubar_status(cx));
                         });
-                        menubar.set_device_status(&status);
                     }
                     Some(bundle) = app_rx.recv() => {
                         cx.update(|cx| {
@@ -227,27 +230,26 @@ fn main() -> Result<()> {
                             windows::add_device::apply_event(cx, event);
                         });
                     }
-                    Some(event) = menubar_rx.recv() => {
-                        let status = cx.update(|cx| match event {
-                            platform::menubar::MenuBarEvent::Open => {
-                                open_main_window(&[], cx);
-                                None
-                            }
-                            platform::menubar::MenuBarEvent::Quit => {
-                                cx.quit();
-                                None
-                            }
-                            platform::menubar::MenuBarEvent::Refresh => {
-                                platform::menubar::refresh_labels();
-                                Some(menubar_status(cx))
-                            }
-                        });
-                        if let Some(status) = status {
-                            menubar.set_device_status(&status);
-                        }
-                    }
                     else => break,
                 }
+            }
+        })
+        .detach();
+
+        // Drain status-item menu clicks (macOS only). Kept off the main select
+        // loop above because `tokio::select!` branches can't be `#[cfg]`-gated,
+        // and the whole status item is macOS-only anyway.
+        #[cfg(target_os = "macos")]
+        cx.spawn(async move |cx| {
+            while let Some(event) = menubar_rx.recv().await {
+                cx.update(|cx| match event {
+                    platform::menubar::MenuBarEvent::Open => open_main_window(&[], cx),
+                    platform::menubar::MenuBarEvent::Quit => cx.quit(),
+                    platform::menubar::MenuBarEvent::Refresh => {
+                        platform::menubar::refresh_labels();
+                        platform::menubar::set_device_status(&menubar_status(cx));
+                    }
+                });
             }
         })
         .detach();
@@ -331,6 +333,7 @@ fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
 
 /// Format the status-item device line from the live [`AppState`], e.g.
 /// `"MX Master 3S · 80%"`, or a placeholder when nothing is connected.
+#[cfg(target_os = "macos")]
 fn menubar_status(cx: &gpui::App) -> String {
     cx.try_global::<AppState>()
         .and_then(AppState::current_record)
