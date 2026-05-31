@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/AprilNEA/OpenLogi/compare/openlogi-hid-v0.1.4...openlogi-hid-v0.2.0) - 2026-05-31
+
+### Added
+
+- *(openlogi-hid)* route HID++ writes to directly-attached devices ([#5](https://github.com/AprilNEA/OpenLogi/pull/5))
+
 ## [0.1.4](https://github.com/AprilNEA/OpenLogi/compare/v0.1.3...v0.1.4) - 2026-05-31
 
 ### Other
