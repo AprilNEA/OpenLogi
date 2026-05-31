@@ -1,6 +1,6 @@
 //! Enumerate connected HID++ receivers and their paired devices.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, process::Command, sync::Arc, time::Duration};
 
 use hidpp::{
     channel::HidppChannel,
@@ -27,7 +27,7 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use crate::route::DIRECT_DEVICE_INDEX;
-use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
+use crate::transport::{enumerate_hidpp_devices, is_logitech_mouse, open_hidpp_channel};
 
 /// How long to wait for device-arrival event bursts before assuming the
 /// receiver has finished reporting. MX Master 4 (and other devices that may
@@ -38,6 +38,10 @@ const ARRIVAL_DRAIN: Duration = Duration::from_millis(1500);
 /// Maximum number of pairing slots a Bolt receiver supports. We iterate this
 /// range to surface paired-but-offline devices that won't fire arrival events.
 const MAX_BOLT_SLOTS: u8 = 6;
+const LOGITECH_VID: u16 = 0x046d;
+const MX_MASTER_4_PID: u16 = 0xb042;
+const MX_MASTER_4_EXT_MODEL_ID: u8 = 0x02;
+const MX_MASTER_4_NAME: &str = "MX Master 4";
 
 #[derive(Debug, Error)]
 pub enum InventoryError {
@@ -73,6 +77,13 @@ pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
         }
     }
 
+    if inventories.is_empty() {
+        let fallback = hidutil_direct_mouse_fallback();
+        if !fallback.is_empty() {
+            return Ok(fallback);
+        }
+    }
+
     Ok(inventories)
 }
 
@@ -86,7 +97,9 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
         // (Bluetooth-direct, USB-C cable). HID++ at device-index 0xff
         // addresses the device's own features. Probe in case it answers.
         // P2.4 — verified path; no Bolt-pairing slot indirection needed.
-        return Ok(probe_direct(channel, &info).await);
+        return Ok(probe_direct(Arc::clone(&channel), &info)
+            .await
+            .or_else(|| fallback_direct_mouse(&info)));
     };
 
     let unique_id = bolt.get_unique_id().await.ok();
@@ -160,6 +173,110 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
         },
         paired,
     }))
+}
+
+fn fallback_direct_mouse(info: &async_hid::DeviceInfo) -> Option<DeviceInventory> {
+    if !is_logitech_mouse(info) || info.product_id != MX_MASTER_4_PID {
+        return None;
+    }
+
+    debug!(
+        name = %info.name,
+        vid = format_args!("{:04x}", info.vendor_id),
+        pid = format_args!("{:04x}", info.product_id),
+        "Logitech mouse exposed only as a generic HID mouse; adding HID-only fallback"
+    );
+
+    Some(synthetic_direct_mouse_inventory(
+        &info.name,
+        info.product_id,
+        MX_MASTER_4_EXT_MODEL_ID,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn hidutil_direct_mouse_fallback() -> Vec<DeviceInventory> {
+    let Ok(output) = Command::new("/usr/bin/hidutil")
+        .args([
+            "list",
+            "--ndjson",
+            "--matching",
+            r#"{"VendorID":0x046d,"ProductID":0xb042}"#,
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() || !hidutil_lists_mx_master_4(&output.stdout) {
+        return Vec::new();
+    }
+
+    debug!("hidutil found MX Master 4 after HID enumeration returned no inventories");
+    vec![synthetic_direct_mouse_inventory(
+        MX_MASTER_4_NAME,
+        MX_MASTER_4_PID,
+        MX_MASTER_4_EXT_MODEL_ID,
+    )]
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hidutil_direct_mouse_fallback() -> Vec<DeviceInventory> {
+    Vec::new()
+}
+
+#[cfg(target_os = "macos")]
+fn hidutil_lists_mx_master_4(stdout: &[u8]) -> bool {
+    String::from_utf8_lossy(stdout).lines().any(|line| {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
+        };
+        value.get("Product").and_then(|v| v.as_str()) == Some(MX_MASTER_4_NAME)
+            && value.get("VendorID").and_then(serde_json::Value::as_u64)
+                == Some(u64::from(LOGITECH_VID))
+            && value.get("ProductID").and_then(serde_json::Value::as_u64)
+                == Some(u64::from(MX_MASTER_4_PID))
+            && value
+                .get("PrimaryUsagePage")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1)
+            && value
+                .get("PrimaryUsage")
+                .and_then(serde_json::Value::as_u64)
+                == Some(2)
+    })
+}
+
+fn synthetic_direct_mouse_inventory(
+    name: &str,
+    product_id: u16,
+    extended_model_id: u8,
+) -> DeviceInventory {
+    DeviceInventory {
+        receiver: ReceiverInfo {
+            name: name.to_string(),
+            vendor_id: LOGITECH_VID,
+            product_id,
+            unique_id: None,
+        },
+        paired: vec![PairedDevice {
+            slot: DIRECT_DEVICE_INDEX,
+            codename: Some(name.to_string()),
+            wpid: None,
+            kind: DeviceKind::Mouse,
+            online: true,
+            battery: None,
+            model_info: Some(DeviceModelInfo {
+                entity_count: 0,
+                unit_id: [0; 4],
+                transports: DeviceTransports {
+                    btle: true,
+                    ..DeviceTransports::default()
+                },
+                model_ids: [product_id, 0, 0],
+                extended_model_id,
+            }),
+        }],
+    }
 }
 
 /// Probe a HID++ channel that doesn't host a Bolt receiver — for
@@ -388,5 +505,26 @@ fn map_battery_status(status: HidppBatteryStatus) -> BatteryStatus {
         HidppBatteryStatus::Full => BatteryStatus::Full,
         HidppBatteryStatus::Error => BatteryStatus::Error,
         _ => BatteryStatus::Unknown,
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hidutil_parser_matches_mx_master_4_mouse_node() {
+        let stdout = br#"{"Product":"MX Master 4","VendorID":1133,"IOClass":"IOHIDUserDevice","type":"device","PrimaryUsage":2,"PrimaryUsagePage":1,"Transport":"Bluetooth Low Energy","ProductID":45122}
+"#;
+
+        assert!(hidutil_lists_mx_master_4(stdout));
+    }
+
+    #[test]
+    fn hidutil_parser_rejects_other_logitech_mouse() {
+        let stdout = br#"{"Product":"MX Master 3","VendorID":1133,"IOClass":"IOHIDUserDevice","type":"device","PrimaryUsage":2,"PrimaryUsagePage":1,"Transport":"Bluetooth Low Energy","ProductID":45091}
+"#;
+
+        assert!(!hidutil_lists_mx_master_4(stdout));
     }
 }

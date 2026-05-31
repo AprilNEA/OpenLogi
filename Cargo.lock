@@ -4462,6 +4462,7 @@ dependencies = [
  "futures-lite 2.6.1",
  "hidpp",
  "openlogi-core",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

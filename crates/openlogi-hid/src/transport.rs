@@ -23,6 +23,8 @@ const LOGITECH_VID: u16 = 0x046d;
 /// HID node per physical HID++ device on every supported OS.
 const HIDPP_USAGE_PAGE: u16 = 0xff00;
 const HIDPP_LONG_USAGE_ID: u16 = 0x0002;
+pub(crate) const HID_GENERIC_DESKTOP: u16 = 0x0001;
+pub(crate) const HID_MOUSE_USAGE_ID: u16 = 0x0002;
 
 pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError>
 {
@@ -30,13 +32,19 @@ pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, 
     Ok(backend
         .enumerate()
         .await?
-        .filter(|d| {
-            d.vendor_id == LOGITECH_VID
-                && d.usage_page == HIDPP_USAGE_PAGE
-                && d.usage_id == HIDPP_LONG_USAGE_ID
-        })
+        .filter(|d| d.vendor_id == LOGITECH_VID && is_hidpp_candidate(d))
         .collect()
         .await)
+}
+
+fn is_hidpp_candidate(d: &DeviceInfo) -> bool {
+    (d.usage_page == HIDPP_USAGE_PAGE && d.usage_id == HIDPP_LONG_USAGE_ID) || is_logitech_mouse(d)
+}
+
+pub(crate) fn is_logitech_mouse(d: &DeviceInfo) -> bool {
+    d.vendor_id == LOGITECH_VID
+        && d.usage_page == HID_GENERIC_DESKTOP
+        && d.usage_id == HID_MOUSE_USAGE_ID
 }
 
 pub(crate) async fn open_hidpp_channel(
