@@ -1,7 +1,7 @@
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    Window, div, px, rgb,
+    AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, FontWeight,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, div, px, rgb,
 };
 use gpui_component::{Icon, IconName, h_flex, v_flex};
 use openlogi_core::config::Config;
@@ -45,6 +45,10 @@ impl AppView {
 
         if !cx.has_global::<AppState>() {
             cx.set_global(AppState::with_runtime(config, inventories, &cache));
+        } else if !inventories.is_empty() {
+            cx.update_global::<AppState, _>(|state, _| {
+                state.refresh_inventories(inventories, &cache);
+            });
         }
 
         if let Some(state) = cx.try_global::<AppState>() {

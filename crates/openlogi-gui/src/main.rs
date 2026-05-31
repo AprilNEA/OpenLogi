@@ -191,8 +191,8 @@ fn main() -> Result<()> {
             // Install the hook-shared AppState up front, then open the window at
             // launch; closing it leaves the app live in the menu bar.
             cx.update(|cx| {
+                let cache = asset::AssetResolver::new();
                 if !cx.has_global::<AppState>() {
-                    let cache = asset::AssetResolver::new();
                     cx.set_global(AppState::with_runtime_shared(
                         initial_config,
                         &inventories,
@@ -201,6 +201,10 @@ fn main() -> Result<()> {
                         gesture_bindings,
                         dpi_cycle,
                     ));
+                } else if !inventories.is_empty() {
+                    cx.update_global::<AppState, _>(|state, _| {
+                        state.refresh_inventories(&inventories, &cache);
+                    });
                 }
                 if !start_minimized {
                     open_main_window(&inventories, cx);
@@ -337,6 +341,27 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
 /// repeat call) re-focuses the live window instead of stacking a duplicate, and
 /// a window closed while the app kept running can be brought back.
 fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
+    let refreshed_inventories;
+    let inventories = if inventories.is_empty() {
+        refreshed_inventories = match enumerate_blocking() {
+            Ok(inventories) => inventories,
+            Err(e) => {
+                warn!(error = %e, "could not refresh inventory before opening window");
+                Vec::new()
+            }
+        };
+        refreshed_inventories.as_slice()
+    } else {
+        inventories
+    };
+
+    if !inventories.is_empty() && cx.has_global::<AppState>() {
+        let cache = asset::AssetResolver::new();
+        cx.update_global::<AppState, _>(|state, _| {
+            state.refresh_inventories(inventories, &cache);
+        });
+    }
+
     let existing = cx.default_global::<windows::WindowRegistry>().main;
     if let Some(handle) = existing {
         if handle
