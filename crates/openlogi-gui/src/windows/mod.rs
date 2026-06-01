@@ -54,7 +54,7 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
     slot: impl Fn(&mut WindowRegistry) -> &mut Option<WindowHandle<Root>>,
     title: impl Into<SharedString>,
     size: Size<Pixels>,
-    build_view: impl FnOnce(&mut Context<V>) -> V + 'static,
+    build_view: impl FnOnce(&mut gpui::Window, &mut Context<V>) -> V + 'static,
     cx: &mut App,
 ) {
     let title = title.into();
@@ -84,7 +84,7 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
 
     let opened = cx.open_window(options, |window, cx| {
         Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
-        let view = cx.new(build_view);
+        let view = cx.new(|cx| build_view(window, cx));
         let appearance_obs = window.observe_window_appearance(|window, cx| {
             Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
         });
