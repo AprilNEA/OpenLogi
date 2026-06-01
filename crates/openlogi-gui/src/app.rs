@@ -153,13 +153,10 @@ impl AppView {
 }
 
 fn open_accessibility_settings() {
-    openlogi_hook::Hook::prompt_accessibility();
-    if let Err(e) = std::process::Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .spawn()
-    {
-        warn!(error = %e, "could not open System Settings");
-    }
+    use crate::platform::permissions::{self, Permission};
+    // Single source of the prompt + System Settings deep link, shared with the
+    // Settings window's Permissions row.
+    permissions::open_pane(Permission::Accessibility);
 }
 
 impl Render for AppView {

@@ -417,9 +417,7 @@ impl HidppChannel {
     fn normalize_outgoing(&self, msg: HidppMessage) -> HidppMessage {
         match msg {
             HidppMessage::Short(payload) if !self.supports_short && self.supports_long => {
-                let mut long = [0u8; LONG_REPORT_LENGTH - 1];
-                long[..payload.len()].copy_from_slice(&payload);
-                HidppMessage::Long(long)
+                HidppMessage::Long(short_payload_as_long(&payload))
             }
             other => other,
         }
@@ -529,4 +527,30 @@ pub enum ChannelError {
     /// Indicates that no response was received following a request.
     #[error("the device did not respond to the request")]
     NoResponse,
+}
+
+/// Widen a short HID++ payload (6 bytes) to a long one (19 bytes): the HID++
+/// header bytes (device / feature / function|sw) sit at the same offsets in
+/// both widths, so the only change is zero-padding the trailing payload. Used
+/// to re-frame short messages as long on a long-only channel — see
+/// [`HidppChannel::normalize_outgoing`]. (OpenLogi local addition.)
+fn short_payload_as_long(payload: &[u8; SHORT_REPORT_LENGTH - 1]) -> [u8; LONG_REPORT_LENGTH - 1] {
+    let mut long = [0u8; LONG_REPORT_LENGTH - 1];
+    long[..payload.len()].copy_from_slice(payload);
+    long
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_payload_widens_preserving_header_and_padding() {
+        // [device, feature, function|sw, p0, p1, p2]
+        let short = [0xff, 0x05, 0x1e, 0xaa, 0xbb, 0xcc];
+        let long = short_payload_as_long(&short);
+        assert_eq!(&long[..short.len()], &short[..]); // header + payload copied verbatim
+        assert!(long[short.len()..].iter().all(|&b| b == 0)); // remainder zero-padded
+        assert_eq!(long.len(), LONG_REPORT_LENGTH - 1);
+    }
 }

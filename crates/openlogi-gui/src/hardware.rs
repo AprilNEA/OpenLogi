@@ -12,8 +12,16 @@
 //! transient open is kept as a fallback for callers (e.g. the CGEventTap hook)
 //! firing while no session is connected.
 
+use std::time::Duration;
+
 use openlogi_hid::{CaptureChannel, DeviceRoute, SharedChannel};
 use tracing::{debug, warn};
+
+/// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
+/// own, so without this an asleep / unresponsive device would hang (and leak)
+/// this background thread forever; a write to a live device completes in well
+/// under a second.
+const WRITE_BUDGET: Duration = Duration::from_secs(5);
 
 /// Clone out the capture session's channel when it reaches `route`. `None` when
 /// no capture session is connected or the open channel points at a different
@@ -55,15 +63,22 @@ pub fn toggle_smartshift_in_background(
             }
         };
         let result = rt.block_on(async {
-            match &shared {
-                Some(shared) => openlogi_hid::toggle_smartshift_on(shared).await,
-                None => openlogi_hid::toggle_smartshift(&target).await,
-            }
+            tokio::time::timeout(WRITE_BUDGET, async {
+                match &shared {
+                    Some(shared) => openlogi_hid::toggle_smartshift_on(shared).await,
+                    None => openlogi_hid::toggle_smartshift(&target).await,
+                }
+            })
+            .await
         });
         let index = target.device_index();
         match result {
-            Ok(mode) => debug!(index, ?mode, reused, "SmartShift toggled"),
-            Err(e) => warn!(error = ?e, "SmartShift toggle failed"),
+            Ok(Ok(mode)) => debug!(index, ?mode, reused, "SmartShift toggled"),
+            Ok(Err(e)) => warn!(error = ?e, "SmartShift toggle failed"),
+            Err(_) => warn!(
+                index,
+                "SmartShift toggle timed out (device asleep/unresponsive)"
+            ),
         }
     });
 }
@@ -99,19 +114,26 @@ pub fn write_dpi_in_background(
         // exhaustiveness.
         let dpi_u16 = u16::try_from(dpi).unwrap_or(u16::MAX);
         let result = rt.block_on(async {
-            match &shared {
-                Some(shared) => openlogi_hid::set_dpi_on(shared, dpi_u16).await,
-                None => openlogi_hid::set_dpi(&target, dpi_u16).await,
-            }
+            tokio::time::timeout(WRITE_BUDGET, async {
+                match &shared {
+                    Some(shared) => openlogi_hid::set_dpi_on(shared, dpi_u16).await,
+                    None => openlogi_hid::set_dpi(&target, dpi_u16).await,
+                }
+            })
+            .await
         });
         match result {
-            Ok(()) => debug!(
+            Ok(Ok(())) => debug!(
                 index = target.device_index(),
                 dpi = dpi_u16,
                 reused,
                 "DPI written to device"
             ),
-            Err(e) => warn!(error = ?e, "DPI write failed"),
+            Ok(Err(e)) => warn!(error = ?e, "DPI write failed"),
+            Err(_) => warn!(
+                dpi = dpi_u16,
+                "DPI write timed out (device asleep/unresponsive)"
+            ),
         }
     });
 }

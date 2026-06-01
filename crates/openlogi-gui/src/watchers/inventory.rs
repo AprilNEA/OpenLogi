@@ -26,6 +26,7 @@ use tracing::{debug, warn};
 /// the loop exits cleanly.
 pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<Vec<DeviceInventory>> {
     let (tx, rx) = mpsc::unbounded_channel();
+    let worker_tx = tx.clone();
     let spawn_result = thread::Builder::new()
         .name("openlogi-inventory-watcher".into())
         .spawn(move || {
@@ -47,7 +48,7 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<Vec<DeviceInventory>> 
                         Vec::new()
                     }
                 };
-                if tx.send(inv).is_err() {
+                if worker_tx.send(inv).is_err() {
                     debug!("inventory watcher receiver dropped — exiting");
                     return;
                 }
@@ -55,11 +56,13 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<Vec<DeviceInventory>> 
             }
         });
     if let Err(e) = spawn_result {
-        // OS thread limits / fork failures are non-fatal: the GUI can run
-        // with the initial enumeration snapshot, just without hot-plug
-        // detection. The dropped sender means the receiver immediately
-        // closes on its first recv() and the GUI loop falls through.
+        // OS thread / fork limits are non-fatal — but startup no longer does a
+        // synchronous enumeration, so the GUI keys its initial "Scanning…"
+        // state off the first snapshot. Emit one empty snapshot here so it
+        // falls through to "No device connected" instead of showing
+        // "Scanning…" forever; there's just no hot-plug / auto-reconnect.
         warn!(error = %e, "could not spawn inventory watcher — auto-reconnect disabled");
+        let _ = tx.send(Vec::new());
     }
     rx
 }

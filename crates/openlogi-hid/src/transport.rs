@@ -34,7 +34,7 @@ const LOGITECH_VID: u16 = 0x046d;
 ///
 /// `long_only` marks a transport that exposes *only* the long report — no
 /// short-report (`0x10`) collection — so short HID++ requests must be
-/// up-converted to long (see [`short_as_long`]). BLE-direct devices on macOS
+/// up-converted to long (handled by the `hidpp` channel). BLE-direct devices on macOS
 /// are long-only; USB / receiver devices carry both. Keeping the flag in this
 /// table means a new long-only transport is a single-line addition here, with
 /// no second site to update.
@@ -53,7 +53,7 @@ fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
 }
 
 /// Whether the matched HID++ collection exposes only the long report, so short
-/// requests must be re-framed as long (see [`short_as_long`]). `false` for
+/// requests must be re-framed as long (done in the `hidpp` channel). `false` for
 /// pages not in [`HIDPP_LONG_COLLECTIONS`].
 fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
     HIDPP_LONG_COLLECTIONS

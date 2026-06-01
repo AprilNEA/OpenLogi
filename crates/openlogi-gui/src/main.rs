@@ -237,7 +237,11 @@ fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     Some(new_inv) = inventory_rx.recv() => {
-                        if !assets_synced && !new_inv.is_empty() {
+                        // Latch on the first snapshot that actually carries
+                        // model info — gating on `!is_empty()` alone could fire
+                        // on a device whose DeviceInformation read hasn't
+                        // resolved yet, leaving its art un-synced all session.
+                        if !assets_synced && !collect_models(&new_inv).is_empty() {
                             assets_synced = true;
                             let inv = new_inv.clone();
                             std::thread::spawn(move || sync_assets_if_needed(&inv));
