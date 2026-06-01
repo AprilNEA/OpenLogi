@@ -94,4 +94,58 @@ impl Index {
             .find(|(_, entry)| entry.model_id.to_ascii_lowercase().ends_with(&suffix_lower))
             .map(|(depot, entry)| (depot.as_str(), entry))
     }
+
+    /// Find the depot whose `displayName` equals `name` (case-insensitive,
+    /// exact). Last-resort bridge for devices whose live HID++ model PID is
+    /// absent from the registry under every transport — e.g. an MX Master 3S
+    /// connected over BTLE reports model id `b034`, but Logi's registry keys
+    /// it `2b043` (a different transport's PID). The firmware codename
+    /// ("MX Master 3S") still matches the registry `displayName`.
+    #[must_use]
+    pub fn find_by_display_name(&self, name: &str) -> Option<(&str, &DeviceEntry)> {
+        self.devices
+            .iter()
+            .find(|(_, entry)| entry.display_name.eq_ignore_ascii_case(name))
+            .map(|(depot, entry)| (depot.as_str(), entry))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn entry(model_id: &str, display_name: &str) -> DeviceEntry {
+        DeviceEntry {
+            model_id: model_id.to_string(),
+            display_name: display_name.to_string(),
+            kind: "mouse".to_string(),
+            asset_path: "assets/mx_master_3s/".to_string(),
+            files: Vec::new(),
+        }
+    }
+
+    fn index_with(depot: &str, model_id: &str, display_name: &str) -> Index {
+        let mut devices = HashMap::new();
+        devices.insert(depot.to_string(), entry(model_id, display_name));
+        Index {
+            schema_version: 1,
+            devices,
+        }
+    }
+
+    #[test]
+    fn find_by_display_name_matches_case_insensitively() {
+        let index = index_with("mx_master_3s", "2b043", "MX Master 3S");
+        let hit = index.find_by_display_name("mx master 3s");
+        assert_eq!(hit.map(|(depot, _)| depot), Some("mx_master_3s"));
+    }
+
+    #[test]
+    fn find_by_display_name_is_exact_not_substring() {
+        // "MX Master 3" must not resolve to the "MX Master 3S" depot —
+        // the bridge is an exact (case-insensitive) name match.
+        let index = index_with("mx_master_3s", "2b043", "MX Master 3S");
+        assert!(index.find_by_display_name("MX Master 3").is_none());
+    }
 }

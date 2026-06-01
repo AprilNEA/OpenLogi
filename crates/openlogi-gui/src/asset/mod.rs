@@ -91,9 +91,13 @@ impl AssetResolver {
         self.has_bundle
     }
 
-    pub fn resolve(&self, model: &DeviceModelInfo) -> Option<ResolvedAsset> {
+    pub fn resolve(
+        &self,
+        model: &DeviceModelInfo,
+        codename: Option<&str>,
+    ) -> Option<ResolvedAsset> {
         let index = self.index.as_ref()?;
-        let (depot, entry) = resolve_in_index(index, model)?;
+        let (depot, entry) = resolve_in_index(index, model, codename)?;
         self.load_files(depot, entry, model)
     }
 
@@ -204,9 +208,15 @@ impl Default for AssetResolver {
 ///    `extended_model_id` (registry: `"2b042"`, device reports
 ///    `ext=01 + b042`). Safe in practice because Logitech reserves PID
 ///    ranges per product family.
+/// 4. Firmware `codename` ↔ registry `displayName` (exact, case-insensitive).
+///    Last resort for devices whose live PID is absent from the registry
+///    under every transport — e.g. an MX Master 3S over BTLE reports model
+///    id `b034`, but the registry keys the 3S as `2b043`; only the name
+///    ("MX Master 3S") still lines up.
 pub(crate) fn resolve_in_index<'a>(
     index: &'a Index,
     model: &DeviceModelInfo,
+    codename: Option<&str>,
 ) -> Option<(&'a str, &'a DeviceEntry)> {
     if let Ok(forced) = std::env::var("OPENLOGI_FORCE_DEPOT")
         && let Some((depot, entry)) = index
@@ -223,10 +233,19 @@ pub(crate) fn resolve_in_index<'a>(
         return Some((depot, entry));
     }
     let suffix = suffix_candidates(model);
-    let hit = suffix
-        .iter()
-        .find_map(|m| index.find_by_model_id_suffix(m))?;
-    debug!(depot = hit.0, "asset matched via bolt-pid suffix fallback");
+    if let Some(hit) = suffix.iter().find_map(|m| index.find_by_model_id_suffix(m)) {
+        debug!(depot = hit.0, "asset matched via bolt-pid suffix fallback");
+        return Some(hit);
+    }
+
+    // Last resort: bridge by firmware codename ↔ registry displayName.
+    let name = codename?;
+    let hit = index.find_by_display_name(name)?;
+    debug!(
+        depot = hit.0,
+        codename = name,
+        "asset matched via codename↔displayName fallback"
+    );
     Some(hit)
 }
 
@@ -246,4 +265,61 @@ fn suffix_candidates(model: &DeviceModelInfo) -> Vec<String> {
         .filter(|id| **id != 0)
         .map(|id| format!("{id:04x}"))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlogi_assets::DeviceEntry;
+    use openlogi_core::device::DeviceTransports;
+    use std::collections::HashMap;
+
+    fn mx_master_3s_index() -> Index {
+        let mut devices = HashMap::new();
+        devices.insert(
+            "mx_master_3s".to_string(),
+            DeviceEntry {
+                model_id: "2b043".to_string(),
+                display_name: "MX Master 3S".to_string(),
+                kind: "mouse".to_string(),
+                asset_path: "assets/mx_master_3s/".to_string(),
+                files: Vec::new(),
+            },
+        );
+        Index {
+            schema_version: 1,
+            devices,
+        }
+    }
+
+    /// An MX Master 3S connected over BTLE reports model id `b034` / ext 1 —
+    /// absent from the registry, which keys the 3S under `2b043`.
+    fn btle_3s_model() -> DeviceModelInfo {
+        DeviceModelInfo {
+            entity_count: 0,
+            unit_id: [0; 4],
+            transports: DeviceTransports {
+                btle: true,
+                ..Default::default()
+            },
+            model_ids: [0xb034, 0, 0],
+            extended_model_id: 0x01,
+        }
+    }
+
+    #[test]
+    fn pid_matching_alone_misses_btle_3s() {
+        // The bug: no model id the device reports (`b034`) appears in the
+        // registry, so strict + suffix PID matching both fail.
+        let index = mx_master_3s_index();
+        assert!(resolve_in_index(&index, &btle_3s_model(), None).is_none());
+    }
+
+    #[test]
+    fn codename_bridges_btle_3s_to_its_depot() {
+        // The fix: the firmware codename matches the registry displayName.
+        let index = mx_master_3s_index();
+        let hit = resolve_in_index(&index, &btle_3s_model(), Some("MX Master 3S"));
+        assert_eq!(hit.map(|(depot, _)| depot), Some("mx_master_3s"));
+    }
 }

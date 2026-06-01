@@ -38,7 +38,7 @@ pub(super) fn build_device_list(
                 continue;
             };
             let config_key = model.config_key();
-            let asset = cache.resolve(model);
+            let asset = cache.resolve(model, paired.codename.as_deref());
             let display_name = asset
                 .as_ref()
                 .map(|a| a.display_name.clone())

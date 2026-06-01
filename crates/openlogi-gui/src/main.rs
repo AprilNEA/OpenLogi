@@ -442,10 +442,10 @@ fn enumerate_blocking() -> Result<Vec<DeviceInventory>> {
 
 /// Flatten every paired device's HID++ model snapshot — that's what the
 /// asset sync feeds into the registry lookup.
-fn collect_models(inventories: &[DeviceInventory]) -> Vec<DeviceModelInfo> {
+fn collect_models(inventories: &[DeviceInventory]) -> Vec<(DeviceModelInfo, Option<String>)> {
     inventories
         .iter()
         .flat_map(|inv| inv.paired.iter())
-        .filter_map(|p| p.model_info)
+        .filter_map(|p| p.model_info.map(|m| (m, p.codename.clone())))
         .collect()
 }

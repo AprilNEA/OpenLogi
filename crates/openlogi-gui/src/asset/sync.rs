@@ -41,7 +41,11 @@ pub fn should_run(has_bundle: bool) -> bool {
 }
 
 /// Refresh the local cache for every model the host can plausibly want.
-pub fn sync(server: &str, models: &[DeviceModelInfo]) -> Result<()> {
+///
+/// Each entry pairs a device's HID++ model info with its firmware `codename`,
+/// so the depot match can fall back to the registry `displayName` for devices
+/// whose live PID isn't in the registry (e.g. an MX Master 3S over BTLE).
+pub fn sync(server: &str, models: &[(DeviceModelInfo, Option<String>)]) -> Result<()> {
     let cache_root = super::paths::user_cache_root();
     fs::create_dir_all(&cache_root)
         .with_context(|| format!("create cache root {}", cache_root.display()))?;
@@ -65,8 +69,8 @@ pub fn sync(server: &str, models: &[DeviceModelInfo]) -> Result<()> {
     {
         targets.push((forced, entry.clone(), 0));
     }
-    for model in models {
-        if let Some((depot, entry)) = super::resolve_in_index(&index, model) {
+    for (model, codename) in models {
+        if let Some((depot, entry)) = super::resolve_in_index(&index, model, codename.as_deref()) {
             targets.push((depot.to_string(), entry.clone(), model.extended_model_id));
         }
     }
