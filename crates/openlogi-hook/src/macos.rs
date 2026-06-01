@@ -36,69 +36,10 @@ unsafe extern "C" {
 }
 
 /// Check whether this process has been granted Accessibility access.
-///
-/// `AXIsProcessTrustedWithOptions(NULL)` is the canonical API, but it can
-/// return `false` for locally-built / ad-hoc-signed binaries even after the
-/// user toggles the permission on in System Settings, because the TCC entry
-/// that was created by a previous (differently-signed) build does not match
-/// the current binary's code-signing identity.
-///
-/// When the API returns `false` we fall back to reading the user TCC database
-/// directly. `auth_value = 2` means "allowed"; any other value (0 = denied,
-/// 1 = limited) keeps `false`. This fallback is intentionally best-effort:
-/// if `sqlite3` is unavailable or the DB path changes, we silently return the
-/// API result unchanged.
 pub(crate) fn has_accessibility() -> bool {
     // SAFETY: NULL is documented as a valid argument; it queries the current
     // trust state without raising a permission dialog.
-    if unsafe { AXIsProcessTrustedWithOptions(std::ptr::null()) } {
-        return true;
-    }
-    // TCC fallback for locally-built / ad-hoc-signed binaries.
-    if tcc_accessibility_allowed() {
-        debug!(
-            "AXIsProcessTrustedWithOptions returned false but TCC db shows \
-             auth_value=2 — treating as granted (locally-signed build)"
-        );
-        return true;
-    }
-    false
-}
-
-/// Return `true` when the user TCC database records `auth_value = 2`
-/// (allowed) for `kTCCServiceAccessibility` and this app's bundle ID.
-fn tcc_accessibility_allowed() -> bool {
-    const BUNDLE_ID: &str = "org.openlogi.openlogi";
-    const QUERY: &str =
-        "SELECT auth_value FROM access \
-         WHERE service='kTCCServiceAccessibility' AND client=?1 LIMIT 1";
-
-    let home = match std::env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => return false,
-    };
-    let db = format!(
-        "{home}/Library/Application Support/com.apple.TCC/TCC.db"
-    );
-    let out = std::process::Command::new("sqlite3")
-        .args([&db, &format!("{QUERY}"), BUNDLE_ID])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim() == "2"
-        }
-        Ok(o) => {
-            debug!(
-                status = %o.status,
-                "sqlite3 TCC query exited non-zero; skipping accessibility fallback"
-            );
-            false
-        }
-        Err(e) => {
-            debug!(error = %e, "sqlite3 not available; skipping accessibility fallback");
-            false
-        }
-    }
+    unsafe { AXIsProcessTrustedWithOptions(std::ptr::null()) }
 }
 
 /// Raise the Accessibility prompt + register the process. See

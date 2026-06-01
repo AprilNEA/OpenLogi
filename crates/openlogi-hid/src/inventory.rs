@@ -24,7 +24,7 @@ use openlogi_core::device::{
 };
 use thiserror::Error;
 use tokio::time::timeout;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::route::DIRECT_DEVICE_INDEX;
 use crate::transport::{enumerate_hidpp_devices, is_logitech_mouse, open_hidpp_channel};
@@ -248,7 +248,7 @@ fn hidutil_direct_mouse_fallback() -> Vec<DeviceInventory> {
         return Vec::new();
     }
 
-    info!("hidutil found MX Master 4 B (BLE-direct) — synthesising inventory");
+    debug!("hidutil found MX Master 4 B (BLE-direct) — synthesising inventory");
     vec![synthetic_direct_mouse_inventory(
         MX_MASTER_4_NAME,
         MX_MASTER_4_PID,

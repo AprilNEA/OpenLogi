@@ -37,6 +37,23 @@ pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, 
         .await)
 }
 
+/// Return `true` for HID nodes that should enter the `probe_one` path.
+///
+/// Two kinds are admitted:
+/// 1. HID++ long-report collection (`0xFF00 / 0x0002`) — the established path
+///    for receivers, USB-direct, and BT-classic devices.
+/// 2. Logitech generic-desktop mouse (`0x0001 / 0x0002`) — added to surface
+///    BLE-direct devices (e.g. MX Master 4 B) whose macOS BLE HID descriptor
+///    does not expose a vendor HID++ collection.
+///
+/// **Invariant:** admitting a generic-desktop node is safe only because
+/// `probe_one` is resilient to non-HID++ endpoints — `open_hidpp_channel`
+/// returns `None` when the channel does not speak HID++, and
+/// `fallback_direct_mouse` in `inventory.rs` re-filters by a known-good PID
+/// before synthesising an inventory. Any future widening of
+/// `fallback_direct_mouse` to additional PIDs must re-verify that the
+/// corresponding devices tolerate `open_hidpp_channel`'s probe writes (or
+/// adjust `supports_short_long_hidpp` accordingly).
 fn is_hidpp_candidate(d: &DeviceInfo) -> bool {
     (d.usage_page == HIDPP_USAGE_PAGE && d.usage_id == HIDPP_LONG_USAGE_ID) || is_logitech_mouse(d)
 }
