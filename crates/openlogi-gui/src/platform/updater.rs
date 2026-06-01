@@ -10,11 +10,13 @@
 //! so a launch-time result is already visible when the window opens.
 
 use gpui::{App, AppContext as _, Entity, Global};
-use gpui_updater::{EngineConfig, GitHubSource, Updater, Version};
+use gpui_updater::{EngineConfig, StaticManifestSource, Updater, Version};
 use openlogi_core::config::AppSettings;
 
-const OWNER: &str = "AprilNEA";
-const REPO: &str = "OpenLogi";
+const MANIFEST_URL: &str = match option_env!("OPENLOGI_UPDATE_MANIFEST_URL") {
+    Some(url) => url,
+    None => "https://updates.openlogi.org/channels/stable/latest.json",
+};
 
 /// App-global handle to the shared updater entity.
 #[derive(Clone)]
@@ -22,14 +24,15 @@ pub struct SharedUpdater(pub Entity<Updater>);
 
 impl Global for SharedUpdater {}
 
-/// Build a fresh updater entity for this app's repo and running version. The
-/// asset is matched by the running OS (`.dmg` on macOS) and CPU architecture,
-/// then verified against the release's `SHA256SUMS`.
+/// Build a fresh updater entity for this app's static update manifest and
+/// running version. The asset is matched by platform metadata and verified
+/// against the manifest's SHA-256.
 pub fn new_entity(cx: &mut App) -> Entity<Updater> {
     cx.new(|cx| {
-        let source = GitHubSource::new(OWNER, REPO)
-            .asset_contains(release_arch())
-            .with_checksums("SHA256SUMS");
+        let source = StaticManifestSource::new(MANIFEST_URL)
+            .os(std::env::consts::OS)
+            .arch(release_arch())
+            .format(release_format());
         let version =
             Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 0, 0));
         Updater::new(source, EngineConfig::new(version), cx)
@@ -40,6 +43,14 @@ fn release_arch() -> &'static str {
     match std::env::consts::ARCH {
         "aarch64" => "arm64",
         arch => arch,
+    }
+}
+
+fn release_format() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "dmg",
+        "windows" => "exe",
+        _ => "tar.gz",
     }
 }
 

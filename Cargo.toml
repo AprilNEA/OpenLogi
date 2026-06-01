@@ -28,6 +28,7 @@ members = [
     "crates/openlogi-cli",
     "crates/openlogi-gui",
     "crates/openlogi-hook",
+    "xtask",
 ]
 
 [workspace.package]

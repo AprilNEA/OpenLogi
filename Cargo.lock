@@ -2465,8 +2465,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-updater"
-version = "0.0.2"
-source = "git+https://github.com/AprilNEA/gpui-updater?tag=v0.0.2#b58381994394b2824795dcbc9ddd0df733b3148c"
+version = "0.0.3"
+source = "git+https://github.com/AprilNEA/gpui-updater?tag=v0.0.3#d84910eda00991169ec60f792444eb54176c43db"
 dependencies = [
  "gpui",
  "minisign-verify",
@@ -8413,6 +8413,18 @@ name = "xmlwriter"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
+
+[[package]]
+name = "xtask"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "sha2",
+ "time",
+]
 
 [[package]]
 name = "y4m"
