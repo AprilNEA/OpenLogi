@@ -11,6 +11,8 @@ use crate::util::{
     repo_root, run, with_env,
 };
 
+const CARGO_BUNDLE_VERSION: &str = "0.10.0";
+
 #[derive(Parser)]
 pub(crate) struct DmgMacos {
     /// App bundle to package.
@@ -165,12 +167,15 @@ pub(crate) fn bundle_macos() -> Result<()> {
     }
 
     println!("==> bundle (.app)");
-    if !command_exists("cargo-bundle") {
+    if !cargo_bundle_version_matches()? {
         let mut install = ProcessCommand::new("cargo");
         install
             .arg("install")
             .arg("cargo-bundle")
+            .arg("--version")
+            .arg(CARGO_BUNDLE_VERSION)
             .arg("--locked")
+            .arg("--force")
             .env("CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER", "/usr/bin/cc");
         run(with_env(&mut install, &xcode_env))?;
     }
@@ -187,6 +192,16 @@ pub(crate) fn bundle_macos() -> Result<()> {
     println!();
     println!("Bundle ready: {}", app.display());
     Ok(())
+}
+
+fn cargo_bundle_version_matches() -> Result<bool> {
+    if !command_exists("cargo-bundle") {
+        return Ok(false);
+    }
+    let output = command_stdout(ProcessCommand::new("cargo-bundle").arg("--version"))?;
+    Ok(output
+        .split_whitespace()
+        .any(|part| part == CARGO_BUNDLE_VERSION))
 }
 
 fn xcode_env() -> Result<Vec<(String, String)>> {

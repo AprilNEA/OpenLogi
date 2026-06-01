@@ -11,10 +11,10 @@
 //! no relation to a host, so they stay off the client.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use tracing::debug;
@@ -104,7 +104,8 @@ impl AssetClient {
 
     /// Fetch a per-depot file into `dir`, returning the number of bytes written.
     pub fn fetch_file_to_dir(&self, asset_path: &str, dir: &Path, name: &str) -> Result<usize> {
-        let dst = dir.join(name);
+        let dst = safe_component_path(dir, name, "asset file name")?;
+        reject_symlink(&dst)?;
         let bytes = self.fetch_file(asset_path, name)?;
         fs::write(&dst, &bytes).with_context(|| format!("write {}", dst.display()))?;
         Ok(bytes.len())
@@ -120,10 +121,16 @@ impl AssetClient {
         dir: &Path,
         file: &FileEntry,
     ) -> Result<FetchOutcome> {
-        if cached_matches(&dir.join(&file.name), &file.sha256) {
+        let dst = safe_component_path(dir, &file.name, "asset file name")?;
+        reject_symlink(&dst)?;
+        if cached_matches(&dst, &file.sha256) {
             return Ok(FetchOutcome::CacheHit);
         }
         let bytes = self.fetch_file_to_dir(asset_path, dir, &file.name)?;
+        if !cached_matches(&dst, &file.sha256) {
+            let _ = fs::remove_file(&dst);
+            bail!("downloaded asset checksum mismatch: {}", dst.display());
+        }
         Ok(FetchOutcome::Fetched { bytes })
     }
 
@@ -154,6 +161,40 @@ pub fn read_bytes(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("read {}", path.display()))
 }
 
+/// Join one untrusted registry component to a trusted directory.
+///
+/// Remote asset metadata is expected to carry depot and file *names*, not
+/// paths. Rejecting separators, absolute prefixes, and `..` keeps asset syncs
+/// inside the cache or bundle directory chosen by the caller.
+pub fn safe_component_path(base: &Path, component: &str, label: &str) -> Result<PathBuf> {
+    ensure_safe_component(component, label)?;
+    Ok(base.join(component))
+}
+
+fn ensure_safe_component(component: &str, label: &str) -> Result<()> {
+    if component.is_empty() {
+        bail!("{label} is empty");
+    }
+    if component.contains('/') || component.contains('\\') {
+        bail!("{label} must be a single path component: {component}");
+    }
+    let mut parts = Path::new(component).components();
+    match (parts.next(), parts.next()) {
+        (Some(Component::Normal(_)), None) => Ok(()),
+        _ => bail!("{label} must be a safe relative path component: {component}"),
+    }
+}
+
+fn reject_symlink(path: &Path) -> Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        bail!(
+            "refusing to write asset through symlink: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Hex SHA-256 of an in-memory blob.
 #[must_use]
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -174,4 +215,32 @@ pub fn sha256_of_file(path: &Path) -> Result<String> {
 #[must_use]
 pub fn cached_matches(path: &Path, expected_sha: &str) -> bool {
     sha256_of_file(path).is_ok_and(|actual| actual.eq_ignore_ascii_case(expected_sha))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_component_path_accepts_plain_names() {
+        assert_eq!(
+            safe_component_path(Path::new("/cache"), "front_core.png", "asset").unwrap(),
+            Path::new("/cache").join("front_core.png")
+        );
+    }
+
+    #[test]
+    fn safe_component_path_rejects_traversal_and_separators() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "../LaunchAgents/x",
+            "nested/file.png",
+            "nested\\file.png",
+        ] {
+            assert!(safe_component_path(Path::new("/cache"), name, "asset").is_err());
+        }
+    }
 }

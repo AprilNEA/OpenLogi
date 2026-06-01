@@ -1,7 +1,7 @@
 //! Device-list construction and selection helpers for [`super::AppState`].
 
-use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceKind};
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceKind, DeviceModelInfo};
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, DirectDeviceIdentity};
 
 use crate::asset::{AssetResolver, ResolvedAsset};
 
@@ -75,7 +75,7 @@ pub(super) fn build_device_list(
                 asset,
                 serial_number: model.serial_number.clone(),
                 unit_id: model.unit_id,
-                route: device_route(inv, paired.slot),
+                route: device_route(inv, paired.slot, model),
                 kind: paired.kind,
                 slot: paired.slot,
                 online: paired.online,
@@ -108,10 +108,11 @@ impl DeviceStableId {
             Some(DeviceRoute::Direct {
                 vendor_id,
                 product_id,
+                identity,
             }) => Self::Direct {
                 vendor_id: *vendor_id,
                 product_id: *product_id,
-                identity: DeviceIdentity::from_record(record),
+                identity: DeviceIdentity::from_direct(identity),
             },
             None => Self::Unknown {
                 slot: record.slot,
@@ -122,6 +123,13 @@ impl DeviceStableId {
 }
 
 impl DeviceIdentity {
+    fn from_direct(identity: &DirectDeviceIdentity) -> Self {
+        identity.serial_number.as_ref().map_or_else(
+            || Self::Unit(identity.unit_id),
+            |serial| Self::Serial(serial.to_ascii_lowercase()),
+        )
+    }
+
     fn from_record(record: &DeviceRecord) -> Self {
         record.serial_number.as_ref().map_or_else(
             || Self::Unit(record.unit_id),
@@ -138,7 +146,7 @@ impl DeviceIdentity {
 /// instead. A Bolt device whose receiver UID couldn't be read gets no route
 /// (`None`), so hardware writes are skipped rather than mis-routed to the
 /// receiver's own pid.
-fn device_route(inv: &DeviceInventory, slot: u8) -> Option<DeviceRoute> {
+fn device_route(inv: &DeviceInventory, slot: u8, model: &DeviceModelInfo) -> Option<DeviceRoute> {
     match &inv.receiver.unique_id {
         Some(receiver_uid) => Some(DeviceRoute::Bolt {
             receiver_uid: receiver_uid.clone(),
@@ -147,6 +155,7 @@ fn device_route(inv: &DeviceInventory, slot: u8) -> Option<DeviceRoute> {
         None if slot == DIRECT_DEVICE_INDEX => Some(DeviceRoute::Direct {
             vendor_id: inv.receiver.vendor_id,
             product_id: inv.receiver.product_id,
+            identity: DirectDeviceIdentity::from_model(model),
         }),
         None => None,
     }

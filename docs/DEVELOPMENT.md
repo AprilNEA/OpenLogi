@@ -9,7 +9,8 @@ build instructions, see the [README](../README.md).
 - macOS: Xcode 16+ with the optional **Metal Toolchain** component (required by
   GPUI's `gpui_macos` build script to compile shaders)
 - `create-dmg` for packaging (`brew install create-dmg`); `cargo-bundle` is
-  installed automatically by `cargo run -p xtask -- bundle-macos`
+  installed automatically at the pinned version declared in `xtask/src/macos.rs`
+  by `cargo run -p xtask -- bundle-macos`
 
 ## Building from source
 
@@ -126,13 +127,20 @@ ${OPENLOGI_UPDATE_BASE_URL}/channels/stable/latest.json
 
 The app embeds that manifest URL at build time via
 `OPENLOGI_UPDATE_MANIFEST_URL`, derived from `OPENLOGI_UPDATE_BASE_URL` in the
-release workflow.
+release workflow. Release builds also embed
+`OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY`; update checks fail closed if the public
+key is absent or if the selected manifest asset has no minisign signature.
 
 Configure the R2/update settings in one 1Password item referenced by the GitHub
 secret `OP_R2_SECRET_ITEM`. The item must contain:
 
 - `OPENLOGI_UPDATE_BASE_URL` — public HTTPS base URL, for example
   `https://updates.openlogi.org`.
+- `OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY` — base64 minisign public key embedded
+  in the app and used to verify updater artifacts.
+- `OPENLOGI_UPDATE_MINISIGN_SECRET_KEY` — passwordless minisign secret key used
+  only in the release publish job to sign DMGs before `latest.json` is
+  generated.
 - `CLOUDFLARE_R2_ACCOUNT_ID` — Cloudflare account ID used for the S3 endpoint.
 - `CLOUDFLARE_R2_BUCKET` — bucket name.
 - `CLOUDFLARE_R2_ACCESS_KEY_ID` — R2 S3 access key.

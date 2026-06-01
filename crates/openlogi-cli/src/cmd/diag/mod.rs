@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use clap::Subcommand;
-use openlogi_hid::DeviceRoute;
+use openlogi_hid::{DeviceRoute, DirectDeviceIdentity};
 
 pub mod dpi;
 pub mod features;
@@ -45,15 +45,18 @@ pub(crate) async fn first_online_device() -> Result<(DeviceRoute, String)> {
         .into_iter()
         .find_map(|inv| {
             let paired = inv.paired.into_iter().find(|p| p.online)?;
-            let route = match inv.receiver.unique_id {
-                Some(receiver_uid) => DeviceRoute::Bolt {
+            let route = if let Some(receiver_uid) = inv.receiver.unique_id {
+                DeviceRoute::Bolt {
                     receiver_uid,
                     slot: paired.slot,
-                },
-                None => DeviceRoute::Direct {
+                }
+            } else {
+                let model = paired.model_info.as_ref()?;
+                DeviceRoute::Direct {
                     vendor_id: inv.receiver.vendor_id,
                     product_id: inv.receiver.product_id,
-                },
+                    identity: DirectDeviceIdentity::from_model(model),
+                }
             };
             let name = paired
                 .codename

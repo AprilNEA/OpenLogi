@@ -24,7 +24,7 @@ pub use pairing::{
     Click, DiscoveredDevice, PairingCommand, PairingError, PairingEvent, PairingReceiver,
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
 };
-pub use route::{DIRECT_DEVICE_INDEX, DeviceRoute};
+pub use route::{DIRECT_DEVICE_INDEX, DeviceRoute, DirectDeviceIdentity};
 pub use smartshift::{SmartShiftMode, SmartShiftStatus};
 pub use write::{
     FeatureEntry, SharedChannel, WriteError, dump_features, get_dpi, get_smartshift_status,

@@ -98,7 +98,7 @@ fn sync_depot(
     entry: &DeviceEntry,
     ext: u8,
 ) -> Result<()> {
-    let dir = cache_root.join(depot);
+    let dir = http::safe_component_path(cache_root, depot, "asset depot")?;
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
 
     // Baseline: metadata + manifest + base PNG. Manifest is mandatory
@@ -158,10 +158,8 @@ fn fetch_to_cache(
     } else {
         warn!(
             file = name,
-            "registry lists no entry — fetching without sha verify"
+            "registry lists no entry — skipping unverified asset"
         );
-        let bytes = client.fetch_file_to_dir(asset_path, dir, name)?;
-        info!(file = name, bytes, "downloaded");
     }
     Ok(())
 }

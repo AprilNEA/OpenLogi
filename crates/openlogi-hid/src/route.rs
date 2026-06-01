@@ -19,8 +19,12 @@ use std::sync::Arc;
 
 use hidpp::{
     channel::HidppChannel,
+    device::Device,
+    feature::device_information::DeviceInformationFeature,
     receiver::{self, Receiver},
 };
+use openlogi_core::device::DeviceModelInfo;
+use tracing::debug;
 
 use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
@@ -35,10 +39,41 @@ pub enum DeviceRoute {
     /// plugged-in receivers; `slot` is the device's pairing slot (1..=6).
     Bolt { receiver_uid: String, slot: u8 },
     /// Attached straight to the host over USB cable or Bluetooth, addressed at
-    /// the HID++ self-index. Re-found by matching the HID node's vendor/product
-    /// id — two identical mice on one host are indistinguishable here, so the
-    /// first match wins (acceptable for v0).
-    Direct { vendor_id: u16, product_id: u16 },
+    /// the HID++ self-index. Re-found by matching both the HID node's
+    /// vendor/product id and the stronger HID++ DeviceInformation identity.
+    Direct {
+        vendor_id: u16,
+        product_id: u16,
+        identity: DirectDeviceIdentity,
+    },
+}
+
+/// Stable identity for a directly-attached HID++ device.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DirectDeviceIdentity {
+    pub serial_number: Option<String>,
+    pub unit_id: [u8; 4],
+}
+
+impl DirectDeviceIdentity {
+    #[must_use]
+    pub fn from_model(model: &DeviceModelInfo) -> Self {
+        Self {
+            serial_number: model.serial_number.clone(),
+            unit_id: model.unit_id,
+        }
+    }
+
+    fn matches(&self, serial_number: Option<&str>, unit_id: [u8; 4]) -> bool {
+        if unit_id != self.unit_id {
+            return false;
+        }
+        match (&self.serial_number, serial_number) {
+            (Some(expected), Some(actual)) => actual.eq_ignore_ascii_case(expected),
+            (Some(_), None) => false,
+            (None, _) => true,
+        }
+    }
 }
 
 impl DeviceRoute {
@@ -62,7 +97,17 @@ impl fmt::Display for DeviceRoute {
             Self::Direct {
                 vendor_id,
                 product_id,
-            } => write!(f, "direct {vendor_id:04x}:{product_id:04x}"),
+                identity,
+            } => match &identity.serial_number {
+                Some(serial) => {
+                    write!(f, "direct {vendor_id:04x}:{product_id:04x} serial {serial}")
+                }
+                None => write!(
+                    f,
+                    "direct {vendor_id:04x}:{product_id:04x} unit {:02x?}",
+                    identity.unit_id
+                ),
+            },
         }
     }
 }
@@ -86,6 +131,7 @@ pub(crate) async fn open_route_channel(
         if let DeviceRoute::Direct {
             vendor_id,
             product_id,
+            ..
         } = route
             && (dev.vendor_id != *vendor_id || dev.product_id != *product_id)
         {
@@ -105,8 +151,85 @@ pub(crate) async fn open_route_channel(
                     return Ok(Some(channel));
                 }
             }
-            DeviceRoute::Direct { .. } => return Ok(Some(channel)),
+            DeviceRoute::Direct { identity, .. } => {
+                if direct_identity_matches(&channel, identity).await {
+                    return Ok(Some(channel));
+                }
+            }
         }
     }
     Ok(None)
+}
+
+async fn direct_identity_matches(
+    channel: &Arc<HidppChannel>,
+    expected: &DirectDeviceIdentity,
+) -> bool {
+    let device = match Device::new(Arc::clone(channel), DIRECT_DEVICE_INDEX).await {
+        Ok(device) => device,
+        Err(e) => {
+            debug!(error = ?e, "direct route DeviceInformation probe failed");
+            return false;
+        }
+    };
+    let Some(feature) = device.get_feature::<DeviceInformationFeature>() else {
+        return false;
+    };
+    let info = match feature.get_device_info().await {
+        Ok(info) => info,
+        Err(e) => {
+            debug!(error = ?e, "direct route device info read failed");
+            return false;
+        }
+    };
+    let serial_number = if expected.serial_number.is_some() && info.capabilities.serial_number {
+        feature
+            .get_serial_number()
+            .await
+            .ok()
+            .and_then(|serial| normalize_serial_number(&serial))
+    } else {
+        None
+    };
+    expected.matches(serial_number.as_deref(), info.unit_id)
+}
+
+fn normalize_serial_number(serial: &str) -> Option<String> {
+    let serial = serial.trim_matches('\0').trim().to_string();
+    (!serial.is_empty()).then_some(serial)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity() -> DirectDeviceIdentity {
+        DirectDeviceIdentity {
+            serial_number: Some("ABC123".to_string()),
+            unit_id: [1, 2, 3, 4],
+        }
+    }
+
+    #[test]
+    fn direct_identity_requires_matching_unit_id() {
+        assert!(!identity().matches(Some("ABC123"), [4, 3, 2, 1]));
+    }
+
+    #[test]
+    fn direct_identity_requires_serial_when_expected() {
+        assert!(identity().matches(Some("abc123"), [1, 2, 3, 4]));
+        assert!(!identity().matches(None, [1, 2, 3, 4]));
+        assert!(!identity().matches(Some("OTHER"), [1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn direct_identity_without_serial_matches_unit_id_only() {
+        let identity = DirectDeviceIdentity {
+            serial_number: None,
+            unit_id: [1, 2, 3, 4],
+        };
+
+        assert!(identity.matches(None, [1, 2, 3, 4]));
+        assert!(identity.matches(Some("anything"), [1, 2, 3, 4]));
+    }
 }

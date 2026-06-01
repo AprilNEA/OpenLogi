@@ -158,14 +158,12 @@ impl Receiver {
                             }
                             // Device name
                             1 => {
-                                let Ok(name) =
-                                    str::from_utf8(&payload[4..(4 + payload[3] as usize)])
-                                else {
+                                let Some((counter, name)) = parse_discovery_name(&payload) else {
                                     return;
                                 };
 
                                 emitter.emit(Event::DeviceDiscoveryDeviceName {
-                                    counter: payload[0] as u16 + payload[1] as u16 * 256,
+                                    counter,
                                     name: name.to_string(),
                                 });
                             }
@@ -496,6 +494,13 @@ impl Receiver {
     }
 }
 
+fn parse_discovery_name(payload: &[u8; 17]) -> Option<(u16, &str)> {
+    let len = usize::from(payload[3]);
+    let end = 4usize.checked_add(len)?;
+    let name = str::from_utf8(payload.get(4..end)?).ok()?;
+    Some((payload[0] as u16 + payload[1] as u16 * 256, name))
+}
+
 impl Drop for Receiver {
     fn drop(&mut self) {
         self.chan.remove_msg_listener(self.msg_listener_hdl);
@@ -700,4 +705,27 @@ pub enum PairingPasskeyPressType {
     Initialization = 0x00,
     Keypress = 0x01,
     Submit = 0x04,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_discovery_name_rejects_oversized_length() {
+        let mut payload = [0u8; 17];
+        payload[3] = 200;
+
+        assert!(parse_discovery_name(&payload).is_none());
+    }
+
+    #[test]
+    fn parse_discovery_name_accepts_bounded_utf8_name() {
+        let mut payload = [0u8; 17];
+        payload[0] = 7;
+        payload[3] = 4;
+        payload[4..8].copy_from_slice(b"Casa");
+
+        assert_eq!(parse_discovery_name(&payload), Some((7, "Casa")));
+    }
 }
