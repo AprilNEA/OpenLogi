@@ -109,9 +109,28 @@ pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, 
     Ok(all
         .into_iter()
         .filter(|d| {
-            d.vendor_id == LOGITECH_VID && is_hidpp_long_collection(d.usage_page, d.usage_id)
+            d.vendor_id == LOGITECH_VID
+                && (is_hidpp_long_collection(d.usage_page, d.usage_id)
+                    || is_logitech_mouse(d))
         })
         .collect())
+}
+
+/// Return `true` for Logitech generic-desktop mouse nodes (`0x0001 / 0x0002`).
+///
+/// Certain BLE-direct mice (e.g. MX Master 4 B, PID `0xb048`) do not expose a
+/// Logitech vendor HID++ collection on macOS — the OS only surfaces a standard
+/// mouse interface. `enumerate_hidpp_devices` admits these so `probe_one` can
+/// attempt an HID++ probe; if that fails, `fallback_direct_mouse` in
+/// `inventory.rs` synthesises an inventory keyed by PID.
+///
+/// **Invariant:** this is safe only because both `open_hidpp_channel` (returns
+/// `None` on non-HID++ endpoints) and `fallback_direct_mouse` (re-filters by
+/// known-good PID) handle the case gracefully. Widening the PID set in
+/// `fallback_direct_mouse` requires verifying that the new device also tolerates
+/// HID++ probe writes — or adjusting `supports_short_long_hidpp` accordingly.
+pub(crate) fn is_logitech_mouse(d: &DeviceInfo) -> bool {
+    d.vendor_id == LOGITECH_VID && d.usage_page == 0x0001 && d.usage_id == 0x0002
 }
 
 pub(crate) async fn open_hidpp_channel(

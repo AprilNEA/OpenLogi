@@ -16,6 +16,7 @@ hidpp = { workspace = true }
 async-hid = { workspace = true }
 tokio = { workspace = true }
 futures-lite = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
