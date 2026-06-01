@@ -16,7 +16,10 @@ pub async fn run(_args: ListArgs) -> Result<()> {
         println!("Notes:");
         println!("  - On macOS, quit Logi Options+ first — both apps fight over HID++ access.");
         println!("  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548).");
-        println!("  - Devices paired directly over Bluetooth are not enumerated yet.");
+        println!(
+            "  - Bluetooth-direct and USB-wired devices are enumerated; make sure the device is \
+             connected and awake."
+        );
         std::process::exit(2);
     }
 
