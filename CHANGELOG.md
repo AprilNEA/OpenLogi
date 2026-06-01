@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.2.0...openlogi-core-v0.3.0) - 2026-06-01
+
+### Added
+
+- *(openlogi-gui)* add Russian localization and language select ([#38](https://github.com/AprilNEA/OpenLogi/pull/38))
+
+### Fixed
+
+- *(gui)* stabilize device tab ordering ([#37](https://github.com/AprilNEA/OpenLogi/pull/37))
+
 ## [0.2.0](https://github.com/AprilNEA/OpenLogi/compare/openlogi-hid-v0.1.4...openlogi-hid-v0.2.0) - 2026-05-31
 
 ### Added
