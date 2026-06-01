@@ -584,3 +584,49 @@ _version: 2
   ru: "Отмена"
   zh-CN: 取消
   zh-HK: 取消
+
+# ── Settings → Permissions section (windows/settings.rs) ────────────────────
+"Permissions":
+  ja: 権限
+  zh-CN: 权限
+  zh-HK: 權限
+"Accessibility":
+  ja: アクセシビリティ
+  zh-CN: 辅助功能
+  zh-HK: 輔助使用
+"Input Monitoring":
+  ja: 入力監視
+  zh-CN: 输入监控
+  zh-HK: 輸入監控
+"Bluetooth":
+  ja: Bluetooth
+  zh-CN: 蓝牙
+  zh-HK: 藍牙
+"Granted":
+  ja: 許可済み
+  zh-CN: 已授权
+  zh-HK: 已授權
+"Not granted":
+  ja: 未許可
+  zh-CN: 未授权
+  zh-HK: 未授權
+"Unknown":
+  ja: 不明
+  zh-CN: 未知
+  zh-HK: 未知
+"Open":
+  ja: 開く
+  zh-CN: 打开
+  zh-HK: 開啟
+"Needed for gesture and button remapping (event tap).":
+  ja: ジェスチャーとボタンの再割り当てに必要です（イベントタップ）。
+  zh-CN: 手势与按键重映射所需（事件捕获）。
+  zh-HK: 手勢與按鍵重新對應所需（事件攔截）。
+"Needed to read HID++ data, including Bluetooth-direct mice.":
+  ja: Bluetooth 直結マウスを含む HID++ データの読み取りに必要です。
+  zh-CN: 读取 HID++ 数据所需，包括蓝牙直连鼠标。
+  zh-HK: 讀取 HID++ 數據所需，包括藍牙直連滑鼠。
+"Allows OpenLogi to use CoreBluetooth (not required for HID access).":
+  ja: OpenLogi が CoreBluetooth を使用できるようにします（HID アクセスには不要）。
+  zh-CN: 允许 OpenLogi 使用 CoreBluetooth（HID 访问不需要）。
+  zh-HK: 允許 OpenLogi 使用 CoreBluetooth（HID 存取不需要）。

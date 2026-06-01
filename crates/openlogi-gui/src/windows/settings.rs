@@ -7,8 +7,9 @@
 //! set grows enough to warrant pages, this can migrate to that widget.
 
 use gpui::{
-    App, AppContext as _, BorrowAppContext as _, Context, Entity, FontWeight, IntoElement,
-    ParentElement as _, Render, SharedString, Size, Styled as _, Subscription, Window, div, px,
+    App, AppContext as _, BorrowAppContext as _, Context, Entity, FontWeight, InteractiveElement,
+    IntoElement, ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px, rgb,
 };
 use gpui_component::{
     Icon, IconName, IndexPath, Sizable,
@@ -20,6 +21,7 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::platform::permissions::{self, Permission, PermissionStatus};
 use crate::state::AppState;
 use crate::theme::{self, Palette};
 use crate::windows::{self, AuxWindow};
@@ -176,6 +178,7 @@ impl Render for SettingsView {
                             .child(tr!("Settings")),
                     )
                     .child(general)
+                    .child(permissions_group(pal, cx))
                     .child(
                         GroupBox::new()
                             .title(group_title(IconName::Globe, tr!("Language")))
@@ -271,6 +274,114 @@ fn setting_row(
                 ),
         )
         .child(control)
+}
+
+/// The Permissions group: live macOS permission statuses. Accessibility is
+/// watcher-backed (read from [`AppState`]); Input Monitoring and Bluetooth are
+/// queried live on each render (both are cheap, no-prompt queries).
+fn permissions_group(pal: Palette, cx: &mut Context<SettingsView>) -> impl IntoElement {
+    let accessibility = if cx
+        .try_global::<AppState>()
+        .is_some_and(|s| s.accessibility_granted)
+    {
+        PermissionStatus::Granted
+    } else {
+        PermissionStatus::Denied
+    };
+
+    GroupBox::new()
+        .title(group_title(IconName::Info, tr!("Permissions")))
+        .child(permission_row(
+            "perm-accessibility",
+            tr!("Accessibility"),
+            tr!("Needed for gesture and button remapping (event tap)."),
+            accessibility,
+            Permission::Accessibility,
+            pal,
+            cx,
+        ))
+        .child(permission_row(
+            "perm-input-monitoring",
+            tr!("Input Monitoring"),
+            tr!("Needed to read HID++ data, including Bluetooth-direct mice."),
+            permissions::input_monitoring(),
+            Permission::InputMonitoring,
+            pal,
+            cx,
+        ))
+        .child(permission_row(
+            "perm-bluetooth",
+            tr!("Bluetooth"),
+            tr!("Allows OpenLogi to use CoreBluetooth (not required for HID access)."),
+            permissions::bluetooth(),
+            Permission::Bluetooth,
+            pal,
+            cx,
+        ))
+}
+
+/// A coloured status word for a permission row.
+fn status_badge(status: PermissionStatus) -> impl IntoElement {
+    let (label, color) = match status {
+        PermissionStatus::Granted => (tr!("Granted"), theme::STATUS_CONNECTED),
+        PermissionStatus::Denied => (tr!("Not granted"), theme::STATUS_CONNECTING),
+        PermissionStatus::Unknown => (tr!("Unknown"), theme::STATUS_OFFLINE),
+    };
+    div().text_xs().text_color(rgb(color)).child(label)
+}
+
+/// One permission row: title + muted description on the left; the live status
+/// word and an "Open" button (deep-links to the System Settings pane) on the
+/// right.
+fn permission_row(
+    id: &'static str,
+    title: SharedString,
+    description: SharedString,
+    status: PermissionStatus,
+    permission: Permission,
+    pal: Palette,
+    cx: &mut Context<SettingsView>,
+) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w(px(0.))
+                .gap_1()
+                .child(div().text_sm().child(title))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(pal.text_muted)
+                        .child(description),
+                ),
+        )
+        .child(
+            h_flex()
+                .gap_3()
+                .items_center()
+                .child(status_badge(status))
+                .child(
+                    div()
+                        .id(id)
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(pal.border)
+                        .text_xs()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(pal.surface_hover))
+                        .child(tr!("Open"))
+                        .on_click(
+                            cx.listener(move |_, _, _, _| permissions::open_pane(permission)),
+                        ),
+                ),
+        )
 }
 
 /// The language picker. "Follow system" clears the stored preference (`None`);
