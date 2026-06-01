@@ -62,6 +62,41 @@ pub(crate) fn prompt_accessibility() {
     let _trusted = unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef().cast()) };
 }
 
+// Raw FFI for the IOKit HID access checks. `IOHIDCheckAccess` reports the
+// current Input Monitoring (a.k.a. "listen event") authorization without
+// prompting; `IOHIDRequestAccess` raises the system dialog the first time and
+// registers the process in System Settings → Privacy & Security → Input
+// Monitoring. Reading HID++ input reports from a directly-attached
+// (Bluetooth / USB) device — which carries the pointer/keyboard collections —
+// is gated by this permission; the Bolt-receiver path is not.
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOHIDCheckAccess(request: u32) -> u32;
+    fn IOHIDRequestAccess(request: u32) -> bool;
+}
+
+/// `IOHIDRequestType::kIOHIDRequestTypeListenEvent` — access to read (listen
+/// to) HID input events, i.e. the "Input Monitoring" privacy category.
+const IOHID_REQUEST_TYPE_LISTEN_EVENT: u32 = 1;
+/// `IOHIDAccessType::kIOHIDAccessTypeGranted`.
+const IOHID_ACCESS_TYPE_GRANTED: u32 = 0;
+
+/// Whether this process has been granted Input Monitoring access.
+pub(crate) fn has_input_monitoring() -> bool {
+    // SAFETY: a plain C call taking an enum value and returning an enum
+    // value; no pointers, always safe to call.
+    unsafe { IOHIDCheckAccess(IOHID_REQUEST_TYPE_LISTEN_EVENT) == IOHID_ACCESS_TYPE_GRANTED }
+}
+
+/// Raise the Input Monitoring prompt + register the process. See
+/// [`super::Hook::prompt_input_monitoring`].
+pub(crate) fn prompt_input_monitoring() {
+    // SAFETY: same as `has_input_monitoring` — a plain C call. Shows the
+    // dialog when access is undetermined and lists the app either way. The
+    // returned grant state is observed separately via `has_input_monitoring`.
+    let _granted = unsafe { IOHIDRequestAccess(IOHID_REQUEST_TYPE_LISTEN_EVENT) };
+}
+
 /// Read the frontmost application's bundle identifier via NSWorkspace.
 /// Pure FFI — returns `None` when no app is frontmost or the identifier
 /// is missing / non-UTF8.

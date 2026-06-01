@@ -177,6 +177,39 @@ impl Hook {
             macos::prompt_accessibility();
         }
     }
+
+    /// Returns `true` when the process has macOS Input Monitoring access —
+    /// required to read HID++ input reports from a directly-attached
+    /// (Bluetooth / USB) device. The Bolt-receiver path does not need it.
+    ///
+    /// On Linux and Windows this always returns `true`; those platforms handle
+    /// permissions at a higher layer.
+    #[must_use]
+    pub fn has_input_monitoring() -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            macos::has_input_monitoring()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            true
+        }
+    }
+
+    /// Show the macOS Input Monitoring permission dialog and register this
+    /// process in System Settings → Privacy & Security → Input Monitoring.
+    ///
+    /// Mirrors [`Self::prompt_accessibility`]: the first time, macOS surfaces
+    /// the native dialog and lists the app there (otherwise the user would
+    /// have to add the binary by hand). The grant only takes effect after the
+    /// app is relaunched. Called for its side effect; the resulting state is
+    /// observed via [`Self::has_input_monitoring`]. No-op on non-macOS.
+    pub fn prompt_input_monitoring() {
+        #[cfg(target_os = "macos")]
+        {
+            macos::prompt_input_monitoring();
+        }
+    }
 }
 
 /// Return the macOS bundle identifier of the currently frontmost application,

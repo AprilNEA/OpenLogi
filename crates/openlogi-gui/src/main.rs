@@ -155,6 +155,13 @@ fn main() -> Result<()> {
         if !Hook::has_accessibility() {
             Hook::prompt_accessibility();
         }
+        // Reading HID++ input reports from a Bluetooth- or USB-direct device
+        // is gated by Input Monitoring (the device carries pointer/keyboard
+        // collections); without it such devices never appear. Request it up
+        // front so macOS lists the app — the grant takes effect on relaunch.
+        if !Hook::has_input_monitoring() {
+            Hook::prompt_input_monitoring();
+        }
 
         // Publish the shared updater and, if the user opted in, run one
         // check on launch. Done before `initial_config` is moved into the
