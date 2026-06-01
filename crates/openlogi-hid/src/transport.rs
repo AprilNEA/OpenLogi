@@ -19,7 +19,7 @@ use tracing::debug;
 
 /// Logitech HID vendor ID.
 const LOGITECH_VID: u16 = 0x046d;
-/// HID++ long-report vendor collections, as `(usage_page, usage_id)` pairs.
+/// HID++ long-report vendor collections, as `(usage_page, usage_id, long_only)`.
 ///
 /// Logitech exposes its HID++ long-report (report id `0x11`) under a
 /// vendor-defined HID collection, but the page differs by transport:
@@ -30,17 +30,18 @@ const LOGITECH_VID: u16 = 0x046d;
 ///   (e.g. the Logitech Lift / Signature mice). Same HID++ protocol, just a
 ///   different vendor page on the BLE HID report descriptor.
 ///
+/// `long_only` marks a transport that exposes *only* the long report — no
+/// short-report (`0x10`) collection — so short HID++ requests must be
+/// up-converted to long (see [`short_as_long`]). BLE-direct devices on macOS
+/// are long-only; USB / receiver devices carry both. Keeping the flag in this
+/// table means a new long-only transport is a single-line addition here, with
+/// no second site to update.
+///
 /// Filtering on these pairs gives us one HID node per physical HID++ device on
 /// every supported OS, without reading report descriptors (`async-hid 0.4`
 /// only exposes those on Linux).
-const HIDPP_LONG_COLLECTIONS: [(u16, u16); 2] = [(0xff00, 0x0002), (0xff43, 0x0202)];
-
-/// The vendor usage page Logitech uses for HID++ over Bluetooth Low Energy.
-/// On macOS a BLE-direct device exposes *only* the long HID++ report (`0x11`)
-/// under this page — there is no short-report (`0x10`) collection — so this
-/// crate up-converts short HID++ requests to long for these channels (see
-/// [`AsyncHidChannel::write_report`]).
-const HIDPP_BLE_USAGE_PAGE: u16 = 0xff43;
+const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 2] =
+    [(0xff00, 0x0002, false), (0xff43, 0x0202, true)];
 
 /// HID++ short / long report IDs and the long report's on-wire length
 /// (report id + 19 payload bytes). Mirrors `hidpp`'s private constants.
@@ -48,8 +49,20 @@ const SHORT_REPORT_ID: u8 = 0x10;
 const LONG_REPORT_ID: u8 = 0x11;
 const LONG_REPORT_LEN: usize = 20;
 
+/// Whether `(usage_page, usage_id)` is one of the HID++ long-report collections.
 fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
-    HIDPP_LONG_COLLECTIONS.contains(&(usage_page, usage_id))
+    HIDPP_LONG_COLLECTIONS
+        .iter()
+        .any(|&(page, usage, _)| (page, usage) == (usage_page, usage_id))
+}
+
+/// Whether the matched HID++ collection exposes only the long report, so short
+/// requests must be re-framed as long (see [`short_as_long`]). `false` for
+/// pages not in [`HIDPP_LONG_COLLECTIONS`].
+fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
+    HIDPP_LONG_COLLECTIONS
+        .iter()
+        .any(|&(page, usage, long_only)| long_only && (page, usage) == (usage_page, usage_id))
 }
 
 /// Re-frame a short HID++ report (`0x10`, 7 bytes) as a long one (`0x11`, 20
@@ -110,7 +123,7 @@ pub(crate) async fn open_hidpp_channel(
     let (reader, writer) = dev.open().await?;
     // BLE-direct devices expose only the long HID++ report; flag the channel so
     // outgoing short requests get up-converted to long (see `write_report`).
-    let long_only = info.usage_page == HIDPP_BLE_USAGE_PAGE;
+    let long_only = is_long_only_collection(info.usage_page, info.usage_id);
     let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only);
     let channel = match HidppChannel::from_raw_channel(raw).await {
         Ok(c) => Arc::new(c),
@@ -190,6 +203,13 @@ mod tests {
         assert!(is_hidpp_long_collection(0xff43, 0x0202)); // BLE-direct (Lift, Signature)
         assert!(!is_hidpp_long_collection(0x0001, 0x0002)); // generic-desktop mouse
         assert!(!is_hidpp_long_collection(0xff43, 0x0002)); // page right, usage wrong
+    }
+
+    #[test]
+    fn only_ble_collection_is_long_only() {
+        assert!(is_long_only_collection(0xff43, 0x0202)); // BLE-direct → up-convert short→long
+        assert!(!is_long_only_collection(0xff00, 0x0002)); // USB / receiver carries both reports
+        assert!(!is_long_only_collection(0x0001, 0x0002)); // not a HID++ collection at all
     }
 
     #[test]
