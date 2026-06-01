@@ -10,6 +10,7 @@ mod route;
 mod transport;
 
 pub mod adjustable_dpi;
+pub mod battery_status;
 pub mod gesture;
 pub mod inventory;
 pub mod pairing;

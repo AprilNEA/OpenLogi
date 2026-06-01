@@ -6,6 +6,7 @@ use hidpp::{
     channel::HidppChannel,
     device::Device,
     feature::{
+        CreatableFeature,
         device_information::v0::DeviceInformationFeatureV0,
         unified_battery::v0::{
             BatteryLevel as HidppBatteryLevel, BatteryStatus as HidppBatteryStatus,
@@ -26,6 +27,7 @@ use thiserror::Error;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
+use crate::battery_status::{BatteryChargeState, BatteryStatusFeatureV0};
 use crate::route::DIRECT_DEVICE_INDEX;
 use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
@@ -295,6 +297,13 @@ async fn probe_features(
             }),
         None => None,
     };
+    // Older MX-class devices (e.g. the MX Master 3) expose the legacy
+    // `0x1000 BatteryStatus` instead of `0x1004 UnifiedBattery`; fall back to
+    // it so they report a charge level too.
+    let battery = match battery {
+        some @ Some(_) => some,
+        None => read_legacy_battery(&mut device, slot).await,
+    };
 
     let model_info = match device.get_feature::<DeviceInformationFeatureV0>() {
         Some(feature) => match feature.get_device_info().await {
@@ -319,6 +328,57 @@ async fn probe_features(
     };
 
     (battery, model_info)
+}
+
+/// Read the legacy `0x1000 BatteryStatus` feature as a [`BatteryInfo`].
+///
+/// Resolved through the device root: `0x1000` isn't in hidpp 0.2's typed
+/// registry, so `enumerate_features` won't surface it (same reason the DPI
+/// feature is opened via the root in `write::open_feature`). Returns `None`
+/// when the device doesn't expose `0x1000` or the read fails.
+async fn read_legacy_battery(device: &mut Device, slot: u8) -> Option<BatteryInfo> {
+    let info = match device.root().get_feature(BatteryStatusFeatureV0::ID).await {
+        Ok(Some(info)) => info,
+        Ok(None) => return None,
+        Err(e) => {
+            debug!(slot, error = ?e, "0x1000 root lookup failed");
+            return None;
+        }
+    };
+    let feature = device.add_feature::<BatteryStatusFeatureV0>(info.index);
+    match feature.get_battery_level_status().await {
+        Ok(reading) => Some(BatteryInfo {
+            percentage: reading.level_percent,
+            level: battery_level_from_percent(reading.level_percent),
+            status: map_charge_state(reading.charge_state),
+        }),
+        Err(e) => {
+            debug!(slot, error = ?e, "0x1000 battery read failed");
+            None
+        }
+    }
+}
+
+/// Derive a coarse [`BatteryLevel`] bucket from a charge percentage. `0x1000`
+/// reports only a raw percentage, unlike `0x1004`'s discrete level field.
+fn battery_level_from_percent(pct: u8) -> BatteryLevel {
+    match pct {
+        0..=10 => BatteryLevel::Critical,
+        11..=30 => BatteryLevel::Low,
+        31..=89 => BatteryLevel::Good,
+        _ => BatteryLevel::Full,
+    }
+}
+
+fn map_charge_state(state: BatteryChargeState) -> BatteryStatus {
+    match state {
+        BatteryChargeState::Discharging => BatteryStatus::Discharging,
+        BatteryChargeState::Recharging | BatteryChargeState::AlmostFull => BatteryStatus::Charging,
+        BatteryChargeState::SlowRecharge => BatteryStatus::ChargingSlow,
+        BatteryChargeState::Full => BatteryStatus::Full,
+        BatteryChargeState::Error => BatteryStatus::Error,
+        BatteryChargeState::Unknown => BatteryStatus::Unknown,
+    }
 }
 
 /// HID++ feature IDs that mark a device as a controllable peripheral rather
