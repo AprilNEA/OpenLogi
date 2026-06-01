@@ -44,7 +44,7 @@ pub struct FeatureEntry {
 /// feature IDs a given peripheral actually exposes (e.g. some mice use
 /// `0x2202 ExtendedAdjustableDpi` instead of `0x2201 AdjustableDpi`).
 pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, WriteError> {
-    use hidpp::feature::feature_set::v0::FeatureSetFeatureV0;
+    use hidpp::feature::feature_set::FeatureSetFeature;
     let index = route.device_index();
     with_route(route, move |channel| async move {
         let mut device = Device::new(Arc::clone(&channel), index)
@@ -55,13 +55,13 @@ pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, Wri
         // `enumerate_features` so the iteration is observable.
         let feature_set_info = device
             .root()
-            .get_feature(FeatureSetFeatureV0::ID)
+            .get_feature(FeatureSetFeature::ID)
             .await
             .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?
             .ok_or(WriteError::FeatureUnsupported {
-                feature_hex: FeatureSetFeatureV0::ID,
+                feature_hex: FeatureSetFeature::ID,
             })?;
-        let feature_set = device.add_feature::<FeatureSetFeatureV0>(feature_set_info.index);
+        let feature_set = device.add_feature::<FeatureSetFeature>(feature_set_info.index);
         let count = feature_set
             .count()
             .await

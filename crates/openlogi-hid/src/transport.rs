@@ -170,7 +170,7 @@ impl RawHidChannel for AsyncHidChannel {
         self.info.product_id
     }
 
-    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error>> {
+    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         let mut w = self.writer.lock().await;
         match self.long_only.then(|| short_as_long(src)).flatten() {
             Some(long) => w.write_output_report(&long).await?,
@@ -179,7 +179,7 @@ impl RawHidChannel for AsyncHidChannel {
         Ok(src.len())
     }
 
-    async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error>> {
+    async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         let mut r = self.reader.lock().await;
         Ok(r.read_input_report(buf).await?)
     }
@@ -188,7 +188,10 @@ impl RawHidChannel for AsyncHidChannel {
         Some((true, true))
     }
 
-    async fn get_report_descriptor(&self, _buf: &mut [u8]) -> Result<usize, Box<dyn Error>> {
+    async fn get_report_descriptor(
+        &self,
+        _buf: &mut [u8],
+    ) -> Result<usize, Box<dyn Error + Send + Sync>> {
         Err("get_report_descriptor is not implemented; pre-filter to HID++ usage pages".into())
     }
 }

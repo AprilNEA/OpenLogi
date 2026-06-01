@@ -33,7 +33,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
 
-pub use hidpp::receiver::bolt::BoltDeviceKind;
+pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 
 use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 

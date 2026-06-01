@@ -1,0 +1,38 @@
+# Vendored fork of the `hidpp` crate from https://github.com/lus/logy
+# @ commit 135c5600807845c269b5d5bfa1f33032281fbd86 (upstream v0.3.0, 2025-12-26),
+# 0BSD © Lukas Schulte Pelkum (see LICENSE). Kept close to upstream to ease
+# future syncs; OpenLogi-specific changes (e.g. BLE long-report handling) live
+# here. The library target stays `hidpp` so dependents import it unchanged.
+#
+# Versioned with the OpenLogi workspace (unified versioning) rather than
+# upstream's 0.3.0 — the upstream version is provenance, recorded above.
+#
+# This crate intentionally does NOT opt into the workspace lint profile
+# (`[lints] workspace = true`): it is third-party code, so we don't impose
+# OpenLogi's pedantic/restriction clippy rules on it.
+[package]
+name = "openlogi-hidpp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "0BSD"
+repository.workspace = true
+description = "OpenLogi's vendored fork of the `hidpp` crate (Logitech HID++ protocol)."
+keywords = ["hid++", "logitech", "hid", "mouse", "keyboard"]
+categories = ["hardware-support"]
+
+[lib]
+name = "hidpp"
+
+[dependencies]
+thiserror = "2"
+hidreport = "0.5.0"
+futures = "0.3.31"
+async-trait = "0.1.88"
+rand = "0.9.0"
+lazy_static = "1.5.0"
+num_enum = "0.7.3"
+async-channel = "2.3.1"
+serde = { version = "1.0", features = ["derive"], optional = true }
+hex = "0.4.3"
+derive_builder = "0.20.2"

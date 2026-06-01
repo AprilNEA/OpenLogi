@@ -6,16 +6,18 @@ use hidpp::{
     channel::HidppChannel,
     device::Device,
     feature::{
-        device_information::v0::DeviceInformationFeatureV0,
-        unified_battery::v0::{
+        device_information::DeviceInformationFeature,
+        unified_battery::{
             BatteryLevel as HidppBatteryLevel, BatteryStatus as HidppBatteryStatus,
-            UnifiedBatteryFeatureV0,
+            UnifiedBatteryFeature,
         },
     },
-    nibble::U4,
     receiver::{
         self, Receiver,
-        bolt::{BoltDeviceConnection, BoltDeviceKind, BoltEvent, BoltReceiver},
+        bolt::{
+            DeviceConnection as BoltDeviceConnection, DeviceKind as BoltDeviceKind,
+            Event as BoltEvent, Receiver as BoltReceiver,
+        },
     },
 };
 use openlogi_core::device::{
@@ -100,7 +102,7 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
 
     let mut paired = Vec::new();
     for slot in 1u8..=MAX_BOLT_SLOTS {
-        let pairing = match bolt.get_device_pairing_information(U4::from_lo(slot)).await {
+        let pairing = match bolt.get_device_pairing_information(slot).await {
             Ok(p) => p,
             Err(e) => {
                 debug!(slot, error = ?e, "slot empty or unreadable");
@@ -283,7 +285,7 @@ async fn probe_features(
         return (None, None);
     }
 
-    let battery = match device.get_feature::<UnifiedBatteryFeatureV0>() {
+    let battery = match device.get_feature::<UnifiedBatteryFeature>() {
         Some(feature) => feature
             .get_battery_info()
             .await
@@ -296,7 +298,7 @@ async fn probe_features(
         None => None,
     };
 
-    let model_info = match device.get_feature::<DeviceInformationFeatureV0>() {
+    let model_info = match device.get_feature::<DeviceInformationFeature>() {
         Some(feature) => match feature.get_device_info().await {
             Ok(info) => {
                 let serial_number = if info.capabilities.serial_number {

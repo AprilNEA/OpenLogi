@@ -58,6 +58,13 @@ name = "openlogi-hook"
 version_group = "openlogi"
 changelog_path = "CHANGELOG.md"
 
+# Vendored fork of the `hidpp` crate (0BSD, from lus/logy). Published with the
+# workspace under unified versioning; upstream's 0.3.0 is provenance only.
+[[package]]
+name = "openlogi-hidpp"
+version_group = "openlogi"
+changelog_path = "CHANGELOG.md"
+
 # Not publishable (git-only gpui deps); keep release-plz out of it entirely.
 # Its version still follows the shared workspace version via inheritance.
 # `publish = false` must mirror the crate's Cargo.toml: release-plz validates

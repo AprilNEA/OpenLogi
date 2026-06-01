@@ -23,6 +23,7 @@ workspace = true
 resolver = "3"
 members = [
     "crates/openlogi-core",
+    "crates/openlogi-hidpp",
     "crates/openlogi-hid",
     "crates/openlogi-assets",
     "crates/openlogi-cli",
@@ -41,7 +42,7 @@ authors = ["AprilNEA <dev@aprilnea.me>"]
 description = "Lightweight, local-first alternative to Logitech Options+ for HID++ devices"
 
 [workspace.dependencies]
-hidpp = "0.2"
+hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.3.3" }
 async-hid = "0.4"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time"] }
 futures-lite = "2"
