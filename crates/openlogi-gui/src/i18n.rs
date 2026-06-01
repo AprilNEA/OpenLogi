@@ -29,6 +29,7 @@ pub const SUPPORTED: &[(&str, &str)] = &[
     ("ru", "Русский"),
     ("zh-CN", "简体中文"),
     ("zh-HK", "繁體中文"),
+    ("it", "Italiano"),
 ];
 
 /// Resolve the locale to apply, preferring an explicit stored `setting`, then
@@ -59,6 +60,7 @@ fn match_supported(code: &str) -> Option<&'static str> {
         Some("en") => Some("en"),
         Some("ja") => Some("ja"),
         Some("ru") => Some("ru"),
+        Some("it") => Some("it"),
         Some("zh") => {
             let traditional = matches!(
                 subtags.find(|t| matches!(*t, "hans" | "hant" | "tw" | "hk" | "mo")),
@@ -101,6 +103,8 @@ mod tests {
         assert_eq!(match_supported("ru-RU"), Some("ru"));
         assert_eq!(match_supported("en-US"), Some("en"));
         assert_eq!(match_supported("fr-FR"), None);
+        assert_eq!(match_supported("it"), Some("it"));
+        assert_eq!(match_supported("it-IT"), Some("it"));
     }
 
     #[test]
@@ -166,6 +170,11 @@ mod tests {
         rust_i18n::set_locale("ru");
         assert_eq!(rust_i18n::t!("Settings"), "Настройки");
         assert_eq!(rust_i18n::t!("Left Click"), "Левый щелчок");
+
+        rust_i18n::set_locale("it");
+        assert_eq!(rust_i18n::t!("Settings"), "Impostazioni");
+        assert_eq!(rust_i18n::t!("Left Click"), "Click sinistro");
+        assert_eq!(rust_i18n::t!("Thanks"), "Grazie");
 
         // English has no column: every key falls back to the English source.
         rust_i18n::set_locale("en");
