@@ -162,9 +162,6 @@ jobs:
           ref_name="${GITHUB_REF_NAME:-dev}"
           ref_name="${ref_name//\//-}"
           cp target/release/OpenLogi.dmg "dist/OpenLogi-${ref_name}-macos-${{ matrix.arch }}.dmg"
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
-            cp target/release/OpenLogi.dmg "dist/OpenLogi-${ref_name}-macos.dmg"
-          fi
 
       - uses: actions/upload-artifact@v7
         with:
