@@ -405,6 +405,26 @@ impl HidppChannel {
         }
     }
 
+    /// Re-frames a short message as long on a long-only channel — a device that
+    /// exposes only the long HID++ report (e.g. a Bluetooth-LE-direct mouse on
+    /// macOS, where `IOHIDDeviceSetReport` rejects the short report). The HID++
+    /// header bytes sit at the same offsets in both widths, so the only change
+    /// is the report id plus zero-padding the extra payload; the device answers
+    /// with a long report, which still matches the request by header. A no-op on
+    /// channels that advertise short support.
+    ///
+    /// (OpenLogi local addition — candidate for upstreaming.)
+    fn normalize_outgoing(&self, msg: HidppMessage) -> HidppMessage {
+        match msg {
+            HidppMessage::Short(payload) if !self.supports_short && self.supports_long => {
+                let mut long = [0u8; LONG_REPORT_LENGTH - 1];
+                long[..payload.len()].copy_from_slice(&payload);
+                HidppMessage::Long(long)
+            }
+            other => other,
+        }
+    }
+
     /// Sends a HID++ message across the channel and waits for a response.
     ///
     /// If no response is expected/required, use [`Self::send_and_forget`].
@@ -415,6 +435,7 @@ impl HidppChannel {
         msg: HidppMessage,
         response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
     ) -> Result<HidppMessage, ChannelError> {
+        let msg = self.normalize_outgoing(msg);
         if !self.supports_msg(&msg) {
             return Err(ChannelError::MessageTypeNotSupported);
         }
@@ -439,6 +460,7 @@ impl HidppChannel {
     ///
     /// If a response is expected, use [`Self::send`],
     pub async fn send_and_forget(&self, msg: HidppMessage) -> Result<(), ChannelError> {
+        let msg = self.normalize_outgoing(msg);
         if !self.supports_msg(&msg) {
             return Err(ChannelError::MessageTypeNotSupported);
         }

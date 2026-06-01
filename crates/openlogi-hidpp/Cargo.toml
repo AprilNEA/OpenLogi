@@ -14,7 +14,10 @@
 name = "openlogi-hidpp"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# Upstream HEAD uses std APIs stabilized in 1.87, so this fork's real MSRV is
+# higher than the workspace's 1.85. Declared explicitly (not inherited) — note
+# this makes the workspace effectively need 1.87 via openlogi-hid.
+rust-version = "1.87"
 license = "0BSD"
 repository.workspace = true
 description = "OpenLogi's vendored fork of the `hidpp` crate (Logitech HID++ protocol)."

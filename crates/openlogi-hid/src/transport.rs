@@ -1,10 +1,12 @@
 //! `RawHidChannel` implementation over `async-hid`.
 //!
-//! The published `hidpp 0.2` derives short/long-report support by reading the
-//! HID report descriptor, but `async-hid 0.4` only exposes descriptors on
-//! Linux. We avoid the path entirely by pre-filtering to the Logitech HID++
-//! long-report usage page at enumeration time, then returning a hardcoded
-//! `Some((true, true))` from `supports_short_long_hidpp`.
+//! `hidpp` derives short/long-report support by reading the HID report
+//! descriptor, but `async-hid 0.4` only exposes descriptors on Linux. We avoid
+//! that path by pre-filtering to the Logitech HID++ vendor collections at
+//! enumeration time (see [`HIDPP_LONG_COLLECTIONS`]) and reporting support
+//! straight from [`AsyncHidChannel::supports_short_long_hidpp`]: USB / receiver
+//! collections carry both reports; BLE-direct collections are long-only, and the
+//! `hidpp` channel up-converts outgoing short messages to long for them.
 
 use std::{error::Error, sync::Arc};
 
@@ -43,12 +45,6 @@ const LOGITECH_VID: u16 = 0x046d;
 const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 2] =
     [(0xff00, 0x0002, false), (0xff43, 0x0202, true)];
 
-/// HID++ short / long report IDs and the long report's on-wire length
-/// (report id + 19 payload bytes). Mirrors `hidpp`'s private constants.
-const SHORT_REPORT_ID: u8 = 0x10;
-const LONG_REPORT_ID: u8 = 0x11;
-const LONG_REPORT_LEN: usize = 20;
-
 /// Whether `(usage_page, usage_id)` is one of the HID++ long-report collections.
 fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
     HIDPP_LONG_COLLECTIONS
@@ -63,28 +59,6 @@ fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
     HIDPP_LONG_COLLECTIONS
         .iter()
         .any(|&(page, usage, long_only)| long_only && (page, usage) == (usage_page, usage_id))
-}
-
-/// Re-frame a short HID++ report (`0x10`, 7 bytes) as a long one (`0x11`, 20
-/// bytes) for a transport that only exposes the long report.
-///
-/// `hidpp 0.2` always pings with — and often sends — short reports, but a
-/// BLE-direct device exposes only the long report on macOS, so a short
-/// `IOHIDDeviceSetReport` fails with `kIOReturnNotFound`. The header bytes
-/// (device / feature / function / sw id) sit at the same offsets in both
-/// widths; only the trailing payload is zero-padded. The device answers with a
-/// long report, which `hidpp` parses and matches by header regardless of width.
-///
-/// Returns `None` (pass the report through unchanged) when `src` isn't a short
-/// report or wouldn't fit the long frame.
-fn short_as_long(src: &[u8]) -> Option<[u8; LONG_REPORT_LEN]> {
-    if src.first() != Some(&SHORT_REPORT_ID) || src.len() > LONG_REPORT_LEN {
-        return None;
-    }
-    let mut long = [0u8; LONG_REPORT_LEN];
-    long[0] = LONG_REPORT_ID;
-    long[1..src.len()].copy_from_slice(&src[1..]);
-    Some(long)
 }
 
 pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError>
@@ -122,7 +96,7 @@ pub(crate) async fn open_hidpp_channel(
     let info: DeviceInfo = (*dev).clone();
     let (reader, writer) = dev.open().await?;
     // BLE-direct devices expose only the long HID++ report; flag the channel so
-    // outgoing short requests get up-converted to long (see `write_report`).
+    // it advertises short-unsupported and the `hidpp` channel up-converts shorts.
     let long_only = is_long_only_collection(info.usage_page, info.usage_id);
     let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only);
     let channel = match HidppChannel::from_raw_channel(raw).await {
@@ -139,8 +113,9 @@ pub(crate) struct AsyncHidChannel {
     reader: Mutex<DeviceReader>,
     writer: Mutex<DeviceWriter>,
     info: DeviceInfo,
-    /// When set, outgoing short HID++ reports are rewritten as long ones — the
-    /// device (a BLE-direct peripheral) only exposes the long report on macOS.
+    /// Whether the device exposes only the long HID++ report (a BLE-direct
+    /// peripheral on macOS). Reported via `supports_short_long_hidpp` so the
+    /// `hidpp` channel up-converts outgoing short messages to long.
     long_only: bool,
 }
 
@@ -172,10 +147,7 @@ impl RawHidChannel for AsyncHidChannel {
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         let mut w = self.writer.lock().await;
-        match self.long_only.then(|| short_as_long(src)).flatten() {
-            Some(long) => w.write_output_report(&long).await?,
-            None => w.write_output_report(src).await?,
-        }
+        w.write_output_report(src).await?;
         Ok(src.len())
     }
 
@@ -185,7 +157,10 @@ impl RawHidChannel for AsyncHidChannel {
     }
 
     fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
-        Some((true, true))
+        // USB / receiver collections carry both reports; BLE-direct collections
+        // are long-only (no short report on macOS), where the `hidpp` channel
+        // up-converts outgoing short messages to long.
+        Some((!self.long_only, true))
     }
 
     async fn get_report_descriptor(
@@ -210,31 +185,8 @@ mod tests {
 
     #[test]
     fn only_ble_collection_is_long_only() {
-        assert!(is_long_only_collection(0xff43, 0x0202)); // BLE-direct → up-convert short→long
+        assert!(is_long_only_collection(0xff43, 0x0202)); // BLE-direct → short-unsupported
         assert!(!is_long_only_collection(0xff00, 0x0002)); // USB / receiver carries both reports
         assert!(!is_long_only_collection(0x0001, 0x0002)); // not a HID++ collection at all
-    }
-
-    #[test]
-    fn upconverts_short_report_preserving_header_and_padding() {
-        // [report id, device, feature, func|sw, p0, p1, p2]
-        let short = [SHORT_REPORT_ID, 0xff, 0x00, 0x1e, 0xaa, 0xbb, 0xcc];
-        let Some(long) = short_as_long(&short) else {
-            panic!("short report should up-convert");
-        };
-
-        assert_eq!(long[0], LONG_REPORT_ID);
-        assert_eq!(&long[1..7], &short[1..]); // header + payload copied verbatim
-        assert!(long[7..].iter().all(|&b| b == 0)); // remainder zero-padded
-        assert_eq!(long.len(), LONG_REPORT_LEN);
-    }
-
-    #[test]
-    fn passes_through_non_short_reports() {
-        // Already a long report — leave it alone.
-        let long_in = [LONG_REPORT_ID, 0xff, 0x00, 0x1e];
-        assert!(short_as_long(&long_in).is_none());
-        // Empty / unknown frames are passed through too.
-        assert!(short_as_long(&[]).is_none());
     }
 }
