@@ -174,7 +174,7 @@ mod tests {
         rust_i18n::set_locale("it");
         assert_eq!(rust_i18n::t!("Settings"), "Impostazioni");
         assert_eq!(rust_i18n::t!("Left Click"), "Click sinistro");
-        assert_eq!(rust_i18n::t!("Thanks"), "Grazie");
+        assert_eq!(rust_i18n::t!("Cancel"), "Annulla");
 
         // English has no column: every key falls back to the English source.
         rust_i18n::set_locale("en");
