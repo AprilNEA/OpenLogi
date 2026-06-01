@@ -1,0 +1,174 @@
+use std::fs;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use anyhow::{Context as _, Result, bail};
+use clap::{Parser, Subcommand};
+use serde::Serialize;
+use sha2::{Digest as _, Sha256};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+
+const APP_ID: &str = "org.openlogi.openlogi";
+const CHANNEL: &str = "stable";
+const MINIMUM_OS_VERSION: &str = "13.0";
+
+#[derive(Parser)]
+#[command(about = "OpenLogi repository maintenance tasks")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Generate the static updater manifest consumed by gpui-updater.
+    GenerateUpdaterManifest(GenerateUpdaterManifest),
+}
+
+#[derive(Parser)]
+struct GenerateUpdaterManifest {
+    /// Directory containing release artifacts.
+    #[arg(long, default_value = "dist")]
+    dist: PathBuf,
+    /// Output manifest path.
+    #[arg(long, default_value = "dist/latest.json")]
+    output: PathBuf,
+    /// Release tag, for example `v0.2.0`.
+    #[arg(long, env = "GITHUB_REF_NAME")]
+    tag: String,
+    /// Public update base URL, for example `https://updates.openlogi.org`.
+    #[arg(long, env = "OPENLOGI_UPDATE_BASE_URL")]
+    base_url: String,
+}
+
+#[derive(Serialize)]
+struct Manifest {
+    schema_version: u8,
+    app_id: &'static str,
+    version: String,
+    tag: String,
+    channel: &'static str,
+    published_at: String,
+    release_url: String,
+    assets: Vec<Asset>,
+}
+
+#[derive(Serialize)]
+struct Asset {
+    name: String,
+    url: String,
+    os: &'static str,
+    arch: String,
+    format: &'static str,
+    content_type: &'static str,
+    size: u64,
+    sha256: String,
+    minimum_os_version: &'static str,
+}
+
+fn main() -> Result<()> {
+    match Cli::parse().command {
+        Command::GenerateUpdaterManifest(args) => generate_updater_manifest(&args),
+    }
+}
+
+fn generate_updater_manifest(args: &GenerateUpdaterManifest) -> Result<()> {
+    let version = args.tag.strip_prefix('v').unwrap_or(&args.tag).to_string();
+    let release_base = format!(
+        "{}/releases/{}",
+        args.base_url.trim_end_matches('/'),
+        args.tag
+    );
+    let assets = collect_assets(&args.dist, &release_base)?;
+    if assets.is_empty() {
+        bail!("no architecture-specific DMG assets found for manifest");
+    }
+
+    let manifest = Manifest {
+        schema_version: 1,
+        app_id: APP_ID,
+        version,
+        tag: args.tag.clone(),
+        channel: CHANNEL,
+        published_at: published_at()?,
+        release_url: format!(
+            "https://github.com/AprilNEA/OpenLogi/releases/tag/{}",
+            args.tag
+        ),
+        assets,
+    };
+
+    if let Some(parent) = args.output.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("could not create manifest directory {}", parent.display()))?;
+    }
+    fs::write(
+        &args.output,
+        serde_json::to_string_pretty(&manifest)? + "\n",
+    )
+    .with_context(|| format!("could not write manifest to {}", args.output.display()))
+}
+
+fn collect_assets(dist: &Path, release_base: &str) -> Result<Vec<Asset>> {
+    let mut assets = Vec::new();
+    for entry in fs::read_dir(dist)
+        .with_context(|| format!("could not read artifact directory {}", dist.display()))?
+    {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("dmg") {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(arch) = dmg_arch(name) else {
+            continue;
+        };
+        assets.push(Asset {
+            name: name.to_string(),
+            url: format!("{release_base}/{name}"),
+            os: "macos",
+            arch: arch.to_string(),
+            format: "dmg",
+            content_type: "application/x-apple-diskimage",
+            size: path
+                .metadata()
+                .with_context(|| format!("could not stat {}", path.display()))?
+                .len(),
+            sha256: sha256(&path)?,
+            minimum_os_version: MINIMUM_OS_VERSION,
+        });
+    }
+    assets.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(assets)
+}
+
+fn dmg_arch(name: &str) -> Option<&str> {
+    let stem = name.strip_suffix(".dmg")?;
+    let (_, arch) = stem.rsplit_once("-macos-")?;
+    matches!(arch, "arm64" | "x86_64").then_some(arch)
+}
+
+fn sha256(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("could not open artifact {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let len = file
+            .read(&mut buffer)
+            .with_context(|| format!("could not read artifact {}", path.display()))?;
+        if len == 0 {
+            break;
+        }
+        hasher.update(&buffer[..len]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn published_at() -> Result<String> {
+    OffsetDateTime::from(SystemTime::now())
+        .format(&Rfc3339)
+        .context("could not format current timestamp")
+}

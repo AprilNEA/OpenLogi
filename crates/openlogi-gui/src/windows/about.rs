@@ -33,7 +33,7 @@ pub struct AboutView {
 }
 
 impl AboutView {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(_: &mut Window, cx: &mut Context<Self>) -> Self {
         // Reuse the app-wide shared updater installed at launch, so a launch-time
         // check result is already visible here. Fall back to a fresh one if it
         // somehow wasn't installed.

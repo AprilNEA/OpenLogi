@@ -4,8 +4,8 @@
 //! at compile time by the `rust_i18n::i18n!` macro in `main.rs`. Call sites use
 //! the [`tr!`](crate::tr) helper (or `rust_i18n::t!`) with the **English string
 //! as the key** — a missing entry falls back to that English text, so the file
-//! carries only the translated `ja` / `zh-CN` / `zh-HK` columns; English is the
-//! key itself.
+//! carries only the translated `ja` / `ru` / `zh-CN` / `zh-HK` columns;
+//! English is the key itself.
 //!
 //! The current locale is a process-global atomic inside `rust_i18n`. Setting it
 //! re-localizes both our own call sites *and* gpui-component's built-in widget
@@ -19,12 +19,14 @@ use openlogi_core::config::AppSettings;
 /// Locales the GUI ships, as `(code, native name)`. The codes match the
 /// sub-keys in `locales/app.yml`; `en` / `zh-CN` / `zh-HK` also match
 /// gpui-component's bundled `ui.yml`, so choosing one localizes the framework's
-/// own widgets too. `ja` is *not* in `ui.yml`, so under Japanese our app strings
-/// localize but the framework's built-in widget strings fall back to English.
+/// own widgets too. `ja` and `ru` are *not* in `ui.yml`, so under Japanese or
+/// Russian our app strings localize but the framework's built-in widget strings
+/// fall back to English.
 /// Order here is the order shown in the Settings picker (after "Follow system").
 pub const SUPPORTED: &[(&str, &str)] = &[
     ("en", "English"),
     ("ja", "日本語"),
+    ("ru", "Русский"),
     ("zh-CN", "简体中文"),
     ("zh-HK", "繁體中文"),
 ];
@@ -56,6 +58,7 @@ fn match_supported(code: &str) -> Option<&'static str> {
     match subtags.next() {
         Some("en") => Some("en"),
         Some("ja") => Some("ja"),
+        Some("ru") => Some("ru"),
         Some("zh") => {
             let traditional = matches!(
                 subtags.find(|t| matches!(*t, "hans" | "hant" | "tw" | "hk" | "mo")),
@@ -94,6 +97,8 @@ mod tests {
         assert_eq!(match_supported("zh-HK"), Some("zh-HK"));
         assert_eq!(match_supported("ja"), Some("ja"));
         assert_eq!(match_supported("ja-JP"), Some("ja"));
+        assert_eq!(match_supported("ru"), Some("ru"));
+        assert_eq!(match_supported("ru-RU"), Some("ru"));
         assert_eq!(match_supported("en-US"), Some("en"));
         assert_eq!(match_supported("fr-FR"), None);
     }
@@ -157,6 +162,10 @@ mod tests {
         rust_i18n::set_locale("ja");
         assert_eq!(rust_i18n::t!("Settings"), "設定");
         assert_eq!(rust_i18n::t!("Left Click"), "左クリック");
+
+        rust_i18n::set_locale("ru");
+        assert_eq!(rust_i18n::t!("Settings"), "Настройки");
+        assert_eq!(rust_i18n::t!("Left Click"), "Левый щелчок");
 
         // English has no column: every key falls back to the English source.
         rust_i18n::set_locale("en");

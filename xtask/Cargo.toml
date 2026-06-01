@@ -1,0 +1,21 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "OpenLogi repository maintenance tasks."
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+time = { version = "0.3", features = ["formatting"] }
+
+[lints]
+workspace = true

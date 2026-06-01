@@ -116,7 +116,7 @@ pub struct AddDeviceView {
 }
 
 impl AddDeviceView {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(_: &mut Window, cx: &mut Context<Self>) -> Self {
         let state_obs = cx.observe_global::<PairingUi>(|_, cx| cx.notify());
         Self {
             appearance_obs: None,

@@ -27,7 +27,7 @@ pub struct UpdateConsentView {
 }
 
 impl UpdateConsentView {
-    fn new(_: &mut Context<Self>) -> Self {
+    fn new(_: &mut Window, _: &mut Context<Self>) -> Self {
         Self {
             appearance_obs: None,
         }

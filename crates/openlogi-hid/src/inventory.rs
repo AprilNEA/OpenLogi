@@ -298,18 +298,32 @@ async fn probe_features(
 
     let model_info = match device.get_feature::<DeviceInformationFeatureV0>() {
         Some(feature) => match feature.get_device_info().await {
-            Ok(info) => Some(DeviceModelInfo {
-                entity_count: info.entity_count,
-                unit_id: info.unit_id,
-                transports: DeviceTransports {
-                    usb: info.transport.usb,
-                    equad: info.transport.e_quad,
-                    btle: info.transport.btle,
-                    bluetooth: info.transport.bluetooth,
-                },
-                model_ids: info.model_id,
-                extended_model_id: info.extended_model_id,
-            }),
+            Ok(info) => {
+                let serial_number = if info.capabilities.serial_number {
+                    match feature.get_serial_number().await {
+                        Ok(serial) => normalize_serial_number(&serial),
+                        Err(e) => {
+                            debug!(slot, error = ?e, "DeviceInformation serial read failed");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                Some(DeviceModelInfo {
+                    entity_count: info.entity_count,
+                    serial_number,
+                    unit_id: info.unit_id,
+                    transports: DeviceTransports {
+                        usb: info.transport.usb,
+                        equad: info.transport.e_quad,
+                        btle: info.transport.btle,
+                        bluetooth: info.transport.bluetooth,
+                    },
+                    model_ids: info.model_id,
+                    extended_model_id: info.extended_model_id,
+                })
+            }
             Err(e) => {
                 debug!(slot, error = ?e, "DeviceInformation read failed");
                 None
@@ -319,6 +333,11 @@ async fn probe_features(
     };
 
     (battery, model_info)
+}
+
+fn normalize_serial_number(serial: &str) -> Option<String> {
+    let serial = serial.trim_matches('\0').trim().to_string();
+    (!serial.is_empty()).then_some(serial)
 }
 
 /// HID++ feature IDs that mark a device as a controllable peripheral rather

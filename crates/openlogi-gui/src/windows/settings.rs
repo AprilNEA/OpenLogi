@@ -7,11 +7,18 @@
 //! set grows enough to warrant pages, this can migrate to that widget.
 
 use gpui::{
-    App, BorrowAppContext as _, Context, FontWeight, InteractiveElement, IntoElement,
-    ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, px, rgb,
+    App, AppContext as _, BorrowAppContext as _, Context, Entity, FontWeight, IntoElement,
+    ParentElement as _, Render, SharedString, Size, Styled as _, Subscription, Window, div, px,
 };
-use gpui_component::{Icon, IconName, group_box::GroupBox, h_flex, switch::Switch, v_flex};
+use gpui_component::{
+    Icon, IconName, IndexPath, Sizable,
+    group_box::GroupBox,
+    h_flex,
+    scroll::ScrollableElement,
+    select::{Select, SelectEvent, SelectItem, SelectState},
+    switch::Switch,
+    v_flex,
+};
 
 use crate::state::AppState;
 use crate::theme::{self, Palette};
@@ -21,13 +28,52 @@ use crate::windows::{self, AuxWindow};
 pub struct SettingsView {
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
+    language_select: Entity<SelectState<Vec<LanguageOption>>>,
 }
 
 impl SettingsView {
-    fn new(_: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let current = cx
+            .try_global::<AppState>()
+            .and_then(|s| s.app_settings().language.clone());
+        let options = language_options();
+        let selected = selected_language_index(current.as_deref(), &options);
+        let language_select = cx.new(|cx| SelectState::new(options, Some(selected), window, cx));
+        cx.subscribe_in(&language_select, window, Self::on_language_select)
+            .detach();
+
         Self {
             appearance_obs: None,
+            language_select,
         }
+    }
+
+    fn on_language_select(
+        &mut self,
+        _: &Entity<SelectState<Vec<LanguageOption>>>,
+        event: &SelectEvent<Vec<LanguageOption>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let SelectEvent::Confirm(_) = event;
+        let language = self
+            .language_select
+            .read(cx)
+            .selected_value()
+            .copied()
+            .filter(|code| !code.is_empty())
+            .map(ToOwned::to_owned);
+
+        cx.update_global::<AppState, _>(|s, _| s.set_language(language));
+        // `t!` reads the locale at render time, so a repaint is what actually
+        // applies the switch; the app menu and status item aren't in any
+        // window's view tree, so re-title them too. The status item's device
+        // line lives on the spawn loop, so ask it to re-localize the whole menu
+        // rather than writing from here.
+        cx.refresh_windows();
+        crate::app_menu::rebuild(cx);
+        #[cfg(target_os = "macos")]
+        crate::platform::tray::request_refresh();
     }
 }
 
@@ -51,12 +97,10 @@ pub fn open(cx: &mut App) {
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let (launch, updates, language) =
-            cx.try_global::<AppState>()
-                .map_or((false, false, None), |s| {
-                    let a = s.app_settings();
-                    (a.launch_at_login, a.check_for_updates, a.language.clone())
-                });
+        let (launch, updates) = cx.try_global::<AppState>().map_or((false, false), |s| {
+            let a = s.app_settings();
+            (a.launch_at_login, a.check_for_updates)
+        });
 
         let general = GroupBox::new()
             .title(group_title(IconName::Settings, tr!("General")))
@@ -119,21 +163,76 @@ impl Render for SettingsView {
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
-            .p_6()
-            .gap_6()
             .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(tr!("Settings")),
-            )
-            .child(general)
-            .child(
-                GroupBox::new()
-                    .title(group_title(IconName::Globe, tr!("Language")))
-                    .child(language_row(language.as_deref(), pal, cx)),
+                v_flex()
+                    .w_full()
+                    .p_6()
+                    .gap_6()
+                    .overflow_y_scrollbar()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(tr!("Settings")),
+                    )
+                    .child(general)
+                    .child(
+                        GroupBox::new()
+                            .title(group_title(IconName::Globe, tr!("Language")))
+                            .child(language_row(&self.language_select, pal)),
+                    ),
             )
     }
+}
+
+#[derive(Clone)]
+struct LanguageOption {
+    label: &'static str,
+    value: &'static str,
+    localize_label: bool,
+}
+
+impl SelectItem for LanguageOption {
+    type Value = &'static str;
+
+    fn title(&self) -> SharedString {
+        if self.localize_label {
+            SharedString::from(rust_i18n::t!("Follow system").into_owned())
+        } else {
+            SharedString::from(self.label)
+        }
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+}
+
+fn language_options() -> Vec<LanguageOption> {
+    let mut options = vec![LanguageOption {
+        label: "Follow system",
+        value: "",
+        localize_label: true,
+    }];
+    options.extend(
+        crate::i18n::SUPPORTED
+            .iter()
+            .map(|(code, name)| LanguageOption {
+                label: name,
+                value: code,
+                localize_label: false,
+            }),
+    );
+    options
+}
+
+fn selected_language_index(current: Option<&str>, options: &[LanguageOption]) -> IndexPath {
+    let value = current.unwrap_or_default();
+    let row = options
+        .iter()
+        .position(|option| option.value == value)
+        .unwrap_or_default();
+    IndexPath::default().row(row)
 }
 
 /// A GroupBox title with a small leading icon. `GroupBox::title` styles the
@@ -174,71 +273,31 @@ fn setting_row(
         .child(control)
 }
 
-/// The language picker: a muted hint above a wrapping row of locale chips. The
-/// leading "Follow system" chip clears the stored preference (`None`); the rest
-/// pin an explicit locale from [`crate::i18n::SUPPORTED`]. Selecting one
-/// switches the locale live, then repaints every window and the menu bar so the
-/// whole UI re-renders without a restart.
+/// The language picker. "Follow system" clears the stored preference (`None`);
+/// the explicit locale entries come from [`crate::i18n::SUPPORTED`]. Selecting
+/// one switches the locale live, then repaints every window and the menu bar so
+/// the whole UI re-renders without a restart.
 fn language_row(
-    current: Option<&str>,
+    language_select: &Entity<SelectState<Vec<LanguageOption>>>,
     pal: Palette,
-    cx: &mut Context<SettingsView>,
 ) -> impl IntoElement {
-    let mut options: Vec<(SharedString, Option<String>)> = vec![(tr!("Follow system"), None)];
-    options.extend(
-        crate::i18n::SUPPORTED
-            .iter()
-            .map(|(code, name)| (SharedString::from(*name), Some((*code).to_string()))),
-    );
-
-    let chips: Vec<_> = options
-        .into_iter()
-        .enumerate()
-        .map(|(idx, (label, lang))| {
-            let active = current == lang.as_deref();
-            div()
-                .id(("lang-chip", idx))
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .border_1()
-                .border_color(if active {
-                    rgb(theme::ACCENT_BLUE).into()
-                } else {
-                    pal.border
-                })
-                .text_xs()
-                .text_color(if active {
-                    rgb(theme::ACCENT_BLUE).into()
-                } else {
-                    pal.text_primary
-                })
-                .cursor_pointer()
-                .hover(|s| s.bg(pal.surface_hover))
-                .child(label)
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.update_global::<AppState, _>(|s, _| s.set_language(lang.clone()));
-                    // `t!` reads the locale at render time, so a repaint is what
-                    // actually applies the switch; the app menu and status item
-                    // aren't in any window's view tree, so re-title them too. The
-                    // status item's device line lives on the spawn loop, so ask it
-                    // to re-localize the whole menu rather than writing from here.
-                    cx.refresh_windows();
-                    crate::app_menu::rebuild(cx);
-                    #[cfg(target_os = "macos")]
-                    crate::platform::tray::request_refresh();
-                }))
-        })
-        .collect();
-
-    v_flex()
+    h_flex()
         .w_full()
-        .gap_2()
+        .items_center()
+        .justify_between()
+        .gap_4()
         .child(
             div()
+                .flex_1()
+                .min_w(px(0.))
                 .text_xs()
                 .text_color(pal.text_muted)
                 .child(tr!("Choose the interface language.")),
         )
-        .child(h_flex().gap_2().flex_wrap().children(chips))
+        .child(
+            Select::new(language_select)
+                .small()
+                .w(px(220.))
+                .menu_width(px(220.)),
+        )
 }

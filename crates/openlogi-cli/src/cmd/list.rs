@@ -11,12 +11,18 @@ pub async fn run(_args: ListArgs) -> Result<()> {
         .context("failed to enumerate HID++ devices")?;
 
     if inventories.is_empty() {
-        println!("No Logitech HID++ receivers found.");
+        println!("No Logitech HID++ devices found.");
         println!();
         println!("Notes:");
         println!("  - On macOS, quit Logi Options+ first — both apps fight over HID++ access.");
-        println!("  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548).");
-        println!("  - Devices paired directly over Bluetooth are not enumerated yet.");
+        println!(
+            "  - A Bluetooth-direct mouse (e.g. Lift, Signature) needs Input Monitoring \
+             permission: System Settings → Privacy & Security → Input Monitoring."
+        );
+        println!(
+            "  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548); other \
+             receivers (Unifying) aren't surfaced yet."
+        );
         std::process::exit(2);
     }
 
@@ -108,8 +114,9 @@ fn format_model(m: &DeviceModelInfo) -> String {
         use std::fmt::Write as _;
         let _ = write!(unit, "{b:02x}");
     }
+    let serial = m.serial_number.as_deref().unwrap_or("—");
     format!(
-        "     model_ids=[{ids}] ext={:02x} unit_id={unit} transports={transports}",
+        "     model_ids=[{ids}] ext={:02x} serial={serial} unit_id={unit} transports={transports}",
         m.extended_model_id
     )
 }

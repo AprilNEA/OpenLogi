@@ -73,9 +73,12 @@ pub struct ReceiverInfo {
 /// Options+ asset registry's `modelId` (e.g. `"6b023"`) is the concatenation
 /// of an extended-model byte and one of these PIDs, so callers usually want
 /// to format `extended_model_id` + `model_ids[N]` to match.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DeviceModelInfo {
     pub entity_count: u8,
+    /// HID++ DeviceInformation serial number, when the device supports the
+    /// optional serial-number function.
+    pub serial_number: Option<String>,
     pub unit_id: [u8; 4],
     pub transports: DeviceTransports,
     pub model_ids: [u16; 3],

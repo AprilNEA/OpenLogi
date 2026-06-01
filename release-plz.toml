@@ -4,8 +4,15 @@
 # from the root Cargo.toml, so the whole workspace moves on a single shared
 # version. `version_group` ties the crates together so they are always bumped and
 # released in lockstep (the highest next version among them wins), and a single
-# `v{version}` tag + GitHub Release is cut for the workspace as a whole — which is
-# what `.github/workflows/release.yml` listens on to build the macOS DMG.
+# `v{version}` tag is cut for the workspace as a whole — which is what
+# `.github/workflows/release.yml` listens on to build the macOS DMG.
+#
+# release-plz cuts the tag only; it does NOT create the GitHub Release. The tag
+# triggers release.yml, which is the single owner of the GitHub Release: softprops
+# creates it as a draft, uploads the DMGs + checksums, then publishes it last.
+# (release-plz publishing the release outright made it immutable before release.yml
+# could attach assets — "target_commitish cannot be changed when release is
+# immutable". Keep `git_release_enable = false` so release.yml owns the lifecycle.)
 #
 # Single changelog: every crate points `changelog_path` at the repo-root
 # CHANGELOG.md, so release-plz aggregates all crates' sections into that one file
@@ -23,8 +30,8 @@ version_group = "openlogi"
 changelog_path = "CHANGELOG.md"
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
-git_release_enable = true
-git_release_name = "v{{ version }}"
+# GitHub Release is owned by release.yml (softprops), not release-plz — see header.
+git_release_enable = false
 
 [[package]]
 name = "openlogi-core"

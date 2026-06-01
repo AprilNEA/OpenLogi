@@ -1,4 +1,4 @@
-name: release
+name: Release
 
 on:
   push:
@@ -24,7 +24,7 @@ jobs:
           - arch: x86_64
             runner: macos-15-intel
     permissions:
-      contents: write
+      contents: read
     env:
       OPENLOGI_BUNDLE_ASSETS: ${{ vars.OPENLOGI_BUNDLE_ASSETS }}
     steps:
@@ -52,6 +52,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_TEAM_ID
           GITHUB_APP_ID: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_ID
           GITHUB_APP_PRIVATE_KEY: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_PRIVATE_KEY
+          OPENLOGI_UPDATE_BASE_URL: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_BASE_URL
 
       - name: Install packaging tools
         run: |
@@ -69,6 +70,7 @@ jobs:
           APPLE_TEAM_ID: ${{ steps.load_secrets.outputs.APPLE_TEAM_ID }}
           GITHUB_APP_ID: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
           GITHUB_APP_PRIVATE_KEY: ${{ steps.load_secrets.outputs.GITHUB_APP_PRIVATE_KEY }}
+          OPENLOGI_UPDATE_BASE_URL: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_BASE_URL }}
         run: |
           set -euo pipefail
           : "${APPLE_SIGNING_IDENTITY:?Configure APPLE_SIGNING_IDENTITY in 1Password}"
@@ -79,6 +81,7 @@ jobs:
           : "${APPLE_TEAM_ID:?Configure APPLE_TEAM_ID in 1Password}"
           : "${GITHUB_APP_ID:?Configure GITHUB_APP_ID in 1Password}"
           : "${GITHUB_APP_PRIVATE_KEY:?Configure GITHUB_APP_PRIVATE_KEY in 1Password}"
+          : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in 1Password}"
 
       - name: Import Apple signing certificate
         uses: apple-actions/import-codesign-certs@v7
@@ -87,9 +90,12 @@ jobs:
           p12-password: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE_PASSWORD }}
 
       - name: Build OpenLogi.app with cargo-bundle
+        env:
+          OPENLOGI_UPDATE_BASE_URL: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_BASE_URL }}
         run: |
           set -euo pipefail
           export SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+          export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
 
           bash scripts/macos-icns.sh
           if [ "${OPENLOGI_BUNDLE_ASSETS:-0}" = "1" ]; then
@@ -165,13 +171,25 @@ jobs:
           name: OpenLogi-macos-dmg-${{ matrix.arch }}
           path: dist/*.dmg
 
+  # Single owner of the GitHub Release. softprops/action-gh-release@v3 creates the
+  # release as a draft, uploads every asset to that (mutable) draft, then publishes
+  # it as its final step — so the release only becomes immutable once all DMGs and
+  # checksums are attached. The static updater assets are pushed to R2 *before* that
+  # softprops call, so the GitHub Release is the last thing published.
   publish:
-    name: Publish release assets
+    name: Publish release
     runs-on: ubuntu-latest
     needs: dmg
     permissions:
       contents: write
     steps:
+      # Needed to build & run the xtask manifest generator below.
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
       - uses: actions/download-artifact@v8
         with:
           pattern: OpenLogi-macos-dmg-*
@@ -183,12 +201,92 @@ jobs:
           cd dist
           sha256sum *.dmg > SHA256SUMS
 
-      - name: Attach DMG to GitHub Release
+      - name: Load static updater publishing config from 1Password
+        id: r2_config
+        uses: 1password/load-secrets-action@v4
+        with:
+          export-env: false
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          OPENLOGI_UPDATE_BASE_URL: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_BASE_URL
+          R2_ACCOUNT_ID: ${{ secrets.OP_R2_SECRET_ITEM }}/CLOUDFLARE_R2_ACCOUNT_ID
+          R2_BUCKET: ${{ secrets.OP_R2_SECRET_ITEM }}/CLOUDFLARE_R2_BUCKET
+          R2_ACCESS_KEY_ID: ${{ secrets.OP_R2_SECRET_ITEM }}/CLOUDFLARE_R2_ACCESS_KEY_ID
+          R2_SECRET_ACCESS_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/CLOUDFLARE_R2_SECRET_ACCESS_KEY
+
+      - name: Validate R2 publishing configuration
+        env:
+          OPENLOGI_UPDATE_BASE_URL: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
+          R2_ACCOUNT_ID: ${{ steps.r2_config.outputs.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ steps.r2_config.outputs.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ steps.r2_config.outputs.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ steps.r2_config.outputs.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in the R2 1Password item}"
+          : "${R2_ACCOUNT_ID:?Configure CLOUDFLARE_R2_ACCOUNT_ID in the R2 1Password item}"
+          : "${R2_BUCKET:?Configure CLOUDFLARE_R2_BUCKET in the R2 1Password item}"
+          : "${R2_ACCESS_KEY_ID:?Configure CLOUDFLARE_R2_ACCESS_KEY_ID in the R2 1Password item}"
+          : "${R2_SECRET_ACCESS_KEY:?Configure CLOUDFLARE_R2_SECRET_ACCESS_KEY in the R2 1Password item}"
+
+      - name: Generate static updater manifest
+        env:
+          OPENLOGI_UPDATE_BASE_URL: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
+        run: |
+          set -euo pipefail
+          cargo run -p xtask -- generate-updater-manifest \
+            --dist dist \
+            --tag "$GITHUB_REF_NAME" \
+            --base-url "$OPENLOGI_UPDATE_BASE_URL" \
+            --output dist/latest.json
+
+      - name: Upload static updater assets to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.r2_config.outputs.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.r2_config.outputs.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REGION: auto
+          R2_ACCOUNT_ID: ${{ steps.r2_config.outputs.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ steps.r2_config.outputs.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          release_prefix="s3://${R2_BUCKET}/releases/${GITHUB_REF_NAME}"
+          channel_manifest="s3://${R2_BUCKET}/channels/stable/latest.json"
+
+          aws s3 cp dist/ "$release_prefix/" \
+            --recursive \
+            --exclude latest.json \
+            --cache-control "public, max-age=31536000, immutable" \
+            --endpoint-url "$endpoint"
+
+          aws s3 cp dist/latest.json "$channel_manifest" \
+            --content-type "application/json" \
+            --cache-control "no-cache" \
+            --endpoint-url "$endpoint"
+
+      # Create the draft, upload assets to it, then publish — all in one step.
+      # `draft` is omitted, so for a non-prerelease softprops creates the release as
+      # a draft, uploads every file, and only then flips it to published. That keeps
+      # the release mutable for the whole upload, which is what avoids the "immutable
+      # release" rejection. latest.json is intentionally not attached — it lives in
+      # R2 only.
+      - name: Publish GitHub Release with assets
         uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.dmg
             dist/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  homebrew-tap:
+    name: Dispatch homebrew-tap update
+    runs-on: ubuntu-latest
+    needs: publish
+    permissions:
+      contents: read
+    steps:
 
       - name: Load GitHub App credentials from 1Password
         id: load_secrets

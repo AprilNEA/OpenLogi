@@ -446,6 +446,6 @@ fn collect_models(inventories: &[DeviceInventory]) -> Vec<(DeviceModelInfo, Opti
     inventories
         .iter()
         .flat_map(|inv| inv.paired.iter())
-        .filter_map(|p| p.model_info.map(|m| (m, p.codename.clone())))
+        .filter_map(|p| p.model_info.clone().map(|m| (m, p.codename.clone())))
         .collect()
 }

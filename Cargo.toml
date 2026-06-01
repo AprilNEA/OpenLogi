@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "hardware-support"]
 readme = "README.md"
 
 [dependencies]
-openlogi-cli = { path = "crates/openlogi-cli", version = "0.2.0" }
+openlogi-cli = { path = "crates/openlogi-cli", version = "0.3.2" }
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 
@@ -28,10 +28,11 @@ members = [
     "crates/openlogi-cli",
     "crates/openlogi-gui",
     "crates/openlogi-hook",
+    "xtask",
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.2"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"

@@ -20,11 +20,36 @@ pub struct DeviceRecord {
     pub config_key: String,
     pub display_name: String,
     pub asset: Option<ResolvedAsset>,
+    pub serial_number: Option<String>,
+    pub unit_id: [u8; 4],
     pub route: Option<DeviceRoute>,
     pub kind: DeviceKind,
     pub slot: u8,
     pub online: bool,
     pub battery: Option<BatteryInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum DeviceStableId {
+    Bolt {
+        receiver_uid: String,
+        slot: u8,
+    },
+    Direct {
+        vendor_id: u16,
+        product_id: u16,
+        identity: DeviceIdentity,
+    },
+    Unknown {
+        slot: u8,
+        identity: DeviceIdentity,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum DeviceIdentity {
+    Serial(String),
+    Unit([u8; 4]),
 }
 
 pub(super) fn build_device_list(
@@ -48,6 +73,8 @@ pub(super) fn build_device_list(
                 config_key,
                 display_name,
                 asset,
+                serial_number: model.serial_number.clone(),
+                unit_id: model.unit_id,
                 route: device_route(inv, paired.slot),
                 kind: paired.kind,
                 slot: paired.slot,
@@ -56,7 +83,51 @@ pub(super) fn build_device_list(
             });
         }
     }
+    // HID enumeration order can change as different mice wake, sleep, or are
+    // selected. Keep the header carousel stable by ordering by the physical
+    // route instead of by whichever HID node happened to be reported first.
+    list.sort_by_key(device_order_key);
     list
+}
+
+fn device_order_key(record: &DeviceRecord) -> (DeviceStableId, String, String) {
+    (
+        DeviceStableId::from_record(record),
+        record.config_key.clone(),
+        record.display_name.clone(),
+    )
+}
+
+impl DeviceStableId {
+    fn from_record(record: &DeviceRecord) -> Self {
+        match &record.route {
+            Some(DeviceRoute::Bolt { receiver_uid, slot }) => Self::Bolt {
+                receiver_uid: receiver_uid.to_ascii_lowercase(),
+                slot: *slot,
+            },
+            Some(DeviceRoute::Direct {
+                vendor_id,
+                product_id,
+            }) => Self::Direct {
+                vendor_id: *vendor_id,
+                product_id: *product_id,
+                identity: DeviceIdentity::from_record(record),
+            },
+            None => Self::Unknown {
+                slot: record.slot,
+                identity: DeviceIdentity::from_record(record),
+            },
+        }
+    }
+}
+
+impl DeviceIdentity {
+    fn from_record(record: &DeviceRecord) -> Self {
+        record.serial_number.as_ref().map_or_else(
+            || Self::Unit(record.unit_id),
+            |serial| Self::Serial(serial.to_ascii_lowercase()),
+        )
+    }
 }
 
 /// Build the [`DeviceRoute`] HID++ writes use to reach a device.
