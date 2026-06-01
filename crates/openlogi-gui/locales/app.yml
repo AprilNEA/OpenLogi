@@ -412,6 +412,16 @@ _version: 2
   ru: "App Exposé"
   zh-CN: 应用程序窗口
   zh-HK: 應用程式視窗
+"Previous Desktop":
+  ja: 前のデスクトップ
+  ru: "Предыдущий рабочий стол"
+  zh-CN: 上一个桌面
+  zh-HK: 上一個桌面
+"Next Desktop":
+  ja: 次のデスクトップ
+  ru: "Следующий рабочий стол"
+  zh-CN: 下一个桌面
+  zh-HK: 下一個桌面
 "Show Desktop":
   ja: デスクトップを表示
   ru: "Показать рабочий стол"

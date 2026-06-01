@@ -282,6 +282,10 @@ pub enum Action {
     MissionControl,
     /// macOS App Exposé — all windows for the current app (⌃↓).
     AppExpose,
+    /// Switch to the previous desktop / Space.
+    PreviousDesktop,
+    /// Switch to the next desktop / Space.
+    NextDesktop,
     /// Show the desktop (hide all windows).
     ShowDesktop,
     /// Open Launchpad.
@@ -447,6 +451,8 @@ impl Action {
             Action::ReloadPage => "Reload Page".into(),
             Action::MissionControl => "Mission Control".into(),
             Action::AppExpose => "App Exposé".into(),
+            Action::PreviousDesktop => "Previous Desktop".into(),
+            Action::NextDesktop => "Next Desktop".into(),
             Action::ShowDesktop => "Show Desktop".into(),
             Action::LaunchpadShow => "Launchpad".into(),
             Action::LockScreen => "Lock Screen".into(),
@@ -494,6 +500,8 @@ impl Action {
             | Action::ReloadPage => Category::Browser,
             Action::MissionControl
             | Action::AppExpose
+            | Action::PreviousDesktop
+            | Action::NextDesktop
             | Action::ShowDesktop
             | Action::LaunchpadShow => Category::Navigation,
             Action::LockScreen | Action::Screenshot => Category::System,
@@ -545,6 +553,8 @@ impl Action {
             // Navigation
             Action::MissionControl,
             Action::AppExpose,
+            Action::PreviousDesktop,
+            Action::NextDesktop,
             Action::ShowDesktop,
             Action::LaunchpadShow,
             // System
@@ -642,6 +652,8 @@ impl Action {
             // user's keyboard settings.
             Action::MissionControl => macos::mission_control(),
             Action::AppExpose => macos::app_expose(),
+            Action::PreviousDesktop => macos::previous_desktop(),
+            Action::NextDesktop => macos::next_desktop(),
             Action::ShowDesktop => macos::show_desktop(),
             Action::LaunchpadShow => macos::launchpad(),
             // ── System ────────────────────────────────────────────────────────
@@ -861,6 +873,48 @@ mod macos {
     }
 
     pub(super) use dock::{app_expose, launchpad, mission_control, show_desktop};
+    pub(super) use symbolic_hotkey::{next_desktop, previous_desktop};
+
+    use app_services::symbol as app_services_symbol;
+
+    /// Shared resolver for private ApplicationServices SPI used by the Dock and
+    /// symbolic-hotkey helpers.
+    #[allow(
+        unsafe_code,
+        reason = "private ApplicationServices SPI symbols are resolved via dlopen/dlsym FFI"
+    )]
+    mod app_services {
+        use std::ffi::{CStr, c_char, c_int, c_void};
+        use std::sync::OnceLock;
+
+        /// Resolve a symbol from ApplicationServices, caching the `dlopen`
+        /// handle for the process lifetime. Returns `None` if the framework or
+        /// symbol is unavailable on this macOS version.
+        pub(super) fn symbol(symbol: &CStr) -> Option<*mut c_void> {
+            const RTLD_LAZY: c_int = 0x1;
+            const APP_SERVICES: &CStr =
+                c"/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices";
+            static HANDLE: OnceLock<usize> = OnceLock::new();
+
+            // SAFETY: `dlopen`/`dlsym` come from libSystem; APP_SERVICES and
+            // `symbol` are valid C strings. The handle is cached and
+            // intentionally never closed.
+            let sym = unsafe {
+                let handle =
+                    *HANDLE.get_or_init(|| dlopen(APP_SERVICES.as_ptr(), RTLD_LAZY) as usize);
+                if handle == 0 {
+                    return None;
+                }
+                dlsym(handle as *mut c_void, symbol.as_ptr())
+            };
+            (!sym.is_null()).then_some(sym)
+        }
+
+        unsafe extern "C" {
+            fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
+            fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        }
+    }
 
     /// WindowServer window/space actions (Mission Control, App Exposé, Show
     /// Desktop, Launchpad).
@@ -879,11 +933,12 @@ mod macos {
         reason = "the private CoreDockSendNotification SPI is only reachable via dlopen/dlsym FFI"
     )]
     mod dock {
-        use std::ffi::{CStr, c_char, c_int, c_void};
-        use std::sync::OnceLock;
+        use std::ffi::{c_int, c_void};
 
         use core_foundation::base::TCFType;
         use core_foundation::string::CFString;
+
+        use super::app_services_symbol;
 
         /// Show all windows across spaces (Mission Control).
         pub(crate) fn mission_control() {
@@ -925,31 +980,145 @@ mod macos {
         /// Resolve `CoreDockSendNotification` from `ApplicationServices`, caching
         /// the `dlopen` handle for the process lifetime. `None` if unavailable.
         fn core_dock_send_notification() -> Option<CoreDockSendNotificationFn> {
-            const RTLD_LAZY: c_int = 0x1;
-            const APP_SERVICES: &CStr =
-                c"/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices";
-            static HANDLE: OnceLock<usize> = OnceLock::new();
-
-            // SAFETY: `dlopen`/`dlsym` come from libSystem; APP_SERVICES is a
-            // valid C string. The handle is cached and intentionally never
-            // closed.
-            let sym = unsafe {
-                let handle =
-                    *HANDLE.get_or_init(|| dlopen(APP_SERVICES.as_ptr(), RTLD_LAZY) as usize);
-                if handle == 0 {
-                    return None;
-                }
-                dlsym(handle as *mut c_void, c"CoreDockSendNotification".as_ptr())
-            };
+            let sym = app_services_symbol(c"CoreDockSendNotification")?;
             // SAFETY: the symbol, when present, has the documented signature.
-            (!sym.is_null()).then(|| unsafe {
-                std::mem::transmute::<*mut c_void, CoreDockSendNotificationFn>(sym)
-            })
+            Some(unsafe { std::mem::transmute::<*mut c_void, CoreDockSendNotificationFn>(sym) })
+        }
+    }
+
+    /// macOS Space switching actions.
+    ///
+    /// Use the system symbolic hotkey records for "Move left a space" (79) and
+    /// "Move right a space" (81). That respects the user's configured shortcut
+    /// instead of assuming Ctrl+Left/Right, and temporarily enables the symbolic
+    /// hotkey when the user has disabled it.
+    #[allow(
+        unsafe_code,
+        reason = "CGS symbolic hotkey SPI is only reachable via dlopen/dlsym FFI"
+    )]
+    mod symbolic_hotkey {
+        use std::ffi::{c_int, c_uint, c_ushort, c_void};
+
+        use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+        use super::app_services_symbol;
+
+        const SPACE_LEFT: u32 = 79;
+        const SPACE_RIGHT: u32 = 81;
+
+        /// Switch to the previous desktop / Space.
+        pub(crate) fn previous_desktop() {
+            post_symbolic_hotkey(SPACE_LEFT);
         }
 
-        unsafe extern "C" {
-            fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-            fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        /// Switch to the next desktop / Space.
+        pub(crate) fn next_desktop() {
+            post_symbolic_hotkey(SPACE_RIGHT);
+        }
+
+        fn post_symbolic_hotkey(hotkey: u32) {
+            let Some(cgs) = cgs_hotkey_api() else {
+                tracing::warn!(hotkey, "CGS symbolic hotkey API unavailable");
+                return;
+            };
+
+            let mut key_equivalent = 0_u16;
+            let mut virtual_key = 0_u16;
+            let mut modifiers = 0_u32;
+
+            // SAFETY: resolved AppServices symbols are called with their
+            // expected signatures and valid out-parameters.
+            let err = unsafe {
+                (cgs.get_value)(
+                    hotkey,
+                    &raw mut key_equivalent,
+                    &raw mut virtual_key,
+                    &raw mut modifiers,
+                )
+            };
+            if err != 0 {
+                tracing::warn!(hotkey, err, "CGSGetSymbolicHotKeyValue failed");
+                return;
+            }
+
+            // SAFETY: resolved AppServices symbol called with its expected
+            // signature.
+            let was_enabled = unsafe { (cgs.is_enabled)(hotkey) };
+            if !was_enabled {
+                // SAFETY: resolved AppServices symbol called with its expected
+                // signature.
+                let err = unsafe { (cgs.set_enabled)(hotkey, true) };
+                if err != 0 {
+                    tracing::warn!(hotkey, err, "CGSSetSymbolicHotKeyEnabled(true) failed");
+                }
+            }
+
+            post_key(virtual_key, modifiers);
+
+            if !was_enabled {
+                // SAFETY: resolved AppServices symbol called with its expected
+                // signature.
+                let err = unsafe { (cgs.set_enabled)(hotkey, false) };
+                if err != 0 {
+                    tracing::warn!(hotkey, err, "CGSSetSymbolicHotKeyEnabled(false) failed");
+                }
+            }
+        }
+
+        fn post_key(vk: u16, modifiers: u32) {
+            let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+                tracing::warn!("CGEventSource::new failed for symbolic hotkey");
+                return;
+            };
+            let Ok(down) = CGEvent::new_keyboard_event(src.clone(), vk, true) else {
+                tracing::warn!(vk, "CGEvent::new_keyboard_event(down) failed");
+                return;
+            };
+            let flags = CGEventFlags::from_bits_truncate(u64::from(modifiers));
+            down.set_flags(flags);
+            down.post(CGEventTapLocation::Session);
+
+            let Ok(up) = CGEvent::new_keyboard_event(src, vk, false) else {
+                tracing::warn!(vk, "CGEvent::new_keyboard_event(up) failed");
+                return;
+            };
+            up.set_flags(flags);
+            up.post(CGEventTapLocation::Session);
+        }
+
+        #[derive(Clone, Copy)]
+        struct CgsHotkeyApi {
+            get_value: CgsGetSymbolicHotKeyValueFn,
+            is_enabled: CgsIsSymbolicHotKeyEnabledFn,
+            set_enabled: CgsSetSymbolicHotKeyEnabledFn,
+        }
+
+        type CgsGetSymbolicHotKeyValueFn =
+            unsafe extern "C" fn(c_uint, *mut c_ushort, *mut c_ushort, *mut c_uint) -> c_int;
+        type CgsIsSymbolicHotKeyEnabledFn = unsafe extern "C" fn(c_uint) -> bool;
+        type CgsSetSymbolicHotKeyEnabledFn = unsafe extern "C" fn(c_uint, bool) -> c_int;
+
+        fn cgs_hotkey_api() -> Option<CgsHotkeyApi> {
+            let get_value = app_services_symbol(c"CGSGetSymbolicHotKeyValue")?;
+            let is_enabled = app_services_symbol(c"CGSIsSymbolicHotKeyEnabled")?;
+            let set_enabled = app_services_symbol(c"CGSSetSymbolicHotKeyEnabled")?;
+
+            // SAFETY: the symbols, when present, have the private SPI
+            // signatures declared above.
+            Some(unsafe {
+                CgsHotkeyApi {
+                    get_value: std::mem::transmute::<*mut c_void, CgsGetSymbolicHotKeyValueFn>(
+                        get_value,
+                    ),
+                    is_enabled: std::mem::transmute::<*mut c_void, CgsIsSymbolicHotKeyEnabledFn>(
+                        is_enabled,
+                    ),
+                    set_enabled: std::mem::transmute::<*mut c_void, CgsSetSymbolicHotKeyEnabledFn>(
+                        set_enabled,
+                    ),
+                }
+            })
         }
     }
 }
@@ -1173,6 +1342,8 @@ mod tests {
     fn category_navigation_variants() {
         assert_eq!(Action::MissionControl.category(), Category::Navigation);
         assert_eq!(Action::AppExpose.category(), Category::Navigation);
+        assert_eq!(Action::PreviousDesktop.category(), Category::Navigation);
+        assert_eq!(Action::NextDesktop.category(), Category::Navigation);
         assert_eq!(Action::ShowDesktop.category(), Category::Navigation);
         assert_eq!(Action::LaunchpadShow.category(), Category::Navigation);
     }
