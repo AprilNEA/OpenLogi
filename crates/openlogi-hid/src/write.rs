@@ -271,7 +271,7 @@ where
     Fut: std::future::Future<Output = Result<T, WriteError>>,
 {
     match open_route_channel(route).await? {
-        Some(channel) => f(channel).await,
+        Some((_, channel)) => f(channel).await,
         None => Err(WriteError::DeviceNotFound),
     }
 }

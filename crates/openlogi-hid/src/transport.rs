@@ -34,7 +34,7 @@ const HIDPP_LONG_USAGE_ID: u16 = 0x0002;
 /// only generic mouse/keyboard collections on page `0xff00` and its HID++
 /// channel on `0xff43`. Filtering on `0xff00` alone misses every BT-direct
 /// device. (Matches Solaar's Bluetooth HID++ report mapping.)
-const HIDPP_BLE_USAGE_PAGE: u16 = 0xff43;
+pub(crate) const HIDPP_BLE_USAGE_PAGE: u16 = 0xff43;
 const HIDPP_BLE_LONG_USAGE_ID: u16 = 0x0202;
 
 /// Whether a HID interface is the HID++ long-report node we drive devices

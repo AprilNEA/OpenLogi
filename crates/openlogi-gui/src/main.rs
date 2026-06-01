@@ -102,7 +102,9 @@ fn main() -> Result<()> {
 
     // HID++ control capture (gesture button, DPI/ModeShift button, thumb wheel)
     // runs independently of the CGEventTap hook — it needs no Accessibility
-    // permission — so start it up front for the active device.
+    // permission — so start it up front for the active device. The session
+    // itself skips Bluetooth-direct devices (see `run_capture_session`), where
+    // holding the HID++ channel open degrades pointer movement.
     watchers::gesture::spawn(
         Arc::clone(&hook_bindings),
         Arc::clone(&gesture_bindings),

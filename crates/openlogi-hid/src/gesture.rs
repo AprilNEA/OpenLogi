@@ -27,6 +27,7 @@ use tracing::{debug, info, warn};
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::route::{DeviceRoute, open_route_channel};
 use crate::thumbwheel::{self, Thumbwheel};
+use crate::transport::HIDPP_BLE_USAGE_PAGE;
 use crate::write::SharedChannel;
 
 /// Shared slot holding the active capture session's open channel, so DPI /
@@ -64,6 +65,11 @@ pub enum GestureError {
     /// A HID++ feature call returned an error; inner string carries context.
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+    /// Bluetooth-direct (0xff43) devices cannot hold a persistent HID++ capture
+    /// session without degrading BLE pointer movement.  Transient writes (DPI,
+    /// SmartShift, battery) are unaffected.
+    #[error("BLE-direct device: persistent capture skipped to prevent pointer movement glitch")]
+    BleDirectUnsupported,
 }
 
 /// Minimum hold before raw-XY travel counts as a swipe. A quicker tap stays a
@@ -104,9 +110,27 @@ pub async fn run_capture_session(
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
 ) -> Result<(), GestureError> {
-    let chan = open_route_channel(&route)
+    let (hid_info, chan) = open_route_channel(&route)
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
+
+    // Holding the `0xff43` HID interface open persistently degrades BLE pointer
+    // movement — jitter that worsens over time — on Bluetooth-direct Logitech
+    // mice (MX Master 3, etc.). A second IOHIDDevice open/activate on the shared
+    // BLE link appears to trigger connection-parameter renegotiation; transient
+    // opens (DPI/SmartShift writes, battery reads) are unaffected. Until a
+    // gentler transport lands (a CoreBluetooth GATT path, like Options+), skip
+    // the capture session for BLE-direct devices so movement stays smooth. Side
+    // buttons still remap via the CGEventTap; Bolt/USB keep full capture.
+    if hid_info.usage_page == HIDPP_BLE_USAGE_PAGE {
+        info!(
+            route = %route,
+            "BLE-direct device: skipping persistent capture to prevent pointer glitch \
+             (gesture/DPI-button/thumbwheel capture unavailable on BLE-direct)"
+        );
+        return Err(GestureError::BleDirectUnsupported);
+    }
+
     let device_index = route.device_index();
     let armed = arm_controls(&chan, device_index, capture_thumbwheel).await?;
 

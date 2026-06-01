@@ -73,9 +73,13 @@ impl fmt::Display for DeviceRoute {
 /// device through its slot via [`DeviceRoute::device_index`]); for a direct
 /// route it is the device's own channel. Returns `None` when nothing matching
 /// is currently connected.
+///
+/// The returned [`async_hid::DeviceInfo`] reflects the matched HID node (e.g.
+/// its `usage_page` distinguishes BLE-direct `0xff43` from USB/receiver
+/// `0xff00`). Callers that only need the channel can discard it with `let Some((_, ch)) = …`.
 pub(crate) async fn open_route_channel(
     route: &DeviceRoute,
-) -> Result<Option<Arc<HidppChannel>>, async_hid::HidError> {
+) -> Result<Option<(async_hid::DeviceInfo, Arc<HidppChannel>)>, async_hid::HidError> {
     let candidates = enumerate_hidpp_devices().await?;
     for dev in candidates {
         // A direct route's vendor/product id is on the unopened `DeviceInfo`
@@ -91,7 +95,7 @@ pub(crate) async fn open_route_channel(
         {
             continue;
         }
-        let Some((_, channel)) = open_hidpp_channel(dev).await? else {
+        let Some((info, channel)) = open_hidpp_channel(dev).await? else {
             continue;
         };
         match route {
@@ -102,10 +106,10 @@ pub(crate) async fn open_route_channel(
                 if let Ok(uid) = bolt.get_unique_id().await
                     && uid.eq_ignore_ascii_case(receiver_uid)
                 {
-                    return Ok(Some(channel));
+                    return Ok(Some((info, channel)));
                 }
             }
-            DeviceRoute::Direct { .. } => return Ok(Some(channel)),
+            DeviceRoute::Direct { .. } => return Ok(Some((info, channel))),
         }
     }
     Ok(None)
