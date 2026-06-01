@@ -61,6 +61,15 @@ pub enum InventoryError {
 ///
 /// We merge the two so an MX Master that's been asleep still shows up with
 /// its codename and kind even before you click it.
+/// A cheap signature of the currently-connected HID++ nodes, for hot-plug
+/// detection without opening any device. Poll this and only call [`enumerate`]
+/// (which opens each channel) when the signature changes — re-opening a
+/// Bluetooth-direct device's channel renegotiates the BLE link and jitters the
+/// pointer, so it must not happen on a timer.
+pub async fn present_keys() -> Result<Vec<(u16, u16, u16)>, InventoryError> {
+    Ok(crate::transport::present_device_keys().await?)
+}
+
 pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
     let candidates = enumerate_hidpp_devices().await?;
 

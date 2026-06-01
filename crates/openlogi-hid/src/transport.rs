@@ -57,6 +57,24 @@ pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, 
         .await)
 }
 
+/// A cheap presence signature of the currently-connected HID++ nodes:
+/// `(vendor_id, product_id, usage_page)` per node, sorted. Enumerating the HID
+/// registry does *not* open any device, so this is safe to poll frequently —
+/// unlike [`enumerate_hidpp_devices`] callers that open each channel, which on
+/// a Bluetooth-direct device renegotiates the BLE link and jitters the pointer.
+pub(crate) async fn present_device_keys() -> Result<Vec<(u16, u16, u16)>, async_hid::HidError> {
+    let backend = HidBackend::default();
+    let mut keys: Vec<(u16, u16, u16)> = backend
+        .enumerate()
+        .await?
+        .filter(|d| is_hidpp_long_node(d))
+        .map(|d| (d.vendor_id, d.product_id, d.usage_page))
+        .collect()
+        .await;
+    keys.sort_unstable();
+    Ok(keys)
+}
+
 pub(crate) async fn open_hidpp_channel(
     dev: async_hid::Device,
 ) -> Result<Option<(DeviceInfo, Arc<HidppChannel>)>, async_hid::HidError> {

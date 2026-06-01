@@ -1,15 +1,19 @@
 //! Polling HID inventory watcher.
 //!
-//! Spawns a dedicated OS thread with a one-shot tokio runtime that calls
-//! `openlogi_hid::enumerate` every `period` and forwards the result over an
-//! unbounded mpsc to the GPUI thread. The GUI applies updates via
-//! `AppState::refresh_inventories`.
+//! Spawns a dedicated OS thread with a one-shot tokio runtime that watches for
+//! device connect/disconnect and forwards a fresh inventory over an unbounded
+//! mpsc to the GPUI thread, which applies it via `AppState::refresh_inventories`.
 //!
 //! Polling beats hot-plug event registration on simplicity: HID transport
 //! crates ship different listener APIs across platforms, and `async-hid 0.4`
-//! does not expose any. A 2 s tick is cheap (one HID enumerate per cycle ≤
-//! a few hundred milliseconds) and matches the human-perceptible reconnect
-//! latency budget in PLAN.md.
+//! does not expose any.
+//!
+//! Crucially, each tick first reads a *cheap presence signature*
+//! (`openlogi_hid::present_keys`, which lists the HID registry without opening
+//! anything) and only runs the full `enumerate` — which opens each device's
+//! HID++ channel — when that signature changes. Re-opening a Bluetooth-direct
+//! device's channel renegotiates the BLE link and visibly jitters the pointer,
+//! so it must happen on connect/disconnect only, never on a bare timer.
 
 use std::thread;
 use std::time::Duration;
@@ -39,17 +43,28 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<Vec<DeviceInventory>> 
                     return;
                 }
             };
+            // `None` until the first successful presence read, so the initial
+            // tick always runs a full enumerate and seeds the GUI.
+            let mut last_keys: Option<Vec<(u16, u16, u16)>> = None;
             loop {
-                let inv = match rt.block_on(openlogi_hid::enumerate()) {
-                    Ok(inv) => inv,
-                    Err(e) => {
-                        warn!(error = ?e, "enumerate failed during watch tick");
-                        Vec::new()
+                match rt.block_on(openlogi_hid::present_keys()) {
+                    Ok(keys) if last_keys.as_ref() != Some(&keys) => {
+                        // Device set changed (or first run): re-probe + publish.
+                        last_keys = Some(keys);
+                        let inv = match rt.block_on(openlogi_hid::enumerate()) {
+                            Ok(inv) => inv,
+                            Err(e) => {
+                                warn!(error = ?e, "enumerate failed during watch tick");
+                                Vec::new()
+                            }
+                        };
+                        if tx.send(inv).is_err() {
+                            debug!("inventory watcher receiver dropped — exiting");
+                            return;
+                        }
                     }
-                };
-                if tx.send(inv).is_err() {
-                    debug!("inventory watcher receiver dropped — exiting");
-                    return;
+                    Ok(_) => {} // unchanged — no channel opened, pointer undisturbed
+                    Err(e) => warn!(error = ?e, "presence check failed during watch tick"),
                 }
                 thread::sleep(period);
             }
