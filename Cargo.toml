@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "hardware-support"]
 readme = "README.md"
 
 [dependencies]
-openlogi-cli = { path = "crates/openlogi-cli", version = "0.3.0" }
+openlogi-cli = { path = "crates/openlogi-cli", version = "0.3.1" }
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 
@@ -32,7 +32,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"

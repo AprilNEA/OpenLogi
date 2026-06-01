@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/AprilNEA/OpenLogi/compare/v0.3.0...v0.3.1) - 2026-06-01
+
+### Added
+
+- *(updater)* use static R2 manifest ([#43](https://github.com/AprilNEA/OpenLogi/pull/43))
+
 ## [0.3.0](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.2.0...openlogi-core-v0.3.0) - 2026-06-01
 
 ### Added
