@@ -297,6 +297,7 @@ mod tests {
     fn btle_3s_model() -> DeviceModelInfo {
         DeviceModelInfo {
             entity_count: 0,
+            serial_number: None,
             unit_id: [0; 4],
             transports: DeviceTransports {
                 btle: true,
