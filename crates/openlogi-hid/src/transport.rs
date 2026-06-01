@@ -19,24 +19,86 @@ use tracing::debug;
 
 /// Logitech HID vendor ID.
 const LOGITECH_VID: u16 = 0x046d;
-/// HID++ long-report usage page / usage. Filtering on this pair gives us one
-/// HID node per physical HID++ device on every supported OS.
-const HIDPP_USAGE_PAGE: u16 = 0xff00;
-const HIDPP_LONG_USAGE_ID: u16 = 0x0002;
+/// HID++ long-report vendor collections, as `(usage_page, usage_id)` pairs.
+///
+/// Logitech exposes its HID++ long-report (report id `0x11`) under a
+/// vendor-defined HID collection, but the page differs by transport:
+///
+/// - `0xFF00 / 0x0002` — USB, Logi Bolt / Unifying receivers, and
+///   Bluetooth-*classic* devices (MX Master over BT).
+/// - `0xFF43 / 0x0202` — Bluetooth-*Low-Energy* directly-paired devices
+///   (e.g. the Logitech Lift / Signature mice). Same HID++ protocol, just a
+///   different vendor page on the BLE HID report descriptor.
+///
+/// Filtering on these pairs gives us one HID node per physical HID++ device on
+/// every supported OS, without reading report descriptors (`async-hid 0.4`
+/// only exposes those on Linux).
+const HIDPP_LONG_COLLECTIONS: [(u16, u16); 2] = [(0xff00, 0x0002), (0xff43, 0x0202)];
+
+/// The vendor usage page Logitech uses for HID++ over Bluetooth Low Energy.
+/// On macOS a BLE-direct device exposes *only* the long HID++ report (`0x11`)
+/// under this page — there is no short-report (`0x10`) collection — so this
+/// crate up-converts short HID++ requests to long for these channels (see
+/// [`AsyncHidChannel::write_report`]).
+const HIDPP_BLE_USAGE_PAGE: u16 = 0xff43;
+
+/// HID++ short / long report IDs and the long report's on-wire length
+/// (report id + 19 payload bytes). Mirrors `hidpp`'s private constants.
+const SHORT_REPORT_ID: u8 = 0x10;
+const LONG_REPORT_ID: u8 = 0x11;
+const LONG_REPORT_LEN: usize = 20;
+
+fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
+    HIDPP_LONG_COLLECTIONS.contains(&(usage_page, usage_id))
+}
+
+/// Re-frame a short HID++ report (`0x10`, 7 bytes) as a long one (`0x11`, 20
+/// bytes) for a transport that only exposes the long report.
+///
+/// `hidpp 0.2` always pings with — and often sends — short reports, but a
+/// BLE-direct device exposes only the long report on macOS, so a short
+/// `IOHIDDeviceSetReport` fails with `kIOReturnNotFound`. The header bytes
+/// (device / feature / function / sw id) sit at the same offsets in both
+/// widths; only the trailing payload is zero-padded. The device answers with a
+/// long report, which `hidpp` parses and matches by header regardless of width.
+///
+/// Returns `None` (pass the report through unchanged) when `src` isn't a short
+/// report or wouldn't fit the long frame.
+fn short_as_long(src: &[u8]) -> Option<[u8; LONG_REPORT_LEN]> {
+    if src.first() != Some(&SHORT_REPORT_ID) || src.len() > LONG_REPORT_LEN {
+        return None;
+    }
+    let mut long = [0u8; LONG_REPORT_LEN];
+    long[0] = LONG_REPORT_ID;
+    long[1..src.len()].copy_from_slice(&src[1..]);
+    Some(long)
+}
 
 pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError>
 {
     let backend = HidBackend::default();
-    Ok(backend
-        .enumerate()
-        .await?
+    let all: Vec<async_hid::Device> = backend.enumerate().await?.collect().await;
+
+    // One-time visibility into what the OS actually reports for Logitech nodes,
+    // so a transport that uses an unexpected vendor page (e.g. a new BLE mouse)
+    // can be diagnosed from `OPENLOGI_LOG=debug` without a rebuild.
+    for d in all.iter().filter(|d| d.vendor_id == LOGITECH_VID) {
+        debug!(
+            name = %d.name,
+            pid = format_args!("{:04x}", d.product_id),
+            usage_page = format_args!("{:#06x}", d.usage_page),
+            usage_id = format_args!("{:#06x}", d.usage_id),
+            matched = is_hidpp_long_collection(d.usage_page, d.usage_id),
+            "logitech HID node"
+        );
+    }
+
+    Ok(all
+        .into_iter()
         .filter(|d| {
-            d.vendor_id == LOGITECH_VID
-                && d.usage_page == HIDPP_USAGE_PAGE
-                && d.usage_id == HIDPP_LONG_USAGE_ID
+            d.vendor_id == LOGITECH_VID && is_hidpp_long_collection(d.usage_page, d.usage_id)
         })
-        .collect()
-        .await)
+        .collect())
 }
 
 pub(crate) async fn open_hidpp_channel(
@@ -46,7 +108,10 @@ pub(crate) async fn open_hidpp_channel(
     // keep using `dev` (which `to_device_info` would consume).
     let info: DeviceInfo = (*dev).clone();
     let (reader, writer) = dev.open().await?;
-    let raw = AsyncHidChannel::new(reader, writer, info.clone());
+    // BLE-direct devices expose only the long HID++ report; flag the channel so
+    // outgoing short requests get up-converted to long (see `write_report`).
+    let long_only = info.usage_page == HIDPP_BLE_USAGE_PAGE;
+    let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only);
     let channel = match HidppChannel::from_raw_channel(raw).await {
         Ok(c) => Arc::new(c),
         Err(e) => {
@@ -61,14 +126,23 @@ pub(crate) struct AsyncHidChannel {
     reader: Mutex<DeviceReader>,
     writer: Mutex<DeviceWriter>,
     info: DeviceInfo,
+    /// When set, outgoing short HID++ reports are rewritten as long ones — the
+    /// device (a BLE-direct peripheral) only exposes the long report on macOS.
+    long_only: bool,
 }
 
 impl AsyncHidChannel {
-    pub(crate) fn new(reader: DeviceReader, writer: DeviceWriter, info: DeviceInfo) -> Self {
+    pub(crate) fn new(
+        reader: DeviceReader,
+        writer: DeviceWriter,
+        info: DeviceInfo,
+        long_only: bool,
+    ) -> Self {
         Self {
             reader: Mutex::new(reader),
             writer: Mutex::new(writer),
             info,
+            long_only,
         }
     }
 }
@@ -85,7 +159,10 @@ impl RawHidChannel for AsyncHidChannel {
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error>> {
         let mut w = self.writer.lock().await;
-        w.write_output_report(src).await?;
+        match self.long_only.then(|| short_as_long(src)).flatten() {
+            Some(long) => w.write_output_report(&long).await?,
+            None => w.write_output_report(src).await?,
+        }
         Ok(src.len())
     }
 
@@ -100,5 +177,41 @@ impl RawHidChannel for AsyncHidChannel {
 
     async fn get_report_descriptor(&self, _buf: &mut [u8]) -> Result<usize, Box<dyn Error>> {
         Err("get_report_descriptor is not implemented; pre-filter to HID++ usage pages".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_both_usb_and_ble_hidpp_collections() {
+        assert!(is_hidpp_long_collection(0xff00, 0x0002)); // USB / receiver / BT-classic
+        assert!(is_hidpp_long_collection(0xff43, 0x0202)); // BLE-direct (Lift, Signature)
+        assert!(!is_hidpp_long_collection(0x0001, 0x0002)); // generic-desktop mouse
+        assert!(!is_hidpp_long_collection(0xff43, 0x0002)); // page right, usage wrong
+    }
+
+    #[test]
+    fn upconverts_short_report_preserving_header_and_padding() {
+        // [report id, device, feature, func|sw, p0, p1, p2]
+        let short = [SHORT_REPORT_ID, 0xff, 0x00, 0x1e, 0xaa, 0xbb, 0xcc];
+        let Some(long) = short_as_long(&short) else {
+            panic!("short report should up-convert");
+        };
+
+        assert_eq!(long[0], LONG_REPORT_ID);
+        assert_eq!(&long[1..7], &short[1..]); // header + payload copied verbatim
+        assert!(long[7..].iter().all(|&b| b == 0)); // remainder zero-padded
+        assert_eq!(long.len(), LONG_REPORT_LEN);
+    }
+
+    #[test]
+    fn passes_through_non_short_reports() {
+        // Already a long report — leave it alone.
+        let long_in = [LONG_REPORT_ID, 0xff, 0x00, 0x1e];
+        assert!(short_as_long(&long_in).is_none());
+        // Empty / unknown frames are passed through too.
+        assert!(short_as_long(&[]).is_none());
     }
 }

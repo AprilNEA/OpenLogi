@@ -11,12 +11,18 @@ pub async fn run(_args: ListArgs) -> Result<()> {
         .context("failed to enumerate HID++ devices")?;
 
     if inventories.is_empty() {
-        println!("No Logitech HID++ receivers found.");
+        println!("No Logitech HID++ devices found.");
         println!();
         println!("Notes:");
         println!("  - On macOS, quit Logi Options+ first — both apps fight over HID++ access.");
-        println!("  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548).");
-        println!("  - Devices paired directly over Bluetooth are not enumerated yet.");
+        println!(
+            "  - A Bluetooth-direct mouse (e.g. Lift, Signature) needs Input Monitoring \
+             permission: System Settings → Privacy & Security → Input Monitoring."
+        );
+        println!(
+            "  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548); other \
+             receivers (Unifying) aren't surfaced yet."
+        );
         std::process::exit(2);
     }
 
