@@ -74,25 +74,12 @@ in
       exec = ''
         set -e
         ${xcodeEnv}
-        if ! command -v cargo-bundle >/dev/null; then
-          CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/cc cargo install cargo-bundle --locked
-        fi
-        bash scripts/macos-icns.sh
-        if [ "''${OPENLOGI_BUNDLE_ASSETS:-0}" = "1" ]; then
-          cargo run -p openlogi --release -- assets sync
-        else
-          rm -rf crates/openlogi-gui/assets
-          mkdir -p crates/openlogi-gui/assets
-        fi
-        cd crates/openlogi-gui
-        cargo bundle --release
-        echo
-        echo "Bundle ready: target/release/bundle/osx/OpenLogi.app"
+        cargo run -p xtask -- bundle-macos
       '';
     };
     "openlogi:dmg" = {
       description = "Build a macOS DMG.";
-      exec = "bash scripts/package-macos.sh";
+      exec = "cargo run -p xtask -- package-macos";
     };
   };
 }

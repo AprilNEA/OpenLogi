@@ -27,41 +27,24 @@ APP="$ROOT/target/dev/OpenLogi.app"
 MACOS="$APP/Contents/MacOS"
 RES="$APP/Contents/Resources"
 ICON_SRC="$ROOT/crates/openlogi-gui/icon/AppIcon.icns"
+PLIST_SRC="$ROOT/crates/openlogi-gui/dev/Info.plist"
 
 mkdir -p "$MACOS" "$RES"
 
 # App icon — gitignored, generated from the master SVG on demand. Mirror it
 # into the bundle whenever the source is newer (or the bundle copy is missing).
 if [ ! -f "$ICON_SRC" ]; then
-  bash "$ROOT/scripts/macos-icns.sh"
+  cargo run -p xtask --manifest-path "$ROOT/Cargo.toml" -- macos-icns
 fi
 if [ "$ICON_SRC" -nt "$RES/AppIcon.icns" ]; then
   cp -f "$ICON_SRC" "$RES/AppIcon.icns"
 fi
 
-# Info.plist — minimal, dev-only. Mirrors the `[package.metadata.bundle]` keys
-# that drive the app name + icon. A distinct `.dev` identifier keeps this
-# target/ artifact from registering as the production app in LaunchServices.
+# Info.plist — minimal, dev-only. A distinct `.dev` identifier keeps this
+# target artifact from registering as the production app in LaunchServices.
 PLIST="$APP/Contents/Info.plist"
-if [ ! -f "$PLIST" ]; then
-  cat > "$PLIST" <<'PLIST_EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key><string>OpenLogi</string>
-  <key>CFBundleDisplayName</key><string>OpenLogi</string>
-  <key>CFBundleExecutable</key><string>openlogi-gui</string>
-  <key>CFBundleIdentifier</key><string>org.openlogi.openlogi.dev</string>
-  <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.0.1</string>
-  <key>CFBundleVersion</key><string>0.0.1</string>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
-  <key>NSHighResolutionCapable</key><true/>
-</dict>
-</plist>
-PLIST_EOF
+if [ "$PLIST_SRC" -nt "$PLIST" ]; then
+  cp -f "$PLIST_SRC" "$PLIST"
 fi
 
 # Hardlink the freshly built binary into the bundle — instant, no 95 MB copy.

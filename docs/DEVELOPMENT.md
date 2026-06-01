@@ -9,7 +9,7 @@ build instructions, see the [README](../README.md).
 - macOS: Xcode 16+ with the optional **Metal Toolchain** component (required by
   GPUI's `gpui_macos` build script to compile shaders)
 - `create-dmg` for packaging (`brew install create-dmg`); `cargo-bundle` is
-  installed automatically by `scripts/package-macos.sh`
+  installed automatically by `cargo run -p xtask -- bundle-macos`
 
 ## Building from source
 
@@ -33,8 +33,9 @@ On macOS the desktop binary is launched from inside a throwaway
 **OpenLogi** name in the menu bar and the app icon in the Dock; a bare
 `cargo run` binary has no bundle, so macOS would otherwise fall back to the
 `openlogi-gui` executable name and a generic icon. The binary is hardlinked in
-(no copy) and the icon is generated once by `scripts/macos-icns.sh`. The runner
-is a transparent passthrough for everything else (the CLI, tests); set
+(no copy) and the icon is generated on demand by
+`cargo run -p xtask -- macos-icns`. The runner is a transparent passthrough for
+everything else (the CLI, tests); set
 `OPENLOGI_DEV_BUNDLE=0` to launch the raw `openlogi-gui` binary instead.
 
 To install the CLI binary on `PATH`:
@@ -96,7 +97,7 @@ Equivalent to `devenv tasks run openlogi:check`.
 ## Packaging the macOS DMG
 
 ```sh
-bash scripts/package-macos.sh          # → target/release/OpenLogi.dmg
+cargo run -p xtask -- package-macos    # → target/release/OpenLogi.dmg
 ```
 
 Environment overrides:
@@ -105,6 +106,13 @@ Environment overrides:
   fully offline build (default: fetched on demand at first launch).
 - `OPENLOGI_SIGN_IDENTITY=<identity>` — codesign the `.app` and `.dmg` with the
   given Developer ID.
+- `OPENLOGI_DMG_BACKGROUND_URL=<url>` — override the branded DMG background
+  TIFF URL (default: `https://assets.openlogi.org/dmg/dmg-background.tiff`).
+
+The local packaging command and release workflow both use the same branded DMG
+layout: a 760×480 background image in a 760×512 Finder window, with 128px icons
+positioned at `(212, 250)` for `OpenLogi.app` and `(548, 250)` for
+`Applications`.
 
 ## Release updater publishing
 

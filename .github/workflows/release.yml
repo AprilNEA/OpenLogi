@@ -58,7 +58,6 @@ jobs:
         run: |
           brew install librsvg
           brew install create-dmg
-          cargo install cargo-bundle --locked
 
       - name: Validate release secrets
         env:
@@ -94,19 +93,8 @@ jobs:
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_BASE_URL }}
         run: |
           set -euo pipefail
-          export SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
           export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
-
-          bash scripts/macos-icns.sh
-          if [ "${OPENLOGI_BUNDLE_ASSETS:-0}" = "1" ]; then
-            cargo run -p openlogi --release -- assets sync
-          else
-            rm -rf crates/openlogi-gui/assets
-            mkdir -p crates/openlogi-gui/assets
-          fi
-
-          cd crates/openlogi-gui
-          cargo bundle --release
+          cargo run -p xtask -- bundle-macos
 
       - name: Sign app bundle
         env:
@@ -123,19 +111,7 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ steps.load_secrets.outputs.APPLE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
-          app="target/release/bundle/osx/OpenLogi.app"
-          dmg="target/release/OpenLogi.dmg"
-          rm -f "$dmg"
-          create-dmg \
-            --volname "OpenLogi" \
-            --window-size 640 420 \
-            --icon "OpenLogi.app" 180 170 \
-            --app-drop-link 460 170 \
-            --hide-extension "OpenLogi.app" \
-            "$dmg" \
-            "$app"
-          codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
-          codesign --verify --verbose=2 "$dmg"
+          cargo run -p xtask -- dmg-macos --sign-identity "$APPLE_SIGNING_IDENTITY"
 
       - name: Notarize DMG
         env:
