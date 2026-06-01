@@ -290,7 +290,7 @@ jobs:
         id: tap_token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
+          client-id: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
           private-key: ${{ steps.app_key.outputs.pem }}
           owner: AprilNEA
           repositories: homebrew-tap

@@ -64,7 +64,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
+          client-id: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
           private-key: ${{ steps.app_key.outputs.pem }}
       # release-plz leaves its release branch behind after a release PR merges,
       # and a leftover ref then makes the next `release-pr` fail with HTTP 422
@@ -191,7 +191,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
+          client-id: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
           private-key: ${{ steps.app_key.outputs.pem }}
       - name: Run release-plz (release)
         uses: release-plz/action@v0.5
