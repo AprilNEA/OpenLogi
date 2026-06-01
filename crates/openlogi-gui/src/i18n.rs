@@ -4,7 +4,7 @@
 //! at compile time by the `rust_i18n::i18n!` macro in `main.rs`. Call sites use
 //! the [`tr!`](crate::tr) helper (or `rust_i18n::t!`) with the **English string
 //! as the key** — a missing entry falls back to that English text, so the file
-//! carries only the translated `ja` / `ru` / `zh-CN` / `zh-HK` / `zh-TW`
+//! carries only the translated `ja` / `ru` / `zh-CN` / `zh-HK` / `zh-TW` / `it`
 //! columns; English is the key itself.
 //!
 //! The current locale is a process-global atomic inside `rust_i18n`. Setting it
@@ -17,7 +17,7 @@
 use openlogi_core::config::AppSettings;
 
 /// Locales the GUI ships, as `(code, native name)`. The codes match the
-/// sub-keys in `locales/app.yml`; `en` / `zh-CN` / `zh-HK` also match
+/// sub-keys in `locales/app.yml`; `en` / `zh-CN` / `zh-HK` / `it` also match
 /// gpui-component's bundled `ui.yml`, so choosing one localizes the framework's
 /// own widgets too. `ja`, `ru`, and `zh-TW` are *not* in `ui.yml`, so under
 /// those locales our app strings localize but the framework's built-in widget
@@ -30,6 +30,7 @@ pub const SUPPORTED: &[(&str, &str)] = &[
     ("zh-CN", "简体中文"),
     ("zh-HK", "繁體中文（香港）"),
     ("zh-TW", "正體中文（臺灣）"),
+    ("it", "Italiano"),
 ];
 
 /// Resolve the locale to apply, preferring an explicit stored `setting`, then
@@ -67,6 +68,7 @@ fn match_supported(code: &str) -> Option<&'static str> {
         Some("en") => Some("en"),
         Some("ja") => Some("ja"),
         Some("ru") => Some("ru"),
+        Some("it") => Some("it"),
         Some("zh") => {
             let mut script = None;
             let mut region = None;
@@ -125,6 +127,8 @@ mod tests {
         assert_eq!(match_supported("ru-RU"), Some("ru"));
         assert_eq!(match_supported("en-US"), Some("en"));
         assert_eq!(match_supported("fr-FR"), None);
+        assert_eq!(match_supported("it"), Some("it"));
+        assert_eq!(match_supported("it-IT"), Some("it"));
     }
 
     #[test]
@@ -208,6 +212,11 @@ mod tests {
             BLURB,
             "blurb key missing from zh-TW app.yml"
         );
+
+        rust_i18n::set_locale("it");
+        assert_eq!(rust_i18n::t!("Settings"), "Impostazioni");
+        assert_eq!(rust_i18n::t!("Left Click"), "Click sinistro");
+        assert_eq!(rust_i18n::t!("Thanks"), "Grazie");
 
         // English has no column: every key falls back to the English source.
         rust_i18n::set_locale("en");
