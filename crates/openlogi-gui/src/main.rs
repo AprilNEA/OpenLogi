@@ -45,7 +45,7 @@ rust_i18n::i18n!("locales", fallback = "en");
 
 use std::sync::{Arc, RwLock};
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use gpui::{
     AppContext, BorrowAppContext as _, Bounds, SharedString, Size, Styled, TitlebarOptions,
     WindowBounds, WindowOptions, px,
@@ -82,8 +82,13 @@ fn main() -> Result<()> {
 
     reconcile_early_config();
 
-    let inventories = enumerate_blocking().context("HID enumeration failed")?;
-    sync_assets_if_needed(&inventories);
+    // Start with no devices and never block startup on HID enumeration — a
+    // sleeping or unresponsive device must not be able to wedge the main thread
+    // before the window opens. The inventory watcher (spawned below) enumerates
+    // on its first tick and `AppState::refresh_inventories` wires up devices,
+    // bindings, and the hook live; asset sync is kicked off in the background
+    // when the first devices appear (see the `inventory_rx` arm).
+    let inventories: Vec<DeviceInventory> = Vec::new();
 
     let (hook_bindings, gesture_bindings, dpi_cycle, initial_config) =
         load_config_and_bindings(&inventories);
@@ -226,13 +231,22 @@ fn main() -> Result<()> {
             });
 
             let mut hook_handle = None;
+            // Asset depots are fetched once, in the background, when devices
+            // first appear — startup no longer blocks on it.
+            let mut assets_synced = false;
             loop {
                 tokio::select! {
                     Some(new_inv) = inventory_rx.recv() => {
+                        if !assets_synced && !new_inv.is_empty() {
+                            assets_synced = true;
+                            let inv = new_inv.clone();
+                            std::thread::spawn(move || sync_assets_if_needed(&inv));
+                        }
                         cx.update(|cx| {
                             let cache = asset::AssetResolver::new();
                             cx.update_global::<AppState, _>(|state, _| {
                                 state.refresh_inventories(&new_inv, &cache);
+                                state.scanning = false;
                             });
                             #[cfg(target_os = "macos")]
                             platform::tray::set_device_status(&tray_status(cx));
@@ -429,15 +443,6 @@ fn init_tracing() {
             EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-}
-
-fn enumerate_blocking() -> Result<Vec<DeviceInventory>> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("tokio runtime init")?;
-    rt.block_on(openlogi_hid::enumerate())
-        .context("openlogi_hid::enumerate")
 }
 
 /// Flatten every paired device's HID++ model snapshot — that's what the

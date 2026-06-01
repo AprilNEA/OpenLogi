@@ -630,3 +630,9 @@ _version: 2
   ja: OpenLogi が CoreBluetooth を使用できるようにします（HID アクセスには不要）。
   zh-CN: 允许 OpenLogi 使用 CoreBluetooth（HID 访问不需要）。
   zh-HK: 允許 OpenLogi 使用 CoreBluetooth（HID 存取不需要）。
+
+# ── Empty / scanning state (app.rs) ─────────────────────────────────────────
+"Scanning for devices…":
+  ja: デバイスを検索中…
+  zh-CN: 正在扫描设备…
+  zh-HK: 正在掃描裝置…

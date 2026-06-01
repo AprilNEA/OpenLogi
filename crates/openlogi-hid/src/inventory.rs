@@ -41,6 +41,18 @@ const ARRIVAL_DRAIN: Duration = Duration::from_millis(1500);
 /// range to surface paired-but-offline devices that won't fire arrival events.
 const MAX_BOLT_SLOTS: u8 = 6;
 
+/// Upper bound on probing one HID node. `hidpp`'s request/response has no
+/// timeout of its own, so without this a single unresponsive (e.g. asleep)
+/// device wedges the whole enumeration — and the GUI runs `enumerate` on a
+/// polling watcher, so a permanent hang would stall every later refresh.
+///
+/// Kept short so a snapshot settles quickly: a timed-out node is skipped and
+/// re-probed on the next watcher tick (~2 s), and the first probe usually wakes
+/// the device so the retry succeeds fast. Comfortably above a healthy device's
+/// probe time (the Bolt arrival drain alone is 1.5 s), so awake devices never
+/// trip it.
+const PROBE_BUDGET: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Error)]
 pub enum InventoryError {
     #[error("HID transport error")]
@@ -68,10 +80,13 @@ pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
 
     let mut inventories = Vec::new();
     for dev in candidates {
-        match probe_one(dev).await {
-            Ok(Some(inv)) => inventories.push(inv),
-            Ok(None) => {}
-            Err(e) => warn!(error = ?e, "skipping device that failed to probe"),
+        match timeout(PROBE_BUDGET, probe_one(dev)).await {
+            Ok(Ok(Some(inv))) => inventories.push(inv),
+            Ok(Ok(None)) => {}
+            Ok(Err(e)) => warn!(error = ?e, "skipping device that failed to probe"),
+            Err(_) => {
+                warn!(budget = ?PROBE_BUDGET, "device probe timed out — skipping (asleep/unresponsive)");
+            }
         }
     }
 

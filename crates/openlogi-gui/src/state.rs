@@ -55,6 +55,11 @@ pub struct AppState {
     /// permission gate; flipped by the accessibility watcher when the user
     /// grants access. Always `true` on platforms without the concept.
     pub accessibility_granted: bool,
+    /// Whether the first device enumeration is still in flight. Startup no
+    /// longer blocks on enumeration (see `main`); this drives the "Scanning…"
+    /// vs "No device connected" empty state and is cleared once the inventory
+    /// watcher delivers its first snapshot.
+    pub scanning: bool,
     /// Bindings for the *currently selected* device. Reloaded whenever the
     /// carousel selection changes.
     pub button_bindings: BTreeMap<ButtonId, Action>,
@@ -132,6 +137,7 @@ impl AppState {
             current_app_bundle: None,
             active_button: None,
             accessibility_granted: Hook::has_accessibility(),
+            scanning: true,
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),
             dpi: DEFAULT_DPI,
