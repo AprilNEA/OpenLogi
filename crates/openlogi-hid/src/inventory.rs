@@ -1,6 +1,6 @@
 //! Enumerate connected HID++ receivers and their paired devices.
 
-use std::{collections::HashMap, process::Command, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use hidpp::{
     channel::HidppChannel,
@@ -24,7 +24,7 @@ use openlogi_core::device::{
 };
 use thiserror::Error;
 use tokio::time::timeout;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::route::DIRECT_DEVICE_INDEX;
 use crate::transport::{enumerate_hidpp_devices, is_logitech_mouse, open_hidpp_channel};
@@ -39,9 +39,9 @@ const ARRIVAL_DRAIN: Duration = Duration::from_millis(1500);
 /// range to surface paired-but-offline devices that won't fire arrival events.
 const MAX_BOLT_SLOTS: u8 = 6;
 const LOGITECH_VID: u16 = 0x046d;
-const MX_MASTER_4_PID: u16 = 0xb042;
+const MX_MASTER_4_PID: u16 = 0xb048;  // MX Master 4 B (Bluetooth-direct)
 const MX_MASTER_4_EXT_MODEL_ID: u8 = 0x02;
-const MX_MASTER_4_NAME: &str = "MX Master 4";
+const MX_MASTER_4_NAME: &str = "MX Master 4 B";
 
 #[derive(Debug, Error)]
 pub enum InventoryError {
@@ -77,10 +77,26 @@ pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
         }
     }
 
-    if inventories.is_empty() {
-        let fallback = hidutil_direct_mouse_fallback();
+    // Run the hidutil fallback whenever the MX Master 4 B is absent from the
+    // inventory, not only when the whole list is empty. A user with a Bolt
+    // receiver attached alongside a BLE-paired MX Master 4 B would otherwise
+    // have the Bolt path populate `inventories` and suppress this fallback,
+    // leaving the BLE device undetected.
+    let already_has_mx4b = inventories.iter().any(|inv| {
+        inv.receiver.product_id == MX_MASTER_4_PID
+            || inv
+                .paired
+                .iter()
+                .any(|p| p.model_info.as_ref().is_some_and(|m| m.model_ids[0] == MX_MASTER_4_PID))
+    });
+    if !already_has_mx4b {
+        // spawn_blocking so the synchronous hidutil shell-out does not stall
+        // the async executor (tokio current-thread or multi-thread).
+        let fallback = tokio::task::spawn_blocking(hidutil_direct_mouse_fallback)
+            .await
+            .unwrap_or_default();
         if !fallback.is_empty() {
-            return Ok(fallback);
+            inventories.extend(fallback);
         }
     }
 
@@ -194,24 +210,45 @@ fn fallback_direct_mouse(info: &async_hid::DeviceInfo) -> Option<DeviceInventory
     ))
 }
 
+/// Confirmed working on macOS 13 (Ventura) and later.
+/// `hidutil list --ndjson` was introduced no later than macOS 10.15; if
+/// `hidutil` exits non-zero (unsupported flag, sandbox denial, etc.) we log
+/// the failure and return an empty vec rather than silently swallowing it.
 #[cfg(target_os = "macos")]
 fn hidutil_direct_mouse_fallback() -> Vec<DeviceInventory> {
-    let Ok(output) = Command::new("/usr/bin/hidutil")
+    use std::process::Command;
+    let output = match Command::new("/usr/bin/hidutil")
         .args([
             "list",
             "--ndjson",
             "--matching",
-            r#"{"VendorID":0x046d,"ProductID":0xb042}"#,
+            // VendorID 0x046d = Logitech; ProductID 0xb048 = MX Master 4 B
+            // (Bluetooth-direct). This is distinct from 0xb042 which is the
+            // USB / Bolt-receiver variant.
+            r#"{"VendorID":0x046d,"ProductID":0xb048}"#,
         ])
         .output()
-    else {
-        return Vec::new();
+    {
+        Ok(o) => o,
+        Err(e) => {
+            debug!(error = %e, "hidutil unavailable; skipping MX Master 4 B fallback");
+            return Vec::new();
+        }
     };
-    if !output.status.success() || !hidutil_lists_mx_master_4(&output.stdout) {
+    if !output.status.success() {
+        debug!(
+            status = %output.status,
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "hidutil exited non-zero; skipping MX Master 4 B fallback \
+             (--ndjson requires macOS 10.15+)"
+        );
+        return Vec::new();
+    }
+    if !hidutil_lists_mx_master_4(&output.stdout) {
         return Vec::new();
     }
 
-    debug!("hidutil found MX Master 4 after HID enumeration returned no inventories");
+    info!("hidutil found MX Master 4 B (BLE-direct) — synthesising inventory");
     vec![synthetic_direct_mouse_inventory(
         MX_MASTER_4_NAME,
         MX_MASTER_4_PID,
@@ -514,7 +551,7 @@ mod tests {
 
     #[test]
     fn hidutil_parser_matches_mx_master_4_mouse_node() {
-        let stdout = br#"{"Product":"MX Master 4","VendorID":1133,"IOClass":"IOHIDUserDevice","type":"device","PrimaryUsage":2,"PrimaryUsagePage":1,"Transport":"Bluetooth Low Energy","ProductID":45122}
+        let stdout = br#"{"Product":"MX Master 4 B","VendorID":1133,"IOClass":"IOHIDUserDevice","type":"device","PrimaryUsage":2,"PrimaryUsagePage":1,"Transport":"Bluetooth Low Energy","ProductID":45128}
 "#;
 
         assert!(hidutil_lists_mx_master_4(stdout));
