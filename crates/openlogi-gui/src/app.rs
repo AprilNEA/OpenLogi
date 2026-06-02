@@ -255,6 +255,7 @@ fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
             div()
                 .max_w(px(440.))
                 .text_sm()
+                .text_center()
                 .child(tr!(
                     "Plug in or pair a supported Logitech device — it'll show up here automatically."
                 )),
@@ -278,7 +279,7 @@ fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
                 )
                 .on_click(|_, _, cx| crate::windows::add_device::open(cx)),
         )
-        .child(div().max_w(px(440.)).text_xs().text_color(pal.text_muted).child(tr!(
+        .child(div().max_w(px(440.)).text_xs().text_center().text_color(pal.text_muted).child(tr!(
             "Using Logi Options+? Quit it first — both apps compete for HID++ access."
         )))
         .into_any_element()
