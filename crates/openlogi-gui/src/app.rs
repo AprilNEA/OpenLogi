@@ -248,7 +248,7 @@ fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
                 .child(if scanning {
                     tr!("Scanning for devices…")
                 } else {
-                    tr!("No device connected")
+                    tr!("No devices connected")
                 }),
         )
         .child(

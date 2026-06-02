@@ -92,7 +92,7 @@ mod macos {
         let target = action_target();
         let menu = Menu::new();
 
-        let idle = rust_i18n::t!("No device connected");
+        let idle = rust_i18n::t!("No devices connected");
         let device_item = MenuItem::disabled(&idle);
         menu.add_item(device_item);
 

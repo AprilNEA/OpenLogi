@@ -401,7 +401,7 @@ fn tray_status(cx: &gpui::App) -> String {
     cx.try_global::<AppState>()
         .and_then(AppState::current_record)
         .map_or_else(
-            || rust_i18n::t!("No device connected").into_owned(),
+            || rust_i18n::t!("No devices connected").into_owned(),
             |record| match &record.battery {
                 Some(battery) => format!("{} · {}%", record.display_name, battery.percentage),
                 None => record.display_name.clone(),
