@@ -383,8 +383,6 @@ pub(crate) struct AsyncHidChannel {
     reader: Mutex<DeviceReader>,
     writer: Mutex<DeviceWriter>,
     info: DeviceInfo,
-    #[cfg(target_os = "windows")]
-    native_writer: Option<NativeHidWriter>,
     /// Whether the device exposes only the long HID++ report (a BLE-direct
     /// peripheral on macOS). Reported via `supports_short_long_hidpp` so the
     /// `hidpp` channel up-converts outgoing short messages to long.
@@ -402,8 +400,6 @@ impl AsyncHidChannel {
         Self {
             reader: Mutex::new(reader),
             writer: Mutex::new(writer),
-            #[cfg(target_os = "windows")]
-            native_writer: NativeHidWriter::new(&info),
             info,
             long_only,
         }
@@ -424,18 +420,6 @@ impl RawHidChannel for AsyncHidChannel {
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         let mut w = self.writer.lock().await;
         if let Err(e) = w.write_output_report(src).await {
-            #[cfg(target_os = "windows")]
-            if let Some(native_writer) = &self.native_writer {
-                debug!(
-                    error = %e,
-                    report_id = format_args!("{:#04x}", src.first().copied().unwrap_or_default()),
-                    len = src.len(),
-                    "async-hid output report write failed; trying native Windows HID fallback"
-                );
-                native_writer.write_report(src)?;
-                return Ok(src.len());
-            }
-
             return Err(Box::new(e));
         }
         Ok(src.len())
