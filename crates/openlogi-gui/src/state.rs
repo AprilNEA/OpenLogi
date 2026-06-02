@@ -57,7 +57,7 @@ pub struct AppState {
     pub accessibility_granted: bool,
     /// Whether the first device enumeration is still in flight. Startup no
     /// longer blocks on enumeration (see `main`); this drives the "Scanning…"
-    /// vs "No device connected" empty state and is cleared once the inventory
+    /// vs "No devices connected" empty state and is cleared once the inventory
     /// watcher delivers its first snapshot.
     pub scanning: bool,
     /// Bindings for the *currently selected* device. Reloaded whenever the

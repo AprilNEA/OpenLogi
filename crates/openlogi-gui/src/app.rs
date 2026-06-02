@@ -265,7 +265,7 @@ fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
                 .id("empty-add-device")
                 .mt_1()
                 .px_4()
-                .py_2()
+                .py_1()
                 .rounded_md()
                 .bg(rgb(theme::ACCENT_BLUE))
                 .text_color(rgb(0x00ff_ffff))
