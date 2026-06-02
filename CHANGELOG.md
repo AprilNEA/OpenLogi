@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.3.4...openlogi-core-v0.4.0) - 2026-06-02
+
+### Added
+
+- *(i18n)* add zh-TW (Traditional Chinese, Taiwan) locale ([#57](https://github.com/AprilNEA/OpenLogi/pull/57))
+
 ## [0.3.4](https://github.com/AprilNEA/OpenLogi/compare/openlogi-hidpp-v0.3.3...openlogi-hidpp-v0.3.4) - 2026-06-01
 
 ### Added
