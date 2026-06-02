@@ -121,8 +121,8 @@ fn sync_depot(
     // Optional second pass: download the colour variant PNGs matching
     // the connected device's `extended_model_id`, for both the front
     // (carousel) and the side / buttons (mouse-model) views. Failure is
-    // non-fatal — `AssetResolver.load_files` falls back to the bare core
-    // PNG that came in with `CORE_FILES`.
+    // non-fatal — `AssetResolver.load_files` falls back to the bare hero
+    // render that came in with the baseline fetch above.
     let manifest_path = dir.join("manifest.json");
     for resource_key in ["device_image", "device_buttons_image"] {
         let Some(variant) =
