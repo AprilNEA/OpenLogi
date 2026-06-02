@@ -12,7 +12,7 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use openlogi_assets::http;
-use openlogi_assets::{CORE_FILES, DepotManifest, DeviceEntry, FetchOutcome};
+use openlogi_assets::{BUTTONS_RENDER_FILES, DepotManifest, DeviceEntry, FetchOutcome};
 use openlogi_core::device::DeviceModelInfo;
 use tracing::{debug, info, warn};
 
@@ -101,19 +101,20 @@ fn sync_depot(
     let dir = cache_root.join(depot);
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
 
-    // Baseline: metadata + manifest + base PNG. Manifest is mandatory
-    // so the variant lookup below has something to consult.
-    for name in CORE_FILES {
+    // Baseline: hotspot metadata + manifest + hero render, in whichever
+    // schema this depot ships (`*_core` or the bare names). Manifest is
+    // fetched here so the variant lookup below has something to consult.
+    for name in entry.baseline_files() {
         fetch_to_cache(client, &entry.asset_path, &dir, entry, name)?;
     }
 
     // Dedicated buttons render — only present on devices whose manifest
     // points `device_buttons_image` at a distinct side view. Fetch it only
     // when the registry lists it so front-only devices don't 404; failure
-    // is non-fatal (the GUI falls back to `front_core.png`).
-    if entry.files.iter().any(|f| f.name == "side_core.png") {
-        if let Err(e) = fetch_to_cache(client, &entry.asset_path, &dir, entry, "side_core.png") {
-            warn!(depot, error = %e, "side_core.png fetch failed");
+    // is non-fatal (the GUI falls back to the hero render).
+    if let Some(side) = entry.preferred_file(&BUTTONS_RENDER_FILES) {
+        if let Err(e) = fetch_to_cache(client, &entry.asset_path, &dir, entry, side) {
+            warn!(depot, error = %e, "buttons render fetch failed");
         }
     }
 
@@ -129,7 +130,10 @@ fn sync_depot(
         else {
             continue;
         };
-        if variant == "front_core.png" || variant == "side_core.png" {
+        if matches!(
+            variant.as_str(),
+            "front_core.png" | "front.png" | "side_core.png" | "side.png"
+        ) {
             continue;
         }
         if let Err(e) = fetch_to_cache(client, &entry.asset_path, &dir, entry, &variant) {

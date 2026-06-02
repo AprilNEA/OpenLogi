@@ -54,15 +54,43 @@ pub struct FileEntry {
     pub bytes: u64,
 }
 
-/// The files every depot must ship, fetched as the per-depot baseline by
-/// both the CLI bundle sync and the GUI runtime sync:
-///
-/// - `core_metadata.json` — hotspot percentages for the buttons overlay
-/// - `manifest.json` — `extended_model_id` → colour-variant + resource-key
-///   filename lookup
-/// - `front_core.png` — the carousel render (and the buttons render on
-///   simpler devices whose manifest points `device_buttons_image` at it)
-pub const CORE_FILES: [&str; 3] = ["core_metadata.json", "manifest.json", "front_core.png"];
+/// Filename schemas Logi ships, most-preferred first. Newer depots use the
+/// `*_core` names; older ones — most keyboards, the MX Vertical, older mice —
+/// ship the bare names. A depot commits to one schema, never a mix, so
+/// resolving each slot to the first name the registry actually lists picks
+/// the right one. The manifest then maps `device_image` /
+/// `device_buttons_image` to the concrete render for colour variants.
+pub const METADATA_FILES: [&str; 2] = ["core_metadata.json", "metadata.json"];
+pub const FRONT_RENDER_FILES: [&str; 2] = ["front_core.png", "front.png"];
+pub const BUTTONS_RENDER_FILES: [&str; 2] = ["side_core.png", "side.png"];
+
+impl DeviceEntry {
+    /// First of `candidates` this depot's registry file list contains —
+    /// the concrete filename for a schema slot (metadata / hero render /
+    /// buttons render). `None` when the depot ships none of them.
+    #[must_use]
+    pub fn preferred_file(&self, candidates: &[&'static str]) -> Option<&'static str> {
+        candidates
+            .iter()
+            .copied()
+            .find(|name| self.files.iter().any(|f| f.name == *name))
+    }
+
+    /// Baseline files both syncs fetch per depot: hotspot metadata (either
+    /// schema), the manifest, and the hero render (either schema). A slot
+    /// the depot doesn't ship is skipped — a camera/receiver depot with no
+    /// metadata or render contributes just the manifest, if even that.
+    #[must_use]
+    pub fn baseline_files(&self) -> Vec<&'static str> {
+        let mut files = Vec::with_capacity(3);
+        files.extend(self.preferred_file(&METADATA_FILES));
+        if self.files.iter().any(|f| f.name == "manifest.json") {
+            files.push("manifest.json");
+        }
+        files.extend(self.preferred_file(&FRONT_RENDER_FILES));
+        files
+    }
+}
 
 impl Index {
     pub fn load_from(path: &Path) -> anyhow::Result<Self> {
@@ -147,5 +175,48 @@ mod tests {
         // the bridge is an exact (case-insensitive) name match.
         let index = index_with("mx_master_3s", "2b043", "MX Master 3S");
         assert!(index.find_by_display_name("MX Master 3").is_none());
+    }
+
+    fn entry_with_files(names: &[&str]) -> DeviceEntry {
+        let mut e = entry("2b043", "MX Master 3S");
+        e.files = names
+            .iter()
+            .map(|name| FileEntry {
+                name: (*name).to_string(),
+                sha256: String::new(),
+                bytes: 0,
+            })
+            .collect();
+        e
+    }
+
+    #[test]
+    fn baseline_files_resolves_core_schema() {
+        let e = entry_with_files(&["core_metadata.json", "manifest.json", "front_core.png"]);
+        assert_eq!(
+            e.baseline_files(),
+            ["core_metadata.json", "manifest.json", "front_core.png"]
+        );
+    }
+
+    #[test]
+    fn baseline_files_resolves_old_schema() {
+        // MX Vertical / most keyboards ship the bare names — the same slots
+        // resolve to `metadata.json` + `front.png`.
+        let e = entry_with_files(&["metadata.json", "manifest.json", "front.png", "side.png"]);
+        assert_eq!(
+            e.baseline_files(),
+            ["metadata.json", "manifest.json", "front.png"]
+        );
+        assert_eq!(e.preferred_file(&BUTTONS_RENDER_FILES), Some("side.png"));
+    }
+
+    #[test]
+    fn baseline_files_skips_missing_slots() {
+        // A depot with no hotspot metadata or render (camera/receiver)
+        // contributes only the manifest.
+        let e = entry_with_files(&["manifest.json"]);
+        assert_eq!(e.baseline_files(), ["manifest.json"]);
+        assert_eq!(e.preferred_file(&METADATA_FILES), None);
     }
 }

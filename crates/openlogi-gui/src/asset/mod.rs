@@ -19,7 +19,9 @@ pub mod sync;
 
 use std::path::{Path, PathBuf};
 
-use openlogi_assets::{DeviceEntry, Index, Metadata};
+use openlogi_assets::{
+    BUTTONS_RENDER_FILES, DeviceEntry, FRONT_RENDER_FILES, Index, METADATA_FILES, Metadata,
+};
 use openlogi_core::device::DeviceModelInfo;
 use tracing::{debug, warn};
 
@@ -109,10 +111,12 @@ impl AssetResolver {
     ) -> Option<ResolvedAsset> {
         for root in &self.read_roots {
             let dir = root.join(depot);
-            let meta_path = dir.join("core_metadata.json");
-            if !meta_path.exists() {
+            // Hotspot metadata in whichever schema this depot cached:
+            // `core_metadata.json` (newer) or `metadata.json` (older).
+            let Some(&meta_name) = METADATA_FILES.iter().find(|n| dir.join(n).exists()) else {
                 continue;
-            }
+            };
+            let meta_path = dir.join(meta_name);
 
             // Pick the colour variant matching this device's HID++
             // extended_model_id byte. Logi calibrates the assignment
@@ -130,18 +134,13 @@ impl AssetResolver {
             // The chosen file may not have been synced (older bundles
             // shipped front-only); fall back through alternatives so a
             // stale cache still gets *something* rather than a synthetic
-            // silhouette.
-            let candidates = [
-                image_name.clone(),
-                "side_core.png".to_string(),
-                variant_front_name.unwrap_or_default(),
-                "front_core.png".to_string(),
-            ];
-            let Some(image_path) = candidates
-                .iter()
-                .filter(|n| !n.is_empty())
-                .map(|n| dir.join(n))
-                .find(|p| p.exists())
+            // silhouette. Both filename schemas (`*_core` and bare) are
+            // tried for each of the buttons and hero renders.
+            let mut candidates = vec![image_name.clone()];
+            candidates.extend(BUTTONS_RENDER_FILES.map(str::to_string));
+            candidates.extend(variant_front_name);
+            candidates.extend(FRONT_RENDER_FILES.map(str::to_string));
+            let Some(image_path) = candidates.iter().map(|n| dir.join(n)).find(|p| p.exists())
             else {
                 continue;
             };
@@ -149,7 +148,7 @@ impl AssetResolver {
             let metadata = match Metadata::load_from(&meta_path) {
                 Ok(m) => m,
                 Err(e) => {
-                    warn!(depot, root = %root.display(), error = ?e, "failed to parse core_metadata.json");
+                    warn!(depot, root = %root.display(), file = meta_name, error = ?e, "failed to parse device metadata");
                     continue;
                 }
             };
@@ -268,6 +267,7 @@ fn suffix_candidates(model: &DeviceModelInfo) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
     use openlogi_assets::DeviceEntry;
@@ -322,5 +322,74 @@ mod tests {
         let index = mx_master_3s_index();
         let hit = resolve_in_index(&index, &btle_3s_model(), Some("MX Master 3S"));
         assert_eq!(hit.map(|(depot, _)| depot), Some("mx_master_3s"));
+    }
+
+    fn bare_model() -> DeviceModelInfo {
+        DeviceModelInfo {
+            entity_count: 0,
+            serial_number: None,
+            unit_id: [0; 4],
+            transports: DeviceTransports::default(),
+            model_ids: [0; 3],
+            extended_model_id: 0,
+        }
+    }
+
+    /// A 24-byte PNG: signature + an `IHDR` chunk header carrying only the
+    /// width/height — all `read_png_dimensions` actually reads.
+    fn png_header(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes
+    }
+
+    /// An old-schema depot (`metadata.json` + `front.png`, no `*_core`
+    /// names, no manifest) must still resolve — this is what makes the
+    /// MX Vertical and the older mice render.
+    #[test]
+    fn resolves_old_schema_depot_on_disk() {
+        let root = std::env::temp_dir().join(format!("openlogi-asset-test-{}", std::process::id()));
+        let depot = "mx_vertical";
+        let dir = root.join(depot);
+        std::fs::create_dir_all(&dir).expect("create depot dir");
+        std::fs::write(
+            dir.join("metadata.json"),
+            r#"{"images":[
+                {"key":"device_image","origin":{"width":100,"height":200}},
+                {"key":"device_buttons_image","origin":{"width":100,"height":200},
+                 "assignments":[{"slotName":"SLOT_NAME_MIDDLE_BUTTON",
+                                 "marker":{"x":50,"y":50},"label":{"x":0,"y":0}}]}
+            ]}"#,
+        )
+        .expect("write metadata.json");
+        std::fs::write(dir.join("front.png"), png_header(100, 200)).expect("write front.png");
+
+        let resolver = AssetResolver {
+            read_roots: vec![root.clone()],
+            write_root: root.clone(),
+            has_bundle: false,
+            index: None,
+        };
+        let entry = DeviceEntry {
+            model_id: "eb020".to_string(),
+            display_name: "MX Vertical".to_string(),
+            kind: "MOUSE".to_string(),
+            asset_path: format!("v1/devices/{depot}/"),
+            files: Vec::new(),
+        };
+
+        let result = resolver.load_files(depot, &entry, &bare_model());
+        std::fs::remove_dir_all(&root).ok();
+
+        let asset = result.expect("old-schema depot should resolve");
+        assert_eq!(
+            asset.image_path.file_name().expect("image has a file name"),
+            "front.png"
+        );
+        assert_eq!((asset.png_width, asset.png_height), (100, 200));
+        assert_eq!(asset.metadata.assignments().count(), 1);
     }
 }
