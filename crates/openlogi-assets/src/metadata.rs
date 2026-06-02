@@ -3,8 +3,10 @@
     reason = "full schema parsed; label direction codes + extra coords land in later phases"
 )]
 
-//! Parses the per-depot `core_metadata.json` shipped by the Logi Options+
-//! installer (and re-hosted by assets.openlogi.org).
+//! Parses the per-depot hotspot metadata shipped by the Logi Options+
+//! installer (and re-hosted by assets.openlogi.org) — `core_metadata.json`
+//! on newer depots, `metadata.json` on older ones. Same schema either way;
+//! the caller picks the filename and hands the path to [`Metadata::load_from`].
 //!
 //! Only the fields OpenLogi actually consumes are deserialized — every
 //! other field is silently ignored. The schema below is observed-from-the-

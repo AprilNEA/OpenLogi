@@ -4,8 +4,8 @@
 //! at compile time by the `rust_i18n::i18n!` macro in `main.rs`. Call sites use
 //! the [`tr!`](crate::tr) helper (or `rust_i18n::t!`) with the **English string
 //! as the key** — a missing entry falls back to that English text, so the file
-//! carries only the translated `ja` / `ru` / `zh-CN` / `zh-HK` columns;
-//! English is the key itself.
+//! carries only the translated `ja` / `ru` / `zh-CN` / `zh-HK` / `zh-TW`
+//! columns; English is the key itself.
 //!
 //! The current locale is a process-global atomic inside `rust_i18n`. Setting it
 //! re-localizes both our own call sites *and* gpui-component's built-in widget
@@ -19,16 +19,17 @@ use openlogi_core::config::AppSettings;
 /// Locales the GUI ships, as `(code, native name)`. The codes match the
 /// sub-keys in `locales/app.yml`; `en` / `zh-CN` / `zh-HK` also match
 /// gpui-component's bundled `ui.yml`, so choosing one localizes the framework's
-/// own widgets too. `ja` and `ru` are *not* in `ui.yml`, so under Japanese or
-/// Russian our app strings localize but the framework's built-in widget strings
-/// fall back to English.
+/// own widgets too. `ja`, `ru`, and `zh-TW` are *not* in `ui.yml`, so under
+/// those locales our app strings localize but the framework's built-in widget
+/// strings fall back to English.
 /// Order here is the order shown in the Settings picker (after "Follow system").
 pub const SUPPORTED: &[(&str, &str)] = &[
     ("en", "English"),
     ("ja", "日本語"),
     ("ru", "Русский"),
     ("zh-CN", "简体中文"),
-    ("zh-HK", "繁體中文"),
+    ("zh-HK", "繁體中文（香港）"),
+    ("zh-TW", "正體中文（臺灣）"),
 ];
 
 /// Resolve the locale to apply, preferring an explicit stored `setting`, then
@@ -47,11 +48,18 @@ pub fn resolve(setting: Option<&str>) -> &'static str {
 }
 
 /// Collapse an arbitrary BCP-47 locale onto one of [`SUPPORTED`], or `None`,
-/// by matching its primary subtag. A `zh` tag is decided by its *first*
-/// script-or-region subtag (script precedes region in BCP-47): `Hant` or a
-/// Traditional-using region (`tw` / `hk` / `mo`) → `zh-HK`; an explicit `Hans`
-/// or no such subtag → `zh-CN`. So `zh-Hans-HK` stays Simplified — the script
-/// tag wins over the region.
+/// by matching its primary subtag. A `zh` tag is decided by examining all
+/// subtags for script and region indicators:
+///
+/// - Explicit `Hans` script → `zh-CN` (always wins — Simplified regardless of
+///   region)
+/// - Explicit `hk` / `mo` region → `zh-HK`
+/// - Explicit `tw` region or bare `Hant` script → `zh-TW`
+/// - No recognized indicator (bare `zh`, `zh-CN`, etc.) → `zh-CN`
+///
+/// So `zh-Hans-HK` stays Simplified (script wins), `zh-Hant-HK` resolves to
+/// Hong Kong (explicit region wins over generic script), and bare `zh-Hant`
+/// falls to Taiwan as the primary Traditional Chinese locale.
 fn match_supported(code: &str) -> Option<&'static str> {
     let lower = code.to_ascii_lowercase();
     let mut subtags = lower.split(['-', '_']);
@@ -60,11 +68,23 @@ fn match_supported(code: &str) -> Option<&'static str> {
         Some("ja") => Some("ja"),
         Some("ru") => Some("ru"),
         Some("zh") => {
-            let traditional = matches!(
-                subtags.find(|t| matches!(*t, "hans" | "hant" | "tw" | "hk" | "mo")),
-                Some("hant" | "tw" | "hk" | "mo")
-            );
-            Some(if traditional { "zh-HK" } else { "zh-CN" })
+            let mut script = None;
+            let mut region = None;
+
+            for subtag in subtags {
+                match subtag {
+                    "hans" | "hant" => script = Some(subtag),
+                    "cn" | "sg" | "tw" | "hk" | "mo" => region = Some(subtag),
+                    _ => {}
+                }
+            }
+
+            match (script, region) {
+                (Some("hans"), _) => Some("zh-CN"),
+                (_, Some("hk" | "mo")) => Some("zh-HK"),
+                (_, Some("tw")) | (Some("hant"), _) => Some("zh-TW"),
+                _ => Some("zh-CN"),
+            }
         }
         _ => None,
     }
@@ -93,8 +113,12 @@ mod tests {
     fn maps_locale_variants() {
         assert_eq!(match_supported("zh-Hans-CN"), Some("zh-CN"));
         assert_eq!(match_supported("zh-CN"), Some("zh-CN"));
-        assert_eq!(match_supported("zh-Hant-TW"), Some("zh-HK"));
+        assert_eq!(match_supported("zh-Hans-HK"), Some("zh-CN"));
+        assert_eq!(match_supported("zh-Hant-TW"), Some("zh-TW"));
+        assert_eq!(match_supported("zh-TW"), Some("zh-TW"));
+        assert_eq!(match_supported("zh-Hant"), Some("zh-TW"));
         assert_eq!(match_supported("zh-HK"), Some("zh-HK"));
+        assert_eq!(match_supported("zh-Hant-HK"), Some("zh-HK"));
         assert_eq!(match_supported("ja"), Some("ja"));
         assert_eq!(match_supported("ja-JP"), Some("ja"));
         assert_eq!(match_supported("ru"), Some("ru"));
@@ -166,6 +190,16 @@ mod tests {
         rust_i18n::set_locale("ru");
         assert_eq!(rust_i18n::t!("Settings"), "Настройки");
         assert_eq!(rust_i18n::t!("Left Click"), "Левый щелчок");
+
+        rust_i18n::set_locale("zh-TW");
+        assert_eq!(rust_i18n::t!("Settings"), "設定");
+        assert_eq!(rust_i18n::t!("Left Click"), "左鍵按一下");
+        assert_eq!(rust_i18n::t!("Bind %{name}", name => "X"), "設定 X");
+        assert_ne!(
+            rust_i18n::t!(BLURB),
+            BLURB,
+            "blurb key missing from zh-TW app.yml"
+        );
 
         // English has no column: every key falls back to the English source.
         rust_i18n::set_locale("en");
