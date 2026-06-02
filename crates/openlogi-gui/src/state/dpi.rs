@@ -44,6 +44,6 @@ impl DpiCycleState {
     fn normalize(&self, dpi: u32) -> u32 {
         self.capabilities
             .as_ref()
-            .map_or(dpi, |caps| u32::from(caps.nearest(dpi)))
+            .map_or(dpi, |caps| caps.snap(dpi))
     }
 }

@@ -56,11 +56,22 @@ pub async fn run(args: DpiArgs) -> Result<()> {
         .context("read DPI after write")?;
     println!("  read-back DPI: {after}");
 
+    // `target` is always a device-reported value, so a mismatch means the
+    // device adjusted it — fine if it landed on another supported value, but a
+    // no-op write (`after == before`) or an off-list read-back is a real fault.
+    // (`target != before` is guaranteed by the early return above.)
+    if after == before {
+        anyhow::bail!("DPI write failed: requested {target}, device still reports {before}");
+    }
     if after != target {
-        anyhow::bail!(
-            "DPI write failed: requested {target}, device reports {after} \
-             (likely out of the device's supported range)"
-        );
+        if info.capabilities.contains(after) {
+            println!("  note: device snapped {target} → {after}");
+        } else {
+            anyhow::bail!(
+                "DPI write failed: requested {target}, device reports {after} \
+                 which is not in its supported list"
+            );
+        }
     }
 
     println!("  restoring DPI: {before}");

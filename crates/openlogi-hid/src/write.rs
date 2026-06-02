@@ -10,8 +10,11 @@
 use std::sync::Arc;
 
 use hidpp::{
-    channel::HidppChannel, device::Device, feature::CreatableFeature,
+    channel::HidppChannel,
+    device::Device,
+    feature::CreatableFeature,
     feature::adjustable_dpi::AdjustableDpiFeature,
+    protocol::v20::{ErrorType, Hidpp20Error},
 };
 use thiserror::Error;
 use tracing::debug;
@@ -90,6 +93,14 @@ impl DpiCapabilities {
             }
         }
         nearest
+    }
+
+    /// Snap `dpi` to the nearest supported value, widened to `u32` for UI math.
+    /// The single home for "round a DPI onto this device's grid" — callers that
+    /// hold an `Option<DpiCapabilities>` should `map_or(dpi, |c| c.snap(dpi))`.
+    #[must_use]
+    pub fn snap(&self, dpi: u32) -> u32 {
+        u32::from(self.nearest(dpi))
     }
 
     /// Best-effort step size for UI widgets that need a single increment.
@@ -219,9 +230,20 @@ pub async fn get_dpi(route: &DeviceRoute) -> Result<u16, WriteError> {
     .await
 }
 
-/// Read the supported DPI values for sensor 0.
-pub async fn get_dpi_list(route: &DeviceRoute) -> Result<Vec<u16>, WriteError> {
-    Ok(get_dpi_info(route).await?.capabilities.values)
+/// Classify a HID++ error from the AdjustableDpi functions. A device that
+/// announces `0x2201` but rejects a function (`Unsupported` /
+/// `InvalidFunctionId`) or returns a structurally invalid DPI list
+/// (`UnsupportedResponse`) will keep doing so, so these map to the permanent
+/// [`WriteError::FeatureUnsupported`]; channel/timeout errors stay transient
+/// [`WriteError::Hidpp`] so callers may retry.
+fn classify_dpi_error(error: Hidpp20Error) -> WriteError {
+    match error {
+        Hidpp20Error::Feature(ErrorType::Unsupported | ErrorType::InvalidFunctionId)
+        | Hidpp20Error::UnsupportedResponse => WriteError::FeatureUnsupported {
+            feature_hex: AdjustableDpiFeature::ID,
+        },
+        other => WriteError::Hidpp(format!("{other:?}")),
+    }
 }
 
 /// Read the current DPI and the supported DPI values for sensor 0 in one
@@ -236,20 +258,22 @@ pub async fn get_dpi_info(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
         let sensor_count = feature
             .get_sensor_count()
             .await
-            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            .map_err(classify_dpi_error)?;
         if sensor_count == 0 {
-            return Err(WriteError::Hidpp(
-                "AdjustableDpi reported zero sensors".into(),
-            ));
+            // The device claims AdjustableDpi but exposes no sensor — it cannot
+            // report DPI, and that won't change on retry.
+            return Err(WriteError::FeatureUnsupported {
+                feature_hex: AdjustableDpiFeature::ID,
+            });
         }
         let current = feature
             .get_sensor_dpi(0)
             .await
-            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            .map_err(classify_dpi_error)?;
         let values = feature
             .get_sensor_dpi_list(0)
             .await
-            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            .map_err(classify_dpi_error)?;
         Ok(DpiInfo {
             current,
             capabilities: DpiCapabilities::new(values)?,

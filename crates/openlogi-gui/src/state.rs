@@ -34,7 +34,7 @@ pub use dpi::DpiCycleState;
 use crate::asset::AssetResolver;
 use crate::data::mouse_buttons::{Action, ButtonId, GestureDirection};
 use crate::state::bindings::{bindings_for, gesture_bindings_for};
-use crate::state::devices::{build_device_list, pick_initial_device};
+use crate::state::devices::{build_device_list, pick_initial_device, sort_device_list};
 
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
@@ -46,6 +46,11 @@ pub const DEFAULT_DPI: u32 = 1600;
 /// disappear mid-interaction.
 const INVENTORY_MISS_GRACE: u8 = 2;
 
+/// How many times to retry DPI capability discovery after a transient HID++
+/// error (read timeout, busy device) before marking the device unsupported. A
+/// genuine "feature not supported" reply is permanent and never retried.
+const DPI_LOAD_MAX_ATTEMPTS: u8 = 3;
+
 /// Per-device DPI capability loading state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DpiStatus {
@@ -55,7 +60,13 @@ pub enum DpiStatus {
     Loading,
     /// The device reported its current DPI and supported values.
     Ready(DpiInfo),
-    /// DPI capability discovery failed or the device does not support it.
+    /// Transient discovery errors (read timeouts, busy device) exhausted the
+    /// retry budget. Distinct from [`Self::Unsupported`] because the device may
+    /// well support DPI — re-selecting it (see [`AppState::set_current_device`])
+    /// grants a fresh attempt.
+    Failed(String),
+    /// The device genuinely does not support the AdjustableDpi feature; never
+    /// retried.
     Unsupported(String),
 }
 
@@ -95,6 +106,11 @@ pub struct AppState {
     /// keyed by [`DeviceRecord::config_key`]. Used to debounce transient HID++
     /// probe misses without hiding a real disconnect forever.
     inventory_misses: BTreeMap<String, u8>,
+    /// Consecutive failed DPI discovery attempts, keyed by
+    /// [`DeviceRecord::config_key`]. Lets a transient read error retry a few
+    /// times (see [`DPI_LOAD_MAX_ATTEMPTS`]) instead of sticking the device on
+    /// [`DpiStatus::Unsupported`] forever.
+    dpi_load_attempts: BTreeMap<String, u8>,
     /// All paired devices, in carousel order. Each entry caches the per-
     /// device data the views need so a switch is a pure index update.
     pub device_list: Vec<DeviceRecord>,
@@ -170,6 +186,7 @@ impl AppState {
             dpi: DEFAULT_DPI,
             dpi_by_device: BTreeMap::new(),
             inventory_misses: BTreeMap::new(),
+            dpi_load_attempts: BTreeMap::new(),
             device_list,
             config,
             hook_bindings,
@@ -252,11 +269,15 @@ impl AppState {
     pub fn refresh_inventories(&mut self, inventories: &[DeviceInventory], cache: &AssetResolver) {
         let new_list = build_device_list(inventories, cache);
         let merged_list = self.merge_inventory_snapshot(new_list);
+        // Compare routes too, not just config_key: a device can reconnect on a
+        // new HID++ index while keeping its model-derived config_key, and the
+        // fresh route must replace the stale one so reads/writes don't target a
+        // dead index.
         let unchanged = merged_list.len() == self.device_list.len()
             && merged_list
                 .iter()
                 .zip(self.device_list.iter())
-                .all(|(a, b)| a.config_key == b.config_key);
+                .all(|(a, b)| a.config_key == b.config_key && a.route == b.route);
         if unchanged {
             return;
         }
@@ -276,10 +297,32 @@ impl AppState {
             "inventory refreshed"
         );
 
+        // A device that came back on a different route must re-discover DPI —
+        // its cached status/attempts were keyed to the now-dead route.
+        let rerouted: Vec<String> = merged_list
+            .iter()
+            .filter(|new| {
+                self.device_list
+                    .iter()
+                    .any(|old| old.config_key == new.config_key && old.route != new.route)
+            })
+            .map(|new| new.config_key.clone())
+            .collect();
+
         self.device_list = merged_list;
+        for key in &rerouted {
+            self.dpi_by_device.remove(key);
+            self.dpi_load_attempts.remove(key);
+        }
         self.dpi_by_device
             .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
+        self.dpi_load_attempts
+            .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
         self.current_device = new_index;
+        // The active device may have changed (selection fell back to index 0
+        // when the previous one vanished); re-seed the displayed DPI so it
+        // tracks the now-current device rather than the old one.
+        self.dpi = self.dpi_for_current();
         self.button_bindings = self.bindings_for_current();
         self.gesture_bindings = self.gesture_bindings_for_current();
         self.sync_hook_bindings();
@@ -322,6 +365,10 @@ impl AppState {
         }
         self.inventory_misses
             .retain(|key, _| merged.iter().any(|record| record.config_key == *key));
+        // `merged` is `previous-order + newly-appeared`, so re-apply the
+        // canonical route order or a new device would be stuck at the end of
+        // the carousel permanently.
+        sort_device_list(&mut merged);
         merged
     }
 
@@ -335,6 +382,18 @@ impl AppState {
             return;
         }
         self.current_device = idx;
+        // A device left in `Failed` (transient read errors exhausted its retry
+        // budget) gets one fresh attempt each time it is re-selected.
+        if let Some(key) = self.current_record().map(|r| r.config_key.clone()) {
+            if matches!(self.dpi_by_device.get(&key), Some(DpiStatus::Failed(_))) {
+                self.dpi_by_device.remove(&key);
+                self.dpi_load_attempts.remove(&key);
+            }
+        }
+        // `self.dpi` is the active device's value; adopt the newly-selected
+        // device's known DPI so the panel doesn't keep showing the previous
+        // device's number until a fresh read lands.
+        self.dpi = self.dpi_for_current();
         self.button_bindings = self.bindings_for_current();
         self.gesture_bindings = self.gesture_bindings_for_current();
         self.sync_hook_bindings();
@@ -384,10 +443,52 @@ impl AppState {
             .unwrap_or(DpiStatus::Unknown)
     }
 
+    /// Whether the active device still needs a DPI read (no status recorded —
+    /// i.e. `Unknown`). Cheaper than `current_dpi_status() == Unknown`: it
+    /// avoids cloning the `DpiInfo`, which matters on the per-frame render path.
+    #[must_use]
+    pub fn current_dpi_unqueried(&self) -> bool {
+        self.current_record()
+            .is_some_and(|record| !self.dpi_by_device.contains_key(&record.config_key))
+    }
+
+    /// The active device's known DPI, falling back to [`DEFAULT_DPI`] until its
+    /// capability read completes. Used to seed `self.dpi` on a device switch.
+    #[must_use]
+    fn dpi_for_current(&self) -> u32 {
+        self.current_record()
+            .and_then(|record| self.dpi_by_device.get(&record.config_key))
+            .and_then(|status| match status {
+                DpiStatus::Ready(info) => Some(u32::from(info.current)),
+                _ => None,
+            })
+            .unwrap_or(DEFAULT_DPI)
+    }
+
     /// Mark DPI capability discovery as in flight for `key`.
     pub fn mark_dpi_loading(&mut self, key: &str) {
         self.dpi_by_device
             .insert(key.to_string(), DpiStatus::Loading);
+    }
+
+    /// Reset a stuck `Loading` for `key` back to `Unknown`. Called when the
+    /// discovery worker vanished without delivering a result (e.g. it panicked),
+    /// so the device isn't wedged on "Reading…" with no path to retry.
+    pub fn clear_dpi_loading(&mut self, key: &str) {
+        if matches!(self.dpi_by_device.get(key), Some(DpiStatus::Loading)) {
+            self.dpi_by_device.remove(key);
+        }
+    }
+
+    /// Drop the active device's recorded DPI status so the next render
+    /// re-runs discovery. Backs the "click to retry" affordance on a
+    /// [`DpiStatus::Failed`] device, which is the only recovery path when the
+    /// carousel has a single device (re-selecting it is a no-op).
+    pub fn retry_active_dpi(&mut self) {
+        if let Some(key) = self.current_record().map(|r| r.config_key.clone()) {
+            self.dpi_by_device.remove(&key);
+            self.dpi_load_attempts.remove(&key);
+        }
     }
 
     /// Store a DPI capability discovery result if it still matches the known
@@ -405,18 +506,65 @@ impl AppState {
             .any(|record| record.config_key == key && record.route.as_ref() == Some(route));
         if !still_matches {
             debug!(key, ?route, "stale DPI capability result ignored");
+            // If the device is still present but on a different route (it
+            // reconnected mid-read), drop the orphaned `Loading` marker so the
+            // next render re-discovers against the live route instead of
+            // spinning on "Reading…" forever.
+            if self
+                .device_list
+                .iter()
+                .any(|record| record.config_key == key)
+            {
+                self.dpi_by_device.remove(&key);
+            }
             return;
         }
 
+        let is_active = self.current_record().map(|r| r.config_key.as_str()) == Some(key.as_str());
         let status = match result {
             Ok(info) => {
-                self.dpi = u32::from(info.current);
+                // Only the active device owns the shared `self.dpi`; a result
+                // landing for a background device after a carousel switch must
+                // not clobber the visible value.
+                if is_active {
+                    self.dpi = u32::from(info.current);
+                }
+                self.dpi_load_attempts.remove(&key);
                 DpiStatus::Ready(info)
             }
-            Err(error) => DpiStatus::Unsupported(error.to_string()),
+            // A genuine "feature not supported" reply will never change — record
+            // it and stop probing.
+            Err(error) if dpi_error_is_permanent(&error) => {
+                self.dpi_load_attempts.remove(&key);
+                DpiStatus::Unsupported(error.to_string())
+            }
+            // Timeouts and other transient failures get a few more tries: clear
+            // the status back to `Unknown` so the next render re-triggers the
+            // read, until the attempt budget runs out, then settle on `Failed`
+            // (retryable on re-select) rather than the permanent `Unsupported`.
+            Err(error) => {
+                let attempts = self.dpi_load_attempts.entry(key.clone()).or_insert(0);
+                *attempts = attempts.saturating_add(1);
+                if *attempts < DPI_LOAD_MAX_ATTEMPTS {
+                    debug!(
+                        key,
+                        attempts = *attempts,
+                        error = %error,
+                        "transient DPI read error — will retry"
+                    );
+                    self.dpi_by_device.remove(&key);
+                    self.refresh_dpi_cycle_capabilities();
+                    return;
+                }
+                self.dpi_load_attempts.remove(&key);
+                DpiStatus::Failed(error.to_string())
+            }
         };
         self.dpi_by_device.insert(key, status);
-        self.sync_dpi_cycle();
+        // Inject the new capabilities without rebuilding the cycle: discovery
+        // completes at an arbitrary moment and must not reset the cycle index
+        // the way a device switch or preset edit deliberately does.
+        self.refresh_dpi_cycle_capabilities();
     }
 
     /// DPI capabilities for the active device, if discovery succeeded.
@@ -426,7 +574,10 @@ impl AppState {
             .and_then(|record| self.dpi_by_device.get(&record.config_key))
             .and_then(|status| match status {
                 DpiStatus::Ready(info) => Some(&info.capabilities),
-                DpiStatus::Unknown | DpiStatus::Loading | DpiStatus::Unsupported(_) => None,
+                DpiStatus::Unknown
+                | DpiStatus::Loading
+                | DpiStatus::Failed(_)
+                | DpiStatus::Unsupported(_) => None,
             })
     }
 
@@ -434,7 +585,7 @@ impl AppState {
     #[must_use]
     pub fn normalize_active_dpi(&self, dpi: u32) -> u32 {
         self.active_dpi_capabilities()
-            .map_or(dpi, |caps| u32::from(caps.nearest(dpi)))
+            .map_or(dpi, |caps| caps.snap(dpi))
     }
 
     /// App-wide settings backing the Settings window (launch-at-login,
@@ -674,6 +825,33 @@ impl AppState {
             }
         }
     }
+
+    /// Patch only the DPI capabilities into the shared cycle, preserving the
+    /// current cycle position. Called when lazy discovery completes, which can
+    /// happen long after the cycle was built — unlike [`Self::sync_dpi_cycle`],
+    /// this must not reset the index.
+    fn refresh_dpi_cycle_capabilities(&self) {
+        let capabilities = self.active_dpi_capabilities().cloned();
+        match self.dpi_cycle.write() {
+            Ok(mut guard) => guard.capabilities = capabilities,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "dpi_cycle lock poisoned — hook will keep stale DPI capabilities"
+                );
+            }
+        }
+    }
+}
+
+/// Whether a DPI discovery error is permanent (the device genuinely lacks the
+/// feature or reports nothing usable) versus transient (a timeout or busy
+/// device worth retrying).
+fn dpi_error_is_permanent(error: &WriteError) -> bool {
+    matches!(
+        error,
+        WriteError::FeatureUnsupported { .. } | WriteError::EmptyDpiList
+    )
 }
 
 impl Global for AppState {}
