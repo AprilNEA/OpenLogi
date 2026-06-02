@@ -12,22 +12,24 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use clap::Args;
-use openlogi_assets::{CORE_FILES, FetchOutcome, http};
+use openlogi_assets::{FRONT_RENDER_FILES, FetchOutcome, METADATA_FILES, http};
 
 /// Default origin. Overridable via `--base` / `OPENLOGI_ASSETS`.
 const DEFAULT_BASE: &str = "https://assets.openlogi.org";
 
 /// Returns true when `name` is an *optional* asset OpenLogi fetches when the
 /// registry lists it but never warns about when it's absent:
-/// - `side_core.png` — the dedicated buttons render, present only on devices
-///   (e.g. MX Master) whose `device_buttons_image` is a distinct side view.
-///   Devices that reuse `front_core.png` simply don't ship one.
-/// - `front_ext_N.png` / `side_ext_N.png` — per-colour variants for the
-///   carousel and the buttons-config view.
+/// - `side_core.png` / `side.png` — the dedicated buttons render, present
+///   only on devices (e.g. MX Master) whose `device_buttons_image` is a
+///   distinct side view. Devices that reuse the hero render don't ship one.
+/// - `front_ext*.png` / `side_ext*.png` — per-colour variants for the
+///   carousel and the buttons-config view. Newer depots name them
+///   `front_ext_N`, older ones `front_extN`; the `front_ext` prefix covers
+///   both.
 ///
 /// (`back_*` renders stay remote until an easyswitch view needs them.)
 fn is_optional_asset(name: &str) -> bool {
-    if name == "side_core.png" {
+    if name == "side_core.png" || name == "side.png" {
         return true;
     }
     let path = std::path::Path::new(name);
@@ -37,7 +39,7 @@ fn is_optional_asset(name: &str) -> bool {
     if !ext_is_png {
         return false;
     }
-    name.starts_with("front_ext_") || name.starts_with("side_ext_")
+    name.starts_with("front_ext") || name.starts_with("side_ext")
 }
 
 #[derive(Debug, Args)]
@@ -83,18 +85,22 @@ pub fn run(args: SyncArgs) -> Result<()> {
         let dir = out.join(depot);
         fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
 
-        // Required core set + every optional asset (side render + colour
-        // variants) the registry lists. Only a *required* file's absence
-        // warns; optional ones are simply skipped when not present.
+        // Per-depot baseline (metadata + manifest + hero render, either
+        // schema) + every optional asset (side render + colour variants)
+        // the registry lists. A depot that ships no hotspot metadata or
+        // hero render won't render in the GUI (cameras, receivers, bare
+        // keyboards) — warn, but still bundle whatever it does have.
+        let baseline = entry.baseline_files();
         let wanted: Vec<&openlogi_assets::FileEntry> = entry
             .files
             .iter()
-            .filter(|f| CORE_FILES.contains(&f.name.as_str()) || is_optional_asset(&f.name))
+            .filter(|f| baseline.contains(&f.name.as_str()) || is_optional_asset(&f.name))
             .collect();
-        for required in CORE_FILES {
-            if !wanted.iter().any(|f| f.name == required) {
-                eprintln!("  WARN {depot}: registry missing {required}");
-            }
+        if entry.preferred_file(&METADATA_FILES).is_none() {
+            eprintln!("  WARN {depot}: no hotspot metadata (core_metadata.json / metadata.json)");
+        }
+        if entry.preferred_file(&FRONT_RENDER_FILES).is_none() {
+            eprintln!("  WARN {depot}: no hero render (front_core.png / front.png)");
         }
 
         for &file_entry in &wanted {
@@ -111,9 +117,14 @@ pub fn run(args: SyncArgs) -> Result<()> {
     let bundle_bytes: u64 = index
         .devices
         .values()
-        .flat_map(|d| d.files.iter())
-        .filter(|f| CORE_FILES.contains(&f.name.as_str()) || is_optional_asset(&f.name))
-        .map(|f| f.bytes)
+        .map(|d| {
+            let baseline = d.baseline_files();
+            d.files
+                .iter()
+                .filter(|f| baseline.contains(&f.name.as_str()) || is_optional_asset(&f.name))
+                .map(|f| f.bytes)
+                .sum::<u64>()
+        })
         .sum();
     #[allow(
         clippy::cast_precision_loss,

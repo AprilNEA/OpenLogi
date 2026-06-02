@@ -248,23 +248,24 @@ fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
                 .child(if scanning {
                     tr!("Scanning for devices…")
                 } else {
-                    tr!("No device connected")
+                    tr!("No devices connected")
                 }),
         )
         .child(
             div()
                 .max_w(px(440.))
                 .text_sm()
-                .text_color(pal.text_muted)
+                .text_center()
                 .child(tr!(
-                    "Plug in or pair a supported Logitech device — it'll show up here automatically."
+                    "Plug in or pair a supported Logitech device — it'll show up here automatically. For direct Bluetooth connections, pair in your computer's bluetooth settings."
                 )),
         )
         .child(
             div()
                 .id("empty-add-device")
+                .mt_1()
                 .px_4()
-                .py_2()
+                .py_1()
                 .rounded_md()
                 .bg(rgb(theme::ACCENT_BLUE))
                 .text_color(rgb(0x00ff_ffff))
@@ -279,7 +280,7 @@ fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
                 )
                 .on_click(|_, _, cx| crate::windows::add_device::open(cx)),
         )
-        .child(div().max_w(px(440.)).text_xs().text_color(pal.text_muted).child(tr!(
+        .child(div().mt_1().max_w(px(440.)).text_xs().text_center().text_color(pal.text_muted).child(tr!(
             "Using Logi Options+? Quit it first — both apps compete for HID++ access."
         )))
         .into_any_element()

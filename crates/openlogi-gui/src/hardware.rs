@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use openlogi_hid::{CaptureChannel, DeviceRoute, SharedChannel};
+use openlogi_hid::{CaptureChannel, DeviceRoute, DpiInfo, SharedChannel, WriteError};
 use tracing::{debug, warn};
 
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
@@ -22,6 +22,23 @@ use tracing::{debug, warn};
 /// this background thread forever; a write to a live device completes in well
 /// under a second.
 const WRITE_BUDGET: Duration = Duration::from_secs(5);
+
+/// Read the current DPI and supported DPI values on a background worker.
+///
+/// This helper is intentionally blocking so GPUI callers can run it via
+/// `cx.background_spawn` without making the UI thread own a Tokio runtime.
+pub fn read_dpi_info_blocking(target: &DeviceRoute) -> Result<DpiInfo, WriteError> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| WriteError::Hidpp(format!("tokio runtime init failed: {e}")))?;
+
+    rt.block_on(async {
+        tokio::time::timeout(WRITE_BUDGET, openlogi_hid::get_dpi_info(target))
+            .await
+            .map_err(|_| WriteError::Hidpp("DPI info read timed out".into()))?
+    })
+}
 
 /// Clone out the capture session's channel when it reaches `route`. `None` when
 /// no capture session is connected or the open channel points at a different
@@ -109,9 +126,8 @@ pub fn write_dpi_in_background(
                 return;
             }
         };
-        // DPI values are clamped to <= 6400 by every caller, so the cast is
-        // lossless. The saturating fallback exists only for type-system
-        // exhaustiveness.
+        // All device-supported DPI values fit in HID++'s u16 wire field. The
+        // saturating fallback exists only for type-system exhaustiveness.
         let dpi_u16 = u16::try_from(dpi).unwrap_or(u16::MAX);
         let result = rt.block_on(async {
             tokio::time::timeout(WRITE_BUDGET, async {

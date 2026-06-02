@@ -406,9 +406,14 @@ fn language_row(
                 .child(tr!("Choose the interface language.")),
         )
         .child(
-            Select::new(language_select)
-                .small()
-                .w(px(220.))
-                .menu_width(px(220.)),
+            // The Select's root is `size_full`, so it would otherwise claim the
+            // whole row and starve the description into one char per line. Pin it
+            // to a fixed-size, non-shrinking box (h_6 matches the `.small()` input).
+            div().flex_shrink_0().w(px(220.)).h_6().child(
+                Select::new(language_select)
+                    .small()
+                    .w(px(220.))
+                    .menu_width(px(220.)),
+            ),
         )
 }

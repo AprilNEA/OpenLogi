@@ -4,6 +4,7 @@ use std::{any::Any, sync::Arc};
 
 use crate::channel::HidppChannel;
 
+pub mod adjustable_dpi;
 pub mod device_friendly_name;
 pub mod device_information;
 pub mod device_type_and_name;

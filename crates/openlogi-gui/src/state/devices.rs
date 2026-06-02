@@ -83,11 +83,18 @@ pub(super) fn build_device_list(
             });
         }
     }
-    // HID enumeration order can change as different mice wake, sleep, or are
-    // selected. Keep the header carousel stable by ordering by the physical
-    // route instead of by whichever HID node happened to be reported first.
-    list.sort_by_key(device_order_key);
+    sort_device_list(&mut list);
     list
+}
+
+/// Order the carousel by physical route. HID enumeration order can change as
+/// different mice wake, sleep, or are selected; sorting by the stable route
+/// (not whichever HID node was reported first) keeps the header stable.
+/// Applied both on a fresh build and after [`super::AppState`] merges a
+/// snapshot, so a newly-appeared device lands in its canonical slot rather than
+/// being appended.
+pub(super) fn sort_device_list(list: &mut [DeviceRecord]) {
+    list.sort_by_key(device_order_key);
 }
 
 fn device_order_key(record: &DeviceRecord) -> (DeviceStableId, String, String) {

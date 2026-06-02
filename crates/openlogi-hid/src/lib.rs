@@ -9,7 +9,6 @@
 mod route;
 mod transport;
 
-pub mod adjustable_dpi;
 pub mod gesture;
 pub mod inventory;
 pub mod pairing;
@@ -27,6 +26,7 @@ pub use pairing::{
 pub use route::{DIRECT_DEVICE_INDEX, DeviceRoute};
 pub use smartshift::{SmartShiftMode, SmartShiftStatus};
 pub use write::{
-    FeatureEntry, SharedChannel, WriteError, dump_features, get_dpi, get_smartshift_status,
-    set_dpi, set_dpi_on, toggle_smartshift, toggle_smartshift_on,
+    DpiCapabilities, DpiInfo, FeatureEntry, SharedChannel, WriteError, dump_features, get_dpi,
+    get_dpi_info, get_smartshift_status, set_dpi, set_dpi_on, toggle_smartshift,
+    toggle_smartshift_on,
 };

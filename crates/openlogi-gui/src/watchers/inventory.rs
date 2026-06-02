@@ -59,7 +59,7 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<Vec<DeviceInventory>> 
         // OS thread / fork limits are non-fatal — but startup no longer does a
         // synchronous enumeration, so the GUI keys its initial "Scanning…"
         // state off the first snapshot. Emit one empty snapshot here so it
-        // falls through to "No device connected" instead of showing
+        // falls through to "No devices connected" instead of showing
         // "Scanning…" forever; there's just no hot-plug / auto-reconnect.
         warn!(error = %e, "could not spawn inventory watcher — auto-reconnect disabled");
         let _ = tx.send(Vec::new());
