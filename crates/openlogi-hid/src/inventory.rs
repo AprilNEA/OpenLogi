@@ -29,7 +29,7 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use crate::route::DIRECT_DEVICE_INDEX;
-use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
+use crate::transport::{HidppNode, enumerate_hidpp_devices, open_hidpp_channel};
 
 /// How long to wait for device-arrival event bursts before assuming the
 /// receiver has finished reporting. MX Master 4 (and other devices that may
@@ -93,7 +93,7 @@ pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
     Ok(inventories)
 }
 
-async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, InventoryError> {
+async fn probe_one(dev: HidppNode) -> Result<Option<DeviceInventory>, InventoryError> {
     let Some((info, channel)) = open_hidpp_channel(dev).await? else {
         return Ok(None);
     };
