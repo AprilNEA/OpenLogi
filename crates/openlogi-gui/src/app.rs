@@ -263,6 +263,7 @@ fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
         .child(
             div()
                 .id("empty-add-device")
+                .mt_1()
                 .px_4()
                 .py_2()
                 .rounded_md()
@@ -279,7 +280,7 @@ fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
                 )
                 .on_click(|_, _, cx| crate::windows::add_device::open(cx)),
         )
-        .child(div().max_w(px(440.)).text_xs().text_center().text_color(pal.text_muted).child(tr!(
+        .child(div().mt_1().max_w(px(440.)).text_xs().text_center().text_color(pal.text_muted).child(tr!(
             "Using Logi Options+? Quit it first — both apps compete for HID++ access."
         )))
         .into_any_element()
