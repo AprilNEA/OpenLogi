@@ -257,7 +257,7 @@ fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
                 .text_sm()
                 .text_center()
                 .child(tr!(
-                    "Plug in or pair a supported Logitech device — it'll show up here automatically."
+                    "Plug in or pair a supported Logitech device — it'll show up here automatically. For direct Bluetooth connections, pair in your computer's bluetooth settings."
                 )),
         )
         .child(

@@ -33,12 +33,12 @@ _version: 2
   zh-HK: 結束 OpenLogi
   zh-TW: 結束 OpenLogi
 
-"Plug in or pair a supported Logitech device — it'll show up here automatically.":
-  ja: 対応する Logitech デバイスを接続またはペアリングすると、ここに自動的に表示されます。
-  ru: "Подключите или сопрягите поддерживаемое устройство Logitech — оно автоматически появится здесь."
-  zh-CN: 接入或配对受支持的 Logitech 设备，它会自动显示在这里。
-  zh-HK: 接入或配對受支援的 Logitech 裝置，它會自動顯示在這裡。
-  zh-TW: 接上或配對相容的 Logitech 裝置，裝置就會自動顯示在這裡。
+"Plug in or pair a supported Logitech device — it'll show up here automatically. For direct Bluetooth connections, pair in your computer's bluetooth settings.":
+  ja: 対応する Logitech デバイスを接続またはペアリングすると、ここに自動的に表示されます。直接 Bluetooth 接続の場合は、コンピューターの Bluetooth 設定でペアリングしてください。
+  ru: "Подключите или сопрягите поддерживаемое устройство Logitech — оно автоматически появится здесь. Для прямых Bluetooth-подключений выполните сопряжение в настройках Bluetooth вашего компьютера."
+  zh-CN: 接入或配对受支持的 Logitech 设备，它会自动显示在这里。如需直接蓝牙连接，请在电脑的蓝牙设置中配对。
+  zh-HK: 接入或配對受支援的 Logitech 裝置，它會自動顯示在這裡。如需直接藍牙連接，請在電腦的藍牙設定中配對。
+  zh-TW: 接上或配對相容的 Logitech 裝置，裝置就會自動顯示在這裡。若要使用直接藍牙連線，請在電腦的藍牙設定中配對。
 "Using Logi Options+? Quit it first — both apps compete for HID++ access.":
   ja: Logi Options+ をお使いですか?まず終了してください — 両方のアプリが HID++ アクセスを奪い合います。
   ru: "Используете Logi Options+? Сначала закройте его — оба приложения конкурируют за доступ к HID++."
