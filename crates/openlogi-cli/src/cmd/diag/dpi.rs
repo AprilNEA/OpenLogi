@@ -7,8 +7,8 @@ use crate::cmd::diag::first_online_device;
 
 #[derive(Debug, Args)]
 pub struct DpiArgs {
-    /// DPI to set during the test. Default = current + 200, clamped to the
-    /// 200–6400 window the GUI slider uses.
+    /// DPI to set during the test. Must be one of the values reported by the
+    /// device's HID++ AdjustableDpi feature.
     #[arg(long)]
     pub target: Option<u16>,
 }
@@ -17,18 +17,28 @@ pub async fn run(args: DpiArgs) -> Result<()> {
     let (route, name) = first_online_device().await?;
     println!("device: {name} ({route})");
 
-    let before = openlogi_hid::get_dpi(&route)
+    let info = openlogi_hid::get_dpi_info(&route)
         .await
-        .context("read current DPI")?;
+        .context("read DPI capabilities")?;
+    let before = info.current;
     println!("  current DPI: {before}");
+    println!("  supported DPI: {}", summarize_dpi(&info.capabilities));
 
-    let target = args.target.unwrap_or_else(|| {
-        if before < 3200 {
-            before.saturating_add(200).clamp(200, 6400)
-        } else {
-            before.saturating_sub(200).clamp(200, 6400)
+    let target = match args.target {
+        Some(target) => {
+            if !info.capabilities.contains(target) {
+                anyhow::bail!(
+                    "target {target} is not in the device-reported DPI list ({})",
+                    summarize_dpi(&info.capabilities)
+                );
+            }
+            target
         }
-    });
+        None => info
+            .capabilities
+            .adjacent_test_target(before)
+            .context("device reports fewer than two DPI values; pass --target to choose one")?,
+    };
     if target == before {
         println!(
             "  target {target} equals current — pick a different --target to exercise the write"
@@ -60,4 +70,22 @@ pub async fn run(args: DpiArgs) -> Result<()> {
 
     println!("✓ DPI round-trip OK");
     Ok(())
+}
+
+fn summarize_dpi(capabilities: &openlogi_hid::DpiCapabilities) -> String {
+    let values = capabilities.values();
+    let step = capabilities.step_hint();
+    if values.len() <= 12 {
+        return values
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+    format!(
+        "{}..{} (step ≈ {step}, {} values)",
+        capabilities.min(),
+        capabilities.max(),
+        values.len()
+    )
 }

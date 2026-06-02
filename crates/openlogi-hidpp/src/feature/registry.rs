@@ -9,7 +9,8 @@ use super::Feature;
 use crate::{
     channel::HidppChannel,
     feature::{
-        CreatableFeature, device_friendly_name::DeviceFriendlyNameFeature,
+        CreatableFeature, adjustable_dpi::AdjustableDpiFeature,
+        device_friendly_name::DeviceFriendlyNameFeature,
         device_information::DeviceInformationFeature,
         device_type_and_name::DeviceTypeAndNameFeature, feature_set::FeatureSetFeature,
         hires_wheel::HiResWheelFeature, root::RootFeature, smartshift::SmartShiftFeature,
@@ -532,7 +533,10 @@ lazy_static! {
             0x2201,
             KnownFeature {
                 name: "AdjustableDpi",
-                versions: &[]
+                versions: &[FeatureVersion {
+                    starting_version: AdjustableDpiFeature::STARTING_VERSION,
+                    producer: new_dyn::<AdjustableDpiFeature>
+                }]
             }
         ),
         (

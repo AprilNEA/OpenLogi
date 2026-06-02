@@ -1,6 +1,6 @@
 //! DPI-cycle state shared with background action dispatch.
 
-use openlogi_hid::DeviceRoute;
+use openlogi_hid::{DeviceRoute, DpiCapabilities};
 
 /// Shared state consumed by the OS hook thread and the DPI panel UI to
 /// implement DPI preset cycling and direct preset selection actions.
@@ -12,6 +12,7 @@ pub struct DpiCycleState {
     pub presets: Vec<u32>,
     pub index: usize,
     pub target: Option<DeviceRoute>,
+    pub capabilities: Option<DpiCapabilities>,
 }
 
 impl DpiCycleState {
@@ -23,7 +24,10 @@ impl DpiCycleState {
             return None;
         }
         self.index = (self.index + 1) % self.presets.len();
-        Some((self.presets[self.index], self.target.clone()))
+        Some((
+            self.normalize(self.presets[self.index]),
+            self.target.clone(),
+        ))
     }
 
     /// Jump to preset `i`, clamping to the list length. Returns the DPI +
@@ -34,6 +38,12 @@ impl DpiCycleState {
         }
         let clamped = i.min(self.presets.len() - 1);
         self.index = clamped;
-        Some((self.presets[clamped], self.target.clone()))
+        Some((self.normalize(self.presets[clamped]), self.target.clone()))
+    }
+
+    fn normalize(&self, dpi: u32) -> u32 {
+        self.capabilities
+            .as_ref()
+            .map_or(dpi, |caps| u32::from(caps.nearest(dpi)))
     }
 }

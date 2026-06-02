@@ -20,6 +20,7 @@ use std::sync::{Arc, RwLock};
 use gpui::Global;
 use openlogi_core::config::{AppSettings, Config};
 use openlogi_core::device::DeviceInventory;
+use openlogi_hid::{DeviceRoute, DpiCapabilities, DpiInfo, WriteError};
 use openlogi_hook::Hook;
 use tracing::{debug, warn};
 
@@ -38,6 +39,25 @@ use crate::state::devices::{build_device_list, pick_initial_device};
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
 pub const DEFAULT_DPI: u32 = 1600;
+
+/// Inventory snapshots can briefly miss a real device while another HID++
+/// request is in flight. Keep the previous record through this many
+/// consecutive misses so a transient probe timeout does not make the carousel
+/// disappear mid-interaction.
+const INVENTORY_MISS_GRACE: u8 = 2;
+
+/// Per-device DPI capability loading state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DpiStatus {
+    /// The selected device has not been queried yet.
+    Unknown,
+    /// A background HID++ read is in flight.
+    Loading,
+    /// The device reported its current DPI and supported values.
+    Ready(DpiInfo),
+    /// DPI capability discovery failed or the device does not support it.
+    Unsupported(String),
+}
 
 pub struct AppState {
     /// Index into [`Self::device_list`] of the currently visible device. May
@@ -68,6 +88,13 @@ pub struct AppState {
     /// lives in [`openlogi_core::config::DeviceConfig::gesture_bindings`].
     pub gesture_bindings: BTreeMap<GestureDirection, Action>,
     pub dpi: u32,
+    /// DPI capability state keyed by [`DeviceRecord::config_key`]. Loaded
+    /// lazily because HID++ reads must not block device switching or rendering.
+    pub dpi_by_device: BTreeMap<String, DpiStatus>,
+    /// Consecutive inventory snapshots that omitted a previously-known device,
+    /// keyed by [`DeviceRecord::config_key`]. Used to debounce transient HID++
+    /// probe misses without hiding a real disconnect forever.
+    inventory_misses: BTreeMap<String, u8>,
     /// All paired devices, in carousel order. Each entry caches the per-
     /// device data the views need so a switch is a pure index update.
     pub device_list: Vec<DeviceRecord>,
@@ -141,6 +168,8 @@ impl AppState {
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),
             dpi: DEFAULT_DPI,
+            dpi_by_device: BTreeMap::new(),
+            inventory_misses: BTreeMap::new(),
             device_list,
             config,
             hook_bindings,
@@ -184,6 +213,7 @@ impl AppState {
                 presets,
                 index: 0,
                 target,
+                capabilities: None,
             },
         )
     }
@@ -221,8 +251,9 @@ impl AppState {
     /// quiet polling cycles (P1.6).
     pub fn refresh_inventories(&mut self, inventories: &[DeviceInventory], cache: &AssetResolver) {
         let new_list = build_device_list(inventories, cache);
-        let unchanged = new_list.len() == self.device_list.len()
-            && new_list
+        let merged_list = self.merge_inventory_snapshot(new_list);
+        let unchanged = merged_list.len() == self.device_list.len()
+            && merged_list
                 .iter()
                 .zip(self.device_list.iter())
                 .all(|(a, b)| a.config_key == b.config_key);
@@ -233,25 +264,65 @@ impl AppState {
         let previous_key = self.current_record().map(|r| r.config_key.clone());
         let new_index = previous_key
             .as_deref()
-            .and_then(|k| new_list.iter().position(|r| r.config_key == k))
+            .and_then(|k| merged_list.iter().position(|r| r.config_key == k))
             .unwrap_or(0);
-        let connected_keys = new_list
+        let connected_keys = merged_list
             .iter()
             .map(|r| r.config_key.as_str())
             .collect::<Vec<_>>();
         debug!(
-            count = new_list.len(),
+            count = merged_list.len(),
             ?connected_keys,
             "inventory refreshed"
         );
 
-        self.device_list = new_list;
+        self.device_list = merged_list;
+        self.dpi_by_device
+            .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
         self.current_device = new_index;
         self.button_bindings = self.bindings_for_current();
         self.gesture_bindings = self.gesture_bindings_for_current();
         self.sync_hook_bindings();
         self.sync_gesture_bindings();
         self.sync_dpi_cycle();
+    }
+
+    fn merge_inventory_snapshot(&mut self, new_list: Vec<DeviceRecord>) -> Vec<DeviceRecord> {
+        let mut by_key = new_list
+            .into_iter()
+            .map(|record| (record.config_key.clone(), record))
+            .collect::<BTreeMap<_, _>>();
+        let mut merged = Vec::with_capacity(by_key.len().max(self.device_list.len()));
+
+        for previous in &self.device_list {
+            if let Some(record) = by_key.remove(&previous.config_key) {
+                self.inventory_misses.remove(&previous.config_key);
+                merged.push(record);
+                continue;
+            }
+
+            let misses = self
+                .inventory_misses
+                .entry(previous.config_key.clone())
+                .or_insert(0);
+            *misses = misses.saturating_add(1);
+            if *misses <= INVENTORY_MISS_GRACE {
+                debug!(
+                    key = %previous.config_key,
+                    misses = *misses,
+                    "keeping device through transient inventory miss"
+                );
+                merged.push(previous.clone());
+            }
+        }
+
+        for (key, record) in by_key {
+            self.inventory_misses.remove(&key);
+            merged.push(record);
+        }
+        self.inventory_misses
+            .retain(|key, _| merged.iter().any(|record| record.config_key == *key));
+        merged
     }
 
     /// Switch the carousel to `idx`. Out-of-range indices are silently
@@ -303,6 +374,67 @@ impl AppState {
         self.current_record()
             .map(|r| self.config.dpi_presets(&r.config_key))
             .unwrap_or_default()
+    }
+
+    /// DPI capability status for the active device.
+    #[must_use]
+    pub fn current_dpi_status(&self) -> DpiStatus {
+        self.current_record()
+            .and_then(|record| self.dpi_by_device.get(&record.config_key).cloned())
+            .unwrap_or(DpiStatus::Unknown)
+    }
+
+    /// Mark DPI capability discovery as in flight for `key`.
+    pub fn mark_dpi_loading(&mut self, key: &str) {
+        self.dpi_by_device
+            .insert(key.to_string(), DpiStatus::Loading);
+    }
+
+    /// Store a DPI capability discovery result if it still matches the known
+    /// device route. This guards against async reads completing after the
+    /// carousel or inventory changed.
+    pub fn store_dpi_info(
+        &mut self,
+        key: String,
+        route: &DeviceRoute,
+        result: Result<DpiInfo, WriteError>,
+    ) {
+        let still_matches = self
+            .device_list
+            .iter()
+            .any(|record| record.config_key == key && record.route.as_ref() == Some(route));
+        if !still_matches {
+            debug!(key, ?route, "stale DPI capability result ignored");
+            return;
+        }
+
+        let status = match result {
+            Ok(info) => {
+                self.dpi = u32::from(info.current);
+                DpiStatus::Ready(info)
+            }
+            Err(error) => DpiStatus::Unsupported(error.to_string()),
+        };
+        self.dpi_by_device.insert(key, status);
+        self.sync_dpi_cycle();
+    }
+
+    /// DPI capabilities for the active device, if discovery succeeded.
+    #[must_use]
+    pub fn active_dpi_capabilities(&self) -> Option<&DpiCapabilities> {
+        self.current_record()
+            .and_then(|record| self.dpi_by_device.get(&record.config_key))
+            .and_then(|status| match status {
+                DpiStatus::Ready(info) => Some(&info.capabilities),
+                DpiStatus::Unknown | DpiStatus::Loading | DpiStatus::Unsupported(_) => None,
+            })
+    }
+
+    /// Snap `dpi` to the active device's supported list when known.
+    #[must_use]
+    pub fn normalize_active_dpi(&self, dpi: u32) -> u32 {
+        self.active_dpi_capabilities()
+            .map_or(dpi, |caps| u32::from(caps.nearest(dpi)))
     }
 
     /// App-wide settings backing the Settings window (launch-at-login,
@@ -524,12 +656,14 @@ impl AppState {
             .map(|r| self.config.dpi_presets(&r.config_key))
             .unwrap_or_default();
         let target = self.current_record().and_then(|r| r.route.clone());
+        let capabilities = self.active_dpi_capabilities().cloned();
         match self.dpi_cycle.write() {
             Ok(mut guard) => {
                 *guard = DpiCycleState {
                     presets,
                     index: 0,
                     target,
+                    capabilities,
                 };
             }
             Err(e) => {

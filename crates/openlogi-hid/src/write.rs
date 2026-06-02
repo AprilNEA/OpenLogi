@@ -9,11 +9,13 @@
 
 use std::sync::Arc;
 
-use hidpp::{channel::HidppChannel, device::Device, feature::CreatableFeature};
+use hidpp::{
+    channel::HidppChannel, device::Device, feature::CreatableFeature,
+    feature::adjustable_dpi::AdjustableDpiFeature,
+};
 use thiserror::Error;
 use tracing::debug;
 
-use crate::adjustable_dpi::AdjustableDpiFeatureV0;
 use crate::route::{DeviceRoute, open_route_channel};
 use crate::smartshift::{SmartShiftFeatureV0, SmartShiftMode, SmartShiftStatus};
 
@@ -27,8 +29,105 @@ pub enum WriteError {
     DeviceUnreachable { index: u8 },
     #[error("device does not expose HID++ feature {feature_hex:#06x}")]
     FeatureUnsupported { feature_hex: u16 },
+    #[error("device returned no supported DPI values")]
+    EmptyDpiList,
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+}
+
+/// Supported DPI values reported by a device's HID++ AdjustableDpi feature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DpiCapabilities {
+    values: Vec<u16>,
+}
+
+impl DpiCapabilities {
+    /// Build capabilities from a device-reported DPI list. Values are sorted
+    /// and deduplicated so callers can rely on stable ordering.
+    pub fn new(mut values: Vec<u16>) -> Result<Self, WriteError> {
+        values.sort_unstable();
+        values.dedup();
+        if values.is_empty() {
+            return Err(WriteError::EmptyDpiList);
+        }
+        Ok(Self { values })
+    }
+
+    /// All supported DPI values, sorted ascending.
+    #[must_use]
+    pub fn values(&self) -> &[u16] {
+        &self.values
+    }
+
+    /// Minimum supported DPI.
+    #[must_use]
+    pub fn min(&self) -> u16 {
+        self.values[0]
+    }
+
+    /// Maximum supported DPI.
+    #[must_use]
+    pub fn max(&self) -> u16 {
+        self.values[self.values.len() - 1]
+    }
+
+    /// Whether `dpi` is exactly supported by the device.
+    #[must_use]
+    pub fn contains(&self, dpi: u16) -> bool {
+        self.values.binary_search(&dpi).is_ok()
+    }
+
+    /// The supported DPI nearest to `dpi`.
+    #[must_use]
+    pub fn nearest(&self, dpi: u32) -> u16 {
+        let mut nearest = self.values[0];
+        let mut best_delta = u32::from(nearest).abs_diff(dpi);
+        for &candidate in &self.values[1..] {
+            let delta = u32::from(candidate).abs_diff(dpi);
+            if delta < best_delta {
+                nearest = candidate;
+                best_delta = delta;
+            }
+        }
+        nearest
+    }
+
+    /// Best-effort step size for UI widgets that need a single increment.
+    /// Returns the smallest positive gap between adjacent reported values.
+    #[must_use]
+    pub fn step_hint(&self) -> u16 {
+        self.values
+            .windows(2)
+            .filter_map(|pair| pair[1].checked_sub(pair[0]))
+            .filter(|step| *step > 0)
+            .min()
+            .unwrap_or(1)
+    }
+
+    /// A supported value different from `current`, for diagnostic write tests.
+    #[must_use]
+    pub fn adjacent_test_target(&self, current: u16) -> Option<u16> {
+        if self.values.len() < 2 {
+            return None;
+        }
+        match self.values.binary_search(&current) {
+            Ok(index) if index + 1 < self.values.len() => Some(self.values[index + 1]),
+            Ok(index) if index > 0 => Some(self.values[index - 1]),
+            Ok(_) => None,
+            Err(index) if index < self.values.len() => Some(self.values[index]),
+            Err(_) => self.values.last().copied(),
+        }
+        .filter(|target| *target != current)
+    }
+}
+
+/// Current DPI plus the supported values reported by the device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DpiInfo {
+    /// DPI currently configured on sensor 0.
+    pub current: u16,
+    /// Supported values reported by the device for sensor 0.
+    pub capabilities: DpiCapabilities,
 }
 
 /// Snapshot of one HID++ feature exposed by a device: protocol ID +
@@ -85,14 +184,11 @@ pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, Wri
 /// Look up `F` on a device by HID++ feature ID, register it with
 /// [`Device::add_feature`], and return the typed wrapper.
 ///
-/// We bypass [`Device::enumerate_features`] because hidpp 0.2's central
-/// registry has `versions: &[]` for the features OpenLogi cares about
-/// (`0x2201 AdjustableDpi`, `0x2202 ExtendedAdjustableDpi`). Calling
-/// `enumerate_features` ends up _not_ registering them, so a subsequent
-/// `device.get_feature::<F>()` looking up our own TypeId returns `None`
-/// even when the device announces the feature ID. The direct lookup via
-/// `root().get_feature(id)` returns the assigned index unconditionally;
-/// `add_feature` then attaches our wrapper to that index.
+/// The direct lookup via `root().get_feature(id)` returns the assigned index
+/// unconditionally; `add_feature` then attaches our wrapper to that index. This
+/// keeps route-based write/read paths independent from full feature-table
+/// enumeration and also works for feature wrappers that are not in the central
+/// registry yet.
 async fn open_feature<F: CreatableFeature + 'static>(
     device: &mut Device,
 ) -> Result<Arc<F>, WriteError> {
@@ -114,11 +210,50 @@ pub async fn get_dpi(route: &DeviceRoute) -> Result<u16, WriteError> {
         let mut device = Device::new(Arc::clone(&channel), index)
             .await
             .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        let feature = open_feature::<AdjustableDpiFeatureV0>(&mut device).await?;
+        let feature = open_feature::<AdjustableDpiFeature>(&mut device).await?;
         feature
             .get_sensor_dpi(0)
             .await
             .map_err(|e| WriteError::Hidpp(format!("{e:?}")))
+    })
+    .await
+}
+
+/// Read the supported DPI values for sensor 0.
+pub async fn get_dpi_list(route: &DeviceRoute) -> Result<Vec<u16>, WriteError> {
+    Ok(get_dpi_info(route).await?.capabilities.values)
+}
+
+/// Read the current DPI and the supported DPI values for sensor 0 in one
+/// route/channel session.
+pub async fn get_dpi_info(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
+    let index = route.device_index();
+    with_route(route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let feature = open_feature::<AdjustableDpiFeature>(&mut device).await?;
+        let sensor_count = feature
+            .get_sensor_count()
+            .await
+            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+        if sensor_count == 0 {
+            return Err(WriteError::Hidpp(
+                "AdjustableDpi reported zero sensors".into(),
+            ));
+        }
+        let current = feature
+            .get_sensor_dpi(0)
+            .await
+            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+        let values = feature
+            .get_sensor_dpi_list(0)
+            .await
+            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+        Ok(DpiInfo {
+            current,
+            capabilities: DpiCapabilities::new(values)?,
+        })
     })
     .await
 }
@@ -159,7 +294,7 @@ async fn set_dpi_on_channel(
     let mut device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    let feature = open_feature::<AdjustableDpiFeatureV0>(&mut device).await?;
+    let feature = open_feature::<AdjustableDpiFeature>(&mut device).await?;
     feature
         .set_sensor_dpi(0, dpi)
         .await
@@ -273,5 +408,65 @@ where
     match open_route_channel(route).await? {
         Some(channel) => f(channel).await,
         None => Err(WriteError::DeviceNotFound),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DpiCapabilities, WriteError};
+
+    #[test]
+    fn capabilities_sort_and_deduplicate_values() -> Result<(), WriteError> {
+        let caps = DpiCapabilities::new(vec![1600, 400, 800, 800])?;
+
+        assert_eq!(caps.values(), [400, 800, 1600]);
+        assert_eq!(caps.min(), 400);
+        assert_eq!(caps.max(), 1600);
+        Ok(())
+    }
+
+    #[test]
+    fn capabilities_reject_empty_list() {
+        assert!(matches!(
+            DpiCapabilities::new(Vec::new()),
+            Err(WriteError::EmptyDpiList)
+        ));
+    }
+
+    #[test]
+    fn nearest_returns_closest_supported_value() -> Result<(), WriteError> {
+        let caps = DpiCapabilities::new(vec![400, 800, 1600])?;
+
+        assert_eq!(caps.nearest(390), 400);
+        assert_eq!(caps.nearest(1000), 800);
+        assert_eq!(caps.nearest(2000), 1600);
+        Ok(())
+    }
+
+    #[test]
+    fn step_hint_returns_smallest_positive_gap() -> Result<(), WriteError> {
+        let caps = DpiCapabilities::new(vec![400, 800, 1200, 2000])?;
+
+        assert_eq!(caps.step_hint(), 400);
+        Ok(())
+    }
+
+    #[test]
+    fn adjacent_test_target_prefers_next_then_previous_value() -> Result<(), WriteError> {
+        let caps = DpiCapabilities::new(vec![400, 800, 1600])?;
+
+        assert_eq!(caps.adjacent_test_target(400), Some(800));
+        assert_eq!(caps.adjacent_test_target(800), Some(1600));
+        assert_eq!(caps.adjacent_test_target(1600), Some(800));
+        Ok(())
+    }
+
+    #[test]
+    fn adjacent_test_target_handles_current_outside_list() -> Result<(), WriteError> {
+        let caps = DpiCapabilities::new(vec![400, 800, 1600])?;
+
+        assert_eq!(caps.adjacent_test_target(1000), Some(1600));
+        assert_eq!(caps.adjacent_test_target(2000), Some(1600));
+        Ok(())
     }
 }
