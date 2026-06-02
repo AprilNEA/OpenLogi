@@ -9,13 +9,62 @@ use crate::cmd::diag::first_online_device;
 pub struct SmartshiftArgs {
     /// Leave the wheel in the toggled mode (skip the second toggle that
     /// restores the original). Useful for visually verifying the flip.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "sensitivity")]
     pub leave_flipped: bool,
+
+    /// Set the auto-disengage sensitivity instead of toggling, keeping the
+    /// current Free/Ratchet mode. N is 1-255 (the wheel's speed threshold to
+    /// free-spin): lower = more sensitive; typical 10-40; 255 = permanent
+    /// ratchet.
+    #[arg(long, value_name = "N")]
+    pub sensitivity: Option<u8>,
 }
 
 pub async fn run(args: SmartshiftArgs) -> Result<()> {
     let (route, name) = first_online_device().await?;
     println!("device: {name} ({route})");
+
+    if let Some(n) = args.sensitivity {
+        if n == 0 {
+            anyhow::bail!("sensitivity must be 1-255 (0 means \"no change\")");
+        }
+
+        let before = openlogi_hid::get_smartshift_status(&route)
+            .await
+            .context("read SmartShift status")?;
+        println!(
+            "  current: mode={:?} sensitivity={}",
+            before.mode, before.auto_disengage
+        );
+
+        let after = openlogi_hid::set_smartshift_sensitivity(&route, n)
+            .await
+            .context("set SmartShift sensitivity")?;
+        println!(
+            "  read-back: mode={:?} sensitivity={}",
+            after.mode, after.auto_disengage
+        );
+
+        if after.auto_disengage != n {
+            anyhow::bail!(
+                "SmartShift sensitivity write not applied: requested {n}, device reports {}",
+                after.auto_disengage
+            );
+        }
+        if after.mode != before.mode {
+            anyhow::bail!(
+                "SmartShift mode changed unexpectedly: was {:?}, now {:?}",
+                before.mode,
+                after.mode
+            );
+        }
+
+        println!(
+            "✓ SmartShift sensitivity set to {n} (mode {:?} preserved)",
+            after.mode
+        );
+        return Ok(());
+    }
 
     let before = openlogi_hid::get_smartshift_status(&route)
         .await

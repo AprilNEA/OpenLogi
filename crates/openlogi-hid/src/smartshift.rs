@@ -152,3 +152,18 @@ impl SmartShiftFeatureV0 {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flipped_is_an_involution() {
+        assert_eq!(SmartShiftMode::Free.flipped(), SmartShiftMode::Ratchet);
+        assert_eq!(SmartShiftMode::Ratchet.flipped(), SmartShiftMode::Free);
+        assert_eq!(
+            SmartShiftMode::Free.flipped().flipped(),
+            SmartShiftMode::Free
+        );
+    }
+}

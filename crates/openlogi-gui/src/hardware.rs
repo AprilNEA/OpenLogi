@@ -60,8 +60,8 @@ fn reusable_channel(
 
 /// Spawn an OS thread that toggles SmartShift (free ↔ ratchet) on the
 /// device at `target` via `openlogi_hid::toggle_smartshift`. Returns
-/// immediately; failures (incl. devices that don't support `0x2111`) are
-/// logged.
+/// immediately; failures (incl. devices that expose neither `0x2111` nor
+/// the older `0x2110` SmartShift feature) are logged.
 pub fn toggle_smartshift_in_background(
     capture: Option<&CaptureChannel>,
     target: Option<DeviceRoute>,
@@ -126,7 +126,8 @@ pub fn read_smartshift_status_blocking(
 
 /// Spawn an OS thread that writes a full SmartShift configuration to the device
 /// at `target` via [`openlogi_hid::set_smartshift`]. Returns immediately;
-/// failures (incl. devices that don't support `0x2111`) are logged.
+/// failures (incl. devices that expose neither `0x2111` nor the older `0x2110`
+/// SmartShift feature) are logged.
 ///
 /// `target == None` is a no-op (dev environment without a real device).
 pub fn write_smartshift_in_background(
