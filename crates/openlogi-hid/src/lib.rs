@@ -8,6 +8,8 @@
 
 mod route;
 mod transport;
+#[cfg(target_os = "windows")]
+mod windows_hid;
 
 pub mod gesture;
 pub mod inventory;
@@ -15,6 +17,7 @@ pub mod pairing;
 pub mod reprog_controls;
 pub mod smartshift;
 pub mod thumbwheel;
+pub mod windows_pairing;
 pub mod write;
 
 pub use gesture::{CaptureChannel, CapturedInput, GestureError, run_capture_session};
@@ -25,6 +28,10 @@ pub use pairing::{
 };
 pub use route::{DIRECT_DEVICE_INDEX, DeviceRoute};
 pub use smartshift::{AUTO_DISENGAGE_PERMANENT, SmartShiftMode, SmartShiftStatus};
+pub use windows_pairing::{
+    WindowsPairingDevice, WindowsPairingError, WindowsPairingOutcome, WindowsPairingStatus,
+    list_windows_pairing_devices, pair_windows_device,
+};
 pub use write::{
     DpiCapabilities, DpiInfo, FeatureEntry, SharedChannel, WriteError, dump_features, get_dpi,
     get_dpi_info, get_smartshift_status, set_dpi, set_dpi_on, set_keyboard_color, set_smartshift,

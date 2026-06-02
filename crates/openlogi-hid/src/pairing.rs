@@ -36,6 +36,7 @@ use tracing::{debug, trace, warn};
 pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 
 use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
+use crate::windows_pairing::{WindowsPairingDevice, WindowsPairingStatus};
 
 /// HID++ device index addressing the receiver itself (not a paired device).
 const RECEIVER_INDEX: u8 = 0xff;
@@ -69,6 +70,9 @@ const NOTIF_FLAGS: [u8; 3] = [0x00, 0x09, 0x00];
 /// Product IDs (vendor `0x046d`) of supported pairing-capable receivers.
 const BOLT_PRODUCT_IDS: &[u16] = &[0xc548];
 const UNIFYING_PRODUCT_IDS: &[u16] = &[0xc52b, 0xc532];
+const CHANNEL_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const REGISTER_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const RECEIVER_UID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Receiver pairing family. Each uses a different register flow.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -177,6 +181,17 @@ pub enum PairingEvent {
     Passkey(PasskeyMethod),
     /// A device was paired and assigned `slot`.
     Paired { slot: u8 },
+    /// Windows Bluetooth device enumeration is running.
+    WindowsSearching,
+    /// Windows Bluetooth pairing candidate.
+    WindowsDeviceFound(WindowsPairingDevice),
+    /// Windows is running the OS pairing ceremony for the named device.
+    WindowsPairing { name: String },
+    /// Windows reported a paired or already-paired result.
+    WindowsPaired {
+        name: String,
+        status: WindowsPairingStatus,
+    },
     /// The flow ended without pairing a device.
     Failed(PairingError),
 }
@@ -203,6 +218,10 @@ pub enum PairingError {
     Timeout,
     #[error("receiver reported pairing error {0:#04x}")]
     Device(u8),
+    #[error("Windows pairing failed: {0}")]
+    Windows(String),
+    #[error("Windows pairing returned {0}")]
+    WindowsStatus(WindowsPairingStatus),
     #[error("pairing was cancelled")]
     Cancelled,
 }
@@ -213,11 +232,18 @@ impl From<async_hid::HidError> for PairingError {
     }
 }
 
+fn receiver_error(code: u8) -> PairingError {
+    match code {
+        0x01 => PairingError::Timeout,
+        _ => PairingError::Device(code),
+    }
+}
+
 /// Lists supported pairing-capable receivers connected to the host.
 pub async fn list_pairing_receivers() -> Result<Vec<PairingReceiver>, PairingError> {
     let mut out = Vec::new();
     for dev in enumerate_hidpp_devices().await? {
-        let Some((_, channel)) = open_hidpp_channel(dev).await? else {
+        let Some((_, channel)) = open_pairing_channel(dev).await? else {
             continue;
         };
         let Some(family) = family_for(channel.product_id) else {
@@ -233,11 +259,22 @@ pub async fn list_pairing_receivers() -> Result<Vec<PairingReceiver>, PairingErr
             product_id: channel.product_id,
         });
     }
+    debug!(count = out.len(), "pairing receivers listed");
     Ok(out)
 }
 
 /// Reads a Bolt receiver's unique ID via the crate's `BoltReceiver`.
 async fn read_bolt_uid(channel: &Arc<HidppChannel>) -> Option<String> {
+    if let Ok(uid) = tokio::time::timeout(RECEIVER_UID_TIMEOUT, read_bolt_uid_inner(channel)).await
+    {
+        uid
+    } else {
+        debug!("Bolt receiver UID read timed out");
+        None
+    }
+}
+
+async fn read_bolt_uid_inner(channel: &Arc<HidppChannel>) -> Option<String> {
     let Some(Receiver::Bolt(bolt)) = receiver::detect(Arc::clone(channel)) else {
         return None;
     };
@@ -248,27 +285,60 @@ async fn read_bolt_uid(channel: &Arc<HidppChannel>) -> Option<String> {
 async fn open_receiver(
     target: &ReceiverSelector,
 ) -> Result<(Arc<HidppChannel>, ReceiverFamily), PairingError> {
+    debug!(?target, "opening pairing receiver");
     for dev in enumerate_hidpp_devices().await? {
-        let Some((_, channel)) = open_hidpp_channel(dev).await? else {
+        let Some((_, channel)) = open_pairing_channel(dev).await? else {
             continue;
         };
         let Some(family) = family_for(channel.product_id) else {
+            debug!(
+                product_id = format_args!("{:04x}", channel.product_id),
+                "HID++ channel is not pairing-capable"
+            );
             continue;
         };
+        debug!(
+            ?family,
+            product_id = format_args!("{:04x}", channel.product_id),
+            "pairing-capable receiver candidate"
+        );
         match target {
-            ReceiverSelector::First => return Ok((channel, family)),
+            ReceiverSelector::First => {
+                debug!(?family, "selected first pairing receiver");
+                return Ok((channel, family));
+            }
             ReceiverSelector::BoltUid(want) => {
                 if family == ReceiverFamily::Bolt
                     && read_bolt_uid(&channel)
                         .await
                         .is_some_and(|uid| uid.eq_ignore_ascii_case(want))
                 {
+                    debug!(?family, uid = %want, "selected requested Bolt receiver");
                     return Ok((channel, family));
                 }
             }
         }
     }
     Err(PairingError::ReceiverNotFound)
+}
+
+async fn open_pairing_channel(
+    dev: async_hid::Device,
+) -> Result<Option<(async_hid::DeviceInfo, Arc<HidppChannel>)>, PairingError> {
+    let name = dev.name.clone();
+    let product_id = dev.product_id;
+    match tokio::time::timeout(CHANNEL_OPEN_TIMEOUT, open_hidpp_channel(dev)).await {
+        Ok(Ok(channel)) => Ok(channel),
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => {
+            debug!(
+                name = %name,
+                product_id = format_args!("{product_id:04x}"),
+                "HID++ channel open timed out; skipping pairing candidate"
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// Decodes a raw HID++ message into `(device_index, sub_id, payload)`, where
@@ -304,6 +374,8 @@ enum Notification {
     PairingSucceeded { slot: u8 },
     /// Bolt pairing/discovery failed with a receiver error code.
     PairingError(u8),
+    /// Bolt discovery elapsed without a device becoming available.
+    DiscoveryTimeout,
     /// Bolt passkey to present to the user (6 ASCII digits).
     Passkey(String),
     /// A device linked to the receiver (`slot` = its device index).
@@ -343,7 +415,9 @@ fn parse_notification(sub_id: u8, device_index: u8, p: [u8; 17]) -> Option<Notif
         }
         notif::DISCOVERY_STATUS => {
             let error = p[1];
-            if error != 0 {
+            if error == 0x01 {
+                Some(Notification::DiscoveryTimeout)
+            } else if error != 0 {
                 Some(Notification::PairingError(error))
             } else {
                 None
@@ -402,24 +476,31 @@ pub async fn run_pairing(
     mut commands: mpsc::UnboundedReceiver<PairingCommand>,
     events: mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
+    debug!(?target, "pairing session starting");
     let (channel, family) = open_receiver(&target).await?;
+    debug!(
+        ?family,
+        product_id = format_args!("{:04x}", channel.product_id),
+        "pairing receiver opened"
+    );
     let (listener, mut notifications) = subscribe(&channel);
 
     let result = drive(&channel, family, &mut commands, &mut notifications, &events).await;
 
     channel.remove_msg_listener(listener);
+    debug!("pairing listener removed; restoring notification flags");
     // Best-effort restore: clear notification flags we set.
-    let _ = channel
-        .write_register(RECEIVER_INDEX, reg::NOTIFICATIONS, [0, 0, 0])
-        .await;
+    let _ = write_register(&channel, reg::NOTIFICATIONS, [0, 0, 0]).await;
 
     if let Err(ref e) = result {
         let _ = events.send(PairingEvent::Failed(e.clone()));
     }
+    debug!(?result, "pairing session finished");
     result
 }
 
 /// Core session loop. Split out so [`run_pairing`] can always run teardown.
+#[allow(clippy::too_many_lines)]
 async fn drive(
     channel: &HidppChannel,
     family: ReceiverFamily,
@@ -428,6 +509,7 @@ async fn drive(
     events: &mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
     write_register(channel, reg::NOTIFICATIONS, NOTIF_FLAGS).await?;
+    debug!("receiver notification flags enabled for pairing");
 
     match family {
         ReceiverFamily::Bolt => {
@@ -437,6 +519,7 @@ async fn drive(
                 [DISCOVERY_TIMEOUT, 0x01, 0x00],
             )
             .await?;
+            debug!(timeout_s = DISCOVERY_TIMEOUT, "Bolt discovery opened");
         }
         ReceiverFamily::Unifying => {
             write_register(
@@ -445,6 +528,10 @@ async fn drive(
                 [0x01, 0x00, DISCOVERY_TIMEOUT],
             )
             .await?;
+            debug!(
+                timeout_s = DISCOVERY_TIMEOUT,
+                "Unifying pairing lock opened"
+            );
         }
     }
     let _ = events.send(PairingEvent::Searching);
@@ -453,6 +540,7 @@ async fn drive(
     let mut partial: HashMap<u16, PartialDevice> = HashMap::new();
     // Auth byte of the device the user chose to pair, for passkey rendering.
     let mut pairing_auth: Option<u8> = None;
+    let mut pair_requested = false;
     let deadline = tokio::time::sleep(SESSION_TIMEOUT);
     tokio::pin!(deadline);
 
@@ -462,7 +550,9 @@ async fn drive(
 
             cmd = commands.recv() => match cmd {
                 Some(PairingCommand::Pair(device)) => {
+                    debug!(name = %device.name, "pair command received");
                     pairing_auth = Some(device.authentication);
+                    pair_requested = true;
                     pair_bolt_device(channel, &device).await?;
                 }
                 Some(PairingCommand::Cancel) | None => {
@@ -482,6 +572,7 @@ async fn drive(
                 let Some(note) = parse_notification(sub_id, device_index, payload) else {
                     continue;
                 };
+                debug!(?note, "parsed pairing notification");
                 match note {
                     Notification::DiscoveryInfo { counter, kind, address, authentication } => {
                         let entry = partial.entry(counter).or_default();
@@ -513,8 +604,17 @@ async fn drive(
                         let _ = events.send(PairingEvent::Paired { slot });
                         return Ok(());
                     }
-                    Notification::PairingError(code) => return Err(PairingError::Device(code)),
+                    Notification::DiscoveryTimeout => return Err(PairingError::Timeout),
+                    Notification::PairingError(code) => return Err(receiver_error(code)),
                     Notification::Connected { slot, established } if family == ReceiverFamily::Unifying => {
+                        if established {
+                            let _ = events.send(PairingEvent::Paired { slot });
+                            return Ok(());
+                        }
+                    }
+                    Notification::Connected { slot, established }
+                        if family == ReceiverFamily::Bolt && pair_requested =>
+                    {
                         if established {
                             let _ = events.send(PairingEvent::Paired { slot });
                             return Ok(());
@@ -523,7 +623,7 @@ async fn drive(
                     Notification::Connected { .. } => {}
                     Notification::UnifyingLock { open, error } => {
                         if error != 0 {
-                            return Err(PairingError::Device(error));
+                            return Err(receiver_error(error));
                         }
                         if !open {
                             // Lock closed without a connection notification: nothing paired.
@@ -623,17 +723,38 @@ async fn write_register(
     address: u8,
     payload: [u8; 3],
 ) -> Result<(), PairingError> {
-    channel
-        .write_register(RECEIVER_INDEX, address, payload)
-        .await
-        .map_err(|e| {
+    match tokio::time::timeout(
+        REGISTER_WRITE_TIMEOUT,
+        channel.write_register(RECEIVER_INDEX, address, payload),
+    )
+    .await
+    {
+        Err(_) => {
+            warn!(
+                register = format_args!("{address:#04x}"),
+                "register write timed out"
+            );
+            Err(PairingError::Register(format!(
+                "register {address:#04x} write timed out"
+            )))
+        }
+        Ok(Ok(())) => {
+            debug!(
+                register = format_args!("{address:#04x}"),
+                payload = format_args!("{payload:02x?}"),
+                "register write succeeded"
+            );
+            Ok(())
+        }
+        Ok(Err(e)) => {
             warn!(
                 register = format_args!("{address:#04x}"),
                 ?e,
                 "register write failed"
             );
-            PairingError::Register(format!("{e}"))
-        })
+            Err(PairingError::Register(format!("{e}")))
+        }
+    }
 }
 
 async fn write_long_register(
@@ -641,17 +762,38 @@ async fn write_long_register(
     address: u8,
     payload: [u8; 16],
 ) -> Result<(), PairingError> {
-    channel
-        .write_long_register(RECEIVER_INDEX, address, payload)
-        .await
-        .map_err(|e| {
+    match tokio::time::timeout(
+        REGISTER_WRITE_TIMEOUT,
+        channel.write_long_register(RECEIVER_INDEX, address, payload),
+    )
+    .await
+    {
+        Err(_) => {
+            warn!(
+                register = format_args!("{address:#04x}"),
+                "long register write timed out"
+            );
+            Err(PairingError::Register(format!(
+                "long register {address:#04x} write timed out"
+            )))
+        }
+        Ok(Ok(())) => {
+            debug!(
+                register = format_args!("{address:#04x}"),
+                payload = format_args!("{payload:02x?}"),
+                "long register write succeeded"
+            );
+            Ok(())
+        }
+        Ok(Err(e)) => {
             warn!(
                 register = format_args!("{address:#04x}"),
                 ?e,
                 "long register write failed"
             );
-            PairingError::Register(format!("{e}"))
-        })
+            Err(PairingError::Register(format!("{e}")))
+        }
+    }
 }
 
 #[cfg(test)]

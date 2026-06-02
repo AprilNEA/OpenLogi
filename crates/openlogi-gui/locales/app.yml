@@ -13,6 +13,7 @@ _version: 2
 
 # ── App chrome: accessibility gate, empty state, footer (app.rs) ────────────
 "No devices connected":
+  ko: "연결된 장치 없음"
   ja: デバイスが接続されていません
   ru: "Устройство не подключено"
   zh-CN: 未连接设备
@@ -73,6 +74,7 @@ _version: 2
 
 # ── Menu-bar status item (platform/menubar.rs) ──────────────────────────────
 "Open OpenLogi":
+  ko: "OpenLogi 열기"
   ja: OpenLogi を開く
   ru: "Открыть OpenLogi"
   zh-CN: 打开 OpenLogi
@@ -80,6 +82,7 @@ _version: 2
   zh-TW: 開啟 OpenLogi
   it: Apri OpenLogi
 "Quit OpenLogi":
+  ko: "OpenLogi 종료"
   ja: OpenLogi を終了
   ru: "Выйти из OpenLogi"
   zh-CN: 退出 OpenLogi
@@ -232,72 +235,84 @@ _version: 2
   zh-HK: 不可用
   zh-TW: 無法使用
 "Mouse":
+  ko: "마우스"
   ja: マウス
   ru: "Мышь"
   zh-CN: 鼠标
   zh-HK: 滑鼠
   zh-TW: 滑鼠
 "Keyboard":
+  ko: "키보드"
   ja: キーボード
   ru: "Клавиатура"
   zh-CN: 键盘
   zh-HK: 鍵盤
   zh-TW: 鍵盤
 "Numpad":
+  ko: "숫자 키패드"
   ja: テンキー
   ru: "Цифровая клавиатура"
   zh-CN: 数字键盘
   zh-HK: 數字鍵盤
   zh-TW: 數字鍵盤
 "Presenter":
+  ko: "프레젠터"
   ja: プレゼンター
   ru: "Презентер"
   zh-CN: 演示器
   zh-HK: 簡報器
   zh-TW: 簡報器
 "Remote":
+  ko: "리모컨"
   ja: リモコン
   ru: "Пульт"
   zh-CN: 遥控器
   zh-HK: 遙控器
   zh-TW: 遙控器
 "Trackball":
+  ko: "트랙볼"
   ja: トラックボール
   ru: "Трекбол"
   zh-CN: 轨迹球
   zh-HK: 軌跡球
   zh-TW: 軌跡球
 "Touchpad":
+  ko: "터치패드"
   ja: タッチパッド
   ru: "Сенсорная панель"
   zh-CN: 触控板
   zh-HK: 觸控板
   zh-TW: 觸控板
 "Tablet":
+  ko: "태블릿"
   ja: タブレット
   ru: "Планшет"
   zh-CN: 数位板
   zh-HK: 平板
   zh-TW: 平板
 "Gamepad":
+  ko: "게임패드"
   ja: ゲームパッド
   ru: "Геймпад"
   zh-CN: 游戏手柄
   zh-HK: 遊戲手掣
   zh-TW: 遊戲手把
 "Joystick":
+  ko: "조이스틱"
   ja: ジョイスティック
   ru: "Джойстик"
   zh-CN: 摇杆
   zh-HK: 搖桿
   zh-TW: 搖桿
 "Headset":
+  ko: "헤드셋"
   ja: ヘッドセット
   ru: "Гарнитура"
   zh-CN: 耳机
   zh-HK: 耳機
   zh-TW: 耳機
 "Using Logi Options+? Quit it first — both apps compete for HID++ access.":
+  ko: "Logi Options+를 사용 중인가요? 먼저 종료하세요. 두 앱이 HID++ 접근을 두고 충돌합니다."
   ja: Logi Options+ をお使いですか?まず終了してください — 両方のアプリが HID++ アクセスを奪い合います。
   ru: "Используете Logi Options+? Сначала закройте его — оба приложения конкурируют за доступ к HID++."
   zh-CN: 正在使用 Logi Options+?请先退出 —— 两个应用会争夺 HID++ 访问权限。
@@ -305,6 +320,7 @@ _version: 2
   zh-TW: 正在使用 Logi Options+？請先結束，兩個應用程式會爭用 HID++ 存取權限。
   it: Usi Logi Options+? Esci prima da lì — entrambe le app competono per l'accesso HID++.
 "Accessibility permission required":
+  ko: "접근성 권한 필요"
   ja: アクセシビリティ権限が必要です
   ru: "Требуется разрешение Универсального доступа"
   zh-CN: 需要「辅助功能」权限
@@ -312,6 +328,7 @@ _version: 2
   zh-TW: 需要「輔助使用」權限
   it: Permesso di Accessibilità richiesto
 "OpenLogi captures mouse buttons (Back / Forward / gesture button) through the system Accessibility permission and runs the actions you bind. Features that talk to the device directly — DPI, SmartShift — are unaffected.":
+  ko: "OpenLogi는 시스템 접근성 권한으로 마우스 버튼(뒤로/앞으로/제스처 버튼)을 감지하고 지정한 동작을 실행합니다. 장치와 직접 통신하는 기능(DPI, SmartShift)은 영향을 받지 않습니다."
   ja: OpenLogi はシステムの「アクセシビリティ」権限を通じてマウスボタン(戻る / 進む / ジェスチャーボタン)を捕捉し、割り当てた操作を実行します。DPI、SmartShift などデバイスと直接通信する機能には影響しません。
   ru: "OpenLogi перехватывает кнопки мыши (Назад / Вперёд / кнопку жестов) через системное разрешение Универсального доступа и выполняет назначенные вами действия. Функции, которые обращаются к устройству напрямую — DPI, SmartShift — не затрагиваются."
   zh-CN: OpenLogi 通过系统的「辅助功能」权限捕获鼠标按键(后退 / 前进 / 手势按钮)并执行你绑定的操作。DPI、SmartShift 等直接与设备通信的功能不受影响。
@@ -319,6 +336,7 @@ _version: 2
   zh-TW: OpenLogi 會透過系統的「輔助使用」權限擷取滑鼠按鍵（後退 / 前進 / 手勢按鈕），並執行指派的操作。DPI、SmartShift 等直接與裝置通訊的功能不受影響。
   it: OpenLogi cattura i pulsanti del mouse (Indietro / Avanti / pulsante gesture) tramite i permessi di Accessibilità del sistema ed esegue le azioni associate. Le funzionalità che comunicano direttamente con il dispositivo — DPI, SmartShift — non sono influenzate.
 "Open System Settings to grant access":
+  ko: "시스템 설정을 열어 접근 권한 부여"
   ja: システム設定を開いて許可する
   ru: "Открыть системные настройки для выдачи доступа"
   zh-CN: 打开系统设置授权
@@ -326,6 +344,7 @@ _version: 2
   zh-TW: 開啟系統設定以授權
   it: Apri Impostazioni di Sistema per concedere l'accesso
 "Takes effect automatically once granted — no restart needed.":
+  ko: "권한을 부여하면 자동으로 적용됩니다. 다시 시작할 필요가 없습니다."
   ja: 許可すると自動的に反映されます — 再起動は不要です。
   ru: "Вступит в силу автоматически после выдачи разрешения — перезапуск не нужен."
   zh-CN: 授权后会自动生效,无需重启。
@@ -333,6 +352,7 @@ _version: 2
   zh-TW: 授權後會自動生效，無需重新啟動。
   it: Diventa effettivo automaticamente una volta concesso — nessun riavvio necessario.
 "Not now (use DPI and other features only)":
+  ko: "지금은 안 함(DPI 및 기타 기능만 사용)"
   ja: 後で(DPI などの機能のみ使用)
   ru: "Не сейчас (использовать только DPI и другие функции)"
   zh-CN: 稍后再说(仅使用 DPI 等功能)
@@ -340,6 +360,7 @@ _version: 2
   zh-TW: 稍後再說（僅使用 DPI 等功能）
   it: Non ora (usa solo DPI e altre funzionalità)
 "Settings":
+  ko: "설정"
   ja: 設定
   ru: "Настройки"
   zh-CN: 设置
@@ -347,6 +368,7 @@ _version: 2
   zh-TW: 設定
   it: Impostazioni
 "Accessibility granted":
+  ko: "접근성 권한 허용됨"
   ja: アクセシビリティは許可済み
   ru: "Универсальный доступ разрешён"
   zh-CN: 辅助功能已授权
@@ -354,6 +376,7 @@ _version: 2
   zh-TW: 輔助使用已授權
   it: Accessibilità concessa
 "Accessibility not granted · click to grant":
+  ko: "접근성 권한 없음 · 클릭하여 허용"
   ja: アクセシビリティ未許可 · クリックして許可
   ru: "Универсальный доступ не разрешён · нажмите, чтобы выдать доступ"
   zh-CN: 辅助功能未授权 · 点击授权
@@ -363,6 +386,7 @@ _version: 2
 
 # ── macOS menu bar (app_menu.rs) ────────────────────────────────────────────
 "About OpenLogi":
+  ko: "OpenLogi 정보"
   ja: OpenLogi について
   ru: "Об OpenLogi"
   zh-CN: 关于 OpenLogi
@@ -370,6 +394,7 @@ _version: 2
   zh-TW: 關於 OpenLogi
   it: Informazioni su OpenLogi
 "Settings…":
+  ko: "설정…"
   ja: 設定…
   ru: "Настройки…"
   zh-CN: 设置…
@@ -389,6 +414,7 @@ _version: 2
   zh-HK: 編輯
   zh-TW: 編輯
 "Undo":
+  ko: "실행 취소"
   ja: 取り消す
   ru: "Отменить"
   zh-CN: 撤销
@@ -396,6 +422,7 @@ _version: 2
   zh-TW: 復原
   it: Annulla
 "Redo":
+  ko: "다시 실행"
   ja: やり直す
   ru: "Повторить"
   zh-CN: 重做
@@ -403,6 +430,7 @@ _version: 2
   zh-TW: 重做
   it: Ripristina
 "Cut":
+  ko: "잘라내기"
   ja: カット
   ru: "Вырезать"
   zh-CN: 剪切
@@ -410,6 +438,7 @@ _version: 2
   zh-TW: 剪下
   it: Taglia
 "Copy":
+  ko: "복사"
   ja: コピー
   ru: "Копировать"
   zh-CN: 复制
@@ -417,6 +446,7 @@ _version: 2
   zh-TW: 複製
   it: Copia
 "Paste":
+  ko: "붙여넣기"
   ja: ペースト
   ru: "Вставить"
   zh-CN: 粘贴
@@ -424,6 +454,7 @@ _version: 2
   zh-TW: 貼上
   it: Incolla
 "Select All":
+  ko: "모두 선택"
   ja: すべて選択
   ru: "Выбрать всё"
   zh-CN: 全选
@@ -443,12 +474,14 @@ _version: 2
   zh-HK: 開啟設定資料夾
   zh-TW: 開啟設定資料夾
 "Device":
+  ko: "장치"
   ja: デバイス
   ru: "Устройство"
   zh-CN: 设备
   zh-HK: 裝置
   zh-TW: 裝置
 "Hide OpenLogi":
+  ko: "OpenLogi 숨기기"
   ja: OpenLogi を隠す
   ru: "Скрыть OpenLogi"
   zh-CN: 隐藏 OpenLogi
@@ -456,6 +489,7 @@ _version: 2
   zh-TW: 隱藏 OpenLogi
   it: Nascondi OpenLogi
 "Hide Others":
+  ko: "다른 앱 숨기기"
   ja: ほかを隠す
   ru: "Скрыть остальные"
   zh-CN: 隐藏其他
@@ -463,6 +497,7 @@ _version: 2
   zh-TW: 隱藏其他
   it: Nascondi altre
 "Show All":
+  ko: "모두 보기"
   ja: すべてを表示
   ru: "Показать все"
   zh-CN: 全部显示
@@ -470,6 +505,7 @@ _version: 2
   zh-TW: 顯示全部
   it: Mostra tutte
 "Window":
+  ko: "창"
   ja: ウインドウ
   ru: "Окно"
   zh-CN: 窗口
@@ -477,6 +513,7 @@ _version: 2
   zh-TW: 視窗
   it: Finestra
 "Minimize":
+  ko: "최소화"
   ja: しまう
   ru: "Свернуть"
   zh-CN: 最小化
@@ -484,6 +521,7 @@ _version: 2
   zh-TW: 最小化
   it: Minimizza
 "Zoom":
+  ko: "확대/축소"
   ja: ズーム
   ru: "Масштабировать"
   zh-CN: 缩放
@@ -491,6 +529,7 @@ _version: 2
   zh-TW: 縮放
   it: Ridimensiona
 "Close Window":
+  ko: "창 닫기"
   ja: ウインドウを閉じる
   ru: "Закрыть окно"
   zh-CN: 关闭窗口
@@ -530,6 +569,7 @@ _version: 2
 
 # ── About window (about.rs) ─────────────────────────────────────────────────
 "Open-source Logitech mouse configuration — DPI, SmartShift, button bindings, and gestures.":
+  ko: "오픈 소스 Logitech 마우스 설정 도구 — DPI, SmartShift, 버튼 바인딩, 제스처를 설정합니다."
   ja: オープンソースの Logitech マウス設定ツール —— DPI、SmartShift、ボタン割り当て、ジェスチャー。
   ru: "Открытая настройка мышей Logitech — DPI, SmartShift, привязки кнопок и жесты."
   zh-CN: 开源的 Logitech 鼠标配置工具 —— DPI、SmartShift、按键绑定与手势。
@@ -539,6 +579,7 @@ _version: 2
 
 # ── Settings window (settings.rs) ───────────────────────────────────────────
 "General":
+  ko: "일반"
   ja: 一般
   ru: "Основные"
   zh-CN: 通用
@@ -546,6 +587,7 @@ _version: 2
   zh-TW: 一般
   it: Generale
 "Launch at login":
+  ko: "로그인 시 실행"
   ja: ログイン時に起動
   ru: "Запускать при входе"
   zh-CN: 开机自启
@@ -553,6 +595,7 @@ _version: 2
   zh-TW: 登入時自動啟動
   it: Avvia al login
 "Automatically start OpenLogi when you log in to macOS.":
+  ko: "macOS에 로그인하면 OpenLogi를 자동으로 시작합니다."
   ja: macOS にログインしたときに OpenLogi を自動的に起動します。
   ru: "Автоматически запускать OpenLogi при входе в macOS."
   zh-CN: 登录 macOS 时自动启动 OpenLogi。
@@ -560,6 +603,7 @@ _version: 2
   zh-TW: 登入 macOS 時自動啟動 OpenLogi。
   it: Avvia automaticamente OpenLogi quando accedi a macOS.
 "Check for updates":
+  ko: "업데이트 확인"
   ja: アップデートを確認
   ru: "Проверять обновления"
   zh-CN: 检查更新
@@ -567,6 +611,7 @@ _version: 2
   zh-TW: 檢查更新
   it: Controlla aggiornamenti
 "Check once per launch for a new version (query only — no automatic download).":
+  ko: "실행할 때마다 한 번 새 버전을 확인합니다(조회만 수행, 자동 다운로드 없음)."
   ja: 起動ごとに新しいバージョンを一度だけ確認します(確認のみ — 自動ダウンロードはしません)。
   ru: "Один раз при запуске проверять наличие новой версии (только проверка — без автоматической загрузки)."
   zh-CN: 每次启动检查一次新版本(仅查询,不自动下载)。
@@ -574,6 +619,7 @@ _version: 2
   zh-TW: 每次啟動時檢查一次新版本（僅查詢，不自動下載）。
   it: Controlla la presenza di una nuova versione ad ogni avvio (solo verifica — nessun download automatico).
 "Show in menu bar":
+  ko: "메뉴 막대에 표시"
   ja: メニューバーに表示
   ru: "Показывать в строке меню"
   zh-CN: 显示在菜单栏
@@ -581,6 +627,7 @@ _version: 2
   zh-TW: 顯示在選單列
   it: Mostra nella barra dei menu
 "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.":
+  ko: "OpenLogi 아이콘을 메뉴 막대에 유지합니다. 끄면 대신 Dock에 남습니다."
   ja: OpenLogi のアイコンをメニューバーに表示します。オフにすると Dock に残ります。
   ru: "Оставлять значок OpenLogi в строке меню. Если выключено, приложение остаётся в Dock."
   zh-CN: 在菜单栏保留 OpenLogi 图标；关闭后改为停留在程序坞中。
@@ -588,6 +635,7 @@ _version: 2
   zh-TW: 在選單列保留 OpenLogi 圖示；關閉後改為停留在 Dock 中。
   it: Mantieni l'icona di OpenLogi nella barra dei menu. Quando è disattivata, rimarrà invece nel Dock.
 "Language":
+  ko: "언어"
   ja: 言語
   ru: "Язык"
   zh-CN: 语言
@@ -595,6 +643,7 @@ _version: 2
   zh-TW: 語言
   it: Lingua
 "Choose the interface language.":
+  ko: "인터페이스 언어를 선택합니다."
   ja: インターフェースの言語を選択します。
   ru: "Выберите язык интерфейса."
   zh-CN: 选择界面语言。
@@ -602,6 +651,7 @@ _version: 2
   zh-TW: 選擇介面語言。
   it: Scegli la lingua dell'interfaccia.
 "Follow system":
+  ko: "시스템 설정 따르기"
   ja: システムに従う
   ru: "Как в системе"
   zh-CN: 跟随系统
@@ -611,6 +661,7 @@ _version: 2
 
 # ── DPI panel (dpi_panel.rs) ────────────────────────────────────────────────
 "PRESETS":
+  ko: "프리셋"
   ja: プリセット
   ru: "ПРЕСЕТЫ"
   zh-CN: 预设
@@ -618,6 +669,7 @@ _version: 2
   zh-TW: 預設
   it: PRESET
 "Add":
+  ko: "추가"
   ja: 追加
   ru: "Добавить"
   zh-CN: 添加
@@ -700,6 +752,7 @@ _version: 2
 
 # ── Binding popover scaffolding (mouse_model/picker.rs) ─────────────────────
 "Bind %{name}":
+  ko: "%{name} 지정"
   ja: "%{name} を割り当て"
   ru: "Назначить %{name}"
   zh-CN: 绑定 %{name}
@@ -707,6 +760,7 @@ _version: 2
   zh-TW: 設定 %{name}
   it: Associa %{name}
 "Unbound":
+  ko: "지정 안 됨"
   ja: 未割り当て
   ru: "Не назначено"
   zh-CN: 未绑定
@@ -719,18 +773,21 @@ _version: 2
   zh-HK: 預設
   zh-TW: 預設
 "5 directions":
+  ko: "5방향"
   ja: 5 方向
   ru: "5 направлений"
   zh-CN: 5 个方向
   zh-HK: 5 個方向
   zh-TW: 5 個方向
 "DPI Preset %{index}":
+  ko: "DPI 프리셋 %{index}"
   ja: DPI プリセット %{index}
   ru: "Пресет DPI %{index}"
   zh-CN: 灵敏度预设 %{index}
   zh-HK: 靈敏度預設 %{index}
   zh-TW: 靈敏度預設 %{index}
 "Gesture %{name}":
+  ko: "%{name} 제스처"
   ja: ジェスチャー %{name}
   ru: "Жест %{name}"
   zh-CN: 手势 %{name}
@@ -740,6 +797,7 @@ _version: 2
 
 # ── Buttons (openlogi_core::binding::ButtonId) ──────────────────────────────
 "Left Click":
+  ko: "왼쪽 클릭"
   ja: 左クリック
   ru: "Левый щелчок"
   zh-CN: 左键单击
@@ -747,6 +805,7 @@ _version: 2
   zh-TW: 左鍵按一下
   it: Click sinistro
 "Right Click":
+  ko: "오른쪽 클릭"
   ja: 右クリック
   ru: "Правый щелчок"
   zh-CN: 右键单击
@@ -754,6 +813,7 @@ _version: 2
   zh-TW: 右鍵按一下
   it: Click destro
 "Middle Click":
+  ko: "가운데 클릭"
   ja: 中クリック
   ru: "Средний щелчок"
   zh-CN: 中键单击
@@ -761,6 +821,7 @@ _version: 2
   zh-TW: 中鍵按一下
   it: Click centrale
 "Back":
+  ko: "뒤로"
   ja: 戻る
   ru: "Назад"
   zh-CN: 后退
@@ -768,6 +829,7 @@ _version: 2
   zh-TW: 後退
   it: Indietro
 "Forward":
+  ko: "앞으로"
   ja: 進む
   ru: "Вперёд"
   zh-CN: 前进
@@ -775,6 +837,7 @@ _version: 2
   zh-TW: 前進
   it: Avanti
 "DPI Toggle":
+  ko: "DPI 전환"
   ja: DPI 切り替え
   ru: "Переключение DPI"
   zh-CN: 灵敏度切换
@@ -782,6 +845,7 @@ _version: 2
   zh-TW: 靈敏度切換
   it: Cambia DPI
 "Thumb Wheel":
+  ko: "엄지 휠"
   ja: サムホイール
   ru: "Колесо под большой палец"
   zh-CN: 拇指滚轮
@@ -789,6 +853,7 @@ _version: 2
   zh-TW: 拇指滾輪
   it: Volante da pollice
 "Gesture Button":
+  ko: "제스처 버튼"
   ja: ジェスチャーボタン
   ru: "Кнопка жестов"
   zh-CN: 手势按钮
@@ -798,6 +863,7 @@ _version: 2
 
 # ── Gesture directions (openlogi_core::binding::GestureDirection) ───────────
 "Up":
+  ko: "위"
   ja: 上
   ru: "Вверх"
   zh-CN: 上
@@ -805,6 +871,7 @@ _version: 2
   zh-TW: 上
   it: Su
 "Down":
+  ko: "아래"
   ja: 下
   ru: "Вниз"
   zh-CN: 下
@@ -812,6 +879,7 @@ _version: 2
   zh-TW: 下
   it: Giù
 "Left":
+  ko: "왼쪽"
   ja: 左
   ru: "Влево"
   zh-CN: 左
@@ -819,6 +887,7 @@ _version: 2
   zh-TW: 左
   it: Sinistra
 "Right":
+  ko: "오른쪽"
   ja: 右
   ru: "Вправо"
   zh-CN: 右
@@ -826,6 +895,7 @@ _version: 2
   zh-TW: 右
   it: Destra
 "Click":
+  ko: "클릭"
   ja: 押し込み
   ru: "Щелчок"
   zh-CN: 按下
@@ -835,6 +905,7 @@ _version: 2
 
 # ── Categories (openlogi_core::binding::Category) ───────────────────────────
 "EDITING":
+  ko: "편집"
   ja: 編集
   ru: "РЕДАКТИРОВАНИЕ"
   zh-CN: 编辑
@@ -842,6 +913,7 @@ _version: 2
   zh-TW: 編輯
   it: MODIFICA
 "BROWSER":
+  ko: "브라우저"
   ja: ブラウザ
   ru: "БРАУЗЕР"
   zh-CN: 浏览器
@@ -849,6 +921,7 @@ _version: 2
   zh-TW: 瀏覽器
   it: BROWSER
 "MEDIA":
+  ko: "미디어"
   ja: メディア
   ru: "МЕДИА"
   zh-CN: 媒体
@@ -856,6 +929,7 @@ _version: 2
   zh-TW: 媒體
   it: MEDIA
 "MOUSE":
+  ko: "마우스"
   ja: マウス
   ru: "МЫШЬ"
   zh-CN: 鼠标
@@ -863,6 +937,7 @@ _version: 2
   zh-TW: 滑鼠
   it: MOUSE
 "SCROLL":
+  ko: "스크롤"
   ja: スクロール
   ru: "ПРОКРУТКА"
   zh-CN: 滚动
@@ -870,6 +945,7 @@ _version: 2
   zh-TW: 捲動
   it: SCROLL
 "NAVIGATION":
+  ko: "탐색"
   ja: ナビゲーション
   ru: "НАВИГАЦИЯ"
   zh-CN: 导航
@@ -877,6 +953,7 @@ _version: 2
   zh-TW: 導覽
   it: NAVIGAZIONE
 "SYSTEM":
+  ko: "시스템"
   ja: システム
   ru: "СИСТЕМА"
   zh-CN: 系统
@@ -892,6 +969,7 @@ _version: 2
 
 # ── Actions (openlogi_core::binding::Action) ────────────────────────────────
 "Find":
+  ko: "찾기"
   ja: 検索
   ru: "Найти"
   zh-CN: 查找
@@ -899,6 +977,7 @@ _version: 2
   zh-TW: 尋找
   it: Trova
 "Save":
+  ko: "저장"
   ja: 保存
   ru: "Сохранить"
   zh-CN: 保存
@@ -906,6 +985,7 @@ _version: 2
   zh-TW: 儲存
   it: Salva
 "Browser Back":
+  ko: "브라우저 뒤로"
   ja: ブラウザで戻る
   ru: "Назад в браузере"
   zh-CN: 浏览器后退
@@ -913,6 +993,7 @@ _version: 2
   zh-TW: 瀏覽器上一頁
   it: Indietro nel browser
 "Browser Forward":
+  ko: "브라우저 앞으로"
   ja: ブラウザで進む
   ru: "Вперёд в браузере"
   zh-CN: 浏览器前进
@@ -920,6 +1001,7 @@ _version: 2
   zh-TW: 瀏覽器下一頁
   it: Avanti nel browser
 "New Tab":
+  ko: "새 탭"
   ja: 新規タブ
   ru: "Новая вкладка"
   zh-CN: 新建标签页
@@ -927,6 +1009,7 @@ _version: 2
   zh-TW: 新增分頁
   it: Nuova scheda
 "Close Tab":
+  ko: "탭 닫기"
   ja: タブを閉じる
   ru: "Закрыть вкладку"
   zh-CN: 关闭标签页
@@ -934,6 +1017,7 @@ _version: 2
   zh-TW: 關閉分頁
   it: Chiudi scheda
 "Reopen Tab":
+  ko: "닫은 탭 다시 열기"
   ja: タブを再度開く
   ru: "Открыть закрытую вкладку"
   zh-CN: 重开标签页
@@ -941,6 +1025,7 @@ _version: 2
   zh-TW: 重新開啟分頁
   it: Riapri scheda
 "Next Tab":
+  ko: "다음 탭"
   ja: 次のタブ
   ru: "Следующая вкладка"
   zh-CN: 下一个标签页
@@ -948,6 +1033,7 @@ _version: 2
   zh-TW: 下一個分頁
   it: Scheda successiva
 "Previous Tab":
+  ko: "이전 탭"
   ja: 前のタブ
   ru: "Предыдущая вкладка"
   zh-CN: 上一个标签页
@@ -955,6 +1041,7 @@ _version: 2
   zh-TW: 上一個分頁
   it: Scheda precedente
 "Reload Page":
+  ko: "페이지 새로고침"
   ja: ページを再読み込み
   ru: "Перезагрузить страницу"
   zh-CN: 刷新页面
@@ -962,6 +1049,7 @@ _version: 2
   zh-TW: 重新載入頁面
   it: Ricarica pagina
 "Mission Control":
+  ko: "Mission Control"
   ja: Mission Control
   ru: "Mission Control"
   zh-CN: 调度中心
@@ -969,6 +1057,7 @@ _version: 2
   zh-TW: Mission Control
   it: Mission Control
 "App Exposé":
+  ko: "App Exposé"
   ja: App Exposé
   ru: "App Exposé"
   zh-CN: 应用程序窗口
@@ -986,6 +1075,7 @@ _version: 2
   zh-CN: 下一个桌面
   zh-HK: 下一個桌面
 "Show Desktop":
+  ko: "데스크탑 보기"
   ja: デスクトップを表示
   ru: "Показать рабочий стол"
   zh-CN: 显示桌面
@@ -993,6 +1083,7 @@ _version: 2
   zh-TW: 顯示桌面
   it: Mostra scrivania
 "Launchpad":
+  ko: "Launchpad"
   ja: Launchpad
   ru: "Launchpad"
   zh-CN: 启动台
@@ -1000,6 +1091,7 @@ _version: 2
   zh-TW: 啟動台
   it: Launchpad
 "Lock Screen":
+  ko: "화면 잠금"
   ja: 画面をロック
   ru: "Заблокировать экран"
   zh-CN: 锁定屏幕
@@ -1007,6 +1099,7 @@ _version: 2
   zh-TW: 鎖定螢幕
   it: Blocca schermo
 "Screenshot":
+  ko: "스크린샷"
   ja: スクリーンショット
   ru: "Снимок экрана"
   zh-CN: 截屏
@@ -1014,6 +1107,7 @@ _version: 2
   zh-TW: 截圖
   it: Istantanea schermo
 "Play / Pause":
+  ko: "재생 / 일시 정지"
   ja: 再生 / 一時停止
   ru: "Воспроизведение / пауза"
   zh-CN: 播放 / 暂停
@@ -1021,6 +1115,7 @@ _version: 2
   zh-TW: 播放 / 暫停
   it: Riproduci / Pausa
 "Next Track":
+  ko: "다음 트랙"
   ja: 次の曲
   ru: "Следующий трек"
   zh-CN: 下一首
@@ -1028,6 +1123,7 @@ _version: 2
   zh-TW: 下一首
   it: Traccia successiva
 "Previous Track":
+  ko: "이전 트랙"
   ja: 前の曲
   ru: "Предыдущий трек"
   zh-CN: 上一首
@@ -1035,6 +1131,7 @@ _version: 2
   zh-TW: 上一首
   it: Traccia precedente
 "Volume Up":
+  ko: "음량 높이기"
   ja: 音量を上げる
   ru: "Увеличить громкость"
   zh-CN: 增大音量
@@ -1042,6 +1139,7 @@ _version: 2
   zh-TW: 調高音量
   it: Alza il volume
 "Volume Down":
+  ko: "음량 낮추기"
   ja: 音量を下げる
   ru: "Уменьшить громкость"
   zh-CN: 减小音量
@@ -1049,6 +1147,7 @@ _version: 2
   zh-TW: 調低音量
   it: Abbassa il volume
 "Mute":
+  ko: "음소거"
   ja: ミュート
   ru: "Выключить звук"
   zh-CN: 静音
@@ -1056,6 +1155,7 @@ _version: 2
   zh-TW: 靜音
   it: Muto
 "Cycle DPI Presets":
+  ko: "DPI 프리셋 순환"
   ja: DPI プリセットを循環
   ru: "Переключать пресеты DPI"
   zh-CN: 循环灵敏度预设
@@ -1063,6 +1163,7 @@ _version: 2
   zh-TW: 循環靈敏度預設
   it: Cicla preset DPI
 "Toggle SmartShift":
+  ko: "SmartShift 전환"
   ja: SmartShift を切り替え
   ru: "Переключить SmartShift"
   zh-CN: 切换 SmartShift
@@ -1070,6 +1171,7 @@ _version: 2
   zh-TW: 切換 SmartShift
   it: Attiva/Disattiva SmartShift
 "Scroll Up":
+  ko: "위로 스크롤"
   ja: 上にスクロール
   ru: "Прокрутить вверх"
   zh-CN: 向上滚动
@@ -1077,6 +1179,7 @@ _version: 2
   zh-TW: 向上捲動
   it: Scorri su
 "Scroll Down":
+  ko: "아래로 스크롤"
   ja: 下にスクロール
   ru: "Прокрутить вниз"
   zh-CN: 向下滚动
@@ -1084,6 +1187,7 @@ _version: 2
   zh-TW: 向下捲動
   it: Scorri giù
 "Scroll Left":
+  ko: "왼쪽으로 스크롤"
   ja: 左にスクロール
   ru: "Прокрутить влево"
   zh-CN: 向左滚动
@@ -1091,6 +1195,7 @@ _version: 2
   zh-TW: 向左捲動
   it: Scorri a sinistra
 "Scroll Right":
+  ko: "오른쪽으로 스크롤"
   ja: 右にスクロール
   ru: "Прокрутить вправо"
   zh-CN: 向右滚动
@@ -1100,6 +1205,7 @@ _version: 2
 
 # ── Add Device / pairing flow (windows/add_device.rs, app_menu.rs, app.rs) ──
 "Add Device":
+  ko: "장치 추가"
   ja: デバイスを追加
   ru: "Добавить устройство"
   zh-CN: 添加设备
@@ -1107,6 +1213,7 @@ _version: 2
   zh-TW: 新增裝置
   it: Aggiungi dispositivo
 "Add Device…":
+  ko: "장치 추가…"
   ja: デバイスを追加…
   ru: "Добавить устройство…"
   zh-CN: 添加设备…
@@ -1114,6 +1221,7 @@ _version: 2
   zh-TW: 新增裝置…
   it: Aggiungi dispositivo…
 "Put the device in pairing mode, then start searching.":
+  ko: "장치를 페어링 모드로 전환한 다음 검색을 시작하세요."
   ja: デバイスをペアリングモードにしてから検索を開始してください。
   ru: "Переведите устройство в режим сопряжения, затем начните поиск."
   zh-CN: 先让设备进入配对模式，然后开始搜索。
@@ -1121,6 +1229,7 @@ _version: 2
   zh-TW: 先讓裝置進入配對模式，然後開始搜尋。
   it: Metti il dispositivo in modalità di associazione, quindi avvia la ricerca.
 "Search for devices":
+  ko: "장치 검색"
   ja: デバイスを検索
   ru: "Искать устройства"
   zh-CN: 搜索设备
@@ -1128,6 +1237,7 @@ _version: 2
   zh-TW: 搜尋裝置
   it: Cerca dispositivi
 "Searching for devices…":
+  ko: "장치 검색 중…"
   ja: デバイスを検索中…
   ru: "Поиск устройств…"
   zh-CN: 正在搜索设备…
@@ -1135,6 +1245,7 @@ _version: 2
   zh-TW: 正在搜尋裝置…
   it: Ricerca dispositivi in corso…
 "Make sure the device is on and in pairing mode.":
+  ko: "장치가 켜져 있고 페어링 모드인지 확인하세요."
   ja: デバイスの電源が入り、ペアリングモードになっていることを確認してください。
   ru: "Убедитесь, что устройство включено и находится в режиме сопряжения."
   zh-CN: 请确认设备已开机并处于配对模式。
@@ -1142,6 +1253,7 @@ _version: 2
   zh-TW: 請確認裝置已開機並處於配對模式。
   it: Assicurati che il dispositivo sia acceso e in modalità di associazione.
 "No devices found yet…":
+  ko: "아직 발견된 장치가 없습니다…"
   ja: まだデバイスが見つかりません…
   ru: "Устройства пока не найдены…"
   zh-CN: 暂未发现设备…
@@ -1149,6 +1261,7 @@ _version: 2
   zh-TW: 尚未找到裝置…
   it: Nessun dispositivo ancora trovato…
 "Select a device to pair:":
+  ko: "페어링할 장치를 선택하세요:"
   ja: "ペアリングするデバイスを選択してください:"
   ru: "Выберите устройство для сопряжения:"
   zh-CN: 选择要配对的设备：
@@ -1156,6 +1269,7 @@ _version: 2
   zh-TW: 選擇要配對的裝置：
   it: "Seleziona un dispositivo da associare:"
 "Pairing…":
+  ko: "페어링 중…"
   ja: ペアリング中…
   ru: "Сопряжение…"
   zh-CN: 正在配对…
@@ -1163,6 +1277,7 @@ _version: 2
   zh-TW: 正在配對…
   it: Associazione in corso…
 "Follow the instructions on your device.":
+  ko: "장치에 표시되는 안내를 따르세요."
   ja: デバイスの指示に従ってください。
   ru: "Следуйте инструкциям на устройстве."
   zh-CN: 请按照设备上的提示操作。
@@ -1170,6 +1285,7 @@ _version: 2
   zh-TW: 請按照裝置上的提示操作。
   it: Segui le istruzioni sul tuo dispositivo.
 "Type this passkey on the new keyboard, then press Enter:":
+  ko: "새 키보드에서 이 패스키를 입력한 다음 Enter를 누르세요:"
   ja: "新しいキーボードでこのパスキーを入力し、Enter キーを押してください:"
   ru: "Введите этот код на новой клавиатуре, затем нажмите Enter:"
   zh-CN: 在新键盘上输入此配对码，然后按回车：
@@ -1177,6 +1293,7 @@ _version: 2
   zh-TW: 在新鍵盤上輸入此配對碼，然後按 Enter：
   it: "Digita questa passkey sulla nuova tastiera, quindi premi Invio:"
 "On the new mouse, click in this order, then press both buttons together:":
+  ko: "새 마우스에서 다음 순서대로 클릭한 뒤 양쪽 버튼을 함께 누르세요:"
   ja: "新しいマウスでこの順にクリックし、最後に両方のボタンを同時に押してください:"
   ru: "На новой мыши нажмите кнопки в этом порядке, затем нажмите обе кнопки одновременно:"
   zh-CN: 在新鼠标上按此顺序点击，最后同时按下左右键：
@@ -1184,6 +1301,7 @@ _version: 2
   zh-TW: 請在新滑鼠上依序按一下，最後同時按下左右鍵：
   it: "Sul nuovo mouse, fai clic in questo ordine, quindi premi entrambi i pulsanti contemporaneamente:"
 "Device paired":
+  ko: "장치 페어링 완료"
   ja: デバイスをペアリングしました
   ru: "Устройство сопряжено"
   zh-CN: 设备已配对
@@ -1191,6 +1309,7 @@ _version: 2
   zh-TW: 裝置已配對
   it: Dispositivo associato
 "Paired to slot %{slot}.":
+  ko: "슬롯 %{slot}에 페어링되었습니다."
   ja: スロット %{slot} にペアリングしました。
   ru: "Сопряжено со слотом %{slot}."
   zh-CN: 已配对到插槽 %{slot}。
@@ -1198,6 +1317,7 @@ _version: 2
   zh-TW: 已配對到插槽 %{slot}。
   it: Associato allo slot %{slot}.
 "Done":
+  ko: "완료"
   ja: 完了
   ru: "Готово"
   zh-CN: 完成
@@ -1205,6 +1325,7 @@ _version: 2
   zh-TW: 完成
   it: Fatto
 "Pairing failed":
+  ko: "페어링 실패"
   ja: ペアリングに失敗しました
   ru: "Сопряжение не удалось"
   zh-CN: 配对失败
@@ -1212,6 +1333,7 @@ _version: 2
   zh-TW: 配對失敗
   it: Associazione fallita
 "Try again":
+  ko: "다시 시도"
   ja: 再試行
   ru: "Повторить"
   zh-CN: 重试
@@ -1219,6 +1341,7 @@ _version: 2
   zh-TW: 重試
   it: Riprova
 "Cancel":
+  ko: "취소"
   ja: キャンセル
   ru: "Отмена"
   zh-CN: 取消
@@ -1228,66 +1351,77 @@ _version: 2
 
 # ── Settings → Permissions section (windows/settings.rs) ────────────────────
 "Permissions":
+  ko: "권한"
   ja: 権限
   zh-CN: 权限
   zh-HK: 權限
   zh-TW: 權限
   it: Permessi
 "Accessibility":
+  ko: "접근성"
   ja: アクセシビリティ
   zh-CN: 辅助功能
   zh-HK: 輔助使用
   zh-TW: 輔助使用
   it: Accessibilità
 "Input Monitoring":
+  ko: "입력 모니터링"
   ja: 入力監視
   zh-CN: 输入监控
   zh-HK: 輸入監控
   zh-TW: 輸入監控
   it: Monitoraggio input
 "Bluetooth":
+  ko: "Bluetooth"
   ja: Bluetooth
   zh-CN: 蓝牙
   zh-HK: 藍牙
   zh-TW: 藍牙
   it: Bluetooth
 "Granted":
+  ko: "허용됨"
   ja: 許可済み
   zh-CN: 已授权
   zh-HK: 已授權
   zh-TW: 已授權
   it: Concesso
 "Not granted":
+  ko: "허용되지 않음"
   ja: 未許可
   zh-CN: 未授权
   zh-HK: 未授權
   zh-TW: 未授權
   it: Non concesso
 "Unknown":
+  ko: "알 수 없음"
   ja: 不明
   zh-CN: 未知
   zh-HK: 未知
   zh-TW: 未知
   it: Sconosciuto
 "Open":
+  ko: "열기"
   ja: 開く
   zh-CN: 打开
   zh-HK: 開啟
   zh-TW: 開啟
   it: Apri
 "Needed for gesture and button remapping (event tap).":
+  ko: "제스처와 버튼 재매핑(이벤트 탭)에 필요합니다."
   ja: ジェスチャーとボタンの再割り当てに必要です（イベントタップ）。
   zh-CN: 手势与按键重映射所需（事件捕获）。
   zh-HK: 手勢與按鍵重新對應所需（事件攔截）。
   zh-TW: 手勢與按鍵重新對應需要此權限（事件監聽）。
   it: Necessario per la rimappatura di gesture e pulsanti (event tap).
 "Needed to read HID++ data, including Bluetooth-direct mice.":
+  ko: "Bluetooth 직접 연결 마우스를 포함해 HID++ 데이터를 읽는 데 필요합니다."
   ja: Bluetooth 直結マウスを含む HID++ データの読み取りに必要です。
   zh-CN: 读取 HID++ 数据所需，包括蓝牙直连鼠标。
   zh-HK: 讀取 HID++ 數據所需，包括藍牙直連滑鼠。
   zh-TW: 需要此權限才能讀取 HID++ 資料，包括藍牙直連滑鼠。
   it: Necessario per leggere i dati HID++, inclusi i mouse con connessione diretta Bluetooth.
 "Allows OpenLogi to use CoreBluetooth (not required for HID access).":
+  ko: "OpenLogi가 CoreBluetooth를 사용할 수 있게 합니다(HID 접근에는 필요하지 않음)."
   ja: OpenLogi が CoreBluetooth を使用できるようにします（HID アクセスには不要）。
   zh-CN: 允许 OpenLogi 使用 CoreBluetooth（HID 访问不需要）。
   zh-HK: 允許 OpenLogi 使用 CoreBluetooth（HID 存取不需要）。
@@ -1296,6 +1430,7 @@ _version: 2
 
 # ── Empty / scanning state (app.rs) ─────────────────────────────────────────
 "Scanning for devices…":
+  ko: "장치 검색 중…"
   ja: デバイスを検索中…
   zh-CN: 正在扫描设备…
   zh-HK: 正在掃描裝置…
@@ -1333,3 +1468,147 @@ _version: 2
   zh-CN: 调整拇指滚轮的横向滚动速度，以及自定义滚轮操作的触发难易程度。
   zh-HK: 調整拇指滾輪的水平捲動速度，以及自訂滾輪操作的觸發難易度。
   zh-TW: 調整拇指滾輪的水平捲動速度，以及自訂滾輪操作的觸發難易度。
+
+# ── Added by the Windows + Korean PR (#93): Windows pairing, update
+#    status, and other strings not present in the base file. ───────────────
+"About":
+  ko: "정보"
+  ja: 情報
+  ru: "О программе"
+  zh-CN: 关于
+  zh-HK: 關於
+  zh-TW: 關於
+"Task View":
+  ko: "작업 보기"
+"Start Menu":
+  ko: "시작 메뉴"
+"%{name} paired through Windows Bluetooth (%{status}).":
+  ko: "%{name} 페어링 완료: Windows Bluetooth(%{status})"
+"Bluetooth device":
+  ko: "Bluetooth 장치"
+"Button remapping ready":
+  ko: "버튼 설정 준비됨"
+"Check for updates?":
+  ko: "업데이트를 확인할까요?"
+"Enable":
+  ko: "활성화"
+"Follow the Windows pairing prompt.":
+  ko: "Windows 페어링 창의 안내를 따르세요."
+"Likely Logitech device":
+  ko: "Logitech 장치일 가능성이 높음"
+"No device was found. Put the device in pairing mode and try again.":
+  ko: "장치를 찾지 못했습니다. 장치를 페어링 모드로 전환한 뒤 다시 시도하세요."
+"No devices found yet...":
+  ko: "아직 발견된 장치가 없습니다..."
+"No supported Logitech receiver was found.":
+  ko: "지원되는 Logitech 수신기를 찾을 수 없습니다."
+"Not now":
+  ko: "나중에"
+"Pairing unavailable":
+  ko: "페어링할 수 없음"
+"Searching Windows Bluetooth...":
+  ko: "Windows Bluetooth 검색 중..."
+"Select a Windows Bluetooth device:":
+  ko: "Windows Bluetooth 장치를 선택하세요:"
+"Windows Bluetooth":
+  ko: "Windows Bluetooth 페어링"
+"Windows is pairing %{name}...":
+  ko: "Windows에서 %{name} 페어링 중..."
+"OpenLogi can check GitHub once per launch for a new version — query only, no automatic download or telemetry. You can change this anytime in Settings.":
+  ko: "OpenLogi는 실행할 때마다 한 번 GitHub에서 새 버전을 확인할 수 있습니다. 조회만 수행하며 자동 다운로드나 텔레메트리는 없습니다. 이 설정은 언제든 설정에서 바꿀 수 있습니다."
+"Download & Install":
+  ko: "다운로드 및 설치"
+"Restart to Update":
+  ko: "다시 시작하여 업데이트"
+"Checking for updates...":
+  ko: "업데이트 확인 중..."
+"You're on the latest version.":
+  ko: "최신 버전을 사용 중입니다."
+"Version %{version} is available.":
+  ko: "%{version} 버전을 사용할 수 있습니다."
+"Downloading %{percent}%...":
+  ko: "다운로드 중... %{percent}%"
+"Downloading %{megabytes} MB...":
+  ko: "다운로드 중... %{megabytes}MB"
+"Installing...":
+  ko: "설치 중..."
+"Version %{version} is ready.":
+  ko: "%{version} 버전 설치 준비 완료."
+"Update failed: %{error}":
+  ko: "업데이트 실패: %{error}"
+"Check for Updates":
+  ko: "업데이트 확인"
+"Releases":
+  ko: "릴리스"
+"Licensed under MIT OR Apache-2.0":
+  ko: "MIT 또는 Apache-2.0 라이선스"
+"Automatically start OpenLogi when you sign in to Windows.":
+  ko: "Windows에 로그인하면 OpenLogi를 자동으로 시작합니다."
+"Automatically start OpenLogi when you sign in.":
+  ko: "로그인하면 OpenLogi를 자동으로 시작합니다."
+"slot %{slot}":
+  ko: "슬롯 %{slot}"
+"HID transport error: %{error}":
+  ko: "HID 전송 오류: %{error}"
+"Receiver register access failed: %{error}":
+  ko: "수신기 레지스터 접근 실패: %{error}"
+"Receiver reported pairing error %{code}.":
+  ko: "수신기가 페어링 오류 %{code}을(를) 보고했습니다."
+"Windows returned %{status}.":
+  ko: "Windows 페어링 결과: %{status}"
+"Pairing was cancelled.":
+  ko: "페어링이 취소되었습니다."
+"No Windows Bluetooth pairing candidates were found.":
+  ko: "페어링 가능한 Windows Bluetooth 장치를 찾지 못했습니다."
+"Windows device not found: %{name}":
+  ko: "Windows 장치를 찾을 수 없습니다: %{name}"
+"Windows device cannot pair: %{name}":
+  ko: "Windows에서 페어링할 수 없는 장치입니다: %{name}"
+"Windows API error: %{error}":
+  ko: "Windows API 오류: %{error}"
+"Windows Bluetooth pairing is only available on Windows.":
+  ko: "Windows Bluetooth 페어링은 Windows에서만 사용할 수 있습니다."
+"Windows pairing timed out.":
+  ko: "Windows 페어링 시간이 초과되었습니다."
+"paired":
+  ko: "페어링됨"
+"not ready to pair":
+  ko: "페어링 준비 안 됨"
+"not paired":
+  ko: "페어링되지 않음"
+"already paired":
+  ko: "이미 페어링됨"
+"connection rejected":
+  ko: "연결 거부됨"
+"too many connections":
+  ko: "연결 수 초과"
+"hardware failure":
+  ko: "하드웨어 오류"
+"authentication timed out":
+  ko: "인증 시간 초과"
+"authentication not allowed":
+  ko: "인증 허용 안 됨"
+"authentication failed":
+  ko: "인증 실패"
+"no supported profiles":
+  ko: "지원 프로필 없음"
+"protection level could not be met":
+  ko: "보호 수준 조건을 만족하지 못함"
+"access denied":
+  ko: "접근 거부됨"
+"invalid ceremony data":
+  ko: "잘못된 페어링 데이터"
+"pairing canceled":
+  ko: "페어링 취소됨"
+"operation already in progress":
+  ko: "이미 작업 진행 중"
+"required handler not registered":
+  ko: "필수 핸들러가 등록되지 않음"
+"rejected by handler":
+  ko: "핸들러에서 거부됨"
+"remote device already has an association":
+  ko: "원격 장치가 이미 연결되어 있음"
+"failed":
+  ko: "실패"
+"unknown status %{code}":
+  ko: "알 수 없는 상태 %{code}"

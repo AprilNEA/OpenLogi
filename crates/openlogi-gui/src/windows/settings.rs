@@ -188,9 +188,13 @@ fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPage {
                     },
                 ),
             )
-            .description(tr!(
-                "Automatically start OpenLogi when you log in to macOS."
-            )),
+            .description(if cfg!(target_os = "windows") {
+                tr!("Automatically start OpenLogi when you sign in to Windows.")
+            } else if cfg!(target_os = "macos") {
+                tr!("Automatically start OpenLogi when you log in to macOS.")
+            } else {
+                tr!("Automatically start OpenLogi when you sign in.")
+            }),
         )
         .item(
             SettingItem::new(

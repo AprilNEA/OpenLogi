@@ -1,35 +1,35 @@
-//! macOS `LaunchAgent` reconciliation for launch-at-login.
+//! Launch-at-login reconciliation.
 //!
-//! When `Config::app_settings.launch_at_login` is `true`, a plist at
-//! `~/Library/LaunchAgents/org.openlogi.openlogi.plist` is kept in sync
-//! with the currently running executable so the next user-login session
-//! relaunches OpenLogi automatically. Setting the flag to `false`
-//! removes the plist on the next startup.
-//!
-//! Linux and Windows are stubs: they accept the same API but do nothing.
-//! XDG autostart on Linux and the Windows `Run` registry key are future
-//! work tracked by the broader "P2.2 follow-up" item in PLAN.md.
-
-use tracing::debug;
+//! macOS uses a `LaunchAgent` plist at
+//! `~/Library/LaunchAgents/org.openlogi.openlogi.plist`. Windows uses the
+//! current user's `Run` registry key. Linux remains a stub until an XDG
+//! autostart backend lands.
 
 #[cfg(target_os = "macos")]
 use std::io;
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
+use tracing::debug;
 #[cfg(target_os = "macos")]
-use tracing::{info, warn};
+use tracing::info;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use tracing::warn;
 
-/// Stable launch-agent identifier — matches the bundle id in
+/// Stable launch-agent identifier; matches the bundle id in
 /// `crates/openlogi-gui/Cargo.toml [package.metadata.bundle]`.
 #[cfg(target_os = "macos")]
 const LABEL: &str = "org.openlogi.openlogi";
 
-/// Reconcile the on-disk `LaunchAgent` plist with `enabled`. Idempotent:
-/// no-op when the file already matches the desired state.
-///
-/// Failures are logged at `warn` instead of bubbling up — startup
-/// shouldn't abort because the user's `LaunchAgents` directory is
-/// read-only.
+/// Stable Windows startup value name.
+#[cfg(target_os = "windows")]
+const RUN_VALUE: &str = "OpenLogi";
+#[cfg(target_os = "windows")]
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Reconcile launch-at-login with `enabled`. Idempotent and best-effort:
+/// failures are logged at `warn` instead of aborting startup.
 pub fn reconcile(enabled: bool) {
     #[cfg(target_os = "macos")]
     {
@@ -37,7 +37,13 @@ pub fn reconcile(enabled: bool) {
             warn!(error = %e, enabled, "LaunchAgent reconcile failed");
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        if let Err(e) = reconcile_windows(enabled) {
+            warn!(error = %e, enabled, "Windows startup registry reconcile failed");
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         if enabled {
             debug!("launch_at_login set but no autostart backend on this platform");
@@ -87,9 +93,6 @@ fn plist_path() -> io::Result<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn render_plist(exe: &str) -> String {
-    // launchd accepts both XML and binary plists; XML is human-readable
-    // and small enough that the cost is negligible. The `--minimized` arg makes
-    // the login-launched instance come up in the menu-bar tray with no window.
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
@@ -110,6 +113,43 @@ fn render_plist(exe: &str) -> String {
         </dict>\n\
         </plist>\n",
     )
+}
+
+#[cfg(target_os = "windows")]
+fn reconcile_windows(enabled: bool) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    let mut command = Command::new("reg.exe");
+    command.creation_flags(CREATE_NO_WINDOW);
+    if enabled {
+        let exe = std::env::current_exe()?;
+        let command_line = format!("\"{}\"", exe.display());
+        command.args([
+            "add",
+            RUN_KEY,
+            "/v",
+            RUN_VALUE,
+            "/t",
+            "REG_SZ",
+            "/d",
+            &command_line,
+            "/f",
+        ]);
+    } else {
+        command.args(["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);
+    }
+
+    let status = command.status()?;
+    if !status.success() && enabled {
+        return Err(std::io::Error::other(format!(
+            "reg.exe exited with status {status}"
+        )));
+    }
+    if !status.success() {
+        debug!("Windows startup registry value was already absent");
+    }
+    Ok(())
 }
 
 #[cfg(all(test, target_os = "macos"))]

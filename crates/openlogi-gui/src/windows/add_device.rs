@@ -19,7 +19,10 @@ use gpui::{
     px, rgb,
 };
 use gpui_component::v_flex;
-use openlogi_hid::{Click, DiscoveredDevice, PairingEvent, PasskeyMethod, ReceiverSelector};
+use openlogi_hid::{
+    Click, DiscoveredDevice, PairingError, PairingEvent, PasskeyMethod, ReceiverSelector,
+    WindowsPairingDevice, WindowsPairingStatus,
+};
 
 use crate::theme::{self, Palette};
 use crate::watchers::pairing::Control;
@@ -47,8 +50,22 @@ pub enum PairingUi {
     Passkey(PasskeyMethod),
     /// A device paired into `slot`.
     Paired { slot: u8 },
+    /// Windows Bluetooth device enumeration is running.
+    WindowsSearching,
+    /// Windows Bluetooth candidates, awaiting the user's pick.
+    WindowsFound(Vec<WindowsPairingDevice>),
+    /// Windows is running the OS pairing ceremony.
+    WindowsPairing { name: String },
+    /// Windows reported a paired or already-paired result.
+    WindowsPaired {
+        name: String,
+        status: WindowsPairingStatus,
+    },
     /// The session ended without pairing; carries a human-readable detail.
-    Failed(String),
+    Failed {
+        detail: SharedString,
+        retryable: bool,
+    },
 }
 
 impl Global for PairingUi {}
@@ -59,7 +76,13 @@ pub fn open(cx: &mut App) {
     let active = matches!(
         cx.try_global::<PairingUi>(),
         Some(
-            PairingUi::Searching | PairingUi::Found(_) | PairingUi::Pairing | PairingUi::Passkey(_)
+            PairingUi::Searching
+                | PairingUi::Found(_)
+                | PairingUi::Pairing
+                | PairingUi::Passkey(_)
+                | PairingUi::WindowsSearching
+                | PairingUi::WindowsFound(_)
+                | PairingUi::WindowsPairing { .. }
         )
     );
     if !active {
@@ -68,7 +91,7 @@ pub fn open(cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.add_device,
         tr!("Add Device"),
-        Size::new(px(520.), px(460.)),
+        Size::new(px(560.), px(480.)),
         AddDeviceView::new,
         cx,
     );
@@ -91,9 +114,125 @@ pub fn apply_event(cx: &mut App, event: PairingEvent) {
         }
         PairingEvent::Passkey(method) => PairingUi::Passkey(method),
         PairingEvent::Paired { slot } => PairingUi::Paired { slot },
-        PairingEvent::Failed(error) => PairingUi::Failed(error.to_string()),
+        PairingEvent::WindowsSearching => PairingUi::WindowsSearching,
+        PairingEvent::WindowsDeviceFound(device) => {
+            let mut devices = match current {
+                PairingUi::WindowsFound(devices) => devices,
+                _ => Vec::new(),
+            };
+            if !devices.iter().any(|d| d.id == device.id) {
+                devices.push(device);
+            }
+            PairingUi::WindowsFound(devices)
+        }
+        PairingEvent::WindowsPairing { name } => PairingUi::WindowsPairing { name },
+        PairingEvent::WindowsPaired { name, status } => PairingUi::WindowsPaired { name, status },
+        PairingEvent::Failed(error) => failure_state(&error),
     };
     cx.set_global(next);
+}
+
+fn failure_state(error: &PairingError) -> PairingUi {
+    let detail = match error {
+        PairingError::Hid(detail) => {
+            tr!("HID transport error: %{error}", error => detail.clone())
+        }
+        PairingError::Timeout => {
+            tr!("No device was found. Put the device in pairing mode and try again.")
+        }
+        PairingError::ReceiverNotFound => tr!("No supported Logitech receiver was found."),
+        PairingError::Register(detail) => {
+            tr!("Receiver register access failed: %{error}", error => detail.clone())
+        }
+        PairingError::Device(code) => tr!(
+            "Receiver reported pairing error %{code}.",
+            code => format!("0x{code:02x}")
+        ),
+        PairingError::Windows(detail) => windows_pairing_error_detail(detail),
+        PairingError::WindowsStatus(status) => tr!(
+            "Windows returned %{status}.",
+            status => windows_pairing_status_text(*status)
+        ),
+        PairingError::Cancelled => tr!("Pairing was cancelled."),
+    };
+    PairingUi::Failed {
+        detail,
+        retryable: !matches!(error, PairingError::ReceiverNotFound),
+    }
+}
+
+fn windows_pairing_error_detail(detail: &str) -> SharedString {
+    if detail == "No Windows Bluetooth pairing candidates were found." {
+        return tr!("No Windows Bluetooth pairing candidates were found.");
+    }
+    if let Some(name) = detail.strip_prefix("Windows device not found: ") {
+        return tr!("Windows device not found: %{name}", name => name.to_owned());
+    }
+    if let Some(name) = detail.strip_prefix("Windows device cannot pair: ") {
+        return tr!("Windows device cannot pair: %{name}", name => name.to_owned());
+    }
+    if let Some(error) = detail.strip_prefix("Windows API error: ") {
+        return tr!("Windows API error: %{error}", error => error.to_owned());
+    }
+    match detail {
+        "Windows Bluetooth pairing is only available on Windows" => {
+            tr!("Windows Bluetooth pairing is only available on Windows.")
+        }
+        "Windows pairing timed out" => tr!("Windows pairing timed out."),
+        _ => SharedString::from(detail.to_owned()),
+    }
+}
+
+fn windows_pairing_status_text(status: WindowsPairingStatus) -> String {
+    match status {
+        WindowsPairingStatus::Paired => rust_i18n::t!("paired").into_owned(),
+        WindowsPairingStatus::NotReadyToPair => rust_i18n::t!("not ready to pair").into_owned(),
+        WindowsPairingStatus::NotPaired => rust_i18n::t!("not paired").into_owned(),
+        WindowsPairingStatus::AlreadyPaired => rust_i18n::t!("already paired").into_owned(),
+        WindowsPairingStatus::ConnectionRejected => {
+            rust_i18n::t!("connection rejected").into_owned()
+        }
+        WindowsPairingStatus::TooManyConnections => {
+            rust_i18n::t!("too many connections").into_owned()
+        }
+        WindowsPairingStatus::HardwareFailure => rust_i18n::t!("hardware failure").into_owned(),
+        WindowsPairingStatus::AuthenticationTimeout => {
+            rust_i18n::t!("authentication timed out").into_owned()
+        }
+        WindowsPairingStatus::AuthenticationNotAllowed => {
+            rust_i18n::t!("authentication not allowed").into_owned()
+        }
+        WindowsPairingStatus::AuthenticationFailure => {
+            rust_i18n::t!("authentication failed").into_owned()
+        }
+        WindowsPairingStatus::NoSupportedProfiles => {
+            rust_i18n::t!("no supported profiles").into_owned()
+        }
+        WindowsPairingStatus::ProtectionLevelCouldNotBeMet => {
+            rust_i18n::t!("protection level could not be met").into_owned()
+        }
+        WindowsPairingStatus::AccessDenied => rust_i18n::t!("access denied").into_owned(),
+        WindowsPairingStatus::InvalidCeremonyData => {
+            rust_i18n::t!("invalid ceremony data").into_owned()
+        }
+        WindowsPairingStatus::PairingCanceled => rust_i18n::t!("pairing canceled").into_owned(),
+        WindowsPairingStatus::OperationAlreadyInProgress => {
+            rust_i18n::t!("operation already in progress").into_owned()
+        }
+        WindowsPairingStatus::RequiredHandlerNotRegistered => {
+            rust_i18n::t!("required handler not registered").into_owned()
+        }
+        WindowsPairingStatus::RejectedByHandler => {
+            rust_i18n::t!("rejected by handler").into_owned()
+        }
+        WindowsPairingStatus::RemoteDeviceHasAssociation => {
+            rust_i18n::t!("remote device already has an association").into_owned()
+        }
+        WindowsPairingStatus::Failed => rust_i18n::t!("failed").into_owned(),
+        WindowsPairingStatus::Other(code) => {
+            rust_i18n::t!("unknown status %{code}", code => code.to_string()).into_owned()
+        }
+    }
 }
 
 fn send(cx: &App, control: Control) {
@@ -105,6 +244,11 @@ fn send(cx: &App, control: Control) {
 fn start_search(cx: &mut App) {
     cx.set_global(PairingUi::Searching);
     send(cx, Control::Start(ReceiverSelector::First));
+}
+
+fn start_windows_search(cx: &mut App) {
+    cx.set_global(PairingUi::WindowsSearching);
+    send(cx, Control::StartWindows);
 }
 
 /// Standalone Add Device window root view.
@@ -140,7 +284,7 @@ impl Render for AddDeviceView {
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
-            .p_6()
+            .p_7()
             .gap_5()
             .child(
                 div()
@@ -153,6 +297,7 @@ impl Render for AddDeviceView {
 }
 
 /// The state-dependent body of the window.
+#[allow(clippy::too_many_lines)]
 fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
     let mut col = v_flex().w_full().flex_1().gap_4();
     match state {
@@ -165,6 +310,10 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                 .child(
                     action_button("ad-search", tr!("Search for devices"), pal, true)
                         .on_click(|_, _, cx| start_search(cx)),
+                )
+                .child(
+                    action_button("ad-windows-search", tr!("Windows Bluetooth"), pal, false)
+                        .on_click(|_, _, cx| start_windows_search(cx)),
                 );
         }
         PairingUi::Searching => {
@@ -215,19 +364,85 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                         .on_click(|_, _, cx| cx.set_global(PairingUi::Idle)),
                 );
         }
-        PairingUi::Failed(detail) => {
+        PairingUi::WindowsSearching => {
+            col = col
+                .child(status_line(tr!("Searching Windows Bluetooth..."), pal))
+                .child(hint(
+                    tr!("Make sure the device is on and in pairing mode."),
+                    pal,
+                ))
+                .child(cancel_button(pal));
+        }
+        PairingUi::WindowsFound(devices) => {
+            col = col.child(status_line(tr!("Select a Windows Bluetooth device:"), pal));
+            if devices.is_empty() {
+                col = col.child(hint(tr!("No devices found yet..."), pal));
+            } else {
+                for (idx, device) in devices.iter().enumerate() {
+                    col = col.child(windows_device_row(idx, device, pal));
+                }
+            }
+            col = col.child(cancel_button(pal));
+        }
+        PairingUi::WindowsPairing { name } => {
+            col = col
+                .child(status_line(
+                    tr!("Windows is pairing %{name}...", name => name.clone()),
+                    pal,
+                ))
+                .child(hint(tr!("Follow the Windows pairing prompt."), pal))
+                .child(cancel_button(pal));
+        }
+        PairingUi::WindowsPaired { name, status } => {
+            col = col
+                .child(
+                    div()
+                        .text_color(rgb(theme::STATUS_CONNECTED))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(tr!("Device paired")),
+                )
+                .child(hint(
+                    tr!(
+                        "%{name} paired through Windows Bluetooth (%{status}).",
+                        name => name.clone(),
+                        status => windows_pairing_status_text(*status)
+                    ),
+                    pal,
+                ))
+                .child(
+                    action_button("ad-done", tr!("Done"), pal, false)
+                        .on_click(|_, _, cx| cx.set_global(PairingUi::Idle)),
+                );
+        }
+        PairingUi::Failed { detail, retryable } => {
+            let title = if *retryable {
+                tr!("Pairing failed")
+            } else {
+                tr!("Pairing unavailable")
+            };
             col = col
                 .child(
                     div()
                         .text_color(rgb(theme::STATUS_CONNECTING))
                         .font_weight(FontWeight::MEDIUM)
-                        .child(tr!("Pairing failed")),
+                        .child(title),
                 )
-                .child(hint(SharedString::from(detail.clone()), pal))
-                .child(
+                .child(hint(detail.clone(), pal));
+            if *retryable {
+                col = col.child(
                     action_button("ad-retry", tr!("Try again"), pal, true)
                         .on_click(|_, _, cx| start_search(cx)),
                 );
+                col = col.child(
+                    action_button("ad-windows-retry", tr!("Windows Bluetooth"), pal, false)
+                        .on_click(|_, _, cx| start_windows_search(cx)),
+                );
+            } else {
+                col = col.child(
+                    action_button("ad-done", tr!("Done"), pal, false)
+                        .on_click(|_, _, cx| cx.set_global(PairingUi::Idle)),
+                );
+            }
         }
     }
     col
@@ -254,6 +469,42 @@ fn device_row(idx: usize, device: &DiscoveredDevice, pal: Palette) -> impl IntoE
         .on_click(move |_, _, cx| {
             send(cx, Control::Pair(picked.clone()));
             cx.set_global(PairingUi::Pairing);
+        })
+}
+
+/// A Windows Bluetooth candidate row; clicking it asks Windows to pair it.
+fn windows_device_row(idx: usize, device: &WindowsPairingDevice, pal: Palette) -> impl IntoElement {
+    let picked = device.clone();
+    let detail = if device.likely_logitech {
+        tr!("Likely Logitech device")
+    } else {
+        tr!("Bluetooth device")
+    };
+    div()
+        .id(("windows-device", idx))
+        .w_full()
+        .px_4()
+        .py_3()
+        .rounded_md()
+        .border_1()
+        .border_color(pal.border)
+        .cursor_pointer()
+        .hover(|s| s.bg(pal.surface_hover))
+        .child(
+            v_flex()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .child(SharedString::from(device.name.clone())),
+                )
+                .child(hint(detail, pal)),
+        )
+        .on_click(move |_, _, cx| {
+            send(cx, Control::PairWindows(picked.clone()));
+            cx.set_global(PairingUi::WindowsPairing {
+                name: picked.name.clone(),
+            });
         })
 }
 
@@ -302,6 +553,7 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
 fn status_line(text: impl Into<SharedString>, _pal: Palette) -> impl IntoElement {
     div()
         .text_sm()
+        .line_height(gpui::relative(1.3))
         .font_weight(FontWeight::MEDIUM)
         .child(text.into())
 }
@@ -309,6 +561,7 @@ fn status_line(text: impl Into<SharedString>, _pal: Palette) -> impl IntoElement
 fn hint(text: impl Into<SharedString>, pal: Palette) -> impl IntoElement {
     div()
         .text_xs()
+        .line_height(gpui::relative(1.35))
         .text_color(pal.text_muted)
         .child(text.into())
 }
@@ -325,7 +578,9 @@ fn action_button(
         .id(id)
         .px_4()
         .py_2()
+        .min_w(px(190.))
         .rounded_md()
+        .text_center()
         .cursor_pointer()
         .child(label.into());
     if primary {

@@ -45,7 +45,7 @@ pub fn open(cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.update_consent,
         "OpenLogi",
-        Size::new(px(380.), px(220.)),
+        Size::new(px(460.), px(260.)),
         UpdateConsentView::new,
         cx,
     );
@@ -72,8 +72,8 @@ impl Render for UpdateConsentView {
             .text_color(pal.text_primary)
             .items_center()
             .justify_center()
-            .gap_4()
-            .p_6()
+            .gap_5()
+            .p_7()
             .child(
                 div()
                     .text_lg()
@@ -82,9 +82,10 @@ impl Render for UpdateConsentView {
             )
             .child(
                 div()
-                    .max_w(px(320.))
+                    .max_w(px(380.))
                     .text_sm()
                     .text_center()
+                    .line_height(gpui::relative(1.35))
                     .text_color(pal.text_muted)
                     .child(tr!(
                         "OpenLogi can check GitHub once per launch for a new version — query \

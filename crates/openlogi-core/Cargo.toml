@@ -30,3 +30,6 @@ zbus = "5"
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.25.0", features = ["highsierra"] }
 core-foundation = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_UI_Input_KeyboardAndMouse"] }

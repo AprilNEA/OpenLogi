@@ -13,6 +13,7 @@ fn hook_error_display() {
         HookError::NoDeviceFound,
         #[cfg(target_os = "linux")]
         HookError::Linux(std::io::Error::other("test reason")),
+        HookError::WindowsHook("test reason".into()),
     ];
     for e in errors {
         assert!(!e.to_string().is_empty(), "empty display for {e:?}");
@@ -47,8 +48,9 @@ fn event_disposition_equality() {
     assert_ne!(EventDisposition::PassThrough, EventDisposition::Suppress);
 }
 
-/// On unsupported targets (not macOS, not Linux), `Hook::start` returns `Unsupported`.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// On unsupported targets (not macOS, Linux, or Windows), `Hook::start` returns
+/// `Unsupported`.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[test]
 fn unsupported_start_returns_unsupported() {
     let result = Hook::start(|_| EventDisposition::PassThrough);

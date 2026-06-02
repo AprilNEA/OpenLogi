@@ -88,7 +88,7 @@ pub struct AppSettings {
     #[serde(default = "default_true")]
     pub show_in_menu_bar: bool,
     /// UI language as a BCP-47-ish locale code matching the GUI's bundled
-    /// locales (`"en"`, `"ja"`, `"ru"`, `"zh-CN"`, `"zh-HK"`, `"zh-TW"`).
+    /// locales (`"en"`, `"ko"`, `"ja"`, `"ru"`, `"zh-CN"`, `"zh-HK"`, `"zh-TW"`).
     /// `None` means "follow the system locale", which the GUI resolves at
     /// startup. Stored here so a user's explicit choice survives restarts
     /// regardless of the OS setting.
@@ -253,6 +253,10 @@ pub enum ConfigError {
     UnsupportedSchemaVersion { path: PathBuf, found: u32 },
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "Config I/O keeps rich parse/write context and is not a hot path"
+)]
 impl Config {
     /// Loads the config from the default user path, returning
     /// [`Config::default`] if the file does not exist yet.

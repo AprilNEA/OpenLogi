@@ -16,6 +16,30 @@ pub use openlogi_core::binding::{
     Action, ButtonId, Category, GestureDirection, default_binding, default_gesture_binding,
 };
 
+/// Localized label for an action in the GUI.
+///
+/// A few navigation actions come from macOS vocabulary in the core action enum,
+/// but the Windows port should show the matching Windows concept.
+#[must_use]
+pub fn localized_action_label(action: &Action) -> String {
+    let key = match action {
+        #[cfg(target_os = "windows")]
+        Action::MissionControl | Action::AppExpose => "Task View".to_string(),
+        #[cfg(target_os = "windows")]
+        Action::LaunchpadShow => "Start Menu".to_string(),
+        Action::SetDpiPreset(i) => {
+            return rust_i18n::t!(
+                "DPI Preset %{index}",
+                index => (u16::from(*i) + 1).to_string()
+            )
+            .into_owned();
+        }
+        Action::CustomShortcut(combo) => return combo.rendered_label(),
+        _ => action.label(),
+    };
+    rust_i18n::t!(key).into_owned()
+}
+
 /// The size of the mouse model canvas. Hotspot coords are relative to this.
 pub const MOUSE_MODEL_SIZE: (f32, f32) = (420., 560.);
 

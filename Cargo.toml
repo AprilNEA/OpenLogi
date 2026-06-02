@@ -44,6 +44,8 @@ description = "Lightweight, local-first alternative to Logitech Options+ for HID
 [workspace.dependencies]
 hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.5.1" }
 async-hid = "0.4"
+windows-sys = "0.61"
+windows = "0.61"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time"] }
 futures-lite = "2"
 serde = { version = "1", features = ["derive"] }

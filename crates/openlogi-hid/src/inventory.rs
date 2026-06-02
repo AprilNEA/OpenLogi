@@ -142,10 +142,18 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
             "paired slot"
         );
 
-        let (battery, model_info) = if online {
-            probe_features(&channel, slot).await
+        let (battery, model_info, online) = if online {
+            let (battery, model_info) = probe_features(&channel, slot).await;
+            let responsive = battery.is_some() || model_info.is_some();
+            if !responsive {
+                debug!(
+                    slot,
+                    "paired slot claimed to be online but did not answer HID++ feature probes"
+                );
+            }
+            (battery, model_info, responsive)
         } else {
-            (None, None)
+            (None, None, false)
         };
         paired.push(PairedDevice {
             slot,

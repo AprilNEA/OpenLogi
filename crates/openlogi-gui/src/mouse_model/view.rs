@@ -19,10 +19,10 @@ use crate::mouse_model::picker::{action_picker, build_gesture_menu};
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette};
 
-const SIDE_W: f32 = 180.;
-const SIDE_GAP: f32 = 24.;
-const LABEL_W: f32 = 156.;
-const LABEL_H: f32 = 56.;
+const SIDE_W: f32 = 210.;
+const SIDE_GAP: f32 = 26.;
+const LABEL_W: f32 = 190.;
+const LABEL_H: f32 = 60.;
 
 const CARD_EDGE_INSET: f32 = SIDE_GAP + (SIDE_W - LABEL_W);
 
@@ -393,6 +393,7 @@ impl RenderOnce for LabelTrigger {
                             .items_center()
                             .gap_1p5()
                             .text_xs()
+                            .line_height(gpui::relative(1.15))
                             .text_color(pal.text_muted)
                             .child(div().text_xs().child("•"))
                             .child(tr!(self.label.id.label())),
@@ -432,6 +433,12 @@ impl RenderOnce for LabelTrigger {
 
 fn localized_action_label(action: &Action) -> gpui::SharedString {
     match action {
+        // A few navigation actions carry macOS vocabulary in the core action
+        // enum; show the matching Windows concept on Windows.
+        #[cfg(target_os = "windows")]
+        Action::MissionControl | Action::AppExpose => tr!("Task View"),
+        #[cfg(target_os = "windows")]
+        Action::LaunchpadShow => tr!("Start Menu"),
         Action::SetDpiPreset(index) => {
             tr!("DPI Preset %{index}", index => (index + 1).to_string())
         }

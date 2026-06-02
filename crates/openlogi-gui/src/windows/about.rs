@@ -62,7 +62,7 @@ impl AboutView {
                 Some(
                     Button::new("update-install")
                         .outline()
-                        .label("Download & Install")
+                        .label(tr!("Download & Install"))
                         .on_click(move |_, _, cx| {
                             u.update(cx, Updater::download_and_install);
                         }),
@@ -73,7 +73,7 @@ impl AboutView {
                 Some(
                     Button::new("update-restart")
                         .outline()
-                        .label("Restart to Update")
+                        .label(tr!("Restart to Update"))
                         .on_click(move |_, _, cx| {
                             u.update(cx, |u, cx| u.restart(cx));
                         }),
@@ -84,23 +84,38 @@ impl AboutView {
 
         let message = match &status {
             UpdateStatus::Idle => None,
-            UpdateStatus::Checking => Some("Checking for updates…".to_string()),
-            UpdateStatus::UpToDate => Some("You're on the latest version.".to_string()),
-            UpdateStatus::Available(v) => Some(format!("Version {v} is available.")),
+            UpdateStatus::Checking => Some(tr!("Checking for updates...")),
+            UpdateStatus::UpToDate => Some(tr!("You're on the latest version.")),
+            UpdateStatus::Available(v) => Some(tr!(
+                "Version %{version} is available.",
+                version => v.to_string()
+            )),
             UpdateStatus::Downloading { downloaded, total } => Some(match total {
-                Some(t) if *t > 0 => format!("Downloading… {}%", *downloaded * 100 / *t),
-                _ => format!("Downloading… {} MB", *downloaded / 1_048_576),
+                Some(t) if *t > 0 => tr!(
+                    "Downloading %{percent}%...",
+                    percent => (*downloaded * 100 / *t).to_string()
+                ),
+                _ => tr!(
+                    "Downloading %{megabytes} MB...",
+                    megabytes => (*downloaded / 1_048_576).to_string()
+                ),
             }),
-            UpdateStatus::Installing => Some("Installing…".to_string()),
-            UpdateStatus::Staged(v) => Some(format!("Version {v} is ready.")),
-            UpdateStatus::Errored(e) => Some(format!("Update failed: {e}")),
+            UpdateStatus::Installing => Some(tr!("Installing...")),
+            UpdateStatus::Staged(v) => Some(tr!(
+                "Version %{version} is ready.",
+                version => v.to_string()
+            )),
+            UpdateStatus::Errored(e) => Some(tr!(
+                "Update failed: %{error}",
+                error => e.clone()
+            )),
         };
 
         let check = {
             let u = updater.clone();
             Button::new("update-check")
                 .outline()
-                .label("Check for Updates")
+                .label(tr!("Check for Updates"))
                 .on_click(move |_, _, cx| {
                     u.update(cx, Updater::check);
                 })
@@ -112,9 +127,10 @@ impl AboutView {
             .child(h_flex().gap_3().child(check).children(action))
             .children(message.map(|text| {
                 div()
-                    .max_w(px(280.))
+                    .max_w(px(340.))
                     .text_xs()
                     .text_center()
+                    .line_height(gpui::relative(1.35))
                     .text_color(pal.text_muted)
                     .child(text)
             }))
@@ -131,8 +147,8 @@ impl AuxWindow for AboutView {
 pub fn open(cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.about,
-        "About OpenLogi",
-        Size::new(px(360.), px(460.)),
+        tr!("About OpenLogi"),
+        Size::new(px(420.), px(500.)),
         AboutView::new,
         cx,
     );
@@ -148,8 +164,8 @@ impl Render for AboutView {
             .text_color(pal.text_primary)
             .items_center()
             .justify_center()
-            .gap_3()
-            .p_8()
+            .gap_4()
+            .p_7()
             .child(img(crate::app_assets::LOGO).w(px(72.)).h(px(72.)))
             .child(
                 div()
@@ -169,9 +185,10 @@ impl Render for AboutView {
             )
             .child(
                 div()
-                    .max_w(px(280.))
+                    .max_w(px(340.))
                     .text_sm()
                     .text_center()
+                    .line_height(gpui::relative(1.35))
                     .text_color(pal.text_muted)
                     .child(tr!(
                         "Open-source Logitech mouse configuration — DPI, SmartShift, button \
@@ -180,7 +197,7 @@ impl Render for AboutView {
             )
             .child(
                 h_flex()
-                    .gap_3()
+                    .gap_2()
                     .pt_2()
                     .child(
                         Button::new("about-repo")
@@ -193,7 +210,7 @@ impl Render for AboutView {
                         Button::new("about-releases")
                             .outline()
                             .icon(IconName::ExternalLink)
-                            .label("Releases")
+                            .label(tr!("Releases"))
                             .on_click(|_, _, cx| cx.open_url(RELEASES_URL)),
                     ),
             )
@@ -202,7 +219,7 @@ impl Render for AboutView {
                 div()
                     .text_xs()
                     .text_color(pal.text_muted)
-                    .child("Licensed under MIT OR Apache-2.0"),
+                    .child(tr!("Licensed under MIT OR Apache-2.0")),
             )
     }
 }

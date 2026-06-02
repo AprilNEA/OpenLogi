@@ -624,6 +624,13 @@ impl Action {
     /// skipped (debug-logged). `CustomShortcut` maps macOS `kVK_*` codes to
     /// Linux key codes; macOS Cmd maps to Ctrl.
     ///
+    /// On Windows, key and scroll events are synthesised via `SendInput`, and
+    /// mouse clicks via `MOUSEEVENTF_*`. The macOS window-manager actions map to
+    /// their Windows equivalents (`MissionControl`/`AppExpose` → Task View,
+    /// `ShowDesktop` → Win+D, `LaunchpadShow` → Start menu). Device-side actions
+    /// are handled at the hook/HID layer. `CustomShortcut` maps macOS `kVK_*`
+    /// codes to Windows virtual-key codes; macOS Cmd maps to Ctrl.
+    ///
     /// On other platforms a warning is logged and the function returns
     /// immediately — the binary compiles clean on all targets.
     pub fn execute(&self) {
@@ -633,7 +640,10 @@ impl Action {
         #[cfg(target_os = "linux")]
         self.execute_linux();
 
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        self.execute_windows();
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             tracing::warn!(
                 action = self.label(),
@@ -845,6 +855,62 @@ impl Action {
             }
         }
     }
+
+    /// Windows implementation: dispatch to `SendInput` helpers.
+    #[cfg(target_os = "windows")]
+    fn execute_windows(&self) {
+        match self {
+            Action::LeftClick => windows::post_click(windows::MouseButton::Left),
+            Action::RightClick => windows::post_click(windows::MouseButton::Right),
+            Action::MiddleClick => windows::post_click(windows::MouseButton::Middle),
+            Action::Copy => windows::post_key(windows::VK_C, &[windows::VK_CONTROL]),
+            Action::Paste => windows::post_key(windows::VK_V, &[windows::VK_CONTROL]),
+            Action::Cut => windows::post_key(windows::VK_X, &[windows::VK_CONTROL]),
+            Action::Undo => windows::post_key(windows::VK_Z, &[windows::VK_CONTROL]),
+            Action::Redo => windows::post_key(windows::VK_Y, &[windows::VK_CONTROL]),
+            Action::SelectAll => windows::post_key(windows::VK_A, &[windows::VK_CONTROL]),
+            Action::Find => windows::post_key(windows::VK_F, &[windows::VK_CONTROL]),
+            Action::Save => windows::post_key(windows::VK_S, &[windows::VK_CONTROL]),
+            Action::BrowserBack => windows::post_key(windows::VK_BROWSER_BACK, &[]),
+            Action::BrowserForward => windows::post_key(windows::VK_BROWSER_FORWARD, &[]),
+            Action::NewTab => windows::post_key(windows::VK_T, &[windows::VK_CONTROL]),
+            Action::CloseTab => windows::post_key(windows::VK_W, &[windows::VK_CONTROL]),
+            Action::ReopenTab => {
+                windows::post_key(windows::VK_T, &[windows::VK_CONTROL, windows::VK_SHIFT]);
+            }
+            Action::NextTab => windows::post_key(windows::VK_TAB, &[windows::VK_CONTROL]),
+            Action::PrevTab => {
+                windows::post_key(windows::VK_TAB, &[windows::VK_CONTROL, windows::VK_SHIFT]);
+            }
+            Action::ReloadPage => windows::post_key(windows::VK_R, &[windows::VK_CONTROL]),
+            Action::MissionControl | Action::AppExpose => {
+                windows::post_key(windows::VK_TAB, &[windows::VK_LWIN]);
+            }
+            Action::ShowDesktop => windows::post_key(windows::VK_D, &[windows::VK_LWIN]),
+            Action::LaunchpadShow => windows::post_key(windows::VK_LWIN, &[]),
+            Action::LockScreen => windows::post_key(windows::VK_L, &[windows::VK_LWIN]),
+            Action::Screenshot => {
+                windows::post_key(windows::VK_S, &[windows::VK_LWIN, windows::VK_SHIFT]);
+            }
+            Action::PlayPause => windows::post_key(windows::VK_MEDIA_PLAY_PAUSE, &[]),
+            Action::NextTrack => windows::post_key(windows::VK_MEDIA_NEXT_TRACK, &[]),
+            Action::PrevTrack => windows::post_key(windows::VK_MEDIA_PREV_TRACK, &[]),
+            Action::VolumeUp => windows::post_key(windows::VK_VOLUME_UP, &[]),
+            Action::VolumeDown => windows::post_key(windows::VK_VOLUME_DOWN, &[]),
+            Action::MuteVolume => windows::post_key(windows::VK_VOLUME_MUTE, &[]),
+            Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::ToggleSmartShift => {
+                tracing::debug!(
+                    action = self.label(),
+                    "device action handled by hook/HID layer"
+                );
+            }
+            Action::ScrollUp
+            | Action::ScrollDown
+            | Action::HorizontalScrollLeft
+            | Action::HorizontalScrollRight => windows::post_scroll(self),
+            Action::CustomShortcut(combo) => windows::post_custom_shortcut(combo),
+        }
+    }
 }
 
 /// Synthesise a horizontal scroll of `delta` wheel lines at the current focus.
@@ -867,7 +933,10 @@ pub fn post_horizontal_scroll(delta: i32) {
     #[cfg(target_os = "linux")]
     linux::scroll(evdev::RelativeAxisCode::REL_HWHEEL, delta);
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    windows::post_horizontal_scroll(delta);
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let _ = delta;
 }
 
@@ -1271,6 +1340,216 @@ mod macos {
                     ),
                 }
             })
+        }
+    }
+}
+
+/// Platform helpers for synthesising OS-level input events on Windows.
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code, reason = "SendInput is the Win32 API for synthetic input")]
+mod windows {
+    use std::mem::size_of;
+
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+        MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+        MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+        MOUSEINPUT, SendInput,
+    };
+
+    use crate::binding::{Action, KeyCombo};
+
+    const WHEEL_DELTA: i32 = 120;
+
+    pub(super) const VK_A: u16 = 0x41;
+    pub(super) const VK_C: u16 = 0x43;
+    pub(super) const VK_D: u16 = 0x44;
+    pub(super) const VK_F: u16 = 0x46;
+    pub(super) const VK_L: u16 = 0x4C;
+    pub(super) const VK_R: u16 = 0x52;
+    pub(super) const VK_S: u16 = 0x53;
+    pub(super) const VK_T: u16 = 0x54;
+    pub(super) const VK_V: u16 = 0x56;
+    pub(super) const VK_W: u16 = 0x57;
+    pub(super) const VK_X: u16 = 0x58;
+    pub(super) const VK_Y: u16 = 0x59;
+    pub(super) const VK_Z: u16 = 0x5A;
+    pub(super) const VK_TAB: u16 = 0x09;
+    pub(super) const VK_SHIFT: u16 = 0x10;
+    pub(super) const VK_CONTROL: u16 = 0x11;
+    pub(super) const VK_MENU: u16 = 0x12;
+    pub(super) const VK_LWIN: u16 = 0x5B;
+    pub(super) const VK_BROWSER_BACK: u16 = 0xA6;
+    pub(super) const VK_BROWSER_FORWARD: u16 = 0xA7;
+    pub(super) const VK_VOLUME_MUTE: u16 = 0xAD;
+    pub(super) const VK_VOLUME_DOWN: u16 = 0xAE;
+    pub(super) const VK_VOLUME_UP: u16 = 0xAF;
+    pub(super) const VK_MEDIA_NEXT_TRACK: u16 = 0xB0;
+    pub(super) const VK_MEDIA_PREV_TRACK: u16 = 0xB1;
+    pub(super) const VK_MEDIA_PLAY_PAUSE: u16 = 0xB3;
+
+    #[derive(Clone, Copy)]
+    pub(super) enum MouseButton {
+        Left,
+        Right,
+        Middle,
+    }
+
+    pub(super) fn post_click(button: MouseButton) {
+        let (down, up) = match button {
+            MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+            MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+            MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+        };
+        send_inputs(&[mouse_input(down, 0), mouse_input(up, 0)]);
+    }
+
+    pub(super) fn post_key(vk: u16, modifiers: &[u16]) {
+        let mut inputs = Vec::with_capacity(modifiers.len() * 2 + 2);
+        for modifier in modifiers {
+            inputs.push(key_input(*modifier, false));
+        }
+        inputs.push(key_input(vk, false));
+        inputs.push(key_input(vk, true));
+        for modifier in modifiers.iter().rev() {
+            inputs.push(key_input(*modifier, true));
+        }
+        send_inputs(&inputs);
+    }
+
+    pub(super) fn post_scroll(action: &Action) {
+        let (flags, data) = match action {
+            Action::ScrollUp => (MOUSEEVENTF_WHEEL, WHEEL_DELTA),
+            Action::ScrollDown => (MOUSEEVENTF_WHEEL, -WHEEL_DELTA),
+            Action::HorizontalScrollLeft => (MOUSEEVENTF_HWHEEL, -WHEEL_DELTA),
+            Action::HorizontalScrollRight => (MOUSEEVENTF_HWHEEL, WHEEL_DELTA),
+            _ => return,
+        };
+        send_inputs(&[mouse_input(flags, data)]);
+    }
+
+    pub(super) fn post_horizontal_scroll(delta: i32) {
+        if delta == 0 {
+            return;
+        }
+        send_inputs(&[mouse_input(
+            MOUSEEVENTF_HWHEEL,
+            delta.saturating_mul(WHEEL_DELTA),
+        )]);
+    }
+
+    pub(super) fn post_custom_shortcut(combo: &KeyCombo) {
+        if combo.key_code == 0 {
+            tracing::warn!(
+                chord = %combo.rendered_label(),
+                "CustomShortcut with no key code; press ignored"
+            );
+            return;
+        }
+        let Some(vk) = mac_virtual_key_to_windows(combo.key_code) else {
+            tracing::warn!(
+                key_code = combo.key_code,
+                chord = %combo.rendered_label(),
+                "CustomShortcut key has no Windows mapping yet; press ignored"
+            );
+            return;
+        };
+
+        let mut modifiers = Vec::new();
+        if combo.modifiers & KeyCombo::MOD_CMD != 0 {
+            modifiers.push(VK_CONTROL);
+        }
+        if combo.modifiers & KeyCombo::MOD_SHIFT != 0 {
+            modifiers.push(VK_SHIFT);
+        }
+        if combo.modifiers & KeyCombo::MOD_CTRL != 0 && !modifiers.contains(&VK_CONTROL) {
+            modifiers.push(VK_CONTROL);
+        }
+        if combo.modifiers & KeyCombo::MOD_OPTION != 0 {
+            modifiers.push(VK_MENU);
+        }
+        post_key(vk, &modifiers);
+    }
+
+    fn send_inputs(inputs: &[INPUT]) {
+        let Ok(input_count) = u32::try_from(inputs.len()) else {
+            tracing::warn!(
+                requested = inputs.len(),
+                "too many SendInput events requested"
+            );
+            return;
+        };
+        let Ok(input_size) = i32::try_from(size_of::<INPUT>()) else {
+            tracing::warn!("INPUT size does not fit the Win32 SendInput contract");
+            return;
+        };
+        let sent = unsafe { SendInput(input_count, inputs.as_ptr(), input_size) };
+        if sent != input_count {
+            tracing::warn!(
+                requested = inputs.len(),
+                sent,
+                "SendInput accepted fewer events than requested"
+            );
+        }
+    }
+
+    fn key_input(vk: u16, key_up: bool) -> INPUT {
+        let mut flags = 0;
+        if key_up {
+            flags |= KEYEVENTF_KEYUP;
+        }
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    fn mouse_input(flags: u32, data: i32) -> INPUT {
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: u32::from_ne_bytes(data.to_ne_bytes()),
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    fn mac_virtual_key_to_windows(key_code: u16) -> Option<u16> {
+        match key_code {
+            0x00 => Some(VK_A),
+            0x01 => Some(VK_S),
+            0x02 => Some(VK_D),
+            0x03 => Some(VK_F),
+            0x06 => Some(VK_Z),
+            0x07 => Some(VK_X),
+            0x08 => Some(VK_C),
+            0x09 => Some(VK_V),
+            0x0C => Some(0x51), // Q
+            0x0D => Some(VK_W),
+            0x0E => Some(0x45), // E
+            0x0F => Some(VK_R),
+            0x10 => Some(VK_Y),
+            0x11 => Some(VK_T),
+            0x20 => Some(0x55), // U
+            0x22 => Some(0x49), // I
+            0x1F => Some(0x4F), // O
+            0x23 => Some(0x50), // P
+            0x30 => Some(VK_TAB),
+            _ => None,
         }
     }
 }

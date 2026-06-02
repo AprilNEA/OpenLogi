@@ -6,15 +6,19 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-/// Channel item: `Some(bundle_id)` when an app is frontmost; `None` for
-/// "no foreground app" (rare on macOS — Finder is usually frontmost even
-/// when nothing else is).
+/// Channel item: `Some(app_id)` when an app is frontmost; `None` for "no
+/// foreground app" (rare on macOS; possible on Windows during shell
+/// transitions).
 pub type ForegroundUpdate = Option<String>;
 
 /// Watch foreground application changes.
 pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<ForegroundUpdate> {
     let (tx, rx) = mpsc::unbounded_channel();
-    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+    if !cfg!(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    )) {
         drop(tx);
         let _ = period;
         return rx;
@@ -29,7 +33,7 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<ForegroundUpdate> {
                 if first_tick || current != last {
                     debug!(?current, ?last, "frontmost app changed");
                     if tx.send(current.clone()).is_err() {
-                        debug!("app watcher receiver dropped — exiting");
+                        debug!("app watcher receiver dropped; exiting");
                         return;
                     }
                     last = current;
@@ -39,7 +43,7 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<ForegroundUpdate> {
             }
         });
     if let Err(e) = spawn_result {
-        warn!(error = %e, "could not spawn app watcher — per-app profiles disabled");
+        warn!(error = %e, "could not spawn app watcher; per-app profiles disabled");
     }
     rx
 }

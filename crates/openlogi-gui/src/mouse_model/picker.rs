@@ -34,7 +34,7 @@ use gpui_component::{
 };
 
 use crate::data::mouse_buttons::{
-    Action, ButtonId, Category, GestureDirection, default_gesture_binding,
+    Action, ButtonId, Category, GestureDirection, default_gesture_binding, localized_action_label,
 };
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette};
@@ -124,7 +124,7 @@ fn gesture_action_submenu(
         submenu = submenu.label(tr!(category.label()));
         for action in actions {
             let checked = action == current;
-            let label = tr!(action.label());
+            let label = localized_action_label(&action);
             let commit = action;
             submenu = submenu.item(PopupMenuItem::new(label).checked(checked).on_click(
                 move |_event, _window, cx| {
@@ -177,7 +177,7 @@ fn action_rows(
         children.push(section_header(&category_label, pal));
         for action in actions {
             let selected = current == Some(&action);
-            let label = tr!(action.label());
+            let label = localized_action_label(&action);
             let on_pick = on_pick.clone();
             let row_id = idx;
             idx += 1;

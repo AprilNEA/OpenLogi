@@ -35,6 +35,11 @@ rust-i18n = "4"
 sys-locale = "0.3.2"
 gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.4", features = ["gpui"] }
 
+# Compiles the Windows application manifest + icon (resources/windows/*) into
+# the executable. No-op on non-Windows targets (see build.rs).
+[build-dependencies]
+embed-resource = "3.0.9"
+
 # Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. objc2 gives typed,
 # `Retained<T>`-owned AppKit bindings so the status-item code can't leak (#99).
 [target.'cfg(target_os = "macos")'.dependencies]

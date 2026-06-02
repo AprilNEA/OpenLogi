@@ -4,7 +4,8 @@
 //! at compile time by the `rust_i18n::i18n!` macro in `main.rs`. Call sites use
 //! the [`tr!`](crate::tr) helper (or `rust_i18n::t!`) with the **English string
 //! as the key** — a missing entry falls back to that English text, so the file
-//! carries only the translated `ja` / `ru` / `zh-CN` / `zh-HK` / `zh-TW` / `it`
+//! carries only the translated `ko` / `ja` / `ru` / `zh-CN` / `zh-HK` /
+//! `zh-TW` / `it`
 //! columns; English is the key itself.
 //!
 //! The current locale is a process-global atomic inside `rust_i18n`. Setting it
@@ -19,12 +20,13 @@ use openlogi_core::config::AppSettings;
 /// Locales the GUI ships, as `(code, native name)`. The codes match the
 /// sub-keys in `locales/app.yml`; `en` / `zh-CN` / `zh-HK` / `it` also match
 /// gpui-component's bundled `ui.yml`, so choosing one localizes the framework's
-/// own widgets too. `ja`, `ru`, and `zh-TW` are *not* in `ui.yml`, so under
+/// own widgets too. `ko`, `ja`, `ru`, and `zh-TW` are *not* in `ui.yml`, so under
 /// those locales our app strings localize but the framework's built-in widget
 /// strings fall back to English.
 /// Order here is the order shown in the Settings picker (after "Follow system").
 pub const SUPPORTED: &[(&str, &str)] = &[
     ("en", "English"),
+    ("ko", "한국어"),
     ("ja", "日本語"),
     ("ru", "Русский"),
     ("zh-CN", "简体中文"),
@@ -66,6 +68,7 @@ fn match_supported(code: &str) -> Option<&'static str> {
     let mut subtags = lower.split(['-', '_']);
     match subtags.next() {
         Some("en") => Some("en"),
+        Some("ko") => Some("ko"),
         Some("ja") => Some("ja"),
         Some("ru") => Some("ru"),
         Some("it") => Some("it"),
@@ -121,6 +124,8 @@ mod tests {
         assert_eq!(match_supported("zh-Hant"), Some("zh-TW"));
         assert_eq!(match_supported("zh-HK"), Some("zh-HK"));
         assert_eq!(match_supported("zh-Hant-HK"), Some("zh-HK"));
+        assert_eq!(match_supported("ko"), Some("ko"));
+        assert_eq!(match_supported("ko-KR"), Some("ko"));
         assert_eq!(match_supported("ja"), Some("ja"));
         assert_eq!(match_supported("ja-JP"), Some("ja"));
         assert_eq!(match_supported("ru"), Some("ru"));
@@ -194,6 +199,35 @@ mod tests {
                 a.category()
             );
         }
+
+        rust_i18n::set_locale("ko");
+        assert_eq!(rust_i18n::t!("Settings"), "설정");
+        assert_eq!(rust_i18n::t!("Left Click"), "왼쪽 클릭");
+        assert_eq!(rust_i18n::t!("Bind %{name}", name => "X"), "X 지정");
+        assert_eq!(rust_i18n::t!("Quit OpenLogi"), "OpenLogi 종료");
+        assert_eq!(rust_i18n::t!("No devices connected"), "연결된 장치 없음");
+        assert_eq!(rust_i18n::t!("Middle Click"), "가운데 클릭");
+        assert_eq!(rust_i18n::t!("Browser Back"), "브라우저 뒤로");
+        assert_eq!(rust_i18n::t!("Cycle DPI Presets"), "DPI 프리셋 순환");
+        assert_eq!(rust_i18n::t!("5 directions"), "5방향");
+        assert_eq!(rust_i18n::t!("Mouse"), "마우스");
+        assert_eq!(rust_i18n::t!("slot %{slot}", slot => "2"), "슬롯 2");
+        assert_eq!(rust_i18n::t!("Button remapping ready"), "버튼 설정 준비됨");
+        assert_eq!(rust_i18n::t!("Check for Updates"), "업데이트 확인");
+        assert_eq!(rust_i18n::t!("Download & Install"), "다운로드 및 설치");
+        assert_eq!(
+            rust_i18n::t!("Windows returned %{status}.", status => "페어링됨"),
+            "Windows 페어링 결과: 페어링됨"
+        );
+        assert_eq!(
+            rust_i18n::t!("Searching Windows Bluetooth..."),
+            "Windows Bluetooth 검색 중..."
+        );
+        assert_ne!(
+            rust_i18n::t!(BLURB),
+            BLURB,
+            "blurb key missing from ko app.yml"
+        );
 
         rust_i18n::set_locale("ja");
         assert_eq!(rust_i18n::t!("Settings"), "設定");

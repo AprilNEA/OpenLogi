@@ -20,5 +20,19 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 num_enum = { workspace = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+    "Devices_Bluetooth",
+    "Devices_Enumeration",
+    "Win32_System_WinRT",
+] }
+windows-sys = { workspace = true, features = [
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
+
 [lints]
 workspace = true

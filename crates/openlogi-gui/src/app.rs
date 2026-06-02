@@ -1241,6 +1241,23 @@ fn footer(pal: Palette, granted: bool) -> impl IntoElement {
 /// status; not granted → an amber-dot affordance that requests the grant on
 /// click (the native prompt + System Settings, via [`open_accessibility_settings`]).
 fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
+    if cfg!(target_os = "windows") {
+        let _ = granted;
+        return h_flex()
+            .gap_2()
+            .items_center()
+            .text_xs()
+            .text_color(pal.text_muted)
+            .child(
+                div()
+                    .size_2()
+                    .rounded_full()
+                    .bg(rgb(theme::STATUS_CONNECTED)),
+            )
+            .child(div().child(tr!("Button remapping ready")))
+            .into_any_element();
+    }
+
     if granted {
         // Reassurance only — kept deliberately quiet: a small dimmed dot and
         // muted text that recede until something is actually wrong.

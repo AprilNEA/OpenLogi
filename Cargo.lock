@@ -4629,6 +4629,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
  "zbus",
 ]
 
@@ -4637,6 +4638,7 @@ name = "openlogi-gui"
 version = "0.5.1"
 dependencies = [
  "anyhow",
+ "embed-resource",
  "fs4",
  "gpui",
  "gpui-component",
@@ -4671,6 +4673,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "windows 0.61.3",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4704,6 +4708,7 @@ dependencies = [
  "openlogi-core",
  "thiserror 2.0.18",
  "tracing",
+ "windows-sys 0.61.2",
  "x11rb",
 ]
 

@@ -22,6 +22,14 @@ use hidpp::{
 use tokio::sync::Mutex;
 use tracing::debug;
 
+#[cfg(target_os = "windows")]
+use std::io;
+
+#[cfg(target_os = "windows")]
+use crate::windows_hid::NativeHidWriter;
+#[cfg(target_os = "windows")]
+use hidpp::channel::{LONG_REPORT_ID, LONG_REPORT_LENGTH, SHORT_REPORT_ID, SHORT_REPORT_LENGTH};
+
 /// Logitech HID vendor ID.
 const LOGITECH_VID: u16 = 0x046d;
 /// HID++ long-report vendor collections, as `(usage_page, usage_id, long_only)`.
@@ -64,6 +72,7 @@ fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
 /// Whether the matched HID++ collection exposes only the long report, so short
 /// requests must be re-framed as long (done in the `hidpp` channel). `false` for
 /// pages not in [`HIDPP_LONG_COLLECTIONS`].
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
     HIDPP_LONG_COLLECTIONS
         .iter()
@@ -143,31 +152,246 @@ pub(crate) async fn open_hidpp_channel(
     // `Device: Deref<Target = DeviceInfo>` — clone the deref'd value so we can
     // keep using `dev` (which `to_device_info` would consume).
     let info: DeviceInfo = (*dev).clone();
-    let (reader, writer) = dev.open().await?;
-    // BLE-direct devices expose only the long HID++ report; flag the channel so
-    // it advertises short-unsupported and the `hidpp` channel up-converts shorts.
-    let long_only = is_long_only_collection(info.usage_page, info.usage_id);
-    let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only);
-    let channel = match HidppChannel::from_raw_channel(raw).await {
-        Ok(c) => Arc::new(c),
-        Err(e) => {
-            debug!(name = %info.name, error = ?e, "not a HID++ channel");
-            return Ok(None);
-        }
-    };
-    Ok(Some((info, channel)))
+    #[cfg(target_os = "windows")]
+    {
+        let raw = WindowsHidppChannel::open(dev, info.clone()).await?;
+        let channel = match HidppChannel::from_raw_channel(raw).await {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                debug!(name = %info.name, error = ?e, "not a HID++ channel");
+                return Ok(None);
+            }
+        };
+        Ok(Some((info, channel)))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let (reader, writer) = dev.open().await?;
+        // BLE-direct devices expose only the long HID++ report; flag the channel so
+        // it advertises short-unsupported and the `hidpp` channel up-converts shorts.
+        let long_only = is_long_only_collection(info.usage_page, info.usage_id);
+        let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only);
+        let channel = match HidppChannel::from_raw_channel(raw).await {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                debug!(name = %info.name, error = ?e, "not a HID++ channel");
+                return Ok(None);
+            }
+        };
+        Ok(Some((info, channel)))
+    }
 }
 
+#[cfg(target_os = "windows")]
+struct HidEndpoint {
+    reader: Mutex<DeviceReader>,
+    writer: Mutex<DeviceWriter>,
+    native_writer: Option<NativeHidWriter>,
+}
+
+#[cfg(target_os = "windows")]
+impl HidEndpoint {
+    fn new(reader: DeviceReader, writer: DeviceWriter, info: &DeviceInfo) -> Self {
+        Self {
+            reader: Mutex::new(reader),
+            writer: Mutex::new(writer),
+            native_writer: NativeHidWriter::new(info),
+        }
+    }
+
+    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
+        let mut writer = self.writer.lock().await;
+        if let Err(e) = writer.write_output_report(src).await {
+            if let Some(native_writer) = &self.native_writer {
+                debug!(
+                    error = %e,
+                    report_id = format_args!("{:#04x}", src.first().copied().unwrap_or_default()),
+                    len = src.len(),
+                    "async-hid output report write failed; trying native Windows HID fallback"
+                );
+                native_writer.write_report(src)?;
+                return Ok(src.len());
+            }
+
+            return Err(Box::new(e));
+        }
+        Ok(src.len())
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsHidppChannel {
+    info: DeviceInfo,
+    short: Option<HidEndpoint>,
+    long: Option<HidEndpoint>,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsHidppChannel {
+    async fn open(
+        long_dev: async_hid::Device,
+        long_info: DeviceInfo,
+    ) -> Result<Self, async_hid::HidError> {
+        let short_dev = find_windows_short_collection(&long_info).await?;
+        let (long_reader, long_writer) = long_dev.open().await?;
+        let long = Some(HidEndpoint::new(long_reader, long_writer, &long_info));
+
+        let short = match short_dev {
+            Some(dev) => {
+                let short_info: DeviceInfo = (*dev).clone();
+                match dev.open().await {
+                    Ok((reader, writer)) => {
+                        debug!(
+                            name = %short_info.name,
+                            pid = format_args!("{:04x}", short_info.product_id),
+                            "paired Windows HID++ short collection"
+                        );
+                        Some(HidEndpoint::new(reader, writer, &short_info))
+                    }
+                    Err(e) => {
+                        debug!(
+                            name = %short_info.name,
+                            pid = format_args!("{:04x}", short_info.product_id),
+                            error = ?e,
+                            "could not open Windows HID++ short collection"
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+
+        debug!(
+            name = %long_info.name,
+            pid = format_args!("{:04x}", long_info.product_id),
+            supports_short = short.is_some(),
+            supports_long = long.is_some(),
+            "opened Windows HID++ composite channel"
+        );
+
+        Ok(Self {
+            info: long_info,
+            short,
+            long,
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn find_windows_short_collection(
+    long_info: &DeviceInfo,
+) -> Result<Option<async_hid::Device>, async_hid::HidError> {
+    let all: Vec<async_hid::Device> = HID_BACKEND.enumerate().await?.collect().await;
+    Ok(all.into_iter().find(|d| {
+        d.vendor_id == long_info.vendor_id
+            && d.product_id == long_info.product_id
+            && d.name == long_info.name
+            && d.usage_page == 0xff00
+            && d.usage_id == 0x0001
+    }))
+}
+
+#[cfg(target_os = "windows")]
+#[async_trait]
+impl RawHidChannel for WindowsHidppChannel {
+    fn vendor_id(&self) -> u16 {
+        self.info.vendor_id
+    }
+
+    fn product_id(&self) -> u16 {
+        self.info.product_id
+    }
+
+    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
+        let endpoint = match src.first().copied() {
+            Some(SHORT_REPORT_ID) => self.short.as_ref(),
+            Some(LONG_REPORT_ID) => self.long.as_ref(),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "unsupported HID++ report id {:#04x}",
+                    src.first().copied().unwrap_or_default()
+                ),
+            )
+        })?;
+
+        endpoint.write_report(src).await
+    }
+
+    async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
+        match (&self.short, &self.long) {
+            (Some(short), Some(long)) => {
+                let mut short_buf = [0u8; SHORT_REPORT_LENGTH];
+                let mut long_buf = [0u8; LONG_REPORT_LENGTH];
+                let mut short_reader = short.reader.lock().await;
+                let mut long_reader = long.reader.lock().await;
+                tokio::select! {
+                    res = short_reader.read_input_report(&mut short_buf) => {
+                        copy_report(&short_buf, res?, buf)
+                    }
+                    res = long_reader.read_input_report(&mut long_buf) => {
+                        copy_report(&long_buf, res?, buf)
+                    }
+                }
+            }
+            (Some(endpoint), None) | (None, Some(endpoint)) => {
+                let mut reader = endpoint.reader.lock().await;
+                Ok(reader.read_input_report(buf).await?)
+            }
+            (None, None) => Err(Box::new(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "no Windows HID++ endpoints are open",
+            ))),
+        }
+    }
+
+    fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
+        Some((self.short.is_some(), self.long.is_some()))
+    }
+
+    async fn get_report_descriptor(
+        &self,
+        _buf: &mut [u8],
+    ) -> Result<usize, Box<dyn Error + Send + Sync>> {
+        Err("get_report_descriptor is not implemented; pre-filter to HID++ usage pages".into())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn copy_report(
+    src: &[u8],
+    len: usize,
+    dst: &mut [u8],
+) -> Result<usize, Box<dyn Error + Send + Sync>> {
+    if len > src.len() || len > dst.len() {
+        return Err(Box::new(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("HID report length {len} exceeds buffer size"),
+        )));
+    }
+    dst[..len].copy_from_slice(&src[..len]);
+    Ok(len)
+}
+
+#[cfg(not(target_os = "windows"))]
 pub(crate) struct AsyncHidChannel {
     reader: Mutex<DeviceReader>,
     writer: Mutex<DeviceWriter>,
     info: DeviceInfo,
+    #[cfg(target_os = "windows")]
+    native_writer: Option<NativeHidWriter>,
     /// Whether the device exposes only the long HID++ report (a BLE-direct
     /// peripheral on macOS). Reported via `supports_short_long_hidpp` so the
     /// `hidpp` channel up-converts outgoing short messages to long.
     long_only: bool,
 }
 
+#[cfg(not(target_os = "windows"))]
 impl AsyncHidChannel {
     pub(crate) fn new(
         reader: DeviceReader,
@@ -178,12 +402,15 @@ impl AsyncHidChannel {
         Self {
             reader: Mutex::new(reader),
             writer: Mutex::new(writer),
+            #[cfg(target_os = "windows")]
+            native_writer: NativeHidWriter::new(&info),
             info,
             long_only,
         }
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 #[async_trait]
 impl RawHidChannel for AsyncHidChannel {
     fn vendor_id(&self) -> u16 {
@@ -196,7 +423,21 @@ impl RawHidChannel for AsyncHidChannel {
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         let mut w = self.writer.lock().await;
-        w.write_output_report(src).await?;
+        if let Err(e) = w.write_output_report(src).await {
+            #[cfg(target_os = "windows")]
+            if let Some(native_writer) = &self.native_writer {
+                debug!(
+                    error = %e,
+                    report_id = format_args!("{:#04x}", src.first().copied().unwrap_or_default()),
+                    len = src.len(),
+                    "async-hid output report write failed; trying native Windows HID fallback"
+                );
+                native_writer.write_report(src)?;
+                return Ok(src.len());
+            }
+
+            return Err(Box::new(e));
+        }
         Ok(src.len())
     }
 
@@ -234,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn only_ble_collection_is_long_only() {
+    fn only_expected_collections_are_long_only() {
         assert!(is_long_only_collection(0xff43, 0x0202)); // BLE-direct → short-unsupported
         assert!(!is_long_only_collection(0xff00, 0x0002)); // USB / receiver carries both reports
         assert!(!is_long_only_collection(0xff43, 0x0602)); // wired G-series keyboard carries both
