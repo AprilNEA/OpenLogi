@@ -1,7 +1,7 @@
 > [!WARNING]
 > **OpenLogi 仍在积极开发中**，尚未稳定 —— 功能与配置仍可能变动。点个 **Star** ⭐ 并 **Watch** 👀 本仓库，第一时间获得发布通知。
 
-<h4 align="right"><a href="README.md">English</a> | <strong>简体中文</strong></h4>
+<h4 align="right"><a href="../README.md">English</a> | <strong>简体中文</strong> | <a href="README.ja.md">日本語</a> | <a href="README.de.md">Deutsch</a> | <a href="README.fr.md">Français</a> | <a href="README.ko.md">한국어</a></h4>
 
 <p align="center">
     <img src="https://assets.openlogi.org/brand/openlogi-animated.svg" width="138" alt="OpenLogi"/>
@@ -35,8 +35,8 @@ SmartShift、按应用切换配置。完全本地化，纯 TOML 配置；
 
 OpenLogi 通过 Logi Bolt 接收器 —— 或蓝牙直连 / 有线连接 —— 与罗技 HID++ 鼠标通信，无需运行 Logi Options+。它包含两个二进制：
 
-- **[OpenLogi GUI](crates/openlogi-gui)** —— 基于 GPUI 的桌面应用：交互式鼠标示意图（按钮可点击）、按钮动作选择器（37 个内置动作 + 录制的自定义快捷键）、DPI 预设、SmartShift 开关、按应用的配置叠加层，以及可在配对设备间实时切换的设备轮播。
-- **[OpenLogi CLI](crates/openlogi-cli)** —— 用于无头清单查看（`list`）以及资源同步与设备诊断的命令行工具。
+- **[OpenLogi GUI](../crates/openlogi-gui)** —— 基于 GPUI 的桌面应用：交互式鼠标示意图（按钮可点击）、按钮动作选择器（39 个内置动作 + 录制的自定义快捷键）、DPI 预设、SmartShift 开关、按应用的配置叠加层、可在配对设备间实时切换的设备轮播，以及一个界面支持六种语言本地化的设置窗口。
+- **[OpenLogi CLI](../crates/openlogi-cli)** —— 用于无头清单查看（`list`）以及资源同步与设备诊断的命令行工具。
 
 所有数据都在本地：绑定保存在普通 TOML 文件里，按键按下经由系统事件 tap 重映射，DPI / SmartShift 变更通过 HID++ 直接写入设备。
 
@@ -51,15 +51,16 @@ OpenLogi 通过 Logi Bolt 接收器 —— 或蓝牙直连 / 有线连接 ——
 | 电量百分比 / 充电状态 | ✅（在线设备） |
 | 交互式 GUI：轮播、鼠标示意图、动作选择器 | ✅ macOS |
 | 经由 OS 事件 tap 的按键重映射（目前为侧键 Back / Forward） | ✅ macOS |
-| 37 个动作目录 + 录制的自定义键盘快捷键 | ✅ macOS¹ |
+| 39 个动作目录 + 录制的自定义键盘快捷键 | ✅ macOS¹ |
 | DPI 控制 + 预设 + 循环 / 按预设设置动作（HID++ `0x2201`） | ✅ macOS |
 | SmartShift 滚轮模式切换（HID++ `0x2111`） | ✅ macOS |
 | 按应用的配置叠加层（应用获得焦点时自动切换） | ✅ macOS |
-| 开机启动 + 可选更新检查 | ✅（仅 TOML —— 暂无设置 UI） |
+| 设置窗口：开机启动、检查更新、菜单栏、权限、语言 | ✅ macOS |
+| 界面本地化（6 种语言：en、ja、ru、zh-CN、zh-HK、zh-TW） | ✅ macOS |
 | 手势按键的方向绑定 | 🟡 可配置；硬件捕获待办 |
 | 中键 / 模式切换键 / 拇指轮的按键捕获 | 🟡 可配置；钩子目前只占用侧键 |
 | Linux / Windows 事件钩子 | ❌ 占位（`Unsupported`） |
-| Unifying 接收器 | ❌（`hidpp 0.2` 暂未实现） |
+| Unifying 接收器 | ❌（暂未支持） |
 
 ¹ 少数动作（例如媒体键）目前只记录预期事件而没有真正发送 —— 已列入待办。
 
@@ -76,19 +77,19 @@ OpenLogi 通过 Logi Bolt 接收器 —— 或蓝牙直连 / 有线连接 ——
 brew install --cask openlogi
 ```
 
-需要从源码构建请看 [DEVELOPMENT.md](docs/DEVELOPMENT.md)。
+需要从源码构建请看 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
 ## 用法（CLI）
 
-查看 [USAGE.md](docs/USAGE.md)
+查看 [USAGE.md](USAGE.md)
 
 ## 配置
 
-查看 [CONFIGURATION.md](docs/CONFIGURATION.md)
+查看 [CONFIGURATION.md](CONFIGURATION.md)
 
 ## 开发
 
-查看 [DEVELOPMENT.md](docs/DEVELOPMENT.md)
+查看 [DEVELOPMENT.md](DEVELOPMENT.md)
 
 ## 致谢
 
@@ -100,8 +101,8 @@ brew install --cask openlogi
 
 双重许可，任选其一：
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](../LICENSE-MIT))
 
 ---
 
