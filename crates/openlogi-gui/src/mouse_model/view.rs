@@ -3,10 +3,12 @@ use gpui::{
     InteractiveElement, IntoElement, MouseButton, ParentElement, Render, RenderOnce,
     StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img, px, rgb,
 };
-use gpui_component::{Selectable, menu::PopupMenu, popover::Popover, v_flex};
+use gpui_component::{Selectable, h_flex, menu::PopupMenu, popover::Popover, v_flex};
 
 use crate::asset::ResolvedAsset;
-use crate::data::mouse_buttons::{Action, ButtonId, Hotspot, MOUSE_MODEL_SIZE, default_hotspots};
+use crate::data::mouse_buttons::{
+    Action, ButtonId, Hotspot, MOUSE_MODEL_SIZE, default_binding, default_hotspots,
+};
 use crate::mouse_model::geometry::{
     asset_dimensions_for_png, asset_hotspots_for_png, default_labels, labels_from_hotspots,
 };
@@ -98,11 +100,21 @@ impl Render for MouseModelView {
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
                 let binding = if label.id == ButtonId::GestureButton {
-                    "5 directions".to_string()
+                    BindingLabel {
+                        text: tr!("5 directions"),
+                        is_default: false,
+                    }
                 } else {
-                    bindings
-                        .get(&label.id)
-                        .map_or_else(|| "Unbound".to_string(), Action::label)
+                    match bindings.get(&label.id) {
+                        Some(action) => BindingLabel {
+                            text: localized_action_label(action),
+                            is_default: *action == default_binding(label.id),
+                        },
+                        None => BindingLabel {
+                            text: tr!("Unbound"),
+                            is_default: false,
+                        },
+                    }
                 };
                 label_popover(
                     idx,
@@ -262,7 +274,7 @@ state both need this many inputs; bundling would just hide the dependency"
 fn label_popover(
     idx: usize,
     label: Label,
-    binding: String,
+    binding: BindingLabel,
     highlighted: bool,
     mouse_left: f32,
     mouse_w: f32,
@@ -309,11 +321,16 @@ fn label_popover(
         .into_any_element()
 }
 
+struct BindingLabel {
+    text: gpui::SharedString,
+    is_default: bool,
+}
+
 #[derive(IntoElement)]
 struct LabelTrigger {
     id: ElementId,
     label: Label,
-    binding: String,
+    binding: BindingLabel,
     highlighted: bool,
     selected: bool,
     view: Entity<MouseModelView>,
@@ -336,6 +353,18 @@ impl RenderOnce for LabelTrigger {
         let btn = self.label.id;
         let view = self.view;
         let pal = theme::palette(cx);
+        let binding_color = if highlighted {
+            rgb(ACCENT_BLUE).into()
+        } else if self.binding.is_default {
+            pal.text_muted
+        } else {
+            pal.text_primary
+        };
+        let binding = if self.binding.is_default {
+            tr!("Default")
+        } else {
+            self.binding.text
+        };
         div()
             .id(self.id)
             .w(px(LABEL_W))
@@ -349,26 +378,42 @@ impl RenderOnce for LabelTrigger {
             } else {
                 pal.border
             })
-            .bg(pal.surface_hover)
+            .bg(if highlighted {
+                pal.surface
+            } else {
+                pal.surface_hover
+            })
+            .cursor_pointer()
+            .hover(move |s| s.bg(pal.surface))
             .child(
                 v_flex()
-                    .gap_0p5()
+                    .gap_1()
                     .child(
-                        div()
+                        h_flex()
+                            .items_center()
+                            .gap_1p5()
                             .text_xs()
                             .text_color(pal.text_muted)
-                            .child(self.label.id.label()),
+                            .child(div().text_xs().child("•"))
+                            .child(tr!(self.label.id.label())),
                     )
                     .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(if highlighted {
-                                rgb(ACCENT_BLUE).into()
-                            } else {
-                                pal.text_primary
-                            })
-                            .child(self.binding),
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(if self.binding.is_default {
+                                        FontWeight::NORMAL
+                                    } else {
+                                        FontWeight::SEMIBOLD
+                                    })
+                                    .text_color(binding_color)
+                                    .child(binding),
+                            )
+                            .child(div().text_sm().text_color(pal.text_muted).child("›")),
                     ),
             )
             .on_hover(move |hovered, _window, cx| {
@@ -382,6 +427,16 @@ impl RenderOnce for LabelTrigger {
                     cx.notify();
                 });
             })
+    }
+}
+
+fn localized_action_label(action: &Action) -> gpui::SharedString {
+    match action {
+        Action::SetDpiPreset(index) => {
+            tr!("DPI Preset %{index}", index => (index + 1).to_string())
+        }
+        Action::CustomShortcut(combo) => combo.rendered_label().into(),
+        _ => tr!(action.label()),
     }
 }
 

@@ -28,6 +28,11 @@ pub const STATUS_OFFLINE: u32 = 0x006b_7280;
 pub const HEADER_H: f32 = 80.;
 pub const FOOTER_H: f32 = 50.;
 
+/// Fixed width of a device card in the Home gallery. Cards are a fixed width so
+/// a wrapping flex row reflows into more or fewer columns as the window
+/// resizes — no manual breakpoints.
+pub const GALLERY_CARD_W: f32 = 220.;
+
 /// Appearance-dependent surface + text colours for the bespoke (non
 /// gpui-component) surfaces. Resolved once per render via [`palette`] and
 /// passed down to the free helper builders.

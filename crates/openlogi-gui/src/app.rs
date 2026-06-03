@@ -1,24 +1,56 @@
+use std::time::Duration;
+
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    Window, div, px, rgb,
+    Animation, AnimationExt as _, AnyElement, AppContext as _, BorrowAppContext as _, BoxShadow,
+    Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, div, ease_in_out,
+    point, prelude::FluentBuilder as _, px, relative, rgb,
 };
-use gpui_component::{Icon, IconName, h_flex, v_flex};
+use gpui_component::{
+    Icon, IconName,
+    collapsible::Collapsible,
+    description_list::{DescriptionItem, DescriptionList},
+    h_flex,
+    scroll::ScrollableElement as _,
+    tooltip::Tooltip,
+    v_flex,
+};
 use openlogi_core::config::Config;
-use openlogi_core::device::DeviceInventory;
+use openlogi_core::device::{
+    BatteryInfo, BatteryLevel, BatteryStatus, DeviceInventory, DeviceKind,
+};
+use openlogi_hid::DeviceRoute;
 use tracing::{info, warn};
 
 use crate::app_menu::{Minimize, Zoom};
 use crate::asset::AssetResolver;
-use crate::components::device_carousel::DeviceCarousel;
 use crate::components::dpi_panel::DpiPanel;
 use crate::mouse_model::view::MouseModelView;
-use crate::state::AppState;
-use crate::theme::{self, FOOTER_H, HEADER_H, Palette};
+use crate::state::{AppState, DeviceRecord};
+use crate::theme::{self, FOOTER_H, GALLERY_CARD_W, HEADER_H, Palette};
+
+/// Which screen the root view is showing.
+///
+/// GPUI has no router, so navigation is a tiny view-local enum that selects
+/// which subtree [`AppView::render`] builds. It is deliberately *not* in
+/// [`AppState`]: the route is pure UI presentation, whereas
+/// [`AppState::current_device`] is functional (it drives the hook bindings,
+/// DPI, and persisted selection). The detail route is keyed by `config_key`
+/// rather than an index so a hot-plug that reorders or drops the device list
+/// can't silently swap the user onto a different device's settings — render
+/// validates the key against the live selection and pops back to [`Route::Home`]
+/// when it no longer matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Route {
+    /// The device gallery.
+    Home,
+    /// A single device's settings, identified by its stable config key.
+    Device { config_key: String },
+}
 
 /// Root application view.
 pub struct AppView {
-    carousel: Entity<DeviceCarousel>,
+    route: Route,
     mouse_model: Entity<MouseModelView>,
     dpi_panel: Entity<DpiPanel>,
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
@@ -28,6 +60,8 @@ pub struct AppView {
     #[allow(dead_code, reason = "held to keep the AppState observer alive")]
     state_obs: Subscription,
     accessibility_dismissed: bool,
+    device_details_open: bool,
+    configuration_open: bool,
 }
 
 impl AppView {
@@ -62,23 +96,49 @@ impl AppView {
             }
         }
 
-        let carousel = cx.new(DeviceCarousel::new);
         let mouse_model = cx.new(MouseModelView::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let state_obs = cx.observe_global::<AppState>(|_, cx| cx.notify());
         Self {
-            carousel,
+            route: Route::Home,
             mouse_model,
             dpi_panel,
             appearance_obs: None,
             state_obs,
             accessibility_dismissed: false,
+            device_details_open: true,
+            configuration_open: true,
         }
     }
 
     /// Keep the OS-appearance observer alive.
     pub fn set_appearance_obs(&mut self, sub: Subscription) {
         self.appearance_obs = Some(sub);
+    }
+
+    /// Drill into a device's settings from the gallery. Makes it the
+    /// functionally active device too (hook bindings, DPI, and the persisted
+    /// selection follow [`AppState::set_current_device`]) and switches the
+    /// route to its detail screen.
+    fn open_device(&mut self, config_key: String, cx: &mut Context<Self>) {
+        cx.update_global::<AppState, _>(|state, _| {
+            if let Some(idx) = state
+                .device_list
+                .iter()
+                .position(|r| r.config_key == config_key)
+            {
+                state.set_current_device(idx);
+            }
+        });
+        self.route = Route::Device { config_key };
+        cx.notify();
+    }
+
+    /// Return to the device gallery. Leaves the active-device selection
+    /// untouched — the route is purely presentational.
+    fn go_home(&mut self, cx: &mut Context<Self>) {
+        self.route = Route::Home;
+        cx.notify();
     }
 
     fn accessibility_gate(pal: Palette, cx: &mut Context<Self>) -> AnyElement {
@@ -160,13 +220,14 @@ fn open_accessibility_settings() {
 }
 
 impl Render for AppView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
 
         let granted = cx
             .try_global::<AppState>()
             .is_none_or(|s| s.accessibility_granted);
         if !granted && !self.accessibility_dismissed {
+            window.set_window_title("OpenLogi");
             return Self::accessibility_gate(pal, cx);
         }
 
@@ -174,10 +235,48 @@ impl Render for AppView {
             .try_global::<AppState>()
             .is_some_and(|s| !s.device_list.is_empty());
         let scanning = cx.try_global::<AppState>().is_some_and(|s| s.scanning);
-        let body = if has_device {
-            body(&self.mouse_model, &self.dpi_panel).into_any_element()
+
+        // Resolve the route. A detail route lives only while its device is
+        // still the live selection; if a hot-plug dropped or reordered it (or
+        // the selection fell back to another device) pop quietly back to the
+        // gallery rather than render a different device under the same screen.
+        let show_device = match &self.route {
+            Route::Home => false,
+            Route::Device { config_key } => {
+                cx.try_global::<AppState>()
+                    .and_then(AppState::current_record)
+                    .map(|r| r.config_key.as_str())
+                    == Some(config_key.as_str())
+            }
+        };
+        if !show_device {
+            self.route = Route::Home;
+        }
+
+        window.set_window_title(&main_window_title(show_device, cx));
+
+        let (header_el, content_el) = if show_device {
+            (
+                detail_header(pal, cx).into_any_element(),
+                body(
+                    &self.mouse_model,
+                    &self.dpi_panel,
+                    self.device_details_open,
+                    self.configuration_open,
+                    pal,
+                    cx,
+                )
+                .into_any_element(),
+            )
         } else {
-            device_empty_state(pal, scanning)
+            (
+                home_header(pal).into_any_element(),
+                if has_device {
+                    device_gallery(pal, cx).into_any_element()
+                } else {
+                    device_empty_state(pal, scanning)
+                },
+            )
         };
 
         v_flex()
@@ -186,42 +285,714 @@ impl Render for AppView {
             .text_color(pal.text_primary)
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            .child(header(&self.carousel, pal))
-            .child(body)
+            .child(header_el)
+            .child(content_el)
             .child(footer(pal, granted))
             .into_any_element()
     }
 }
 
-fn header(carousel: &Entity<DeviceCarousel>, pal: Palette) -> impl IntoElement {
+/// Home (gallery) top bar: the "Devices" title, a Settings gear, and the
+/// Add-Device button — the entry points the old carousel header used to carry.
+fn home_header(pal: Palette) -> impl IntoElement {
     h_flex()
         .h(px(HEADER_H))
         .w_full()
         .px_5()
-        .gap_4()
+        .gap_3()
         .items_center()
         .border_b_1()
         .border_color(pal.border)
         .child(
             div()
+                .flex_1()
+                .min_w_0()
                 .text_lg()
                 .font_weight(FontWeight::SEMIBOLD)
-                .child("OpenLogi"),
+                .child(tr!("Devices")),
         )
-        .child(div().flex_1().min_w_0().child(carousel.clone()))
+        .child(settings_button(pal))
+        .child(add_device_button(pal))
 }
 
-fn body(mouse_model: &Entity<MouseModelView>, dpi_panel: &Entity<DpiPanel>) -> impl IntoElement {
+/// Device-detail top bar: a back affordance returning to the gallery, the
+/// active device's name, its connection status, and the Add-Device button.
+fn detail_header(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let record = cx
+        .try_global::<AppState>()
+        .and_then(AppState::current_record)
+        .cloned();
+    h_flex()
+        .h(px(HEADER_H))
+        .w_full()
+        .px_5()
+        .gap_3()
+        .items_center()
+        .border_b_1()
+        .border_color(pal.border)
+        .child(back_button(pal, cx))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_lg()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(
+                    record
+                        .as_ref()
+                        .map_or_else(|| tr!("Device").to_string(), |r| r.display_name.clone()),
+                ),
+        )
+        .when_some(record, |this, r| this.child(status_badge(r.online, pal)))
+        .child(add_device_button(pal))
+}
+
+/// "← Back" affordance on the detail screen; returns to the gallery without
+/// changing the active-device selection.
+fn back_button(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    h_flex()
+        .id("detail-back")
+        .flex_shrink_0()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .text_color(pal.text_muted)
+        .cursor_pointer()
+        .hover(|s| s.bg(pal.surface_hover).text_color(pal.text_primary))
+        .child(Icon::new(IconName::ChevronLeft).size_4())
+        .child(tr!("Back"))
+        .on_click(cx.listener(|this, _, _, cx| this.go_home(cx)))
+}
+
+/// Square Settings gear in the Home header: opens the Settings window.
+fn settings_button(pal: Palette) -> impl IntoElement {
+    h_flex()
+        .id("home-settings")
+        .flex_shrink_0()
+        .size(px(36.))
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .border_1()
+        .border_color(pal.border)
+        .bg(pal.surface)
+        .text_color(pal.text_muted)
+        .cursor_pointer()
+        .hover(|s| s.bg(pal.surface_hover).text_color(pal.text_primary))
+        .tooltip(|window, cx| Tooltip::new(tr!("Settings")).build(window, cx))
+        .child(Icon::new(IconName::Settings).size_4())
+        .on_click(|_, _, cx| crate::windows::settings::open(cx))
+}
+
+/// The Home gallery: a wrapping grid of device cards. Clicking a card selects
+/// that device and drills into its detail screen. The active device (whose
+/// bindings the hook is using) is ringed so it stays identifiable while
+/// browsing.
+fn device_gallery(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let (records, active_key) = cx.try_global::<AppState>().map_or_else(
+        || (Vec::new(), None),
+        |s| {
+            (
+                s.device_list.clone(),
+                s.current_record().map(|r| r.config_key.clone()),
+            )
+        },
+    );
+
+    let mut cards = Vec::with_capacity(records.len());
+    for (idx, record) in records.iter().enumerate() {
+        let active = Some(&record.config_key) == active_key.as_ref();
+        let key = record.config_key.clone();
+        let on_click = cx.listener(move |this, _, _, cx| this.open_device(key.clone(), cx));
+        cards.push(gallery_card(idx, record, active, pal, on_click));
+    }
+
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .overflow_y_scrollbar()
+        .p_6()
+        .child(h_flex().w_full().flex_wrap().gap_4().children(cards))
+}
+
+/// One device card in the gallery.
+fn gallery_card(
+    idx: usize,
+    record: &DeviceRecord,
+    active: bool,
+    pal: Palette,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    div()
+        .id(("gallery-card", idx))
+        .w(px(GALLERY_CARD_W))
+        .p_4()
+        .rounded_lg()
+        .border_2()
+        .border_color(if active {
+            rgb(theme::ACCENT_BLUE).into()
+        } else {
+            pal.border
+        })
+        .bg(pal.surface)
+        .cursor_pointer()
+        .hover(|s| s.bg(pal.surface_hover))
+        .on_click(on_click)
+        .child(
+            v_flex()
+                .gap_3()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(status_dot(idx, record.online))
+                        .when_some(record.battery.as_ref(), |this, b| {
+                            this.child(battery_view(b, pal))
+                        }),
+                )
+                .child(
+                    v_flex()
+                        .gap_0p5()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(record.display_name.clone()),
+                        )
+                        .child(div().text_xs().text_color(pal.text_muted).child(format!(
+                            "{} · slot {}",
+                            kind_label(record.kind),
+                            record.slot
+                        ))),
+                ),
+        )
+        .into_any_element()
+}
+
+/// Connectivity dot for a gallery card: a steady grey when offline, a softly
+/// breathing green when connected. The animation id is keyed by card index so
+/// sibling cards don't share animation state.
+fn status_dot(idx: usize, online: bool) -> AnyElement {
+    let color = if online {
+        theme::STATUS_CONNECTED
+    } else {
+        theme::STATUS_OFFLINE
+    };
+    let base = div().size(px(10.)).rounded_full().bg(rgb(color));
+    if !online {
+        return base.into_any_element();
+    }
+    base.with_animation(
+        ("gallery-status-breath", idx),
+        Animation::new(Duration::from_millis(2200))
+            .repeat()
+            .with_easing(ease_in_out),
+        |this, delta| {
+            let intensity = (delta * std::f32::consts::PI).sin();
+            this.shadow(vec![BoxShadow {
+                color: gpui::hsla(0.35, 0.7, 0.55, 0.35 + intensity * 0.45),
+                offset: point(px(0.), px(0.)),
+                blur_radius: px(2. + intensity * 8.),
+                spread_radius: px(0.5),
+            }])
+        },
+    )
+    .into_any_element()
+}
+
+/// Battery readout for a gallery card: a charge/level glyph plus the
+/// percentage, in the muted metadata style.
+fn battery_view(b: &BatteryInfo, pal: Palette) -> AnyElement {
+    h_flex()
+        .gap_1()
+        .items_center()
+        .text_xs()
+        .text_color(pal.text_muted)
+        .child(Icon::new(battery_icon(b)).size_3())
+        .child(format!("{}%", b.percentage))
+        .into_any_element()
+}
+
+/// Pick the battery glyph from charge state first (charging / full / error),
+/// then fall back to the discrete charge level for a plain discharge.
+fn battery_icon(b: &BatteryInfo) -> IconName {
+    match b.status {
+        BatteryStatus::Charging | BatteryStatus::ChargingSlow => IconName::BatteryCharging,
+        BatteryStatus::Full => IconName::BatteryFull,
+        BatteryStatus::Error => IconName::BatteryWarning,
+        BatteryStatus::Discharging | BatteryStatus::Unknown => match b.level {
+            BatteryLevel::Critical => IconName::BatteryWarning,
+            BatteryLevel::Low => IconName::BatteryLow,
+            BatteryLevel::Good => IconName::BatteryMedium,
+            BatteryLevel::Full => IconName::BatteryFull,
+            BatteryLevel::Unknown => IconName::Battery,
+        },
+    }
+}
+
+/// Trailing "+" button that opens the pairing window. Present in both screen
+/// headers; the empty state carries its own primary "Add Device" CTA, so this
+/// never floats alone in an empty header.
+fn add_device_button(pal: Palette) -> impl IntoElement {
+    h_flex()
+        .id("header-add-device")
+        .flex_shrink_0()
+        .size(px(36.))
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .border_1()
+        .border_color(pal.border)
+        .bg(pal.surface)
+        .text_color(pal.text_muted)
+        .cursor_pointer()
+        .hover(|s| s.bg(pal.surface_hover).text_color(pal.text_primary))
+        .tooltip(|window, cx| Tooltip::new(tr!("Add Device")).build(window, cx))
+        .child(Icon::new(IconName::Plus).size_4())
+        .on_click(|_, _, cx| crate::windows::add_device::open(cx))
+}
+
+fn main_window_title(show_device: bool, cx: &Context<AppView>) -> SharedString {
+    if !show_device {
+        return SharedString::from("OpenLogi");
+    }
+    cx.try_global::<AppState>()
+        .and_then(AppState::current_record)
+        .map_or_else(
+            || SharedString::from("OpenLogi"),
+            |record| SharedString::from(format!("OpenLogi - {}", record.display_name)),
+        )
+}
+
+fn body(
+    mouse_model: &Entity<MouseModelView>,
+    dpi_panel: &Entity<DpiPanel>,
+    device_details_open: bool,
+    configuration_open: bool,
+    pal: Palette,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     h_flex()
         .flex_1()
         .w_full()
         .min_h_0()
-        .items_start()
+        .items_stretch()
         .justify_center()
-        .gap_6()
+        .gap_4()
         .p_6()
-        .child(mouse_model.clone())
-        .child(dpi_panel.clone())
+        .child(div().flex_1().min_w_0().child(mouse_model.clone()))
+        .child(right_panel(
+            dpi_panel,
+            device_details_open,
+            configuration_open,
+            pal,
+            cx,
+        ))
+}
+
+fn right_panel(
+    dpi_panel: &Entity<DpiPanel>,
+    device_details_open: bool,
+    configuration_open: bool,
+    pal: Palette,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    v_flex()
+        .w(px(340.))
+        .min_w(px(340.))
+        .max_w(px(340.))
+        .h_full()
+        .min_h_0()
+        .flex_shrink_0()
+        .gap_3()
+        .overflow_y_scrollbar()
+        .child(device_status_card(device_details_open, pal, cx))
+        .child(panel_card(
+            tr!("Pointer tuning"),
+            IconName::Settings,
+            pal,
+            dpi_panel.clone().into_any_element(),
+        ))
+        .child(configuration_card(configuration_open, pal, cx))
+}
+
+fn device_status_card(open: bool, pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let content = cx
+        .try_global::<AppState>()
+        .and_then(AppState::current_record)
+        .cloned()
+        .map_or_else(
+            || {
+                div()
+                    .text_sm()
+                    .text_color(pal.text_muted)
+                    .child(tr!("No active device"))
+                    .into_any_element()
+            },
+            |record| {
+                v_flex()
+                    .gap_3()
+                    .child(device_summary(
+                        &record.display_name,
+                        record.kind,
+                        record.online,
+                        pal,
+                    ))
+                    .when_some(record.battery.as_ref(), |this, battery| {
+                        this.child(battery_summary(battery, pal))
+                    })
+                    .child(
+                        Collapsible::new()
+                            .open(open)
+                            .content(device_description_list(record)),
+                    )
+                    .into_any_element()
+            },
+        );
+
+    collapsible_panel_card(
+        "device-details-header",
+        tr!("Device details"),
+        IconName::Info,
+        open,
+        pal,
+        content,
+        cx.listener(|this, _, _, cx| {
+            this.device_details_open = !this.device_details_open;
+            cx.notify();
+        }),
+    )
+}
+
+fn configuration_card(open: bool, pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let (binding_count, gesture_count, preset_count, app_profile) = cx
+        .try_global::<AppState>()
+        .map_or((0, 0, 0, tr!("Default profile").to_string()), |state| {
+            (
+                state.button_bindings.len(),
+                state.gesture_bindings.len(),
+                state.dpi_presets().len(),
+                state
+                    .current_app_bundle
+                    .clone()
+                    .unwrap_or_else(|| tr!("Default profile").to_string()),
+            )
+        });
+
+    let content = v_flex()
+        .gap_3()
+        .child(
+            Collapsible::new().open(open).content(
+                DescriptionList::new()
+                    .columns(1)
+                    .label_width(px(118.))
+                    .bordered(false)
+                    .child(DescriptionItem::new(tr!("Active profile")).value(app_profile))
+                    .child(
+                        DescriptionItem::new(tr!("Button bindings"))
+                            .value(binding_count.to_string()),
+                    )
+                    .child(
+                        DescriptionItem::new(tr!("Gesture bindings"))
+                            .value(gesture_count.to_string()),
+                    )
+                    .child(
+                        DescriptionItem::new(tr!("DPI presets")).value(preset_count.to_string()),
+                    ),
+            ),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .pt_1()
+                .child(sidebar_action(
+                    "right-panel-settings",
+                    IconName::Settings,
+                    tr!("Settings"),
+                    pal,
+                    |_event, _window, cx| crate::windows::settings::open(cx),
+                ))
+                .child(sidebar_action(
+                    "right-panel-config-folder",
+                    IconName::Folder,
+                    tr!("Config folder"),
+                    pal,
+                    |_event, _window, cx| {
+                        if let Ok(path) = openlogi_core::paths::config_dir() {
+                            cx.open_url(&file_url(&path));
+                        }
+                    },
+                )),
+        )
+        .into_any_element();
+
+    collapsible_panel_card(
+        "configuration-header",
+        tr!("Configuration"),
+        IconName::Folder,
+        open,
+        pal,
+        content,
+        cx.listener(|this, _, _, cx| {
+            this.configuration_open = !this.configuration_open;
+            cx.notify();
+        }),
+    )
+}
+
+fn device_summary(name: &str, kind: DeviceKind, online: bool, pal: Palette) -> impl IntoElement {
+    h_flex()
+        .justify_between()
+        .gap_3()
+        .child(
+            v_flex()
+                .gap_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(name.to_string()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(pal.text_muted)
+                        .child(kind_label(kind)),
+                ),
+        )
+        .child(status_badge(online, pal))
+}
+
+fn device_description_list(record: crate::state::DeviceRecord) -> impl IntoElement {
+    let mut items = vec![
+        DescriptionItem::new(tr!("Connection")).value(route_label(record.route.as_ref())),
+        DescriptionItem::new(tr!("Slot")).value(record.slot.to_string()),
+        DescriptionItem::new(tr!("Device key")).value(record.config_key),
+    ];
+    if let Some(serial) = record.serial_number {
+        items.push(DescriptionItem::new(tr!("Serial")).value(serial));
+    }
+
+    DescriptionList::new()
+        .columns(1)
+        .label_width(px(100.))
+        .bordered(false)
+        .children(items)
+}
+
+fn collapsible_panel_card(
+    id: &'static str,
+    title: SharedString,
+    icon: IconName,
+    open: bool,
+    pal: Palette,
+    content: AnyElement,
+    on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    panel_card(
+        SharedString::from(""),
+        icon.clone(),
+        pal,
+        Collapsible::new()
+            .open(open)
+            .child(
+                h_flex()
+                    .id(id)
+                    .items_center()
+                    .justify_between()
+                    .cursor_pointer()
+                    .on_click(on_toggle)
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(Icon::new(icon).size_4().text_color(pal.text_muted))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(title),
+                            ),
+                    )
+                    .child(
+                        Icon::new(if open {
+                            IconName::ChevronUp
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .size_4()
+                        .text_color(pal.text_muted),
+                    ),
+            )
+            .content(content)
+            .into_any_element(),
+    )
+}
+
+fn panel_card(
+    title: SharedString,
+    icon: IconName,
+    pal: Palette,
+    content: AnyElement,
+) -> impl IntoElement {
+    div()
+        .w_full()
+        .max_w_full()
+        .min_w_0()
+        .rounded_lg()
+        .border_1()
+        .border_color(pal.border)
+        .bg(pal.surface)
+        .p_4()
+        .child(
+            v_flex()
+                .gap_3()
+                .when(!title.is_empty(), |this| {
+                    this.child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .text_color(pal.text_primary)
+                            .child(Icon::new(icon).size_4().text_color(pal.text_muted))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(title),
+                            ),
+                    )
+                })
+                .child(content),
+        )
+}
+
+fn status_badge(online: bool, pal: Palette) -> impl IntoElement {
+    let (label, color) = if online {
+        (tr!("Connected"), theme::STATUS_CONNECTED)
+    } else {
+        (tr!("Offline"), theme::STATUS_OFFLINE)
+    };
+    h_flex()
+        .gap_1()
+        .items_center()
+        .rounded_full()
+        .border_1()
+        .border_color(pal.border)
+        .px_2()
+        .py_1()
+        .text_xs()
+        .text_color(pal.text_muted)
+        .child(div().size_1p5().rounded_full().bg(rgb(color)))
+        .child(label)
+}
+
+fn battery_summary(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
+    let status = match battery.status {
+        BatteryStatus::Charging | BatteryStatus::ChargingSlow => tr!("Charging"),
+        BatteryStatus::Full => tr!("Full"),
+        BatteryStatus::Error => tr!("Battery error"),
+        BatteryStatus::Discharging | BatteryStatus::Unknown => tr!("Battery"),
+    };
+    v_flex()
+        .gap_2()
+        .child(
+            h_flex()
+                .justify_between()
+                .text_xs()
+                .text_color(pal.text_muted)
+                .child(status)
+                .child(format!("{}%", battery.percentage)),
+        )
+        .child(
+            div()
+                .h(px(6.))
+                .w_full()
+                .rounded_full()
+                .bg(pal.surface_hover)
+                .child(
+                    div()
+                        .h_full()
+                        .w(relative_percent(battery.percentage))
+                        .rounded_full()
+                        .bg(rgb(battery_color(battery.percentage))),
+                ),
+        )
+}
+
+fn sidebar_action(
+    id: &'static str,
+    icon: IconName,
+    label: SharedString,
+    pal: Palette,
+    handler: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    h_flex()
+        .id(id)
+        .flex_1()
+        .justify_center()
+        .items_center()
+        .gap_1()
+        .rounded_md()
+        .border_1()
+        .border_color(pal.border)
+        .bg(pal.surface)
+        .px_2()
+        .py_1()
+        .text_xs()
+        .text_color(pal.text_primary)
+        .cursor_pointer()
+        .hover(move |s| s.bg(pal.surface_hover))
+        .child(Icon::new(icon).size_3())
+        .child(label)
+        .on_click(handler)
+        .into_any_element()
+}
+
+fn route_label(route: Option<&DeviceRoute>) -> String {
+    match route {
+        Some(DeviceRoute::Bolt { .. }) => tr!("Bolt receiver").to_string(),
+        Some(DeviceRoute::Direct { .. }) => tr!("Direct connection").to_string(),
+        None => tr!("Unavailable").to_string(),
+    }
+}
+
+fn kind_label(kind: DeviceKind) -> String {
+    match kind {
+        DeviceKind::Mouse => tr!("Mouse").to_string(),
+        DeviceKind::Keyboard => tr!("Keyboard").to_string(),
+        DeviceKind::Numpad => tr!("Numpad").to_string(),
+        DeviceKind::Presenter => tr!("Presenter").to_string(),
+        DeviceKind::Remote => tr!("Remote").to_string(),
+        DeviceKind::Trackball => tr!("Trackball").to_string(),
+        DeviceKind::Touchpad => tr!("Touchpad").to_string(),
+        DeviceKind::Tablet => tr!("Tablet").to_string(),
+        DeviceKind::Gamepad => tr!("Gamepad").to_string(),
+        DeviceKind::Joystick => tr!("Joystick").to_string(),
+        DeviceKind::Headset => tr!("Headset").to_string(),
+        DeviceKind::Unknown => tr!("Device").to_string(),
+    }
+}
+
+fn battery_color(percentage: u8) -> u32 {
+    match percentage {
+        0..=20 => 0x00ef_4444,
+        21..=50 => theme::STATUS_CONNECTING,
+        _ => theme::STATUS_CONNECTED,
+    }
+}
+
+fn relative_percent(value: u8) -> gpui::DefiniteLength {
+    relative(f32::from(value.clamp(1, 100)) / 100.)
+}
+
+fn file_url(path: &std::path::Path) -> String {
+    format!("file://{}", path.to_string_lossy().replace(' ', "%20"))
 }
 
 /// Body shown when no device is connected. The inventory watcher keeps polling
@@ -286,6 +1057,12 @@ fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
         .into_any_element()
 }
 
+/// Footer status bar: passive state only. Left — the Accessibility-permission
+/// indicator; right — the app version. The former actions (Add Device /
+/// Settings / About) moved to where they belong: Add Device to the device
+/// header's "+", Settings to the right panel's Configuration card and the menu
+/// bar (⌘,), About to the menu bar. Keeping operations out of here leaves a
+/// genuine status bar — two quiet readouts at the edges, nothing in the middle.
 fn footer(pal: Palette, granted: bool) -> impl IntoElement {
     h_flex()
         .h(px(FOOTER_H))
@@ -296,38 +1073,6 @@ fn footer(pal: Palette, granted: bool) -> impl IntoElement {
         .justify_between()
         .border_t_1()
         .border_color(pal.border)
-        .child(
-            h_flex()
-                .gap_2()
-                .text_xs()
-                .text_color(pal.text_muted)
-                .child(
-                    div()
-                        .id("footer-add-device")
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(pal.text_primary))
-                        .child(footer_link(IconName::Plus, tr!("Add Device")))
-                        .on_click(|_, _, cx| crate::windows::add_device::open(cx)),
-                )
-                .child(div().child("·"))
-                .child(
-                    div()
-                        .id("footer-settings")
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(pal.text_primary))
-                        .child(footer_link(IconName::Settings, tr!("Settings")))
-                        .on_click(|_, _, cx| crate::windows::settings::open(cx)),
-                )
-                .child(div().child("·"))
-                .child(
-                    div()
-                        .id("footer-about")
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(pal.text_primary))
-                        .child(footer_link(IconName::Info, tr!("About")))
-                        .on_click(|_, _, cx| crate::windows::about::open(cx)),
-                ),
-        )
         .child(accessibility_status(pal, granted))
         .child(
             div()
@@ -337,32 +1082,29 @@ fn footer(pal: Palette, granted: bool) -> impl IntoElement {
         )
 }
 
-/// A footer link's content: a small leading icon plus its label, laid out
-/// inline. The hover colour is inherited from the clickable wrapper, so this
-/// only describes the static row.
-fn footer_link(icon: IconName, label: SharedString) -> impl IntoElement {
-    h_flex()
-        .gap_1()
-        .items_center()
-        .child(Icon::new(icon))
-        .child(label)
-}
-
 /// Footer Accessibility-permission indicator. Granted → a muted green-dot
 /// status; not granted → an amber-dot affordance that requests the grant on
 /// click (the native prompt + System Settings, via [`open_accessibility_settings`]).
 fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
-    let dot = |color: u32| div().size_2().rounded_full().bg(rgb(color));
     if granted {
+        // Reassurance only — kept deliberately quiet: a small dimmed dot and
+        // muted text that recede until something is actually wrong.
         h_flex()
-            .gap_2()
+            .gap_1p5()
             .items_center()
             .text_xs()
             .text_color(pal.text_muted)
-            .child(dot(theme::STATUS_CONNECTED))
+            .child(
+                div()
+                    .size_1p5()
+                    .rounded_full()
+                    .bg(rgb(theme::STATUS_CONNECTED)),
+            )
             .child(div().child(tr!("Accessibility granted")))
             .into_any_element()
     } else {
+        // The state that needs attention — full-strength text, an amber dot,
+        // and a click target that requests the grant.
         h_flex()
             .id("footer-accessibility")
             .gap_2()
@@ -370,7 +1112,12 @@ fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
             .text_xs()
             .text_color(pal.text_primary)
             .cursor_pointer()
-            .child(dot(theme::STATUS_CONNECTING))
+            .child(
+                div()
+                    .size_2()
+                    .rounded_full()
+                    .bg(rgb(theme::STATUS_CONNECTING)),
+            )
             .child(div().child(tr!("Accessibility not granted · click to grant")))
             .on_click(|_, _, _| open_accessibility_settings())
             .into_any_element()

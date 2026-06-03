@@ -153,7 +153,15 @@ mod tests {
         rust_i18n::set_locale("zh-CN");
         assert_eq!(rust_i18n::t!("Settings"), "设置"); // GUI chrome
         assert_eq!(rust_i18n::t!("Left Click"), "左键单击"); // core enum label
+        assert_eq!(rust_i18n::t!("DPI"), "灵敏度"); // DPI panel/category label
         assert_eq!(rust_i18n::t!("Bind %{name}", name => "X"), "绑定 X"); // interpolation
+        assert_eq!(rust_i18n::t!("Unbound"), "未绑定"); // mouse model card state
+        assert_eq!(rust_i18n::t!("Default"), "默认"); // default-binding card state
+        assert_eq!(rust_i18n::t!("5 directions"), "5 个方向"); // gesture card summary
+        assert_eq!(
+            rust_i18n::t!("DPI Preset %{index}", index => "2"),
+            "灵敏度预设 2"
+        ); // parameterized action label
         assert_eq!(rust_i18n::t!("Quit OpenLogi"), "退出 OpenLogi"); // menu-bar status item
         assert_eq!(rust_i18n::t!("No devices connected"), "未连接设备"); // menu-bar device line
         assert_ne!(
@@ -163,11 +171,9 @@ mod tests {
         );
 
         // Exhaustive: every non-parameterized device/action label has a `zh-CN`
-        // entry. `DPI` is a universal initialism, identical across locales — it
-        // has no entry, so it's the one exception to "differs from English".
-        // Parameterized `Action`s (`SetDpiPreset`, `CustomShortcut`) are
-        // English-only by design and absent from the catalog, so they're skipped.
-        let covered = |label: &str| label == "DPI" || rust_i18n::t!(label) != label;
+        // entry. Parameterized `Action`s (`SetDpiPreset`, `CustomShortcut`) are
+        // skipped here and checked explicitly above where needed.
+        let covered = |label: &str| rust_i18n::t!(label) != label;
         for b in ButtonId::ALL {
             assert!(covered(b.label()), "no zh-CN for ButtonId::{b:?}");
         }

@@ -18,6 +18,12 @@ _version: 2
   zh-CN: 未连接设备
   zh-HK: 未連接裝置
   zh-TW: 沒有已連線的裝置
+"Devices":
+  ja: デバイス
+  ru: "Устройства"
+  zh-CN: 设备
+  zh-HK: 裝置
+  zh-TW: 裝置
 
 # ── Menu-bar status item (platform/menubar.rs) ──────────────────────────────
 "Open OpenLogi":
@@ -39,6 +45,210 @@ _version: 2
   zh-CN: 接入或配对受支持的 Logitech 设备，它会自动显示在这里。如需直接蓝牙连接，请在电脑的蓝牙设置中配对。
   zh-HK: 接入或配對受支援的 Logitech 裝置，它會自動顯示在這裡。如需直接藍牙連接，請在電腦的藍牙設定中配對。
   zh-TW: 接上或配對相容的 Logitech 裝置，裝置就會自動顯示在這裡。若要使用直接藍牙連線，請在電腦的藍牙設定中配對。
+"No active device":
+  ja: アクティブなデバイスがありません
+  ru: "Нет активного устройства"
+  zh-CN: 没有活动设备
+  zh-HK: 沒有使用中的裝置
+  zh-TW: 沒有使用中的裝置
+"Pointer tuning":
+  ja: ポインター調整
+  ru: "Настройка указателя"
+  zh-CN: 指针调校
+  zh-HK: 指標調校
+  zh-TW: 指標調整
+"Device details":
+  ja: デバイス詳細
+  ru: "Сведения об устройстве"
+  zh-CN: 设备详情
+  zh-HK: 裝置詳情
+  zh-TW: 裝置詳細資訊
+"Configuration":
+  ja: 設定
+  ru: "Конфигурация"
+  zh-CN: 配置
+  zh-HK: 設定
+  zh-TW: 設定
+"Connection":
+  ja: 接続
+  ru: "Подключение"
+  zh-CN: 连接
+  zh-HK: 連線
+  zh-TW: 連線
+"Slot":
+  ja: スロット
+  ru: "Слот"
+  zh-CN: 槽位
+  zh-HK: 插槽
+  zh-TW: 插槽
+"Device key":
+  ja: デバイスキー
+  ru: "Ключ устройства"
+  zh-CN: 设备键
+  zh-HK: 裝置鍵
+  zh-TW: 裝置鍵
+"Serial":
+  ja: シリアル
+  ru: "Серийный номер"
+  zh-CN: 序列号
+  zh-HK: 序號
+  zh-TW: 序號
+"Active profile":
+  ja: アクティブなプロファイル
+  ru: "Активный профиль"
+  zh-CN: 当前配置文件
+  zh-HK: 目前設定檔
+  zh-TW: 目前設定檔
+"Default profile":
+  ja: デフォルトプロファイル
+  ru: "Профиль по умолчанию"
+  zh-CN: 默认配置文件
+  zh-HK: 預設設定檔
+  zh-TW: 預設設定檔
+"Button bindings":
+  ja: ボタン割り当て
+  ru: "Привязки кнопок"
+  zh-CN: 按键绑定
+  zh-HK: 按鍵綁定
+  zh-TW: 按鍵指派
+"Gesture bindings":
+  ja: ジェスチャー割り当て
+  ru: "Привязки жестов"
+  zh-CN: 手势绑定
+  zh-HK: 手勢綁定
+  zh-TW: 手勢指派
+"DPI presets":
+  ja: DPI プリセット
+  ru: "Пресеты DPI"
+  zh-CN: DPI 预设
+  zh-HK: DPI 預設
+  zh-TW: DPI 預設
+"Config folder":
+  ja: 設定フォルダー
+  ru: "Папка конфигурации"
+  zh-CN: 配置文件夹
+  zh-HK: 設定資料夾
+  zh-TW: 設定資料夾
+"Connected":
+  ja: 接続済み
+  ru: "Подключено"
+  zh-CN: 已连接
+  zh-HK: 已連線
+  zh-TW: 已連線
+"Offline":
+  ja: オフライン
+  ru: "Не в сети"
+  zh-CN: 离线
+  zh-HK: 離線
+  zh-TW: 離線
+"Battery":
+  ja: バッテリー
+  ru: "Батарея"
+  zh-CN: 电量
+  zh-HK: 電量
+  zh-TW: 電量
+"Charging":
+  ja: 充電中
+  ru: "Заряжается"
+  zh-CN: 充电中
+  zh-HK: 充電中
+  zh-TW: 充電中
+"Full":
+  ja: フル充電
+  ru: "Полный заряд"
+  zh-CN: 已充满
+  zh-HK: 已充滿
+  zh-TW: 已充滿
+"Battery error":
+  ja: バッテリーエラー
+  ru: "Ошибка батареи"
+  zh-CN: 电池错误
+  zh-HK: 電池錯誤
+  zh-TW: 電池錯誤
+"Bolt receiver":
+  ja: Bolt レシーバー
+  ru: "Приёмник Bolt"
+  zh-CN: Bolt 接收器
+  zh-HK: Bolt 接收器
+  zh-TW: Bolt 接收器
+"Direct connection":
+  ja: 直接接続
+  ru: "Прямое подключение"
+  zh-CN: 直接连接
+  zh-HK: 直接連線
+  zh-TW: 直接連線
+"Unavailable":
+  ja: 利用不可
+  ru: "Недоступно"
+  zh-CN: 不可用
+  zh-HK: 不可用
+  zh-TW: 無法使用
+"Mouse":
+  ja: マウス
+  ru: "Мышь"
+  zh-CN: 鼠标
+  zh-HK: 滑鼠
+  zh-TW: 滑鼠
+"Keyboard":
+  ja: キーボード
+  ru: "Клавиатура"
+  zh-CN: 键盘
+  zh-HK: 鍵盤
+  zh-TW: 鍵盤
+"Numpad":
+  ja: テンキー
+  ru: "Цифровая клавиатура"
+  zh-CN: 数字键盘
+  zh-HK: 數字鍵盤
+  zh-TW: 數字鍵盤
+"Presenter":
+  ja: プレゼンター
+  ru: "Презентер"
+  zh-CN: 演示器
+  zh-HK: 簡報器
+  zh-TW: 簡報器
+"Remote":
+  ja: リモコン
+  ru: "Пульт"
+  zh-CN: 遥控器
+  zh-HK: 遙控器
+  zh-TW: 遙控器
+"Trackball":
+  ja: トラックボール
+  ru: "Трекбол"
+  zh-CN: 轨迹球
+  zh-HK: 軌跡球
+  zh-TW: 軌跡球
+"Touchpad":
+  ja: タッチパッド
+  ru: "Сенсорная панель"
+  zh-CN: 触控板
+  zh-HK: 觸控板
+  zh-TW: 觸控板
+"Tablet":
+  ja: タブレット
+  ru: "Планшет"
+  zh-CN: 数位板
+  zh-HK: 平板
+  zh-TW: 平板
+"Gamepad":
+  ja: ゲームパッド
+  ru: "Геймпад"
+  zh-CN: 游戏手柄
+  zh-HK: 遊戲手掣
+  zh-TW: 遊戲手把
+"Joystick":
+  ja: ジョイスティック
+  ru: "Джойстик"
+  zh-CN: 摇杆
+  zh-HK: 搖桿
+  zh-TW: 搖桿
+"Headset":
+  ja: ヘッドセット
+  ru: "Гарнитура"
+  zh-CN: 耳机
+  zh-HK: 耳機
+  zh-TW: 耳機
 "Using Logi Options+? Quit it first — both apps compete for HID++ access.":
   ja: Logi Options+ をお使いですか?まず終了してください — 両方のアプリが HID++ アクセスを奪い合います。
   ru: "Используете Logi Options+? Сначала закройте его — оба приложения конкурируют за доступ к HID++."
@@ -81,12 +291,6 @@ _version: 2
   zh-CN: 设置
   zh-HK: 設定
   zh-TW: 設定
-"About":
-  ja: 情報
-  ru: "О программе"
-  zh-CN: 关于
-  zh-HK: 關於
-  zh-TW: 關於
 "Accessibility granted":
   ja: アクセシビリティは許可済み
   ru: "Универсальный доступ разрешён"
@@ -113,6 +317,72 @@ _version: 2
   zh-CN: 设置…
   zh-HK: 設定…
   zh-TW: 設定…
+"Check for Updates…":
+  ja: アップデートを確認…
+  ru: "Проверить обновления…"
+  zh-CN: 检查更新…
+  zh-HK: 檢查更新…
+  zh-TW: 檢查更新…
+"Edit":
+  ja: 編集
+  ru: "Правка"
+  zh-CN: 编辑
+  zh-HK: 編輯
+  zh-TW: 編輯
+"Undo":
+  ja: 取り消す
+  ru: "Отменить"
+  zh-CN: 撤销
+  zh-HK: 復原
+  zh-TW: 復原
+"Redo":
+  ja: やり直す
+  ru: "Повторить"
+  zh-CN: 重做
+  zh-HK: 重做
+  zh-TW: 重做
+"Cut":
+  ja: カット
+  ru: "Вырезать"
+  zh-CN: 剪切
+  zh-HK: 剪下
+  zh-TW: 剪下
+"Copy":
+  ja: コピー
+  ru: "Копировать"
+  zh-CN: 复制
+  zh-HK: 複製
+  zh-TW: 複製
+"Paste":
+  ja: ペースト
+  ru: "Вставить"
+  zh-CN: 粘贴
+  zh-HK: 貼上
+  zh-TW: 貼上
+"Select All":
+  ja: すべて選択
+  ru: "Выбрать всё"
+  zh-CN: 全选
+  zh-HK: 全選
+  zh-TW: 全選
+"View":
+  ja: 表示
+  ru: "Вид"
+  zh-CN: 显示
+  zh-HK: 顯示
+  zh-TW: 顯示
+"Open Configuration Folder":
+  ja: 設定フォルダーを開く
+  ru: "Открыть папку конфигурации"
+  zh-CN: 打开配置文件夹
+  zh-HK: 開啟設定資料夾
+  zh-TW: 開啟設定資料夾
+"Device":
+  ja: デバイス
+  ru: "Устройство"
+  zh-CN: 设备
+  zh-HK: 裝置
+  zh-TW: 裝置
 "Hide OpenLogi":
   ja: OpenLogi を隠す
   ru: "Скрыть OpenLogi"
@@ -155,6 +425,36 @@ _version: 2
   zh-CN: 关闭窗口
   zh-HK: 關閉視窗
   zh-TW: 關閉視窗
+"Bring All to Front":
+  ja: すべてを手前に移動
+  ru: "Поместить все окна вперед"
+  zh-CN: 全部移到前面
+  zh-HK: 全部移到最前
+  zh-TW: 全部移到最前
+"Help":
+  ja: ヘルプ
+  ru: "Справка"
+  zh-CN: 帮助
+  zh-HK: 說明
+  zh-TW: 輔助說明
+"OpenLogi Help":
+  ja: OpenLogi ヘルプ
+  ru: "Справка OpenLogi"
+  zh-CN: OpenLogi 帮助
+  zh-HK: OpenLogi 說明
+  zh-TW: OpenLogi 輔助說明
+"Open GitHub Repository":
+  ja: GitHub リポジトリを開く
+  ru: "Открыть репозиторий GitHub"
+  zh-CN: 打开 GitHub 仓库
+  zh-HK: 開啟 GitHub 儲存庫
+  zh-TW: 開啟 GitHub 儲存庫
+"Latest Release":
+  ja: 最新リリース
+  ru: "Последний выпуск"
+  zh-CN: 最新版本
+  zh-HK: 最新版本
+  zh-TW: 最新版本
 
 # ── About window (about.rs) ─────────────────────────────────────────────────
 "Open-source Logitech mouse configuration — DPI, SmartShift, button bindings, and gestures.":
@@ -247,6 +547,30 @@ _version: 2
   zh-CN: 绑定 %{name}
   zh-HK: 綁定 %{name}
   zh-TW: 設定 %{name}
+"Unbound":
+  ja: 未割り当て
+  ru: "Не назначено"
+  zh-CN: 未绑定
+  zh-HK: 未綁定
+  zh-TW: 未設定
+"Default":
+  ja: デフォルト
+  ru: "По умолчанию"
+  zh-CN: 默认
+  zh-HK: 預設
+  zh-TW: 預設
+"5 directions":
+  ja: 5 方向
+  ru: "5 направлений"
+  zh-CN: 5 个方向
+  zh-HK: 5 個方向
+  zh-TW: 5 個方向
+"DPI Preset %{index}":
+  ja: DPI プリセット %{index}
+  ru: "Пресет DPI %{index}"
+  zh-CN: 灵敏度预设 %{index}
+  zh-HK: 靈敏度預設 %{index}
+  zh-TW: 靈敏度預設 %{index}
 "Gesture %{name}":
   ja: ジェスチャー %{name}
   ru: "Жест %{name}"
@@ -288,9 +612,9 @@ _version: 2
 "DPI Toggle":
   ja: DPI 切り替え
   ru: "Переключение DPI"
-  zh-CN: DPI 切换
-  zh-HK: DPI 切換
-  zh-TW: DPI 切換
+  zh-CN: 灵敏度切换
+  zh-HK: 靈敏度切換
+  zh-TW: 靈敏度切換
 "Thumb Wheel":
   ja: サムホイール
   ru: "Колесо под большой палец"
@@ -379,44 +703,14 @@ _version: 2
   zh-CN: 系统
   zh-HK: 系統
   zh-TW: 系統
+"DPI":
+  ja: DPI
+  ru: "DPI"
+  zh-CN: 灵敏度
+  zh-HK: 靈敏度
+  zh-TW: 靈敏度
 
 # ── Actions (openlogi_core::binding::Action) ────────────────────────────────
-"Copy":
-  ja: コピー
-  ru: "Копировать"
-  zh-CN: 复制
-  zh-HK: 複製
-  zh-TW: 複製
-"Paste":
-  ja: ペースト
-  ru: "Вставить"
-  zh-CN: 粘贴
-  zh-HK: 貼上
-  zh-TW: 貼上
-"Cut":
-  ja: カット
-  ru: "Вырезать"
-  zh-CN: 剪切
-  zh-HK: 剪下
-  zh-TW: 剪下
-"Undo":
-  ja: 取り消す
-  ru: "Отменить"
-  zh-CN: 撤销
-  zh-HK: 復原
-  zh-TW: 復原
-"Redo":
-  ja: やり直す
-  ru: "Повторить"
-  zh-CN: 重做
-  zh-HK: 重做
-  zh-TW: 重做
-"Select All":
-  ja: すべて選択
-  ru: "Выбрать всё"
-  zh-CN: 全选
-  zh-HK: 全選
-  zh-TW: 全選
 "Find":
   ja: 検索
   ru: "Найти"
@@ -562,9 +856,9 @@ _version: 2
 "Cycle DPI Presets":
   ja: DPI プリセットを循環
   ru: "Переключать пресеты DPI"
-  zh-CN: 循环 DPI 预设
-  zh-HK: 循環 DPI 預設
-  zh-TW: 循環 DPI 預設
+  zh-CN: 循环灵敏度预设
+  zh-HK: 循環靈敏度預設
+  zh-TW: 循環靈敏度預設
 "Toggle SmartShift":
   ja: SmartShift を切り替え
   ru: "Переключить SmartShift"

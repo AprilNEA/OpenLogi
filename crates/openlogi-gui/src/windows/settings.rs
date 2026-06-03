@@ -1,5 +1,6 @@
-//! The Settings window — a standalone OS window (⌘, / menu / footer link)
-//! exposing the app-wide preferences in [`openlogi_core::config::AppSettings`].
+//! The Settings window — a standalone OS window (⌘, / menu bar / the right
+//! panel's Configuration card) exposing the app-wide preferences in
+//! [`openlogi_core::config::AppSettings`].
 //!
 //! Uses gpui-component's Settings widget so page navigation, search, and the
 //! left sidebar share the same behaviour as the rest of that component set.
@@ -100,7 +101,7 @@ impl Render for SettingsView {
             .text_color(pal.text_primary)
             .child(
                 Settings::new("settings")
-                    .sidebar_width(px(240.))
+                    .sidebar_width(px(210.))
                     .page(general_page())
                     .page(permissions_page(pal))
                     .page(language_page(self.language_select.clone())),
@@ -246,9 +247,7 @@ fn language_page(language_select: Entity<SelectState<Vec<LanguageOption>>>) -> S
             SettingGroup::new().item(
                 SettingItem::new(
                     tr!("Language"),
-                    SettingField::render(move |_, _, _| {
-                        language_select_field(language_select.clone())
-                    }),
+                    SettingField::render(move |_, _, _| language_select_field(&language_select)),
                 )
                 .description(tr!("Choose the interface language.")),
             ),
@@ -347,12 +346,15 @@ fn permission_field(
 /// The language picker field. "Follow system" clears the stored preference
 /// (`None`); explicit locale entries come from [`crate::i18n::SUPPORTED`].
 fn language_select_field(
-    language_select: Entity<SelectState<Vec<LanguageOption>>>,
-) -> impl IntoElement {
+    language_select: &Entity<SelectState<Vec<LanguageOption>>>,
+    // `Select::new` clones the entity internally, so the returned element borrows
+    // nothing — `use<>` opts out of edition-2024's default RPIT lifetime capture
+    // so it can be returned from the `Fn` render closure.
+) -> impl IntoElement + use<> {
     // The Select's root is `size_full`, so pin it to a fixed-size box instead
     // of letting it consume the whole Settings item row.
     div().flex_shrink_0().w(px(220.)).h_6().child(
-        Select::new(&language_select)
+        Select::new(language_select)
             .small()
             .w(px(220.))
             .menu_width(px(220.)),

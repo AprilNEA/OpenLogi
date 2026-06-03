@@ -248,7 +248,7 @@ impl Render for DpiPanel {
                 h_flex()
                     .justify_between()
                     .items_baseline()
-                    .child(div().text_sm().text_color(pal.text_muted).child("DPI"))
+                    .child(div().text_sm().text_color(pal.text_muted).child(tr!("DPI")))
                     .child(
                         div()
                             .text_sm()
