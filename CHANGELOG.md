@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/AprilNEA/OpenLogi/compare/openlogi-v0.4.0...openlogi-v0.4.1) - 2026-06-03
+
+### Added
+
+- *(gui)* refine device gallery worktree changes
+- *(nix)* wire passthru.updateScript for nix-update / autobump
+- *(nix)* add nixpkgs package + flake; commit the prebuilt app icon
+
+### Other
+
+- route issue-chooser questions to GitHub Discussions
+- update Telegram invite link to the new channel
+- *(release)* disable homebrew-tap dispatch (openlogi moved to homebrew-cask) ([#105](https://github.com/AprilNEA/OpenLogi/pull/105))
+- add GitHub issue form templates ([#102](https://github.com/AprilNEA/OpenLogi/pull/102))
+- configure release-plz branch prefix
+
 ## [0.4.0](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.3.4...openlogi-core-v0.4.0) - 2026-06-02
 
 ### Added
