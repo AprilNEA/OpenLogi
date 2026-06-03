@@ -22,6 +22,10 @@
 [workspace]
 # Open release PRs from a `release-plz/`-prefixed branch.
 pr_branch_prefix = "release-plz/"
+# OpenLogi ships as an application, not a published-API library, so
+# cargo-semver-checks' "⚠ API breaking changes" analysis is just noise in the
+# release PR. Disable it so the PR shows the changelog, not the break risk.
+semver_check = false
 # Per-crate tags/releases are off; the root crate owns the one workspace release.
 git_tag_enable = false
 git_release_enable = false
