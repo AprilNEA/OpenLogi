@@ -37,6 +37,11 @@ pub struct ResolvedAsset {
     pub depot: String,
     pub display_name: String,
     pub image_path: PathBuf,
+    /// The front/hero render (`device_image`, typically `front_*.png`) used for
+    /// the device gallery cards — distinct from [`Self::image_path`], which is
+    /// the side/buttons view the mouse model aligns hotspots against. `None`
+    /// when the depot ships no front render.
+    pub hero_image_path: Option<PathBuf>,
     pub metadata: Metadata,
     /// Actual pixel dimensions of `image_path`. Logi's
     /// `core_metadata.json` `origin` field tracks the *bbox of the mouse
@@ -127,6 +132,15 @@ impl AssetResolver {
             let buttons_name = buttons_image_for(&dir, &entry.model_id, model.extended_model_id);
             let variant_front_name =
                 variant_image_for(&dir, &entry.model_id, model.extended_model_id);
+            // Front/hero render for the gallery: the colour variant's
+            // `device_image`, falling back to the generic front renders. Resolved
+            // against this same root so it sits beside the buttons image.
+            let hero_image_path = variant_front_name
+                .clone()
+                .into_iter()
+                .chain(FRONT_RENDER_FILES.map(str::to_string))
+                .map(|n| dir.join(n))
+                .find(|p| p.exists());
             let image_name = buttons_name
                 .clone()
                 .or_else(|| variant_front_name.clone())
@@ -180,6 +194,7 @@ impl AssetResolver {
                 depot: depot.to_string(),
                 display_name: entry.display_name.clone(),
                 image_path,
+                hero_image_path,
                 metadata,
                 png_width,
                 png_height,

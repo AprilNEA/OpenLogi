@@ -4,7 +4,7 @@ use gpui::{
     Animation, AnimationExt as _, AnyElement, AppContext as _, BorrowAppContext as _, BoxShadow,
     Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, div, ease_in_out,
-    point, prelude::FluentBuilder as _, px, relative, rgb,
+    img, point, prelude::FluentBuilder as _, px, relative, rgb,
 };
 use gpui_component::{
     Icon, IconName,
@@ -24,6 +24,7 @@ use tracing::{info, warn};
 
 use crate::app_menu::{Minimize, Zoom};
 use crate::asset::AssetResolver;
+use crate::components::carousel::Carousel;
 use crate::components::dpi_panel::DpiPanel;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AppState, DeviceRecord};
@@ -404,36 +405,44 @@ fn settings_button(pal: Palette) -> impl IntoElement {
         .on_click(|_, _, cx| crate::windows::settings::open(cx))
 }
 
-/// The Home gallery: a wrapping grid of device cards. Clicking a card selects
-/// that device and drills into its detail screen. The active device (whose
-/// bindings the hook is using) is ringed so it stays identifiable while
-/// browsing.
+/// The Home gallery: a [`Carousel`] of device cards. Clicking a card selects
+/// that device and drills into its detail screen; the carousel's arrows and
+/// dots move the active selection (whose bindings the hook uses) without
+/// leaving the gallery. The active device's card is ringed so it stays
+/// identifiable while browsing.
 fn device_gallery(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let (records, active_key) = cx.try_global::<AppState>().map_or_else(
-        || (Vec::new(), None),
+    let (records, active_idx) = cx.try_global::<AppState>().map_or_else(
+        || (Vec::new(), 0),
         |s| {
-            (
-                s.device_list.clone(),
-                s.current_record().map(|r| r.config_key.clone()),
-            )
+            let active = s.current_device.min(s.device_list.len().saturating_sub(1));
+            (s.device_list.clone(), active)
         },
     );
 
     let mut cards = Vec::with_capacity(records.len());
     for (idx, record) in records.iter().enumerate() {
-        let active = Some(&record.config_key) == active_key.as_ref();
         let key = record.config_key.clone();
         let on_click = cx.listener(move |this, _, _, cx| this.open_device(key.clone(), cx));
-        cards.push(gallery_card(idx, record, active, pal, on_click));
+        cards.push(gallery_card(idx, record, idx == active_idx, pal, on_click));
     }
 
     v_flex()
         .flex_1()
         .w_full()
         .min_h_0()
-        .overflow_y_scrollbar()
+        .justify_center()
         .p_6()
-        .child(h_flex().w_full().flex_wrap().gap_4().children(cards))
+        .child(
+            Carousel::new("device-carousel")
+                .selected(active_idx)
+                .item_width(px(GALLERY_CARD_W))
+                .accent(rgb(theme::ACCENT_BLUE).into())
+                .children(cards)
+                .on_select(cx.listener(|_, ix: &usize, _, cx| {
+                    cx.update_global::<AppState, _>(|state, _| state.set_current_device(*ix));
+                    cx.notify();
+                })),
+        )
 }
 
 /// One device card in the gallery.
@@ -461,35 +470,78 @@ fn gallery_card(
         .on_click(on_click)
         .child(
             v_flex()
+                .w_full()
                 .gap_3()
-                .child(
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(status_dot(idx, record.online))
-                        .when_some(record.battery.as_ref(), |this, b| {
-                            this.child(battery_view(b, pal))
-                        }),
-                )
+                .child(hero_view(record, pal))
                 .child(
                     v_flex()
-                        .gap_0p5()
-                        .min_w_0()
+                        .w_full()
+                        .gap_1()
                         .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(record.display_name.clone()),
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(record.display_name.clone()),
+                                )
+                                .child(status_dot(idx, record.online)),
                         )
-                        .child(div().text_xs().text_color(pal.text_muted).child(format!(
-                            "{} · slot {}",
-                            kind_label(record.kind),
-                            record.slot
-                        ))),
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(pal.text_muted)
+                                        .child(format!(
+                                            "{} · slot {}",
+                                            kind_label(record.kind),
+                                            record.slot
+                                        )),
+                                )
+                                .when_some(record.battery.as_ref(), |this, b| {
+                                    this.child(battery_view(b, pal))
+                                }),
+                        ),
                 ),
         )
         .into_any_element()
+}
+
+/// The device photo for a gallery card: the resolved front/hero render scaled
+/// to fit, or a neutral placeholder when the depot ships no front art.
+fn hero_view(record: &DeviceRecord, pal: Palette) -> AnyElement {
+    let hero = record
+        .asset
+        .as_ref()
+        .and_then(|a| a.hero_image_path.clone());
+    let base = div()
+        .h(px(120.))
+        .w_full()
+        .overflow_hidden()
+        .rounded_md()
+        .bg(pal.surface_hover);
+    match hero {
+        Some(path) => base.child(img(path).size_full()).into_any_element(),
+        None => base
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(Icon::new(IconName::Cpu).size_8().text_color(pal.text_muted))
+            .into_any_element(),
+    }
 }
 
 /// Connectivity dot for a gallery card: a steady grey when offline, a softly

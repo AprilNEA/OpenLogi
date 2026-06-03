@@ -4,4 +4,5 @@
 //! widget owns its local state; cross-widget coordination happens through
 //! [`crate::state::AppState`].
 
+pub mod carousel;
 pub mod dpi_panel;
