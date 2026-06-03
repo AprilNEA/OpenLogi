@@ -73,7 +73,7 @@ OpenLogi 通过 Logi Bolt 接收器 —— 或蓝牙直连 / 有线连接 ——
 或通过 [Homebrew](https://brew.sh) 安装：
 
 ```sh
-brew install --cask aprilnea/tap/openlogi
+brew install --cask openlogi
 ```
 
 需要从源码构建请看 [DEVELOPMENT.md](docs/DEVELOPMENT.md)。

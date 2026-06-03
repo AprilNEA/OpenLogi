@@ -74,7 +74,7 @@ Download the signed, notarized `.dmg` from the [latest release](https://github.c
 Or install via [Homebrew](https://brew.sh):
 
 ```sh
-brew install --cask aprilnea/tap/openlogi
+brew install --cask openlogi
 ```
 
 To build from source, see [DEVELOPMENT.md](docs/DEVELOPMENT.md).
