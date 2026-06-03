@@ -130,6 +130,16 @@ fn button_number_to_id(n: i64) -> Option<ButtonId> {
 /// Convert a `CGEvent` to our [`MouseEvent`] vocabulary. Returns `None`
 /// for event types we don't translate (e.g. move events, unknown buttons).
 fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
+    // Skip events OpenLogi synthesized itself (e.g. a MouseBack/MouseForward
+    // action posting button4/5). They carry our sentinel in the source
+    // user-data field; without this a button bound to its own native action
+    // would re-enter the tap and loop forever. `None` → the tap keeps the event
+    // so it still reaches the OS.
+    if event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
+        == openlogi_core::binding::SYNTHETIC_EVENT_USER_DATA
+    {
+        return None;
+    }
     match etype {
         CGEventType::LeftMouseDown => Some(MouseEvent::Button {
             id: ButtonId::LeftClick,

@@ -10,6 +10,14 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// Sentinel stamped into the `EVENT_SOURCE_USER_DATA` field of every mouse
+/// event OpenLogi synthesizes on macOS. Our own CGEventTap (in `openlogi-hook`)
+/// listens at the HID location, so it sees the events we post; without a way to
+/// recognise them, synthesizing a back/forward button while the same physical
+/// button is bound to that action would re-enter the tap and loop forever. The
+/// tap skips any event carrying this tag. Value is the ASCII bytes `"olgi"`.
+pub const SYNTHETIC_EVENT_USER_DATA: i64 = 0x6F_6C_67_69;
+
 /// One of the user-rebindable hotspots on a Logi mouse. The order matches the
 /// physical layout from front to side; [`ButtonId::ALL`] is consumed by the
 /// default-binding generator and the popover trigger list.
@@ -240,6 +248,14 @@ pub enum Action {
     RightClick,
     /// Middle mouse button (wheel click).
     MiddleClick,
+    /// Mouse "back" side button (extra button 4). Synthesizes the real mouse
+    /// button event, which browsers and most apps interpret as "navigate back"
+    /// natively — unlike [`Action::BrowserBack`], which sends ⌘[ and is ignored
+    /// by many apps.
+    MouseBack,
+    /// Mouse "forward" side button (extra button 5). Native counterpart to
+    /// [`Action::MouseBack`]; see [`Action::BrowserForward`] for the ⌘] form.
+    MouseForward,
 
     // ── Editing ──────────────────────────────────────────────────────────────
     /// Copy the current selection (⌘C / Ctrl+C).
@@ -433,6 +449,8 @@ impl Action {
             Action::LeftClick => "Left Click".into(),
             Action::RightClick => "Right Click".into(),
             Action::MiddleClick => "Middle Click".into(),
+            Action::MouseBack => "Back (Button 4)".into(),
+            Action::MouseForward => "Forward (Button 5)".into(),
             Action::Copy => "Copy".into(),
             Action::Paste => "Paste".into(),
             Action::Cut => "Cut".into(),
@@ -478,7 +496,11 @@ impl Action {
     #[must_use]
     pub fn category(&self) -> Category {
         match self {
-            Action::LeftClick | Action::RightClick | Action::MiddleClick => Category::Mouse,
+            Action::LeftClick
+            | Action::RightClick
+            | Action::MiddleClick
+            | Action::MouseBack
+            | Action::MouseForward => Category::Mouse,
             // CustomShortcut is assigned to Editing so it doesn't need a
             // separate arm (it's not in the picker catalog).
             Action::Copy
@@ -532,6 +554,8 @@ impl Action {
             Action::LeftClick,
             Action::RightClick,
             Action::MiddleClick,
+            Action::MouseBack,
+            Action::MouseForward,
             // Editing
             Action::Copy,
             Action::Paste,
@@ -623,6 +647,11 @@ impl Action {
             Action::LeftClick => macos::post_click(CGMouseButton::Left),
             Action::RightClick => macos::post_click(CGMouseButton::Right),
             Action::MiddleClick => macos::post_click(CGMouseButton::Center),
+            // Extra mouse buttons: post the real button4/5 the OS treats as
+            // back/forward. Button numbers are 0-indexed (3 = back / "button 4",
+            // 4 = forward / "button 5").
+            Action::MouseBack => macos::post_other_button(3),
+            Action::MouseForward => macos::post_other_button(4),
             // ── Editing ───────────────────────────────────────────────────────
             Action::Copy => macos::post_key(VK_C, cmd),
             Action::Paste => macos::post_key(VK_V, cmd),
@@ -761,7 +790,8 @@ const VK_TAB: u16 = 0x30;
 #[cfg(target_os = "macos")]
 mod macos {
     use core_graphics::event::{
-        CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, ScrollEventUnit,
+        CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
+        ScrollEventUnit,
     };
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     use core_graphics::geometry::CGPoint;
@@ -790,11 +820,51 @@ mod macos {
         };
         for (kind, phase) in [(down, "down"), (up, "up")] {
             if let Ok(ev) = CGEvent::new_mouse_event(src.clone(), kind, location, button) {
+                tag_synthetic(&ev);
                 ev.post(CGEventTapLocation::HID);
             } else {
                 tracing::warn!(phase, "CGEvent::new_mouse_event failed");
             }
         }
+    }
+
+    /// Post a down + up pair for an "extra" mouse button by its raw button
+    /// number (3 = back / "button 4", 4 = forward / "button 5"). These are the
+    /// native events browsers and most apps interpret as back/forward.
+    ///
+    /// `CGMouseButton` only names Left/Right/Center, so we create an
+    /// `OtherMouse` event and override `MOUSE_EVENT_BUTTON_NUMBER` to address
+    /// buttons ≥ 3. Tagged via [`tag_synthetic`] so OpenLogi's own event tap
+    /// ignores it instead of re-translating it into a Back/Forward press.
+    pub(super) fn post_other_button(button_number: i64) {
+        let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+            tracing::warn!("CGEventSource::new failed for extra mouse button");
+            return;
+        };
+        let location = CGEvent::new(src.clone()).map_or(CGPoint::new(0., 0.), |e| e.location());
+        for (kind, phase) in [
+            (CGEventType::OtherMouseDown, "down"),
+            (CGEventType::OtherMouseUp, "up"),
+        ] {
+            if let Ok(ev) =
+                CGEvent::new_mouse_event(src.clone(), kind, location, CGMouseButton::Center)
+            {
+                ev.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, button_number);
+                tag_synthetic(&ev);
+                ev.post(CGEventTapLocation::HID);
+            } else {
+                tracing::warn!(phase, "CGEvent::new_mouse_event failed for extra button");
+            }
+        }
+    }
+
+    /// Stamp our sentinel into the event's source user-data so OpenLogi's own
+    /// event tap can recognise (and pass through) events it synthesized itself.
+    fn tag_synthetic(ev: &CGEvent) {
+        ev.set_integer_value_field(
+            EventField::EVENT_SOURCE_USER_DATA,
+            crate::binding::SYNTHETIC_EVENT_USER_DATA,
+        );
     }
 
     /// Post a key-down + key-up pair for `vk` with `flags` set.
