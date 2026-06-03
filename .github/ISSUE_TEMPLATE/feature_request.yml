@@ -1,0 +1,61 @@
+name: ✨ Feature Request
+description: Suggest a new feature or an improvement to existing functionality.
+title: "[Feature]: "
+labels: ["type: feature", "needs: triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea? Great. If you want a **specific Logitech device supported**,
+        please use the **🖱️ Device Support / Compatibility** template instead.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checklist
+      options:
+        - label: I searched existing issues and the [Roadmap](https://github.com/AprilNEA/OpenLogi#roadmap), and this isn't already tracked.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do? What's missing or frustrating today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like OpenLogi to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you've tried, or how Logi Options+ / other tools handle this.
+
+  - type: checkboxes
+    id: area
+    attributes:
+      label: Related area(s)
+      options:
+        - label: GUI
+        - label: CLI
+        - label: Button actions / remapping
+        - label: DPI
+        - label: SmartShift
+        - label: Per-application profiles
+        - label: Configuration (TOML)
+        - label: Auto-update
+        - label: Other
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Mockups, links, references, or anything else that helps.

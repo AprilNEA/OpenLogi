@@ -14,7 +14,7 @@
 <div align="center">
     <a href="https://twitter.com/AprilNEA" target="_blank">
     <img alt="twitter" src="https://img.shields.io/badge/follow-AprilNEA-green?style=social&logo=Twitter"></a>
-    <a href="https://t.me/+pCVJtHAgI3hjYTkx" target="_blank">
+    <a href="https://t.me/+u8DfyLlIqPYxZjJh" target="_blank">
     <img alt="telegram" src="https://img.shields.io/badge/chat-telegram-blueviolet?style=flat&logo=Telegram"></a>
     <a href="https://github.com/AprilNEA/OpenLogi/releases" target="_blank">
     <img alt="GitHub downloads" src="https://img.shields.io/github/downloads/AprilNEA/OpenLogi/total.svg?style=flat"></a>
@@ -74,7 +74,7 @@ Download the signed, notarized `.dmg` from the [latest release](https://github.c
 Or install via [Homebrew](https://brew.sh):
 
 ```sh
-brew install --cask aprilnea/tap/openlogi
+brew install --cask openlogi
 ```
 
 To build from source, see [DEVELOPMENT.md](docs/DEVELOPMENT.md).

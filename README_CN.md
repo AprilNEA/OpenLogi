@@ -14,7 +14,7 @@
 <div align="center">
     <a href="https://twitter.com/AprilNEA" target="_blank">
     <img alt="twitter" src="https://img.shields.io/badge/follow-AprilNEA-green?style=flat-square&logo=Twitter"></a>
-    <a href="https://t.me/+pCVJtHAgI3hjYTkx" target="_blank">
+    <a href="https://t.me/+u8DfyLlIqPYxZjJh" target="_blank">
     <img alt="telegram" src="https://img.shields.io/badge/chat-telegram-blueviolet?style=flat-square&logo=Telegram"></a>
     <a href="https://github.com/AprilNEA/OpenLogi/releases" target="_blank">
     <img alt="GitHub downloads" src="https://img.shields.io/github/downloads/AprilNEA/OpenLogi/total.svg?style=flat-square"></a>
@@ -73,7 +73,7 @@ OpenLogi 通过 Logi Bolt 接收器 —— 或蓝牙直连 / 有线连接 ——
 或通过 [Homebrew](https://brew.sh) 安装：
 
 ```sh
-brew install --cask aprilnea/tap/openlogi
+brew install --cask openlogi
 ```
 
 需要从源码构建请看 [DEVELOPMENT.md](docs/DEVELOPMENT.md)。
