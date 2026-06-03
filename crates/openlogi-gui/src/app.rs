@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AppContext as _, BorrowAppContext as _, BoxShadow,
-    Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
+    Context, Div, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, div, ease_in_out,
     img, point, prelude::FluentBuilder as _, px, relative, rgb,
 };
@@ -28,7 +28,7 @@ use crate::components::carousel::Carousel;
 use crate::components::dpi_panel::DpiPanel;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AppState, DeviceRecord};
-use crate::theme::{self, FOOTER_H, GALLERY_CARD_W, HEADER_H, Palette};
+use crate::theme::{self, FOOTER_H, HEADER_H, Palette};
 
 /// Which screen the root view is showing.
 ///
@@ -291,7 +291,7 @@ impl Render for AppView {
             (
                 home_header(pal).into_any_element(),
                 if has_device {
-                    device_gallery(pal, cx).into_any_element()
+                    device_gallery(cx).into_any_element()
                 } else {
                     device_empty_state(pal, scanning)
                 },
@@ -405,137 +405,160 @@ fn settings_button(pal: Palette) -> impl IntoElement {
         .on_click(|_, _, cx| crate::windows::settings::open(cx))
 }
 
-/// The Home gallery: a [`Carousel`] of device cards. Clicking a card selects
-/// that device and drills into its detail screen; the carousel's arrows and
-/// dots move the active selection (whose bindings the hook uses) without
-/// leaving the gallery. The active device's card is ringed so it stays
-/// identifiable while browsing.
-fn device_gallery(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let (records, active_idx) = cx.try_global::<AppState>().map_or_else(
-        || (Vec::new(), 0),
-        |s| {
-            let active = s.current_device.min(s.device_list.len().saturating_sub(1));
-            (s.device_list.clone(), active)
-        },
-    );
+/// The Home device list: a centre-stage [`Carousel`]. The focused (centre)
+/// device shows a large photo; its neighbours peek smaller on the sides.
+/// Clicking the focused card opens its detail screen; clicking a neighbour,
+/// arrow, or dot moves the active selection (whose bindings the hook uses)
+/// without leaving Home.
+fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
+    let (len, active_idx) = cx.try_global::<AppState>().map_or((0, 0), |s| {
+        let len = s.device_list.len();
+        (len, s.current_device.min(len.saturating_sub(1)))
+    });
+    let view = cx.entity();
 
-    let mut cards = Vec::with_capacity(records.len());
-    for (idx, record) in records.iter().enumerate() {
-        let key = record.config_key.clone();
-        let on_click = cx.listener(move |this, _, _, cx| this.open_device(key.clone(), cx));
-        cards.push(gallery_card(idx, record, idx == active_idx, pal, on_click));
-    }
+    v_flex().flex_1().w_full().min_h_0().p_6().child(
+        Carousel::new("device-carousel")
+            .len(len)
+            .selected(active_idx)
+            .accent(rgb(theme::ACCENT_BLUE).into())
+            .render_item(move |idx, focused, _window, cx| {
+                let pal = theme::palette(cx);
+                let Some(record) = cx
+                    .try_global::<AppState>()
+                    .and_then(|s| s.device_list.get(idx).cloned())
+                else {
+                    return div().into_any_element();
+                };
+                if focused {
+                    let key = record.config_key.clone();
+                    let view = view.clone();
+                    focused_card(idx, &record, pal)
+                        .id(("device-focused", idx))
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| this.open_device(key.clone(), cx));
+                        })
+                        .into_any_element()
+                } else {
+                    peek_card(&record, pal).into_any_element()
+                }
+            })
+            .on_select(cx.listener(|_, ix: &usize, _, cx| {
+                cx.update_global::<AppState, _>(|state, _| state.set_current_device(*ix));
+                cx.notify();
+            })),
+    )
+}
 
+/// The large, centred device card: a big photo above the name, status, and
+/// battery. The photo floats directly on the window background — centre-stage
+/// size and the page dots already signal the selection, so no frame is needed.
+/// Returns a bare [`Div`] so the caller can wire its click handler.
+fn focused_card(idx: usize, record: &DeviceRecord, pal: Palette) -> Div {
+    div().size_full().p_4().child(
+        v_flex()
+            .size_full()
+            .gap_3()
+            .child(
+                div()
+                    .flex_1()
+                    .w_full()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(device_image(record, pal)),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_base()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(record.display_name.clone()),
+                            )
+                            .child(status_dot(idx, record.online)),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(pal.text_muted)
+                                    .child(format!(
+                                        "{} · slot {}",
+                                        kind_label(record.kind),
+                                        record.slot
+                                    )),
+                            )
+                            .when_some(record.battery.as_ref(), |this, b| {
+                                this.child(battery_view(b, pal))
+                            }),
+                    ),
+            ),
+    )
+}
+
+/// A small side (peek) device card: just the photo and the name.
+fn peek_card(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
     v_flex()
-        .flex_1()
-        .w_full()
-        .min_h_0()
-        .justify_center()
-        .p_6()
+        .size_full()
+        .gap_2()
+        .items_center()
         .child(
-            Carousel::new("device-carousel")
-                .selected(active_idx)
-                .item_width(px(GALLERY_CARD_W))
-                .accent(rgb(theme::ACCENT_BLUE).into())
-                .children(cards)
-                .on_select(cx.listener(|_, ix: &usize, _, cx| {
-                    cx.update_global::<AppState, _>(|state, _| state.set_current_device(*ix));
-                    cx.notify();
-                })),
-        )
-}
-
-/// One device card in the gallery.
-fn gallery_card(
-    idx: usize,
-    record: &DeviceRecord,
-    active: bool,
-    pal: Palette,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
-) -> AnyElement {
-    div()
-        .id(("gallery-card", idx))
-        .w(px(GALLERY_CARD_W))
-        .p_4()
-        .rounded_lg()
-        .border_2()
-        .border_color(if active {
-            rgb(theme::ACCENT_BLUE).into()
-        } else {
-            pal.border
-        })
-        .bg(pal.surface)
-        .cursor_pointer()
-        .hover(|s| s.bg(pal.surface_hover))
-        .on_click(on_click)
-        .child(
-            v_flex()
+            div()
+                .flex_1()
                 .w_full()
-                .gap_3()
-                .child(hero_view(record, pal))
-                .child(
-                    v_flex()
-                        .w_full()
-                        .gap_1()
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(record.display_name.clone()),
-                                )
-                                .child(status_dot(idx, record.online)),
-                        )
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(pal.text_muted)
-                                        .child(format!(
-                                            "{} · slot {}",
-                                            kind_label(record.kind),
-                                            record.slot
-                                        )),
-                                )
-                                .when_some(record.battery.as_ref(), |this, b| {
-                                    this.child(battery_view(b, pal))
-                                }),
-                        ),
-                ),
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(device_image(record, pal)),
         )
-        .into_any_element()
+        .child(
+            div()
+                .max_w_full()
+                .truncate()
+                .text_xs()
+                .text_color(pal.text_muted)
+                .child(record.display_name.clone()),
+        )
 }
 
-/// The device photo for a gallery card: the resolved front/hero render scaled
-/// to fit, or a neutral placeholder when the depot ships no front art.
-fn hero_view(record: &DeviceRecord, pal: Palette) -> AnyElement {
-    let hero = record
+/// The device photo, scaled to fit its container (object-fit contain), or a
+/// neutral placeholder when the depot ships no front render.
+///
+/// Sized with `max_*` rather than `size_full` so the image is bounded by the
+/// container but keeps its intrinsic aspect: `size_full` makes gpui's `img`
+/// fall back to the raw pixel dimensions when the box can't fully constrain it,
+/// which (with an `overflow_hidden` parent) cropped the device into a zoomed
+/// close-up. `object_fit` defaults to `Contain`, so the whole device shows.
+fn device_image(record: &DeviceRecord, pal: Palette) -> AnyElement {
+    match record
         .asset
         .as_ref()
-        .and_then(|a| a.hero_image_path.clone());
-    let base = div()
-        .h(px(120.))
-        .w_full()
-        .overflow_hidden()
-        .rounded_md()
-        .bg(pal.surface_hover);
-    match hero {
-        Some(path) => base.child(img(path).size_full()).into_any_element(),
-        None => base
+        .and_then(|a| a.hero_image_path.clone())
+    {
+        Some(path) => img(path).max_w_full().max_h_full().into_any_element(),
+        None => div()
+            .size_full()
             .flex()
             .items_center()
             .justify_center()
