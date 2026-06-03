@@ -110,7 +110,7 @@ impl Render for SettingsView {
 }
 
 fn general_page() -> SettingPage {
-    let mut group = SettingGroup::new()
+    let group = SettingGroup::new()
         .item(
             SettingItem::new(
                 tr!("Launch at login"),
@@ -153,28 +153,26 @@ fn general_page() -> SettingPage {
         );
 
     #[cfg(target_os = "macos")]
-    {
-        group = group.item(
-            SettingItem::new(
-                tr!("Show in menu bar"),
-                SettingField::switch(
-                    |cx| {
-                        cx.try_global::<AppState>()
-                            .is_some_and(|s| s.app_settings().show_in_menu_bar)
-                    },
-                    |enabled, cx| {
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_show_in_menu_bar(enabled);
-                        });
-                        cx.refresh_windows();
-                    },
-                ),
-            )
-            .description(tr!(
-                "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead."
-            )),
-        );
-    }
+    let group = group.item(
+        SettingItem::new(
+            tr!("Show in menu bar"),
+            SettingField::switch(
+                |cx| {
+                    cx.try_global::<AppState>()
+                        .is_some_and(|s| s.app_settings().show_in_menu_bar)
+                },
+                |enabled, cx| {
+                    cx.update_global::<AppState, _>(move |s, _| {
+                        s.set_show_in_menu_bar(enabled);
+                    });
+                    cx.refresh_windows();
+                },
+            ),
+        )
+        .description(tr!(
+            "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead."
+        )),
+    );
 
     SettingPage::new(tr!("General"))
         .icon(IconName::Settings)
