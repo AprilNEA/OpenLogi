@@ -11,6 +11,7 @@
   fetchFromGitHub,
   stdenv,
   cargo-bundle,
+  nix-update-script,
 }:
 
 rustPlatform.buildRustPackage (finalAttrs: {
@@ -93,6 +94,11 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
     runHook postInstall
   '';
+
+  # `nix-update openlogi` (and nixpkgs' autobump) bump the version and refetch
+  # src.hash + cargoHash automatically — effective once `src` is the
+  # fetchFromGitHub form above (a local `src` has no remote version to track).
+  passthru.updateScript = nix-update-script { };
 
   meta = {
     description = "Local-first alternative to Logitech Options+ for HID++ devices";
