@@ -1,0 +1,146 @@
+name: 🐞 Bug Report
+description: Something is broken or behaves incorrectly.
+title: "[Bug]: "
+labels: ["type: bug", "needs: triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug report! OpenLogi talks to hardware over HID++, so
+        **device, connection, and version details are essential** — issues without
+        them are usually impossible to reproduce.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checklist
+      options:
+        - label: I searched [existing issues](https://github.com/AprilNEA/OpenLogi/issues?q=is%3Aissue) and this is not a duplicate.
+          required: true
+        - label: I am on the [latest release](https://github.com/AprilNEA/OpenLogi/releases/latest) or a recent `master` build.
+          required: true
+        - label: I quit **Logi Options+** before running OpenLogi (the two apps fight over HID++ access and only one can own a receiver at a time).
+          required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which part of OpenLogi?
+      options:
+        - GUI (desktop app)
+        - CLI (the `openlogi` binary)
+        - Both
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: OpenLogi version
+      description: GUI → About window, or run `openlogi --version`.
+      placeholder: e.g. 0.4.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      description: macOS is the only supported platform today; Linux and Windows are still stubs.
+      options:
+        - macOS
+        - Linux
+        - Windows
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version & architecture
+      placeholder: e.g. macOS 15.5 (Sequoia), Apple Silicon
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device model
+      description: The Logitech mouse — and receiver, if any — involved.
+      placeholder: e.g. MX Master 3S + Logi Bolt receiver
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connection
+    attributes:
+      label: How is the device connected?
+      options:
+        - Logi Bolt receiver
+        - Bluetooth (direct, no receiver)
+        - Wired (USB cable)
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: area
+    attributes:
+      label: Affected area(s)
+      options:
+        - label: Device discovery / detection
+        - label: Button remapping
+        - label: DPI control
+        - label: SmartShift
+        - label: Per-application profiles
+        - label: Battery status
+        - label: Settings / configuration (TOML)
+        - label: Auto-update
+        - label: Menu bar / tray
+        - label: Other
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, plus what you expected to happen instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: device-list
+    attributes:
+      label: "`openlogi list` output"
+      description: Run `openlogi list` and paste the output — it shows your receiver/device IDs and pairing state. Omit only if the CLI is unreachable.
+      render: text
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Re-run with verbose logging and paste the relevant output.
+        CLI: `OPENLOGI_LOG=debug openlogi <command>`.
+        GUI: launch from a terminal with `OPENLOGI_LOG=debug /Applications/OpenLogi.app/Contents/MacOS/OpenLogi`.
+      render: shell
+
+  - type: checkboxes
+    id: permissions
+    attributes:
+      label: macOS permissions (if applicable)
+      description: System Settings → Privacy & Security
+      options:
+        - label: OpenLogi has **Accessibility** permission (needed to remap buttons via the event tap).
+        - label: OpenLogi has **Input Monitoring** permission (needed for Bluetooth-direct devices and capture).

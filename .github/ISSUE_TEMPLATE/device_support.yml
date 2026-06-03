@@ -1,0 +1,77 @@
+name: 🖱️ Device Support / Compatibility
+description: A Logitech device isn't detected, isn't fully supported, or you'd like support added.
+title: "[Device]: "
+labels: ["area: hidpp", "needs: triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        OpenLogi speaks HID++ — the diagnostic output below tells us exactly what
+        your device reports, which is what we need to add or fix support.
+
+        > **Known limitation:** `hidpp` currently only recognises **Logi Bolt**
+        > receivers (PID `0xC548`). Unifying and other receivers are not surfaced yet.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checklist
+      options:
+        - label: I quit **Logi Options+** before testing.
+          required: true
+        - label: I searched existing issues for my device.
+          required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device model
+      placeholder: e.g. MX Master 3S, MX Anywhere 3, Lift, Signature M650
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection
+      options:
+        - Logi Bolt receiver
+        - Bluetooth (direct, no receiver)
+        - Wired (USB cable)
+        - Unifying receiver
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: behavior
+    attributes:
+      label: What's the problem?
+      options:
+        - Device is not detected at all
+        - Device is detected but a feature doesn't work
+        - Requesting support for a device not yet supported
+    validations:
+      required: true
+
+  - type: textarea
+    id: list
+    attributes:
+      label: "`openlogi list` output"
+      description: Run `openlogi list` and paste the full output (shows vendor/product IDs and pairing state).
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: features
+    attributes:
+      label: "`openlogi diag features` output"
+      description: If the device is detected, run `openlogi diag features` and paste the HID++ feature dump. Skip this if the device isn't detected at all.
+      render: text
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What works, what doesn't, your OS + version, and how the device behaves in Logi Options+ for comparison.
