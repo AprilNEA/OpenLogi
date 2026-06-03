@@ -24,6 +24,19 @@ _version: 2
   zh-CN: 设备
   zh-HK: 裝置
   zh-TW: 裝置
+# Device-detail tabs (app.rs)
+"Buttons":
+  ja: ボタン
+  ru: "Кнопки"
+  zh-CN: 按键
+  zh-HK: 按鍵
+  zh-TW: 按鍵
+"Pointer":
+  ja: ポインター
+  ru: "Указатель"
+  zh-CN: 指针
+  zh-HK: 指標
+  zh-TW: 指標
 
 # ── Menu-bar status item (platform/menubar.rs) ──────────────────────────────
 "Open OpenLogi":

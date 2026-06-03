@@ -8,10 +8,10 @@ use gpui::{
 };
 use gpui_component::{
     Icon, IconName,
-    collapsible::Collapsible,
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
     scroll::ScrollableElement as _,
+    tab::TabBar,
     tooltip::Tooltip,
     v_flex,
 };
@@ -48,6 +48,31 @@ enum Route {
     Device { config_key: String },
 }
 
+/// The active section of the device-detail screen. Backs the detail `TabBar`;
+/// reset to [`DetailTab::Buttons`] whenever a device is opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailTab {
+    /// The mouse model with clickable button hotspots.
+    Buttons,
+    /// Pointer tuning — DPI and presets.
+    Pointer,
+    /// Device info and configuration.
+    Device,
+}
+
+impl DetailTab {
+    /// Tab order, matching the `TabBar` child order.
+    const ORDER: [Self; 3] = [Self::Buttons, Self::Pointer, Self::Device];
+
+    fn index(self) -> usize {
+        Self::ORDER.iter().position(|t| *t == self).unwrap_or(0)
+    }
+
+    fn from_index(ix: usize) -> Self {
+        Self::ORDER.get(ix).copied().unwrap_or(Self::Buttons)
+    }
+}
+
 /// Root application view.
 pub struct AppView {
     route: Route,
@@ -60,8 +85,8 @@ pub struct AppView {
     #[allow(dead_code, reason = "held to keep the AppState observer alive")]
     state_obs: Subscription,
     accessibility_dismissed: bool,
-    device_details_open: bool,
-    configuration_open: bool,
+    /// Which section of the device-detail screen is showing.
+    active_tab: DetailTab,
 }
 
 impl AppView {
@@ -106,8 +131,7 @@ impl AppView {
             appearance_obs: None,
             state_obs,
             accessibility_dismissed: false,
-            device_details_open: true,
-            configuration_open: true,
+            active_tab: DetailTab::Buttons,
         }
     }
 
@@ -131,6 +155,7 @@ impl AppView {
             }
         });
         self.route = Route::Device { config_key };
+        self.active_tab = DetailTab::Buttons;
         cx.notify();
     }
 
@@ -258,15 +283,8 @@ impl Render for AppView {
         let (header_el, content_el) = if show_device {
             (
                 detail_header(pal, cx).into_any_element(),
-                body(
-                    &self.mouse_model,
-                    &self.dpi_panel,
-                    self.device_details_open,
-                    self.configuration_open,
-                    pal,
-                    cx,
-                )
-                .into_any_element(),
+                detail_content(&self.mouse_model, &self.dpi_panel, self.active_tab, pal, cx)
+                    .into_any_element(),
             )
         } else {
             (
@@ -569,59 +587,100 @@ fn main_window_title(show_device: bool, cx: &Context<AppView>) -> SharedString {
         )
 }
 
-fn body(
+/// The device-detail body: a tab bar over three sections (buttons / pointer /
+/// device), with the active section filling the rest of the screen.
+fn detail_content(
     mouse_model: &Entity<MouseModelView>,
     dpi_panel: &Entity<DpiPanel>,
-    device_details_open: bool,
-    configuration_open: bool,
+    active: DetailTab,
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let content = match active {
+        DetailTab::Buttons => buttons_tab(mouse_model).into_any_element(),
+        DetailTab::Pointer => pointer_tab(dpi_panel, pal).into_any_element(),
+        DetailTab::Device => device_tab(pal, cx).into_any_element(),
+    };
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .child(detail_tab_bar(active, cx))
+        .child(content)
+}
+
+/// The detail screen's tab bar. Clicking a tab swaps the active section.
+fn detail_tab_bar(active: DetailTab, cx: &mut Context<AppView>) -> impl IntoElement {
+    div().w_full().px_5().pt_3().child(
+        TabBar::new("detail-tabs")
+            .underline()
+            .w_full()
+            .selected_index(active.index())
+            .child(tr!("Buttons"))
+            .child(tr!("Pointer"))
+            .child(tr!("Device"))
+            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                this.active_tab = DetailTab::from_index(*ix);
+                cx.notify();
+            })),
+    )
+}
+
+/// Buttons tab: the mouse model with clickable hotspots, centred with a max
+/// width so it doesn't stretch across a wide window.
+fn buttons_tab(mouse_model: &Entity<MouseModelView>) -> impl IntoElement {
     h_flex()
         .flex_1()
         .w_full()
         .min_h_0()
-        .items_stretch()
         .justify_center()
-        .gap_4()
         .p_6()
-        .child(div().flex_1().min_w_0().child(mouse_model.clone()))
-        .child(right_panel(
-            dpi_panel,
-            device_details_open,
-            configuration_open,
-            pal,
-            cx,
-        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .max_w(px(760.))
+                .child(mouse_model.clone()),
+        )
 }
 
-fn right_panel(
-    dpi_panel: &Entity<DpiPanel>,
-    device_details_open: bool,
-    configuration_open: bool,
-    pal: Palette,
-    cx: &mut Context<AppView>,
-) -> impl IntoElement {
+/// Pointer tab: the DPI panel in a titled card.
+fn pointer_tab(dpi_panel: &Entity<DpiPanel>, pal: Palette) -> impl IntoElement {
     v_flex()
-        .w(px(340.))
-        .min_w(px(340.))
-        .max_w(px(340.))
-        .h_full()
+        .flex_1()
+        .w_full()
         .min_h_0()
-        .flex_shrink_0()
-        .gap_3()
+        .items_center()
         .overflow_y_scrollbar()
-        .child(device_status_card(device_details_open, pal, cx))
-        .child(panel_card(
+        .p_6()
+        .child(div().w_full().max_w(px(560.)).child(panel_card(
             tr!("Pointer tuning"),
             IconName::Settings,
             pal,
             dpi_panel.clone().into_any_element(),
-        ))
-        .child(configuration_card(configuration_open, pal, cx))
+        )))
 }
 
-fn device_status_card(open: bool, pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+/// Device tab: device details and configuration cards stacked.
+fn device_tab(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .items_center()
+        .overflow_y_scrollbar()
+        .p_6()
+        .child(
+            v_flex()
+                .w_full()
+                .max_w(px(560.))
+                .gap_3()
+                .child(device_details_card(pal, cx))
+                .child(configuration_card(pal, cx)),
+        )
+}
+
+fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     let content = cx
         .try_global::<AppState>()
         .and_then(AppState::current_record)
@@ -646,30 +705,15 @@ fn device_status_card(open: bool, pal: Palette, cx: &mut Context<AppView>) -> im
                     .when_some(record.battery.as_ref(), |this, battery| {
                         this.child(battery_summary(battery, pal))
                     })
-                    .child(
-                        Collapsible::new()
-                            .open(open)
-                            .content(device_description_list(record)),
-                    )
+                    .child(device_description_list(record))
                     .into_any_element()
             },
         );
 
-    collapsible_panel_card(
-        "device-details-header",
-        tr!("Device details"),
-        IconName::Info,
-        open,
-        pal,
-        content,
-        cx.listener(|this, _, _, cx| {
-            this.device_details_open = !this.device_details_open;
-            cx.notify();
-        }),
-    )
+    panel_card(tr!("Device details"), IconName::Info, pal, content)
 }
 
-fn configuration_card(open: bool, pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     let (binding_count, gesture_count, preset_count, app_profile) = cx
         .try_global::<AppState>()
         .map_or((0, 0, 0, tr!("Default profile").to_string()), |state| {
@@ -687,24 +731,18 @@ fn configuration_card(open: bool, pal: Palette, cx: &mut Context<AppView>) -> im
     let content = v_flex()
         .gap_3()
         .child(
-            Collapsible::new().open(open).content(
-                DescriptionList::new()
-                    .columns(1)
-                    .label_width(px(118.))
-                    .bordered(false)
-                    .child(DescriptionItem::new(tr!("Active profile")).value(app_profile))
-                    .child(
-                        DescriptionItem::new(tr!("Button bindings"))
-                            .value(binding_count.to_string()),
-                    )
-                    .child(
-                        DescriptionItem::new(tr!("Gesture bindings"))
-                            .value(gesture_count.to_string()),
-                    )
-                    .child(
-                        DescriptionItem::new(tr!("DPI presets")).value(preset_count.to_string()),
-                    ),
-            ),
+            DescriptionList::new()
+                .columns(1)
+                .label_width(px(118.))
+                .bordered(false)
+                .child(DescriptionItem::new(tr!("Active profile")).value(app_profile))
+                .child(
+                    DescriptionItem::new(tr!("Button bindings")).value(binding_count.to_string()),
+                )
+                .child(
+                    DescriptionItem::new(tr!("Gesture bindings")).value(gesture_count.to_string()),
+                )
+                .child(DescriptionItem::new(tr!("DPI presets")).value(preset_count.to_string())),
         )
         .child(
             h_flex()
@@ -731,18 +769,7 @@ fn configuration_card(open: bool, pal: Palette, cx: &mut Context<AppView>) -> im
         )
         .into_any_element();
 
-    collapsible_panel_card(
-        "configuration-header",
-        tr!("Configuration"),
-        IconName::Folder,
-        open,
-        pal,
-        content,
-        cx.listener(|this, _, _, cx| {
-            this.configuration_open = !this.configuration_open;
-            cx.notify();
-        }),
-    )
+    panel_card(tr!("Configuration"), IconName::Folder, pal, content)
 }
 
 fn device_summary(name: &str, kind: DeviceKind, online: bool, pal: Palette) -> impl IntoElement {
@@ -784,55 +811,6 @@ fn device_description_list(record: crate::state::DeviceRecord) -> impl IntoEleme
         .label_width(px(100.))
         .bordered(false)
         .children(items)
-}
-
-fn collapsible_panel_card(
-    id: &'static str,
-    title: SharedString,
-    icon: IconName,
-    open: bool,
-    pal: Palette,
-    content: AnyElement,
-    on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
-) -> impl IntoElement {
-    panel_card(
-        SharedString::from(""),
-        icon.clone(),
-        pal,
-        Collapsible::new()
-            .open(open)
-            .child(
-                h_flex()
-                    .id(id)
-                    .items_center()
-                    .justify_between()
-                    .cursor_pointer()
-                    .on_click(on_toggle)
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(Icon::new(icon).size_4().text_color(pal.text_muted))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(title),
-                            ),
-                    )
-                    .child(
-                        Icon::new(if open {
-                            IconName::ChevronUp
-                        } else {
-                            IconName::ChevronDown
-                        })
-                        .size_4()
-                        .text_color(pal.text_muted),
-                    ),
-            )
-            .content(content)
-            .into_any_element(),
-    )
 }
 
 fn panel_card(
