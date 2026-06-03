@@ -30,13 +30,17 @@ use gpui::{
     px, relative,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _,
+    ActiveTheme as _, Disableable as _, IconName, Sizable as _, Size,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
 
 type SelectHandler = Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
 type ItemRenderer = Rc<dyn Fn(usize, bool, &mut Window, &mut App) -> AnyElement + 'static>;
+
+/// Side padding of the uniform-mode row (also used in its fits-the-viewport
+/// check, so the two stay in step).
+const UNIFORM_PAD: f32 = 24.;
 
 /// A centre-stage carousel. See the module docs.
 #[derive(IntoElement)]
@@ -45,6 +49,9 @@ pub struct Carousel {
     len: usize,
     selected: usize,
     render_item: Option<ItemRenderer>,
+    /// When set, switch from coverflow to an equal-size scrolling row whose
+    /// cards are this wide; coverflow's magnify/peek options are then ignored.
+    uniform: Option<Pixels>,
     focused_frac: f32,
     side_frac: f32,
     gap: Pixels,
@@ -66,6 +73,7 @@ impl Carousel {
             len: 0,
             selected: 0,
             render_item: None,
+            uniform: None,
             focused_frac: 0.44,
             side_frac: 0.17,
             gap: px(16.),
@@ -99,6 +107,17 @@ impl Carousel {
         f: impl Fn(usize, bool, &mut Window, &mut App) -> AnyElement + 'static,
     ) -> Self {
         self.render_item = Some(Rc::new(f));
+        self
+    }
+
+    /// Lay the items out as an equal-size, horizontally scrollable row (each
+    /// card `card_w` wide) instead of the centre-stage coverflow. In this mode
+    /// `render_item`'s `focused` flag marks the *active* item (so the caller can
+    /// style it), clicks are wired by `render_item` itself, and the coverflow
+    /// options (`focused_frac` / `side_frac` / arrows / dots) are ignored.
+    #[must_use]
+    pub fn uniform(mut self, card_w: Pixels) -> Self {
+        self.uniform = Some(card_w);
         self
     }
 
@@ -154,6 +173,117 @@ impl Carousel {
 
 impl RenderOnce for Carousel {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        match self.uniform {
+            Some(card_w) => self.render_uniform(card_w, window, cx),
+            None => self.render_coverflow(window, cx),
+        }
+    }
+}
+
+impl Carousel {
+    /// Equal-size scrolling row — see [`Carousel::uniform`]. Every item renders
+    /// at `card_w` in a horizontally scrollable row that centres while the cards
+    /// fit the viewport and left-aligns (so the scroll reaches the first card)
+    /// once they overflow. Prev/next arrows hug the screen edges and the page
+    /// dots sit underneath; each card's click and active styling come from
+    /// `render_item`. The coverflow magnify/peek and slide are the only parts
+    /// dropped.
+    fn render_uniform(self, card_w: Pixels, window: &mut Window, cx: &mut App) -> AnyElement {
+        let Self {
+            len,
+            selected,
+            render_item,
+            gap,
+            arrows,
+            indicators,
+            accent,
+            on_select,
+            ..
+        } = self;
+        let Some(render_item) = render_item.filter(|_| len > 0) else {
+            return div().into_any_element();
+        };
+        let selected = selected.min(len - 1);
+        let multi = len > 1;
+        let accent = accent.unwrap_or(cx.theme().primary);
+        let dot_idle = cx.theme().border;
+
+        let count = u16::try_from(len).map_or(f32::MAX, f32::from);
+        let content_w =
+            count * f32::from(card_w) + (count - 1.).max(0.) * f32::from(gap) + 2. * UNIFORM_PAD;
+        let centered = content_w <= f32::from(window.viewport_size().width);
+        let mut items = Vec::with_capacity(len);
+        for i in 0..len {
+            items.push(render_item(i, i == selected, window, cx));
+        }
+
+        let row = h_flex()
+            .id("carousel-uniform")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_x_scroll()
+            .items_center()
+            .gap(gap)
+            .px(px(UNIFORM_PAD))
+            .py_4()
+            .map(|row| if centered { row.justify_center() } else { row })
+            .children(items);
+
+        // Prev/next arrows hug the left and right edges (vertically centred),
+        // flanking the scrollable row; the page dots sit centred underneath.
+        let stage = h_flex()
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .items_center()
+            .px_4()
+            .when(multi && arrows, |this| {
+                this.child(arrow(
+                    "carousel-prev",
+                    IconName::ChevronLeft,
+                    selected.saturating_sub(1),
+                    selected == 0,
+                    Size::Large,
+                    on_select.clone(),
+                ))
+            })
+            .child(row)
+            .when(multi && arrows, |this| {
+                this.child(arrow(
+                    "carousel-next",
+                    IconName::ChevronRight,
+                    (selected + 1).min(len - 1),
+                    selected + 1 >= len,
+                    Size::Large,
+                    on_select.clone(),
+                ))
+            });
+
+        v_flex()
+            .size_full()
+            .gap_3()
+            .pb_6()
+            .child(stage)
+            .when(multi && indicators, |this| {
+                this.child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_center()
+                        .gap_1p5()
+                        .children(
+                            (0..len).map(|i| {
+                                dot(i, i == selected, accent, dot_idle, on_select.clone())
+                            }),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// Centre-stage ("coverflow") layout — the default. See the module docs.
+    fn render_coverflow(self, window: &mut Window, cx: &mut App) -> AnyElement {
         let Self {
             id,
             len,
@@ -166,6 +296,7 @@ impl RenderOnce for Carousel {
             indicators,
             accent,
             on_select,
+            ..
         } = self;
 
         let Some(render_item) = render_item.filter(|_| len > 0) else {
@@ -297,6 +428,7 @@ fn controls(
                 IconName::ChevronLeft,
                 selected.saturating_sub(1),
                 selected == 0,
+                Size::XSmall,
                 on_select.cloned(),
             ))
         })
@@ -311,6 +443,7 @@ fn controls(
                 IconName::ChevronRight,
                 (selected + 1).min(len - 1),
                 selected + 1 >= len,
+                Size::XSmall,
                 on_select.cloned(),
             ))
         })
@@ -351,12 +484,13 @@ fn arrow(
     icon: IconName,
     target: usize,
     disabled: bool,
+    size: Size,
     on_select: Option<SelectHandler>,
 ) -> impl IntoElement {
     Button::new(id)
         .icon(icon)
         .ghost()
-        .xsmall()
+        .with_size(size)
         .disabled(disabled)
         .when_some(on_select.filter(|_| !disabled), |this, handler| {
             this.on_click(move |_, window, cx| handler(&target, window, cx))

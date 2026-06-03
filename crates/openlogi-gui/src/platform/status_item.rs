@@ -85,6 +85,21 @@ impl StatusItem {
         }
     }
 
+    /// Remove the status item from the system status bar.
+    pub(super) fn remove_from_status_bar(&self) {
+        let status_bar: id = unsafe {
+            // SAFETY: `NSStatusBar.systemStatusBar` returns the process-wide
+            // status bar when called from the main AppKit thread.
+            msg_send![class!(NSStatusBar), systemStatusBar]
+        };
+        unsafe {
+            // SAFETY: `self.raw()` is the retained `NSStatusItem` created by
+            // `StatusItem::new`; removing it from the owning status bar is the
+            // documented AppKit teardown path for menu-bar extras.
+            let _: () = msg_send![status_bar, removeStatusItem: self.raw()];
+        }
+    }
+
     /// Attach a menu to the status item.
     pub(super) fn set_menu(&self, menu: Menu) {
         unsafe {

@@ -176,6 +176,12 @@ fn main() -> Result<()> {
             platform::tray::set_visible(show_in_menu_bar);
         }
 
+        #[cfg(target_os = "macos")]
+        cx.on_app_quit(|_| async {
+            platform::tray::uninstall();
+        })
+        .detach();
+
         // Keep the activation policy in step with window presence — but only
         // while the menu-bar icon is on. Last window closed + tray on → drop to
         // accessory (no Dock/menu bar); tray off → stay a regular Dock app so

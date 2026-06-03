@@ -405,11 +405,15 @@ fn settings_button(pal: Palette) -> impl IntoElement {
         .on_click(|_, _, cx| crate::windows::settings::open(cx))
 }
 
-/// The Home device list: a centre-stage [`Carousel`]. The focused (centre)
-/// device shows a large photo; its neighbours peek smaller on the sides.
-/// Clicking the focused card opens its detail screen; clicking a neighbour,
-/// arrow, or dot moves the active selection (whose bindings the hook uses)
-/// without leaving Home.
+/// Horizontal gap between gallery cards, in pixels.
+const GALLERY_GAP: f32 = 24.;
+
+/// The Home device list: an equal-size, horizontally scrollable row of device
+/// cards (Logi Options+ style), via [`Carousel`]'s `uniform` mode. Each card
+/// floats the device photo on the window background above its name and battery;
+/// the row centres while the cards fit the viewport and scrolls once they don't.
+/// Clicking a card opens its detail screen and makes it the active device (whose
+/// bindings the hook uses); the active card wears a faint accent ring.
 fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
     let (len, active_idx) = cx.try_global::<AppState>().map_or((0, 0), |s| {
         let len = s.device_list.len();
@@ -417,10 +421,12 @@ fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
     });
     let view = cx.entity();
 
-    v_flex().flex_1().w_full().min_h_0().p_6().child(
+    v_flex().flex_1().w_full().min_h_0().child(
         Carousel::new("device-carousel")
             .len(len)
             .selected(active_idx)
+            .uniform(px(theme::GALLERY_CARD_W))
+            .gap(px(GALLERY_GAP))
             .accent(rgb(theme::ACCENT_BLUE).into())
             .render_item(move |idx, focused, _window, cx| {
                 let pal = theme::palette(cx);
@@ -430,19 +436,16 @@ fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                 else {
                     return div().into_any_element();
                 };
-                if focused {
-                    let key = record.config_key.clone();
-                    let view = view.clone();
-                    focused_card(idx, &record, pal)
-                        .id(("device-focused", idx))
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| {
-                            view.update(cx, |this, cx| this.open_device(key.clone(), cx));
-                        })
-                        .into_any_element()
-                } else {
-                    peek_card(&record, pal).into_any_element()
-                }
+                let key = record.config_key.clone();
+                let view = view.clone();
+                device_card(idx, &record, focused, pal)
+                    .id(("device-card", idx))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(pal.surface))
+                    .on_click(move |_, _, cx| {
+                        view.update(cx, |this, cx| this.open_device(key.clone(), cx));
+                    })
+                    .into_any_element()
             })
             .on_select(cx.listener(|_, ix: &usize, _, cx| {
                 cx.update_global::<AppState, _>(|state, _| state.set_current_device(*ix));
@@ -451,94 +454,78 @@ fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
     )
 }
 
-/// The large, centred device card: a big photo above the name, status, and
-/// battery. The photo floats directly on the window background — centre-stage
-/// size and the page dots already signal the selection, so no frame is needed.
-/// Returns a bare [`Div`] so the caller can wire its click handler.
-fn focused_card(idx: usize, record: &DeviceRecord, pal: Palette) -> Div {
-    div().size_full().p_4().child(
-        v_flex()
-            .size_full()
-            .gap_3()
-            .child(
-                div()
-                    .flex_1()
-                    .w_full()
-                    .min_h_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(device_image(record, pal)),
-            )
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_base()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(record.display_name.clone()),
-                            )
-                            .child(status_dot(idx, record.online)),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(pal.text_muted)
-                                    .child(format!(
-                                        "{} · slot {}",
-                                        kind_label(record.kind),
-                                        record.slot
-                                    )),
-                            )
-                            .when_some(record.battery.as_ref(), |this, b| {
-                                this.child(battery_view(b, pal))
-                            }),
-                    ),
-            ),
-    )
-}
-
-/// A small side (peek) device card: just the photo and the name.
-fn peek_card(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
+/// A device card in the Home gallery: the device photo floating on the window
+/// background above the name, connectivity dot, kind/slot, and battery. Fixed
+/// width so cards stay equal in the scrollable row. The active device wears a
+/// faint accent ring; inactive cards reserve the same 1px border in a
+/// transparent colour so selection never nudges the layout. Returns a bare
+/// [`Div`] so the gallery can wire the click handler.
+fn device_card(idx: usize, record: &DeviceRecord, active: bool, pal: Palette) -> Div {
+    let ring = if active {
+        rgb(theme::ACCENT_BLUE).into()
+    } else {
+        gpui::transparent_black()
+    };
     v_flex()
-        .size_full()
-        .gap_2()
+        .w(px(theme::GALLERY_CARD_W))
+        .flex_shrink_0()
         .items_center()
+        .gap_3()
+        .p_3()
+        .rounded_xl()
+        .border_1()
+        .border_color(ring)
         .child(
             div()
-                .flex_1()
                 .w_full()
-                .min_h_0()
+                .h(px(theme::GALLERY_PHOTO_H))
                 .flex()
                 .items_center()
                 .justify_center()
                 .child(device_image(record, pal)),
         )
         .child(
-            div()
-                .max_w_full()
-                .truncate()
-                .text_xs()
-                .text_color(pal.text_muted)
-                .child(record.display_name.clone()),
+            v_flex()
+                .w_full()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(record.display_name.clone()),
+                        )
+                        .child(status_dot(idx, record.online)),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(pal.text_muted)
+                                .child(format!(
+                                    "{} · slot {}",
+                                    kind_label(record.kind),
+                                    record.slot
+                                )),
+                        )
+                        .when_some(record.battery.as_ref(), |this, b| {
+                            this.child(battery_view(b, pal))
+                        }),
+                ),
         )
 }
 

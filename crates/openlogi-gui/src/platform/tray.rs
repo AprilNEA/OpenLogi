@@ -13,12 +13,15 @@
 #[cfg(target_os = "macos")]
 pub use macos::{
     TrayEvent, hide_from_dock, install, refresh_labels, request_refresh, set_device_status,
-    set_visible, show_in_dock,
+    set_visible, show_in_dock, uninstall,
 };
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use std::sync::OnceLock;
+    use std::sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use cocoa::base::id;
     use objc::runtime::{Object, Sel};
@@ -56,6 +59,9 @@ mod macos {
     /// The `NSStatusItem` itself, so [`set_visible`] can show / hide the icon.
     static STATUS_ITEM: OnceLock<StatusItem> = OnceLock::new();
 
+    /// Whether the status item is currently installed in `NSStatusBar`.
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+
     struct MenuRefs {
         open: MenuItem,
         quit: MenuItem,
@@ -76,6 +82,10 @@ mod macos {
     /// target in particular *must* be retained, since `NSMenuItem` keeps only a
     /// weak reference to it.
     pub fn install(tx: mpsc::UnboundedSender<TrayEvent>) {
+        if INSTALLED.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
         let _ = MENU_TX.set(tx);
 
         let status_item = StatusItem::new();
@@ -86,6 +96,22 @@ mod macos {
         let _ = DEVICE_ITEM.set(installed_menu.device_item);
         let _ = MENU_REFS.set(installed_menu.refs);
         status_item.set_menu(installed_menu.menu);
+    }
+
+    /// Remove the status item from the system status bar during app teardown.
+    ///
+    /// `NSStatusItem`s normally disappear when the process exits, but GPUI's
+    /// graceful quit can leave background workers winding down briefly. Removing
+    /// it explicitly avoids a stale, non-clickable menu-bar gap during teardown
+    /// and makes repeated calls harmless.
+    pub fn uninstall() {
+        if !INSTALLED.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let Some(item) = STATUS_ITEM.get() else {
+            return;
+        };
+        item.remove_from_status_bar();
     }
 
     fn build_menu() -> InstalledMenu {
