@@ -1,2 +1,77 @@
+# release-plz configuration — https://release-plz.dev/docs/config
+#
+# Unified versioning: every published crate inherits `version.workspace = true`
+# from the root Cargo.toml, so the whole workspace moves on a single shared
+# version. `version_group` ties the crates together so they are always bumped and
+# released in lockstep (the highest next version among them wins), and a single
+# `v{version}` tag is cut for the workspace as a whole — which is what
+# `.github/workflows/release.yml` listens on to build the macOS DMG.
+#
+# release-plz cuts the tag only; it does NOT create the GitHub Release. The tag
+# triggers release.yml, which is the single owner of the GitHub Release: softprops
+# creates it as a draft, uploads the DMGs + checksums, then publishes it last.
+# (release-plz publishing the release outright made it immutable before release.yml
+# could attach assets — "target_commitish cannot be changed when release is
+# immutable". Keep `git_release_enable = false` so release.yml owns the lifecycle.)
+#
+# Single changelog: every crate points `changelog_path` at the repo-root
+# CHANGELOG.md, so release-plz aggregates all crates' sections into that one file
+# instead of scattering a CHANGELOG.md into each crate directory. (changelog_path
+# is per-package only — it can't be set in [workspace].)
+
 [workspace]
+# Open release PRs from a `release-plz/`-prefixed branch.
 pr_branch_prefix = "release-plz/"
+# Per-crate tags/releases are off; the root crate owns the one workspace release.
+git_tag_enable = false
+git_release_enable = false
+
+[[package]]
+name = "openlogi"
+version_group = "openlogi"
+changelog_path = "CHANGELOG.md"
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+# GitHub Release is owned by release.yml (softprops), not release-plz — see header.
+git_release_enable = false
+
+[[package]]
+name = "openlogi-core"
+version_group = "openlogi"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "openlogi-hid"
+version_group = "openlogi"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "openlogi-assets"
+version_group = "openlogi"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "openlogi-cli"
+version_group = "openlogi"
+changelog_path = "CHANGELOG.md"
+
+[[package]]
+name = "openlogi-hook"
+version_group = "openlogi"
+changelog_path = "CHANGELOG.md"
+
+# Vendored fork of the `hidpp` crate (0BSD, from lus/logy). Published with the
+# workspace under unified versioning; upstream's 0.3.0 is provenance only.
+[[package]]
+name = "openlogi-hidpp"
+version_group = "openlogi"
+changelog_path = "CHANGELOG.md"
+
+# Not publishable (git-only gpui deps); keep release-plz out of it entirely.
+# Its version still follows the shared workspace version via inheritance.
+# `publish = false` must mirror the crate's Cargo.toml: release-plz validates
+# publish consistency across *all* workspace packages before honoring `release`.
+[[package]]
+name = "openlogi-gui"
+release = false
+publish = false
