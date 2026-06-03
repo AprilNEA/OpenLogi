@@ -1,24 +1,18 @@
 //! The Settings window — a standalone OS window (⌘, / menu / footer link)
 //! exposing the app-wide preferences in [`openlogi_core::config::AppSettings`].
 //!
-//! Two toggles for now, so the layout is a hand-rolled form rather than
-//! gpui-component's [`Settings`](gpui_component::setting::Settings) widget
-//! (whose 250px page sidebar would dwarf two switches). When the preference
-//! set grows enough to warrant pages, this can migrate to that widget.
+//! Uses gpui-component's Settings widget so page navigation, search, and the
+//! left sidebar share the same behaviour as the rest of that component set.
 
 use gpui::{
-    App, AppContext as _, BorrowAppContext as _, Context, Entity, FontWeight, InteractiveElement,
-    IntoElement, ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, px, rgb,
+    App, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement, IntoElement,
+    ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, px, rgb,
 };
 use gpui_component::{
-    Icon, IconName, IndexPath, Sizable,
-    group_box::GroupBox,
-    h_flex,
-    scroll::ScrollableElement,
+    IconName, IndexPath, Sizable, h_flex,
     select::{Select, SelectEvent, SelectItem, SelectState},
-    switch::Switch,
-    v_flex,
+    setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
 };
 
 use crate::platform::permissions::{self, Permission, PermissionStatus};
@@ -90,7 +84,7 @@ pub fn open(cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.settings,
         "Settings",
-        Size::new(px(520.), px(360.)),
+        Size::new(px(820.), px(520.)),
         SettingsView::new,
         cx,
     );
@@ -99,93 +93,166 @@ pub fn open(cx: &mut App) {
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let (launch, updates) = cx.try_global::<AppState>().map_or((false, false), |s| {
-            let a = s.app_settings();
-            (a.launch_at_login, a.check_for_updates)
-        });
 
-        let general = GroupBox::new()
-            .title(group_title(IconName::Settings, tr!("General")))
-            .child(setting_row(
-                Switch::new("launch-at-login")
-                    .checked(launch)
-                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
-                        let enabled = *checked;
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_launch_at_login(enabled);
-                        });
-                        cx.notify();
-                    })),
-                tr!("Launch at login"),
-                tr!("Automatically start OpenLogi when you log in to macOS."),
-                pal,
-            ))
-            .child(setting_row(
-                Switch::new("check-for-updates")
-                    .checked(updates)
-                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
-                        let enabled = *checked;
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_check_for_updates(enabled);
-                        });
-                        cx.notify();
-                    })),
-                tr!("Check for updates"),
-                tr!(
-                    "Check once per launch for a new version (query only — no automatic download)."
-                ),
-                pal,
-            ));
-
-        // The menu-bar (status item) is macOS-only, so its toggle is too.
-        #[cfg(target_os = "macos")]
-        let general = {
-            let in_menu_bar = cx
-                .try_global::<AppState>()
-                .is_some_and(|s| s.app_settings().show_in_menu_bar);
-            general.child(setting_row(
-                Switch::new("show-in-menu-bar")
-                    .checked(in_menu_bar)
-                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
-                        let enabled = *checked;
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_show_in_menu_bar(enabled);
-                        });
-                        cx.notify();
-                    })),
-                tr!("Show in menu bar"),
-                tr!(
-                    "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead."
-                ),
-                pal,
-            ))
-        };
-
-        v_flex()
+        div()
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
             .child(
-                v_flex()
-                    .w_full()
-                    .p_6()
-                    .gap_6()
-                    .overflow_y_scrollbar()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(tr!("Settings")),
-                    )
-                    .child(general)
-                    .child(permissions_group(pal, cx))
-                    .child(
-                        GroupBox::new()
-                            .title(group_title(IconName::Globe, tr!("Language")))
-                            .child(language_row(&self.language_select, pal)),
-                    ),
+                Settings::new("settings")
+                    .sidebar_width(px(240.))
+                    .page(general_page())
+                    .page(permissions_page(pal))
+                    .page(language_page(self.language_select.clone())),
             )
     }
+}
+
+fn general_page() -> SettingPage {
+    let mut group = SettingGroup::new()
+        .item(
+            SettingItem::new(
+                tr!("Launch at login"),
+                SettingField::switch(
+                    |cx| {
+                        cx.try_global::<AppState>()
+                            .is_some_and(|s| s.app_settings().launch_at_login)
+                    },
+                    |enabled, cx| {
+                        cx.update_global::<AppState, _>(move |s, _| {
+                            s.set_launch_at_login(enabled);
+                        });
+                        cx.refresh_windows();
+                    },
+                ),
+            )
+            .description(tr!(
+                "Automatically start OpenLogi when you log in to macOS."
+            )),
+        )
+        .item(
+            SettingItem::new(
+                tr!("Check for updates"),
+                SettingField::switch(
+                    |cx| {
+                        cx.try_global::<AppState>()
+                            .is_some_and(|s| s.app_settings().check_for_updates)
+                    },
+                    |enabled, cx| {
+                        cx.update_global::<AppState, _>(move |s, _| {
+                            s.set_check_for_updates(enabled);
+                        });
+                        cx.refresh_windows();
+                    },
+                ),
+            )
+            .description(tr!(
+                "Check once per launch for a new version (query only — no automatic download)."
+            )),
+        );
+
+    #[cfg(target_os = "macos")]
+    {
+        group = group.item(
+            SettingItem::new(
+                tr!("Show in menu bar"),
+                SettingField::switch(
+                    |cx| {
+                        cx.try_global::<AppState>()
+                            .is_some_and(|s| s.app_settings().show_in_menu_bar)
+                    },
+                    |enabled, cx| {
+                        cx.update_global::<AppState, _>(move |s, _| {
+                            s.set_show_in_menu_bar(enabled);
+                        });
+                        cx.refresh_windows();
+                    },
+                ),
+            )
+            .description(tr!(
+                "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead."
+            )),
+        );
+    }
+
+    SettingPage::new(tr!("General"))
+        .icon(IconName::Settings)
+        .resettable(false)
+        .group(group)
+}
+
+fn permissions_page(pal: Palette) -> SettingPage {
+    SettingPage::new(tr!("Permissions"))
+        .icon(IconName::Info)
+        .resettable(false)
+        .group(
+            SettingGroup::new()
+                .item(permission_item(
+                    "perm-accessibility",
+                    tr!("Accessibility"),
+                    tr!("Needed for gesture and button remapping (event tap)."),
+                    Permission::Accessibility,
+                    |cx| {
+                        if cx
+                            .try_global::<AppState>()
+                            .is_some_and(|s| s.accessibility_granted)
+                        {
+                            PermissionStatus::Granted
+                        } else {
+                            PermissionStatus::Denied
+                        }
+                    },
+                    pal,
+                ))
+                .item(permission_item(
+                    "perm-input-monitoring",
+                    tr!("Input Monitoring"),
+                    tr!("Needed to read HID++ data, including Bluetooth-direct mice."),
+                    Permission::InputMonitoring,
+                    |_| permissions::input_monitoring(),
+                    pal,
+                ))
+                .item(permission_item(
+                    "perm-bluetooth",
+                    tr!("Bluetooth"),
+                    tr!("Allows OpenLogi to use CoreBluetooth (not required for HID access)."),
+                    Permission::Bluetooth,
+                    |_| permissions::bluetooth(),
+                    pal,
+                )),
+        )
+}
+
+fn permission_item(
+    id: &'static str,
+    title: SharedString,
+    description: SharedString,
+    permission: Permission,
+    status: impl Fn(&App) -> PermissionStatus + 'static,
+    pal: Palette,
+) -> SettingItem {
+    SettingItem::new(
+        title,
+        SettingField::render(move |_, _, cx| permission_field(id, status(cx), permission, pal)),
+    )
+    .description(description)
+}
+
+fn language_page(language_select: Entity<SelectState<Vec<LanguageOption>>>) -> SettingPage {
+    SettingPage::new(tr!("Language"))
+        .icon(IconName::Globe)
+        .resettable(false)
+        .group(
+            SettingGroup::new().item(
+                SettingItem::new(
+                    tr!("Language"),
+                    SettingField::render(move |_, _, _| {
+                        language_select_field(language_select.clone())
+                    }),
+                )
+                .description(tr!("Choose the interface language.")),
+            ),
+        )
 }
 
 #[derive(Clone)]
@@ -238,88 +305,6 @@ fn selected_language_index(current: Option<&str>, options: &[LanguageOption]) ->
     IndexPath::default().row(row)
 }
 
-/// A GroupBox title with a small leading icon. `GroupBox::title` styles the
-/// text itself, so this only lays the icon and label out inline.
-fn group_title(icon: IconName, label: SharedString) -> impl IntoElement {
-    h_flex()
-        .gap_1p5()
-        .items_center()
-        .child(Icon::new(icon))
-        .child(label)
-}
-
-/// One row: title + muted description on the left, the control on the right.
-fn setting_row(
-    control: Switch,
-    title: impl Into<SharedString>,
-    description: impl Into<SharedString>,
-    pal: Palette,
-) -> impl IntoElement {
-    h_flex()
-        .w_full()
-        .items_center()
-        .justify_between()
-        .gap_4()
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w(px(0.))
-                .gap_1()
-                .child(div().text_sm().child(title.into()))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(pal.text_muted)
-                        .child(description.into()),
-                ),
-        )
-        .child(control)
-}
-
-/// The Permissions group: live macOS permission statuses. Accessibility is
-/// watcher-backed (read from [`AppState`]); Input Monitoring and Bluetooth are
-/// queried live on each render (both are cheap, no-prompt queries).
-fn permissions_group(pal: Palette, cx: &mut Context<SettingsView>) -> impl IntoElement {
-    let accessibility = if cx
-        .try_global::<AppState>()
-        .is_some_and(|s| s.accessibility_granted)
-    {
-        PermissionStatus::Granted
-    } else {
-        PermissionStatus::Denied
-    };
-
-    GroupBox::new()
-        .title(group_title(IconName::Info, tr!("Permissions")))
-        .child(permission_row(
-            "perm-accessibility",
-            tr!("Accessibility"),
-            tr!("Needed for gesture and button remapping (event tap)."),
-            accessibility,
-            Permission::Accessibility,
-            pal,
-            cx,
-        ))
-        .child(permission_row(
-            "perm-input-monitoring",
-            tr!("Input Monitoring"),
-            tr!("Needed to read HID++ data, including Bluetooth-direct mice."),
-            permissions::input_monitoring(),
-            Permission::InputMonitoring,
-            pal,
-            cx,
-        ))
-        .child(permission_row(
-            "perm-bluetooth",
-            tr!("Bluetooth"),
-            tr!("Allows OpenLogi to use CoreBluetooth (not required for HID access)."),
-            permissions::bluetooth(),
-            Permission::Bluetooth,
-            pal,
-            cx,
-        ))
-}
-
 /// A coloured status word for a permission row.
 fn status_badge(status: PermissionStatus) -> impl IntoElement {
     let (label, color) = match status {
@@ -330,90 +315,46 @@ fn status_badge(status: PermissionStatus) -> impl IntoElement {
     div().text_xs().text_color(rgb(color)).child(label)
 }
 
-/// One permission row: title + muted description on the left; the live status
-/// word and an "Open" button (deep-links to the System Settings pane) on the
-/// right.
-fn permission_row(
+/// The right-side field for one permission row: live status plus an "Open"
+/// button that deep-links to the System Settings pane.
+fn permission_field(
     id: &'static str,
-    title: SharedString,
-    description: SharedString,
     status: PermissionStatus,
     permission: Permission,
     pal: Palette,
-    cx: &mut Context<SettingsView>,
 ) -> impl IntoElement {
     h_flex()
-        .w_full()
+        .flex_shrink_0()
         .items_center()
-        .justify_between()
-        .gap_4()
+        .gap_3()
+        .child(status_badge(status))
         .child(
-            v_flex()
-                .flex_1()
-                .min_w(px(0.))
-                .gap_1()
-                .child(div().text_sm().child(title))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(pal.text_muted)
-                        .child(description),
-                ),
-        )
-        .child(
-            h_flex()
-                .gap_3()
-                .items_center()
-                .child(status_badge(status))
-                .child(
-                    div()
-                        .id(id)
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(pal.border)
-                        .text_xs()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(pal.surface_hover))
-                        .child(tr!("Open"))
-                        .on_click(
-                            cx.listener(move |_, _, _, _| permissions::open_pane(permission)),
-                        ),
-                ),
+            div()
+                .id(id)
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(pal.border)
+                .text_xs()
+                .cursor_pointer()
+                .hover(move |s| s.bg(pal.surface_hover))
+                .child(tr!("Open"))
+                .on_click(move |_, _, _| permissions::open_pane(permission)),
         )
 }
 
-/// The language picker. "Follow system" clears the stored preference (`None`);
-/// the explicit locale entries come from [`crate::i18n::SUPPORTED`]. Selecting
-/// one switches the locale live, then repaints every window and the menu bar so
-/// the whole UI re-renders without a restart.
-fn language_row(
-    language_select: &Entity<SelectState<Vec<LanguageOption>>>,
-    pal: Palette,
+/// The language picker field. "Follow system" clears the stored preference
+/// (`None`); explicit locale entries come from [`crate::i18n::SUPPORTED`].
+fn language_select_field(
+    language_select: Entity<SelectState<Vec<LanguageOption>>>,
 ) -> impl IntoElement {
-    h_flex()
-        .w_full()
-        .items_center()
-        .justify_between()
-        .gap_4()
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .text_xs()
-                .text_color(pal.text_muted)
-                .child(tr!("Choose the interface language.")),
-        )
-        .child(
-            // The Select's root is `size_full`, so it would otherwise claim the
-            // whole row and starve the description into one char per line. Pin it
-            // to a fixed-size, non-shrinking box (h_6 matches the `.small()` input).
-            div().flex_shrink_0().w(px(220.)).h_6().child(
-                Select::new(language_select)
-                    .small()
-                    .w(px(220.))
-                    .menu_width(px(220.)),
-            ),
-        )
+    // The Select's root is `size_full`, so pin it to a fixed-size box instead
+    // of letting it consume the whole Settings item row.
+    div().flex_shrink_0().w(px(220.)).h_6().child(
+        Select::new(&language_select)
+            .small()
+            .w(px(220.))
+            .menu_width(px(220.)),
+    )
 }
