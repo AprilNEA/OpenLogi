@@ -26,6 +26,7 @@ in
     sccache
     prek
     create-dmg
+    librsvg # rsvg-convert: renders design/icon/openlogi.svg for `xtask macos-icns`
   ];
 
   languages.rust = {
