@@ -37,6 +37,8 @@
 
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use openlogi_core::binding::action_device_path;
 use openlogi_core::binding::{Action, KeyCombo};
 
 fn parse_action(s: &str) -> Result<Action, String> {
@@ -166,6 +168,20 @@ fn main() {
         eprintln!("error: no actions specified");
         print_usage();
         std::process::exit(1);
+    }
+
+    // On Linux, initialise the uinput device eagerly so we can print its node
+    // path before the countdown — giving time to attach evtest in another terminal.
+    #[cfg(target_os = "linux")]
+    match action_device_path() {
+        Some(path) => {
+            println!("uinput device: {}", path.display());
+            println!("  To monitor raw events, open another terminal and run:");
+            println!("  sudo evtest {}", path.display());
+        }
+        None => {
+            eprintln!("warning: could not find uinput device node (check /dev/uinput permissions)");
+        }
     }
 
     let delay = Duration::from_secs_f64(initial_delay_secs);

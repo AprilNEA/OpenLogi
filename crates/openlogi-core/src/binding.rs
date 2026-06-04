@@ -854,6 +854,18 @@ pub fn post_horizontal_scroll(delta: i32) {
     let _ = delta;
 }
 
+/// Return the `/dev/input/eventN` node for the action-injector uinput device,
+/// initialising it if needed.
+///
+/// Intended for debugging and manual smoke-testing (e.g. attaching `evtest`
+/// before firing `Action::execute`). Returns `None` on non-Linux platforms or
+/// when the device could not be created (e.g. `/dev/uinput` not writable).
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn action_device_path() -> Option<std::path::PathBuf> {
+    linux::device_node()
+}
+
 // ── macOS virtual key codes ────────────────────────────────────────────────
 // Source: <HIToolbox/Events.h> kVK_* constants. Values are layout-independent
 // for the US ANSI keyboard.
@@ -1306,6 +1318,8 @@ mod linux {
     use evdev::uinput::VirtualDevice;
     use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 
+    const DEVICE_NAME: &str = "OpenLogi action injector";
+
     static VIRTUAL_INPUT: LazyLock<Option<Mutex<VirtualDevice>>> = LazyLock::new(|| {
         build()
             .map(Mutex::new)
@@ -1428,7 +1442,7 @@ mod linux {
         }
 
         VirtualDevice::builder()?
-            .name("OpenLogi action injector")
+            .name(DEVICE_NAME)
             .with_keys(&keys)?
             .with_relative_axes(&axes)?
             .build()
@@ -1485,6 +1499,30 @@ mod linux {
     /// Inject a single relative-axis delta followed by `SYN_REPORT`.
     pub(super) fn scroll(axis: RelativeAxisCode, value: i32) {
         emit(&[rel_ev(axis, value), syn()]);
+    }
+
+    /// Force the virtual device to initialise (if it hasn't already) and return
+    /// its `/dev/input/eventN` node path.
+    ///
+    /// Scans `/sys/class/input/*/name` for the device name. Returns `None` if
+    /// the device couldn't be created or if the node hasn't appeared yet (udev
+    /// typically creates it within a few milliseconds of the `ioctl`).
+    pub(super) fn device_node() -> Option<std::path::PathBuf> {
+        // Touch the LazyLock to force initialisation.
+        let _ = &*VIRTUAL_INPUT;
+        // Give udev a moment to create the /dev node.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        std::fs::read_dir("/sys/class/input")
+            .ok()?
+            .flatten()
+            .find_map(|entry| {
+                let name = std::fs::read_to_string(entry.path().join("name")).ok()?;
+                if name.trim() == DEVICE_NAME {
+                    Some(std::path::Path::new("/dev/input").join(entry.file_name()))
+                } else {
+                    None
+                }
+            })
     }
 
     /// Convert a [`KeyCombo`] modifier bitmask to the evdev keys to hold.
