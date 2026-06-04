@@ -1366,7 +1366,8 @@ mod linux {
         KeyCode::KEY_HOME,  KeyCode::KEY_END,   KeyCode::KEY_PAGEUP,   KeyCode::KEY_PAGEDOWN,
         KeyCode::KEY_TAB,   KeyCode::KEY_ENTER, KeyCode::KEY_BACKSPACE, KeyCode::KEY_DELETE,
         KeyCode::KEY_ESC,   KeyCode::KEY_SPACE,
-        // Modifiers
+        // Modifiers (KEY_LEFTMETA not emitted by any current action — reserved
+        // for future Super/Windows-key mappings once D-Bus per-app profiles land)
         KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_LEFTALT, KeyCode::KEY_LEFTMETA,
         // Function keys
         KeyCode::KEY_F1,  KeyCode::KEY_F2,  KeyCode::KEY_F3,  KeyCode::KEY_F4,
@@ -1431,25 +1432,36 @@ mod linux {
         InputEvent::new(EventType::RELATIVE.0, axis.0, value)
     }
 
-    /// Inject modifier-down, key-down, key-up, modifier-up (in reverse order),
-    /// followed by `SYN_REPORT`.
+    /// Inject modifier-down + key-down in one SYN frame, then key-up +
+    /// modifier-up in a second SYN frame.
+    ///
+    /// Two separate frames give the kernel distinct timestamps for press and
+    /// release, which matches what the kernel `uinput` docs show and avoids
+    /// toolkits treating a zero-duration event as invalid.
     pub(super) fn press_key(mods: &[KeyCode], key: KeyCode) {
-        let mut events: Vec<InputEvent> = Vec::with_capacity(mods.len() * 2 + 3);
+        // Down phase.
+        let mut down: Vec<InputEvent> = Vec::with_capacity(mods.len() + 2);
         for &m in mods {
-            events.push(key_ev(m, 1));
+            down.push(key_ev(m, 1));
         }
-        events.push(key_ev(key, 1));
-        events.push(key_ev(key, 0));
+        down.push(key_ev(key, 1));
+        down.push(syn());
+        emit(&down);
+
+        // Up phase.
+        let mut up: Vec<InputEvent> = Vec::with_capacity(mods.len() + 2);
+        up.push(key_ev(key, 0));
         for &m in mods.iter().rev() {
-            events.push(key_ev(m, 0));
+            up.push(key_ev(m, 0));
         }
-        events.push(syn());
-        emit(&events);
+        up.push(syn());
+        emit(&up);
     }
 
-    /// Inject a button-down + button-up pair followed by `SYN_REPORT`.
+    /// Inject a button-down in one SYN frame and button-up in a second.
     pub(super) fn click(button: KeyCode) {
-        emit(&[key_ev(button, 1), key_ev(button, 0), syn()]);
+        emit(&[key_ev(button, 1), syn()]);
+        emit(&[key_ev(button, 0), syn()]);
     }
 
     /// Inject a single relative-axis delta followed by `SYN_REPORT`.

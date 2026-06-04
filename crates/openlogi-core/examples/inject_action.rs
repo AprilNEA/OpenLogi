@@ -121,7 +121,7 @@ fn parse_hex_u16(s: &str) -> Option<u16> {
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1).peekable();
+    let mut args = std::env::args().skip(1);
 
     let mut initial_delay_secs: f64 = 2.0;
     let mut between_ms: u64 = 200;
