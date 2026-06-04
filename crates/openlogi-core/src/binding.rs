@@ -313,7 +313,13 @@ pub enum Action {
     LaunchpadShow,
 
     // ── System ────────────────────────────────────────────────────────────────
-    /// Lock the screen.
+    /// Lock the screen (⌘⌃Q on macOS / Ctrl+Alt+L on Linux).
+    ///
+    /// On Linux, Ctrl+Alt+L is the default shortcut in GNOME and KDE. Other
+    /// desktop environments may use a different shortcut or none at all. A
+    /// future improvement would use `org.freedesktop.login1.LockSession()` via
+    /// D-Bus for compositor-independent locking; deferred until D-Bus support
+    /// (`zbus`) is added for per-app profiles.
     LockScreen,
     /// Capture a screenshot.
     Screenshot,
