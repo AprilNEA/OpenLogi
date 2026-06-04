@@ -1342,107 +1342,48 @@ mod linux {
             .ok()
     });
 
-    #[allow(clippy::too_many_lines)] // key-capability table — inherently long
+    #[rustfmt::skip]
+    const KEY_CAPABILITIES: &[KeyCode] = &[
+        // Letters
+        KeyCode::KEY_A, KeyCode::KEY_B, KeyCode::KEY_C, KeyCode::KEY_D,
+        KeyCode::KEY_E, KeyCode::KEY_F, KeyCode::KEY_G, KeyCode::KEY_H,
+        KeyCode::KEY_I, KeyCode::KEY_J, KeyCode::KEY_K, KeyCode::KEY_L,
+        KeyCode::KEY_M, KeyCode::KEY_N, KeyCode::KEY_O, KeyCode::KEY_P,
+        KeyCode::KEY_Q, KeyCode::KEY_R, KeyCode::KEY_S, KeyCode::KEY_T,
+        KeyCode::KEY_U, KeyCode::KEY_V, KeyCode::KEY_W, KeyCode::KEY_X,
+        KeyCode::KEY_Y, KeyCode::KEY_Z,
+        // Digits
+        KeyCode::KEY_0, KeyCode::KEY_1, KeyCode::KEY_2, KeyCode::KEY_3,
+        KeyCode::KEY_4, KeyCode::KEY_5, KeyCode::KEY_6, KeyCode::KEY_7,
+        KeyCode::KEY_8, KeyCode::KEY_9,
+        // Punctuation / symbols
+        KeyCode::KEY_MINUS,      KeyCode::KEY_EQUAL,   KeyCode::KEY_LEFTBRACE,
+        KeyCode::KEY_RIGHTBRACE, KeyCode::KEY_BACKSLASH, KeyCode::KEY_SEMICOLON,
+        KeyCode::KEY_APOSTROPHE, KeyCode::KEY_GRAVE,   KeyCode::KEY_COMMA,
+        KeyCode::KEY_DOT,        KeyCode::KEY_SLASH,
+        // Navigation / editing
+        KeyCode::KEY_LEFT,  KeyCode::KEY_RIGHT, KeyCode::KEY_UP,       KeyCode::KEY_DOWN,
+        KeyCode::KEY_HOME,  KeyCode::KEY_END,   KeyCode::KEY_PAGEUP,   KeyCode::KEY_PAGEDOWN,
+        KeyCode::KEY_TAB,   KeyCode::KEY_ENTER, KeyCode::KEY_BACKSPACE, KeyCode::KEY_DELETE,
+        KeyCode::KEY_ESC,   KeyCode::KEY_SPACE,
+        // Modifiers
+        KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_LEFTALT, KeyCode::KEY_LEFTMETA,
+        // Function keys
+        KeyCode::KEY_F1,  KeyCode::KEY_F2,  KeyCode::KEY_F3,  KeyCode::KEY_F4,
+        KeyCode::KEY_F5,  KeyCode::KEY_F6,  KeyCode::KEY_F7,  KeyCode::KEY_F8,
+        KeyCode::KEY_F9,  KeyCode::KEY_F10, KeyCode::KEY_F11, KeyCode::KEY_F12,
+        // System
+        KeyCode::KEY_SYSRQ,
+        // Multimedia
+        KeyCode::KEY_PLAYPAUSE, KeyCode::KEY_NEXTSONG, KeyCode::KEY_PREVIOUSSONG,
+        KeyCode::KEY_VOLUMEUP,  KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_MUTE,
+        // Mouse buttons (injected as EV_KEY with BTN_* codes)
+        KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE,
+    ];
+
     fn build() -> io::Result<VirtualDevice> {
         let mut keys = AttributeSet::<KeyCode>::default();
-        for k in [
-            // Letters
-            KeyCode::KEY_A,
-            KeyCode::KEY_B,
-            KeyCode::KEY_C,
-            KeyCode::KEY_D,
-            KeyCode::KEY_E,
-            KeyCode::KEY_F,
-            KeyCode::KEY_G,
-            KeyCode::KEY_H,
-            KeyCode::KEY_I,
-            KeyCode::KEY_J,
-            KeyCode::KEY_K,
-            KeyCode::KEY_L,
-            KeyCode::KEY_M,
-            KeyCode::KEY_N,
-            KeyCode::KEY_O,
-            KeyCode::KEY_P,
-            KeyCode::KEY_Q,
-            KeyCode::KEY_R,
-            KeyCode::KEY_S,
-            KeyCode::KEY_T,
-            KeyCode::KEY_U,
-            KeyCode::KEY_V,
-            KeyCode::KEY_W,
-            KeyCode::KEY_X,
-            KeyCode::KEY_Y,
-            KeyCode::KEY_Z,
-            // Digits
-            KeyCode::KEY_0,
-            KeyCode::KEY_1,
-            KeyCode::KEY_2,
-            KeyCode::KEY_3,
-            KeyCode::KEY_4,
-            KeyCode::KEY_5,
-            KeyCode::KEY_6,
-            KeyCode::KEY_7,
-            KeyCode::KEY_8,
-            KeyCode::KEY_9,
-            // Punctuation / symbols
-            KeyCode::KEY_MINUS,
-            KeyCode::KEY_EQUAL,
-            KeyCode::KEY_LEFTBRACE,
-            KeyCode::KEY_RIGHTBRACE,
-            KeyCode::KEY_BACKSLASH,
-            KeyCode::KEY_SEMICOLON,
-            KeyCode::KEY_APOSTROPHE,
-            KeyCode::KEY_GRAVE,
-            KeyCode::KEY_COMMA,
-            KeyCode::KEY_DOT,
-            KeyCode::KEY_SLASH,
-            // Navigation / editing
-            KeyCode::KEY_LEFT,
-            KeyCode::KEY_RIGHT,
-            KeyCode::KEY_UP,
-            KeyCode::KEY_DOWN,
-            KeyCode::KEY_HOME,
-            KeyCode::KEY_END,
-            KeyCode::KEY_PAGEUP,
-            KeyCode::KEY_PAGEDOWN,
-            KeyCode::KEY_TAB,
-            KeyCode::KEY_ENTER,
-            KeyCode::KEY_BACKSPACE,
-            KeyCode::KEY_DELETE,
-            KeyCode::KEY_ESC,
-            KeyCode::KEY_SPACE,
-            // Modifiers
-            KeyCode::KEY_LEFTCTRL,
-            KeyCode::KEY_LEFTSHIFT,
-            KeyCode::KEY_LEFTALT,
-            KeyCode::KEY_LEFTMETA,
-            // Function keys
-            KeyCode::KEY_F1,
-            KeyCode::KEY_F2,
-            KeyCode::KEY_F3,
-            KeyCode::KEY_F4,
-            KeyCode::KEY_F5,
-            KeyCode::KEY_F6,
-            KeyCode::KEY_F7,
-            KeyCode::KEY_F8,
-            KeyCode::KEY_F9,
-            KeyCode::KEY_F10,
-            KeyCode::KEY_F11,
-            KeyCode::KEY_F12,
-            // System
-            KeyCode::KEY_SYSRQ,
-            // Multimedia
-            KeyCode::KEY_PLAYPAUSE,
-            KeyCode::KEY_NEXTSONG,
-            KeyCode::KEY_PREVIOUSSONG,
-            KeyCode::KEY_VOLUMEUP,
-            KeyCode::KEY_VOLUMEDOWN,
-            KeyCode::KEY_MUTE,
-            // Mouse buttons (injected as EV_KEY with BTN_* codes)
-            KeyCode::BTN_LEFT,
-            KeyCode::BTN_RIGHT,
-            KeyCode::BTN_MIDDLE,
-        ] {
+        for &k in KEY_CAPABILITIES {
             keys.insert(k);
         }
 
