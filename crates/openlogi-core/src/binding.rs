@@ -313,13 +313,10 @@ pub enum Action {
     LaunchpadShow,
 
     // ── System ────────────────────────────────────────────────────────────────
-    /// Lock the screen (⌘⌃Q on macOS / Ctrl+Alt+L on Linux).
+    /// Lock the screen (⌘⌃Q on macOS).
     ///
-    /// On Linux, Ctrl+Alt+L is the default shortcut in GNOME and KDE. Other
-    /// desktop environments may use a different shortcut or none at all. A
-    /// future improvement would use `org.freedesktop.login1.LockSession()` via
-    /// D-Bus for compositor-independent locking; deferred until D-Bus support
-    /// (`zbus`) is added for per-app profiles.
+    /// On Linux, calls `org.freedesktop.ScreenSaver.Lock()` via D-Bus, which
+    /// works on GNOME, KDE, and any desktop implementing the interface.
     LockScreen,
     /// Capture a screenshot.
     Screenshot,
@@ -690,13 +687,15 @@ impl Action {
             Action::PreviousDesktop => linux::press_key(&[ctrl, alt], KeyCode::KEY_LEFT),
             Action::NextDesktop => linux::press_key(&[ctrl, alt], KeyCode::KEY_RIGHT),
             // ── System ────────────────────────────────────────────────────────
-            // Ctrl+Alt+L is the standard lock shortcut in GNOME and KDE.
-            Action::LockScreen => linux::press_key(&[ctrl, alt], KeyCode::KEY_L),
+            // org.freedesktop.ScreenSaver works on GNOME, KDE, and most desktops.
+            Action::LockScreen => linux::lock_screen(),
             Action::Screenshot => linux::press_key(&[], KeyCode::KEY_SYSRQ),
             // ── Media ─────────────────────────────────────────────────────────
-            Action::PlayPause => linux::press_key(&[], KeyCode::KEY_PLAYPAUSE),
-            Action::NextTrack => linux::press_key(&[], KeyCode::KEY_NEXTSONG),
-            Action::PrevTrack => linux::press_key(&[], KeyCode::KEY_PREVIOUSSONG),
+            // MPRIS targets the running media player; XF86 volume keys go to the
+            // system mixer (PulseAudio/PipeWire) which is what users expect.
+            Action::PlayPause => linux::mpris_command("PlayPause", KeyCode::KEY_PLAYPAUSE),
+            Action::NextTrack => linux::mpris_command("Next", KeyCode::KEY_NEXTSONG),
+            Action::PrevTrack => linux::mpris_command("Previous", KeyCode::KEY_PREVIOUSSONG),
             Action::VolumeUp => linux::press_key(&[], KeyCode::KEY_VOLUMEUP),
             Action::VolumeDown => linux::press_key(&[], KeyCode::KEY_VOLUMEDOWN),
             Action::MuteVolume => linux::press_key(&[], KeyCode::KEY_MUTE),
@@ -1592,6 +1591,79 @@ mod linux {
             0x7E => KeyCode::KEY_UP,         // kVK_UpArrow
             _ => return None,
         })
+    }
+
+    // ── D-Bus helpers ────────────────────────────────────────────────────────
+
+    use zbus::blocking::Connection as DbusConn;
+
+    static SESSION_BUS: LazyLock<Option<DbusConn>> = LazyLock::new(|| {
+        DbusConn::session()
+            .map_err(|e| tracing::warn!("D-Bus session bus unavailable: {e}"))
+            .ok()
+    });
+
+    /// Lock the screen via `org.freedesktop.ScreenSaver.Lock()`, falling back
+    /// to the Ctrl+Alt+L keyboard shortcut if D-Bus is unavailable.
+    ///
+    /// The D-Bus path works on GNOME, KDE, and any desktop implementing the
+    /// `org.freedesktop.ScreenSaver` interface. The fallback covers lightweight
+    /// WMs that lack the interface but honour the shortcut.
+    pub(super) fn lock_screen() {
+        if let Some(conn) = SESSION_BUS.as_ref() {
+            if conn
+                .call_method(
+                    Some("org.freedesktop.ScreenSaver"),
+                    "/org/freedesktop/ScreenSaver",
+                    Some("org.freedesktop.ScreenSaver"),
+                    "Lock",
+                    &(),
+                )
+                .is_ok()
+            {
+                return;
+            }
+        }
+        // Fallback: Ctrl+Alt+L is the conventional lock shortcut on GNOME and KDE.
+        press_key(&[KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTALT], KeyCode::KEY_L);
+    }
+
+    /// Send `command` to the first MPRIS-capable media player on the session bus,
+    /// falling back to the corresponding XF86 multimedia key if no player is found.
+    ///
+    /// MPRIS reliably targets the running player; the XF86 key covers apps that
+    /// accept multimedia keys but don't expose MPRIS.
+    pub(super) fn mpris_command(command: &str, fallback: KeyCode) {
+        if let Some(conn) = SESSION_BUS.as_ref() {
+            if let Ok(reply) = conn.call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                "ListNames",
+                &(),
+            ) {
+                if let Ok(names) = reply.body().deserialize::<Vec<String>>() {
+                    if let Some(player) =
+                        names.iter().find(|n| n.starts_with("org.mpris.MediaPlayer2."))
+                    {
+                        if conn
+                            .call_method(
+                                Some(player.as_str()),
+                                "/org/mpris/MediaPlayer2",
+                                Some("org.mpris.MediaPlayer2.Player"),
+                                command,
+                                &(),
+                            )
+                            .is_ok()
+                        {
+                            return;
+                        }
+                        tracing::debug!("MPRIS {command} on {player} failed, using key fallback");
+                    }
+                }
+            }
+        }
+        press_key(&[], fallback);
     }
 }
 
