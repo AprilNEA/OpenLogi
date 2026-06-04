@@ -6,12 +6,19 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "OS-level mouse-event hook for OpenLogi. macOS via CGEventTap; Linux/Windows are stubs."
+description = "OS-level mouse-event hook for OpenLogi. macOS via CGEventTap; Linux via evdev+uinput; Windows is a stub."
 
 [dependencies]
 openlogi-core = { path = "../openlogi-core", version = "0.5.1" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+ctrlc = "3"
 
 # CGEventTap stays on core-graphics/core-foundation (the freeze-hazard run-loop
 # machinery). The frontmost-app read uses objc2 (NSWorkspace) so no raw `objc`.

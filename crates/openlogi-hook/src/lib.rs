@@ -1,9 +1,10 @@
 //! OS-level mouse-event hook for OpenLogi.
 //!
-//! On macOS the hook is implemented with `CGEventTap` (the same primitive used
-//! by Logi Options+ and external-reference). Linux and Windows return
-//! [`HookError::Unsupported`] from [`Hook::start`] — stubs that let the
-//! workspace compile on all platforms without feature-gating callers.
+//! | Platform | Implementation |
+//! |----------|---------------|
+//! | macOS    | `CGEventTap` (same primitive used by Logi Options+) |
+//! | Linux    | `evdev` grab + `uinput` re-injection |
+//! | Windows  | stub — returns [`HookError::Unsupported`] |
 //!
 //! # Usage
 //!
@@ -57,7 +58,7 @@ pub enum EventDisposition {
 /// Errors that [`Hook::start`] and related functions can produce.
 #[derive(Debug, thiserror::Error)]
 pub enum HookError {
-    /// This platform has no hook implementation yet (Linux, Windows).
+    /// This platform has no hook implementation yet (Windows).
     #[error("mouse event hook is not supported on this platform")]
     Unsupported,
     /// macOS Accessibility permission has not been granted to this process.
@@ -70,20 +71,37 @@ pub enum HookError {
     /// created. The inner string carries the context.
     #[error("CGEventTap setup failed: {0}")]
     MacOsTap(String),
+    /// No mouse device was found under `/dev/input`. Either no pointing device
+    /// is connected, or the process lacks read permission on the device nodes
+    /// (add the user to the `input` group, or add a `udev` rule).
+    #[cfg(target_os = "linux")]
+    #[error(
+        "no mouse device found under /dev/input; \
+         ensure a pointing device is connected and the process has read permission \
+         (add user to the `input` group or add a udev rule)"
+    )]
+    NoDeviceFound,
+    /// A Linux-specific I/O error occurred while setting up or running the hook.
+    #[cfg(target_os = "linux")]
+    #[error("Linux input error: {0}")]
+    Linux(#[source] std::io::Error),
 }
 
 /// A running OS-level mouse hook. Call [`Hook::stop`] to tear down.
 ///
-/// Internally on macOS, a dedicated `std::thread` runs a `CFRunLoop` that
-/// drains the `CGEventTap` queue. `stop` signals that run loop and joins the
-/// thread so the process exits cleanly. Dropping a `Hook` without calling
-/// `stop` has the same effect via `Drop`.
+/// On macOS a dedicated thread runs a `CFRunLoop` draining a `CGEventTap`.
+/// On Linux one thread per physical mouse device reads `evdev` events and
+/// re-injects pass-through events via a `uinput` virtual device.
+/// Call `stop` (or let the value drop) to shut down all threads and release
+/// grabbed devices.
 pub struct Hook {
     #[cfg(target_os = "macos")]
     inner: Option<macos::HookInner>,
-    /// Makes `Hook` uninhabited on non-macOS targets, so [`Hook::start`] can
+    #[cfg(target_os = "linux")]
+    inner: Option<linux::HookInner>,
+    /// Makes `Hook` uninhabited on unsupported targets so [`Hook::start`] can
     /// only ever return `Err` there and the type can never be constructed.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     never: std::convert::Infallible,
 }
 
@@ -93,7 +111,11 @@ impl Drop for Hook {
         if let Some(inner) = self.inner.take() {
             macos::stop(inner);
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        if let Some(inner) = self.inner.take() {
+            linux::stop(inner);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         // Unreachable: `never: Infallible` makes `Hook` uninhabited here.
         {}
     }
@@ -102,14 +124,14 @@ impl Drop for Hook {
 impl Hook {
     /// Install the mouse hook and start delivering events to `cb`.
     ///
-    /// The callback runs on a private background thread (not the GPUI thread)
-    /// for every mouse button or scroll event at the OS HID tap. It must
-    /// return [`EventDisposition`] quickly — blocking it stalls input delivery
-    /// system-wide.
+    /// The callback runs on a private background thread for every mouse button
+    /// or scroll event. It must return [`EventDisposition`] quickly — blocking
+    /// it stalls input delivery system-wide.
     ///
-    /// On macOS, returns [`HookError::AccessibilityDenied`] when the process
-    /// has not been granted Accessibility permission. On Linux and Windows,
-    /// returns [`HookError::Unsupported`].
+    /// On macOS, returns [`HookError::AccessibilityDenied`] when Accessibility
+    /// permission has not been granted. On Linux, returns
+    /// [`HookError::NoDeviceFound`] when no mouse device is accessible.
+    /// On Windows, always returns [`HookError::Unsupported`].
     pub fn start(
         cb: impl Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static,
     ) -> Result<Self, HookError> {
@@ -117,7 +139,11 @@ impl Hook {
         {
             macos::start(cb).map(|inner| Self { inner: Some(inner) })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            linux::start(cb).map(|inner| Self { inner: Some(inner) })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = cb;
             Err(HookError::Unsupported)
@@ -126,14 +152,14 @@ impl Hook {
 
     /// Stop the hook and release OS resources.
     ///
-    /// Signals the background run loop to exit and blocks until the thread
-    /// joins. Calling this explicitly is preferred over relying on `Drop` when
-    /// errors in cleanup should be visible. `Drop` calls this automatically.
+    /// Signals background threads to exit and blocks until they join. Calling
+    /// this explicitly is preferred over relying on `Drop` when errors in
+    /// cleanup should be visible. `Drop` calls this automatically.
     #[cfg_attr(
-        not(target_os = "macos"),
+        not(any(target_os = "macos", target_os = "linux")),
         allow(
             unused_mut,
-            reason = "`mut self` is only consumed by the macOS teardown path"
+            reason = "`mut self` is only consumed by macOS and Linux teardown paths"
         )
     )]
     pub fn stop(mut self) {
@@ -141,15 +167,20 @@ impl Hook {
         if let Some(inner) = self.inner.take() {
             macos::stop(inner);
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        if let Some(inner) = self.inner.take() {
+            linux::stop(inner);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         match self.never {}
     }
 
-    /// Returns `true` when the process has the macOS Accessibility entitlement
-    /// required to install an active `CGEventTap`.
+    /// Returns `true` when the process has the permissions required to install
+    /// the hook.
     ///
-    /// On Linux and Windows this always returns `true`; those platforms handle
-    /// permissions at a higher layer.
+    /// On macOS, checks the Accessibility entitlement. On Linux and Windows
+    /// this always returns `true`; those platforms enforce permissions at a
+    /// lower layer (device node ownership / group membership).
     #[must_use]
     pub fn has_accessibility() -> bool {
         #[cfg(target_os = "macos")]
@@ -181,7 +212,10 @@ impl Hook {
 
 /// Return the macOS bundle identifier of the currently frontmost application,
 /// e.g. `"com.microsoft.VSCode"`. `None` when no app is frontmost, when
-/// reading the value fails, or on any non-macOS platform (P1.4).
+/// reading the value fails, or on any non-macOS platform.
+///
+/// On Linux, per-application profile switching is not yet implemented and this
+/// always returns `None`.
 ///
 /// Costs four `objc_msgSend`s plus a UTF-8 copy — well under a millisecond
 /// at the 1 Hz polling cadence in `openlogi-gui::app_watcher`.
@@ -199,6 +233,9 @@ pub fn frontmost_bundle_id() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 mod macos;
+
+#[cfg(target_os = "linux")]
+mod linux;
 
 #[cfg(test)]
 mod tests;

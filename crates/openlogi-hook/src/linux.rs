@@ -1,0 +1,497 @@
+//! Linux `evdev` + `uinput` implementation of the OS-level mouse hook.
+//!
+//! Each physical mouse found under `/dev/input/` is grabbed exclusively;
+//! a paired `uinput` virtual device re-injects events the callback marks
+//! [`crate::EventDisposition::PassThrough`]. Events marked
+//! [`crate::EventDisposition::Suppress`] are consumed and never reach the desktop.
+//!
+//! # Permissions
+//!
+//! The process needs read access to `/dev/input/eventN` (typically the `input`
+//! group) and write access to `/dev/uinput` (the `input` or `uinput` group, or
+//! a `udev` rule granting access). Without those, `start()` returns
+//! [`crate::HookError::Linux`].
+
+use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread;
+
+use evdev::uinput::VirtualDevice;
+use evdev::{Device, EventSummary, KeyCode, RelativeAxisCode};
+use tracing::{debug, error, warn};
+
+use crate::{ButtonId, EventDisposition, HookError, MouseEvent};
+
+/// Name stamped on every uinput pass-through device; used to skip those
+/// devices during enumeration so we don't hook our own virtual mice.
+const VIRTUAL_DEVICE_NAME: &str = "OpenLogi virtual mouse";
+
+/// Hi-res scroll resolution: 120 units per standard wheel tick, matching the
+/// Linux kernel's `REL_WHEEL_HI_RES` convention and Windows HID semantics.
+const HIRES_UNITS_PER_TICK: f32 = 120.0;
+
+pub(crate) struct HookInner {
+    stop: Arc<AtomicBool>,
+    /// One pipe write-end per device thread; writing wakes the blocking poll.
+    stop_pipes: Vec<OwnedFd>,
+    threads: Vec<thread::JoinHandle<()>>,
+}
+
+pub(crate) fn start(
+    cb: impl Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static,
+) -> Result<HookInner, HookError> {
+    let devices = find_mouse_devices();
+    if devices.is_empty() {
+        return Err(HookError::NoDeviceFound);
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let cb: Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
+    let mut threads: Vec<thread::JoinHandle<()>> = Vec::with_capacity(devices.len());
+    let mut stop_pipes: Vec<OwnedFd> = Vec::with_capacity(devices.len());
+
+    let result = (|| -> io::Result<()> {
+        for (path, device) in devices {
+            let (rx, tx) = create_pipe()?;
+            let stop_clone = Arc::clone(&stop);
+            let cb_clone = Arc::clone(&cb);
+            let handle = thread::Builder::new()
+                .name(format!("openlogi-hook:{}", path.display()))
+                .spawn(move || device_thread(path, device, cb_clone, stop_clone, rx))?;
+            threads.push(handle);
+            stop_pipes.push(tx);
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        shutdown(&stop, &stop_pipes, threads);
+        return Err(HookError::Linux(e));
+    }
+
+    Ok(HookInner {
+        stop,
+        stop_pipes,
+        threads,
+    })
+}
+
+pub(crate) fn stop(inner: HookInner) {
+    shutdown(&inner.stop, &inner.stop_pipes, inner.threads);
+}
+
+fn shutdown(stop: &AtomicBool, pipes: &[OwnedFd], threads: Vec<thread::JoinHandle<()>>) {
+    stop.store(true, Ordering::Relaxed);
+    for fd in pipes {
+        signal_pipe(fd);
+    }
+    for handle in threads {
+        if let Err(e) = handle.join() {
+            error!("hook thread panicked on shutdown: {e:?}");
+        }
+    }
+}
+
+/// Write one wake-up byte to a pipe, retrying on EINTR.
+fn signal_pipe(fd: &OwnedFd) {
+    loop {
+        // SAFETY: fd is a valid open pipe write end; writing one byte is safe.
+        let ret = unsafe { libc::write(fd.as_raw_fd(), [0u8].as_ptr().cast(), 1) };
+        if ret >= 0 {
+            return;
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        error!("failed to signal hook thread pipe ({err}): hook thread may not wake");
+        return;
+    }
+}
+
+fn create_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0i32; 2];
+    // SAFETY: fds is a valid two-element array; pipe() fills it with two new fds on success.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: pipe() succeeded, so both fds are valid open file descriptors we own.
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+fn find_mouse_devices() -> Vec<(std::path::PathBuf, Device)> {
+    evdev::enumerate()
+        .filter(|(_, d)| d.name().unwrap_or("") != VIRTUAL_DEVICE_NAME)
+        .filter(|(_, d)| {
+            d.supported_keys()
+                .is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT))
+        })
+        .collect()
+}
+
+fn build_virtual_device(device: &Device) -> io::Result<evdev::uinput::VirtualDevice> {
+    let builder = VirtualDevice::builder()?.name(VIRTUAL_DEVICE_NAME);
+
+    let builder = if let Some(keys) = device.supported_keys() {
+        builder.with_keys(keys)?
+    } else {
+        builder
+    };
+
+    let builder = if let Some(axes) = device.supported_relative_axes() {
+        builder.with_relative_axes(axes)?
+    } else {
+        builder
+    };
+
+    builder.build()
+}
+
+/// Block until `device_fd` has data or `stop_fd` is readable.
+///
+/// Returns `true` when the device is ready to read, `false` on stop signal or
+/// unrecoverable poll error.
+fn wait_readable(device_fd: i32, stop_fd: i32) -> bool {
+    let mut fds = [
+        libc::pollfd {
+            fd: device_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: stop_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    loop {
+        // SAFETY: fds is a valid two-element pollfd array.
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        if ret < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue; // interrupted by signal — retry
+            }
+            error!("poll() failed: {err}");
+            return false;
+        }
+        if fds[1].revents & libc::POLLIN != 0 {
+            return false; // stop signal
+        }
+        if fds[0].revents & libc::POLLIN != 0 {
+            return true; // device has data
+        }
+    }
+}
+
+fn scroll(delta_x: f32, delta_y: f32) -> MouseEvent {
+    MouseEvent::Scroll { delta_x, delta_y }
+}
+
+fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent> {
+    match event.destructure() {
+        EventSummary::Key(_, key, value) => {
+            let id = key_to_button(key)?;
+            Some(MouseEvent::Button {
+                id,
+                pressed: value != 0,
+            })
+        }
+        #[allow(clippy::cast_precision_loss)] // scroll deltas fit comfortably in f32 mantissa
+        EventSummary::RelativeAxis(_, axis, value) => {
+            let v = value as f32;
+            if hires_scroll {
+                match axis {
+                    RelativeAxisCode::REL_WHEEL_HI_RES => {
+                        Some(scroll(0.0, v / HIRES_UNITS_PER_TICK))
+                    }
+                    RelativeAxisCode::REL_HWHEEL_HI_RES => {
+                        Some(scroll(v / HIRES_UNITS_PER_TICK, 0.0))
+                    }
+                    // Low-res ticks are redundant when hi-res is active.
+                    _ => None,
+                }
+            } else {
+                match axis {
+                    RelativeAxisCode::REL_WHEEL => Some(scroll(0.0, v)),
+                    RelativeAxisCode::REL_HWHEEL => Some(scroll(v, 0.0)),
+                    _ => None,
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+fn key_to_button(key: KeyCode) -> Option<ButtonId> {
+    match key {
+        KeyCode::BTN_LEFT => Some(ButtonId::LeftClick),
+        KeyCode::BTN_RIGHT => Some(ButtonId::RightClick),
+        KeyCode::BTN_MIDDLE => Some(ButtonId::MiddleClick),
+        // BTN_BACK/BTN_SIDE both appear as the back thumb button across mice.
+        KeyCode::BTN_BACK | KeyCode::BTN_SIDE => Some(ButtonId::Back),
+        // BTN_FORWARD/BTN_EXTRA both appear as the forward thumb button.
+        KeyCode::BTN_FORWARD | KeyCode::BTN_EXTRA => Some(ButtonId::Forward),
+        // BTN_TASK is the closest generic match for a mode/DPI toggle button.
+        KeyCode::BTN_TASK => Some(ButtonId::DpiToggle),
+        _ => None,
+    }
+}
+
+// All params are owned: path/cb/stop/stop_rx are moved into the thread and must not be refs.
+#[allow(clippy::needless_pass_by_value)]
+fn device_thread(
+    path: std::path::PathBuf,
+    mut device: Device,
+    cb: Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync>,
+    stop: Arc<AtomicBool>,
+    stop_rx: OwnedFd,
+) {
+    let mut virtual_device = match build_virtual_device(&device) {
+        Ok(vd) => vd,
+        Err(e) => {
+            warn!("failed to create uinput device for {}: {e}", path.display());
+            return;
+        }
+    };
+
+    if let Err(e) = device.grab() {
+        warn!(
+            "failed to grab {} exclusively: {e} — button events will be duplicated",
+            path.display()
+        );
+    }
+
+    let hires_scroll = device
+        .supported_relative_axes()
+        .is_some_and(|axes| axes.contains(RelativeAxisCode::REL_WHEEL_HI_RES));
+
+    let device_fd = device.as_raw_fd();
+    let stop_fd = stop_rx.as_raw_fd();
+    // Events that will be re-injected at the next SYN_REPORT.
+    let mut pending: Vec<evdev::InputEvent> = Vec::new();
+
+    debug!("hook started on {}", path.display());
+
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        if !wait_readable(device_fd, stop_fd) {
+            break;
+        }
+
+        let events = match device.fetch_events() {
+            Ok(iter) => iter,
+            Err(e) => {
+                error!("read error on {}: {e}", path.display());
+                break;
+            }
+        };
+
+        for event in events {
+            if let EventSummary::Synchronization(..) = event.destructure() {
+                // Flush pending pass-through events followed by the sync marker.
+                if !pending.is_empty() {
+                    pending.push(event);
+                    if let Err(e) = virtual_device.emit(&pending) {
+                        error!("uinput emit failed: {e}");
+                    }
+                    pending.clear();
+                }
+            } else {
+                let disposition = translate(&event, hires_scroll)
+                    .map_or(EventDisposition::PassThrough, |me| cb(me));
+                if matches!(disposition, EventDisposition::PassThrough) {
+                    pending.push(event);
+                }
+            }
+        }
+    }
+
+    debug!("hook stopped on {}", path.display());
+    // Dropping `device` releases the exclusive grab, restoring normal input delivery.
+}
+
+#[cfg(test)]
+mod tests {
+    use evdev::{EventType, InputEvent, KeyCode, RelativeAxisCode};
+
+    use super::*;
+
+    // ── key_to_button ────────────────────────────────────────────────────────
+
+    #[test]
+    fn key_to_button_maps_standard_mouse_buttons() {
+        let cases = [
+            (KeyCode::BTN_LEFT, ButtonId::LeftClick),
+            (KeyCode::BTN_RIGHT, ButtonId::RightClick),
+            (KeyCode::BTN_MIDDLE, ButtonId::MiddleClick),
+            (KeyCode::BTN_BACK, ButtonId::Back),
+            (KeyCode::BTN_SIDE, ButtonId::Back),
+            (KeyCode::BTN_FORWARD, ButtonId::Forward),
+            (KeyCode::BTN_EXTRA, ButtonId::Forward),
+            (KeyCode::BTN_TASK, ButtonId::DpiToggle),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(
+                key_to_button(key),
+                Some(expected),
+                "key_to_button({key:?}) should be {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn key_to_button_returns_none_for_non_mouse_keys() {
+        assert_eq!(key_to_button(KeyCode::KEY_A), None);
+        assert_eq!(key_to_button(KeyCode::KEY_LEFTSHIFT), None);
+    }
+
+    // ── translate ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn translate_btn_left_down_returns_button_pressed() {
+        let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_LEFT.0, 1);
+        assert!(matches!(
+            translate(&event, false),
+            Some(MouseEvent::Button {
+                id: ButtonId::LeftClick,
+                pressed: true
+            })
+        ));
+    }
+
+    #[test]
+    fn translate_btn_left_up_returns_button_released() {
+        let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_LEFT.0, 0);
+        assert!(matches!(
+            translate(&event, false),
+            Some(MouseEvent::Button {
+                id: ButtonId::LeftClick,
+                pressed: false
+            })
+        ));
+    }
+
+    #[test]
+    fn translate_btn_back_returns_back() {
+        let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_BACK.0, 1);
+        assert!(matches!(
+            translate(&event, false),
+            Some(MouseEvent::Button {
+                id: ButtonId::Back,
+                pressed: true
+            })
+        ));
+    }
+
+    #[test]
+    fn translate_btn_side_returns_back() {
+        let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_SIDE.0, 1);
+        assert!(matches!(
+            translate(&event, false),
+            Some(MouseEvent::Button {
+                id: ButtonId::Back,
+                pressed: true
+            })
+        ));
+    }
+
+    #[test]
+    fn translate_btn_forward_returns_forward() {
+        let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_FORWARD.0, 1);
+        assert!(matches!(
+            translate(&event, false),
+            Some(MouseEvent::Button {
+                id: ButtonId::Forward,
+                pressed: true
+            })
+        ));
+    }
+
+    // ── scroll — standard ────────────────────────────────────────────────────
+
+    #[test]
+    fn translate_rel_wheel_returns_scroll_y() {
+        let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_WHEEL.0, 3);
+        let result = translate(&event, false);
+        assert!(
+            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y })
+                if delta_x.abs() < f32::EPSILON && (delta_y - 3.0).abs() < f32::EPSILON),
+            "expected Scroll {{ delta_x: 0.0, delta_y: 3.0 }}, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn translate_rel_hwheel_returns_scroll_x() {
+        let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL.0, -2);
+        let result = translate(&event, false);
+        assert!(
+            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y })
+                if (delta_x - -2.0).abs() < f32::EPSILON && delta_y.abs() < f32::EPSILON),
+            "expected Scroll {{ delta_x: -2.0, delta_y: 0.0 }}, got {result:?}"
+        );
+    }
+
+    // ── scroll — hi-res ──────────────────────────────────────────────────────
+
+    #[test]
+    fn translate_hires_wheel_returns_fractional_scroll_y() {
+        // 60 hi-res units = 0.5 standard ticks
+        let event = InputEvent::new(
+            EventType::RELATIVE.0,
+            RelativeAxisCode::REL_WHEEL_HI_RES.0,
+            60,
+        );
+        let result = translate(&event, true);
+        assert!(
+            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y })
+                if delta_x.abs() < f32::EPSILON && (delta_y - 0.5).abs() < f32::EPSILON),
+            "expected Scroll {{ delta_x: 0.0, delta_y: 0.5 }}, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn translate_hires_hwheel_returns_fractional_scroll_x() {
+        let event = InputEvent::new(
+            EventType::RELATIVE.0,
+            RelativeAxisCode::REL_HWHEEL_HI_RES.0,
+            -120,
+        );
+        let result = translate(&event, true);
+        assert!(
+            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y })
+                if (delta_x - -1.0).abs() < f32::EPSILON && delta_y.abs() < f32::EPSILON),
+            "expected Scroll {{ delta_x: -1.0, delta_y: 0.0 }}, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn translate_low_res_wheel_skipped_when_hires_active() {
+        let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_WHEEL.0, 1);
+        assert!(translate(&event, true).is_none());
+    }
+
+    #[test]
+    fn translate_low_res_hwheel_skipped_when_hires_active() {
+        let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL.0, 1);
+        assert!(translate(&event, true).is_none());
+    }
+
+    #[test]
+    fn translate_non_mouse_key_returns_none() {
+        let event = InputEvent::new(EventType::KEY.0, KeyCode::KEY_A.0, 1);
+        assert!(translate(&event, false).is_none());
+    }
+
+    #[test]
+    fn translate_sync_event_returns_none() {
+        let event = InputEvent::new(EventType::SYNCHRONIZATION.0, 0, 0);
+        assert!(translate(&event, false).is_none());
+    }
+}
