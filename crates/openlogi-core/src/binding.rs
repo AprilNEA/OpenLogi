@@ -1504,26 +1504,23 @@ mod linux {
     /// Force the virtual device to initialise (if it hasn't already) and return
     /// its `/dev/input/eventN` node path.
     ///
-    /// Scans `/sys/class/input/*/name` for the device name. Returns `None` if
-    /// the device couldn't be created or if the node hasn't appeared yet (udev
-    /// typically creates it within a few milliseconds of the `ioctl`).
+    /// Uses `VirtualDevice::enumerate_dev_nodes()` which returns the correct
+    /// `/dev/input/eventN` path directly. Returns `None` if the device couldn't
+    /// be created or if the node hasn't appeared yet (udev typically creates it
+    /// within a few milliseconds of the `ioctl`).
     pub(super) fn device_node() -> Option<std::path::PathBuf> {
         // Touch the LazyLock to force initialisation.
         let _ = &*VIRTUAL_INPUT;
         // Give udev a moment to create the /dev node.
         std::thread::sleep(std::time::Duration::from_millis(150));
-        std::fs::read_dir("/sys/class/input")
-            .ok()?
-            .flatten()
-            .find_map(|entry| {
-                let name = std::fs::read_to_string(entry.path().join("name")).ok()?;
-                if name.trim() == DEVICE_NAME {
-                    Some(std::path::Path::new("/dev/input").join(entry.file_name()))
-                } else {
-                    None
-                }
-            })
+        if let Some(m) = &*VIRTUAL_INPUT {
+            if let Ok(mut guard) = m.lock() {
+                return guard.enumerate_dev_nodes_blocking().ok()?.flatten().next();
+            }
+        }
+        None
     }
+
 
     /// Convert a [`KeyCombo`] modifier bitmask to the evdev keys to hold.
     ///
