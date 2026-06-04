@@ -266,7 +266,12 @@ pub enum Action {
     Cut,
     /// Undo the last action (⌘Z / Ctrl+Z).
     Undo,
-    /// Redo the last undone action (⌘⇧Z / Ctrl+Y).
+    /// Redo the last undone action (⌘⇧Z on macOS / Ctrl+Shift+Z on Linux).
+    ///
+    /// Note: Ctrl+Y is the dominant redo shortcut in LibreOffice and many GTK
+    /// apps. Ctrl+Shift+Z is used here because it mirrors the macOS convention
+    /// and works in GNOME text fields, browsers, and Electron apps. If Ctrl+Y
+    /// coverage is needed, a `CustomShortcut` binding is the escape hatch.
     Redo,
     /// Select all content (⌘A / Ctrl+A).
     SelectAll,
