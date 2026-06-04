@@ -361,8 +361,8 @@ pub enum Action {
 ///
 /// `modifiers` is a bitmask of [`KeyCombo::MOD_CMD`] etc. so the wire format
 /// is a compact integer, not a string. `key_code` is the macOS virtual key
-/// (kVK_*); other platforms map at `execute` time when they grow real
-/// support.
+/// (`kVK_*`); on Linux, `Action::execute` maps it to an evdev `KeyCode` via
+/// `linux::macos_vk_to_linux`.
 ///
 /// `display` is purely for rendering — e.g. `"⌘⇧P"`. Callers regenerate it
 /// from the captured chord; we keep it in the struct so older configs
@@ -372,7 +372,8 @@ pub struct KeyCombo {
     /// Bitmask of [`Self::MOD_CMD`] etc.
     pub modifiers: u8,
     /// macOS virtual key code (`kVK_*`). 0 means "no key" — useful for
-    /// modifier-only placeholders that the recorder UI rejects.
+    /// modifier-only placeholders that the recorder UI rejects. On Linux,
+    /// `Action::execute` translates this to an evdev `KeyCode`.
     pub key_code: u16,
     /// Pre-rendered chord label, e.g. `"⌘⇧P"`. Empty falls through to a
     /// generated label at runtime.
@@ -716,19 +717,7 @@ impl Action {
                     );
                     return;
                 };
-                let mut mods: Vec<KeyCode> = Vec::new();
-                // macOS Cmd and Ctrl both map to Linux Ctrl; the bitwise OR
-                // deduplicates them so we only push one KEY_LEFTCTRL.
-                if combo.modifiers & (KeyCombo::MOD_CMD | KeyCombo::MOD_CTRL) != 0 {
-                    mods.push(ctrl);
-                }
-                if combo.modifiers & KeyCombo::MOD_SHIFT != 0 {
-                    mods.push(shift);
-                }
-                if combo.modifiers & KeyCombo::MOD_OPTION != 0 {
-                    mods.push(alt);
-                }
-                linux::press_key(&mods, key);
+                linux::press_key(&linux::modifiers_to_keycodes(combo.modifiers), key);
             }
         }
     }
@@ -1495,6 +1484,26 @@ mod linux {
     /// Inject a single relative-axis delta followed by `SYN_REPORT`.
     pub(super) fn scroll(axis: RelativeAxisCode, value: i32) {
         emit(&[rel_ev(axis, value), syn()]);
+    }
+
+    /// Convert a [`KeyCombo`] modifier bitmask to the evdev keys to hold.
+    ///
+    /// macOS Cmd (`MOD_CMD`) and Ctrl (`MOD_CTRL`) both map to `KEY_LEFTCTRL`;
+    /// the bitwise-OR check deduplicates them so at most one Ctrl is pushed.
+    /// Order is canonical: Ctrl → Shift → Alt.
+    pub(super) fn modifiers_to_keycodes(modifiers: u8) -> Vec<KeyCode> {
+        use crate::binding::KeyCombo;
+        let mut mods = Vec::new();
+        if modifiers & (KeyCombo::MOD_CMD | KeyCombo::MOD_CTRL) != 0 {
+            mods.push(KeyCode::KEY_LEFTCTRL);
+        }
+        if modifiers & KeyCombo::MOD_SHIFT != 0 {
+            mods.push(KeyCode::KEY_LEFTSHIFT);
+        }
+        if modifiers & KeyCombo::MOD_OPTION != 0 {
+            mods.push(KeyCode::KEY_LEFTALT);
+        }
+        mods
     }
 
     /// Map a macOS `kVK_*` virtual key code to the corresponding Linux `KeyCode`.

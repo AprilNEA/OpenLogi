@@ -104,20 +104,18 @@ fn parse_action(s: &str) -> Result<Action, String> {
     })
 }
 
-fn parse_hex_u8(s: &str) -> Option<u8> {
-    let hex = s
-        .strip_prefix("0x")
+fn strip_hex_prefix(s: &str) -> &str {
+    s.strip_prefix("0x")
         .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
-    u8::from_str_radix(hex, 16).ok()
+        .unwrap_or(s)
+}
+
+fn parse_hex_u8(s: &str) -> Option<u8> {
+    u8::from_str_radix(strip_hex_prefix(s), 16).ok()
 }
 
 fn parse_hex_u16(s: &str) -> Option<u16> {
-    let hex = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
-    u16::from_str_radix(hex, 16).ok()
+    u16::from_str_radix(strip_hex_prefix(s), 16).ok()
 }
 
 fn main() {
