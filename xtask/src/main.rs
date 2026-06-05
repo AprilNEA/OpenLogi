@@ -18,7 +18,7 @@ struct Cli {
 enum Command {
     /// Generate the static updater manifest consumed by gpui-updater.
     GenerateUpdaterManifest(GenerateUpdaterManifest),
-    /// Generate the macOS app icon from the master SVG.
+    /// Generate the macOS app icon from the master PNG.
     MacosIcns,
     /// Build the release OpenLogi.app bundle.
     BundleMacos,

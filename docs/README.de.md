@@ -104,6 +104,10 @@ Dual-lizenziert unter wahlweise
 
 —— nach deiner Wahl.
 
+### Logo & Markenmaterialien
+
+Das OpenLogi-Logo und das App-Icon —— die Markenmaterialien unter [`design/`](../design/) —— sind © 2026 AprilNEA, alle Rechte vorbehalten, und werden nicht von den oben genannten MIT-/Apache-Lizenzen abgedeckt; siehe [`design/LICENSE`](../design/LICENSE). Das Forken des Codes gewährt keinerlei Rechte am Namen, Logo oder Icon von OpenLogi; bitte verwende sie ohne vorherige schriftliche Genehmigung nicht, um deine eigenen Projekte, Forks oder Distributionen zu repräsentieren.
+
 ---
 
 **Nicht mit Logitech verbunden.** „Logitech“, „MX Master“ und „Options+“ sind Marken der Logitech International S.A.

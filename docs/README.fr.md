@@ -104,6 +104,10 @@ Sous double licence, au choix :
 
 à votre convenance.
 
+### Logo et ressources de marque
+
+Le logo et l'icône d'application d'OpenLogi —— les ressources de marque situées dans [`design/`](../design/) —— sont © 2026 AprilNEA, tous droits réservés, et ne sont pas couverts par les licences MIT/Apache ci-dessus ; voir [`design/LICENSE`](../design/LICENSE). Forker le code n'accorde aucun droit sur le nom, le logo ou l'icône d'OpenLogi ; merci de ne pas les utiliser pour représenter vos propres projets, forks ou distributions sans autorisation écrite préalable.
+
 ---
 
 **Sans affiliation avec Logitech.** « Logitech », « MX Master » et « Options+ » sont des marques de Logitech International S.A.

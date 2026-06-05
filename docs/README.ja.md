@@ -104,6 +104,10 @@ brew install --cask openlogi
 
 お好きな方をお選びください。
 
+### ロゴとブランドアセット
+
+OpenLogi のロゴとアプリアイコン（[`design/`](../design/) 配下のブランドアセット）は © 2026 AprilNEA に帰属し、すべての権利を留保します。これらは上記の MIT / Apache ライセンスの対象外です。詳細は [`design/LICENSE`](../design/LICENSE) を参照してください。コードをフォークしても、OpenLogi の名称・ロゴ・アイコンに対するいかなる権利も付与されません。事前の書面による許可なく、ご自身のプロジェクト・フォーク・配布物を表すために使用しないでください。
+
 ---
 
 **Logitech とは無関係です。** 「Logitech」「MX Master」「Options+」は Logitech International S.A. の商標です。

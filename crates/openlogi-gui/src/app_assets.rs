@@ -13,7 +13,7 @@ use gpui::{AssetSource, Result, SharedString};
 /// Asset path [`AppAssets`] resolves to the embedded app logo.
 pub const LOGO: &str = "openlogi.png";
 
-/// The 512×512 app icon, embedded into the binary.
+/// The 1024×1024 app icon, embedded into the binary.
 const LOGO_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../design/icon/openlogi.png"

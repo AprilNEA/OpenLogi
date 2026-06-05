@@ -104,6 +104,10 @@ brew install --cask openlogi
 
 원하는 쪽을 선택하시면 됩니다.
 
+### 로고 및 브랜드 자산
+
+OpenLogi 로고와 앱 아이콘 —— [`design/`](../design/) 아래의 브랜드 자산 —— 은 © 2026 AprilNEA에 귀속되며 모든 권리를 보유합니다. 이는 위의 MIT/Apache 라이선스에 포함되지 않습니다. 자세한 내용은 [`design/LICENSE`](../design/LICENSE)를 참조하세요. 코드를 포크하더라도 OpenLogi 이름, 로고, 아이콘에 대한 어떠한 권리도 부여되지 않습니다. 사전 서면 허가 없이 본인의 프로젝트, 포크, 배포본을 나타내는 데 사용하지 마세요.
+
 ---
 
 **Logitech과 무관합니다.** "Logitech", "MX Master", "Options+"는 Logitech International S.A.의 상표입니다.

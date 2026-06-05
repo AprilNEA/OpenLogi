@@ -107,6 +107,14 @@ Dual-licensed under either of
 
 at your option.
 
+### Logo & brand assets
+
+The OpenLogi logo and app icon — the brand assets under [`design/`](design/) —
+are © 2026 AprilNEA, all rights reserved, and are not covered by the MIT/Apache
+licenses above; see [`design/LICENSE`](design/LICENSE). Forking the code grants
+no right to the OpenLogi name, logo, or icon; please don't use them to represent
+your own projects, forks, or distributions without prior written permission.
+
 ---
 
 **Not affiliated with Logitech.** "Logitech", "MX Master", and "Options+" are trademarks of Logitech International S.A.

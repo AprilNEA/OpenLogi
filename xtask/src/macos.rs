@@ -43,11 +43,11 @@ pub(crate) fn package_macos(args: &DmgMacos) -> Result<()> {
 
 pub(crate) fn generate_macos_icns() -> Result<()> {
     let root = repo_root()?;
-    let svg = root.join("design/icon/openlogi.svg");
+    let master = root.join("design/icon/openlogi.png");
     let output_dir = root.join("crates/openlogi-gui/icon");
     let output = output_dir.join("AppIcon.icns");
 
-    ensure_file(&svg)?;
+    ensure_file(&master)?;
     fs::create_dir_all(&output_dir).with_context(|| {
         format!(
             "could not create icon output directory {}",
@@ -60,53 +60,19 @@ pub(crate) fn generate_macos_icns() -> Result<()> {
     fs::create_dir_all(&iconset)
         .with_context(|| format!("could not create iconset directory {}", iconset.display()))?;
 
-    if command_exists("rsvg-convert") {
-        render_iconset(&iconset, |size, output| {
-            run(ProcessCommand::new("rsvg-convert")
-                .arg("-w")
-                .arg(size.to_string())
-                .arg("-h")
-                .arg(size.to_string())
-                .arg(&svg)
-                .arg("-o")
-                .arg(output))
-        })?;
-    } else if command_exists("resvg") {
-        render_iconset(&iconset, |size, output| {
-            run(ProcessCommand::new("resvg")
-                .arg("--width")
-                .arg(size.to_string())
-                .arg("--height")
-                .arg(size.to_string())
-                .arg(&svg)
-                .arg(output))
-        })?;
-    } else {
-        println!("note: no rsvg-convert/resvg — using qlmanage + sips (built-in)");
-        let _ = ProcessCommand::new("qlmanage")
-            .arg("-t")
-            .arg("-s")
-            .arg("1024")
-            .arg("-o")
-            .arg(work.path())
-            .arg(&svg)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let master = work.path().join("openlogi.svg.png");
-        ensure_file(&master)
-            .with_context(|| format!("qlmanage could not render {}", svg.display()))?;
-        render_iconset(&iconset, |size, output| {
-            run(ProcessCommand::new("sips")
-                .arg("-z")
-                .arg(size.to_string())
-                .arg(size.to_string())
-                .arg(&master)
-                .arg("--out")
-                .arg(output)
-                .stdout(Stdio::null()))
-        })?;
-    }
+    // The squircle and opaque fill are baked into the 1024² master PNG, so each
+    // iconset slot is just a sips downscale. sips and iconutil are macOS
+    // built-ins — no SVG renderer (rsvg/resvg) needed.
+    render_iconset(&iconset, |size, output| {
+        run(ProcessCommand::new("sips")
+            .arg("-z")
+            .arg(size.to_string())
+            .arg(size.to_string())
+            .arg(&master)
+            .arg("--out")
+            .arg(output)
+            .stdout(Stdio::null()))
+    })?;
 
     run(ProcessCommand::new("iconutil")
         .arg("-c")

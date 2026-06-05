@@ -31,7 +31,7 @@ PLIST_SRC="$ROOT/crates/openlogi-gui/dev/Info.plist"
 
 mkdir -p "$MACOS" "$RES"
 
-# App icon — gitignored, generated from the master SVG on demand. Mirror it
+# App icon — generated from the master PNG on demand. Mirror it
 # into the bundle whenever the source is newer (or the bundle copy is missing).
 if [ ! -f "$ICON_SRC" ]; then
   cargo run -p xtask --manifest-path "$ROOT/Cargo.toml" -- macos-icns

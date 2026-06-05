@@ -104,6 +104,10 @@ brew install --cask openlogi
 - Apache License, Version 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
 - MIT license ([LICENSE-MIT](../LICENSE-MIT))
 
+### Logo 与品牌资产
+
+OpenLogi 的 Logo 与应用图标 —— 即 [`design/`](../design/) 下的品牌资产 —— 版权归 © 2026 AprilNEA 所有，保留全部权利，不在上述 MIT/Apache 许可范围内；详见 [`design/LICENSE`](../design/LICENSE)。复刻代码并不授予你对 OpenLogi 名称、Logo 或图标的任何权利；未经事先书面许可，请勿将它们用于代表你自己的项目、复刻或分发版本。
+
 ---
 
 **与罗技无关。** "Logitech"、"MX Master" 与 "Options+" 是 Logitech International S.A. 的商标。
