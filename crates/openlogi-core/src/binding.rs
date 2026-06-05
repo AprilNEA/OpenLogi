@@ -1665,8 +1665,11 @@ mod linux {
             )
             .ok()?;
         let names = reply.body().deserialize::<Vec<String>>().ok()?;
-        let Some(player) = names.iter().find(|n| n.starts_with("org.mpris.MediaPlayer2.")) else {
-            tracing::debug!("no MPRIS player found — {command} skipped");
+        let Some(player) = names
+            .iter()
+            .find(|n| n.starts_with("org.mpris.MediaPlayer2."))
+        else {
+            tracing::debug!("no MPRIS player found — {command} via XF86 key fallback");
             return None;
         };
         match conn.call_method(
