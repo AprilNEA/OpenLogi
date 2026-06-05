@@ -95,13 +95,18 @@ jobs:
         run: test "$(uname -m)" = "${{ matrix.arch }}"
       - run: cargo test --workspace --all-targets
 
-  check-windows:
-    name: cargo check (windows)
+  clippy-windows:
+    name: clippy (windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      # openlogi-gui's GPUI/Metal deps don't build on Windows yet — restrict to
-      # the platform-agnostic crates so the workspace stays green on push.
-      - run: cargo check -p openlogi-core -p openlogi-hid -p openlogi-assets -p openlogi -p openlogi-hook --all-targets
+      # openlogi-gui's GPUI backend doesn't build on Windows yet — restrict to
+      # the platform-agnostic crates so the workspace stays green on push. clippy
+      # subsumes `cargo check` and additionally lints the Windows-only code paths
+      # (the WH_MOUSE_LL hook, SendInput synthesis, native HID writer, WinRT
+      # pairing) that the Linux/macOS clippy jobs never compile.
+      - run: cargo clippy -p openlogi-core -p openlogi-hidpp -p openlogi-hid -p openlogi-assets -p openlogi-cli -p openlogi -p openlogi-hook --all-targets -- -D warnings
