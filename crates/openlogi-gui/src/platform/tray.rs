@@ -1,14 +1,19 @@
 //! System-tray / status-item presence. macOS-only today, via `NSStatusItem`
-//! (which lives in the menu bar) over raw Cocoa FFI — GPUI exposes no
-//! status-bar API.
+//! (which lives in the menu bar) over `objc2` — GPUI exposes no status-bar API.
 //!
 //! `tray` is the cross-platform-neutral name: macOS has the menu-bar status
 //! item, Windows the system tray / notification area, Linux the
 //! StatusNotifierItem spec. Only macOS is implemented, so the module carries no
 //! stub — every caller gates on `cfg(target_os = "macos")` instead.
 //!
-//! Menu clicks can't reach GPUI's `App`, so they post a [`TrayEvent`] on a
-//! channel that a dedicated task in `main.rs` drains.
+//! All AppKit objects are owned as `Retained<T>` (issue #99: the old raw-`id`
+//! path leaked a `CFString` on every refresh). `NSMenu`/`NSMenuItem` are
+//! `MainThreadOnly`, hence `!Send`, so the tray's state lives in a main-thread
+//! `thread_local` rather than a `Sync` static — the "main thread only" contract
+//! is now enforced by the type system instead of a doc comment.
+//!
+//! Menu clicks can't reach GPUI's `App`, so the [`MenuTarget`] action methods
+//! post a [`TrayEvent`] on a channel that a dedicated task in `main.rs` drains.
 
 #[cfg(target_os = "macos")]
 pub use macos::{
@@ -18,20 +23,22 @@ pub use macos::{
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use std::sync::{
-        OnceLock,
-        atomic::{AtomicBool, Ordering},
-    };
+    #![expect(
+        unsafe_code,
+        reason = "define_class! menu-target subclass + its super-init; GPUI has no menu-bar API"
+    )]
 
-    use cocoa::base::id;
-    use objc::runtime::{Object, Sel};
-    use objc::{sel, sel_impl};
+    use std::cell::RefCell;
+
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, NSObject};
+    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+    use objc2_app_kit::{NSMenuItem, NSStatusItem};
+    use objc2_foundation::NSString;
     use tokio::sync::mpsc;
     use tracing::warn;
 
-    use super::super::status_item::{
-        self, ActionCallback, ActionTarget, ActivationPolicy, Menu, MenuItem, StatusItem,
-    };
+    use super::super::status_item::{self, ActivationPolicy};
 
     /// A request raised by clicking a status-bar menu item, or by a live
     /// language switch asking the drain task to re-localize the whole menu.
@@ -43,190 +50,202 @@ mod macos {
         Refresh,
     }
 
-    const TARGET_CLASS: &str = "OpenLogiMenuTarget";
-
-    // Read by the Objective-C action callbacks, which can't capture state.
-    static MENU_TX: OnceLock<mpsc::UnboundedSender<TrayEvent>> = OnceLock::new();
-
-    /// Open/Quit item pointers, kept so a live locale switch can re-title them.
-    /// Stored as opaque menu-item handles; only touched on the main thread.
-    static MENU_REFS: OnceLock<MenuRefs> = OnceLock::new();
-
     /// How many device rows the tray menu can show at once.
     const MAX_DEVICE_ROWS: usize = 8;
 
-    /// The device-status line items, written by [`set_device_lines`] — one per
-    /// connected device, spare rows hidden. Only ever touched on the main thread.
-    static DEVICE_ITEMS: OnceLock<Vec<MenuItem>> = OnceLock::new();
-
-    /// The `NSStatusItem` itself, so [`set_visible`] can show / hide the icon.
-    static STATUS_ITEM: OnceLock<StatusItem> = OnceLock::new();
-
-    /// Whether the status item is currently installed in `NSStatusBar`.
-    static INSTALLED: AtomicBool = AtomicBool::new(false);
-
-    struct MenuRefs {
-        open: MenuItem,
-        quit: MenuItem,
+    /// Instance state for [`MenuTarget`]: the channel back to the drain task.
+    struct MenuTargetIvars {
+        tx: mpsc::UnboundedSender<TrayEvent>,
     }
 
-    struct InstalledMenu {
-        menu: Menu,
-        refs: MenuRefs,
-        device_items: Vec<MenuItem>,
+    define_class!(
+        // SAFETY: NSObject has no subclassing requirements, and `MenuTarget`
+        // does not implement `Drop`.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "OpenLogiMenuTarget"]
+        #[ivars = MenuTargetIvars]
+        struct MenuTarget;
+
+        impl MenuTarget {
+            #[unsafe(method(openOpenLogi:))]
+            fn open_openlogi(&self, _sender: Option<&AnyObject>) {
+                self.post(TrayEvent::Open);
+            }
+
+            #[unsafe(method(quitOpenLogi:))]
+            fn quit_openlogi(&self, _sender: Option<&AnyObject>) {
+                self.post(TrayEvent::Quit);
+            }
+        }
+    );
+
+    impl MenuTarget {
+        fn new(mtm: MainThreadMarker, tx: mpsc::UnboundedSender<TrayEvent>) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(MenuTargetIvars { tx });
+            // SAFETY: `init` initializes our freshly-allocated, ivar-set NSObject
+            // subclass and returns it — the two-phase construction objc2's
+            // `define_class!` is designed around.
+            unsafe { msg_send![super(this), init] }
+        }
+
+        fn post(&self, event: TrayEvent) {
+            if self.ivars().tx.send(event).is_err() {
+                warn!(?event, "menu-bar event dropped — GPUI loop gone");
+            }
+        }
     }
 
-    /// Install the status item. Main thread only.
-    ///
-    /// The activation policy (Dock + menu-bar visibility) is *not* set here —
-    /// [`show_in_dock`] / [`hide_from_dock`] manage it as windows open and
-    /// close. The status item, its menu, and the click target are all retained
-    /// for the app's lifetime (a status item lives as long as the process); the
-    /// target in particular *must* be retained, since `NSMenuItem` keeps only a
-    /// weak reference to it.
+    /// Every retained AppKit object the tray needs. `MainThreadOnly` objects are
+    /// `!Send`, so this can only live in a main-thread `thread_local`.
+    struct TrayState {
+        status_item: Retained<NSStatusItem>,
+        /// Open/Quit items, kept so a live locale switch can re-title them.
+        open_item: Retained<NSMenuItem>,
+        quit_item: Retained<NSMenuItem>,
+        /// One per device row; spare rows hidden.
+        device_items: Vec<Retained<NSMenuItem>>,
+        /// A clone of the click channel, so `request_refresh` can post without
+        /// reaching into the (weakly-referenced) target.
+        sender: mpsc::UnboundedSender<TrayEvent>,
+        #[expect(
+            dead_code,
+            reason = "kept alive: NSMenuItem stores only a weak reference to its target"
+        )]
+        target: Retained<MenuTarget>,
+    }
+
+    thread_local! {
+        /// The live tray, or `None` before [`install`] / after [`uninstall`].
+        /// Main-thread only by construction (it holds `!Send` AppKit objects).
+        static TRAY: RefCell<Option<TrayState>> = const { RefCell::new(None) };
+    }
+
+    /// Build and show the status item + its menu. A no-op if already installed
+    /// or if called off the main thread (it never is — GPUI drives the tray).
     pub fn install(tx: mpsc::UnboundedSender<TrayEvent>) {
-        if INSTALLED.swap(true, Ordering::AcqRel) {
-            return;
-        }
-
-        let _ = MENU_TX.set(tx);
-
-        let status_item = StatusItem::new();
-        let _ = STATUS_ITEM.set(status_item);
-        status_item.set_symbol_icon("computermouse.fill", "OpenLogi", "OpenLogi");
-
-        let installed_menu = build_menu();
-        let _ = DEVICE_ITEMS.set(installed_menu.device_items);
-        let _ = MENU_REFS.set(installed_menu.refs);
-        status_item.set_menu(installed_menu.menu);
-    }
-
-    /// Remove the status item from the system status bar during app teardown.
-    ///
-    /// `NSStatusItem`s normally disappear when the process exits, but GPUI's
-    /// graceful quit can leave background workers winding down briefly. Removing
-    /// it explicitly avoids a stale, non-clickable menu-bar gap during teardown
-    /// and makes repeated calls harmless.
-    pub fn uninstall() {
-        if !INSTALLED.swap(false, Ordering::AcqRel) {
-            return;
-        }
-        let Some(item) = STATUS_ITEM.get() else {
+        let Some(mtm) = MainThreadMarker::new() else {
+            warn!("tray install requested off the main thread — skipped");
             return;
         };
-        item.remove_from_status_bar();
+        TRAY.with_borrow_mut(|slot| {
+            if slot.is_some() {
+                return;
+            }
+
+            let status_item = status_item::create_status_item();
+            status_item::set_symbol_icon(
+                &status_item,
+                mtm,
+                "computermouse.fill",
+                "OpenLogi",
+                "OpenLogi",
+            );
+
+            let target = MenuTarget::new(mtm, tx.clone());
+            let menu = status_item::new_menu(mtm);
+
+            let idle = rust_i18n::t!("No devices connected");
+            let mut device_items = Vec::with_capacity(MAX_DEVICE_ROWS);
+            for i in 0..MAX_DEVICE_ROWS {
+                let title = if i == 0 { idle.as_ref() } else { "" };
+                let item = status_item::new_disabled_item(mtm, title);
+                item.setHidden(i != 0);
+                menu.addItem(&item);
+                device_items.push(item);
+            }
+
+            status_item::add_separator(&menu, mtm);
+
+            let open_title = rust_i18n::t!("Open OpenLogi");
+            let open_item =
+                status_item::new_action_item(mtm, &open_title, sel!(openOpenLogi:), &target);
+            menu.addItem(&open_item);
+            let quit_title = rust_i18n::t!("Quit OpenLogi");
+            let quit_item =
+                status_item::new_action_item(mtm, &quit_title, sel!(quitOpenLogi:), &target);
+            menu.addItem(&quit_item);
+
+            // The status item retains the menu, so `menu` may drop after this.
+            status_item.setMenu(Some(&menu));
+
+            *slot = Some(TrayState {
+                status_item,
+                open_item,
+                quit_item,
+                device_items,
+                sender: tx,
+                target,
+            });
+        });
     }
 
-    fn build_menu() -> InstalledMenu {
-        let target = action_target();
-        let menu = Menu::new();
-
-        let idle = rust_i18n::t!("No devices connected");
-        let mut device_items = Vec::with_capacity(MAX_DEVICE_ROWS);
-        for i in 0..MAX_DEVICE_ROWS {
-            let label = if i == 0 {
-                idle.to_string()
-            } else {
-                String::new()
-            };
-            let item = MenuItem::disabled(&label);
-            item.set_hidden(i != 0);
-            menu.add_item(item);
-            device_items.push(item);
-        }
-
-        menu.add_separator();
-
-        let open_selector = sel!(openOpenLogi:);
-        let quit_selector = sel!(quitOpenLogi:);
-        let open_title = rust_i18n::t!("Open OpenLogi");
-        let open_item = MenuItem::action(&open_title, open_selector, &target);
-        menu.add_item(open_item);
-        let quit_title = rust_i18n::t!("Quit OpenLogi");
-        let quit_item = MenuItem::action(&quit_title, quit_selector, &target);
-        menu.add_item(quit_item);
-
-        InstalledMenu {
-            menu,
-            refs: MenuRefs {
-                open: open_item,
-                quit: quit_item,
-            },
-            device_items,
-        }
-    }
-
-    fn action_target() -> ActionTarget {
-        let open_selector = sel!(openOpenLogi:);
-        let quit_selector = sel!(quitOpenLogi:);
-        let target_methods = [
-            (open_selector, open_action as ActionCallback),
-            (quit_selector, quit_action as ActionCallback),
-        ];
-        ActionTarget::new(TARGET_CLASS, &target_methods)
-    }
-
-    /// Show the app in the Dock + menu bar — called when a window opens, so the
-    /// app menu (⌘Q, Settings, …) is available while the window is up.
-    pub fn show_in_dock() {
-        status_item::set_activation_policy(ActivationPolicy::Regular);
-    }
-
-    /// Drop the app out of the Dock + menu bar, leaving only the status item —
-    /// called when the last window closes (and on a `--minimized` launch).
-    pub fn hide_from_dock() {
-        status_item::set_activation_policy(ActivationPolicy::Accessory);
+    /// Remove the status item from the system status bar during teardown.
+    /// Dropping [`TrayState`] releases every retained object.
+    pub fn uninstall() {
+        TRAY.with_borrow_mut(|slot| {
+            if let Some(state) = slot.take() {
+                status_item::remove_status_item(&state.status_item);
+            }
+        });
     }
 
     /// Show or hide the status-item icon without tearing it down — backs the
     /// "Show in menu bar" setting. A no-op until [`install`] has run.
     pub fn set_visible(visible: bool) {
-        let Some(item) = STATUS_ITEM.get() else {
-            return;
-        };
-        item.set_visible(visible);
+        TRAY.with_borrow(|slot| {
+            if let Some(state) = slot.as_ref() {
+                state.status_item.setVisible(visible);
+            }
+        });
     }
 
     /// Update the device rows — one per connected device (e.g.
-    /// `"MX Master 3S · 80%"`, `"G513 Carbon GX Blue"`). Spare rows are hidden;
-    /// an empty list shows the "No devices connected" placeholder. Main-thread
-    /// only, and a no-op until [`install`] has published the items.
+    /// `"MX Master 3S · 80%"`). Spare rows are hidden; an empty list shows the
+    /// "No devices connected" placeholder. A no-op until [`install`] has run.
+    ///
+    /// Each title is a fresh `Retained<NSString>` that releases when the
+    /// statement ends — no leak, no autorelease pool (the issue-#99 fix).
     pub fn set_device_lines(lines: &[String]) {
-        let Some(items) = DEVICE_ITEMS.get() else {
-            return;
-        };
-        if lines.is_empty() {
-            let idle = rust_i18n::t!("No devices connected");
-            if let Some(first) = items.first() {
-                first.set_title(&idle);
-                first.set_hidden(false);
+        TRAY.with_borrow(|slot| {
+            let Some(state) = slot.as_ref() else {
+                return;
+            };
+            if lines.is_empty() {
+                let idle = rust_i18n::t!("No devices connected");
+                if let Some(first) = state.device_items.first() {
+                    first.setTitle(&NSString::from_str(&idle));
+                    first.setHidden(false);
+                }
+                for item in state.device_items.iter().skip(1) {
+                    item.setHidden(true);
+                }
+                return;
             }
-            for item in items.iter().skip(1) {
-                item.set_hidden(true);
+            for (i, item) in state.device_items.iter().enumerate() {
+                if let Some(line) = lines.get(i) {
+                    item.setTitle(&NSString::from_str(line));
+                    item.setHidden(false);
+                } else {
+                    item.setHidden(true);
+                }
             }
-            return;
-        }
-        for (i, item) in items.iter().enumerate() {
-            if let Some(line) = lines.get(i) {
-                item.set_title(line);
-                item.set_hidden(false);
-            } else {
-                item.set_hidden(true);
-            }
-        }
+        });
     }
 
-    /// Re-title the Open/Quit items for the current locale. Main-thread only,
-    /// like every status-item write. The device rows are refreshed separately via
-    /// [`set_device_lines`].
+    /// Re-title the Open/Quit items for the current locale. The device rows are
+    /// refreshed separately via [`set_device_lines`].
     pub fn refresh_labels() {
-        let Some(refs) = MENU_REFS.get() else {
-            return;
-        };
-        let open_title = rust_i18n::t!("Open OpenLogi");
-        let quit_title = rust_i18n::t!("Quit OpenLogi");
-        refs.open.set_title(&open_title);
-        refs.quit.set_title(&quit_title);
+        TRAY.with_borrow(|slot| {
+            if let Some(state) = slot.as_ref() {
+                state
+                    .open_item
+                    .setTitle(&NSString::from_str(&rust_i18n::t!("Open OpenLogi")));
+                state
+                    .quit_item
+                    .setTitle(&NSString::from_str(&rust_i18n::t!("Quit OpenLogi")));
+            }
+        });
     }
 
     /// Ask the drain task to re-localize the whole menu after a live language
@@ -234,22 +253,28 @@ mod macos {
     /// (recomputed from the live `AppState`, which only the task can read) is
     /// rewritten on the main thread alongside the static labels.
     pub fn request_refresh() {
-        post(TrayEvent::Refresh);
+        TRAY.with_borrow(|slot| {
+            if let Some(state) = slot.as_ref()
+                && state.sender.send(TrayEvent::Refresh).is_err()
+            {
+                warn!("tray refresh dropped — GPUI loop gone");
+            }
+        });
     }
 
-    extern "C" fn open_action(_this: &Object, _cmd: Sel, _sender: id) {
-        post(TrayEvent::Open);
+    /// Show the app in the Dock + menu bar — called when a window opens, so the
+    /// app menu (⌘Q, Settings, …) is available while the window is up.
+    pub fn show_in_dock() {
+        if let Some(mtm) = MainThreadMarker::new() {
+            status_item::set_activation_policy(mtm, ActivationPolicy::Regular);
+        }
     }
 
-    extern "C" fn quit_action(_this: &Object, _cmd: Sel, _sender: id) {
-        post(TrayEvent::Quit);
-    }
-
-    fn post(event: TrayEvent) {
-        if let Some(tx) = MENU_TX.get()
-            && tx.send(event).is_err()
-        {
-            warn!(?event, "menu-bar event dropped — GPUI loop gone");
+    /// Drop the app out of the Dock + menu bar, leaving only the status item —
+    /// called when the last window closes (and on a `--minimized` launch).
+    pub fn hide_from_dock() {
+        if let Some(mtm) = MainThreadMarker::new() {
+            status_item::set_activation_policy(mtm, ActivationPolicy::Accessory);
         }
     }
 }

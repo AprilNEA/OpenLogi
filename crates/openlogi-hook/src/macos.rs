@@ -62,54 +62,27 @@ pub(crate) fn prompt_accessibility() {
     let _trusted = unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef().cast()) };
 }
 
-/// Read the frontmost application's bundle identifier via NSWorkspace.
-/// Pure FFI — returns `None` when no app is frontmost or the identifier
-/// is missing / non-UTF8.
+/// Read the frontmost application's bundle identifier via `NSWorkspace`.
+/// Returns `None` when no app is frontmost or the identifier is missing.
 ///
-/// Wrapped in a per-call `NSAutoreleasePool`. Without it, every call on
-/// a non-main thread (the watcher loop) leaks the workspace, app, and
-/// bundle-id objects — at one call per second that's hundreds of MB
-/// after a full workday.
+/// `NSWorkspace` is `AnyThread`, so this is sound on the watcher thread. The
+/// reads return owned `Retained` values (no leak by construction), but the
+/// framework still autoreleases internal temporaries and `to_str` borrows its
+/// UTF-8 view from the pool — so an explicit `autoreleasepool` is required off
+/// the main thread, where no run loop drains one. (Without it the old raw path
+/// leaked the workspace/app/bundle-id objects: hundreds of MB across a workday.)
 pub(crate) fn frontmost_bundle_id() -> Option<String> {
-    use cocoa::base::{id, nil};
-    use cocoa::foundation::{NSAutoreleasePool, NSString};
-    use objc::{class, msg_send, sel, sel_impl};
+    use objc2::rc::autoreleasepool;
+    use objc2_app_kit::NSWorkspace;
 
-    // SAFETY: NSWorkspace is part of AppKit, available on every supported
-    // macOS (≥13.0). Each `msg_send!` returns either `nil` (handled below)
-    // or an autoreleased Objective-C object. The surrounding
-    // `NSAutoreleasePool` drains those temporaries when this function
-    // returns; the Rust `String` we hand back is a copy that outlives
-    // the pool.
-    unsafe {
-        let pool = NSAutoreleasePool::new(nil);
-        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
-        if workspace == nil {
-            let _: () = msg_send![pool, drain];
-            return None;
-        }
-        let app: id = msg_send![workspace, frontmostApplication];
-        if app == nil {
-            let _: () = msg_send![pool, drain];
-            return None;
-        }
-        let bundle_id: id = msg_send![app, bundleIdentifier];
-        if bundle_id == nil {
-            let _: () = msg_send![pool, drain];
-            return None;
-        }
-        let ptr: *const std::os::raw::c_char = NSString::UTF8String(bundle_id);
-        let result = if ptr.is_null() {
-            None
-        } else {
-            std::ffi::CStr::from_ptr(ptr)
-                .to_str()
-                .ok()
-                .map(str::to_owned)
-        };
-        let _: () = msg_send![pool, drain];
-        result
-    }
+    autoreleasepool(|pool| {
+        let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+        let bundle_id = app.bundleIdentifier()?;
+        // SAFETY: `to_str` yields a UTF-8 view valid for `pool`'s lifetime; we
+        // copy it into an owned `String` before the pool (and `bundle_id`) drop,
+        // so the borrow never escapes.
+        Some(unsafe { bundle_id.to_str(pool) }.to_owned())
+    })
 }
 
 /// Translate a raw OS button number to a [`ButtonId`].

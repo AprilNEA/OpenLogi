@@ -13,15 +13,17 @@ openlogi-core = { path = "../openlogi-core", version = "0.4.1" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+# CGEventTap stays on core-graphics/core-foundation (the freeze-hazard run-loop
+# machinery). The frontmost-app read uses objc2 (NSWorkspace) so no raw `objc`.
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { workspace = true }
 core-foundation = { workspace = true }
-cocoa = "0.26"
-objc = "0.2"
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", features = ["NSString"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "NSRunningApplication"] }
 
 [lints.rust]
 unsafe_code = "allow"
-unexpected_cfgs = { level = "allow", check-cfg = [] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

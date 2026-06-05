@@ -85,8 +85,8 @@ mod macos {
         reason = "IOKit (IOHIDCheckAccess) + CoreBluetooth privacy-permission FFI"
     )]
 
-    use objc::runtime::Class;
-    use objc::{msg_send, sel, sel_impl};
+    use objc2::msg_send;
+    use objc2::runtime::AnyClass;
 
     use super::PermissionStatus;
 
@@ -119,13 +119,14 @@ mod macos {
     pub(super) fn bluetooth() -> PermissionStatus {
         // `+[CBManager authorization]` (inherited by CBCentralManager) is a
         // class method returning `CBManagerAuthorization`: notDetermined = 0,
-        // restricted = 1, denied = 2, allowedAlways = 3. Use `Class::get` (not
-        // the `class!` macro) so a missing class degrades to `Unknown` instead
-        // of panicking.
-        let Some(cls) = Class::get("CBCentralManager") else {
+        // restricted = 1, denied = 2, allowedAlways = 3. Use `AnyClass::get`
+        // (not the `class!` macro) so a missing class degrades to `Unknown`
+        // instead of panicking.
+        let Some(cls) = AnyClass::get(c"CBCentralManager") else {
             return PermissionStatus::Unknown;
         };
-        // SAFETY: sending a documented class method that returns an NSInteger.
+        // SAFETY: sending a documented class method (`+authorization`) that
+        // returns a `CBManagerAuthorization` NSInteger.
         let authorization: isize = unsafe { msg_send![cls, authorization] };
         match authorization {
             3 => PermissionStatus::Granted,
