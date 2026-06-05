@@ -56,6 +56,7 @@ jobs:
           # GITHUB_APP_ID: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_ID
           # GITHUB_APP_PRIVATE_KEY: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_PRIVATE_KEY
           OPENLOGI_UPDATE_BASE_URL: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_BASE_URL
+          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY
 
       - name: Install packaging tools
         run: |
@@ -73,6 +74,7 @@ jobs:
           # GITHUB_APP_ID: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
           # GITHUB_APP_PRIVATE_KEY: ${{ steps.load_secrets.outputs.GITHUB_APP_PRIVATE_KEY }}
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_BASE_URL }}
+          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
         run: |
           set -euo pipefail
           : "${APPLE_SIGNING_IDENTITY:?Configure APPLE_SIGNING_IDENTITY in 1Password}"
@@ -84,6 +86,7 @@ jobs:
           # : "${GITHUB_APP_ID:?Configure GITHUB_APP_ID in 1Password}"
           # : "${GITHUB_APP_PRIVATE_KEY:?Configure GITHUB_APP_PRIVATE_KEY in 1Password}"
           : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in 1Password}"
+          : "${OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY in 1Password}"
 
       - name: Import Apple signing certificate
         uses: apple-actions/import-codesign-certs@v7
@@ -94,6 +97,7 @@ jobs:
       - name: Build OpenLogi.app with cargo-bundle
         env:
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_BASE_URL }}
+          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
         run: |
           set -euo pipefail
           export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
@@ -185,6 +189,8 @@ jobs:
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           OPENLOGI_UPDATE_BASE_URL: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_BASE_URL
+          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY
+          OPENLOGI_UPDATE_MINISIGN_SECRET_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_SECRET_KEY
           R2_ACCOUNT_ID: ${{ secrets.OP_R2_SECRET_ITEM }}/CLOUDFLARE_R2_ACCOUNT_ID
           R2_BUCKET: ${{ secrets.OP_R2_SECRET_ITEM }}/CLOUDFLARE_R2_BUCKET
           R2_ACCESS_KEY_ID: ${{ secrets.OP_R2_SECRET_ITEM }}/CLOUDFLARE_R2_ACCESS_KEY_ID
@@ -193,6 +199,8 @@ jobs:
       - name: Validate R2 publishing configuration
         env:
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
+          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
+          OPENLOGI_UPDATE_MINISIGN_SECRET_KEY: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_MINISIGN_SECRET_KEY }}
           R2_ACCOUNT_ID: ${{ steps.r2_config.outputs.R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ steps.r2_config.outputs.R2_BUCKET }}
           R2_ACCESS_KEY_ID: ${{ steps.r2_config.outputs.R2_ACCESS_KEY_ID }}
@@ -200,10 +208,32 @@ jobs:
         run: |
           set -euo pipefail
           : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in the R2 1Password item}"
+          : "${OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY in the R2 1Password item}"
+          : "${OPENLOGI_UPDATE_MINISIGN_SECRET_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_SECRET_KEY in the R2 1Password item}"
           : "${R2_ACCOUNT_ID:?Configure CLOUDFLARE_R2_ACCOUNT_ID in the R2 1Password item}"
           : "${R2_BUCKET:?Configure CLOUDFLARE_R2_BUCKET in the R2 1Password item}"
           : "${R2_ACCESS_KEY_ID:?Configure CLOUDFLARE_R2_ACCESS_KEY_ID in the R2 1Password item}"
           : "${R2_SECRET_ACCESS_KEY:?Configure CLOUDFLARE_R2_SECRET_ACCESS_KEY in the R2 1Password item}"
+
+      - name: Install minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+
+      - name: Sign updater artifacts
+        env:
+          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
+          OPENLOGI_UPDATE_MINISIGN_SECRET_KEY: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          key_file="${RUNNER_TEMP}/openlogi-minisign.key"
+          umask 077
+          printf '%s\n' "$OPENLOGI_UPDATE_MINISIGN_SECRET_KEY" > "$key_file"
+          trap 'rm -f "$key_file"' EXIT
+          for artifact in dist/*.dmg; do
+            minisign -S -m "$artifact" -s "$key_file" -x "$artifact.minisig" -W
+            minisign -V -m "$artifact" -P "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" -x "$artifact.minisig"
+          done
 
       - name: Generate static updater manifest
         env:
@@ -252,6 +282,7 @@ jobs:
         with:
           files: |
             dist/*.dmg
+            dist/*.minisig
             dist/SHA256SUMS
           generate_release_notes: true
           fail_on_unmatched_files: true

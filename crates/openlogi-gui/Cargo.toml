@@ -33,7 +33,7 @@ thiserror.workspace = true
 ureq.workspace = true
 rust-i18n = "4"
 sys-locale = "0.3.2"
-gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.3", features = ["gpui"] }
+gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.4", features = ["gpui"] }
 
 # Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. Same crates the
 # openlogi-hook CGEventTap uses, so the toolchain is already proven here.
