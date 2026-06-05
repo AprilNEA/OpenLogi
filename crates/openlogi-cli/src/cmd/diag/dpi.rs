@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use clap::Args;
 
-use crate::cmd::diag::first_online_device;
+use crate::cmd::diag::select_device;
 
 #[derive(Debug, Args)]
 pub struct DpiArgs {
@@ -11,10 +11,17 @@ pub struct DpiArgs {
     /// device's HID++ AdjustableDpi feature.
     #[arg(long)]
     pub target: Option<u16>,
+
+    /// Run against the device whose name contains this string
+    /// (case-insensitive) instead of auto-selecting. Useful when several
+    /// devices are paired (e.g. a mouse and a keyboard over Bluetooth).
+    #[arg(long, value_name = "NAME")]
+    pub device: Option<String>,
 }
 
 pub async fn run(args: DpiArgs) -> Result<()> {
-    let (route, name) = first_online_device().await?;
+    // 0x2201 = AdjustableDpi — auto-skip devices (keyboards) that lack it.
+    let (route, name) = select_device(args.device.as_deref(), &[0x2201]).await?;
     println!("device: {name} ({route})");
 
     let info = openlogi_hid::get_dpi_info(&route)

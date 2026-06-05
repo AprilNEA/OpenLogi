@@ -5,7 +5,7 @@ use std::num::NonZeroU8;
 use anyhow::{Context, Result};
 use clap::Args;
 
-use crate::cmd::diag::first_online_device;
+use crate::cmd::diag::select_device;
 
 #[derive(Debug, Args)]
 pub struct SmartshiftArgs {
@@ -21,10 +21,17 @@ pub struct SmartshiftArgs {
     /// always preserved). `0` is rejected — the device treats it as "no change".
     #[arg(long, value_name = "N")]
     pub sensitivity: Option<NonZeroU8>,
+
+    /// Run against the device whose name contains this string
+    /// (case-insensitive) instead of auto-selecting. Useful when several
+    /// devices are paired (e.g. a mouse and a keyboard over Bluetooth).
+    #[arg(long, value_name = "NAME")]
+    pub device: Option<String>,
 }
 
 pub async fn run(args: SmartshiftArgs) -> Result<()> {
-    let (route, name) = first_online_device().await?;
+    // 0x2110 / 0x2111 = SmartShift — auto-skip devices that expose neither.
+    let (route, name) = select_device(args.device.as_deref(), &[0x2110, 0x2111]).await?;
     println!("device: {name} ({route})");
 
     if let Some(n) = args.sensitivity {
