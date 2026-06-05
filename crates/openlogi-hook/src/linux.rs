@@ -166,6 +166,7 @@ fn build_virtual_device(device: &Device) -> io::Result<evdev::uinput::VirtualDev
 /// Returns `true` when the device is ready to read, `false` on stop signal or
 /// unrecoverable poll error.
 fn wait_readable(device_fd: i32, stop_fd: i32) -> bool {
+    const ERR_FLAGS: libc::c_short = libc::POLLERR | libc::POLLHUP | libc::POLLNVAL;
     let mut fds = [
         libc::pollfd {
             fd: device_fd,
@@ -188,6 +189,17 @@ fn wait_readable(device_fd: i32, stop_fd: i32) -> bool {
             }
             error!("poll() failed: {err}");
             return false;
+        }
+        // An error/hangup on either fd (e.g. the grabbed device was unplugged →
+        // POLLHUP) leaves it permanently "ready", so without this check neither
+        // POLLIN branch fires and the loop spins at 100% CPU. Treat it as a stop
+        // so the caller exits the thread and releases the grab.
+        if fds[0].revents & ERR_FLAGS != 0 {
+            warn!("hooked device closed or errored; stopping its thread");
+            return false;
+        }
+        if fds[1].revents & ERR_FLAGS != 0 {
+            return false; // stop pipe closed → shut down
         }
         if fds[1].revents & libc::POLLIN != 0 {
             return false; // stop signal
