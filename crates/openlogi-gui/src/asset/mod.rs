@@ -31,6 +31,51 @@ use tracing::{debug, warn};
 use self::images::{buttons_image_for, load_manifest, read_png_dimensions, variant_image_for};
 use self::paths::{bundle_assets_root, load_index, user_cache_root};
 
+/// Total bytes of the per-user asset cache — the tier [`sync`] writes and
+/// [`clear_cache`] removes. The read-only app bundle (release builds) is a
+/// separate tier and isn't counted.
+#[must_use]
+pub fn cache_size_bytes() -> u64 {
+    fn dir_size(dir: &Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .map(|entry| match entry.file_type() {
+                Ok(ft) if ft.is_dir() => dir_size(&entry.path()),
+                Ok(_) => entry.metadata().map_or(0, |m| m.len()),
+                Err(_) => 0,
+            })
+            .sum()
+    }
+    dir_size(&user_cache_root())
+}
+
+/// Delete the per-user asset cache. The next sync re-fetches what the
+/// connected devices need; on a release build the bundled art keeps serving
+/// in the meantime. A missing cache is treated as already clear.
+pub fn clear_cache() -> std::io::Result<()> {
+    match std::fs::remove_dir_all(user_cache_root()) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+/// Reveal the asset cache directory in the OS file manager (Finder on macOS),
+/// creating it first so there's something to open.
+pub fn reveal_cache_in_file_manager() {
+    let root = user_cache_root();
+    if let Err(e) = std::fs::create_dir_all(&root) {
+        warn!(error = %e, path = %root.display(), "could not create cache dir to reveal");
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    if let Err(e) = std::process::Command::new("open").arg(&root).spawn() {
+        warn!(error = %e, "could not open cache dir in Finder");
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedAsset {
     #[allow(
