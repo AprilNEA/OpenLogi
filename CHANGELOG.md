@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/AprilNEA/OpenLogi/compare/openlogi-assets-v0.5.0...openlogi-assets-v0.5.1) - 2026-06-05
+
+### Fixed
+
+- *(assets)* match devices against every model id a depot lists
+
+### Other
+
+- *(assets)* lock the index.json modelIds schema contract
+
 ## [0.5.0](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.4.1...openlogi-core-v0.5.0) - 2026-06-05
 
 ### Added
