@@ -228,8 +228,12 @@ jobs:
           set -euo pipefail
           key_file="${RUNNER_TEMP}/openlogi-minisign.key"
           umask 077
-          printf '%s\n' "$OPENLOGI_UPDATE_MINISIGN_SECRET_KEY" > "$key_file"
           trap 'rm -f "$key_file"' EXIT
+          # The secret key file is stored base64-encoded in 1Password so its two
+          # lines survive paste/round-trip (a raw multi-line value can have its
+          # newline mangled to a space — see the GitHub App key note above).
+          # `tr -d` drops any wrapping whitespace before decoding.
+          printf '%s' "$OPENLOGI_UPDATE_MINISIGN_SECRET_KEY" | tr -d '[:space:]' | base64 -d > "$key_file"
           for artifact in dist/*.dmg; do
             minisign -S -m "$artifact" -s "$key_file" -x "$artifact.minisig" -W
             minisign -V -m "$artifact" -P "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" -x "$artifact.minisig"

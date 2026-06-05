@@ -139,8 +139,11 @@ secret `OP_R2_SECRET_ITEM`. The item must contain:
   `https://updates.openlogi.org`.
 - `OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY` — base64 minisign public key embedded in
   the app and used to verify updater artifacts.
-- `OPENLOGI_UPDATE_MINISIGN_SECRET_KEY` — passwordless minisign secret key used
-  only in the release publish job to sign DMGs before `latest.json` is generated.
+- `OPENLOGI_UPDATE_MINISIGN_SECRET_KEY` — the passwordless minisign secret key
+  file, **base64-encoded** (`base64 < minisign.key`), used only in the release
+  publish job to sign DMGs before `latest.json` is generated. It is stored
+  base64 (not raw) so its two lines survive 1Password's paste handling; the
+  workflow decodes it, mirroring the GitHub App key.
 - `CLOUDFLARE_R2_ACCOUNT_ID` — Cloudflare account ID used for the S3 endpoint.
 - `CLOUDFLARE_R2_BUCKET` — bucket name.
 - `CLOUDFLARE_R2_ACCESS_KEY_ID` — R2 S3 access key.
