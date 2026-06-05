@@ -15,6 +15,7 @@
 )]
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use gpui::Global;
@@ -163,6 +164,12 @@ pub struct AppState {
     /// watcher holds the other `Arc` clone, so writes here reach it without
     /// GPUI involvement.
     pub gesture_hook_bindings: Arc<RwLock<BTreeMap<GestureDirection, Action>>>,
+    /// Thumb-wheel sensitivity shared with the gesture watcher thread. The
+    /// watcher reads it on every wheel event to scale scroll speed / action
+    /// thresholds; [`Self::set_thumbwheel_sensitivity`] is the only writer.
+    /// Separate from [`Self::config`]'s persisted copy so the watcher never
+    /// touches the GPUI-owned config.
+    pub thumbwheel_sensitivity: Arc<AtomicI32>,
 }
 
 impl AppState {
@@ -183,6 +190,7 @@ impl AppState {
         let bindings_arc = Arc::new(RwLock::new(BTreeMap::new()));
         let gesture_arc = Arc::new(RwLock::new(BTreeMap::new()));
         let cycle_arc = Arc::new(RwLock::new(DpiCycleState::default()));
+        let sensitivity_arc = Arc::new(AtomicI32::new(config.app_settings.thumbwheel_sensitivity));
         Self::with_runtime_shared(
             config,
             inventories,
@@ -190,6 +198,7 @@ impl AppState {
             bindings_arc,
             gesture_arc,
             cycle_arc,
+            sensitivity_arc,
         )
     }
 
@@ -205,6 +214,7 @@ impl AppState {
         hook_bindings: Arc<RwLock<BTreeMap<ButtonId, Action>>>,
         gesture_hook_bindings: Arc<RwLock<BTreeMap<GestureDirection, Action>>>,
         dpi_cycle: Arc<RwLock<DpiCycleState>>,
+        thumbwheel_sensitivity: Arc<AtomicI32>,
     ) -> Self {
         let device_list = build_device_list(inventories, cache);
         let current_device = pick_initial_device(&device_list, config.selected_device());
@@ -227,6 +237,7 @@ impl AppState {
             hook_bindings,
             dpi_cycle,
             gesture_hook_bindings,
+            thumbwheel_sensitivity,
         };
         state.button_bindings = state.bindings_for_current();
         state.gesture_bindings = state.gesture_bindings_for_current();
@@ -866,6 +877,25 @@ impl AppState {
         self.config.app_settings.check_for_updates = enabled;
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist update-check setting");
+        }
+    }
+
+    /// Set the thumb-wheel sensitivity (clamped to the valid range), publish it
+    /// to the gesture watcher via the shared atomic, and persist it. No-op when
+    /// unchanged. Disk failures are logged, not propagated.
+    pub fn set_thumbwheel_sensitivity(&mut self, sensitivity: i32) {
+        let sensitivity = sensitivity.clamp(
+            openlogi_core::config::MIN_THUMBWHEEL_SENSITIVITY,
+            openlogi_core::config::MAX_THUMBWHEEL_SENSITIVITY,
+        );
+        if self.config.app_settings.thumbwheel_sensitivity == sensitivity {
+            return;
+        }
+        self.config.app_settings.thumbwheel_sensitivity = sensitivity;
+        self.thumbwheel_sensitivity
+            .store(sensitivity, Ordering::Relaxed);
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist thumbwheel sensitivity");
         }
     }
 

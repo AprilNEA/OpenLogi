@@ -23,16 +23,23 @@ pub enum ButtonId {
     /// The "ModeShift" button under the wheel — typically used for SmartShift /
     /// DPI cycle. Named `DpiToggle` for historical reasons.
     DpiToggle,
-    /// The horizontal thumb wheel found on MX-line devices. Bind a click
-    /// action; rotation isn't bindable yet (P1.2 / P1.5 follow-up).
+    /// The horizontal thumb wheel's click. Kept in [`ButtonId::ALL`] so its
+    /// default still seeds and dispatches when the wheel is diverted, even
+    /// though the mouse model surfaces the two rotation directions instead of
+    /// the click (see `mouse_model::geometry`).
     Thumbwheel,
+    /// Rotating the thumb wheel "up" (positive rotation). Bound, by default, to
+    /// continuous horizontal scroll; see [`crate::watchers`]-side dispatch.
+    ThumbwheelScrollUp,
+    /// Rotating the thumb wheel "down" (negative rotation).
+    ThumbwheelScrollDown,
     /// The thumb-pad gesture button on MX-line devices. The press itself
     /// fires the bound action; swipe directions are P1.5 territory.
     GestureButton,
 }
 
 impl ButtonId {
-    pub const ALL: [ButtonId; 8] = [
+    pub const ALL: [ButtonId; 10] = [
         ButtonId::LeftClick,
         ButtonId::RightClick,
         ButtonId::MiddleClick,
@@ -40,6 +47,8 @@ impl ButtonId {
         ButtonId::Forward,
         ButtonId::DpiToggle,
         ButtonId::Thumbwheel,
+        ButtonId::ThumbwheelScrollUp,
+        ButtonId::ThumbwheelScrollDown,
         ButtonId::GestureButton,
     ];
 
@@ -54,6 +63,8 @@ impl ButtonId {
             ButtonId::Forward => "Forward",
             ButtonId::DpiToggle => "DPI Toggle",
             ButtonId::Thumbwheel => "Thumb Wheel",
+            ButtonId::ThumbwheelScrollUp => "Thumb Wheel Up",
+            ButtonId::ThumbwheelScrollDown => "Thumb Wheel Down",
             ButtonId::GestureButton => "Gesture Button",
         }
     }
@@ -233,6 +244,11 @@ impl Category {
 /// fires when the button is pressed.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Action {
+    // ── System ───────────────────────────────────────────────────────────────
+    /// Suppress the input entirely — the button or wheel direction is captured
+    /// but no OS event is synthesised, so the physical input does nothing.
+    None,
+
     // ── Mouse ────────────────────────────────────────────────────────────────
     /// Primary mouse button.
     LeftClick,
@@ -430,6 +446,7 @@ impl Action {
     #[must_use]
     pub fn label(&self) -> String {
         match self {
+            Action::None => "Do Nothing".into(),
             Action::LeftClick => "Left Click".into(),
             Action::RightClick => "Right Click".into(),
             Action::MiddleClick => "Middle Click".into(),
@@ -504,7 +521,7 @@ impl Action {
             | Action::NextDesktop
             | Action::ShowDesktop
             | Action::LaunchpadShow => Category::Navigation,
-            Action::LockScreen | Action::Screenshot => Category::System,
+            Action::None | Action::LockScreen | Action::Screenshot => Category::System,
             Action::PlayPause
             | Action::NextTrack
             | Action::PrevTrack
@@ -558,6 +575,7 @@ impl Action {
             Action::ShowDesktop,
             Action::LaunchpadShow,
             // System
+            Action::None,
             Action::LockScreen,
             Action::Screenshot,
             // Media
@@ -616,6 +634,8 @@ impl Action {
         let none = CGEventFlags::CGEventFlagNull;
 
         match self {
+            // Suppressed input: captured but deliberately produces no event.
+            Action::None => {}
             // ── Mouse clicks: synthesise a click at the cursor ────────────────
             // Remapping a *different* button to a click lands here (e.g. Back →
             // MiddleClick). A button left on its own native click never reaches
@@ -1144,6 +1164,13 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::Forward => Action::BrowserForward,
         ButtonId::DpiToggle => Action::CycleDpiPresets,
         ButtonId::Thumbwheel => Action::AppExpose,
+        // The thumb wheel scrolls horizontally by default: rotating it produces
+        // continuous horizontal scroll, with "up" → right and "down" → left.
+        // The wheel watcher renders these two actions as smooth, sensitivity-
+        // scaled scrolling rather than the discrete per-press burst a button
+        // would get (see `watchers::gesture`).
+        ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollRight,
+        ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
         ButtonId::GestureButton => Action::MissionControl,
     }
 }

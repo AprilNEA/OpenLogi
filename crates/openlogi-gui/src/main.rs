@@ -97,6 +97,12 @@ fn main() -> Result<()> {
     // The capture session publishes its open HID++ channel here so DPI /
     // SmartShift writes reuse it instead of opening their own.
     let capture_channel: openlogi_hid::CaptureChannel = Arc::new(RwLock::new(None));
+    // Thumb-wheel sensitivity, shared between the gesture watcher (reader) and
+    // the GPUI-owned `AppState` (writer). Created here so both sides hold the
+    // same atomic from the first event.
+    let thumbwheel_sensitivity = Arc::new(std::sync::atomic::AtomicI32::new(
+        initial_config.app_settings.thumbwheel_sensitivity,
+    ));
     let hook_arcs = (
         Arc::clone(&hook_bindings),
         Arc::clone(&dpi_cycle),
@@ -115,6 +121,7 @@ fn main() -> Result<()> {
         Arc::clone(&gesture_bindings),
         Arc::clone(&dpi_cycle),
         Arc::clone(&capture_channel),
+        Arc::clone(&thumbwheel_sensitivity),
     );
 
     let mut inventory_rx = watchers::inventory::spawn(std::time::Duration::from_secs(2));
@@ -213,6 +220,7 @@ fn main() -> Result<()> {
                         hook_bindings,
                         gesture_bindings,
                         dpi_cycle,
+                        thumbwheel_sensitivity,
                     ));
                 }
                 if !start_minimized {

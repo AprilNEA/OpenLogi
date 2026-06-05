@@ -94,7 +94,24 @@ pub struct AppSettings {
     /// regardless of the OS setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// Thumb-wheel responsiveness, on a [`MIN_THUMBWHEEL_SENSITIVITY`]–
+    /// [`MAX_THUMBWHEEL_SENSITIVITY`] scale. It scales both the speed of the
+    /// wheel's continuous horizontal scroll and how few rotation increments a
+    /// custom wheel action needs to fire. [`DEFAULT_THUMBWHEEL_SENSITIVITY`]
+    /// (the out-of-the-box value) means 1× scroll speed; the wheel is only
+    /// diverted from native scrolling once this leaves the default.
+    #[serde(default = "default_thumbwheel_sensitivity")]
+    pub thumbwheel_sensitivity: i32,
 }
+
+/// Out-of-the-box [`AppSettings::thumbwheel_sensitivity`]. At this value the
+/// wheel's horizontal scroll runs at 1× and the wheel is left to scroll
+/// natively (no HID++ diversion) unless a binding diverges from its default.
+pub const DEFAULT_THUMBWHEEL_SENSITIVITY: i32 = 14;
+/// Lowest selectable [`AppSettings::thumbwheel_sensitivity`].
+pub const MIN_THUMBWHEEL_SENSITIVITY: i32 = 1;
+/// Highest selectable [`AppSettings::thumbwheel_sensitivity`].
+pub const MAX_THUMBWHEEL_SENSITIVITY: i32 = 100;
 
 impl AppSettings {
     /// `skip_serializing_if` helper: true when nothing diverges from the
@@ -113,6 +130,7 @@ impl Default for AppSettings {
             update_prompt_seen: false,
             show_in_menu_bar: true,
             language: None,
+            thumbwheel_sensitivity: DEFAULT_THUMBWHEEL_SENSITIVITY,
         }
     }
 }
@@ -121,6 +139,12 @@ impl Default for AppSettings {
 /// icon is on out of the box and configs predating the field keep that behavior.
 fn default_true() -> bool {
     true
+}
+
+/// serde default for [`AppSettings::thumbwheel_sensitivity`]: keeps configs
+/// predating the field at the 1× default.
+const fn default_thumbwheel_sensitivity() -> i32 {
+    DEFAULT_THUMBWHEEL_SENSITIVITY
 }
 
 /// Per-device RGB lighting: a single static color, brightness, and on/off.

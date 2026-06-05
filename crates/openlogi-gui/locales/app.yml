@@ -1181,3 +1181,35 @@ _version: 2
   zh-CN: 正在扫描设备…
   zh-HK: 正在掃描裝置…
   zh-TW: 正在掃描裝置…
+
+# ── Thumb wheel (binding.rs labels + settings.rs) ───────────────────────────
+"Thumb Wheel Up":
+  ja: サムホイール 上
+  ru: "Колесо большого пальца вверх"
+  zh-CN: 拇指滚轮向上
+  zh-HK: 拇指滾輪向上
+  zh-TW: 拇指滾輪向上
+"Thumb Wheel Down":
+  ja: サムホイール 下
+  ru: "Колесо большого пальца вниз"
+  zh-CN: 拇指滚轮向下
+  zh-HK: 拇指滾輪向下
+  zh-TW: 拇指滾輪向下
+"Do Nothing":
+  ja: 何もしない
+  ru: "Ничего не делать"
+  zh-CN: 不执行任何操作
+  zh-HK: 不執行任何操作
+  zh-TW: 不執行任何操作
+"Thumb Wheel Sensitivity":
+  ja: サムホイールの感度
+  ru: "Чувствительность колеса большого пальца"
+  zh-CN: 拇指滚轮灵敏度
+  zh-HK: 拇指滾輪靈敏度
+  zh-TW: 拇指滾輪靈敏度
+"Scales the thumb wheel's horizontal scroll speed and how readily custom wheel actions trigger.":
+  ja: サムホイールの横スクロール速度と、カスタムホイール操作の発動しやすさを調整します。
+  ru: "Масштабирует скорость горизонтальной прокрутки колеса и лёгкость срабатывания пользовательских действий колеса."
+  zh-CN: 调整拇指滚轮的横向滚动速度，以及自定义滚轮操作的触发难易程度。
+  zh-HK: 調整拇指滾輪的水平捲動速度，以及自訂滾輪操作的觸發難易度。
+  zh-TW: 調整拇指滾輪的水平捲動速度，以及自訂滾輪操作的觸發難易度。

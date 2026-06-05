@@ -6,14 +6,18 @@
 //! left sidebar share the same behaviour as the rest of that component set.
 
 use gpui::{
-    App, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, px, rgb,
+    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
+    IntoElement, ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px, rgb,
 };
 use gpui_component::{
     IconName, IndexPath, Sizable, h_flex,
     select::{Select, SelectEvent, SelectItem, SelectState},
     setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
+    slider::{Slider, SliderEvent, SliderState},
+};
+use openlogi_core::config::{
+    DEFAULT_THUMBWHEEL_SENSITIVITY, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
 };
 
 use crate::platform::permissions::{self, Permission, PermissionStatus};
@@ -26,9 +30,14 @@ pub struct SettingsView {
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
     language_select: Entity<SelectState<Vec<LanguageOption>>>,
+    sensitivity_slider: Entity<SliderState>,
 }
 
 impl SettingsView {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "sensitivity bounds are tiny 1..=100 integers — exact in f32"
+    )]
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let current = cx
             .try_global::<AppState>()
@@ -39,10 +48,51 @@ impl SettingsView {
         cx.subscribe_in(&language_select, window, Self::on_language_select)
             .detach();
 
+        let sensitivity = cx
+            .try_global::<AppState>()
+            .map_or(DEFAULT_THUMBWHEEL_SENSITIVITY, |s| {
+                s.app_settings().thumbwheel_sensitivity
+            });
+        let sensitivity_slider = cx.new(|_| {
+            SliderState::new()
+                .min(MIN_THUMBWHEEL_SENSITIVITY as f32)
+                .max(MAX_THUMBWHEEL_SENSITIVITY as f32)
+                .default_value(sensitivity as f32)
+        });
+        cx.subscribe_in(&sensitivity_slider, window, Self::on_sensitivity_slider)
+            .detach();
+
         Self {
             appearance_obs: None,
             language_select,
+            sensitivity_slider,
         }
+    }
+
+    /// Commit the thumb-wheel sensitivity slider. The label tracks the live
+    /// slider value on every `Change`; persistence (and the one shared-atomic
+    /// write the watcher reads) happens once on `Release`.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "slider value is a stepped 1..=100 figure"
+    )]
+    #[allow(
+        clippy::unused_self,
+        reason = "gpui subscription handlers must take &mut self"
+    )]
+    fn on_sensitivity_slider(
+        &mut self,
+        _: &Entity<SliderState>,
+        event: &SliderEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let SliderEvent::Release(value) = event {
+            let sensitivity = value.start().round() as i32;
+            cx.update_global::<AppState, _>(|s, _| s.set_thumbwheel_sensitivity(sensitivity));
+        }
+        cx.notify();
     }
 
     fn on_language_select(
@@ -102,15 +152,26 @@ impl Render for SettingsView {
             .child(
                 Settings::new("settings")
                     .sidebar_width(px(210.))
-                    .page(general_page())
+                    .page(general_page(self.sensitivity_slider.clone()))
                     .page(permissions_page(pal))
                     .page(language_page(self.language_select.clone())),
             )
     }
 }
 
-fn general_page() -> SettingPage {
+fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPage {
     let group = SettingGroup::new()
+        .item(
+            SettingItem::new(
+                tr!("Thumb Wheel Sensitivity"),
+                SettingField::render(move |_, _, cx| {
+                    sensitivity_field(&sensitivity_slider, cx)
+                }),
+            )
+            .description(tr!(
+                "Scales the thumb wheel's horizontal scroll speed and how readily custom wheel actions trigger."
+            )),
+        )
         .item(
             SettingItem::new(
                 tr!("Launch at login"),
@@ -361,4 +422,35 @@ fn language_select_field(
             .w(px(220.))
             .menu_width(px(220.)),
     )
+}
+
+/// The thumb-wheel sensitivity field: the slider plus a live value readout that
+/// flags the 1× default. Reads the slider entity directly so the readout tracks
+/// the drag; persistence is handled by [`SettingsView::on_sensitivity_slider`].
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "slider value is a stepped 1..=100 figure"
+)]
+fn sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> AnyElement {
+    let value = slider.read(cx).value().start().round() as i32;
+    let label = if value == DEFAULT_THUMBWHEEL_SENSITIVITY {
+        format!("{value} ({})", rust_i18n::t!("Default"))
+    } else {
+        value.to_string()
+    };
+    let pal = theme::palette(cx);
+    h_flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap_3()
+        .child(div().w(px(180.)).child(Slider::new(slider)))
+        .child(
+            div()
+                .w(px(72.))
+                .text_sm()
+                .text_color(pal.text_muted)
+                .child(label),
+        )
+        .into_any_element()
 }
