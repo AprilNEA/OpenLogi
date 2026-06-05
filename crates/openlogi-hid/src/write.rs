@@ -7,6 +7,7 @@
 //! (once per slider release) — unless a [`SharedChannel`] from the capture
 //! session is reused.
 
+use std::num::NonZeroU8;
 use std::sync::Arc;
 
 use async_hid::AsyncHidWrite;
@@ -327,11 +328,13 @@ impl SmartShift {
 
     /// Write a new auto-disengage `sensitivity`, preserving the current mode
     /// (and, on Enhanced, the tunable torque). Reads the current status first
-    /// so every preserved field is written back explicitly.
-    async fn set_sensitivity(&self, value: u8) -> Result<(), WriteError> {
+    /// so every preserved field is written back explicitly. The [`NonZeroU8`]
+    /// rules out `0`, which the device would treat as "no change" — a silent
+    /// non-write rather than a real sensitivity update.
+    async fn set_sensitivity(&self, value: NonZeroU8) -> Result<(), WriteError> {
         let current = self.status().await?;
         self.set_status(SmartShiftStatus {
-            auto_disengage: value,
+            auto_disengage: value.get(),
             ..current
         })
         .await
@@ -428,13 +431,14 @@ pub async fn get_smartshift_status(route: &DeviceRoute) -> Result<SmartShiftStat
 ///
 /// `value` is written verbatim: `0x01..=0xfe` is the auto-disengage threshold
 /// (smaller = releases sooner / more sensitive) and `0xff` is permanent ratchet.
-/// Callers should reject `0`, which the device treats as "no change".
+/// The [`NonZeroU8`] parameter rules out `0` at the type level — the device
+/// treats a `0` threshold as "no change", so it could never be a real write.
 ///
 /// `FeatureUnsupported` when the device exposes neither HID++ `0x2111`
 /// (MX Master 3 / 3S) nor the older `0x2110` (MX Master 2S).
 pub async fn set_smartshift_sensitivity(
     route: &DeviceRoute,
-    value: u8,
+    value: NonZeroU8,
 ) -> Result<SmartShiftStatus, WriteError> {
     let index = route.device_index();
     with_route(route, move |channel| async move {
