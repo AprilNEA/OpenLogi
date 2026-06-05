@@ -129,9 +129,18 @@ impl AssetResolver {
             // `side_*.png`), so we prefer that resource for the
             // mouse-model render — otherwise hotspot percentages drift
             // off every button. `front_*.png` is left for the carousel.
-            let buttons_name = buttons_image_for(&dir, &entry.model_id, model.extended_model_id);
-            let variant_front_name =
-                variant_image_for(&dir, &entry.model_id, model.extended_model_id);
+            //
+            // The depot's manifest keys variants on one of its model ids,
+            // which isn't always the index primary — the MX Master 3S
+            // manifest is keyed on `2b034` while the index lists `2b043`
+            // first. Try each listed id as the variant base so the right
+            // colour render resolves regardless of which pid Logi keyed on.
+            let buttons_name = entry
+                .model_id_candidates()
+                .find_map(|base| buttons_image_for(&dir, base, model.extended_model_id));
+            let variant_front_name = entry
+                .model_id_candidates()
+                .find_map(|base| variant_image_for(&dir, base, model.extended_model_id));
             // Front/hero render for the gallery: the colour variant's
             // `device_image`, falling back to the generic front renders. Resolved
             // against this same root so it sits beside the buttons image.
@@ -289,26 +298,45 @@ mod tests {
     use openlogi_core::device::DeviceTransports;
     use std::collections::HashMap;
 
-    fn mx_master_3s_index() -> Index {
+    fn mx_master_3s_entry(model_ids: Vec<String>) -> DeviceEntry {
+        DeviceEntry {
+            model_id: "2b043".to_string(),
+            model_ids,
+            display_name: "MX Master 3S".to_string(),
+            kind: "mouse".to_string(),
+            asset_path: "assets/mx_master_3s/".to_string(),
+            files: Vec::new(),
+        }
+    }
+
+    fn index_of(depot: &str, entry: DeviceEntry) -> Index {
         let mut devices = HashMap::new();
-        devices.insert(
-            "mx_master_3s".to_string(),
-            DeviceEntry {
-                model_id: "2b043".to_string(),
-                display_name: "MX Master 3S".to_string(),
-                kind: "mouse".to_string(),
-                asset_path: "assets/mx_master_3s/".to_string(),
-                files: Vec::new(),
-            },
-        );
+        devices.insert(depot.to_string(), entry);
         Index {
             schema_version: 1,
             devices,
         }
     }
 
-    /// An MX Master 3S connected over BTLE reports model id `b034` / ext 1 —
-    /// absent from the registry, which keys the 3S under `2b043`.
+    /// The current registry: the 3S depot lists both bolt pids Logi ships for
+    /// it (`b043` via a Bolt receiver, `b034` over BTLE).
+    fn mx_master_3s_index() -> Index {
+        index_of(
+            "mx_master_3s",
+            mx_master_3s_entry(vec!["2b043".into(), "2b034".into()]),
+        )
+    }
+
+    /// A legacy index generated before `modelIds` existed: only the primary
+    /// pid `2b043` is listed, so the BTLE pid `b034` matches nothing.
+    fn legacy_mx_master_3s_index() -> Index {
+        index_of("mx_master_3s", mx_master_3s_entry(Vec::new()))
+    }
+
+    /// An MX Master 3S connected over BTLE reports bolt pid `b034` / ext 1.
+    /// The strict `{ext}{pid}` key (`1b034`) matches no registry entry — the
+    /// depot lists `2b034`/`2b043` (ext 2) — so the suffix `b034` is what
+    /// bridges it.
     fn btle_3s_model() -> DeviceModelInfo {
         DeviceModelInfo {
             entity_count: 0,
@@ -324,17 +352,27 @@ mod tests {
     }
 
     #[test]
-    fn pid_matching_alone_misses_btle_3s() {
-        // The bug: no model id the device reports (`b034`) appears in the
-        // registry, so strict + suffix PID matching both fail.
+    fn secondary_pid_resolves_btle_3s_without_codename() {
+        // The fix: the depot lists `2b034` alongside `2b043`, so the suffix
+        // match on `b034` resolves the BTLE 3S by pid — no codename needed.
         let index = mx_master_3s_index();
+        let hit = resolve_in_index(&index, &btle_3s_model(), None);
+        assert_eq!(hit.map(|(depot, _)| depot), Some("mx_master_3s"));
+    }
+
+    #[test]
+    fn legacy_index_misses_btle_3s_by_pid() {
+        // Before `modelIds`: only `2b043` is listed, so neither strict nor
+        // suffix pid matching finds the BTLE 3S (`b034`).
+        let index = legacy_mx_master_3s_index();
         assert!(resolve_in_index(&index, &btle_3s_model(), None).is_none());
     }
 
     #[test]
-    fn codename_bridges_btle_3s_to_its_depot() {
-        // The fix: the firmware codename matches the registry displayName.
-        let index = mx_master_3s_index();
+    fn codename_bridges_btle_3s_on_legacy_index() {
+        // Back-compat: on a legacy index the firmware codename still bridges
+        // to the depot via displayName.
+        let index = legacy_mx_master_3s_index();
         let hit = resolve_in_index(&index, &btle_3s_model(), Some("MX Master 3S"));
         assert_eq!(hit.map(|(depot, _)| depot), Some("mx_master_3s"));
     }
@@ -390,6 +428,7 @@ mod tests {
         };
         let entry = DeviceEntry {
             model_id: "eb020".to_string(),
+            model_ids: Vec::new(),
             display_name: "MX Vertical".to_string(),
             kind: "MOUSE".to_string(),
             asset_path: format!("v1/devices/{depot}/"),
