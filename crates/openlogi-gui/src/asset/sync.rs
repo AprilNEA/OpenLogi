@@ -51,13 +51,14 @@ pub fn sync(server: &str, models: &[(DeviceModelInfo, Option<String>)]) -> Resul
         .with_context(|| format!("create cache root {}", cache_root.display()))?;
 
     let client = http::AssetClient::new(server);
-    let index = match client.fetch_index_to_dir(&cache_root) {
-        Ok(idx) => idx,
-        Err(e) => {
-            warn!(error = ?e, "index.json fetch failed — proceeding with cached files");
-            return Ok(());
-        }
-    };
+    // The index is the critical shared resource — if it can't be fetched
+    // (after the HTTP layer's own retries) bail with an error so the caller
+    // retries the whole sync on a later device snapshot, rather than latching
+    // success off a run that downloaded nothing. Per-depot failures below stay
+    // best-effort: an optional colour variant 404 shouldn't block everything.
+    let index = client
+        .fetch_index_to_dir(&cache_root)
+        .context("fetch asset index")?;
 
     // Each target carries the HID++ `extended_model_id` byte so the
     // depot sync can fetch the right colour variant. `OPENLOGI_FORCE_DEPOT`

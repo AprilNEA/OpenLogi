@@ -43,6 +43,7 @@ mod windows;
 // gpui-component ships, so the framework's own widgets localize alongside ours.
 rust_i18n::i18n!("locales", fallback = "en");
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
@@ -237,20 +238,37 @@ fn main() -> Result<()> {
             });
 
             let mut hook_handle = None;
-            // Asset depots are fetched once, in the background, when devices
-            // first appear — startup no longer blocks on it.
-            let mut assets_synced = false;
+            // Asset depots are fetched in the background when devices first
+            // appear — startup no longer blocks on it. The sync runs once on
+            // success, but a failed attempt is retried on the next snapshot
+            // instead of being latched off for the session (see SYNC_*).
+            let sync_state = Arc::new(AtomicU8::new(SYNC_IDLE));
             loop {
                 tokio::select! {
                     Some(new_inv) = inventory_rx.recv() => {
-                        // Latch on the first snapshot that actually carries
-                        // model info — gating on `!is_empty()` alone could fire
-                        // on a device whose DeviceInformation read hasn't
-                        // resolved yet, leaving its art un-synced all session.
-                        if !assets_synced && !collect_models(&new_inv).is_empty() {
-                            assets_synced = true;
+                        // Kick off (or retry) the one-shot asset sync. Gate on a
+                        // snapshot that actually carries model info — `!is_empty()`
+                        // alone could fire on a device whose DeviceInformation read
+                        // hasn't resolved yet, leaving its art un-synced. `RUNNING`
+                        // blocks a second concurrent sync; `DONE` latches it off;
+                        // `FAILED` lets this 2 s tick retry, so a transient network
+                        // error no longer strands the device on the silhouette
+                        // until an app restart.
+                        let state = sync_state.load(Ordering::Acquire);
+                        if matches!(state, SYNC_IDLE | SYNC_FAILED)
+                            && !collect_models(&new_inv).is_empty()
+                        {
+                            sync_state.store(SYNC_RUNNING, Ordering::Release);
                             let inv = new_inv.clone();
-                            std::thread::spawn(move || sync_assets_if_needed(&inv));
+                            let state = Arc::clone(&sync_state);
+                            std::thread::spawn(move || {
+                                let next = if sync_assets_if_needed(&inv) {
+                                    SYNC_DONE
+                                } else {
+                                    SYNC_FAILED
+                                };
+                                state.store(next, Ordering::Release);
+                            });
                         }
                         cx.update(|cx| {
                             let cache = asset::AssetResolver::new();
@@ -330,14 +348,31 @@ fn reconcile_early_config() {
     }
 }
 
-fn sync_assets_if_needed(inventories: &[DeviceInventory]) {
+/// Asset-sync state, stored in an [`AtomicU8`] and polled on each inventory
+/// snapshot. A failed run flips back to [`SYNC_FAILED`] so the next tick
+/// retries, rather than latching the sync off for the whole session.
+const SYNC_IDLE: u8 = 0;
+const SYNC_RUNNING: u8 = 1;
+const SYNC_DONE: u8 = 2;
+const SYNC_FAILED: u8 = 3;
+
+/// Refresh the asset cache for the connected devices. Returns `true` when the
+/// sync completed (or wasn't needed) and `false` when it failed and should be
+/// retried. Runs on a dedicated background thread — the HTTP layer's blocking
+/// retries are fine here.
+fn sync_assets_if_needed(inventories: &[DeviceInventory]) -> bool {
     let probe_cache = asset::AssetResolver::new();
-    if asset::sync::should_run(probe_cache.has_bundle_root()) {
-        let server = std::env::var("OPENLOGI_ASSETS")
-            .unwrap_or_else(|_| asset::sync::DEFAULT_BASE.to_string());
-        let models = collect_models(inventories);
-        if let Err(e) = asset::sync::sync(&server, &models) {
-            warn!(error = ?e, "asset sync raised — continuing with whatever's cached");
+    if !asset::sync::should_run(probe_cache.has_bundle_root()) {
+        return true;
+    }
+    let server =
+        std::env::var("OPENLOGI_ASSETS").unwrap_or_else(|_| asset::sync::DEFAULT_BASE.to_string());
+    let models = collect_models(inventories);
+    match asset::sync::sync(&server, &models) {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(error = ?e, "asset sync failed — will retry on the next device snapshot");
+            false
         }
     }
 }
