@@ -15,7 +15,10 @@
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
-use openlogi_hid::{CaptureChannel, DeviceRoute, DpiInfo, SharedChannel, WriteError};
+use openlogi_hid::{
+    CaptureChannel, DeviceRoute, DpiInfo, SharedChannel, SmartShiftMode, SmartShiftStatus,
+    WriteError,
+};
 use tracing::{debug, warn};
 
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
@@ -96,6 +99,94 @@ pub fn toggle_smartshift_in_background(
             Err(_) => warn!(
                 index,
                 "SmartShift toggle timed out (device asleep/unresponsive)"
+            ),
+        }
+    });
+}
+
+/// Read the device's current SmartShift configuration (wheel mode +
+/// auto-disengage threshold + tunable torque) on a background worker.
+///
+/// Blocking, like [`read_dpi_info_blocking`], so the SmartShift panel can run
+/// it off a dedicated OS thread without the UI thread owning a Tokio runtime.
+pub fn read_smartshift_status_blocking(
+    target: &DeviceRoute,
+) -> Result<SmartShiftStatus, WriteError> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| WriteError::Hidpp(format!("tokio runtime init failed: {e}")))?;
+
+    rt.block_on(async {
+        tokio::time::timeout(WRITE_BUDGET, openlogi_hid::get_smartshift_status(target))
+            .await
+            .map_err(|_| WriteError::Hidpp("SmartShift status read timed out".into()))?
+    })
+}
+
+/// Spawn an OS thread that writes a full SmartShift configuration to the device
+/// at `target` via [`openlogi_hid::set_smartshift`]. Returns immediately;
+/// failures (incl. devices that don't support `0x2111`) are logged.
+///
+/// `target == None` is a no-op (dev environment without a real device).
+pub fn write_smartshift_in_background(
+    capture: Option<&CaptureChannel>,
+    target: Option<DeviceRoute>,
+    mode: SmartShiftMode,
+    auto_disengage: u8,
+    tunable_torque: u8,
+) {
+    let Some(target) = target else {
+        debug!("no target device — SmartShift write skipped");
+        return;
+    };
+    let shared = reusable_channel(capture, &target);
+    let reused = shared.is_some();
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                warn!(error = %e, "tokio runtime init failed; SmartShift write skipped");
+                return;
+            }
+        };
+        let result = rt.block_on(async {
+            tokio::time::timeout(WRITE_BUDGET, async {
+                match &shared {
+                    Some(shared) => {
+                        openlogi_hid::set_smartshift_on(
+                            shared,
+                            mode,
+                            auto_disengage,
+                            tunable_torque,
+                        )
+                        .await
+                    }
+                    None => {
+                        openlogi_hid::set_smartshift(&target, mode, auto_disengage, tunable_torque)
+                            .await
+                    }
+                }
+            })
+            .await
+        });
+        let index = target.device_index();
+        match result {
+            Ok(Ok(())) => debug!(
+                index,
+                ?mode,
+                auto_disengage,
+                tunable_torque,
+                reused,
+                "SmartShift config written"
+            ),
+            Ok(Err(e)) => warn!(error = ?e, "SmartShift write failed"),
+            Err(_) => warn!(
+                index,
+                "SmartShift write timed out (device asleep/unresponsive)"
             ),
         }
     });

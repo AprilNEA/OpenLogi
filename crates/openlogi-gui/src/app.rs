@@ -25,6 +25,7 @@ use crate::asset::AssetResolver;
 use crate::components::carousel::Carousel;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::lighting_panel::LightingPanel;
+use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AppState, DeviceRecord};
 use crate::theme::{self, FOOTER_H, HEADER_H, Palette};
@@ -129,6 +130,7 @@ pub struct AppView {
     route: Route,
     mouse_model: Entity<MouseModelView>,
     dpi_panel: Entity<DpiPanel>,
+    smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
@@ -175,12 +177,14 @@ impl AppView {
 
         let mouse_model = cx.new(MouseModelView::new);
         let dpi_panel = cx.new(DpiPanel::new);
+        let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
         let state_obs = cx.observe_global::<AppState>(|_, cx| cx.notify());
         Self {
             route: Route::Home,
             mouse_model,
             dpi_panel,
+            smartshift_panel,
             lighting_panel,
             appearance_obs: None,
             state_obs,
@@ -345,6 +349,7 @@ impl Render for AppView {
                 detail_content(
                     &self.mouse_model,
                     &self.dpi_panel,
+                    &self.smartshift_panel,
                     &self.lighting_panel,
                     self.active_tab,
                     pal,
@@ -713,6 +718,7 @@ fn main_window_title(show_device: bool, cx: &Context<AppView>) -> SharedString {
 fn detail_content(
     mouse_model: &Entity<MouseModelView>,
     dpi_panel: &Entity<DpiPanel>,
+    smartshift_panel: &Entity<SmartShiftPanel>,
     lighting_panel: &Entity<LightingPanel>,
     active: DetailTab,
     pal: Palette,
@@ -731,7 +737,7 @@ fn detail_content(
     };
     let content = match active {
         DetailTab::Buttons => buttons_tab(mouse_model).into_any_element(),
-        DetailTab::Pointer => pointer_tab(dpi_panel, pal).into_any_element(),
+        DetailTab::Pointer => pointer_tab(dpi_panel, smartshift_panel, pal).into_any_element(),
         DetailTab::Lighting => lighting_tab(lighting_panel, pal).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
     };
@@ -785,8 +791,13 @@ fn buttons_tab(mouse_model: &Entity<MouseModelView>) -> impl IntoElement {
         )
 }
 
-/// Pointer tab: the DPI panel in a titled card.
-fn pointer_tab(dpi_panel: &Entity<DpiPanel>, pal: Palette) -> impl IntoElement {
+/// Pointer tab: the DPI panel and the SmartShift wheel controls, each in a
+/// titled card, stacked.
+fn pointer_tab(
+    dpi_panel: &Entity<DpiPanel>,
+    smartshift_panel: &Entity<SmartShiftPanel>,
+    pal: Palette,
+) -> impl IntoElement {
     v_flex()
         .flex_1()
         .w_full()
@@ -794,11 +805,18 @@ fn pointer_tab(dpi_panel: &Entity<DpiPanel>, pal: Palette) -> impl IntoElement {
         .items_center()
         .overflow_y_scrollbar()
         .p_6()
+        .gap_4()
         .child(div().w_full().max_w(px(560.)).child(panel_card(
             tr!("Pointer tuning"),
             IconName::Settings,
             pal,
             dpi_panel.clone().into_any_element(),
+        )))
+        .child(div().w_full().max_w(px(560.)).child(panel_card(
+            tr!("SmartShift"),
+            IconName::Settings,
+            pal,
+            smartshift_panel.clone().into_any_element(),
         )))
 }
 

@@ -21,8 +21,8 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
         .await
         .context("read SmartShift status")?;
     println!(
-        "  current: mode={:?} sensitivity={}",
-        before.mode, before.sensitivity
+        "  current: mode={:?} auto_disengage={} torque={}",
+        before.mode, before.auto_disengage, before.tunable_torque
     );
 
     let new_mode = openlogi_hid::toggle_smartshift(&route)
@@ -34,8 +34,8 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
         .await
         .context("read SmartShift after toggle")?;
     println!(
-        "  read-back: mode={:?} sensitivity={}",
-        after.mode, after.sensitivity
+        "  read-back: mode={:?} auto_disengage={} torque={}",
+        after.mode, after.auto_disengage, after.tunable_torque
     );
 
     if after.mode == before.mode {

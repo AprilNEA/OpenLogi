@@ -10,10 +10,12 @@
 //! previous state.
 //!
 //! Mode encoding (consistent across 0x2110 / 0x2111):
-//! - `1` = free-spin (no ratchet, infinite scroll)
-//! - `2` = ratchet (clicky); when paired with sensitivity 1–50 the
-//!   firmware also engages auto-switch ("SmartShift active"); `0xff`
-//!   means "permanent ratchet, never auto-switch".
+//! - `wheelMode` `1` = free-spin (no ratchet, infinite scroll), `2` =
+//!   ratchet (clicky).
+//! - `autoDisengage` `0x01`–`0xFE` = the wheel speed (in 0.25 turn/s steps)
+//!   past which a ratchet-mode wheel releases into free-spin — i.e. the
+//!   "SmartShift" threshold. `0xFF` keeps the ratchet engaged permanently
+//!   (never auto-switches). See [`AUTO_DISENGAGE_PERMANENT`].
 
 use std::sync::Arc;
 
@@ -63,13 +65,25 @@ impl SmartShiftMode {
     }
 }
 
+/// `autoDisengage` value that keeps the ratchet engaged permanently — the
+/// wheel never auto-releases into free-spin, regardless of speed. Any other
+/// value (`0x01`–`0xFE`) is a SmartShift speed threshold.
+pub const AUTO_DISENGAGE_PERMANENT: u8 = 0xff;
+
 /// Snapshot returned from [`SmartShiftFeatureV0::get_status`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SmartShiftStatus {
     pub mode: SmartShiftMode,
-    /// Auto-switch threshold (0–255). Higher = harder to flip into free-
-    /// spin while scrolling. Logitech defaults to ~32 on the MX line.
-    pub sensitivity: u8,
+    /// SmartShift speed threshold: `0x01`–`0xFE` in 0.25 turn/s steps (higher
+    /// = harder to flip into free-spin while scrolling; Logitech defaults to
+    /// ~16 on the MX line), or [`AUTO_DISENGAGE_PERMANENT`] for a permanently
+    /// engaged ratchet.
+    pub auto_disengage: u8,
+    /// Tunable-torque force as a percentage (`1`–`100`) of the device's max
+    /// force, or `0` when the device doesn't support tunable torque. Read back
+    /// and re-sent unchanged so adjusting the mode or threshold doesn't
+    /// disturb the wheel's resistance.
+    pub tunable_torque: u8,
 }
 
 /// `SmartShift` / `0x2111` feature, version 0+.
@@ -104,9 +118,9 @@ const FUNCTION_GET_STATUS: u8 = 1;
 const FUNCTION_SET_STATUS: u8 = 2;
 
 impl SmartShiftFeatureV0 {
-    /// Read the current mode + sensitivity. Reserved mode bytes fall back
-    /// to [`SmartShiftMode::Ratchet`] because that's the "safe" / clicky
-    /// behaviour most users expect.
+    /// Read the current `wheelMode` + `autoDisengage` + `currentTunableTorque`.
+    /// Reserved mode bytes fall back to [`SmartShiftMode::Ratchet`] because
+    /// that's the "safe" / clicky behaviour most users expect.
     pub async fn get_status(&self) -> Result<SmartShiftStatus, Hidpp20Error> {
         let response = self
             .chan
@@ -124,17 +138,20 @@ impl SmartShiftFeatureV0 {
         let mode = SmartShiftMode::from_byte(payload[0]).unwrap_or(SmartShiftMode::Ratchet);
         Ok(SmartShiftStatus {
             mode,
-            sensitivity: payload[1],
+            auto_disengage: payload[1],
+            tunable_torque: payload.get(2).copied().unwrap_or(0),
         })
     }
 
-    /// Write a new mode + sensitivity. The third payload byte is
-    /// `defaultSensitivity` per the spec; we pass `0` to mean "don't
-    /// change the firmware default".
+    /// Write a new `wheelMode` + `autoDisengage` + `currentTunableTorque`. The
+    /// firmware stores all three persistently in the device's NVM, so callers
+    /// should read the current `tunable_torque` (and any field they don't mean
+    /// to change) via [`Self::get_status`] and re-send it here.
     pub async fn set_status(
         &self,
         mode: SmartShiftMode,
-        sensitivity: u8,
+        auto_disengage: u8,
+        tunable_torque: u8,
     ) -> Result<(), Hidpp20Error> {
         let _ = self
             .chan
@@ -145,7 +162,7 @@ impl SmartShiftFeatureV0 {
                     function_id: U4::from_lo(FUNCTION_SET_STATUS),
                     software_id: self.chan.get_sw_id(),
                 },
-                [mode.as_byte(), sensitivity, 0],
+                [mode.as_byte(), auto_disengage, tunable_torque],
             ))
             .await?;
         Ok(())

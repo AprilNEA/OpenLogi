@@ -20,7 +20,9 @@ use std::sync::{Arc, RwLock};
 use gpui::Global;
 use openlogi_core::config::{AppSettings, Config, Lighting};
 use openlogi_core::device::DeviceInventory;
-use openlogi_hid::{DeviceRoute, DpiCapabilities, DpiInfo, WriteError};
+use openlogi_hid::{
+    DeviceRoute, DpiCapabilities, DpiInfo, SmartShiftMode, SmartShiftStatus, WriteError,
+};
 use openlogi_hook::Hook;
 use tracing::{debug, warn};
 
@@ -70,6 +72,27 @@ pub enum DpiStatus {
     Unsupported(String),
 }
 
+/// Per-device SmartShift (`0x2111`) loading state. Mirrors [`DpiStatus`]:
+/// lazily loaded because the HID++ read must not block device switching or
+/// rendering. Unlike DPI presets, the resolved config is *not* persisted to
+/// `config.toml` — the device stores wheel mode / threshold / torque in its
+/// own non-volatile memory, so the GUI only ever reads and writes the device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SmartShiftLoad {
+    /// The selected device has not been queried yet.
+    Unknown,
+    /// A background HID++ read is in flight.
+    Loading,
+    /// The device reported its current SmartShift configuration.
+    Ready(SmartShiftStatus),
+    /// Transient read errors exhausted the retry budget; retryable on
+    /// re-select.
+    Failed(String),
+    /// The device genuinely does not expose SmartShift (`0x2111`); never
+    /// retried.
+    Unsupported(String),
+}
+
 pub struct AppState {
     /// Index into [`Self::device_list`] of the currently visible device. May
     /// be out of bounds briefly while inventories re-enumerate; views must
@@ -111,6 +134,14 @@ pub struct AppState {
     /// times (see [`DPI_LOAD_MAX_ATTEMPTS`]) instead of sticking the device on
     /// [`DpiStatus::Unsupported`] forever.
     dpi_load_attempts: BTreeMap<String, u8>,
+    /// SmartShift (`0x2111`) configuration state keyed by
+    /// [`DeviceRecord::config_key`]. Loaded lazily on the same pattern as
+    /// [`Self::dpi_by_device`]; the device persists the values itself, so this
+    /// is a read/write cache, not a source of truth saved to disk.
+    pub smartshift_by_device: BTreeMap<String, SmartShiftLoad>,
+    /// Consecutive failed SmartShift read attempts, keyed by
+    /// [`DeviceRecord::config_key`] — mirrors [`Self::dpi_load_attempts`].
+    smartshift_load_attempts: BTreeMap<String, u8>,
     /// All paired devices, in carousel order. Each entry caches the per-
     /// device data the views need so a switch is a pure index update.
     pub device_list: Vec<DeviceRecord>,
@@ -187,6 +218,8 @@ impl AppState {
             dpi_by_device: BTreeMap::new(),
             inventory_misses: BTreeMap::new(),
             dpi_load_attempts: BTreeMap::new(),
+            smartshift_by_device: BTreeMap::new(),
+            smartshift_load_attempts: BTreeMap::new(),
             device_list,
             config,
             hook_bindings,
@@ -313,10 +346,16 @@ impl AppState {
         for key in &rerouted {
             self.dpi_by_device.remove(key);
             self.dpi_load_attempts.remove(key);
+            self.smartshift_by_device.remove(key);
+            self.smartshift_load_attempts.remove(key);
         }
         self.dpi_by_device
             .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
         self.dpi_load_attempts
+            .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
+        self.smartshift_by_device
+            .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
+        self.smartshift_load_attempts
             .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
         self.current_device = new_index;
         // The active device may have changed (selection fell back to index 0
@@ -388,6 +427,13 @@ impl AppState {
             if matches!(self.dpi_by_device.get(&key), Some(DpiStatus::Failed(_))) {
                 self.dpi_by_device.remove(&key);
                 self.dpi_load_attempts.remove(&key);
+            }
+            if matches!(
+                self.smartshift_by_device.get(&key),
+                Some(SmartShiftLoad::Failed(_))
+            ) {
+                self.smartshift_by_device.remove(&key);
+                self.smartshift_load_attempts.remove(&key);
             }
         }
         // `self.dpi` is the active device's value; adopt the newly-selected
@@ -586,6 +632,154 @@ impl AppState {
     pub fn normalize_active_dpi(&self, dpi: u32) -> u32 {
         self.active_dpi_capabilities()
             .map_or(dpi, |caps| caps.snap(dpi))
+    }
+
+    /// SmartShift configuration status for the active device.
+    #[must_use]
+    pub fn current_smartshift_status(&self) -> SmartShiftLoad {
+        self.current_record()
+            .and_then(|record| self.smartshift_by_device.get(&record.config_key).cloned())
+            .unwrap_or(SmartShiftLoad::Unknown)
+    }
+
+    /// Whether the active device still needs a SmartShift read (no status
+    /// recorded). Cheaper than comparing a cloned [`SmartShiftLoad`] on the
+    /// per-frame render path.
+    #[must_use]
+    pub fn current_smartshift_unqueried(&self) -> bool {
+        self.current_record()
+            .is_some_and(|record| !self.smartshift_by_device.contains_key(&record.config_key))
+    }
+
+    /// The active device's resolved SmartShift config, if the read succeeded.
+    /// Callers use it to preserve fields they don't mean to change (e.g.
+    /// tunable torque) when writing back.
+    #[must_use]
+    pub fn current_smartshift_ready(&self) -> Option<SmartShiftStatus> {
+        self.current_record()
+            .and_then(|record| self.smartshift_by_device.get(&record.config_key))
+            .and_then(|status| match status {
+                SmartShiftLoad::Ready(s) => Some(*s),
+                SmartShiftLoad::Unknown
+                | SmartShiftLoad::Loading
+                | SmartShiftLoad::Failed(_)
+                | SmartShiftLoad::Unsupported(_) => None,
+            })
+    }
+
+    /// Mark SmartShift discovery as in flight for `key`.
+    pub fn mark_smartshift_loading(&mut self, key: &str) {
+        self.smartshift_by_device
+            .insert(key.to_string(), SmartShiftLoad::Loading);
+    }
+
+    /// Reset a stuck `Loading` for `key` back to `Unknown` — called when the
+    /// read worker vanished without delivering a result.
+    pub fn clear_smartshift_loading(&mut self, key: &str) {
+        if matches!(
+            self.smartshift_by_device.get(key),
+            Some(SmartShiftLoad::Loading)
+        ) {
+            self.smartshift_by_device.remove(key);
+        }
+    }
+
+    /// Drop the active device's recorded SmartShift status so the next render
+    /// re-runs discovery. Backs the "click to retry" affordance on a
+    /// [`SmartShiftLoad::Failed`] device.
+    pub fn retry_active_smartshift(&mut self) {
+        if let Some(key) = self.current_record().map(|r| r.config_key.clone()) {
+            self.smartshift_by_device.remove(&key);
+            self.smartshift_load_attempts.remove(&key);
+        }
+    }
+
+    /// Store a SmartShift read result if it still matches the known device
+    /// route, with the same transient-retry / permanent-unsupported handling
+    /// as [`Self::store_dpi_info`].
+    pub fn store_smartshift_status(
+        &mut self,
+        key: String,
+        route: &DeviceRoute,
+        result: Result<SmartShiftStatus, WriteError>,
+    ) {
+        let still_matches = self
+            .device_list
+            .iter()
+            .any(|record| record.config_key == key && record.route.as_ref() == Some(route));
+        if !still_matches {
+            debug!(key, ?route, "stale SmartShift result ignored");
+            if self.device_list.iter().any(|r| r.config_key == key) {
+                self.smartshift_by_device.remove(&key);
+            }
+            return;
+        }
+
+        let status = match result {
+            Ok(status) => {
+                self.smartshift_load_attempts.remove(&key);
+                SmartShiftLoad::Ready(status)
+            }
+            Err(error) if smartshift_error_is_permanent(&error) => {
+                self.smartshift_load_attempts.remove(&key);
+                SmartShiftLoad::Unsupported(error.to_string())
+            }
+            Err(error) => {
+                let attempts = self
+                    .smartshift_load_attempts
+                    .entry(key.clone())
+                    .or_insert(0);
+                *attempts = attempts.saturating_add(1);
+                if *attempts < DPI_LOAD_MAX_ATTEMPTS {
+                    debug!(
+                        key,
+                        attempts = *attempts,
+                        error = %error,
+                        "transient SmartShift read error — will retry"
+                    );
+                    self.smartshift_by_device.remove(&key);
+                    return;
+                }
+                self.smartshift_load_attempts.remove(&key);
+                SmartShiftLoad::Failed(error.to_string())
+            }
+        };
+        self.smartshift_by_device.insert(key, status);
+    }
+
+    /// Write a full SmartShift configuration to the active device (best-effort,
+    /// on a background thread) and optimistically cache it. The device persists
+    /// the values in its own NVM, so nothing is written to `config.toml`.
+    /// No-op when no device is selected.
+    pub fn commit_smartshift(
+        &mut self,
+        mode: SmartShiftMode,
+        auto_disengage: u8,
+        tunable_torque: u8,
+    ) {
+        let Some(record) = self.current_record() else {
+            debug!("no active device — SmartShift change ignored");
+            return;
+        };
+        let key = record.config_key.clone();
+        let target = record.route.clone();
+        crate::hardware::write_smartshift_in_background(
+            None,
+            target,
+            mode,
+            auto_disengage,
+            tunable_torque,
+        );
+        // Reflect the write immediately so the panel doesn't flicker back to
+        // the previous value before a re-read lands.
+        self.smartshift_by_device.insert(
+            key,
+            SmartShiftLoad::Ready(SmartShiftStatus {
+                mode,
+                auto_disengage,
+                tunable_torque,
+            }),
+        );
     }
 
     /// The lighting config for the active device, or the default when none is
@@ -876,6 +1070,13 @@ fn dpi_error_is_permanent(error: &WriteError) -> bool {
         error,
         WriteError::FeatureUnsupported { .. } | WriteError::EmptyDpiList
     )
+}
+
+/// Whether a SmartShift read error is permanent: a genuine "feature not
+/// supported" reply (the device lacks `0x2111`) never changes, so stop
+/// probing. Everything else (timeouts, busy device) is transient.
+fn smartshift_error_is_permanent(error: &WriteError) -> bool {
+    matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
 impl Global for AppState {}

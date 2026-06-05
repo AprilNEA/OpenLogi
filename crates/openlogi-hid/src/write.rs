@@ -454,17 +454,67 @@ async fn toggle_smartshift_on_channel(
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let feature = open_feature::<SmartShiftFeatureV0>(&mut device).await?;
-    let SmartShiftStatus { mode, sensitivity } = feature
+    let SmartShiftStatus {
+        mode,
+        auto_disengage,
+        tunable_torque,
+    } = feature
         .get_status()
         .await
         .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
     let next = mode.flipped();
     feature
-        .set_status(next, sensitivity)
+        .set_status(next, auto_disengage, tunable_torque)
         .await
         .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
     debug!(index, ?next, "wrote SmartShift mode");
     Ok(next)
+}
+
+/// Write a full SmartShift configuration — wheel mode, auto-disengage
+/// threshold, and tunable torque — to `route`. The firmware persists all three
+/// to the device's NVM. Callers that mean to change only one field should read
+/// the rest via [`get_smartshift_status`] first and pass them back unchanged.
+///
+/// `FeatureUnsupported` when the device doesn't expose HID++ `0x2111`.
+pub async fn set_smartshift(
+    route: &DeviceRoute,
+    mode: SmartShiftMode,
+    auto_disengage: u8,
+    tunable_torque: u8,
+) -> Result<(), WriteError> {
+    let index = route.device_index();
+    with_route(route, move |channel| async move {
+        set_smartshift_on_channel(&channel, index, mode, auto_disengage, tunable_torque).await
+    })
+    .await
+}
+
+/// The SmartShift write itself, on an already-open channel at HID++ `index`.
+/// Shared by [`set_smartshift`] and [`set_smartshift_on`].
+async fn set_smartshift_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    mode: SmartShiftMode,
+    auto_disengage: u8,
+    tunable_torque: u8,
+) -> Result<(), WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let feature = open_feature::<SmartShiftFeatureV0>(&mut device).await?;
+    feature
+        .set_status(mode, auto_disengage, tunable_torque)
+        .await
+        .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+    debug!(
+        index,
+        ?mode,
+        auto_disengage,
+        tunable_torque,
+        "wrote SmartShift config"
+    );
+    Ok(())
 }
 
 /// An open HID++ channel to a device, shared so DPI / SmartShift writes can
@@ -504,6 +554,24 @@ pub async fn set_dpi_on(shared: &SharedChannel, dpi: u16) -> Result<(), WriteErr
 /// Toggle SmartShift on an already-open [`SharedChannel`].
 pub async fn toggle_smartshift_on(shared: &SharedChannel) -> Result<SmartShiftMode, WriteError> {
     toggle_smartshift_on_channel(&shared.channel, shared.route.device_index()).await
+}
+
+/// Write a full SmartShift configuration on an already-open [`SharedChannel`]
+/// — the fast path that skips enumeration and channel setup.
+pub async fn set_smartshift_on(
+    shared: &SharedChannel,
+    mode: SmartShiftMode,
+    auto_disengage: u8,
+    tunable_torque: u8,
+) -> Result<(), WriteError> {
+    set_smartshift_on_channel(
+        &shared.channel,
+        shared.route.device_index(),
+        mode,
+        auto_disengage,
+        tunable_torque,
+    )
+    .await
 }
 
 /// Boilerplate-eater: open the channel that reaches `route`, then run `f` once
