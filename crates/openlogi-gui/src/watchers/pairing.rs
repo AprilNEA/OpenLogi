@@ -14,7 +14,8 @@ use std::{thread, time::Duration};
 
 use openlogi_hid::{
     DiscoveredDevice, PairingCommand, PairingError, PairingEvent, ReceiverSelector,
-    WindowsPairingDevice, list_windows_pairing_devices, pair_windows_device, run_pairing,
+    WindowsPairingDevice, WindowsPairingError, list_windows_pairing_devices, pair_windows_device,
+    run_pairing,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -162,15 +163,13 @@ async fn run_windows_session(
     let devices = match list_windows_pairing_devices().await {
         Ok(devices) => devices,
         Err(error) => {
-            let _ = evt_tx.send(PairingEvent::Failed(PairingError::Windows(
-                error.to_string(),
-            )));
+            let _ = evt_tx.send(PairingEvent::Failed(PairingError::Windows(error)));
             return true;
         }
     };
     if devices.is_empty() {
         let _ = evt_tx.send(PairingEvent::Failed(PairingError::Windows(
-            "No Windows Bluetooth pairing candidates were found.".into(),
+            WindowsPairingError::NoCandidates,
         )));
         return true;
     }
@@ -205,9 +204,7 @@ async fn run_windows_session(
                                 )));
                         }
                         Err(error) => {
-                            let _ = evt_tx.send(PairingEvent::Failed(PairingError::Windows(
-                                error.to_string(),
-                            )));
+                            let _ = evt_tx.send(PairingEvent::Failed(PairingError::Windows(error)));
                         }
                     }
                     return true;

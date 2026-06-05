@@ -13,9 +13,7 @@ use windows_sys::Win32::{
         HidD_GetAttributes, HidD_GetPreparsedData, HidD_SetFeature, HidD_SetOutputReport,
         HidP_GetCaps, PHIDP_PREPARSED_DATA,
     },
-    Foundation::{
-        CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WIN32_ERROR,
-    },
+    Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE},
     Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
         WriteFile,
@@ -269,8 +267,7 @@ impl fmt::Display for NativeWriteError {
                 Ok(())
             }
             Self::HidpStatus(operation, status) => {
-                let status = WIN32_ERROR::from_ne_bytes(status.to_ne_bytes());
-                write!(f, "{operation} returned NTSTATUS {status:#x}")
+                write!(f, "{operation} returned NTSTATUS {status:#010x}")
             }
             Self::LastOsError(operation, error) => write!(f, "{operation}: {error}"),
         }

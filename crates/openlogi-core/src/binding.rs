@@ -886,6 +886,12 @@ impl Action {
             Action::MissionControl | Action::AppExpose => {
                 windows::post_key(windows::VK_TAB, &[windows::VK_LWIN]);
             }
+            Action::PreviousDesktop => {
+                windows::post_key(windows::VK_LEFT, &[windows::VK_LWIN, windows::VK_CONTROL]);
+            }
+            Action::NextDesktop => {
+                windows::post_key(windows::VK_RIGHT, &[windows::VK_LWIN, windows::VK_CONTROL]);
+            }
             Action::ShowDesktop => windows::post_key(windows::VK_D, &[windows::VK_LWIN]),
             Action::LaunchpadShow => windows::post_key(windows::VK_LWIN, &[]),
             Action::LockScreen => windows::post_key(windows::VK_L, &[windows::VK_LWIN]),
@@ -909,6 +915,7 @@ impl Action {
             | Action::HorizontalScrollLeft
             | Action::HorizontalScrollRight => windows::post_scroll(self),
             Action::CustomShortcut(combo) => windows::post_custom_shortcut(combo),
+            Action::None => {}
         }
     }
 }
@@ -1375,6 +1382,8 @@ mod windows {
     pub(super) const VK_Y: u16 = 0x59;
     pub(super) const VK_Z: u16 = 0x5A;
     pub(super) const VK_TAB: u16 = 0x09;
+    pub(super) const VK_LEFT: u16 = 0x25;
+    pub(super) const VK_RIGHT: u16 = 0x27;
     pub(super) const VK_SHIFT: u16 = 0x10;
     pub(super) const VK_CONTROL: u16 = 0x11;
     pub(super) const VK_MENU: u16 = 0x12;

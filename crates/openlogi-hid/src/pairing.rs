@@ -36,7 +36,7 @@ use tracing::{debug, trace, warn};
 pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 
 use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
-use crate::windows_pairing::{WindowsPairingDevice, WindowsPairingStatus};
+use crate::windows_pairing::{WindowsPairingDevice, WindowsPairingError, WindowsPairingStatus};
 
 /// HID++ device index addressing the receiver itself (not a paired device).
 const RECEIVER_INDEX: u8 = 0xff;
@@ -219,7 +219,7 @@ pub enum PairingError {
     #[error("receiver reported pairing error {0:#04x}")]
     Device(u8),
     #[error("Windows pairing failed: {0}")]
-    Windows(String),
+    Windows(WindowsPairingError),
     #[error("Windows pairing returned {0}")]
     WindowsStatus(WindowsPairingStatus),
     #[error("pairing was cancelled")]

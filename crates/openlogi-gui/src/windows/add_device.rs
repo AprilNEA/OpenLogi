@@ -21,7 +21,7 @@ use gpui::{
 use gpui_component::v_flex;
 use openlogi_hid::{
     Click, DiscoveredDevice, PairingError, PairingEvent, PasskeyMethod, ReceiverSelector,
-    WindowsPairingDevice, WindowsPairingStatus,
+    WindowsPairingDevice, WindowsPairingError, WindowsPairingStatus,
 };
 
 use crate::theme::{self, Palette};
@@ -148,7 +148,7 @@ fn failure_state(error: &PairingError) -> PairingUi {
             "Receiver reported pairing error %{code}.",
             code => format!("0x{code:02x}")
         ),
-        PairingError::Windows(detail) => windows_pairing_error_detail(detail),
+        PairingError::Windows(error) => windows_pairing_error_detail(error),
         PairingError::WindowsStatus(status) => tr!(
             "Windows returned %{status}.",
             status => windows_pairing_status_text(*status)
@@ -161,25 +161,24 @@ fn failure_state(error: &PairingError) -> PairingUi {
     }
 }
 
-fn windows_pairing_error_detail(detail: &str) -> SharedString {
-    if detail == "No Windows Bluetooth pairing candidates were found." {
-        return tr!("No Windows Bluetooth pairing candidates were found.");
-    }
-    if let Some(name) = detail.strip_prefix("Windows device not found: ") {
-        return tr!("Windows device not found: %{name}", name => name.to_owned());
-    }
-    if let Some(name) = detail.strip_prefix("Windows device cannot pair: ") {
-        return tr!("Windows device cannot pair: %{name}", name => name.to_owned());
-    }
-    if let Some(error) = detail.strip_prefix("Windows API error: ") {
-        return tr!("Windows API error: %{error}", error => error.to_owned());
-    }
-    match detail {
-        "Windows Bluetooth pairing is only available on Windows" => {
+fn windows_pairing_error_detail(error: &WindowsPairingError) -> SharedString {
+    match error {
+        WindowsPairingError::Unsupported => {
             tr!("Windows Bluetooth pairing is only available on Windows.")
         }
-        "Windows pairing timed out" => tr!("Windows pairing timed out."),
-        _ => SharedString::from(detail.to_owned()),
+        WindowsPairingError::NoCandidates => {
+            tr!("No Windows Bluetooth pairing candidates were found.")
+        }
+        WindowsPairingError::Timeout => tr!("Windows pairing timed out."),
+        WindowsPairingError::NotFound(name) => {
+            tr!("Windows device not found: %{name}", name => name.clone())
+        }
+        WindowsPairingError::NotPairable(name) => {
+            tr!("Windows device cannot pair: %{name}", name => name.clone())
+        }
+        WindowsPairingError::Api(error) => {
+            tr!("Windows API error: %{error}", error => error.clone())
+        }
     }
 }
 
@@ -310,11 +309,13 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                 .child(
                     action_button("ad-search", tr!("Search for devices"), pal, true)
                         .on_click(|_, _, cx| start_search(cx)),
-                )
-                .child(
+                );
+            if cfg!(target_os = "windows") {
+                col = col.child(
                     action_button("ad-windows-search", tr!("Windows Bluetooth"), pal, false)
                         .on_click(|_, _, cx| start_windows_search(cx)),
                 );
+            }
         }
         PairingUi::Searching => {
             col = col

@@ -97,6 +97,8 @@ impl fmt::Display for WindowsPairingStatus {
 pub enum WindowsPairingError {
     #[error("Windows Bluetooth pairing is only available on Windows")]
     Unsupported,
+    #[error("No Windows Bluetooth pairing candidates were found.")]
+    NoCandidates,
     #[error("Windows pairing timed out")]
     Timeout,
     #[error("Windows device not found: {0}")]
@@ -152,7 +154,7 @@ mod imp {
             Enumeration::{DeviceInformation, DevicePairingResultStatus, DeviceWatcher},
         },
         Foundation::TypedEventHandler,
-        Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize},
+        Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
         core::{HSTRING, IInspectable},
     };
 
@@ -163,7 +165,7 @@ mod imp {
 
     pub fn list_windows_pairing_devices() -> Result<Vec<WindowsPairingDevice>, WindowsPairingError>
     {
-        init_winrt()?;
+        let _winrt = init_winrt()?;
         let selector = BluetoothLEDevice::GetDeviceSelectorFromPairingState(false)
             .map_err(|e| api_error(&e))?;
         let devices = find_unpaired_bluetooth_endpoints(&selector)?;
@@ -186,7 +188,7 @@ mod imp {
     pub fn pair_windows_device(
         device_id: &str,
     ) -> Result<WindowsPairingOutcome, WindowsPairingError> {
-        init_winrt()?;
+        let _winrt = init_winrt()?;
         let device = find_device_by_id(device_id)?;
         let candidate = pairing_device_from_info(&device)?;
         let pairing = device.Pairing().map_err(|e| api_error(&e))?;
@@ -298,9 +300,23 @@ mod imp {
         .any(|needle| name.contains(needle))
     }
 
+    struct WinrtApartment;
+
+    impl Drop for WinrtApartment {
+        #[expect(unsafe_code, reason = "WinRT apartment cleanup requires FFI")]
+        fn drop(&mut self) {
+            unsafe {
+                RoUninitialize();
+            }
+        }
+    }
+
     #[expect(unsafe_code, reason = "WinRT apartment initialization requires FFI")]
-    fn init_winrt() -> Result<(), WindowsPairingError> {
-        unsafe { RoInitialize(RO_INIT_MULTITHREADED).map_err(|e| api_error(&e)) }
+    fn init_winrt() -> Result<WinrtApartment, WindowsPairingError> {
+        unsafe {
+            RoInitialize(RO_INIT_MULTITHREADED).map_err(|e| api_error(&e))?;
+        }
+        Ok(WinrtApartment)
     }
 
     fn api_error(error: &windows::core::Error) -> WindowsPairingError {
