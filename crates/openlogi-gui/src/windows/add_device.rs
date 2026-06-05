@@ -434,10 +434,12 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                     action_button("ad-retry", tr!("Try again"), pal, true)
                         .on_click(|_, _, cx| start_search(cx)),
                 );
-                col = col.child(
-                    action_button("ad-windows-retry", tr!("Windows Bluetooth"), pal, false)
-                        .on_click(|_, _, cx| start_windows_search(cx)),
-                );
+                if cfg!(target_os = "windows") {
+                    col = col.child(
+                        action_button("ad-windows-retry", tr!("Windows Bluetooth"), pal, false)
+                            .on_click(|_, _, cx| start_windows_search(cx)),
+                    );
+                }
             } else {
                 col = col.child(
                     action_button("ad-done", tr!("Done"), pal, false)
