@@ -4628,7 +4628,6 @@ dependencies = [
  "futures",
  "hex",
  "hidreport",
- "lazy_static",
  "num_enum",
  "rand 0.9.4",
  "serde",
