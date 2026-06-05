@@ -25,7 +25,7 @@ use openlogi_assets::{
 use openlogi_core::device::DeviceModelInfo;
 use tracing::{debug, warn};
 
-use self::images::{buttons_image_for, read_png_dimensions, variant_image_for};
+use self::images::{buttons_image_for, load_manifest, read_png_dimensions, variant_image_for};
 use self::paths::{bundle_assets_root, load_index, user_cache_root};
 
 #[derive(Debug, Clone)]
@@ -135,12 +135,18 @@ impl AssetResolver {
             // manifest is keyed on `2b034` while the index lists `2b043`
             // first. Try each listed id as the variant base so the right
             // colour render resolves regardless of which pid Logi keyed on.
-            let buttons_name = entry
-                .model_id_candidates()
-                .find_map(|base| buttons_image_for(&dir, base, model.extended_model_id));
-            let variant_front_name = entry
-                .model_id_candidates()
-                .find_map(|base| variant_image_for(&dir, base, model.extended_model_id));
+            // Parse the manifest once and consult it for every candidate.
+            let manifest = load_manifest(&dir);
+            let buttons_name = manifest.as_ref().and_then(|m| {
+                entry
+                    .model_id_candidates()
+                    .find_map(|base| buttons_image_for(m, base, model.extended_model_id))
+            });
+            let variant_front_name = manifest.as_ref().and_then(|m| {
+                entry
+                    .model_id_candidates()
+                    .find_map(|base| variant_image_for(m, base, model.extended_model_id))
+            });
             // Front/hero render for the gallery: the colour variant's
             // `device_image`, falling back to the generic front renders. Resolved
             // against this same root so it sits beside the buttons image.
