@@ -158,8 +158,11 @@ fn main() -> Result<()> {
 
     // Manual asset actions (Settings → Assets): Refresh / Clear cache. The
     // sender is published as a global so the Settings window can drive the
-    // sync that lives on the main loop below.
+    // sync that lives on the main loop below; the loop keeps a second sender
+    // (`asset_ctrl_self_tx`) to re-issue a command it had to defer while a
+    // sync was in flight.
     let (asset_ctrl_tx, mut asset_ctrl_rx) = tokio::sync::mpsc::unbounded_channel::<AssetCommand>();
+    let asset_ctrl_self_tx = asset_ctrl_tx.clone();
 
     // `with_assets` registers the embedded app logo ([`app_assets`]) plus the
     // lucide SVGs that back `gpui_component::IconName`; without it `img()` /
@@ -268,6 +271,11 @@ fn main() -> Result<()> {
             // Clear (the AssetControl arm below) can sync the current devices
             // without waiting for the next snapshot.
             let mut latest_inv: Vec<DeviceInventory> = Vec::new();
+            // A manual Refresh / Clear that arrived while a sync was in
+            // flight: stashed here and run by the sync-outcome arm the moment
+            // that sync finishes, so a Clear's cache wipe never races the
+            // in-flight fetch's writes and the manual fetch is never dropped.
+            let mut deferred_manual: Option<AssetCommand> = None;
             // Cleared when the IPC update channel closes (the client thread
             // died), so the select stops polling a closed receiver.
             let mut ipc_open = true;
@@ -364,34 +372,49 @@ fn main() -> Result<()> {
                         }
                     },
                     Some(cmd) = asset_ctrl_rx.recv() => {
-                        // Manual Refresh / Clear from Settings → Assets. Clear
-                        // wipes the per-user cache first; both then force a
-                        // fresh fetch for the current devices — bypassing the
-                        // auto-download setting and the release-bundle
-                        // `sync_enabled` gate — resetting the retry backoff so
-                        // the next automatic attempt isn't delayed.
-                        if matches!(cmd, AssetCommand::ClearCache) {
-                            if let Err(e) = asset::clear_cache() {
-                                warn!(error = %e, "could not clear asset cache");
+                        // Manual Refresh / Clear from Settings → Assets. Both
+                        // force a fresh fetch for the current devices —
+                        // bypassing the auto-download setting and the
+                        // release-bundle `sync_enabled` gate — and Clear wipes
+                        // the per-user cache first, resetting the retry backoff
+                        // so the next automatic attempt isn't delayed.
+                        if sync_running {
+                            // A sync is writing the cache right now. Stash the
+                            // command; the outcome arm re-issues it the moment
+                            // that sync finishes, so a Clear never wipes the
+                            // cache out from under the running fetch and a
+                            // second writer is never spawned alongside it. A
+                            // queued Clear wins over a later Refresh — Clear
+                            // re-fetches too, so collapsing to Refresh would
+                            // silently drop the wipe.
+                            if matches!(cmd, AssetCommand::ClearCache)
+                                || !matches!(deferred_manual, Some(AssetCommand::ClearCache))
+                            {
+                                deferred_manual = Some(cmd);
                             }
-                            // The on-disk cache is gone: drop the bookkeeping
-                            // that says otherwise (so the automatic sync can
-                            // re-fetch a device that reconnects later), rebuild
-                            // the resolver, and repaint so cleared art falls
-                            // back to the silhouette immediately.
-                            synced_keys.clear();
-                            index_refreshed = false;
-                            cache = asset::AssetResolver::new();
-                            cx.update(|cx| {
-                                let changed = cx.update_global::<AppState, _>(|state, _| {
-                                    state.refresh_inventories(&latest_inv, &cache, true)
-                                });
-                                if changed {
-                                    cx.refresh_windows();
+                        } else {
+                            if matches!(cmd, AssetCommand::ClearCache) {
+                                if let Err(e) = asset::clear_cache() {
+                                    warn!(error = %e, "could not clear asset cache");
                                 }
-                            });
-                        }
-                        if !sync_running {
+                                // The on-disk cache is gone: drop the bookkeeping
+                                // that says otherwise (so the automatic sync can
+                                // re-fetch a device that reconnects later), rebuild
+                                // the resolver, and repaint so cleared art falls
+                                // back to the silhouette (or bundled art)
+                                // immediately.
+                                synced_keys.clear();
+                                index_refreshed = false;
+                                cache = asset::AssetResolver::new();
+                                cx.update(|cx| {
+                                    let changed = cx.update_global::<AppState, _>(|state, _| {
+                                        state.refresh_inventories(&latest_inv, &cache, true)
+                                    });
+                                    if changed {
+                                        cx.refresh_windows();
+                                    }
+                                });
+                            }
                             sync_running = true;
                             sync_attempts = 0;
                             last_sync_at = None;
@@ -420,6 +443,14 @@ fn main() -> Result<()> {
                             synced_keys.extend(outcome.keys);
                             cache = asset::AssetResolver::new();
                             assets_dirty = true;
+                        }
+                        // A manual Refresh / Clear that landed mid-sync waited
+                        // for this moment: re-issue it now that the cache is no
+                        // longer being written. The arm above runs it (sync is
+                        // idle again) — or re-defers if a new sync already
+                        // started in the meantime.
+                        if let Some(cmd) = deferred_manual.take() {
+                            let _ = asset_ctrl_self_tx.send(cmd);
                         }
                     }
                     Some(update) = ipc_pairing.recv() => {
