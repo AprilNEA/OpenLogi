@@ -35,18 +35,18 @@ rust-i18n = "4"
 sys-locale = "0.3.2"
 gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.3", features = ["gpui"] }
 
-# Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. Same crates the
-# openlogi-hook CGEventTap uses, so the toolchain is already proven here.
+# Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. objc2 gives typed,
+# `Retained<T>`-owned AppKit bindings so the status-item code can't leak (#99).
 [target.'cfg(target_os = "macos")'.dependencies]
-cocoa = "0.26"
-objc = "0.2"
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication"] }
+objc2-foundation = { version = "0.3.2", features = ["NSString"] }
 
-# Mirrors [workspace.lints], plus an allow for the legacy `cfg(cargo-clippy)`
-# check emitted by objc 0.2's macros (same as openlogi-hook). unsafe_code stays
-# denied; the menubar module opts in locally with #[expect(unsafe_code)].
+# unsafe_code stays denied; the status-item/tray modules opt in locally with
+# #[expect(unsafe_code)] for the few objc2 calls (init-with-action, set-target,
+# super-init) that remain unsafe.
 [lints.rust]
 unsafe_code = "deny"
-unexpected_cfgs = { level = "allow", check-cfg = [] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
