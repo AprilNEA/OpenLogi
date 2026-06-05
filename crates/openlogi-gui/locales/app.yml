@@ -585,6 +585,79 @@ _version: 2
   zh-HK: 新增
   zh-TW: 新增
 
+# ── SmartShift panel (components/smartshift_panel.rs) ───────────────────────
+# "SmartShift" (card title) and "On"/"Off" are intentionally absent: the brand
+# name is identical across locales (English-key fallback), and On/Off are
+# already defined for the lighting toggle above. "Sensitivity" is rendered as
+# "切换灵敏度" / "切り替え感度" etc. rather than the bare "灵敏度" the DPI panel
+# uses, so the two cards stacked in the Pointer tab stay distinguishable.
+"Wheel mode":
+  ja: ホイールモード
+  ru: "Режим колеса"
+  zh-CN: 滚轮模式
+  zh-HK: 滾輪模式
+  zh-TW: 滾輪模式
+"Free spin":
+  ja: フリースピン
+  ru: "Свободное вращение"
+  zh-CN: 自由滚动
+  zh-HK: 自由滾動
+  zh-TW: 自由滾動
+"Ratchet":
+  ja: ラチェット
+  ru: "Трещотка"
+  zh-CN: 棘轮
+  zh-HK: 棘輪
+  zh-TW: 棘輪
+"Sensitivity":
+  ja: 切り替え感度
+  ru: "Чувствительность переключения"
+  zh-CN: 切换灵敏度
+  zh-HK: 切換靈敏度
+  zh-TW: 切換靈敏度
+"Higher keeps the ratchet engaged longer before free-spin.":
+  ja: 値を大きくすると、フリースピンに切り替わるまでラチェットが長く維持されます。
+  ru: "Большее значение дольше удерживает трещотку до перехода в свободное вращение."
+  zh-CN: 数值越高，棘轮保持越久才进入自由滚动。
+  zh-HK: 數值越高，棘輪維持越久才進入自由滾動。
+  zh-TW: 數值越高，棘輪維持越久才會進入自由滾動。
+"Permanent ratchet":
+  ja: 常時ラチェット
+  ru: "Постоянная трещотка"
+  zh-CN: 永久棘轮
+  zh-HK: 永久棘輪
+  zh-TW: 永久棘輪
+"Never auto-switch to free-spin.":
+  ja: フリースピンに自動で切り替えません。
+  ru: "Никогда автоматически не переключаться в свободное вращение."
+  zh-CN: 永不自动切换到自由滚动。
+  zh-HK: 永不自動切換至自由滾動。
+  zh-TW: 永不自動切換至自由滾動。
+"Device offline — SmartShift unavailable.":
+  ja: デバイスがオフラインです — SmartShift は利用できません。
+  ru: "Устройство не в сети — SmartShift недоступен."
+  zh-CN: 设备离线 —— SmartShift 不可用。
+  zh-HK: 裝置離線 —— SmartShift 不可用。
+  zh-TW: 裝置離線 —— SmartShift 無法使用。
+"Reading SmartShift settings…":
+  ja: SmartShift 設定を読み取り中…
+  ru: "Чтение настроек SmartShift…"
+  zh-CN: 正在读取 SmartShift 设置…
+  zh-HK: 正在讀取 SmartShift 設定…
+  zh-TW: 正在讀取 SmartShift 設定…
+"Couldn't read SmartShift — click to retry.":
+  ja: SmartShift を読み取れませんでした — クリックして再試行。
+  ru: "Не удалось прочитать SmartShift — нажмите, чтобы повторить."
+  zh-CN: 无法读取 SmartShift —— 点击重试。
+  zh-HK: 無法讀取 SmartShift —— 點擊重試。
+  zh-TW: 無法讀取 SmartShift —— 按一下重試。
+"This device does not support SmartShift.":
+  ja: このデバイスは SmartShift に対応していません。
+  ru: "Это устройство не поддерживает SmartShift."
+  zh-CN: 此设备不支持 SmartShift。
+  zh-HK: 此裝置不支援 SmartShift。
+  zh-TW: 此裝置不支援 SmartShift。
+
 # ── Binding popover scaffolding (mouse_model/picker.rs) ─────────────────────
 "Bind %{name}":
   ja: "%{name} を割り当て"
