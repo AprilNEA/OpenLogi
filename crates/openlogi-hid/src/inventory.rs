@@ -143,11 +143,8 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
             "paired slot"
         );
 
-        // The pairing register already supplies a kind here, so only spend a
-        // `0x0005` round-trip when it came back `Unknown` (see `probe_features`).
-        let register_kind = map_kind(bolt_kind);
         let (battery, model_info, probed_kind) = if online {
-            probe_features(&channel, slot, register_kind == DeviceKind::Unknown).await
+            probe_features(&channel, slot).await
         } else {
             (None, None, None)
         };
@@ -155,7 +152,9 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
             slot,
             codename,
             wpid,
-            kind: resolve_device_kind(register_kind, probed_kind),
+            // Prefer the device's own `0x0005` type; the register kind is the
+            // offline fallback.
+            kind: resolve_device_kind(probed_kind, map_kind(bolt_kind)),
             online,
             battery,
             model_info,
@@ -195,9 +194,7 @@ async fn probe_direct(
     channel: Arc<HidppChannel>,
     info: &async_hid::DeviceInfo,
 ) -> Option<DeviceInventory> {
-    // The receiver-less path has no pairing register, so always ask `0x0005`.
-    let (battery, model_info, probed_kind) =
-        probe_features(&channel, DIRECT_DEVICE_INDEX, true).await;
+    let (battery, model_info, probed_kind) = probe_features(&channel, DIRECT_DEVICE_INDEX).await;
     // Hybrid peripheral discriminator. A genuine directly-attached device is
     // either wireless/Bluetooth — which reports a battery — or wired, which
     // reports none but still exposes a control feature (adjustable DPI or
@@ -244,7 +241,7 @@ async fn probe_direct(
             // Bluetooth-direct mouse would stay `Unknown` and lose its
             // button/pointer tabs to the wired-keyboard lighting heuristic
             // (issue #127).
-            kind: resolve_device_kind(DeviceKind::Unknown, probed_kind),
+            kind: resolve_device_kind(probed_kind, DeviceKind::Unknown),
             online: true,
             battery,
             model_info,
@@ -291,18 +288,18 @@ async fn read_codename(channel: &HidppChannel, slot: u8) -> Option<String> {
 }
 
 /// Open a HID++ session for `slot` and query the features we care about
-/// (battery, device-information, and — when `read_device_type` — the `0x0005`
-/// device type) in one shot. Returns `(battery, model, kind)`; any field may be
-/// `None` if the device doesn't expose that feature or the read fails. Device
-/// sessions are expensive (multi-round-trip) so we fold every read through the
-/// same `Device::new` + `enumerate_features`.
+/// (battery, device-information, `0x0005` device type) in one shot. Returns
+/// `(battery, model, kind)`; any field may be `None` if the device doesn't
+/// expose that feature or the read fails. Device sessions are expensive
+/// (multi-round-trip) so we fold every read through the same `Device::new` +
+/// `enumerate_features`.
 ///
-/// `read_device_type` is `false` on the Bolt path when the pairing register
-/// already gave a concrete kind, so the common case spends no extra round-trip.
+/// Only online, responsive devices reach here, so the `0x0005` read is one
+/// extra short round-trip on a device that just answered two others — cheap,
+/// and the authoritative kind source (see [`resolve_device_kind`]).
 async fn probe_features(
     channel: &Arc<HidppChannel>,
     slot: u8,
-    read_device_type: bool,
 ) -> (
     Option<BatteryInfo>,
     Option<DeviceModelInfo>,
@@ -369,22 +366,19 @@ async fn probe_features(
         None => None,
     };
 
-    // `0x0005` reports the device's marketing type (mouse, keyboard, …). On the
-    // direct path this is the only kind signal; on the Bolt path it backstops a
-    // pairing register that reported `Unknown`. Skipped otherwise to avoid a
-    // round-trip the caller would only discard.
-    let kind = match (
-        read_device_type,
-        device.get_feature::<DeviceTypeAndNameFeature>(),
-    ) {
-        (true, Some(feature)) => match feature.get_device_type().await {
+    // `0x0005` reports the device's own marketing type (mouse, keyboard, …) —
+    // the authoritative kind signal. On the direct path it's the only one; on
+    // the Bolt path it corrects a pairing register that reported the wrong (or
+    // `Unknown`) kind.
+    let kind = match device.get_feature::<DeviceTypeAndNameFeature>() {
+        Some(feature) => match feature.get_device_type().await {
             Ok(ty) => Some(map_device_type(ty)),
             Err(e) => {
                 debug!(slot, error = ?e, "DeviceType read failed");
                 None
             }
         },
-        _ => None,
+        None => None,
     };
 
     (battery, model_info, kind)
@@ -462,16 +456,20 @@ fn map_device_type(ty: HidppDeviceType) -> DeviceKind {
     }
 }
 
-/// Resolve a device's kind from a `primary` source (the Bolt pairing register,
-/// or `Unknown` on the receiver-less direct path) and a `secondary` source (the
-/// HID++ `0x0005` probe). The primary wins unless it is [`DeviceKind::Unknown`],
-/// in which case we fall back to the probe — that's what keeps a Bluetooth-direct
-/// mouse from being mistaken for a wired keyboard (issue #127).
-fn resolve_device_kind(primary: DeviceKind, secondary: Option<DeviceKind>) -> DeviceKind {
-    if primary == DeviceKind::Unknown {
-        secondary.unwrap_or(DeviceKind::Unknown)
-    } else {
-        primary
+/// Resolve a device's kind, preferring the device's own HID++ `0x0005` report
+/// (`probed`) over the receiver-supplied `register` kind.
+///
+/// `0x0005` is the device's self-reported marketing type and is authoritative;
+/// the Bolt pairing register is a coarser hint that can misreport (e.g. an
+/// MX Anywhere 3S surfacing as `Keyboard`, which strips its button/pointer tabs
+/// — issue #127). We therefore trust `probed` whenever it names a kind we model,
+/// falling back to `register` when the device was offline (no probe → `None`),
+/// didn't answer `0x0005`, or reported a type we don't map (`Unknown`). On the
+/// receiver-less direct path `register` is simply `Unknown`.
+fn resolve_device_kind(probed: Option<DeviceKind>, register: DeviceKind) -> DeviceKind {
+    match probed {
+        Some(kind) if kind != DeviceKind::Unknown => kind,
+        _ => register,
     }
 }
 
@@ -501,29 +499,40 @@ mod tests {
     use super::{DeviceKind, resolve_device_kind};
 
     #[test]
-    fn resolve_kind_keeps_a_known_primary() {
-        // A Bolt register that already says "mouse" is authoritative; a stray
-        // `0x0005` answer must not override it.
+    fn probe_overrides_a_misreporting_register() {
+        // The crux of #127: a Bolt register calling an MX Anywhere 3S a
+        // `Keyboard` must lose to the device's own `0x0005` = `Mouse`.
         assert_eq!(
-            resolve_device_kind(DeviceKind::Mouse, Some(DeviceKind::Keyboard)),
+            resolve_device_kind(Some(DeviceKind::Mouse), DeviceKind::Keyboard),
             DeviceKind::Mouse
         );
     }
 
     #[test]
-    fn resolve_kind_falls_back_to_the_probe_when_primary_unknown() {
-        // The direct path (and an Unknown Bolt register) defers to the probe —
-        // this is what restores the button/pointer tabs for a BT-direct mouse.
+    fn probe_supplies_the_kind_on_the_direct_path() {
+        // No pairing register on the direct path (register = Unknown); the probe
+        // is what restores the button/pointer tabs for a BT-direct mouse.
         assert_eq!(
-            resolve_device_kind(DeviceKind::Unknown, Some(DeviceKind::Mouse)),
+            resolve_device_kind(Some(DeviceKind::Mouse), DeviceKind::Unknown),
             DeviceKind::Mouse
         );
     }
 
     #[test]
-    fn resolve_kind_stays_unknown_without_a_probe() {
+    fn register_is_the_fallback_when_the_probe_is_absent_or_unmodelled() {
+        // Offline device / no `0x0005` answer → trust the register.
         assert_eq!(
-            resolve_device_kind(DeviceKind::Unknown, None),
+            resolve_device_kind(None, DeviceKind::Mouse),
+            DeviceKind::Mouse
+        );
+        // A `0x0005` type we don't model also defers to the register.
+        assert_eq!(
+            resolve_device_kind(Some(DeviceKind::Unknown), DeviceKind::Keyboard),
+            DeviceKind::Keyboard
+        );
+        // Nothing to go on → Unknown (direct path, no probe).
+        assert_eq!(
+            resolve_device_kind(None, DeviceKind::Unknown),
             DeviceKind::Unknown
         );
     }
