@@ -4611,6 +4611,7 @@ version = "0.5.1"
 dependencies = [
  "async-hid",
  "futures-lite 2.6.1",
+ "num_enum",
  "openlogi-core",
  "openlogi-hidpp",
  "thiserror 2.0.18",

@@ -25,36 +25,20 @@ use hidpp::{
     nibble::U4,
     protocol::v20::{self, Hidpp20Error},
 };
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 /// SmartShift mode values understood by the firmware. `Free` = free-spin,
-/// `Ratchet` = clicky / smartshift-off.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `Ratchet` = clicky / smartshift-off. The discriminant is the wire byte;
+/// reserved values (`0` / `3` / future) fail [`TryFrom`] and callers fall back
+/// to whatever they consider sane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoPrimitive, TryFromPrimitive)]
+#[repr(u8)]
 pub enum SmartShiftMode {
-    Free,
-    Ratchet,
+    Free = 1,
+    Ratchet = 2,
 }
 
 impl SmartShiftMode {
-    /// Wire byte for the `setRatchetControlMode` request.
-    #[must_use]
-    pub fn as_byte(self) -> u8 {
-        match self {
-            SmartShiftMode::Free => 1,
-            SmartShiftMode::Ratchet => 2,
-        }
-    }
-
-    /// Inverse of [`Self::as_byte`]. `None` for reserved values (0 / 3 /
-    /// future). Callers fall back to whatever they consider sane.
-    #[must_use]
-    pub fn from_byte(b: u8) -> Option<Self> {
-        match b {
-            1 => Some(Self::Free),
-            2 => Some(Self::Ratchet),
-            _ => None,
-        }
-    }
-
     /// The opposite mode — used by [`crate::write::toggle_smartshift`].
     #[must_use]
     pub fn flipped(self) -> Self {
@@ -135,7 +119,7 @@ impl SmartShiftFeatureV0 {
             ))
             .await?;
         let payload = response.extend_payload();
-        let mode = SmartShiftMode::from_byte(payload[0]).unwrap_or(SmartShiftMode::Ratchet);
+        let mode = SmartShiftMode::try_from(payload[0]).unwrap_or(SmartShiftMode::Ratchet);
         Ok(SmartShiftStatus {
             mode,
             auto_disengage: payload[1],
@@ -162,7 +146,7 @@ impl SmartShiftFeatureV0 {
                     function_id: U4::from_lo(FUNCTION_SET_STATUS),
                     software_id: self.chan.get_sw_id(),
                 },
-                [mode.as_byte(), auto_disengage, tunable_torque],
+                [u8::from(mode), auto_disengage, tunable_torque],
             ))
             .await?;
         Ok(())

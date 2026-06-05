@@ -18,6 +18,7 @@ tokio = { workspace = true }
 futures-lite = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+num_enum = "0.7.3"
 
 [lints]
 workspace = true
