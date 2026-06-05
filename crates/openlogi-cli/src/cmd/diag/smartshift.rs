@@ -1,5 +1,7 @@
 //! `openlogi diag smartshift` — SmartShift toggle round-trip.
 
+use std::num::NonZeroU8;
+
 use anyhow::{Context, Result};
 use clap::Args;
 
@@ -15,9 +17,10 @@ pub struct SmartshiftArgs {
     /// Set the auto-disengage sensitivity instead of toggling, keeping the
     /// current Free/Ratchet mode. N is 1-255 (the wheel's speed threshold to
     /// free-spin): lower = more sensitive; typical 10-40; 255 = permanent
-    /// ratchet.
+    /// ratchet (only meaningful while in Ratchet mode; the current mode is
+    /// always preserved). `0` is rejected — the device treats it as "no change".
     #[arg(long, value_name = "N")]
-    pub sensitivity: Option<u8>,
+    pub sensitivity: Option<NonZeroU8>,
 }
 
 pub async fn run(args: SmartshiftArgs) -> Result<()> {
@@ -25,10 +28,6 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
     println!("device: {name} ({route})");
 
     if let Some(n) = args.sensitivity {
-        if n == 0 {
-            anyhow::bail!("sensitivity must be 1-255 (0 means \"no change\")");
-        }
-
         let before = openlogi_hid::get_smartshift_status(&route)
             .await
             .context("read SmartShift status")?;
@@ -45,7 +44,7 @@ pub async fn run(args: SmartshiftArgs) -> Result<()> {
             after.mode, after.auto_disengage
         );
 
-        if after.auto_disengage != n {
+        if after.auto_disengage != n.get() {
             anyhow::bail!(
                 "SmartShift sensitivity write not applied: requested {n}, device reports {}",
                 after.auto_disengage
