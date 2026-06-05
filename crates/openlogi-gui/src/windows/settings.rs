@@ -42,6 +42,10 @@ pub struct SettingsView {
     appearance_obs: Option<Subscription>,
     language_select: Entity<SelectState<Vec<LanguageOption>>>,
     sensitivity_slider: Entity<SliderState>,
+    /// Asset-cache size blurb, computed once when the window opens rather than
+    /// re-walking the cache on every render. A snapshot — reopen to refresh
+    /// after a Clear.
+    asset_cache_desc: SharedString,
 }
 
 impl SettingsView {
@@ -77,6 +81,7 @@ impl SettingsView {
             appearance_obs: None,
             language_select,
             sensitivity_slider,
+            asset_cache_desc: cache_size_description(),
         }
     }
 
@@ -159,7 +164,7 @@ impl Render for SettingsView {
                     .sidebar_width(px(210.))
                     .page(general_page(self.sensitivity_slider.clone()))
                     .page(permissions_page(pal))
-                    .page(assets_page(pal))
+                    .page(assets_page(pal, self.asset_cache_desc.clone()))
                     .page(language_page(self.language_select.clone())),
             )
     }
@@ -344,7 +349,7 @@ fn permission_item(
     .description(description)
 }
 
-fn assets_page(pal: Palette) -> SettingPage {
+fn assets_page(pal: Palette, cache_desc: SharedString) -> SettingPage {
     let group = SettingGroup::new()
         .item(
             SettingItem::new(
@@ -392,7 +397,7 @@ fn assets_page(pal: Palette) -> SettingPage {
                     })
                 }),
             )
-            .description(cache_size_description()),
+            .description(cache_desc),
         )
         .item(
             SettingItem::new(
@@ -413,7 +418,8 @@ fn assets_page(pal: Palette) -> SettingPage {
 }
 
 /// Human-readable size of the on-disk asset cache, for the "Clear cache" row.
-/// Recomputed each time the Settings window renders, so it tracks a clear.
+/// Computed once when the Settings window opens (`asset_cache_desc`), not per
+/// render.
 fn cache_size_description() -> SharedString {
     #[allow(
         clippy::cast_precision_loss,
