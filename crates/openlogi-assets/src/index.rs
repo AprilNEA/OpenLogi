@@ -178,6 +178,7 @@ impl Index {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
     use std::collections::HashMap;
@@ -250,6 +251,55 @@ mod tests {
             index.find_by_model_id_suffix("b034").map(|(d, _)| d),
             Some("mx_master_3s")
         );
+    }
+
+    #[test]
+    fn deserializes_modelids_schema_emitted_by_stage_assets() {
+        // The exact entry shape `stage_assets.py` writes — `modelIds` plus
+        // fields the client doesn't model (`extendedDisplayName`). Parsing
+        // must keep the list and resolve the BTLE pid; unknown fields ignored.
+        let json = r#"{
+            "schema_version": 1,
+            "devices": {
+                "mx_master_3s": {
+                    "modelId": "2b043",
+                    "modelIds": ["2b034", "2b043"],
+                    "displayName": "MX Master 3S",
+                    "extendedDisplayName": "Wireless Mouse MX Master 3S",
+                    "type": "MOUSE",
+                    "asset_path": "v1/devices/mx_master_3s/",
+                    "files": [{"name": "front_core.png", "sha256": "ab", "bytes": 1}]
+                }
+            }
+        }"#;
+        let index: Index = serde_json::from_str(json).expect("parse modelIds index");
+        assert_eq!(
+            index.find_by_model_id_suffix("b034").map(|(d, _)| d),
+            Some("mx_master_3s")
+        );
+        assert_eq!(index.devices["mx_master_3s"].model_ids, ["2b034", "2b043"]);
+    }
+
+    #[test]
+    fn deserializes_legacy_schema_without_modelids() {
+        // An index published before `modelIds`: the field is absent, defaults
+        // to empty, and matching still works off the lone `modelId`.
+        let json = r#"{
+            "schema_version": 1,
+            "devices": {
+                "mx_master_3s": {
+                    "modelId": "2b043",
+                    "displayName": "MX Master 3S",
+                    "type": "MOUSE",
+                    "asset_path": "v1/devices/mx_master_3s/",
+                    "files": []
+                }
+            }
+        }"#;
+        let index: Index = serde_json::from_str(json).expect("parse legacy index");
+        let entry = &index.devices["mx_master_3s"];
+        assert!(entry.model_ids.is_empty());
+        assert_eq!(entry.model_id_candidates().collect::<Vec<_>>(), ["2b043"]);
     }
 
     #[test]
