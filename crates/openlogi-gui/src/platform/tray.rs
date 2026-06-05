@@ -121,6 +121,18 @@ mod macos {
         static TRAY: RefCell<Option<TrayState>> = const { RefCell::new(None) };
     }
 
+    /// Debug-time guard for the tray mutators: GPUI drives them on the main
+    /// thread. A future off-main caller is a bug — it would silently no-op
+    /// (the `!Send` `TrayState` only exists in the main thread's TLS), so make
+    /// that loud in debug builds while staying free in release.
+    #[inline]
+    fn debug_assert_main_thread() {
+        debug_assert!(
+            MainThreadMarker::new().is_some(),
+            "tray function called off the main thread"
+        );
+    }
+
     /// Build and show the status item + its menu. A no-op if already installed
     /// or if called off the main thread (it never is — GPUI drives the tray).
     pub fn install(tx: mpsc::UnboundedSender<TrayEvent>) {
@@ -183,6 +195,7 @@ mod macos {
     /// Remove the status item from the system status bar during teardown.
     /// Dropping [`TrayState`] releases every retained object.
     pub fn uninstall() {
+        debug_assert_main_thread();
         TRAY.with_borrow_mut(|slot| {
             if let Some(state) = slot.take() {
                 status_item::remove_status_item(&state.status_item);
@@ -193,6 +206,7 @@ mod macos {
     /// Show or hide the status-item icon without tearing it down — backs the
     /// "Show in menu bar" setting. A no-op until [`install`] has run.
     pub fn set_visible(visible: bool) {
+        debug_assert_main_thread();
         TRAY.with_borrow(|slot| {
             if let Some(state) = slot.as_ref() {
                 state.status_item.setVisible(visible);
@@ -207,6 +221,7 @@ mod macos {
     /// Each title is a fresh `Retained<NSString>` that releases when the
     /// statement ends — no leak, no autorelease pool (the issue-#99 fix).
     pub fn set_device_lines(lines: &[String]) {
+        debug_assert_main_thread();
         TRAY.with_borrow(|slot| {
             let Some(state) = slot.as_ref() else {
                 return;
@@ -236,6 +251,7 @@ mod macos {
     /// Re-title the Open/Quit items for the current locale. The device rows are
     /// refreshed separately via [`set_device_lines`].
     pub fn refresh_labels() {
+        debug_assert_main_thread();
         TRAY.with_borrow(|slot| {
             if let Some(state) = slot.as_ref() {
                 state
@@ -253,6 +269,7 @@ mod macos {
     /// (recomputed from the live `AppState`, which only the task can read) is
     /// rewritten on the main thread alongside the static labels.
     pub fn request_refresh() {
+        debug_assert_main_thread();
         TRAY.with_borrow(|slot| {
             if let Some(state) = slot.as_ref()
                 && state.sender.send(TrayEvent::Refresh).is_err()

@@ -79,6 +79,12 @@ fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
 /// busy and its heap dirty around the clock (issue #99). Reusing one long-lived
 /// backend is the usage async-hid intends, and keeps the device set warm between
 /// polls. `HidBackend` is `Arc`-backed, so this is shared, not copied.
+///
+/// `enumerate` is also reached from `open_route_writer`, so the inventory
+/// watcher and a (rare) lighting write can enumerate through this one backend
+/// concurrently. That is sound: async-hid declares the backend `Send + Sync`,
+/// `enumerate` only reads a snapshot (`IOHIDManagerCopyDevices`), and sharing a
+/// single long-lived `IOHIDManager` across threads is the model hidapi uses too.
 static HID_BACKEND: LazyLock<HidBackend> = LazyLock::new(HidBackend::default);
 
 pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError>
