@@ -51,7 +51,7 @@ serde_json = "1"
 toml = "0.8"
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 sha2 = "0.10"
-backon = "1.6"
+backon = { version = "1.6", default-features = false, features = ["std", "std-blocking-sleep"] }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 thiserror = "2"
