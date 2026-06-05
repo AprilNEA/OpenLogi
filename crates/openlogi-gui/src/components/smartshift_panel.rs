@@ -179,7 +179,11 @@ impl SmartShiftPanel {
                         tr!("Ratchet"),
                         ratchet,
                         SmartShiftMode::Ratchet,
-                        cur_auto,
+                        // `committed`, not `cur_auto`: when the cached value is
+                        // `0xFF` (permanent ratchet) this resolves to the last
+                        // real threshold, so switching to ratchet mode doesn't
+                        // silently re-arm permanent ratchet behind the toggle.
+                        committed,
                         torque,
                         pal,
                     )),

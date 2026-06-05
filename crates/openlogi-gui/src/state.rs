@@ -137,8 +137,10 @@ pub struct AppState {
     /// SmartShift (`0x2111`) configuration state keyed by
     /// [`DeviceRecord::config_key`]. Loaded lazily on the same pattern as
     /// [`Self::dpi_by_device`]; the device persists the values itself, so this
-    /// is a read/write cache, not a source of truth saved to disk.
-    pub smartshift_by_device: BTreeMap<String, SmartShiftLoad>,
+    /// is a read/write cache, not a source of truth saved to disk. Private so
+    /// all access goes through the accessor methods below (`current_smartshift_*`,
+    /// `store_smartshift_status`), which enforce the stale-result and retry rules.
+    smartshift_by_device: BTreeMap<String, SmartShiftLoad>,
     /// Consecutive failed SmartShift read attempts, keyed by
     /// [`DeviceRecord::config_key`] — mirrors [`Self::dpi_load_attempts`].
     smartshift_load_attempts: BTreeMap<String, u8>,
