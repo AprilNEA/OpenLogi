@@ -33,7 +33,6 @@ hidreport = "0.5.0"
 futures = "0.3.31"
 async-trait = "0.1.88"
 rand = "0.9.0"
-lazy_static = "1.5.0"
 num_enum = "0.7.3"
 async-channel = "2.3.1"
 serde = { version = "1.0", features = ["derive"], optional = true }
