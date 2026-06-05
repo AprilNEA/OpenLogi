@@ -15,9 +15,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use backon::{BlockingRetryable, ExponentialBuilder};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
-use tracing::debug;
+use tracing::{debug, warn};
 use ureq::Agent;
 
 use crate::index::{FileEntry, Index};
@@ -34,6 +35,14 @@ const INDEX_NAME: &str = "index.json";
 /// Bound on DNS + TCP + TLS connect. Deliberately does *not* cap body-read
 /// time, so a slow-but-progressing download of a large asset isn't killed.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Retries after the initial attempt for a single GET (3 tries total).
+const MAX_RETRIES: usize = 2;
+
+/// Backoff before the first retry; doubles each attempt (200ms, 400ms,
+/// plus jitter). Keeps a transient blip from needing an app restart
+/// without a fleet of clients hammering the host in lockstep.
+const RETRY_MIN_DELAY: Duration = Duration::from_millis(200);
 
 /// Blocking client for one asset host.
 ///
@@ -127,18 +136,54 @@ impl AssetClient {
         Ok(FetchOutcome::Fetched { bytes })
     }
 
-    /// GET `url` on the shared agent and read the whole body into memory.
-    /// `read_to_vec` caps the body at ureq's default 10 MB — ample for the
-    /// registry JSON and the device PNGs, and a safety net against a
+    /// GET `url` on the shared agent and read the whole body into memory,
+    /// retrying transient failures (timeouts, dropped connections, 5xx) with
+    /// exponential backoff. Permanent failures (4xx, malformed request) fail
+    /// fast. `read_to_vec` caps the body at ureq's default 10 MB — ample for
+    /// the registry JSON and the device PNGs, and a safety net against a
     /// runaway response.
+    ///
+    /// The backoff sleeps block the calling thread, which is fine: every
+    /// caller runs on the sync's dedicated background thread, never the
+    /// async runtime. `backon` defaults to `std::thread::sleep` here.
     fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
-        self.agent
-            .get(url)
+        let policy = ExponentialBuilder::default()
+            .with_min_delay(RETRY_MIN_DELAY)
+            .with_factor(2.0)
+            .with_max_times(MAX_RETRIES)
+            .with_jitter();
+        (|| self.try_get_bytes(url))
+            .retry(policy)
+            .when(is_retryable)
+            .notify(|e: &ureq::Error, dur: Duration| {
+                warn!(%url, backoff_ms = dur.as_millis(), error = ?e, "transient fetch error — retrying");
+            })
             .call()
-            .with_context(|| format!("GET {url}"))?
-            .body_mut()
-            .read_to_vec()
-            .with_context(|| format!("read body {url}"))
+            .map_err(|e| anyhow::Error::new(e).context(format!("GET {url}")))
+    }
+
+    /// One GET + full body read, surfacing the typed [`ureq::Error`] so the
+    /// retry loop in [`get_bytes`](Self::get_bytes) can tell transient
+    /// failures from permanent ones.
+    fn try_get_bytes(&self, url: &str) -> std::result::Result<Vec<u8>, ureq::Error> {
+        self.agent.get(url).call()?.body_mut().read_to_vec()
+    }
+}
+
+/// Whether a failed fetch is worth retrying. Transport-level hiccups
+/// (timeouts, dropped/refused connections, DNS blips) and 5xx — plus the two
+/// "back off and retry" 4xx codes — are transient; a 4xx like 404 or a
+/// malformed-request error won't change on a retry.
+fn is_retryable(error: &ureq::Error) -> bool {
+    use ureq::Error;
+    match error {
+        Error::StatusCode(code) => *code >= 500 || matches!(*code, 408 | 429),
+        Error::Io(_)
+        | Error::Timeout(_)
+        | Error::ConnectionFailed
+        | Error::HostNotFound
+        | Error::Protocol(_) => true,
+        _ => false,
     }
 }
 
@@ -174,4 +219,30 @@ pub fn sha256_of_file(path: &Path) -> Result<String> {
 #[must_use]
 pub fn cached_matches(path: &Path, expected_sha: &str) -> bool {
     sha256_of_file(path).is_ok_and(|actual| actual.eq_ignore_ascii_case(expected_sha))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_retryable;
+    use ureq::Error;
+
+    #[test]
+    fn retries_transient_failures_not_permanent_ones() {
+        // Transient: server errors, the two "back off" 4xx codes, and
+        // transport-level failures all warrant a retry.
+        assert!(is_retryable(&Error::StatusCode(500)));
+        assert!(is_retryable(&Error::StatusCode(503)));
+        assert!(is_retryable(&Error::StatusCode(408)));
+        assert!(is_retryable(&Error::StatusCode(429)));
+        assert!(is_retryable(&Error::HostNotFound));
+        assert!(is_retryable(&Error::ConnectionFailed));
+        assert!(is_retryable(&Error::Io(
+            std::io::ErrorKind::ConnectionReset.into()
+        )));
+
+        // Permanent: a missing file or bad request won't change on retry.
+        assert!(!is_retryable(&Error::StatusCode(404)));
+        assert!(!is_retryable(&Error::StatusCode(400)));
+        assert!(!is_retryable(&Error::StatusCode(403)));
+    }
 }
