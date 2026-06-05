@@ -45,6 +45,7 @@ rust_i18n::i18n!("locales", fallback = "en");
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use gpui::{
@@ -240,9 +241,12 @@ fn main() -> Result<()> {
             let mut hook_handle = None;
             // Asset depots are fetched in the background when devices first
             // appear — startup no longer blocks on it. The sync runs once on
-            // success, but a failed attempt is retried on the next snapshot
-            // instead of being latched off for the session (see SYNC_*).
+            // success; a failed attempt is retried (see SYNC_*) with a
+            // growing, capped delay so a permanently-down host isn't polled
+            // every tick yet a recovered one still self-heals.
             let sync_state = Arc::new(AtomicU8::new(SYNC_IDLE));
+            let mut sync_attempts: u32 = 0;
+            let mut last_sync_at: Option<Instant> = None;
             loop {
                 tokio::select! {
                     Some(new_inv) = inventory_rx.recv() => {
@@ -251,13 +255,18 @@ fn main() -> Result<()> {
                         // alone could fire on a device whose DeviceInformation read
                         // hasn't resolved yet, leaving its art un-synced. `RUNNING`
                         // blocks a second concurrent sync; `DONE` latches it off;
-                        // `FAILED` lets this 2 s tick retry, so a transient network
-                        // error no longer strands the device on the silhouette
-                        // until an app restart.
+                        // `FAILED` retries once its backoff window elapses, so a
+                        // transient network error no longer strands the device on
+                        // the silhouette until an app restart.
                         let state = sync_state.load(Ordering::Acquire);
+                        let backoff_passed = last_sync_at
+                            .is_none_or(|t| t.elapsed() >= sync_retry_delay(sync_attempts));
                         if matches!(state, SYNC_IDLE | SYNC_FAILED)
+                            && backoff_passed
                             && !collect_models(&new_inv).is_empty()
                         {
+                            sync_attempts = sync_attempts.saturating_add(1);
+                            last_sync_at = Some(Instant::now());
                             sync_state.store(SYNC_RUNNING, Ordering::Release);
                             let inv = new_inv.clone();
                             let state = Arc::clone(&sync_state);
@@ -355,6 +364,18 @@ const SYNC_IDLE: u8 = 0;
 const SYNC_RUNNING: u8 = 1;
 const SYNC_DONE: u8 = 2;
 const SYNC_FAILED: u8 = 3;
+
+/// Minimum gap before re-attempting a failed sync, doubling with each
+/// consecutive attempt and capped at a minute. The first attempt is
+/// immediate (`last_sync_at` is `None`); after that a permanently-down host
+/// is polled ever more slowly (1s, 2s, 4s … 60s) instead of on every tick,
+/// while a recovered host still self-heals on the next attempt.
+fn sync_retry_delay(attempts: u32) -> Duration {
+    const CAP: Duration = Duration::from_secs(60);
+    // Cap the shift so `1 << exp` can't overflow, then clamp the result.
+    let exp = attempts.saturating_sub(1).min(6);
+    Duration::from_secs(1u64 << exp).min(CAP)
+}
 
 /// Refresh the asset cache for the connected devices. Returns `true` when the
 /// sync completed (or wasn't needed) and `false` when it failed and should be
@@ -499,4 +520,21 @@ fn collect_models(inventories: &[DeviceInventory]) -> Vec<(DeviceModelInfo, Opti
         .flat_map(|inv| inv.paired.iter())
         .filter_map(|p| p.model_info.clone().map(|m| (m, p.codename.clone())))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sync_retry_delay;
+    use std::time::Duration;
+
+    #[test]
+    fn retry_delay_doubles_then_caps() {
+        assert_eq!(sync_retry_delay(1), Duration::from_secs(1));
+        assert_eq!(sync_retry_delay(2), Duration::from_secs(2));
+        assert_eq!(sync_retry_delay(3), Duration::from_secs(4));
+        assert_eq!(sync_retry_delay(5), Duration::from_secs(16));
+        // Caps at 60s and never overflows the shift for large attempt counts.
+        assert_eq!(sync_retry_delay(7), Duration::from_secs(60));
+        assert_eq!(sync_retry_delay(u32::MAX), Duration::from_secs(60));
+    }
 }
