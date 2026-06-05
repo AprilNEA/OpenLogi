@@ -16,7 +16,7 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
-    HC_ACTION, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostThreadMessageW,
+    HC_ACTION, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostThreadMessageW,
     SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_QUIT,
     WM_RBUTTONDOWN, WM_RBUTTONUP, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
@@ -180,6 +180,10 @@ fn hook_data(lparam: LPARAM) -> Option<MSLLHOOKSTRUCT> {
 }
 
 fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
+    if data.flags & LLMHF_INJECTED != 0 {
+        return None;
+    }
+
     let pressed = match wparam as u32 {
         WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => Some(true),
         WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_XBUTTONUP => Some(false),
@@ -257,4 +261,19 @@ fn last_error(context: &str) -> HookError {
     HookError::WindowsHook(format!("{context} failed with GetLastError={}", unsafe {
         GetLastError()
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn translate_event_ignores_injected_mouse_input() {
+        let data = MSLLHOOKSTRUCT {
+            flags: LLMHF_INJECTED,
+            ..MSLLHOOKSTRUCT::default()
+        };
+
+        assert!(translate_event(WM_LBUTTONDOWN as WPARAM, data).is_none());
+    }
 }
