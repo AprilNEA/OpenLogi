@@ -8,7 +8,10 @@
 //! collections carry both reports; BLE-direct collections are long-only, and the
 //! `hidpp` channel up-converts outgoing short messages to long for them.
 
-use std::{error::Error, sync::Arc};
+use std::{
+    error::Error,
+    sync::{Arc, LazyLock},
+};
 
 use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceInfo, DeviceReader, DeviceWriter, HidBackend};
 use futures_lite::StreamExt as _;
@@ -67,10 +70,20 @@ fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
         .any(|&(page, usage, long_only)| long_only && (page, usage) == (usage_page, usage_id))
 }
 
+/// Process-wide HID backend, created once and reused for every enumeration.
+///
+/// async-hid's macOS backend wraps an `IOHIDManager`; `HidBackend::default()`
+/// builds, schedules, and (on drop) cancels one. The inventory watcher
+/// enumerates every ~2 s, so building a fresh backend per call spun up and tore
+/// down an `IOHIDManager` on every tick — needless churn that kept the process
+/// busy and its heap dirty around the clock (issue #99). Reusing one long-lived
+/// backend is the usage async-hid intends, and keeps the device set warm between
+/// polls. `HidBackend` is `Arc`-backed, so this is shared, not copied.
+static HID_BACKEND: LazyLock<HidBackend> = LazyLock::new(HidBackend::default);
+
 pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError>
 {
-    let backend = HidBackend::default();
-    let all: Vec<async_hid::Device> = backend.enumerate().await?.collect().await;
+    let all: Vec<async_hid::Device> = HID_BACKEND.enumerate().await?.collect().await;
 
     // One-time visibility into what the OS actually reports for Logitech nodes,
     // so a transport that uses an unexpected vendor page (e.g. a new BLE mouse)
