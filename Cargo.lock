@@ -4590,6 +4590,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "openlogi-agent"
+version = "0.5.1"
+dependencies = [
+ "openlogi-agent-core",
+ "openlogi-core",
+ "openlogi-hook",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "openlogi-agent-core"
 version = "0.5.1"
 dependencies = [

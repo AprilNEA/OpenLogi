@@ -88,3 +88,10 @@ publish = false
 name = "openlogi-agent-core"
 release = false
 publish = false
+
+# The headless background agent binary — shipped as a login-item helper inside
+# the .app, never published. publish=false mirrors its Cargo.toml.
+[[package]]
+name = "openlogi-agent"
+release = false
+publish = false
