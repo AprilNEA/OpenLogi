@@ -1,6 +1,6 @@
 //! Device-list construction and selection helpers for [`super::AppState`].
 
-use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceKind};
+use openlogi_core::device::{BatteryInfo, Capabilities, DeviceInventory, DeviceKind};
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 use tracing::debug;
 
@@ -25,6 +25,11 @@ pub struct DeviceRecord {
     pub unit_id: [u8; 4],
     pub route: Option<DeviceRoute>,
     pub kind: DeviceKind,
+    /// Configuration capabilities from the device's HID++ feature table. `None`
+    /// when the device couldn't be probed (offline); the snapshot merge carries
+    /// the last-known value forward, and the UI falls back to
+    /// [`Capabilities::presumed_from_kind`] for a never-probed device.
+    pub capabilities: Option<Capabilities>,
     pub slot: u8,
     pub online: bool,
     pub battery: Option<BatteryInfo>,
@@ -79,6 +84,7 @@ pub(super) fn build_device_list(
                 unit_id: model.unit_id,
                 route: device_route(inv, paired.slot),
                 kind,
+                capabilities: paired.capabilities,
                 slot: paired.slot,
                 online: paired.online,
                 battery: paired.battery.clone(),
@@ -156,6 +162,10 @@ fn demo_keyboard() -> DeviceRecord {
         unit_id: [0; 4],
         route: None,
         kind: DeviceKind::Keyboard,
+        capabilities: Some(Capabilities {
+            lighting: true,
+            ..Capabilities::default()
+        }),
         slot: 0,
         online: true,
         battery: None,

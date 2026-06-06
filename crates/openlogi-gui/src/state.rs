@@ -390,8 +390,15 @@ impl AppState {
         let mut merged = Vec::with_capacity(by_key.len().max(self.device_list.len()));
 
         for previous in &self.device_list {
-            if let Some(record) = by_key.remove(&previous.config_key) {
+            if let Some(mut record) = by_key.remove(&previous.config_key) {
                 self.inventory_misses.remove(&previous.config_key);
+                // Capabilities can only be measured while the device is online.
+                // When a known device goes offline (or a probe fails) the fresh
+                // record carries `None`; keep the last-known set so a sleeping
+                // mouse doesn't lose its button/pointer panels.
+                if record.capabilities.is_none() {
+                    record.capabilities = previous.capabilities;
+                }
                 merged.push(record);
                 continue;
             }

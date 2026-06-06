@@ -22,8 +22,8 @@ use hidpp::{
     },
 };
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, DeviceInventory, DeviceKind, DeviceModelInfo,
-    DeviceTransports, PairedDevice, ReceiverInfo,
+    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
+    DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
 };
 use thiserror::Error;
 use tokio::time::timeout;
@@ -144,16 +144,17 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
         );
 
         let register_kind = map_kind(bolt_kind);
-        let (battery, model_info, probed_kind) = if online {
+        let probe = if online {
             probe_features(&channel, slot).await
         } else {
-            (None, None, None)
+            ProbedFeatures::default()
         };
         // Surface a real cross-source disagreement (both sides confident, but
-        // different) — it means a HID++ kind source misreported this device, the
-        // exact failure behind #127. Logged at debug since `enumerate` re-runs
-        // on a 2s watcher tick; a `RUST_LOG=openlogi_hid=debug` run shows it.
-        if let Some(probed) = probed_kind
+        // different) — it means a HID++ kind source misreported this device.
+        // Kind is now an identity hint only (the UI gates on capabilities), so
+        // this is purely diagnostic; logged at debug since `enumerate` re-runs
+        // on a 2s watcher tick.
+        if let Some(probed) = probe.kind
             && probed != DeviceKind::Unknown
             && register_kind != DeviceKind::Unknown
             && probed != register_kind
@@ -171,10 +172,11 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
             wpid,
             // Prefer the device's own `0x0005` type; the register kind is the
             // offline fallback.
-            kind: resolve_device_kind(probed_kind, register_kind),
+            kind: resolve_device_kind(probe.kind, register_kind),
             online,
-            battery,
-            model_info,
+            battery: probe.battery,
+            model_info: probe.model_info,
+            capabilities: probe.capabilities,
         });
     }
 
@@ -211,28 +213,25 @@ async fn probe_direct(
     channel: Arc<HidppChannel>,
     info: &async_hid::DeviceInfo,
 ) -> Option<DeviceInventory> {
-    let (battery, model_info, probed_kind) = probe_features(&channel, DIRECT_DEVICE_INDEX).await;
+    let probe = probe_features(&channel, DIRECT_DEVICE_INDEX).await;
     // Hybrid peripheral discriminator. A genuine directly-attached device is
-    // either wireless/Bluetooth — which reports a battery — or wired, which
-    // reports none but still exposes a control feature (adjustable DPI or
-    // reprogrammable buttons). A Bolt receiver's secondary HID interface also
-    // answers DeviceInformation at 0xff, but exposes neither battery nor those
-    // control features, so it's filtered out here. Without this guard a Bolt
-    // setup ends up with two entries in `device_list`: the real mouse (via the
-    // Bolt path) and a phantom "direct device" pointing at the receiver, which
-    // sits at index 0 and steals every DPI / SmartShift write attempt.
-    //
-    // Battery is the fast path (no extra round-trips); the feature probe only
-    // runs for battery-less devices, so wired mice cost one more lookup while
-    // the common wireless case is unaffected.
-    let is_peripheral =
-        battery.is_some() || exposes_peripheral_feature(&channel, DIRECT_DEVICE_INDEX).await;
+    // either wireless/Bluetooth — which reports a battery — or exposes a
+    // configuration feature (buttons / pointer / lighting). A Bolt receiver's
+    // secondary HID interface also answers DeviceInformation at 0xff, but
+    // exposes neither battery nor those features, so it's filtered out here.
+    // Without this guard a Bolt setup ends up with two entries in `device_list`:
+    // the real mouse (via the Bolt path) and a phantom "direct device" pointing
+    // at the receiver, which sits at index 0 and steals every DPI / SmartShift
+    // write attempt. We reuse the capabilities the probe already derived from
+    // the feature table — no extra round-trip.
+    let caps = probe.capabilities.unwrap_or_default();
+    let is_peripheral = probe.battery.is_some() || caps.buttons || caps.pointer || caps.lighting;
     if !is_peripheral {
         debug!(
             vid = format_args!("{:04x}", info.vendor_id),
             pid = format_args!("{:04x}", info.product_id),
-            has_model = model_info.is_some(),
-            "slot 0xff exposes no battery or control feature — likely a receiver \
+            has_model = probe.model_info.is_some(),
+            "slot 0xff exposes no battery or config feature — likely a receiver \
              secondary interface; skipping"
         );
         return None;
@@ -253,15 +252,14 @@ async fn probe_direct(
             slot: DIRECT_DEVICE_INDEX,
             codename: Some(info.name.clone()),
             wpid: None,
-            // No receiver pairing register on the direct path, so the HID++
-            // `0x0005` device-type probe is the only kind signal. Without it a
-            // Bluetooth-direct mouse would stay `Unknown` and lose its
-            // button/pointer tabs to the wired-keyboard lighting heuristic
-            // (issue #127).
-            kind: resolve_device_kind(probed_kind, DeviceKind::Unknown),
+            // No receiver pairing register here, so `0x0005` is the only kind
+            // hint — but kind is just identity now; the UI gates on the
+            // capabilities below, so a misread kind can't hide the panels (#127).
+            kind: resolve_device_kind(probe.kind, DeviceKind::Unknown),
             online: true,
-            battery,
-            model_info,
+            battery: probe.battery,
+            model_info: probe.model_info,
+            capabilities: probe.capabilities,
         }],
     })
 }
@@ -304,35 +302,47 @@ async fn read_codename(channel: &HidppChannel, slot: u8) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Open a HID++ session for `slot` and query the features we care about
-/// (battery, device-information, `0x0005` device type) in one shot. Returns
-/// `(battery, model, kind)`; any field may be `None` if the device doesn't
-/// expose that feature or the read fails. Device sessions are expensive
-/// (multi-round-trip) so we fold every read through the same `Device::new` +
-/// `enumerate_features`.
+/// Everything a single device probe yields. Any field is `None` when the
+/// device doesn't expose that feature or the read failed.
+#[derive(Default)]
+struct ProbedFeatures {
+    battery: Option<BatteryInfo>,
+    model_info: Option<DeviceModelInfo>,
+    /// Marketing type from HID++ `0x0005` — an identity hint only.
+    kind: Option<DeviceKind>,
+    /// Configuration capabilities derived from the device's feature table.
+    capabilities: Option<Capabilities>,
+}
+
+/// Open a HID++ session for `slot` and read everything we care about (battery,
+/// device-information, `0x0005` device type, and the feature table that drives
+/// [`Capabilities`]) in one shot. Device sessions are expensive (multi-round-
+/// trip) so we fold every read through the same `Device::new` +
+/// `enumerate_features` — the feature table is the Vec that enumeration already
+/// returns, so capabilities cost no extra round-trip.
 ///
-/// Only online, responsive devices reach here, so the `0x0005` read is one
-/// extra short round-trip on a device that just answered two others — cheap,
-/// and the authoritative kind source (see [`resolve_device_kind`]).
-async fn probe_features(
-    channel: &Arc<HidppChannel>,
-    slot: u8,
-) -> (
-    Option<BatteryInfo>,
-    Option<DeviceModelInfo>,
-    Option<DeviceKind>,
-) {
+/// Only online, responsive devices reach here.
+async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> ProbedFeatures {
     let mut device = match Device::new(Arc::clone(channel), slot).await {
         Ok(d) => d,
         Err(e) => {
             debug!(slot, error = ?e, "Device::new failed");
-            return (None, None, None);
+            return ProbedFeatures::default();
         }
     };
-    if let Err(e) = device.enumerate_features().await {
-        debug!(slot, error = ?e, "enumerate_features failed");
-        return (None, None, None);
-    }
+    // The enumeration response IS the device's feature-ID table — capture it
+    // for capability derivation instead of discarding it.
+    let capabilities = match device.enumerate_features().await {
+        Ok(Some(features)) => {
+            let ids: Vec<u16> = features.iter().map(|f| f.id).collect();
+            Some(Capabilities::from_feature_ids(&ids))
+        }
+        Ok(None) => None,
+        Err(e) => {
+            debug!(slot, error = ?e, "enumerate_features failed");
+            return ProbedFeatures::default();
+        }
+    };
 
     let battery = match device.get_feature::<UnifiedBatteryFeature>() {
         Some(feature) => feature
@@ -398,44 +408,17 @@ async fn probe_features(
         None => None,
     };
 
-    (battery, model_info, kind)
+    ProbedFeatures {
+        battery,
+        model_info,
+        kind,
+        capabilities,
+    }
 }
 
 fn normalize_serial_number(serial: &str) -> Option<String> {
     let serial = serial.trim_matches('\0').trim().to_string();
     (!serial.is_empty()).then_some(serial)
-}
-
-/// HID++ feature IDs that mark a device as a controllable peripheral rather
-/// than a bare receiver interface: adjustable DPI (both encodings) and
-/// reprogrammable controls. Used by [`probe_direct`]'s hybrid discriminator
-/// to admit wired mice, which report no battery.
-const PERIPHERAL_FEATURE_IDS: [u16; 3] = [
-    0x2201, // AdjustableDpi
-    0x2202, // ExtendedAdjustableDpi
-    0x1b04, // ReprogControlsV4
-];
-
-/// Whether the device at `index` announces any [`PERIPHERAL_FEATURE_IDS`].
-/// Looks each up through the device root — hidpp 0.2's feature registry
-/// doesn't carry these, so `enumerate_features` wouldn't surface them (see
-/// `write::open_feature`).
-async fn exposes_peripheral_feature(channel: &Arc<HidppChannel>, index: u8) -> bool {
-    let device = match Device::new(Arc::clone(channel), index).await {
-        Ok(d) => d,
-        Err(e) => {
-            debug!(index, error = ?e, "Device::new failed during peripheral probe");
-            return false;
-        }
-    };
-    for id in PERIPHERAL_FEATURE_IDS {
-        match device.root().get_feature(id).await {
-            Ok(Some(_)) => return true,
-            Ok(None) => {}
-            Err(e) => debug!(index, id, error = ?e, "root feature probe failed"),
-        }
-    }
-    false
 }
 
 fn map_kind(k: BoltDeviceKind) -> DeviceKind {
