@@ -150,8 +150,44 @@ pub(crate) fn bundle_macos() -> Result<()> {
 
     let app = root.join("target/release/bundle/osx/OpenLogi.app");
     ensure_dir(&app)?;
+    embed_agent_helper(&root, &app, &xcode_env)?;
     println!();
     println!("Bundle ready: {}", app.display());
+    Ok(())
+}
+
+/// Build the headless agent and embed it as a nested login-item helper at
+/// `OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app`. The agent is
+/// the always-on process (hook + device I/O + menu bar); shipping it inside the
+/// GUI bundle keeps one notarized artifact, lets `open -b` foreground the GUI
+/// from the agent's menu, and gives the agent a stable signed identity so its
+/// Accessibility (TCC) grant survives app updates.
+fn embed_agent_helper(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<()> {
+    println!("==> agent helper (build)");
+    run(with_env(
+        ProcessCommand::new("cargo")
+            .arg("build")
+            .arg("-p")
+            .arg("openlogi-agent")
+            .arg("--release")
+            .current_dir(root),
+        xcode_env,
+    ))?;
+    let agent_bin = root.join("target/release/openlogi-agent");
+    ensure_file(&agent_bin)?;
+
+    let helper = app.join("Contents/Library/LoginItems/OpenLogiAgent.app");
+    let helper_macos = helper.join("Contents/MacOS");
+    fs::create_dir_all(&helper_macos)
+        .with_context(|| format!("could not create {}", helper_macos.display()))?;
+    fs::copy(&agent_bin, helper_macos.join("openlogi-agent"))
+        .with_context(|| "could not copy the agent binary into the helper bundle".to_string())?;
+    let info_src = root.join("crates/openlogi-agent/macos/Info.plist");
+    ensure_file(&info_src)?;
+    fs::copy(&info_src, helper.join("Contents/Info.plist"))
+        .with_context(|| "could not write the helper Info.plist".to_string())?;
+
+    println!("    embedded {}", helper.display());
     Ok(())
 }
 
@@ -241,21 +277,40 @@ pub(crate) fn dmg_macos(args: &DmgMacos) -> Result<()> {
 
 fn sign_app(identity: &str) -> Result<()> {
     let app = repo_root()?.join("target/release/bundle/osx/OpenLogi.app");
+    let helper = app.join("Contents/Library/LoginItems/OpenLogiAgent.app");
     println!("==> codesign ({identity})");
+    // Inside-out signing: seal the nested helper with its own signature first,
+    // then the outer app (which seals the already-signed helper). `--deep` is
+    // deprecated and can't give the helper an independent signature — but a
+    // stable, separately-signed helper identity is exactly what lets the agent's
+    // Accessibility (TCC) grant persist across updates. So sign each explicitly.
+    if helper.exists() {
+        codesign_runtime(identity, &helper)?;
+    }
+    codesign_runtime(identity, &app)?;
+    run(ProcessCommand::new("codesign")
+        .arg("--verify")
+        .arg("--strict")
+        .arg(&app))?;
+    if helper.exists() {
+        run(ProcessCommand::new("codesign")
+            .arg("--verify")
+            .arg("--strict")
+            .arg(&helper))?;
+    }
+    Ok(())
+}
+
+/// Sign one bundle with the hardened runtime + a secure timestamp.
+fn codesign_runtime(identity: &str, target: &Path) -> Result<()> {
     run(ProcessCommand::new("codesign")
         .arg("--force")
-        .arg("--deep")
         .arg("--options")
         .arg("runtime")
         .arg("--timestamp")
         .arg("--sign")
         .arg(identity)
-        .arg(&app))?;
-    run(ProcessCommand::new("codesign")
-        .arg("--verify")
-        .arg("--deep")
-        .arg("--strict")
-        .arg(&app))
+        .arg(target))
 }
 
 fn sign_dmg(identity: &str, dmg: &Path) -> Result<()> {

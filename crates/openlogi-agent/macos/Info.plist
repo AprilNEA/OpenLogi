@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyList-1.0.dtd">
+<!--
+  Info.plist for the nested login-item helper, assembled by `xtask` into
+  OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app.
+
+  LSUIElement=true makes the agent an Accessory app: a menu-bar status item with
+  no Dock icon (the agent also sets NSApplicationActivationPolicy::Accessory at
+  runtime). A distinct CFBundleIdentifier (org.openlogi.agent) + a stable
+  Developer-ID signature is what lets the Accessibility (TCC) grant persist
+  across app updates — the agent, not the GUI, is the hook-trusted process.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>OpenLogi Agent</string>
+  <key>CFBundleDisplayName</key>
+  <string>OpenLogi Agent</string>
+  <key>CFBundleExecutable</key>
+  <string>openlogi-agent</string>
+  <key>CFBundleIdentifier</key>
+  <string>org.openlogi.agent</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.5.1</string>
+  <key>CFBundleVersion</key>
+  <string>0.5.1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>
