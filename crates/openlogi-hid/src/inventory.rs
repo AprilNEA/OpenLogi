@@ -61,6 +61,49 @@ pub enum InventoryError {
     Hid(#[from] async_hid::HidError),
 }
 
+/// How many `enumerate` ticks a device's probe is reused before a fresh read.
+/// The expensive part of a probe (the `enumerate_features` feature-table walk)
+/// reads *immutable* data — model, capabilities, marketing type — so it never
+/// needs re-reading for a known device. Only the battery is volatile, and a
+/// coarse battery bucket tolerates being up to `REFRESH_TICKS` ticks stale; at
+/// the GUI's ~2s tick that is ~30s. New and cache-stale devices are still probed
+/// in full, so this only skips redundant work for steady-state devices.
+const REFRESH_TICKS: u64 = 15;
+
+/// Stable identity used to memoize a device's probe across `enumerate` ticks.
+/// Keyed on the device's *own* identity (never its slot) so a re-paired or
+/// moved device can't inherit another device's cached capabilities.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DeviceId {
+    /// Bolt: the unit id from the pairing register (cheap, read every tick).
+    Bolt { unit_id: [u8; 4] },
+    /// Direct (Bluetooth/USB): the HID node's vendor + product id. A given model
+    /// has one feature table, so two same-model units can't disagree here.
+    Direct { vendor_id: u16, product_id: u16 },
+}
+
+/// A memoized probe result plus the tick it was taken on.
+#[derive(Clone)]
+struct Cached {
+    probe: ProbedFeatures,
+    probed_tick: u64,
+}
+
+/// Whether `cached` is stale enough that the device should be re-probed.
+fn is_stale(cached: &Cached, tick: u64) -> bool {
+    tick.wrapping_sub(cached.probed_tick) >= REFRESH_TICKS
+}
+
+/// Stateful device enumerator: holds the per-device probe cache so the polling
+/// watcher reuses immutable data across ticks instead of re-handshaking every
+/// device every ~2s. One-shot callers use the [`enumerate`] free function, which
+/// runs against a fresh (empty) cache.
+#[derive(Default)]
+pub struct Enumerator {
+    cache: HashMap<DeviceId, Cached>,
+    tick: u64,
+}
+
 /// Enumerate all Logitech HID++ receivers visible to the current process and
 /// the devices paired to each.
 ///
@@ -76,41 +119,63 @@ pub enum InventoryError {
 /// We merge the two so an MX Master that's been asleep still shows up with
 /// its codename and kind even before you click it.
 pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
-    let candidates = enumerate_hidpp_devices().await?;
-
-    debug!(count = candidates.len(), "HID++ candidate interfaces");
-
-    // Probe every candidate concurrently. Probing is serialized by `await`
-    // otherwise, so a single asleep/unresponsive node that burns the whole
-    // `PROBE_BUDGET` would stall the entire snapshot behind it (and the watcher
-    // re-runs every ~2s). Concurrent, the tick is bounded by the *slowest*
-    // probe, not their sum. Each candidate is an independent HID interface, so
-    // there's no shared state to contend on.
-    let results = candidates
-        .into_iter()
-        .map(|dev| async move { timeout(PROBE_BUDGET, probe_one(dev)).await })
-        .collect::<Vec<_>>()
-        .join()
-        .await;
-
-    let mut inventories = Vec::new();
-    for result in results {
-        match result {
-            Ok(Ok(Some(inv))) => inventories.push(inv),
-            Ok(Ok(None)) => {}
-            Ok(Err(e)) => warn!(error = ?e, "skipping device that failed to probe"),
-            Err(_) => {
-                warn!(budget = ?PROBE_BUDGET, "device probe timed out — skipping (asleep/unresponsive)");
-            }
-        }
-    }
-
-    Ok(inventories)
+    Enumerator::default().enumerate().await
 }
 
-async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, InventoryError> {
+impl Enumerator {
+    /// One enumeration pass, reusing the cache from prior passes. Probes every
+    /// HID candidate concurrently (so one asleep node that burns the whole
+    /// `PROBE_BUDGET` can't stall the others), reusing each device's cached
+    /// immutable data when it's present and fresh.
+    pub async fn enumerate(&mut self) -> Result<Vec<DeviceInventory>, InventoryError> {
+        self.tick = self.tick.wrapping_add(1);
+        let tick = self.tick;
+        let candidates = enumerate_hidpp_devices().await?;
+        debug!(count = candidates.len(), "HID++ candidate interfaces");
+
+        // Borrow the cache read-only for the concurrent probes; updates are
+        // collected and applied afterwards so the futures share `&cache` without
+        // a `RefCell`. Each candidate is an independent HID interface.
+        let results = {
+            let cache = &self.cache;
+            candidates
+                .into_iter()
+                .map(|dev| async move { timeout(PROBE_BUDGET, probe_one(dev, cache, tick)).await })
+                .collect::<Vec<_>>()
+                .join()
+                .await
+        };
+
+        let mut inventories = Vec::new();
+        let mut updates = Vec::new();
+        for result in results {
+            match result {
+                Ok(Ok((inv, mut probed))) => {
+                    inventories.extend(inv);
+                    updates.append(&mut probed);
+                }
+                Ok(Err(e)) => warn!(error = ?e, "skipping device that failed to probe"),
+                Err(_) => {
+                    warn!(budget = ?PROBE_BUDGET, "device probe timed out — skipping (asleep/unresponsive)");
+                }
+            }
+        }
+        for (id, cached) in updates {
+            self.cache.insert(id, cached);
+        }
+        Ok(inventories)
+    }
+}
+
+/// Probe one HID candidate. Returns its inventory (if any) plus the cache
+/// entries for devices it freshly probed, for the caller to fold into the cache.
+async fn probe_one(
+    dev: async_hid::Device,
+    cache: &HashMap<DeviceId, Cached>,
+    tick: u64,
+) -> Result<(Option<DeviceInventory>, Vec<(DeviceId, Cached)>), InventoryError> {
     let Some((info, channel)) = open_hidpp_channel(dev).await? else {
-        return Ok(None);
+        return Ok((None, Vec::new()));
     };
 
     let Some(Receiver::Bolt(bolt)) = receiver::detect(Arc::clone(&channel)) else {
@@ -118,7 +183,7 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
         // (Bluetooth-direct, USB-C cable). HID++ at device-index 0xff
         // addresses the device's own features. Probe in case it answers.
         // P2.4 — verified path; no Bolt-pairing slot indirection needed.
-        return Ok(probe_direct(channel, &info).await);
+        return Ok(probe_direct(channel, &info, cache, tick).await);
     };
 
     let unique_id = bolt.get_unique_id().await.ok();
@@ -131,67 +196,14 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
         connections.into_iter().map(|c| (c.index, c)).collect();
 
     let mut paired = Vec::new();
+    let mut updates = Vec::new();
     for slot in 1u8..=MAX_BOLT_SLOTS {
-        let pairing = match bolt.get_device_pairing_information(slot).await {
-            Ok(p) => p,
-            Err(e) => {
-                debug!(slot, error = ?e, "slot empty or unreadable");
-                continue;
-            }
-        };
-
-        let codename = read_codename(&channel, slot).await;
-        let event = by_slot.get(&slot);
-        // Prefer event data when present — it's a live response. Fall back to
-        // the pairing register for sleeping devices that didn't reply.
-        let online = event.map_or(pairing.online, |c| c.online);
-        let bolt_kind = event.map_or(pairing.kind, |c| c.kind);
-        let wpid = event.map(|c| c.wpid);
-        debug!(
-            slot,
-            online,
-            ?wpid,
-            ?bolt_kind,
-            has_event = event.is_some(),
-            codename = ?codename,
-            "paired slot"
-        );
-
-        let register_kind = map_kind(bolt_kind);
-        let probe = if online {
-            probe_features(&channel, slot).await
-        } else {
-            ProbedFeatures::default()
-        };
-        // Surface a real cross-source disagreement (both sides confident, but
-        // different) — it means a HID++ kind source misreported this device.
-        // Kind is now an identity hint only (the UI gates on capabilities), so
-        // this is purely diagnostic; logged at debug since `enumerate` re-runs
-        // on a 2s watcher tick.
-        if let Some(probed) = probe.kind
-            && probed != DeviceKind::Unknown
-            && register_kind != DeviceKind::Unknown
-            && probed != register_kind
+        if let Some((device, update)) =
+            probe_bolt_slot(&channel, &bolt, by_slot.get(&slot), slot, cache, tick).await
         {
-            debug!(
-                slot,
-                ?register_kind,
-                ?probed,
-                "device-kind sources disagree — trusting 0x0005"
-            );
+            paired.push(device);
+            updates.extend(update);
         }
-        paired.push(PairedDevice {
-            slot,
-            codename,
-            wpid,
-            // Prefer the device's own `0x0005` type; the register kind is the
-            // offline fallback.
-            kind: resolve_device_kind(probe.kind, register_kind),
-            online,
-            battery: probe.battery,
-            model_info: probe.model_info,
-            capabilities: probe.capabilities,
-        });
     }
 
     if let Some(count) = pairing_count
@@ -204,15 +216,110 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
         );
     }
 
-    Ok(Some(DeviceInventory {
-        receiver: ReceiverInfo {
-            name: "Logi Bolt Receiver".to_string(),
-            vendor_id: info.vendor_id,
-            product_id: info.product_id,
-            unique_id,
-        },
-        paired,
-    }))
+    Ok((
+        Some(DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Logi Bolt Receiver".to_string(),
+                vendor_id: info.vendor_id,
+                product_id: info.product_id,
+                unique_id,
+            },
+            paired,
+        }),
+        updates,
+    ))
+}
+
+/// Probe a single Bolt pairing slot. Returns `None` when the slot is empty or
+/// unreadable, otherwise the device plus an optional cache entry (`Some` only
+/// when the device was freshly probed this tick).
+async fn probe_bolt_slot(
+    channel: &Arc<HidppChannel>,
+    bolt: &BoltReceiver,
+    event: Option<&BoltDeviceConnection>,
+    slot: u8,
+    cache: &HashMap<DeviceId, Cached>,
+    tick: u64,
+) -> Option<(PairedDevice, Option<(DeviceId, Cached)>)> {
+    let pairing = match bolt.get_device_pairing_information(slot).await {
+        Ok(p) => p,
+        Err(e) => {
+            debug!(slot, error = ?e, "slot empty or unreadable");
+            return None;
+        }
+    };
+    let codename = read_codename(channel, slot).await;
+    // Prefer event data when present — it's a live response. Fall back to the
+    // pairing register for sleeping devices that didn't reply.
+    let online = event.map_or(pairing.online, |c| c.online);
+    let bolt_kind = event.map_or(pairing.kind, |c| c.kind);
+    let wpid = event.map(|c| c.wpid);
+    debug!(
+        slot,
+        online,
+        ?wpid,
+        ?bolt_kind,
+        has_event = event.is_some(),
+        codename = ?codename,
+        "paired slot"
+    );
+
+    // The pairing register gives the device's unit id cheaply every tick — its
+    // stable cache identity. An all-zero id is treated as unidentifiable (don't
+    // cache; always probe when online).
+    let id = (pairing.unit_id != [0u8; 4]).then_some(DeviceId::Bolt {
+        unit_id: pairing.unit_id,
+    });
+    let cached = id.as_ref().and_then(|i| cache.get(i));
+    let register_kind = map_kind(bolt_kind);
+
+    // Re-probe an online device only on a cache miss or when its cached probe is
+    // stale; reuse the cached immutable data otherwise (and for an offline
+    // device, so a sleeping mouse keeps its model + capabilities).
+    let mut update = None;
+    let probe = if online && cached.is_none_or(|c| is_stale(c, tick)) {
+        let probe = probe_features(channel, slot).await;
+        if let Some(probed) = probe.kind
+            && probed != DeviceKind::Unknown
+            && register_kind != DeviceKind::Unknown
+            && probed != register_kind
+        {
+            debug!(
+                slot,
+                ?register_kind,
+                ?probed,
+                "device-kind sources disagree — trusting 0x0005"
+            );
+        }
+        update = id.map(|id| {
+            (
+                id,
+                Cached {
+                    probe: probe.clone(),
+                    probed_tick: tick,
+                },
+            )
+        });
+        probe
+    } else if let Some(cached) = cached {
+        cached.probe.clone()
+    } else {
+        ProbedFeatures::default()
+    };
+
+    let device = PairedDevice {
+        slot,
+        codename,
+        wpid,
+        // Prefer the device's own `0x0005` type; the register kind is the
+        // offline fallback.
+        kind: resolve_device_kind(probe.kind, register_kind),
+        online,
+        battery: probe.battery,
+        model_info: probe.model_info,
+        capabilities: probe.capabilities,
+    };
+    Some((device, update))
 }
 
 /// Probe a HID++ channel that doesn't host a Bolt receiver — for
@@ -226,8 +333,30 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
 async fn probe_direct(
     channel: Arc<HidppChannel>,
     info: &async_hid::DeviceInfo,
-) -> Option<DeviceInventory> {
-    let probe = probe_features(&channel, DIRECT_DEVICE_INDEX).await;
+    cache: &HashMap<DeviceId, Cached>,
+    tick: u64,
+) -> (Option<DeviceInventory>, Vec<(DeviceId, Cached)>) {
+    let id = DeviceId::Direct {
+        vendor_id: info.vendor_id,
+        product_id: info.product_id,
+    };
+    let mut updates = Vec::new();
+    // Reuse the cached probe while fresh; a direct device's model + features are
+    // immutable, so most ticks skip the feature-table walk entirely.
+    let probe = match cache.get(&id) {
+        Some(cached) if !is_stale(cached, tick) => cached.probe.clone(),
+        _ => {
+            let probe = probe_features(&channel, DIRECT_DEVICE_INDEX).await;
+            updates.push((
+                id,
+                Cached {
+                    probe: probe.clone(),
+                    probed_tick: tick,
+                },
+            ));
+            probe
+        }
+    };
     // Hybrid peripheral discriminator. A genuine directly-attached device is
     // either wireless/Bluetooth — which reports a battery — or exposes a
     // configuration feature (buttons / pointer / lighting). A Bolt receiver's
@@ -248,14 +377,14 @@ async fn probe_direct(
             "slot 0xff exposes no battery or config feature — likely a receiver \
              secondary interface; skipping"
         );
-        return None;
+        return (None, updates);
     }
 
     // Without a Bolt receiver we don't have a wpid, codename, or pairing
     // info — those live on the receiver registers. Use the HID name as
     // the display fallback and leave wpid empty.
     debug!(name = %info.name, "BT-direct / wired device recognised");
-    Some(DeviceInventory {
+    let inventory = DeviceInventory {
         receiver: ReceiverInfo {
             name: info.name.clone(),
             vendor_id: info.vendor_id,
@@ -275,7 +404,8 @@ async fn probe_direct(
             model_info: probe.model_info,
             capabilities: probe.capabilities,
         }],
-    })
+    };
+    (Some(inventory), updates)
 }
 
 async fn drain_device_arrival(bolt: &BoltReceiver) -> Vec<BoltDeviceConnection> {
@@ -318,7 +448,7 @@ async fn read_codename(channel: &HidppChannel, slot: u8) -> Option<String> {
 
 /// Everything a single device probe yields. Any field is `None` when the
 /// device doesn't expose that feature or the read failed.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct ProbedFeatures {
     battery: Option<BatteryInfo>,
     model_info: Option<DeviceModelInfo>,
@@ -510,7 +640,24 @@ fn map_battery_status(status: HidppBatteryStatus) -> BatteryStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceKind, resolve_device_kind};
+    use super::{Cached, DeviceKind, ProbedFeatures, REFRESH_TICKS, is_stale, resolve_device_kind};
+
+    #[test]
+    fn cached_probe_is_reused_until_refresh_ticks() {
+        let cached = Cached {
+            probe: ProbedFeatures::default(),
+            probed_tick: 10,
+        };
+        assert!(!is_stale(&cached, 10), "same tick is fresh");
+        assert!(
+            !is_stale(&cached, 10 + REFRESH_TICKS - 1),
+            "just under the window is still fresh"
+        );
+        assert!(
+            is_stale(&cached, 10 + REFRESH_TICKS),
+            "at the window the probe is refreshed"
+        );
+    }
 
     #[test]
     fn probe_overrides_a_misreporting_register() {

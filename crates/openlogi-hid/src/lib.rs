@@ -18,7 +18,7 @@ pub mod thumbwheel;
 pub mod write;
 
 pub use gesture::{CaptureChannel, CapturedInput, GestureError, run_capture_session};
-pub use inventory::{InventoryError, enumerate};
+pub use inventory::{Enumerator, InventoryError, enumerate};
 pub use pairing::{
     Click, DiscoveredDevice, PairingCommand, PairingError, PairingEvent, PairingReceiver,
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
