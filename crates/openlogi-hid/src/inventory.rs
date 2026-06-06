@@ -72,14 +72,16 @@ const REFRESH_TICKS: u64 = 15;
 
 /// Stable identity used to memoize a device's probe across `enumerate` ticks.
 /// Keyed on the device's *own* identity (never its slot) so a re-paired or
-/// moved device can't inherit another device's cached capabilities.
+/// moved device can't inherit another device's cached probe.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum DeviceId {
+enum CacheKey {
     /// Bolt: the unit id from the pairing register (cheap, read every tick).
     Bolt { unit_id: [u8; 4] },
-    /// Direct (Bluetooth/USB): the HID node's vendor + product id. A given model
-    /// has one feature table, so two same-model units can't disagree here.
-    Direct { vendor_id: u16, product_id: u16 },
+    /// Direct (Bluetooth/USB): the OS-assigned HID node id (macOS registry-entry
+    /// id, Linux dev path, Windows interface path). Unique *per node*, so two
+    /// units of the same model never collide, and stable while connected so the
+    /// cache still hits across ticks.
+    Direct(async_hid::DeviceId),
 }
 
 /// A memoized probe result plus the tick it was taken on.
@@ -100,7 +102,7 @@ fn is_stale(cached: &Cached, tick: u64) -> bool {
 /// runs against a fresh (empty) cache.
 #[derive(Default)]
 pub struct Enumerator {
-    cache: HashMap<DeviceId, Cached>,
+    cache: HashMap<CacheKey, Cached>,
     tick: u64,
 }
 
@@ -171,9 +173,9 @@ impl Enumerator {
 /// entries for devices it freshly probed, for the caller to fold into the cache.
 async fn probe_one(
     dev: async_hid::Device,
-    cache: &HashMap<DeviceId, Cached>,
+    cache: &HashMap<CacheKey, Cached>,
     tick: u64,
-) -> Result<(Option<DeviceInventory>, Vec<(DeviceId, Cached)>), InventoryError> {
+) -> Result<(Option<DeviceInventory>, Vec<(CacheKey, Cached)>), InventoryError> {
     let Some((info, channel)) = open_hidpp_channel(dev).await? else {
         return Ok((None, Vec::new()));
     };
@@ -238,9 +240,9 @@ async fn probe_bolt_slot(
     bolt: &BoltReceiver,
     event: Option<&BoltDeviceConnection>,
     slot: u8,
-    cache: &HashMap<DeviceId, Cached>,
+    cache: &HashMap<CacheKey, Cached>,
     tick: u64,
-) -> Option<(PairedDevice, Option<(DeviceId, Cached)>)> {
+) -> Option<(PairedDevice, Option<(CacheKey, Cached)>)> {
     let pairing = match bolt.get_device_pairing_information(slot).await {
         Ok(p) => p,
         Err(e) => {
@@ -267,7 +269,7 @@ async fn probe_bolt_slot(
     // The pairing register gives the device's unit id cheaply every tick — its
     // stable cache identity. An all-zero id is treated as unidentifiable (don't
     // cache; always probe when online).
-    let id = (pairing.unit_id != [0u8; 4]).then_some(DeviceId::Bolt {
+    let id = (pairing.unit_id != [0u8; 4]).then_some(CacheKey::Bolt {
         unit_id: pairing.unit_id,
     });
     let cached = id.as_ref().and_then(|i| cache.get(i));
@@ -333,13 +335,10 @@ async fn probe_bolt_slot(
 async fn probe_direct(
     channel: Arc<HidppChannel>,
     info: &async_hid::DeviceInfo,
-    cache: &HashMap<DeviceId, Cached>,
+    cache: &HashMap<CacheKey, Cached>,
     tick: u64,
-) -> (Option<DeviceInventory>, Vec<(DeviceId, Cached)>) {
-    let id = DeviceId::Direct {
-        vendor_id: info.vendor_id,
-        product_id: info.product_id,
-    };
+) -> (Option<DeviceInventory>, Vec<(CacheKey, Cached)>) {
+    let id = CacheKey::Direct(info.id.clone());
     let mut updates = Vec::new();
     // Reuse the cached probe while fresh; a direct device's model + features are
     // immutable, so most ticks skip the feature-table walk entirely.
