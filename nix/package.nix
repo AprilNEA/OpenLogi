@@ -16,7 +16,7 @@
 
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "openlogi";
-  version = "0.4.0";
+  version = "0.5.3";
 
   # Build from the working tree (target/.git/etc. filtered out). cargo-bundle
   # uses the committed crates/openlogi-gui/icon/AppIcon.icns.
@@ -42,7 +42,10 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   # One FOD vendors every dependency, including the zed / wgpu / font-kit git
   # forks gpui pulls in. Same approach as nixpkgs' zed-editor.
-  cargoHash = "sha256-bY/yKDjdjFAF7A6Q8Yc/r5H0K0ATbP9Jq9zAN72CYi4=";
+  # Stable across version bumps (cargoDepsName decouples the vendored-dir
+  # name from the version so the hash only changes when Cargo.lock deps change).
+  cargoDepsName = finalAttrs.pname;
+  cargoHash = "sha256-HJuEQvMwlIZXb2W44m2WzFSiNb56pozSJSDe7ApmmGI=";
 
   postPatch = ''
     # .cargo/config.toml forces `linker = /usr/bin/cc` + a /Applications/Xcode
