@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.5.2...openlogi-core-v0.5.3) - 2026-06-06
+
+### Fixed
+
+- *(gui)* prefer asset-registry kind + harden device-kind classification
+
+### Other
+
+- gate config panels on HID++ capabilities, not device kind
+
 ## [0.5.2](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.5.1...openlogi-core-v0.5.2) - 2026-06-05
 
 ### Added
