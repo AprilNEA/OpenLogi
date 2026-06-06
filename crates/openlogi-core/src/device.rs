@@ -8,6 +8,15 @@ use serde::Serialize;
 
 /// What a paired peripheral is. Mirrors `hidpp::receiver::bolt::BoltDeviceKind`
 /// but is owned by us so consumers don't depend on `hidpp`.
+///
+/// Several upstream "device type" vocabularies feed this one enum, and they do
+/// **not** agree on numbers: the Bolt pairing register uses `Unknown=0,
+/// Keyboard=1, Mouse=2, …`, while the HID++ `0x0005` feature uses
+/// `Keyboard=0, …, Mouse=3, …` (no `Unknown` at all). The asset registry adds a
+/// third, free-form *string* type (`"mouse"`, case-inconsistently `"MOUSE"`).
+/// They are converted to this enum at their respective boundaries — never by
+/// reinterpreting one source's raw byte with another's table — so the numeric
+/// mismatch can't leak past those mappers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeviceKind {
@@ -23,6 +32,32 @@ pub enum DeviceKind {
     Joystick,
     Headset,
     Unknown,
+}
+
+impl DeviceKind {
+    /// Parse the OpenLogi asset registry's `type` string into a [`DeviceKind`].
+    ///
+    /// The registry field is free-form and case-inconsistent (both `"mouse"`
+    /// and `"MOUSE"` ship), so we case-fold before matching. Values we don't
+    /// model map to [`DeviceKind::Unknown`], which callers treat as "no asset
+    /// opinion" and fall back to the HID++ classification.
+    #[must_use]
+    pub fn from_registry_type(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "mouse" => Self::Mouse,
+            "keyboard" => Self::Keyboard,
+            "numpad" => Self::Numpad,
+            "presenter" => Self::Presenter,
+            "remote" | "remotecontrol" => Self::Remote,
+            "trackball" => Self::Trackball,
+            "touchpad" | "trackpad" => Self::Touchpad,
+            "tablet" => Self::Tablet,
+            "gamepad" => Self::Gamepad,
+            "joystick" => Self::Joystick,
+            "headset" => Self::Headset,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 /// Coarse battery bucket reported by the device firmware.
@@ -134,4 +169,31 @@ pub struct PairedDevice {
 pub struct DeviceInventory {
     pub receiver: ReceiverInfo,
     pub paired: Vec<PairedDevice>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeviceKind;
+
+    #[test]
+    fn registry_type_is_case_folded() {
+        // The registry ships both `"mouse"` and `"MOUSE"`; both must resolve so
+        // the asset cross-check can't silently miss a depot.
+        assert_eq!(DeviceKind::from_registry_type("mouse"), DeviceKind::Mouse);
+        assert_eq!(DeviceKind::from_registry_type("MOUSE"), DeviceKind::Mouse);
+        assert_eq!(
+            DeviceKind::from_registry_type("  Keyboard "),
+            DeviceKind::Keyboard
+        );
+    }
+
+    #[test]
+    fn unknown_registry_type_defers_to_the_caller() {
+        // Unmodelled / empty → Unknown, i.e. "no asset opinion".
+        assert_eq!(
+            DeviceKind::from_registry_type("webcam"),
+            DeviceKind::Unknown
+        );
+        assert_eq!(DeviceKind::from_registry_type(""), DeviceKind::Unknown);
+    }
 }

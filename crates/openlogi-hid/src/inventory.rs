@@ -143,18 +143,35 @@ async fn probe_one(dev: async_hid::Device) -> Result<Option<DeviceInventory>, In
             "paired slot"
         );
 
+        let register_kind = map_kind(bolt_kind);
         let (battery, model_info, probed_kind) = if online {
             probe_features(&channel, slot).await
         } else {
             (None, None, None)
         };
+        // Surface a real cross-source disagreement (both sides confident, but
+        // different) — it means a HID++ kind source misreported this device, the
+        // exact failure behind #127. Logged at debug since `enumerate` re-runs
+        // on a 2s watcher tick; a `RUST_LOG=openlogi_hid=debug` run shows it.
+        if let Some(probed) = probed_kind
+            && probed != DeviceKind::Unknown
+            && register_kind != DeviceKind::Unknown
+            && probed != register_kind
+        {
+            debug!(
+                slot,
+                ?register_kind,
+                ?probed,
+                "device-kind sources disagree — trusting 0x0005"
+            );
+        }
         paired.push(PairedDevice {
             slot,
             codename,
             wpid,
             // Prefer the device's own `0x0005` type; the register kind is the
             // offline fallback.
-            kind: resolve_device_kind(probed_kind, map_kind(bolt_kind)),
+            kind: resolve_device_kind(probed_kind, register_kind),
             online,
             battery,
             model_info,

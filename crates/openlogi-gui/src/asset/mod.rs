@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use openlogi_assets::{
     BUTTONS_RENDER_FILES, DeviceEntry, FRONT_RENDER_FILES, Index, METADATA_FILES, Metadata,
 };
-use openlogi_core::device::DeviceModelInfo;
+use openlogi_core::device::{DeviceKind, DeviceModelInfo};
 use tracing::{debug, warn};
 
 use self::images::{buttons_image_for, load_manifest, read_png_dimensions, variant_image_for};
@@ -36,6 +36,12 @@ pub struct ResolvedAsset {
     )]
     pub depot: String,
     pub display_name: String,
+    /// The registry's curated device type for this model, normalized from the
+    /// asset index `type` string. Per-model and human-maintained, so it's the
+    /// most authoritative kind signal we have — the UI prefers it over the
+    /// runtime HID++ classification when a device matched a known depot.
+    /// [`DeviceKind::Unknown`] when the registry type was missing/unmodelled.
+    pub kind: DeviceKind,
     pub image_path: PathBuf,
     /// The front/hero render (`device_image`, typically `front_*.png`) used for
     /// the device gallery cards — distinct from [`Self::image_path`], which is
@@ -208,6 +214,7 @@ impl AssetResolver {
             return Some(ResolvedAsset {
                 depot: depot.to_string(),
                 display_name: entry.display_name.clone(),
+                kind: DeviceKind::from_registry_type(&entry.kind),
                 image_path,
                 hero_image_path,
                 metadata,

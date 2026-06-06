@@ -72,6 +72,15 @@ enum DetailTab {
 impl DetailTab {
     /// The detail sections shown for `record`, in tab order. Always non-empty:
     /// every device gets at least the info tab.
+    ///
+    /// This gates panels on the coarse [`DeviceKind`], which is a stand-in for
+    /// the real signal: which HID++ features the device actually exposes. The
+    /// kind can be wrong (the whole of #127) and the `kind ⇒ panel-set` mapping
+    /// bakes in "every mouse has buttons+DPI, every keyboard only has lighting"
+    /// — both false in general. Before keyboard configuration lands, move this
+    /// to capability-driven gating (show Buttons iff `0x1b04`, Pointer iff
+    /// `0x2201`/`0x2202`, Lighting iff `0x8070`/`0x8071`, …) or the keyboard
+    /// will lose its real config the same way the mouse lost its tabs here.
     fn tabs_for(record: &DeviceRecord) -> Vec<Self> {
         let mut tabs = Vec::new();
         if is_configurable_pointer(record.kind) {
@@ -1276,5 +1285,63 @@ fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
             .child(div().child(tr!("Accessibility not granted · click to grant")))
             .on_click(|_, _, _| open_accessibility_settings())
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DetailTab, DeviceKind, DeviceRecord, DeviceRoute};
+
+    fn record(kind: DeviceKind, route: Option<DeviceRoute>) -> DeviceRecord {
+        DeviceRecord {
+            config_key: "test".to_string(),
+            display_name: "Test".to_string(),
+            asset: None,
+            serial_number: None,
+            unit_id: [0; 4],
+            route,
+            kind,
+            slot: 1,
+            online: true,
+            battery: None,
+        }
+    }
+
+    /// The #127 contract: a pointer device must always offer button + pointer
+    /// tuning and must never collapse to a lighting-only screen.
+    #[test]
+    fn pointer_devices_always_get_buttons_and_pointer() {
+        for kind in [DeviceKind::Mouse, DeviceKind::Trackball] {
+            let tabs = DetailTab::tabs_for(&record(kind, None));
+            assert!(tabs.contains(&DetailTab::Buttons), "{kind:?} lost Buttons");
+            assert!(tabs.contains(&DetailTab::Pointer), "{kind:?} lost Pointer");
+            assert!(
+                !tabs.contains(&DetailTab::Lighting),
+                "{kind:?} should not show a lighting tab"
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_gets_lighting_not_pointer_tabs() {
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, None));
+        assert!(tabs.contains(&DetailTab::Lighting));
+        assert!(!tabs.contains(&DetailTab::Buttons));
+        assert!(!tabs.contains(&DetailTab::Pointer));
+    }
+
+    /// The wired-keyboard fallback: an unidentified direct device still offers
+    /// lighting. Kept intentionally — a misdetected mouse is now prevented
+    /// upstream by `0x0005` / asset-registry classification, not by narrowing
+    /// this heuristic.
+    #[test]
+    fn unknown_direct_device_keeps_the_lighting_fallback() {
+        let route = Some(DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+        });
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Unknown, route));
+        assert!(tabs.contains(&DetailTab::Lighting));
+        assert!(!tabs.contains(&DetailTab::Buttons));
     }
 }
