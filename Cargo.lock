@@ -4664,6 +4664,7 @@ name = "openlogi-hid"
 version = "0.5.1"
 dependencies = [
  "async-hid",
+ "futures-concurrency",
  "futures-lite 2.6.1",
  "num_enum",
  "openlogi-core",

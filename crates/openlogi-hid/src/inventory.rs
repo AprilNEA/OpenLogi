@@ -2,6 +2,7 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use futures_concurrency::future::Join as _;
 use hidpp::{
     channel::HidppChannel,
     device::Device,
@@ -79,9 +80,22 @@ pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
 
     debug!(count = candidates.len(), "HID++ candidate interfaces");
 
+    // Probe every candidate concurrently. Probing is serialized by `await`
+    // otherwise, so a single asleep/unresponsive node that burns the whole
+    // `PROBE_BUDGET` would stall the entire snapshot behind it (and the watcher
+    // re-runs every ~2s). Concurrent, the tick is bounded by the *slowest*
+    // probe, not their sum. Each candidate is an independent HID interface, so
+    // there's no shared state to contend on.
+    let results = candidates
+        .into_iter()
+        .map(|dev| async move { timeout(PROBE_BUDGET, probe_one(dev)).await })
+        .collect::<Vec<_>>()
+        .join()
+        .await;
+
     let mut inventories = Vec::new();
-    for dev in candidates {
-        match timeout(PROBE_BUDGET, probe_one(dev)).await {
+    for result in results {
+        match result {
             Ok(Ok(Some(inv))) => inventories.push(inv),
             Ok(Ok(None)) => {}
             Ok(Err(e)) => warn!(error = ?e, "skipping device that failed to probe"),

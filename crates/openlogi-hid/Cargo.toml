@@ -19,6 +19,7 @@ futures-lite = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 num_enum = { workspace = true }
+futures-concurrency = "7"
 
 [lints]
 workspace = true
