@@ -1,6 +1,10 @@
 //! Enumerate connected HID++ receivers and their paired devices.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use futures_concurrency::future::Join as _;
 use hidpp::{
@@ -84,6 +88,11 @@ enum CacheKey {
     Direct(async_hid::DeviceId),
 }
 
+/// Enumeration ticks a device may be missing before its cache entry is evicted.
+/// A small grace rides out a transient receiver timeout without dropping the
+/// device's memoized data.
+const CACHE_MISS_GRACE: u8 = 3;
+
 /// A memoized probe result plus the tick it was taken on.
 #[derive(Clone)]
 struct Cached {
@@ -91,9 +100,66 @@ struct Cached {
     probed_tick: u64,
 }
 
+/// What a probed device contributes to the cache this tick. The key lets stale
+/// entries be evicted; `Fresh` also carries the value to insert. `Unkeyed` is a
+/// device we can't (or won't) cache — an all-zero unit id, or a rejected
+/// non-peripheral — so its key is neither inserted nor kept alive.
+enum CacheOutcome {
+    Fresh(CacheKey, Cached),
+    Seen(CacheKey),
+    Unkeyed,
+}
+
+/// `Seen` when the device has a stable key, else `Unkeyed`.
+fn seen(id: Option<CacheKey>) -> CacheOutcome {
+    id.map_or(CacheOutcome::Unkeyed, CacheOutcome::Seen)
+}
+
 /// Whether `cached` is stale enough that the device should be re-probed.
 fn is_stale(cached: &Cached, tick: u64) -> bool {
     tick.wrapping_sub(cached.probed_tick) >= REFRESH_TICKS
+}
+
+/// Decide a device's probe: reuse a fresh cache, or (online + miss/stale)
+/// re-probe — but keep the last-known immutable data if the re-probe fails
+/// rather than overwriting it with an empty default. An unprobed offline device
+/// with no cache yields a default probe. Returns the probe plus its cache
+/// contribution (only a *successful* probe is cached).
+async fn probe_or_reuse(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    id: Option<CacheKey>,
+    cached: Option<&Cached>,
+    online: bool,
+    tick: u64,
+) -> (ProbedFeatures, CacheOutcome) {
+    if online && cached.is_none_or(|c| is_stale(c, tick)) {
+        let fresh = probe_features(channel, index).await;
+        // `capabilities` is `Some` exactly when the feature-table walk succeeded;
+        // only then is the probe worth caching.
+        if fresh.capabilities.is_some() {
+            return match id {
+                Some(key) => {
+                    let value = Cached {
+                        probe: fresh.clone(),
+                        probed_tick: tick,
+                    };
+                    (fresh, CacheOutcome::Fresh(key, value))
+                }
+                None => (fresh, CacheOutcome::Unkeyed),
+            };
+        }
+        // Re-probe failed: don't cache the failure. Fall back to the last-known
+        // data so a transient glitch doesn't drop the device or its battery.
+        return match cached {
+            Some(c) => (c.probe.clone(), seen(id)),
+            None => (fresh, seen(id)),
+        };
+    }
+    match cached {
+        Some(c) => (c.probe.clone(), seen(id)),
+        None => (ProbedFeatures::default(), seen(id)),
+    }
 }
 
 /// Stateful device enumerator: holds the per-device probe cache so the polling
@@ -103,6 +169,9 @@ fn is_stale(cached: &Cached, tick: u64) -> bool {
 #[derive(Default)]
 pub struct Enumerator {
     cache: HashMap<CacheKey, Cached>,
+    /// Consecutive ticks each cached device has been missing, for grace-period
+    /// eviction.
+    misses: HashMap<CacheKey, u8>,
     tick: u64,
 }
 
@@ -149,12 +218,12 @@ impl Enumerator {
         };
 
         let mut inventories = Vec::new();
-        let mut updates = Vec::new();
+        let mut outcomes = Vec::new();
         for result in results {
             match result {
                 Ok(Ok((inv, mut probed))) => {
                     inventories.extend(inv);
-                    updates.append(&mut probed);
+                    outcomes.append(&mut probed);
                 }
                 Ok(Err(e)) => warn!(error = ?e, "skipping device that failed to probe"),
                 Err(_) => {
@@ -162,20 +231,55 @@ impl Enumerator {
                 }
             }
         }
-        for (id, cached) in updates {
-            self.cache.insert(id, cached);
+
+        // Apply fresh probes and record which devices were seen this tick.
+        let mut seen_keys = HashSet::new();
+        for outcome in outcomes {
+            match outcome {
+                CacheOutcome::Fresh(key, cached) => {
+                    seen_keys.insert(key.clone());
+                    self.cache.insert(key, cached);
+                }
+                CacheOutcome::Seen(key) => {
+                    seen_keys.insert(key);
+                }
+                CacheOutcome::Unkeyed => {}
+            }
         }
+        self.evict_unseen(&seen_keys);
         Ok(inventories)
+    }
+
+    /// Drop cache entries for devices not seen this tick, after a short grace so
+    /// a transient receiver timeout doesn't discard a still-present device.
+    fn evict_unseen(&mut self, seen_keys: &HashSet<CacheKey>) {
+        for key in seen_keys {
+            self.misses.remove(key);
+        }
+        let missing: Vec<CacheKey> = self
+            .cache
+            .keys()
+            .filter(|k| !seen_keys.contains(*k))
+            .cloned()
+            .collect();
+        for key in missing {
+            let misses = self.misses.entry(key.clone()).or_insert(0);
+            *misses += 1;
+            if *misses > CACHE_MISS_GRACE {
+                self.cache.remove(&key);
+                self.misses.remove(&key);
+            }
+        }
     }
 }
 
-/// Probe one HID candidate. Returns its inventory (if any) plus the cache
-/// entries for devices it freshly probed, for the caller to fold into the cache.
+/// Probe one HID candidate. Returns its inventory (if any) plus each device's
+/// cache contribution this tick, for the caller to apply and to drive eviction.
 async fn probe_one(
     dev: async_hid::Device,
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
-) -> Result<(Option<DeviceInventory>, Vec<(CacheKey, Cached)>), InventoryError> {
+) -> Result<(Option<DeviceInventory>, Vec<CacheOutcome>), InventoryError> {
     let Some((info, channel)) = open_hidpp_channel(dev).await? else {
         return Ok((None, Vec::new()));
     };
@@ -185,7 +289,8 @@ async fn probe_one(
         // (Bluetooth-direct, USB-C cable). HID++ at device-index 0xff
         // addresses the device's own features. Probe in case it answers.
         // P2.4 — verified path; no Bolt-pairing slot indirection needed.
-        return Ok(probe_direct(channel, &info, cache, tick).await);
+        let (inventory, outcome) = probe_direct(channel, &info, cache, tick).await;
+        return Ok((inventory, vec![outcome]));
     };
 
     let unique_id = bolt.get_unique_id().await.ok();
@@ -198,13 +303,13 @@ async fn probe_one(
         connections.into_iter().map(|c| (c.index, c)).collect();
 
     let mut paired = Vec::new();
-    let mut updates = Vec::new();
+    let mut outcomes = Vec::new();
     for slot in 1u8..=MAX_BOLT_SLOTS {
-        if let Some((device, update)) =
+        if let Some((device, outcome)) =
             probe_bolt_slot(&channel, &bolt, by_slot.get(&slot), slot, cache, tick).await
         {
             paired.push(device);
-            updates.extend(update);
+            outcomes.push(outcome);
         }
     }
 
@@ -228,13 +333,12 @@ async fn probe_one(
             },
             paired,
         }),
-        updates,
+        outcomes,
     ))
 }
 
 /// Probe a single Bolt pairing slot. Returns `None` when the slot is empty or
-/// unreadable, otherwise the device plus an optional cache entry (`Some` only
-/// when the device was freshly probed this tick).
+/// unreadable, otherwise the device plus its cache contribution this tick.
 async fn probe_bolt_slot(
     channel: &Arc<HidppChannel>,
     bolt: &BoltReceiver,
@@ -242,7 +346,7 @@ async fn probe_bolt_slot(
     slot: u8,
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
-) -> Option<(PairedDevice, Option<(CacheKey, Cached)>)> {
+) -> Option<(PairedDevice, CacheOutcome)> {
     let pairing = match bolt.get_device_pairing_information(slot).await {
         Ok(p) => p,
         Err(e) => {
@@ -275,39 +379,20 @@ async fn probe_bolt_slot(
     let cached = id.as_ref().and_then(|i| cache.get(i));
     let register_kind = map_kind(bolt_kind);
 
-    // Re-probe an online device only on a cache miss or when its cached probe is
-    // stale; reuse the cached immutable data otherwise (and for an offline
-    // device, so a sleeping mouse keeps its model + capabilities).
-    let mut update = None;
-    let probe = if online && cached.is_none_or(|c| is_stale(c, tick)) {
-        let probe = probe_features(channel, slot).await;
-        if let Some(probed) = probe.kind
-            && probed != DeviceKind::Unknown
-            && register_kind != DeviceKind::Unknown
-            && probed != register_kind
-        {
-            debug!(
-                slot,
-                ?register_kind,
-                ?probed,
-                "device-kind sources disagree — trusting 0x0005"
-            );
-        }
-        update = id.map(|id| {
-            (
-                id,
-                Cached {
-                    probe: probe.clone(),
-                    probed_tick: tick,
-                },
-            )
-        });
-        probe
-    } else if let Some(cached) = cached {
-        cached.probe.clone()
-    } else {
-        ProbedFeatures::default()
-    };
+    let (probe, outcome) = probe_or_reuse(channel, slot, id, cached, online, tick).await;
+    if matches!(outcome, CacheOutcome::Fresh(..))
+        && let Some(probed) = probe.kind
+        && probed != DeviceKind::Unknown
+        && register_kind != DeviceKind::Unknown
+        && probed != register_kind
+    {
+        debug!(
+            slot,
+            ?register_kind,
+            ?probed,
+            "device-kind sources disagree — trusting 0x0005"
+        );
+    }
 
     let device = PairedDevice {
         slot,
@@ -321,7 +406,7 @@ async fn probe_bolt_slot(
         model_info: probe.model_info,
         capabilities: probe.capabilities,
     };
-    Some((device, update))
+    Some((device, outcome))
 }
 
 /// Probe a HID++ channel that doesn't host a Bolt receiver — for
@@ -337,25 +422,13 @@ async fn probe_direct(
     info: &async_hid::DeviceInfo,
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
-) -> (Option<DeviceInventory>, Vec<(CacheKey, Cached)>) {
+) -> (Option<DeviceInventory>, CacheOutcome) {
     let id = CacheKey::Direct(info.id.clone());
-    let mut updates = Vec::new();
-    // Reuse the cached probe while fresh; a direct device's model + features are
-    // immutable, so most ticks skip the feature-table walk entirely.
-    let probe = match cache.get(&id) {
-        Some(cached) if !is_stale(cached, tick) => cached.probe.clone(),
-        _ => {
-            let probe = probe_features(&channel, DIRECT_DEVICE_INDEX).await;
-            updates.push((
-                id,
-                Cached {
-                    probe: probe.clone(),
-                    probed_tick: tick,
-                },
-            ));
-            probe
-        }
-    };
+    let cached = cache.get(&id);
+    // A direct device is always "present" (its HID node is the candidate), so
+    // treat it as online: reuse the cached probe while fresh, otherwise probe.
+    let (probe, outcome) =
+        probe_or_reuse(&channel, DIRECT_DEVICE_INDEX, Some(id), cached, true, tick).await;
     // Hybrid peripheral discriminator. A genuine directly-attached device is
     // either wireless/Bluetooth — which reports a battery — or exposes a
     // configuration feature (buttons / pointer / lighting). A Bolt receiver's
@@ -376,7 +449,9 @@ async fn probe_direct(
             "slot 0xff exposes no battery or config feature — likely a receiver \
              secondary interface; skipping"
         );
-        return (None, updates);
+        // Don't cache or keep a rejected non-peripheral — `Unkeyed` lets any
+        // prior entry for this node be evicted.
+        return (None, CacheOutcome::Unkeyed);
     }
 
     // Without a Bolt receiver we don't have a wpid, codename, or pairing
@@ -404,7 +479,7 @@ async fn probe_direct(
             capabilities: probe.capabilities,
         }],
     };
-    (Some(inventory), updates)
+    (Some(inventory), outcome)
 }
 
 async fn drain_device_arrival(bolt: &BoltReceiver) -> Vec<BoltDeviceConnection> {
@@ -639,7 +714,61 @@ fn map_battery_status(status: HidppBatteryStatus) -> BatteryStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cached, DeviceKind, ProbedFeatures, REFRESH_TICKS, is_stale, resolve_device_kind};
+    use std::collections::HashSet;
+
+    use super::{
+        CACHE_MISS_GRACE, CacheKey, Cached, DeviceKind, Enumerator, ProbedFeatures, REFRESH_TICKS,
+        is_stale, resolve_device_kind,
+    };
+
+    fn cache_entry(probed_tick: u64) -> Cached {
+        Cached {
+            probe: ProbedFeatures::default(),
+            probed_tick,
+        }
+    }
+
+    #[test]
+    fn cache_entry_survives_grace_then_evicts() {
+        let mut e = Enumerator::default();
+        let key = CacheKey::Bolt {
+            unit_id: [1, 2, 3, 4],
+        };
+        e.cache.insert(key.clone(), cache_entry(0));
+        let nobody = HashSet::new();
+        // Missing for the whole grace window: kept.
+        for _ in 0..CACHE_MISS_GRACE {
+            e.evict_unseen(&nobody);
+            assert!(
+                e.cache.contains_key(&key),
+                "evicted inside the grace window"
+            );
+        }
+        // One miss past the grace: evicted.
+        e.evict_unseen(&nobody);
+        assert!(
+            !e.cache.contains_key(&key),
+            "should evict past the grace window"
+        );
+    }
+
+    #[test]
+    fn being_seen_resets_the_miss_counter() {
+        let mut e = Enumerator::default();
+        let key = CacheKey::Bolt { unit_id: [9; 4] };
+        e.cache.insert(key.clone(), cache_entry(0));
+        let nobody = HashSet::new();
+        let seen: HashSet<CacheKey> = std::iter::once(key.clone()).collect();
+        e.evict_unseen(&nobody); // miss 1
+        e.evict_unseen(&seen); // seen → counter reset
+        for _ in 0..CACHE_MISS_GRACE {
+            e.evict_unseen(&nobody);
+        }
+        assert!(
+            e.cache.contains_key(&key),
+            "counter reset by a sighting, so still within grace"
+        );
+    }
 
     #[test]
     fn cached_probe_is_reused_until_refresh_ticks() {
