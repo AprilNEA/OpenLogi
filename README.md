@@ -78,6 +78,18 @@ Or install via [Homebrew](https://brew.sh):
 brew install --cask openlogi
 ```
 
+The official Homebrew cask is the default installation path. To explicitly
+track the latest GitHub release from `aprilnea/tap` instead:
+
+```sh
+brew tap aprilnea/tap
+brew install --cask aprilnea/tap/openlogi@latest
+```
+
+`openlogi@latest` is maintained by OpenLogi's release workflow and may update
+before the official cask autobump lands. Install either `openlogi` or
+`openlogi@latest`, not both.
+
 To build from source, see [DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Usage (CLI)
