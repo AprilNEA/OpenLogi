@@ -23,9 +23,9 @@ use gpui_component::{
 };
 use openlogi_hid::{AUTO_DISENGAGE_PERMANENT, DeviceRoute, SmartShiftMode, SmartShiftStatus};
 
-use crate::hardware::read_smartshift_status_blocking;
 use crate::state::{AppState, SmartShiftLoad};
 use crate::theme::{self, ACCENT_BLUE, Palette};
+use openlogi_agent_core::hardware::read_smartshift_status_blocking;
 
 /// Friendly slider range for the `autoDisengage` threshold. The wire field is
 /// `0x01`–`0xFE` (0.25 turn/s steps), but realistic scroll speeds sit well

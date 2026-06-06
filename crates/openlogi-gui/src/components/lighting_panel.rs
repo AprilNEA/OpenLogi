@@ -2,7 +2,7 @@
 //!
 //! A palette of color swatches, an on/off toggle, and a brightness slider,
 //! persisted per device via [`AppState::commit_lighting`] and pushed to the
-//! keyboard through [`crate::hardware::set_lighting_in_background`].
+//! keyboard through [`openlogi_agent_core::hardware::set_lighting_in_background`].
 
 use gpui::{
     AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,

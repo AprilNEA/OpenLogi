@@ -27,17 +27,15 @@ use openlogi_hid::{
 use openlogi_hook::Hook;
 use tracing::{debug, warn};
 
-mod bindings;
 mod devices;
-mod dpi;
 
 pub use devices::DeviceRecord;
-pub use dpi::DpiCycleState;
+pub use openlogi_agent_core::DpiCycleState;
 
 use crate::asset::AssetResolver;
 use crate::data::mouse_buttons::{Action, ButtonId, GestureDirection};
-use crate::state::bindings::{bindings_for, gesture_bindings_for};
 use crate::state::devices::{build_device_list, pick_initial_device, sort_device_list};
+use openlogi_agent_core::bindings::{bindings_for, gesture_bindings_for};
 
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
@@ -263,8 +261,9 @@ impl AppState {
         let device_list = build_device_list(inventories, cache);
         let current_device = pick_initial_device(&device_list, config.selected_device());
         let record = device_list.get(current_device);
-        let bindings = bindings_for(config, record, None);
-        let gesture_bindings = gesture_bindings_for(config, record);
+        let config_key = record.map(|r| r.config_key.as_str());
+        let bindings = bindings_for(config, config_key, None);
+        let gesture_bindings = gesture_bindings_for(config, config_key);
         let presets = record
             .map(|r| config.dpi_presets(&r.config_key))
             .unwrap_or_default();
@@ -776,7 +775,7 @@ impl AppState {
         };
         let key = record.config_key.clone();
         let target = record.route.clone();
-        crate::hardware::write_smartshift_in_background(
+        openlogi_agent_core::hardware::write_smartshift_in_background(
             None,
             target,
             mode,
@@ -812,7 +811,7 @@ impl AppState {
             return;
         };
         let target = self.current_record().and_then(|r| r.route.clone());
-        crate::hardware::set_lighting_in_background(target, &lighting);
+        openlogi_agent_core::hardware::set_lighting_in_background(target, &lighting);
         self.config.set_lighting(&key, lighting);
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist lighting to config.toml");
@@ -974,13 +973,16 @@ impl AppState {
     fn bindings_for_current(&self) -> BTreeMap<ButtonId, Action> {
         bindings_for(
             &self.config,
-            self.current_record(),
+            self.current_record().map(|r| r.config_key.as_str()),
             self.current_app_bundle.as_deref(),
         )
     }
 
     fn gesture_bindings_for_current(&self) -> BTreeMap<GestureDirection, Action> {
-        gesture_bindings_for(&self.config, self.current_record())
+        gesture_bindings_for(
+            &self.config,
+            self.current_record().map(|r| r.config_key.as_str()),
+        )
     }
 
     /// Update a single gesture-button sub-binding in memory, on disk, and in the

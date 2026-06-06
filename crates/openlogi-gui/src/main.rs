@@ -28,8 +28,6 @@ mod app_menu;
 mod asset;
 mod components;
 mod data;
-mod hardware;
-mod hook_runtime;
 mod i18n;
 mod mouse_model;
 mod platform;
@@ -60,8 +58,8 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::app::AppView;
-use crate::hook_runtime::BindingMap;
 use crate::state::{AppState, DpiCycleState};
+use openlogi_agent_core::hook_runtime::{self, BindingMap};
 
 #[allow(
     clippy::too_many_lines,

@@ -17,9 +17,9 @@ use gpui_component::{
 use openlogi_hid::{DeviceRoute, DpiCapabilities};
 use tracing::debug;
 
-use crate::hardware::{read_dpi_info_blocking, write_dpi_in_background};
 use crate::state::{AppState, DpiStatus};
 use crate::theme::{self, ACCENT_BLUE, Palette};
+use openlogi_agent_core::hardware::{read_dpi_info_blocking, write_dpi_in_background};
 
 /// Slider column width. Matches the right-column layout in `app.rs`.
 const PANEL_W: f32 = 300.;

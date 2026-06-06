@@ -30,8 +30,8 @@ use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_sessi
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use crate::hook_runtime::{self, BindingMap};
 use crate::state::DpiCycleState;
+use openlogi_agent_core::hook_runtime::{self, BindingMap};
 
 /// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
 /// direction). The watcher reads it to map a captured swipe to a bound action.

@@ -79,3 +79,12 @@ changelog_path = "CHANGELOG.md"
 name = "openlogi-gui"
 release = false
 publish = false
+
+# Shared headless orchestration for the background agent. Not publishable
+# (links git-only gpui-adjacent siblings); version follows the shared workspace
+# version by inheritance. `publish = false` mirrors the crate's Cargo.toml — see
+# the openlogi-gui note above.
+[[package]]
+name = "openlogi-agent-core"
+release = false
+publish = false

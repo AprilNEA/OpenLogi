@@ -4590,6 +4590,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "openlogi-agent-core"
+version = "0.5.1"
+dependencies = [
+ "openlogi-core",
+ "openlogi-hid",
+ "openlogi-hook",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "openlogi-assets"
 version = "0.5.1"
 dependencies = [
@@ -4646,6 +4657,7 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "openlogi-agent-core",
  "openlogi-assets",
  "openlogi-core",
  "openlogi-hid",

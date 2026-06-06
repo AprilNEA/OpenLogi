@@ -1,9 +1,9 @@
 //! Runtime bridge between background input events and OpenLogi actions.
 //!
-//! The GPUI thread owns `AppState`, while the CGEventTap hook and HID++
-//! gesture watcher run outside it. This module contains the shared runtime
-//! surface between them: the binding map mirrored from `AppState`, lazy hook
-//! installation, and action dispatch for both hook and gesture events.
+//! The CGEventTap hook and the HID++ gesture watcher run outside any UI thread.
+//! This module is the shared runtime surface between them and the bound config:
+//! the binding map, lazy hook installation, and action dispatch for both hook
+//! and gesture events.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -13,10 +13,10 @@ use openlogi_hid::CaptureChannel;
 use openlogi_hook::{EventDisposition, Hook, MouseEvent};
 use tracing::{info, warn};
 
+use crate::DpiCycleState;
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
-use crate::state::DpiCycleState;
 
-/// Shared binding map threaded between `AppState` and the hook callback.
+/// Shared binding map threaded between the config owner and the hook callback.
 pub type BindingMap = Arc<RwLock<BTreeMap<ButtonId, Action>>>;
 
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not

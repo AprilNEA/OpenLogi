@@ -1,0 +1,21 @@
+[package]
+name = "openlogi-agent-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Headless orchestration shared by the OpenLogi background agent: hook runtime, HID++ writes, DPI cycle, binding maps."
+# Links path-only siblings and is bundled inside the .app via openlogi-agent.
+publish = false
+
+[dependencies]
+openlogi-core = { path = "../openlogi-core" }
+openlogi-hid = { path = "../openlogi-hid" }
+openlogi-hook = { path = "../openlogi-hook" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true
