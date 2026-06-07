@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.5.3...openlogi-core-v0.5.4) - 2026-06-07
+
+### Added
+
+- *(agent)* tarpc IPC server backed by the orchestrator + device I/O
+- *(agent)* define tarpc IPC service contract + serde-derive wire types
+
+### Fixed
+
+- *(agent)* give the agent its own single-instance lock
+
+### Other
+
+- Merge origin/master into feat/agent-daemon-split
+
 ## [0.5.3](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.5.2...openlogi-core-v0.5.3) - 2026-06-06
 
 ### Fixed
