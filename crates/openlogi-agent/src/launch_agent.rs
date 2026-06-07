@@ -3,8 +3,10 @@
 //! When `Config::app_settings.launch_at_login` is `true`, a plist at
 //! `~/Library/LaunchAgents/org.openlogi.agent.plist` is kept in sync with the
 //! running agent executable so the next login relaunches it. `KeepAlive` is
-//! `true` — the always-on daemon must survive a crash, the way Logi Options+'s
-//! own agent does. No `--minimized`: the agent is always headless.
+//! `{SuccessfulExit: false}` — the always-on daemon is respawned after a crash
+//! (the way Logi Options+'s own agent does), but the tray's "Quit" (a clean
+//! `exit(0)`) is *not* relaunched, so Quit actually stops it until the next
+//! login. No `--minimized`: the agent is always headless.
 //!
 //! The legacy `org.openlogi.openlogi` plist (the pre-split GUI autostart, which
 //! launched the GUI with `--minimized`) is removed on every reconcile so the
@@ -109,6 +111,7 @@ fn plist_path(label: &str) -> io::Result<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn render_plist(exe: &str) -> String {
+    let exe = xml_escape(exe);
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
@@ -124,10 +127,27 @@ fn render_plist(exe: &str) -> String {
         <key>RunAtLoad</key>\n  \
         <true/>\n  \
         <key>KeepAlive</key>\n  \
-        <true/>\n\
+        <dict>\n    \
+        <key>SuccessfulExit</key>\n    \
+        <false/>\n  \
+        </dict>\n\
         </dict>\n\
         </plist>\n",
     )
+}
+
+/// Escape a string for inclusion in plist XML element text. A path can legally
+/// contain `&`, `<`, `>` (all valid APFS filename characters); left raw they
+/// produce a malformed plist that `std::fs::write` stores happily but launchd
+/// silently rejects at the next login, so the agent would never auto-start.
+/// `&` is replaced first so it doesn't double-escape the entities below.
+#[cfg(target_os = "macos")]
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -142,9 +162,21 @@ mod tests {
         assert!(body.contains(LABEL));
         assert!(body.contains("openlogi-agent"));
         assert!(body.contains("RunAtLoad"));
-        // KeepAlive must be true (the always-on daemon survives crashes) and
-        // there is no --minimized arg (the agent is always headless).
-        assert!(body.contains("<key>KeepAlive</key>\n  <true/>"));
+        // KeepAlive uses SuccessfulExit:false so a crash respawns but the tray's
+        // Quit (a clean exit(0)) is NOT relaunched; no --minimized (always headless).
+        assert!(body.contains(
+            "<key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>"
+        ));
         assert!(!body.contains("--minimized"));
+    }
+
+    #[test]
+    fn render_plist_escapes_xml_metacharacters_in_the_path() {
+        // A home/app path with XML metacharacters (all legal APFS filename chars)
+        // must not produce a malformed plist launchd would reject.
+        let body = render_plist("/Users/R&D/Apps/<OpenLogi>/openlogi-agent");
+        assert!(body.contains("/Users/R&amp;D/Apps/&lt;OpenLogi&gt;/openlogi-agent"));
+        // The raw, unescaped ampersand must not survive into the plist.
+        assert!(!body.contains("R&D"));
     }
 }
