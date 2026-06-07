@@ -14,7 +14,7 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, DeviceInventory, DeviceKind,
+    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
 };
 use openlogi_hid::DeviceRoute;
 use tracing::info;
@@ -71,13 +71,26 @@ enum DetailTab {
 impl DetailTab {
     /// The detail sections shown for `record`, in tab order. Always non-empty:
     /// every device gets at least the info tab.
+    ///
+    /// Each panel is gated on the device's actual [`Capabilities`] — the HID++
+    /// features it announced — not on its [`DeviceKind`]. A panel shows iff the
+    /// device can do that thing, so a misclassified device can't lose its
+    /// panels (issue #127) and a keyboard's future button config won't be hidden
+    /// by a kind check. Devices we never probed (offline at startup) have no
+    /// measured capabilities; we presume a set from their kind so a sleeping
+    /// mouse still shows its (host-side) button bindings.
     fn tabs_for(record: &DeviceRecord) -> Vec<Self> {
+        let caps = record
+            .capabilities
+            .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
         let mut tabs = Vec::new();
-        if is_configurable_pointer(record.kind) {
+        if caps.buttons {
             tabs.push(Self::Buttons);
+        }
+        if caps.pointer {
             tabs.push(Self::Pointer);
         }
-        if supports_lighting(record) {
+        if caps.lighting {
             tabs.push(Self::Lighting);
         }
         tabs.push(Self::Device);
@@ -100,28 +113,6 @@ impl DetailTab {
             Self::Device => tr!("Device"),
         }
     }
-}
-
-/// Whether a device drives the mouse model + DPI panel. Other kinds (keyboards,
-/// numpads, headsets…) don't get a mouse silhouette that doesn't describe them
-/// (issue #19); they fall back to the info tab — and, for wired keyboards, the
-/// lighting tab.
-fn is_configurable_pointer(kind: DeviceKind) -> bool {
-    matches!(kind, DeviceKind::Mouse | DeviceKind::Trackball)
-}
-
-/// Whether to offer the RGB lighting tab. A `Keyboard` is always a keyboard;
-/// wired G-series keyboards, though, enumerate as `Unknown` over the direct
-/// (USB) path (it carries no codename or kind), so a direct-attached `Unknown`
-/// counts too.
-///
-/// [`openlogi_hid::set_keyboard_color`] only drives the *wired* path today (it
-/// opens a raw USB writer), so a Bolt/Unifying-paired keyboard's writes no-op
-/// until a wireless lighting path lands — the tab still persists the config.
-fn supports_lighting(record: &DeviceRecord) -> bool {
-    matches!(record.kind, DeviceKind::Keyboard)
-        || (matches!(record.kind, DeviceKind::Unknown)
-            && matches!(record.route, Some(DeviceRoute::Direct { .. })))
 }
 
 /// Root application view.
@@ -811,7 +802,8 @@ fn pointer_tab(
 }
 
 /// Lighting tab: the RGB controls (swatches, on/off, brightness) in a titled
-/// card. Only reached for wired keyboards — see [`supports_lighting`].
+/// card. Shown when the device reports a lighting capability — see
+/// [`DetailTab::tabs_for`].
 fn lighting_tab(lighting_panel: &Entity<LightingPanel>, pal: Palette) -> impl IntoElement {
     v_flex()
         .flex_1()
@@ -1266,5 +1258,72 @@ fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
             .child(div().child(tr!("Accessibility not granted · click to grant")))
             .on_click(|_, _, _| open_accessibility_settings())
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
+
+    fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord {
+        DeviceRecord {
+            config_key: "test".to_string(),
+            display_name: "Test".to_string(),
+            asset: None,
+            serial_number: None,
+            unit_id: [0; 4],
+            route: None,
+            kind,
+            capabilities,
+            slot: 1,
+            online: true,
+            battery: None,
+        }
+    }
+
+    /// Tabs follow measured capabilities, not kind — the core of the #127 fix.
+    /// A device the registry mislabels (kind=Keyboard) but that exposes button +
+    /// pointer features still gets its Buttons/Pointer tabs and no lighting.
+    #[test]
+    fn tabs_follow_capabilities_not_kind() {
+        let caps = Some(Capabilities {
+            buttons: true,
+            pointer: true,
+            lighting: false,
+        });
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+        assert!(tabs.contains(&DetailTab::Buttons));
+        assert!(tabs.contains(&DetailTab::Pointer));
+        assert!(!tabs.contains(&DetailTab::Lighting));
+    }
+
+    /// Each panel is independent: a lighting-only device (e.g. a keyboard with
+    /// RGB but no remappable keys yet) shows only Lighting + Device.
+    #[test]
+    fn lighting_only_device_shows_only_lighting() {
+        let caps = Some(Capabilities {
+            lighting: true,
+            ..Capabilities::default()
+        });
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+        assert_eq!(tabs, vec![DetailTab::Lighting, DetailTab::Device]);
+    }
+
+    /// An unprobed (offline) device has no measured capabilities and falls back
+    /// to a kind presumption, so a sleeping mouse keeps its button/pointer tabs.
+    #[test]
+    fn unprobed_mouse_falls_back_to_presumed_capabilities() {
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, None));
+        assert!(tabs.contains(&DetailTab::Buttons));
+        assert!(tabs.contains(&DetailTab::Pointer));
+        assert!(!tabs.contains(&DetailTab::Lighting));
+    }
+
+    /// An unprobed, unidentified device presumes nothing — only the info tab,
+    /// rather than guessing wrong panels (the old Unknown+Direct→lighting bug).
+    #[test]
+    fn unprobed_unknown_device_shows_only_device_tab() {
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Unknown, None));
+        assert_eq!(tabs, vec![DetailTab::Device]);
     }
 }

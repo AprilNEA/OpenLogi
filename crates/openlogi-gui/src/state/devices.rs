@@ -1,7 +1,8 @@
 //! Device-list construction and selection helpers for [`super::AppState`].
 
-use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceKind};
+use openlogi_core::device::{BatteryInfo, Capabilities, DeviceInventory, DeviceKind};
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use tracing::debug;
 
 use crate::asset::{AssetResolver, ResolvedAsset};
 
@@ -24,6 +25,11 @@ pub struct DeviceRecord {
     pub unit_id: [u8; 4],
     pub route: Option<DeviceRoute>,
     pub kind: DeviceKind,
+    /// Configuration capabilities from the device's HID++ feature table. `None`
+    /// when the device couldn't be probed (offline); the snapshot merge carries
+    /// the last-known value forward, and the UI falls back to
+    /// [`Capabilities::presumed_from_kind`] for a never-probed device.
+    pub capabilities: Option<Capabilities>,
     pub slot: u8,
     pub online: bool,
     pub battery: Option<BatteryInfo>,
@@ -69,6 +75,7 @@ pub(super) fn build_device_list(
                 .map(|a| a.display_name.clone())
                 .or_else(|| paired.codename.clone())
                 .unwrap_or_else(|| format!("Slot {}", paired.slot));
+            let kind = effective_kind(paired.kind, asset.as_ref().map(|a| a.kind));
             list.push(DeviceRecord {
                 config_key,
                 display_name,
@@ -76,7 +83,8 @@ pub(super) fn build_device_list(
                 serial_number: model.serial_number.clone(),
                 unit_id: model.unit_id,
                 route: device_route(inv, paired.slot),
-                kind: paired.kind,
+                kind,
+                capabilities: paired.capabilities,
                 slot: paired.slot,
                 online: paired.online,
                 battery: paired.battery.clone(),
@@ -154,6 +162,10 @@ fn demo_keyboard() -> DeviceRecord {
         unit_id: [0; 4],
         route: None,
         kind: DeviceKind::Keyboard,
+        capabilities: Some(Capabilities {
+            lighting: true,
+            ..Capabilities::default()
+        }),
         slot: 0,
         online: true,
         battery: None,
@@ -182,8 +194,57 @@ fn device_route(inv: &DeviceInventory, slot: u8) -> Option<DeviceRoute> {
     }
 }
 
+/// Pick a device's [`DeviceKind`], preferring the asset registry's curated type
+/// over the runtime HID++ classification.
+///
+/// The registry type is per-model and human-maintained, so a device that
+/// matched a known depot is classified by what that model *is* — not by a Bolt
+/// pairing register that can misreport (the failure behind #127). We fall back
+/// to `hid_kind` when there is no asset or its type is `Unknown`. A genuine
+/// disagreement is logged at debug (the list rebuilds on every snapshot, so a
+/// louder level would spam); it flags a HID++ source we shouldn't trust for
+/// that device.
+fn effective_kind(hid_kind: DeviceKind, asset_kind: Option<DeviceKind>) -> DeviceKind {
+    let Some(asset_kind) = asset_kind.filter(|k| *k != DeviceKind::Unknown) else {
+        return hid_kind;
+    };
+    if hid_kind != DeviceKind::Unknown && hid_kind != asset_kind {
+        debug!(
+            ?hid_kind,
+            ?asset_kind,
+            "HID++ device kind disagrees with the asset registry — trusting the registry"
+        );
+    }
+    asset_kind
+}
+
 pub(super) fn pick_initial_device(list: &[DeviceRecord], saved: Option<&str>) -> usize {
     saved
         .and_then(|key| list.iter().position(|r| r.config_key == key))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeviceKind, effective_kind};
+
+    #[test]
+    fn asset_kind_overrides_a_misreporting_hid_kind() {
+        // #127: the registry knows this depot is a mouse, so a HID++ source that
+        // reported `Keyboard` loses.
+        assert_eq!(
+            effective_kind(DeviceKind::Keyboard, Some(DeviceKind::Mouse)),
+            DeviceKind::Mouse
+        );
+    }
+
+    #[test]
+    fn hid_kind_is_used_without_a_modelled_asset() {
+        // No asset, or an asset whose type we don't model → keep the HID kind.
+        assert_eq!(effective_kind(DeviceKind::Mouse, None), DeviceKind::Mouse);
+        assert_eq!(
+            effective_kind(DeviceKind::Mouse, Some(DeviceKind::Unknown)),
+            DeviceKind::Mouse
+        );
+    }
 }

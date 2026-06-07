@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.5.2...openlogi-core-v0.5.3) - 2026-06-06
+
+### Fixed
+
+- *(gui)* prefer asset-registry kind + harden device-kind classification
+
+### Other
+
+- gate config panels on HID++ capabilities, not device kind
+
+## [0.5.2](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.5.1...openlogi-core-v0.5.2) - 2026-06-05
+
+### Added
+
+- *(core)* LockScreen and media actions via D-Bus on Linux
+- *(core)* expose action_device_path for evtest attachment
+- *(core)* implement Action::execute on Linux via uinput
+- enable Thumb Wheel Up/Down mapping, "Do Nothing" action, and native scroll sensitivity ([#125](https://github.com/AprilNEA/OpenLogi/pull/125))
+
+### Fixed
+
+- *(core)* fmt + clarify mpris fallback log on the Linux D-Bus code
+- *(core)* address PR #124 review comments
+- *(core)* drop unused REL_X/REL_Y from the action uinput device
+- *(core)* cover Action::None in execute_linux
+- *(core)* address PR review comments
+- *(core)* use enumerate_dev_nodes_blocking for correct event path
+- *(core)* address code review findings
+
+### Other
+
+- run clippy on Windows instead of bare cargo check ([#146](https://github.com/AprilNEA/OpenLogi/pull/146))
+- *(core)* simplify D-Bus helpers and add -v flag to inject_action
+- *(core)* simplify inject_action parsing, guard --delay
+- *(core)* extract KEY_CAPABILITIES const, drop too_many_lines allow
+- *(core)* note LockScreen Linux limitation and D-Bus follow-up
+- *(core)* note Ctrl+Shift+Z vs Ctrl+Y redo shortcut choice on Linux
+- *(core)* clarify scroll unit difference between post_horizontal_scroll and HorizontalScroll* actions
+- *(core)* simplify Linux execute helpers and doc fixes
+- *(core)* add vk_mapping tests and inject_action example
+
 ## [0.5.1](https://github.com/AprilNEA/OpenLogi/compare/openlogi-assets-v0.5.0...openlogi-assets-v0.5.1) - 2026-06-05
 
 ### Fixed

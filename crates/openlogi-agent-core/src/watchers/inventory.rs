@@ -40,8 +40,12 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<Vec<DeviceInventory>> 
                     return;
                 }
             };
+            // A persistent enumerator so its per-device probe cache survives
+            // across ticks — a known device's immutable data (model, features)
+            // is reused instead of being re-handshaked every poll.
+            let mut enumerator = openlogi_hid::Enumerator::default();
             loop {
-                let inv = match rt.block_on(openlogi_hid::enumerate()) {
+                let inv = match rt.block_on(enumerator.enumerate()) {
                     Ok(inv) => inv,
                     Err(e) => {
                         warn!(error = ?e, "enumerate failed during watch tick");
