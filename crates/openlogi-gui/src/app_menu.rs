@@ -10,12 +10,9 @@
 //! in a top-of-screen bar — calling `install` there is a harmless no-op.
 
 use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, actions};
+use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
 
 use crate::state::AppState;
-
-const REPO_URL: &str = "https://github.com/AprilNEA/OpenLogi";
-const HELP_URL: &str = "https://github.com/AprilNEA/OpenLogi#readme";
-const RELEASES_URL: &str = "https://github.com/AprilNEA/OpenLogi/releases/latest";
 
 actions!(
     openlogi,

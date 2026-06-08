@@ -56,13 +56,22 @@ fi
 ln -f "$bin" "$MACOS/openlogi-gui" 2>/dev/null || cp -f "$bin" "$MACOS/openlogi-gui"
 
 # Register the dev .app with LaunchServices so the `openlogi://` URL scheme
-# works during development. Only re-register when the Info.plist was updated
-# this run — avoids the (normally ~10 ms but occasionally multi-second)
-# lsregister cost on every incremental rebuild.
+# works during development. Gate on the *bundled* plist (freshly stamped by the
+# copy step above) vs a marker, so a rebuilt bundle re-registers even when the
+# source plist is unchanged — and only stamp the marker when lsregister actually
+# succeeds, so a failure retries next run instead of latching off. Skips the
+# (normally ~10 ms, occasionally multi-second) lsregister cost on the steady
+# incremental path.
+#
+# Both the dev build (here) and the release build register the same openlogi://
+# scheme; LaunchServices routes to the last-registered handler. If a release
+# install starts winning the scheme during development, re-run this (touch the
+# dev plist) or `lsregister -f "$APP"` to put the dev build back in front.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-if [ -x "$LSREGISTER" ] && [ "$PLIST_SRC" -nt "$PLIST.lsregistered" ]; then
-  "$LSREGISTER" -R "$APP" 2>/dev/null || true
-  touch "$PLIST.lsregistered"
+if [ -x "$LSREGISTER" ] && [ "$PLIST" -nt "$PLIST.lsregistered" ]; then
+  if "$LSREGISTER" -R "$APP" 2>/dev/null; then
+    touch "$PLIST.lsregistered"
+  fi
 fi
 
 # Embed the headless agent so the GUI can auto-spawn it in dev. The GUI's IPC

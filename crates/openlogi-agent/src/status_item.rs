@@ -67,9 +67,16 @@ pub(crate) fn new_action_item(
     item
 }
 
-/// Set a custom PNG as the status-item icon (template image). Pass the @2x
-/// PNG data; the image size is set to half the pixel dimensions so macOS picks
-/// the right resolution on both Retina and non-Retina displays.
+/// The point height of a menu-bar status item's icon (AppKit convention; the
+/// status bar is ~22pt tall, leaving ~18pt for the icon).
+const STATUS_ICON_POINTS: f64 = 18.0;
+
+/// Set a custom PNG as the status-item icon (template image). Pass the @2x PNG
+/// data; the image's logical size is pinned to the fixed menu-bar point size,
+/// so macOS scales the bitmap to fit regardless of the PNG's pixel dimensions
+/// or DPI metadata. (A single bitmap is scaled, not resolution-selected —
+/// crisp @1x/@2x selection would need multiple `NSImageRep`s, overkill for a
+/// monochrome template glyph this small.)
 pub(crate) fn set_png_icon(
     item: &NSStatusItem,
     mtm: MainThreadMarker,
@@ -82,10 +89,9 @@ pub(crate) fn set_png_icon(
     let data = NSData::with_bytes(png_2x);
     match NSImage::initWithData(NSImage::alloc(), &data) {
         Some(image) => {
-            let px = image.size();
             image.setSize(objc2_foundation::NSSize::new(
-                px.width / 2.0,
-                px.height / 2.0,
+                STATUS_ICON_POINTS,
+                STATUS_ICON_POINTS,
             ));
             image.setTemplate(true);
             button.setImage(Some(&image));

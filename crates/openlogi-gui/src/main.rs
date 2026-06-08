@@ -51,6 +51,7 @@ use gpui::{
     WindowBounds, WindowOptions, px,
 };
 use gpui_component::{ActiveTheme, Root, Theme, ThemeMode};
+use openlogi_core::brand::DeeplinkCommand;
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, DeviceModelInfo};
 use tracing::{info, warn};
@@ -59,52 +60,36 @@ use tracing_subscriber::EnvFilter;
 use crate::app::AppView;
 use crate::state::AppState;
 
-/// A GUI action requested by the agent's tray menu via `openlogi://` URL.
-#[derive(Clone, Debug)]
-enum GuiCommand {
-    Show,
-    OpenSettings,
-    OpenAbout,
-    CheckForUpdates,
-    Quit,
-}
-
-impl GuiCommand {
-    fn parse(s: &str) -> Option<Self> {
-        match s {
-            "show" => Some(Self::Show),
-            "open-settings" => Some(Self::OpenSettings),
-            "open-about" => Some(Self::OpenAbout),
-            "check-for-updates" => Some(Self::CheckForUpdates),
-            "quit" => Some(Self::Quit),
-            _ => None,
+fn dispatch_gui_command(command: DeeplinkCommand, cx: &mut gpui::App) {
+    use DeeplinkCommand as Cmd;
+    match command {
+        Cmd::Quit => cx.quit(),
+        // Always route Show through `open_main_window`: it re-focuses (and
+        // deminiaturizes) an existing window or opens a fresh one, so the tray's
+        // "Show Main Window" works whether or not a window is already up.
+        Cmd::Show => open_main_window(&[], cx),
+        // The aux windows are standalone; open the main window first as the
+        // session anchor (no-op when one is already open) so closing the aux
+        // window doesn't leave the app windowless — and quitting — by surprise.
+        Cmd::OpenSettings => {
+            ensure_main_window(cx);
+            windows::settings::open(cx);
+        }
+        Cmd::OpenAbout => {
+            ensure_main_window(cx);
+            windows::about::open(cx);
+        }
+        Cmd::CheckForUpdates => {
+            ensure_main_window(cx);
+            app_menu::check_for_updates(cx);
         }
     }
 }
 
-fn parse_url_command(url: &str) -> Option<GuiCommand> {
-    let path = url.strip_prefix("openlogi://")?;
-    let command = path.split(['/', '?']).next().unwrap_or(path);
-    let result = GuiCommand::parse(command);
-    if result.is_none() {
-        warn!(url, "unknown openlogi:// command — ignoring");
-    }
-    result
-}
-
-fn dispatch_gui_command(command: &GuiCommand, cx: &mut gpui::App) {
-    if matches!(command, GuiCommand::Quit) {
-        cx.quit();
-        return;
-    }
+/// Open the main window as the session anchor when no window is currently open.
+fn ensure_main_window(cx: &mut gpui::App) {
     if cx.windows().is_empty() {
         open_main_window(&[], cx);
-    }
-    match command {
-        GuiCommand::OpenSettings => windows::settings::open(cx),
-        GuiCommand::OpenAbout => windows::about::open(cx),
-        GuiCommand::CheckForUpdates => app_menu::check_for_updates(cx),
-        GuiCommand::Show | GuiCommand::Quit => {}
     }
 }
 
@@ -161,13 +146,15 @@ fn main() -> Result<()> {
     // URL scheme: `open openlogi://open-settings` from the agent's tray or
     // external apps. Works for both cold start (macOS launches the app then
     // delivers the URL) and warm reactivation (delivered to the running app).
-    let (gui_cmd_tx, mut gui_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<GuiCommand>();
+    let (gui_cmd_tx, mut gui_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<DeeplinkCommand>();
     app.on_open_urls({
         let tx = gui_cmd_tx.clone();
         move |urls| {
             for url in &urls {
-                if let Some(cmd) = parse_url_command(url) {
+                if let Some(cmd) = DeeplinkCommand::parse_url(url) {
                     let _ = tx.send(cmd);
+                } else {
+                    warn!(url, "unknown openlogi:// command — ignoring");
                 }
             }
         }
@@ -279,7 +266,7 @@ fn main() -> Result<()> {
                         });
                     }
                     Some(cmd) = gui_cmd_rx.recv() => {
-                        cx.update(|cx| dispatch_gui_command(&cmd, cx));
+                        cx.update(|cx| dispatch_gui_command(cmd, cx));
                     }
                     else => break,
                 }

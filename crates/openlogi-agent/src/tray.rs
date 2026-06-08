@@ -1,12 +1,14 @@
 //! The agent's menu-bar status item.
 //!
 //! The always-on agent hosts the menu bar (the GUI is on-demand). The item
-//! carries "Open OpenLogi", GUI-directed actions, help links, and "Quit
-//! OpenLogi". Clicks fire on the main thread's AppKit run loop.
+//! carries GUI-directed actions ("Show Main Window", Settings, About, Check for
+//! Updates) and "Quit OpenLogi"; the GitHub/help links live in the GUI's own
+//! menu bar, not here. Clicks fire on the main thread's AppKit run loop.
 //!
-//! GUI-directed actions open `openlogi://` URLs which macOS delivers to the
-//! GUI via Apple Events — works for both cold start (app launched then URL
-//! delivered) and warm reactivation (URL delivered to running app).
+//! GUI-directed actions open [`DeeplinkCommand`] `openlogi://` URLs which macOS
+//! delivers to the GUI via Apple Events — works for both cold start (app
+//! launched then URL delivered) and warm reactivation (URL delivered to the
+//! running app).
 //!
 //! macOS-only. AppKit objects are `Retained<T>` (no #99-style leaks); the run
 //! loop owns the main thread for the agent's lifetime.
@@ -19,8 +21,9 @@
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage, NSRunningApplication};
 use objc2_foundation::NSString;
+use openlogi_core::brand::DeeplinkCommand;
 use tracing::{info, warn};
 
 use crate::status_item;
@@ -36,45 +39,37 @@ define_class!(
     impl MenuTarget {
         #[unsafe(method(openOpenLogi:))]
         fn open_openlogi(&self, _sender: Option<&AnyObject>) {
-            open_url("openlogi://show");
+            open_command(DeeplinkCommand::Show);
         }
 
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: Option<&AnyObject>) {
-            open_url("openlogi://open-settings");
+            open_command(DeeplinkCommand::OpenSettings);
         }
 
         #[unsafe(method(openAbout:))]
         fn open_about(&self, _sender: Option<&AnyObject>) {
-            open_url("openlogi://open-about");
+            open_command(DeeplinkCommand::OpenAbout);
         }
 
         #[unsafe(method(checkForUpdates:))]
         fn check_for_updates(&self, _sender: Option<&AnyObject>) {
-            open_url("openlogi://check-for-updates");
-        }
-
-        #[unsafe(method(openHelp:))]
-        fn open_help(&self, _sender: Option<&AnyObject>) {
-            open_url("https://github.com/AprilNEA/OpenLogi#readme");
-        }
-
-        #[unsafe(method(openRepository:))]
-        fn open_repository(&self, _sender: Option<&AnyObject>) {
-            open_url("https://github.com/AprilNEA/OpenLogi");
-        }
-
-        #[unsafe(method(openLatestRelease:))]
-        fn open_latest_release(&self, _sender: Option<&AnyObject>) {
-            open_url("https://github.com/AprilNEA/OpenLogi/releases/latest");
+            open_command(DeeplinkCommand::CheckForUpdates);
         }
 
         #[unsafe(method(quitOpenLogi:))]
         fn quit_openlogi(&self, _sender: Option<&AnyObject>) {
-            // Blocking wait is fine here — the agent is about to exit anyway.
-            let _ = std::process::Command::new("open")
-                .arg("openlogi://quit")
-                .output();
+            // Tell a *running* GUI to quit too, but don't let `open` cold-launch
+            // one just to immediately quit it (it would flash a window — and on
+            // first run the update-consent prompt — before exiting). The gate
+            // keeps the target warm in the common case, so the blocking
+            // `.output()` (which guarantees Apple-Event delivery) returns at
+            // once; a GUI that races to exit after the check was quitting anyway.
+            if gui_is_running() {
+                let _ = std::process::Command::new("open")
+                    .arg(DeeplinkCommand::Quit.to_url())
+                    .output();
+            }
             info!("menu-bar Quit — exiting agent");
             std::process::exit(0);
         }
@@ -95,6 +90,25 @@ fn open_url(url: &str) {
         Ok(_) => info!(url, "menu-bar — opening URL"),
         Err(e) => warn!(error = %e, url, "could not open URL from menu bar"),
     }
+}
+
+/// Route a GUI-directed [`DeeplinkCommand`] through the `openlogi://` scheme.
+/// macOS launches the GUI (cold start) or hands the URL to the running app.
+fn open_command(command: DeeplinkCommand) {
+    open_url(&command.to_url());
+}
+
+/// Whether an OpenLogi GUI process is currently running (prod or dev bundle).
+/// Used to avoid cold-launching the GUI from the Quit handler just to quit it.
+fn gui_is_running() -> bool {
+    // The release bundle id and the dev bundle's `.dev` suffix; the agent's own
+    // id is `org.openlogi.agent`, so neither matches the agent itself.
+    const GUI_BUNDLE_IDS: [&str; 2] = ["org.openlogi.openlogi", "org.openlogi.openlogi.dev"];
+    GUI_BUNDLE_IDS.iter().any(|id| {
+        let running =
+            NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(id));
+        !running.is_empty()
+    })
 }
 
 /// Run the agent's AppKit main loop: an `Accessory` `NSApplication` (no Dock
@@ -162,21 +176,6 @@ fn install_status_item(
         "u",
     );
     menu.addItem(&updates);
-    status_item::add_separator(&menu, mtm);
-
-    let help = status_item::new_action_item(mtm, "OpenLogi Help", sel!(openHelp:), &target, "");
-    menu.addItem(&help);
-    let repository = status_item::new_action_item(
-        mtm,
-        "Open GitHub Repository",
-        sel!(openRepository:),
-        &target,
-        "",
-    );
-    menu.addItem(&repository);
-    let release =
-        status_item::new_action_item(mtm, "Latest Release", sel!(openLatestRelease:), &target, "");
-    menu.addItem(&release);
     status_item::add_separator(&menu, mtm);
 
     let quit =

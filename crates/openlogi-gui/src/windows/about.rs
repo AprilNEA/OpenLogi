@@ -12,17 +12,11 @@ use gpui::{
 use gpui_component::{IconName, button::Button, h_flex, v_flex};
 use gpui_updater::{UpdateStatus, Updater};
 
+use openlogi_core::brand::{RELEASES_URL, REPO_URL, release_tag_url};
+
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::theme;
 use crate::windows::{self, AuxWindow};
-
-const REPO_URL: &str = "https://github.com/AprilNEA/OpenLogi";
-const RELEASES_URL: &str = "https://github.com/AprilNEA/OpenLogi/releases/latest";
-/// Release page for this exact build, opened by clicking the version label.
-const RELEASE_TAG_URL: &str = concat!(
-    "https://github.com/AprilNEA/OpenLogi/releases/tag/v",
-    env!("CARGO_PKG_VERSION")
-);
 
 /// Standalone About window root view.
 pub struct AboutView {
@@ -169,7 +163,7 @@ impl Render for AboutView {
                     .cursor_pointer()
                     .hover(|s| s.text_color(pal.text_primary))
                     .child(concat!("v", env!("CARGO_PKG_VERSION")))
-                    .on_click(|_, _, cx| cx.open_url(RELEASE_TAG_URL)),
+                    .on_click(|_, _, cx| cx.open_url(&release_tag_url(env!("CARGO_PKG_VERSION")))),
             )
             .child(
                 div()
