@@ -262,6 +262,7 @@ fn permissions_page(pal: Palette) -> SettingPage {
                 tr!("Needed for gesture and button remapping (event tap)."),
                 Permission::Accessibility,
                 |cx| {
+<<<<<<< HEAD
                     // The agent owns the hook, so this is *its* grant,
                     // reported over IPC; before the first snapshot the
                     // state is genuinely unknown, not denied.
@@ -272,6 +273,15 @@ fn permissions_page(pal: Palette) -> SettingPage {
                         Some(true) => PermissionStatus::Granted,
                         Some(false) => PermissionStatus::Denied,
                         None => PermissionStatus::Unknown,
+=======
+                    if cx
+                        .try_global::<AppState>()
+                        .is_some_and(|s| s.accessibility_granted)
+                    {
+                        PermissionStatus::Granted
+                    } else {
+                        PermissionStatus::Denied
+>>>>>>> 3138252 (feat(linux): input device access permission check)
                     }
                 },
                 pal,
@@ -303,6 +313,7 @@ fn permissions_page(pal: Palette) -> SettingPage {
             SettingField::render(move |_, _, _| {
                 let status = permissions::input_device_access();
                 let field = gpui_component::v_flex().gap_1().child(status_badge(status));
+<<<<<<< HEAD
                 let hint = match status {
                     PermissionStatus::Denied => Some(tr!(
                         "OpenLogi needs write access to /dev/uinput (for button \
@@ -318,6 +329,15 @@ fn permissions_page(pal: Palette) -> SettingPage {
                 };
                 if let Some(text) = hint {
                     field.child(div().text_xs().text_color(pal.text_muted).child(text))
+=======
+                if matches!(status, PermissionStatus::Denied | PermissionStatus::Unknown) {
+                    field.child(div().text_xs().text_color(pal.text_muted).child(tr!(
+                        "OpenLogi needs write access to /dev/uinput (for button \
+                             remapping) and read/write access to /dev/hidraw* (for HID++ \
+                             communication). Install the OpenLogi udev rules to grant \
+                             access — see the Linux install guide."
+                    )))
+>>>>>>> 3138252 (feat(linux): input device access permission check)
                 } else {
                     field
                 }
@@ -431,35 +451,42 @@ fn permission_field(
     permission: Permission,
     pal: Palette,
 ) -> impl IntoElement {
-    h_flex()
+    let row = h_flex()
         .flex_shrink_0()
         .items_center()
         .gap_3()
-        .child(status_badge(status))
-        .child(
-            div()
-                .id(id)
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .border_1()
-                .border_color(pal.border)
-                .text_xs()
-                .cursor_pointer()
-                .hover(move |s| s.bg(pal.surface_hover))
-                .child(tr!("Open"))
-                .on_click(move |_, _, cx| {
-                    // Accessibility must be prompted in the agent (it owns the
-                    // hook); prompting in the GUI would authorize the wrong
-                    // binary. Other panes just deep-link to System Settings.
-                    if matches!(permission, Permission::Accessibility)
-                        && let Some(state) = cx.try_global::<crate::state::AppState>()
-                    {
-                        state.request_accessibility_prompt();
-                    }
-                    permissions::open_pane(permission);
-                }),
-        )
+        .child(status_badge(status));
+
+    #[cfg(target_os = "macos")]
+    let row = row.child(
+        div()
+            .id(id)
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(pal.border)
+            .text_xs()
+            .cursor_pointer()
+            .hover(move |s| s.bg(pal.surface_hover))
+            .child(tr!("Open"))
+            .on_click(move |_, _, cx| {
+                // Accessibility must be prompted in the agent (it owns the
+                // hook); prompting in the GUI would authorize the wrong
+                // binary. Other panes just deep-link to System Settings.
+                if matches!(permission, Permission::Accessibility)
+                    && let Some(state) = cx.try_global::<crate::state::AppState>()
+                {
+                    state.request_accessibility_prompt();
+                }
+                permissions::open_pane(permission);
+            }),
+    );
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = (id, permission, pal);
+
+    row
 }
 
 /// The language picker field. "Follow system" clears the stored preference
