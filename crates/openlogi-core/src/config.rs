@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::binding::{Action, Binding, ButtonId, GestureDirection, default_binding_for};
+use crate::device::{Capabilities, DeviceKind};
 use crate::paths::{self, PathsError};
 
 /// The schema version the current build produces. Bumped on breaking layout
@@ -263,6 +264,31 @@ where
     Ok(button.map(GestureOwner::Button))
 }
 
+/// Last-known identity of a device, captured while it was online so the UI can
+/// render its card and the *correct* config panels before any live HID++ probe
+/// completes — or while the device is asleep and can't be probed at all.
+///
+/// Every field is a **static property of the model**, not of the current
+/// connection: an MX Master 3S has adjustable DPI whether or not it is awake.
+/// That is what makes this safe to persist — it never goes stale. It is also
+/// free of any per-unit identifier (no serial number, no unit id), so caching
+/// it adds no privacy surface beyond the `config_key` already used as the map
+/// key. Persisting identity is what stops a sleeping/just-booted mouse from
+/// vanishing from the device list (and losing its Pointer/Buttons panels)
+/// until a cold probe happens to win its race — see issue #159.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceIdentity {
+    /// The name shown in the carousel, as resolved from the asset registry the
+    /// last time the device was online.
+    pub display_name: String,
+    /// The device's resolved [`DeviceKind`] (asset registry preferred, HID++
+    /// classification as fallback).
+    pub kind: DeviceKind,
+    /// Configuration capabilities measured from the device's HID++ feature
+    /// table. This is the field that keeps a sleeping mouse's panels visible.
+    pub capabilities: Capabilities,
+}
+
 /// Settings scoped to a single physical device (keyed by HID++ model+ext).
 ///
 /// Deserialization goes through [`RawDeviceConfig`] (`#[serde(from)]`) so
@@ -279,6 +305,12 @@ pub struct DeviceConfig {
     /// as a scalar ahead of the `bindings` sub-table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gesture_owner: Option<GestureOwner>,
+    /// Last-known identity (name / kind / capabilities), captured while the
+    /// device was online. Lets the UI render this device — with the right
+    /// config panels — on a cold start before any probe, or while it sleeps.
+    /// `None` for configs written before this field existed or by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<DeviceIdentity>,
     /// Every rebindable button's binding: a single [`Action`], or — for the
     /// gesture button (and, later, any raw-XY-capable button) — a
     /// [`Binding::Gesture`] per-direction map.
@@ -316,6 +348,8 @@ struct RawDeviceConfig {
     /// [`deserialize_gesture_owner`].
     #[serde(default, deserialize_with = "deserialize_gesture_owner")]
     gesture_owner: Option<GestureOwner>,
+    #[serde(default)]
+    identity: Option<DeviceIdentity>,
     /// v2 shape — present on already-migrated files; wins on any key collision.
     #[serde(default)]
     bindings: BTreeMap<ButtonId, Binding>,
@@ -366,6 +400,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
 
         DeviceConfig {
             gesture_owner: raw.gesture_owner,
+            identity: raw.identity,
             bindings,
             per_app_bindings: raw.per_app_bindings,
             dpi_presets: raw.dpi_presets,
@@ -711,6 +746,34 @@ impl Config {
             .dpi_presets = presets;
     }
 
+    /// The last-known [`DeviceIdentity`] for `device_key`, or `None` if the
+    /// device has never been seen online (or was configured before identities
+    /// were recorded).
+    #[must_use]
+    pub fn device_identity(&self, device_key: &str) -> Option<&DeviceIdentity> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.identity.as_ref())
+    }
+
+    /// Record (or refresh) the identity captured for `device_key` while it was
+    /// online, creating the device entry if needed.
+    pub fn set_device_identity(&mut self, device_key: &str, identity: DeviceIdentity) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .identity = Some(identity);
+    }
+
+    /// Iterate every device we've recorded an identity for, as
+    /// `(config_key, identity)`. Used to seed offline placeholder cards so a
+    /// known device stays visible (with its panels) before any live probe.
+    pub fn known_identities(&self) -> impl Iterator<Item = (&str, &DeviceIdentity)> {
+        self.devices
+            .iter()
+            .filter_map(|(k, d)| d.identity.as_ref().map(|i| (k.as_str(), i)))
+    }
+
     /// The lighting config for `device_key`, or `None` if unset.
     #[must_use]
     pub fn lighting(&self, device_key: &str) -> Option<Lighting> {
@@ -889,6 +952,42 @@ mod tests {
         assert!(
             !body.contains("dpi_presets"),
             "empty dpi_presets should be omitted: {body}"
+        );
+    }
+
+    #[test]
+    fn device_identity_roundtrips_and_is_iterable() {
+        use crate::device::{Capabilities, DeviceKind};
+
+        let mut cfg = Config::default();
+        let mouse = DeviceIdentity {
+            display_name: "MX Master 3S".to_string(),
+            kind: DeviceKind::Mouse,
+            capabilities: Capabilities {
+                buttons: true,
+                pointer: true,
+                lighting: false,
+            },
+        };
+        cfg.set_device_identity("2b034", mouse.clone());
+        // Recording an identity must not disturb unrelated per-device state.
+        cfg.set_binding(
+            "2b034",
+            ButtonId::Back,
+            Binding::Single(Action::BrowserBack),
+        );
+
+        let parsed = write_and_read(&cfg);
+        assert_eq!(parsed.device_identity("2b034"), Some(&mouse));
+        assert_eq!(parsed.device_identity("absent"), None);
+        assert_eq!(
+            parsed.bindings_for("2b034").get(&ButtonId::Back),
+            Some(&Binding::Single(Action::BrowserBack)),
+            "identity must coexist with bindings on the same device block"
+        );
+        assert_eq!(
+            parsed.known_identities().collect::<Vec<_>>(),
+            vec![("2b034", &mouse)]
         );
     }
 

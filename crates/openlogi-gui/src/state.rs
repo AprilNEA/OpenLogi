@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui::{App, Global};
-use openlogi_core::config::{AppSettings, Config, Lighting};
+use openlogi_core::config::{AppSettings, Config, DeviceIdentity, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     DeviceRoute, DpiCapabilities, DpiInfo, SmartShiftMode, SmartShiftStatus, WriteError,
@@ -212,12 +212,14 @@ impl AppState {
     /// builds the `Arc` first and uses [`Self::with_runtime_shared`] instead.
     #[must_use]
     pub fn with_runtime(
-        config: Config,
+        mut config: Config,
         inventories: &[DeviceInventory],
         cache: &AssetResolver,
         ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
     ) -> Self {
-        let device_list = build_device_list(inventories, cache);
+        let device_list = build_device_list(inventories, cache, &config);
+        // Record any device probed at launch so it survives the next cold start.
+        persist_identities(&mut config, &device_list);
         let current_device = pick_initial_device(&device_list, config.selected_device());
         let mut state = Self {
             current_device,
@@ -309,7 +311,7 @@ impl AppState {
         BTreeMap<GestureDirection, Action>,
         DpiCycleState,
     ) {
-        let device_list = build_device_list(inventories, cache);
+        let device_list = build_device_list(inventories, cache, config);
         let current_device = pick_initial_device(&device_list, config.selected_device());
         let record = device_list.get(current_device);
         let config_key = record.map(|r| r.config_key.as_str());
@@ -398,17 +400,29 @@ impl AppState {
         cache: &AssetResolver,
         force: bool,
     ) -> bool {
-        let new_list = build_device_list(inventories, cache);
+        let new_list = build_device_list(inventories, cache, &self.config);
         let merged_list = self.merge_inventory_snapshot(new_list);
-        // Compare routes too, not just config_key: a device can reconnect on a
-        // new HID++ index while keeping its model-derived config_key, and the
-        // fresh route must replace the stale one so reads/writes don't target a
-        // dead index.
+        // Capture any newly-probed identity before the unchanged-check can early
+        // out: a device whose capabilities just resolved keeps the same
+        // config_key + route, so that guard would otherwise skip the write.
+        persist_identities(&mut self.config, &merged_list);
+        // Compare more than config_key: a device can reconnect on a new HID++
+        // index while keeping its model-derived config_key, and the fresh route
+        // must replace the stale one so reads/writes don't target a dead index.
+        // `online` and `capabilities` are compared too, so a device waking up or
+        // a probe that resolves its feature table on a stable route still
+        // refreshes the carousel (and its config panels) instead of being
+        // swallowed by this guard.
         let unchanged = merged_list.len() == self.device_list.len()
             && merged_list
                 .iter()
                 .zip(self.device_list.iter())
-                .all(|(a, b)| a.config_key == b.config_key && a.route == b.route);
+                .all(|(a, b)| {
+                    a.config_key == b.config_key
+                        && a.route == b.route
+                        && a.online == b.online
+                        && a.capabilities == b.capabilities
+                });
         if unchanged && !force {
             return false;
         }
@@ -1176,6 +1190,40 @@ impl AppState {
         }
         // The agent owns the gesture watcher; have it rebuild from config.
         self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+    }
+}
+
+/// Record the identity (name / kind / capabilities) of every currently online,
+/// fully-probed device into `config`, persisting to disk only when something
+/// actually changed.
+///
+/// This is the write half of the identity-driven device list: it is what lets
+/// [`build_device_list`] resurrect a sleeping device on the next launch. Only
+/// online devices with *measured* capabilities are recorded — never a presumed
+/// or carried-forward `None` — so a placeholder never persists empty panels.
+/// The change-guard keeps quiet inventory ticks off the disk; the agent does
+/// not consume identities, so no `ReloadConfig` is sent.
+fn persist_identities(config: &mut Config, list: &[DeviceRecord]) {
+    let mut changed = false;
+    for record in list {
+        if !record.online {
+            continue;
+        }
+        let Some(capabilities) = record.capabilities else {
+            continue;
+        };
+        let identity = DeviceIdentity {
+            display_name: record.display_name.clone(),
+            kind: record.kind,
+            capabilities,
+        };
+        if config.device_identity(&record.config_key) != Some(&identity) {
+            config.set_device_identity(&record.config_key, identity);
+            changed = true;
+        }
+    }
+    if changed && let Err(e) = config.save_atomic() {
+        warn!(error = %e, "could not persist device identities to config.toml");
     }
 }
 
