@@ -12,7 +12,7 @@ use gpui::{
 use gpui_component::{IconName, button::Button, h_flex, v_flex};
 use gpui_updater::{UpdateStatus, Updater};
 
-use crate::app_menu::CloseWindow;
+use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::theme;
 use crate::windows::{self, AuxWindow};
 
@@ -148,6 +148,8 @@ impl Render for AboutView {
             .bg(pal.bg)
             .text_color(pal.text_primary)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &Minimize, window, _| window.minimize_window())
+            .on_action(|_: &Zoom, window, _| window.zoom_window())
             .items_center()
             .justify_center()
             .gap_3()
