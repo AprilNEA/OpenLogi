@@ -76,12 +76,7 @@ pub fn install(cx: &mut App) {
     cx.on_action(|_: &OpenAbout, cx| crate::windows::about::open(cx));
     cx.on_action(|_: &OpenAddDevice, cx| crate::windows::add_device::open(cx));
     cx.on_action(|_: &BringAllToFront, cx| cx.activate(true));
-    cx.on_action(|_: &CheckForUpdates, cx| {
-        if let Some(updater) = crate::platform::updater::shared(cx) {
-            updater.update(cx, gpui_updater::Updater::check);
-        }
-        crate::windows::about::open(cx);
-    });
+    cx.on_action(|_: &CheckForUpdates, cx| check_for_updates(cx));
     cx.on_action(|_: &OpenConfigFolder, cx| {
         if let Ok(path) = openlogi_core::paths::config_dir() {
             cx.open_url(&file_url(&path));
@@ -116,6 +111,15 @@ pub fn install(cx: &mut App) {
 /// leaving the already-registered action handlers and key bindings untouched.
 pub fn rebuild(cx: &mut App) {
     cx.set_menus(menus(cx));
+}
+
+/// Run a manual update check and show the About window where update status is
+/// rendered. Shared by the app menu and agent tray IPC commands.
+pub fn check_for_updates(cx: &mut App) {
+    if let Some(updater) = crate::platform::updater::shared(cx) {
+        updater.update(cx, gpui_updater::Updater::check);
+    }
+    crate::windows::about::open(cx);
 }
 
 fn menus(cx: &App) -> Vec<Menu> {

@@ -1,10 +1,10 @@
 //! The agent's menu-bar status item.
 //!
 //! The always-on agent hosts the menu bar (the GUI is on-demand). The item
-//! carries "Open OpenLogi" — launches / foregrounds the GUI — and "Quit
-//! OpenLogi" — exits the agent. Clicks fire on the main thread's AppKit run
-//! loop, so the [`MenuTarget`] action methods do the work directly (no channel
-//! back to a UI thread, unlike the old GUI tray).
+//! carries "Open OpenLogi", GUI-directed actions, help links, and "Quit
+//! OpenLogi". Clicks fire on the main thread's AppKit run loop; GUI-directed
+//! actions are stored as a pending IPC command before launching / foregrounding
+//! the GUI.
 //!
 //! macOS-only. AppKit objects are `Retained<T>` (no #99-style leaks); the run
 //! loop owns the main thread for the agent's lifetime.
@@ -14,10 +14,13 @@
     reason = "the objc2 calls marked unsafe (super-init, the wrapped init-with-action/set-target) are localized here and in status_item"
 )]
 
+use std::sync::{Arc, Mutex as StdMutex};
+
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject};
-use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+use openlogi_agent_core::ipc::GuiCommand;
 use tracing::{info, warn};
 
 use crate::status_item;
@@ -28,12 +31,43 @@ define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "OpenLogiAgentMenuTarget"]
+    #[ivars = Arc<StdMutex<Option<GuiCommand>>>]
     struct MenuTarget;
 
     impl MenuTarget {
         #[unsafe(method(openOpenLogi:))]
         fn open_openlogi(&self, _sender: Option<&AnyObject>) {
             launch_gui();
+        }
+
+        #[unsafe(method(openSettings:))]
+        fn open_settings(&self, _sender: Option<&AnyObject>) {
+            self.request_gui_command(GuiCommand::OpenSettings);
+        }
+
+        #[unsafe(method(openAbout:))]
+        fn open_about(&self, _sender: Option<&AnyObject>) {
+            self.request_gui_command(GuiCommand::OpenAbout);
+        }
+
+        #[unsafe(method(checkForUpdates:))]
+        fn check_for_updates(&self, _sender: Option<&AnyObject>) {
+            self.request_gui_command(GuiCommand::CheckForUpdates);
+        }
+
+        #[unsafe(method(openHelp:))]
+        fn open_help(&self, _sender: Option<&AnyObject>) {
+            open_url("https://github.com/AprilNEA/OpenLogi#readme");
+        }
+
+        #[unsafe(method(openRepository:))]
+        fn open_repository(&self, _sender: Option<&AnyObject>) {
+            open_url("https://github.com/AprilNEA/OpenLogi");
+        }
+
+        #[unsafe(method(openLatestRelease:))]
+        fn open_latest_release(&self, _sender: Option<&AnyObject>) {
+            open_url("https://github.com/AprilNEA/OpenLogi/releases/latest");
         }
 
         #[unsafe(method(quitOpenLogi:))]
@@ -45,11 +79,22 @@ define_class!(
 );
 
 impl MenuTarget {
-    fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(());
+    fn new(
+        mtm: MainThreadMarker,
+        gui_command: Arc<StdMutex<Option<GuiCommand>>>,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(gui_command);
         // SAFETY: `init` initializes our freshly-allocated NSObject subclass and
         // returns it (the two-phase construction objc2's `define_class!` uses).
         unsafe { msg_send![super(this), init] }
+    }
+
+    fn request_gui_command(&self, command: GuiCommand) {
+        match self.ivars().lock() {
+            Ok(mut pending) => *pending = Some(command),
+            Err(e) => warn!(error = %e, "could not store GUI command from menu bar"),
+        }
+        launch_gui();
     }
 }
 
@@ -68,6 +113,13 @@ fn launch_gui() {
     }
 }
 
+fn open_url(url: &str) {
+    match std::process::Command::new("open").arg(url).spawn() {
+        Ok(_) => info!(url, "menu-bar link opened"),
+        Err(e) => warn!(error = %e, url, "could not open menu-bar link"),
+    }
+}
+
 /// Run the agent's AppKit main loop: an `Accessory` `NSApplication` (no Dock
 /// icon) optionally hosting the menu-bar status item. Must be called on the
 /// process's main thread; blocks for the agent's lifetime (the agent exits via
@@ -78,7 +130,7 @@ fn launch_gui() {
 /// tokio core still does all the work). The toggle takes effect on the agent's
 /// next launch — a no-restart live toggle would need a main-thread hop from the
 /// IPC reload path (deferred; it can't be verified headlessly).
-pub fn run_app_loop(show_in_menu_bar: bool) -> ! {
+pub fn run_app_loop(show_in_menu_bar: bool, gui_command: Arc<StdMutex<Option<GuiCommand>>>) -> ! {
     let Some(mtm) = MainThreadMarker::new() else {
         warn!("agent AppKit loop not started off the main thread — exiting");
         std::process::exit(1);
@@ -88,7 +140,7 @@ pub fn run_app_loop(show_in_menu_bar: bool) -> ! {
 
     // Bind the status item (+ its target/menu) so they outlive `run()` — the
     // menu items only weakly reference the target. `None` when hidden.
-    let _tray = show_in_menu_bar.then(|| install_status_item(mtm));
+    let _tray = show_in_menu_bar.then(|| install_status_item(mtm, gui_command));
     info!(show_in_menu_bar, "agent AppKit loop started");
 
     app.run();
@@ -100,12 +152,13 @@ pub fn run_app_loop(show_in_menu_bar: bool) -> ! {
 /// menu items weakly reference, and the menu itself).
 fn install_status_item(
     mtm: MainThreadMarker,
+    gui_command: Arc<StdMutex<Option<GuiCommand>>>,
 ) -> (
     Retained<objc2_app_kit::NSStatusItem>,
     Retained<MenuTarget>,
     Retained<objc2_app_kit::NSMenu>,
 ) {
-    let target = MenuTarget::new(mtm);
+    let target = MenuTarget::new(mtm, gui_command);
     let status_item = status_item::create_status_item();
     status_item::set_symbol_icon(
         &status_item,
@@ -117,6 +170,27 @@ fn install_status_item(
     let menu = status_item::new_menu(mtm);
     let open = status_item::new_action_item(mtm, "Open OpenLogi", sel!(openOpenLogi:), &target);
     menu.addItem(&open);
+    status_item::add_separator(&menu, mtm);
+    let settings = status_item::new_action_item(mtm, "Settings…", sel!(openSettings:), &target);
+    menu.addItem(&settings);
+    let about = status_item::new_action_item(mtm, "About OpenLogi", sel!(openAbout:), &target);
+    menu.addItem(&about);
+    let updates =
+        status_item::new_action_item(mtm, "Check for Updates…", sel!(checkForUpdates:), &target);
+    menu.addItem(&updates);
+    status_item::add_separator(&menu, mtm);
+    let help = status_item::new_action_item(mtm, "OpenLogi Help", sel!(openHelp:), &target);
+    menu.addItem(&help);
+    let repository = status_item::new_action_item(
+        mtm,
+        "Open GitHub Repository",
+        sel!(openRepository:),
+        &target,
+    );
+    menu.addItem(&repository);
+    let release =
+        status_item::new_action_item(mtm, "Latest Release", sel!(openLatestRelease:), &target);
+    menu.addItem(&release);
     status_item::add_separator(&menu, mtm);
     let quit = status_item::new_action_item(mtm, "Quit OpenLogi", sel!(quitOpenLogi:), &target);
     menu.addItem(&quit);

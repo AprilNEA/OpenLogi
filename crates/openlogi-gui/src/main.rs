@@ -51,6 +51,7 @@ use gpui::{
     WindowBounds, WindowOptions, px,
 };
 use gpui_component::{ActiveTheme, Root, Theme, ThemeMode};
+use openlogi_agent_core::ipc::GuiCommand;
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, DeviceModelInfo};
 use tracing::{info, warn};
@@ -206,6 +207,9 @@ fn main() -> Result<()> {
                                 state.accessibility_granted =
                                     update.status.accessibility_granted;
                             });
+                            if let Some(command) = update.gui_command {
+                                handle_gui_command(&command, cx);
+                            }
                             cx.refresh_windows();
                         });
                     }
@@ -222,6 +226,14 @@ fn main() -> Result<()> {
     });
 
     Ok(())
+}
+
+fn handle_gui_command(command: &GuiCommand, cx: &mut gpui::App) {
+    match command {
+        GuiCommand::OpenSettings => windows::settings::open(cx),
+        GuiCommand::OpenAbout => windows::about::open(cx),
+        GuiCommand::CheckForUpdates => app_menu::check_for_updates(cx),
+    }
 }
 
 /// Asset-sync state, stored in an [`AtomicU8`] and polled on each inventory
