@@ -16,13 +16,19 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::binding::{Action, ButtonId, GestureDirection};
+use crate::binding::{Action, Binding, ButtonId, GestureDirection};
 use crate::paths::{self, PathsError};
 
 /// The schema version the current build produces. Bumped on breaking layout
 /// changes; readers branch on the parsed value before consuming the rest of
 /// the file.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// v2 merged the per-device `button_bindings` + `gesture_bindings` maps into a
+/// single `bindings: BTreeMap<ButtonId, Binding>`. A v1 file still loads (the
+/// [`RawDeviceConfig`] shim folds the legacy fields) and self-heals to v2 on the
+/// next save; [`Config::load_from_path`] rejects only versions *newer* than this
+/// so a forward file fails loudly instead of silently losing bindings.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,22 +203,28 @@ where
 }
 
 /// Settings scoped to a single physical device (keyed by HID++ model+ext).
+///
+/// Deserialization goes through [`RawDeviceConfig`] (`#[serde(from)]`) so
+/// pre-v2 files — which split bindings across `button_bindings` +
+/// `gesture_bindings` — fold into the unified [`Self::bindings`] map. Only
+/// `bindings` is ever serialized, so a migrated file self-heals to the v2 shape
+/// on its next save.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(from = "RawDeviceConfig")]
 pub struct DeviceConfig {
+    /// Every rebindable button's binding: a single [`Action`], or — for the
+    /// gesture button (and, later, any raw-XY-capable button) — a
+    /// [`Binding::Gesture`] per-direction map.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub button_bindings: BTreeMap<ButtonId, Action>,
+    pub bindings: BTreeMap<ButtonId, Binding>,
     /// Per-application binding overlays (P1.4). Keyed by bundle identifier
     /// (e.g. `"com.microsoft.VSCode"` on macOS). When the foreground app's
     /// id matches a key here, those bindings take precedence; anything not
-    /// listed falls through to `button_bindings`.
+    /// listed falls through to `bindings`. Deliberately `Action`-valued (not
+    /// `Binding`): a per-app override replaces the whole button with one
+    /// action, never a per-direction gesture overlay.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
-    /// Sub-bindings for the gesture button: hold + swipe direction or a
-    /// plain click. Edited via the gesture picker; the legacy single
-    /// `button_bindings[GestureButton]` entry is ignored on devices that
-    /// have entries here. Hardware dispatch is a P1.5 follow-up.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub gesture_bindings: BTreeMap<GestureDirection, Action>,
     /// Ordered list of DPI presets cycled through by
     /// [`Action::CycleDpiPresets`] and indexed by
     /// [`Action::SetDpiPreset`]. Empty means "no presets configured" —
@@ -223,6 +235,56 @@ pub struct DeviceConfig {
     /// until the user changes it, so it stays out of `config.toml` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lighting: Option<Lighting>,
+}
+
+/// Deserialize-only shim that folds the pre-v2 `button_bindings` +
+/// `gesture_bindings` fields into [`DeviceConfig::bindings`]. Never serialized
+/// (only [`DeviceConfig`] is), so reading a legacy file and saving rewrites it
+/// in the v2 shape.
+#[derive(Deserialize)]
+struct RawDeviceConfig {
+    /// v2 shape — present on already-migrated files; wins on any key collision.
+    #[serde(default)]
+    bindings: BTreeMap<ButtonId, Binding>,
+    /// Legacy v1 per-button single bindings.
+    #[serde(default)]
+    button_bindings: BTreeMap<ButtonId, Action>,
+    /// Legacy v1 flat gesture map (implicitly the gesture button's directions).
+    #[serde(default)]
+    gesture_bindings: BTreeMap<GestureDirection, Action>,
+    #[serde(default)]
+    per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
+    #[serde(default)]
+    dpi_presets: Vec<u32>,
+    #[serde(default)]
+    lighting: Option<Lighting>,
+}
+
+impl From<RawDeviceConfig> for DeviceConfig {
+    fn from(raw: RawDeviceConfig) -> Self {
+        let mut bindings = raw.bindings; // the v2 map wins on every key.
+
+        // Re-home the legacy flat gesture map under `GestureButton`. This MUST
+        // happen before folding `button_bindings`, so a legacy single
+        // `button_bindings[GestureButton]` entry coexisting with a
+        // `gesture_bindings` map cannot claim the slot first and silently drop
+        // the whole direction map (the pre-v2 rule was "gesture entries win").
+        if !raw.gesture_bindings.is_empty() {
+            bindings
+                .entry(ButtonId::GestureButton)
+                .or_insert_with(|| Binding::Gesture(raw.gesture_bindings));
+        }
+        for (button, action) in raw.button_bindings {
+            bindings.entry(button).or_insert(Binding::Single(action));
+        }
+
+        DeviceConfig {
+            bindings,
+            per_app_bindings: raw.per_app_bindings,
+            dpi_presets: raw.dpi_presets,
+            lighting: raw.lighting,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -269,16 +331,26 @@ impl Config {
     pub fn load_from_path(path: &Path) -> Result<Self, ConfigError> {
         match fs::read_to_string(path) {
             Ok(text) => {
-                let config: Self = toml::from_str(&text).map_err(|source| ConfigError::Parse {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
-                if config.schema_version != SCHEMA_VERSION {
+                let mut config: Self =
+                    toml::from_str(&text).map_err(|source| ConfigError::Parse {
+                        path: path.to_path_buf(),
+                        source,
+                    })?;
+                // Accept any version up to the current one: older files migrate
+                // through the per-device [`RawDeviceConfig`] shim and self-heal on
+                // the next save. Only a *newer* file is rejected — loudly, so a
+                // downgraded binary refuses to load (and silently wipe) a config
+                // it can't represent.
+                if config.schema_version > SCHEMA_VERSION {
                     return Err(ConfigError::UnsupportedSchemaVersion {
                         path: path.to_path_buf(),
                         found: config.schema_version,
                     });
                 }
+                // Stamp the in-memory doc to the current version so a re-save
+                // writes the migrated v2 shape (the device shim already folded
+                // the legacy fields during deserialize).
+                config.schema_version = SCHEMA_VERSION;
                 Ok(config)
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
@@ -314,50 +386,73 @@ impl Config {
     /// Returns the bindings stored for `device_key`, or an empty map if the
     /// device has no committed bindings yet.
     #[must_use]
-    pub fn bindings_for(&self, device_key: &str) -> BTreeMap<ButtonId, Action> {
+    pub fn bindings_for(&self, device_key: &str) -> BTreeMap<ButtonId, Binding> {
         self.devices
             .get(device_key)
-            .map(|d| d.button_bindings.clone())
+            .map(|d| d.bindings.clone())
             .unwrap_or_default()
     }
 
-    /// Records `action` as the binding for `button` on `device_key`,
-    /// creating the device entry if needed.
-    pub fn set_binding(&mut self, device_key: &str, button: ButtonId, action: Action) {
+    /// Records `binding` for `button` on `device_key`, creating the device
+    /// entry if needed. Replaces the whole binding (use
+    /// [`Self::set_gesture_direction`] to edit one direction of a gesture
+    /// binding in place).
+    pub fn set_binding(&mut self, device_key: &str, button: ButtonId, binding: Binding) {
         self.devices
             .entry(device_key.to_string())
             .or_default()
-            .button_bindings
-            .insert(button, action);
+            .bindings
+            .insert(button, binding);
     }
 
-    /// Returns the gesture sub-bindings stored for `device_key`, or an empty
-    /// map if none are set yet.
+    /// Returns the gesture sub-bindings for `device_key`'s gesture button, or an
+    /// empty map if it isn't in gesture mode. Derived from the unified
+    /// [`DeviceConfig::bindings`]; kept as a convenience for the agent-side
+    /// per-direction adapter.
     #[must_use]
     pub fn gesture_bindings_for(&self, device_key: &str) -> BTreeMap<GestureDirection, Action> {
-        self.devices
+        match self
+            .devices
             .get(device_key)
-            .map(|d| d.gesture_bindings.clone())
-            .unwrap_or_default()
+            .and_then(|d| d.bindings.get(&ButtonId::GestureButton))
+        {
+            Some(Binding::Gesture(map)) => map.clone(),
+            _ => BTreeMap::new(),
+        }
     }
 
-    /// Records `action` for `direction` of `device_key`'s gesture button.
-    pub fn set_gesture_binding(
+    /// Records `action` for one `direction` of `button`'s gesture binding,
+    /// creating the device entry if needed. A button with no binding (or a
+    /// [`Binding::Single`]) is upgraded to [`Binding::Gesture`], preserving any
+    /// prior single action as the [`GestureDirection::Click`] entry.
+    pub fn set_gesture_direction(
         &mut self,
         device_key: &str,
+        button: ButtonId,
         direction: GestureDirection,
         action: Action,
     ) {
-        self.devices
+        let entry = self
+            .devices
             .entry(device_key.to_string())
             .or_default()
-            .gesture_bindings
-            .insert(direction, action);
+            .bindings
+            .entry(button)
+            .or_insert_with(|| Binding::Gesture(BTreeMap::new()));
+        if let Binding::Single(prev) = entry {
+            let mut map = BTreeMap::new();
+            map.insert(GestureDirection::Click, prev.clone());
+            *entry = Binding::Gesture(map);
+        }
+        if let Binding::Gesture(map) = entry {
+            map.insert(direction, action);
+        }
     }
 
     /// Resolve the effective binding map for `device_key`, overlaying the
     /// per-app entry for `bundle_id` (if any) on top of the global per-device
-    /// `button_bindings`. Per-app values win; everything else falls through.
+    /// `bindings`. A per-app override replaces the whole button with a
+    /// [`Binding::Single`]; everything else falls through.
     ///
     /// Returns an empty map when the device has no recorded bindings yet.
     /// Callers (the GUI / hook) layer their own defaults on top.
@@ -366,15 +461,15 @@ impl Config {
         &self,
         device_key: &str,
         bundle_id: Option<&str>,
-    ) -> BTreeMap<ButtonId, Action> {
+    ) -> BTreeMap<ButtonId, Binding> {
         let Some(device) = self.devices.get(device_key) else {
             return BTreeMap::new();
         };
-        let mut out = device.button_bindings.clone();
+        let mut out = device.bindings.clone();
         if let Some(bid) = bundle_id {
             if let Some(overlay) = device.per_app_bindings.get(bid) {
                 for (k, v) in overlay {
-                    out.insert(*k, v.clone());
+                    out.insert(*k, Binding::Single(v.clone()));
                 }
             }
         }
@@ -536,34 +631,39 @@ mod tests {
     #[test]
     fn bindings_roundtrip_per_device() {
         let mut cfg = Config::default();
-        cfg.set_binding("2b042", ButtonId::Back, Action::Copy);
+        cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Copy));
         cfg.set_binding(
             "2b042",
             ButtonId::DpiToggle,
-            Action::CustomShortcut(crate::binding::KeyCombo {
+            Binding::Single(Action::CustomShortcut(crate::binding::KeyCombo {
                 modifiers: crate::binding::KeyCombo::MOD_CMD,
                 key_code: 0x23, // kVK_ANSI_P
                 display: "⌘P".into(),
-            }),
+            })),
         );
-        cfg.set_binding("4082d", ButtonId::Back, Action::Paste);
+        cfg.set_binding("4082d", ButtonId::Back, Binding::Single(Action::Paste));
 
         let parsed = write_and_read(&cfg);
 
         // Per-device isolation.
         let a = parsed.bindings_for("2b042");
-        assert_eq!(a.get(&ButtonId::Back), Some(&Action::Copy));
+        assert_eq!(a.get(&ButtonId::Back), Some(&Binding::Single(Action::Copy)));
         assert_eq!(
             a.get(&ButtonId::DpiToggle),
-            Some(&Action::CustomShortcut(crate::binding::KeyCombo {
-                modifiers: crate::binding::KeyCombo::MOD_CMD,
-                key_code: 0x23,
-                display: "⌘P".into(),
-            }))
+            Some(&Binding::Single(Action::CustomShortcut(
+                crate::binding::KeyCombo {
+                    modifiers: crate::binding::KeyCombo::MOD_CMD,
+                    key_code: 0x23,
+                    display: "⌘P".into(),
+                }
+            )))
         );
 
         let b = parsed.bindings_for("4082d");
-        assert_eq!(b.get(&ButtonId::Back), Some(&Action::Paste));
+        assert_eq!(
+            b.get(&ButtonId::Back),
+            Some(&Binding::Single(Action::Paste))
+        );
         assert_eq!(b.len(), 1, "device b should only see its own bindings");
 
         // Unknown device returns empty map without panic.
@@ -573,17 +673,20 @@ mod tests {
     #[test]
     fn human_readable_toml_layout() {
         let mut cfg = Config::default();
-        cfg.set_binding("2b042", ButtonId::Back, Action::BrowserBack);
+        cfg.set_binding(
+            "2b042",
+            ButtonId::Back,
+            Binding::Single(Action::BrowserBack),
+        );
         let body = toml::to_string_pretty(&cfg).expect("serialize");
 
         // The model id only contains [A-Za-z0-9_], so TOML emits it as a
         // bare-word table key (no surrounding quotes). The test asserts the
         // observable structure rather than locking in a specific quoting.
-        assert!(body.contains("schema_version = 1"), "got: {body}");
-        assert!(
-            body.contains("[devices.2b042.button_bindings]"),
-            "got: {body}"
-        );
+        assert!(body.contains("schema_version = 2"), "got: {body}");
+        assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
+        // A `Single` binding serializes byte-identically to the pre-v2 bare
+        // `Action`, so the leaf line is unchanged.
         assert!(body.contains("Back = \"BrowserBack\""), "got: {body}");
     }
 
@@ -616,7 +719,7 @@ mod tests {
     fn empty_dpi_presets_skip_serialization() {
         let mut cfg = Config::default();
         // Add a binding so the device block exists.
-        cfg.set_binding("2b042", ButtonId::Back, Action::Copy);
+        cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Copy));
         cfg.set_dpi_presets("2b042", vec![800]);
         cfg.set_dpi_presets("2b042", vec![]); // clear
 
@@ -639,8 +742,16 @@ mod tests {
     #[test]
     fn per_app_overlay_takes_precedence() {
         let mut cfg = Config::default();
-        cfg.set_binding("2b042", ButtonId::Back, Action::BrowserBack);
-        cfg.set_binding("2b042", ButtonId::Forward, Action::BrowserForward);
+        cfg.set_binding(
+            "2b042",
+            ButtonId::Back,
+            Binding::Single(Action::BrowserBack),
+        );
+        cfg.set_binding(
+            "2b042",
+            ButtonId::Forward,
+            Binding::Single(Action::BrowserForward),
+        );
         cfg.set_per_app_binding(
             "2b042",
             "com.microsoft.VSCode",
@@ -650,23 +761,32 @@ mod tests {
 
         // Global: both buttons are browser nav.
         let global = cfg.effective_bindings("2b042", None);
-        assert_eq!(global.get(&ButtonId::Back), Some(&Action::BrowserBack));
+        assert_eq!(
+            global.get(&ButtonId::Back),
+            Some(&Binding::Single(Action::BrowserBack))
+        );
         assert_eq!(
             global.get(&ButtonId::Forward),
-            Some(&Action::BrowserForward)
+            Some(&Binding::Single(Action::BrowserForward))
         );
 
-        // VSCode: Back overridden, Forward inherits.
+        // VSCode: Back overridden (wrapped as Single), Forward inherits.
         let vscode = cfg.effective_bindings("2b042", Some("com.microsoft.VSCode"));
-        assert_eq!(vscode.get(&ButtonId::Back), Some(&Action::Undo));
+        assert_eq!(
+            vscode.get(&ButtonId::Back),
+            Some(&Binding::Single(Action::Undo))
+        );
         assert_eq!(
             vscode.get(&ButtonId::Forward),
-            Some(&Action::BrowserForward)
+            Some(&Binding::Single(Action::BrowserForward))
         );
 
         // Unrelated app falls through.
         let other = cfg.effective_bindings("2b042", Some("com.apple.Safari"));
-        assert_eq!(other.get(&ButtonId::Back), Some(&Action::BrowserBack));
+        assert_eq!(
+            other.get(&ButtonId::Back),
+            Some(&Binding::Single(Action::BrowserBack))
+        );
     }
 
     #[test]
@@ -718,18 +838,133 @@ mod tests {
     #[test]
     fn empty_device_block_is_skipped_in_output() {
         // Inserting then clearing should not leave a [devices."x"] header
-        // with no bindings under it (skip_serializing_if on button_bindings).
+        // with no bindings under it (skip_serializing_if on bindings).
         let mut cfg = Config::default();
-        cfg.set_binding("2b042", ButtonId::Back, Action::Copy);
+        cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Copy));
         cfg.devices
             .get_mut("2b042")
             .expect("entry")
-            .button_bindings
+            .bindings
             .clear();
         let body = toml::to_string_pretty(&cfg).expect("serialize");
         assert!(
             !body.contains("Back"),
             "cleared bindings should not appear: {body}"
         );
+    }
+
+    #[test]
+    fn migrates_v1_button_and_gesture_bindings() {
+        // A pre-v2 file: split button_bindings + a flat gesture_bindings map.
+        let v1 = "\
+schema_version = 1
+
+[devices.2b042.button_bindings]
+Back = \"BrowserBack\"
+
+[devices.2b042.gesture_bindings]
+Up = \"Copy\"
+Click = \"Paste\"
+";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, v1).expect("write");
+
+        // v1 still loads (version <= current) and folds into the merged map.
+        let cfg = Config::load_from_path(&path).expect("load v1");
+        let bindings = cfg.bindings_for("2b042");
+        assert_eq!(
+            bindings.get(&ButtonId::Back),
+            Some(&Binding::Single(Action::BrowserBack))
+        );
+        let mut gesture = BTreeMap::new();
+        gesture.insert(GestureDirection::Up, Action::Copy);
+        gesture.insert(GestureDirection::Click, Action::Paste);
+        assert_eq!(
+            bindings.get(&ButtonId::GestureButton),
+            Some(&Binding::Gesture(gesture))
+        );
+
+        // Saving self-heals to the v2 shape: stamped version + merged table,
+        // legacy field names gone.
+        let body = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(body.contains("schema_version = 2"), "got: {body}");
+        assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
+        assert!(!body.contains("button_bindings"), "got: {body}");
+        assert!(!body.contains("gesture_bindings"), "got: {body}");
+    }
+
+    #[test]
+    fn migration_gesture_map_wins_over_legacy_single_gesture_button_entry() {
+        // The data-loss guard: when a legacy single button_bindings[GestureButton]
+        // entry coexists with a gesture_bindings map (reachable via hand-edited
+        // or very old configs), the gesture map must survive — not be shadowed by
+        // the single entry. Mirrors the pre-v2 "gesture entries win" rule.
+        let v1 = "\
+schema_version = 1
+
+[devices.2b042.button_bindings]
+GestureButton = \"MissionControl\"
+
+[devices.2b042.gesture_bindings]
+Up = \"Copy\"
+Down = \"Paste\"
+";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, v1).expect("write");
+
+        let cfg = Config::load_from_path(&path).expect("load v1");
+        let mut gesture = BTreeMap::new();
+        gesture.insert(GestureDirection::Up, Action::Copy);
+        gesture.insert(GestureDirection::Down, Action::Paste);
+        assert_eq!(
+            cfg.bindings_for("2b042").get(&ButtonId::GestureButton),
+            Some(&Binding::Gesture(gesture)),
+            "gesture map must win over the legacy single GestureButton entry"
+        );
+    }
+
+    #[test]
+    fn rejects_newer_schema_version_but_accepts_v1() {
+        // A future version is rejected loudly; the current and older versions
+        // load (older ones migrate through the shim).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "schema_version = 99\n").expect("write");
+        assert!(matches!(
+            Config::load_from_path(&path).expect_err("v99 should fail"),
+            ConfigError::UnsupportedSchemaVersion { found: 99, .. }
+        ));
+
+        fs::write(&path, "schema_version = 1\n").expect("write");
+        assert!(
+            Config::load_from_path(&path).is_ok(),
+            "v1 should still load"
+        );
+    }
+
+    #[test]
+    fn set_gesture_direction_upgrades_single_to_gesture() {
+        let mut cfg = Config::default();
+        // Start from a Single binding, then bind a swipe direction.
+        cfg.set_binding(
+            "2b042",
+            ButtonId::Back,
+            Binding::Single(Action::BrowserBack),
+        );
+        cfg.set_gesture_direction("2b042", ButtonId::Back, GestureDirection::Up, Action::Copy);
+
+        match cfg.bindings_for("2b042").get(&ButtonId::Back) {
+            Some(Binding::Gesture(map)) => {
+                // The prior single action is preserved as the Click entry.
+                assert_eq!(
+                    map.get(&GestureDirection::Click),
+                    Some(&Action::BrowserBack)
+                );
+                assert_eq!(map.get(&GestureDirection::Up), Some(&Action::Copy));
+            }
+            other => panic!("expected Gesture after upgrade, got {other:?}"),
+        }
     }
 }

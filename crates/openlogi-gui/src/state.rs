@@ -31,7 +31,7 @@ pub use devices::DeviceRecord;
 pub use openlogi_agent_core::DpiCycleState;
 
 use crate::asset::AssetResolver;
-use crate::data::mouse_buttons::{Action, ButtonId, GestureDirection};
+use crate::data::mouse_buttons::{Action, Binding, ButtonId, GestureDirection};
 use crate::state::devices::{build_device_list, pick_initial_device, sort_device_list};
 use openlogi_agent_core::bindings::{bindings_for, gesture_bindings_for};
 
@@ -948,7 +948,8 @@ impl AppState {
             );
             return;
         };
-        self.config.set_binding(&key, button, action);
+        self.config
+            .set_binding(&key, button, Binding::Single(action));
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist binding to config.toml");
         }
@@ -983,7 +984,8 @@ impl AppState {
             );
             return;
         };
-        self.config.set_gesture_binding(&key, direction, action);
+        self.config
+            .set_gesture_direction(&key, ButtonId::GestureButton, direction, action);
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist gesture binding to config.toml");
         }

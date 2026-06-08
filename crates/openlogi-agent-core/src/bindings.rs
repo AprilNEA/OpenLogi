@@ -11,8 +11,14 @@ use openlogi_core::binding::{
 };
 use openlogi_core::config::Config;
 
-/// Effective button bindings for the device `config_key`, with `app_bundle`'s
-/// per-app overlay applied. Unset buttons fall back to [`default_binding`].
+/// Effective per-button single-action map for the device `config_key`, with
+/// `app_bundle`'s per-app overlay applied. Unset buttons fall back to
+/// [`default_binding`].
+///
+/// This is the map the OS hook and the HID++ button-press path consume, so a
+/// `Binding::Gesture` is projected to its `click_action()` — the gesture
+/// button's per-direction swipes are dispatched via the separate
+/// [`gesture_bindings_for`] map, not here.
 #[must_use]
 pub fn bindings_for(
     config: &Config,
@@ -27,8 +33,8 @@ pub fn bindings_for(
         .copied()
         .map(|b| (b, default_binding(b)))
         .collect();
-    for (k, v) in stored {
-        bindings.insert(k, v);
+    for (k, binding) in stored {
+        bindings.insert(k, binding.click_action());
     }
     bindings
 }

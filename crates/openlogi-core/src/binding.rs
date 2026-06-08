@@ -6,6 +6,7 @@
 //! the TOML config keys/values use the enum variant identifiers verbatim, so
 //! renames are migration events.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -444,6 +445,83 @@ impl KeyCombo {
             }
         }
         out
+    }
+}
+
+/// What a single rebindable [`ButtonId`] does: either one [`Action`], or — for a
+/// raw-XY-capable button placed in gesture mode — a per-[`GestureDirection`]
+/// map (hold + swipe up/down/left/right, or a plain click).
+///
+/// There has only ever been one binding map per device; a gesture binding is
+/// just a binding whose payload is a direction map instead of a single action.
+///
+/// # Serialization
+///
+/// `#[serde(untagged)]`: [`Single`](Binding::Single) serializes exactly as the
+/// bare [`Action`] did before (a string `"BrowserBack"`, or a single-key table
+/// for the payload variants), and [`Gesture`](Binding::Gesture) serializes as a
+/// table keyed by [`GestureDirection`] names (`Up`/`Down`/`Left`/`Right`/
+/// `Click`).
+///
+/// The two arms are disambiguated by the **zero overlap** between [`Action`]
+/// variant names and [`GestureDirection`] variant names — untagged tries
+/// `Single(Action)` first, and a table keyed by `Up` etc. cannot parse as an
+/// externally-tagged `Action`, so it falls through to `Gesture`. A payload
+/// action like `{ SetDpiPreset = 2 }` is a valid externally-tagged `Action`, so
+/// it stays `Single` and never reaches the `Gesture` arm. This invariant is the
+/// entire safety basis for untagged routing; the `binding_untagged_*` tests
+/// guard it (a future `Action` named `Up`/`Down`/`Left`/`Right`/`Click` would
+/// silently mis-route, and those tests would fail).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Binding {
+    /// One action, fired on press. The shape every non-gesture button uses.
+    Single(Action),
+    /// Per-direction sub-bindings for a button in gesture mode. Keyed by the
+    /// committed swipe direction, with [`GestureDirection::Click`] holding the
+    /// plain-click (no-swipe) action.
+    Gesture(BTreeMap<GestureDirection, Action>),
+}
+
+impl Binding {
+    /// The plain-click action for this binding: the [`Single`](Binding::Single)
+    /// action, or the [`Gesture`](Binding::Gesture) map's
+    /// [`Click`](GestureDirection::Click) entry. Falls back to [`Action::None`]
+    /// when a gesture binding has no explicit `Click`.
+    ///
+    /// Lets the click-dispatch path stay binding-shape-agnostic.
+    #[must_use]
+    pub fn click_action(&self) -> Action {
+        match self {
+            Binding::Single(action) => action.clone(),
+            Binding::Gesture(map) => map
+                .get(&GestureDirection::Click)
+                .cloned()
+                .unwrap_or(Action::None),
+        }
+    }
+
+    /// The action bound to `direction`, if this is a gesture binding.
+    /// [`Single`](Binding::Single) has no directions and returns `None`.
+    #[must_use]
+    pub fn direction_action(&self, direction: GestureDirection) -> Option<&Action> {
+        match self {
+            Binding::Single(_) => None,
+            Binding::Gesture(map) => map.get(&direction),
+        }
+    }
+
+    /// Whether this binding drives raw-XY swipe capture (the
+    /// [`Gesture`](Binding::Gesture) arm).
+    #[must_use]
+    pub fn is_gesture(&self) -> bool {
+        matches!(self, Binding::Gesture(_))
+    }
+}
+
+impl From<Action> for Binding {
+    fn from(action: Action) -> Self {
+        Binding::Single(action)
     }
 }
 
@@ -1283,9 +1361,11 @@ mod macos {
 /// (per-direction, see [`default_gesture_binding`]). The bindings persist
 /// regardless so the user only configures once.
 ///
-/// `GestureButton`'s entry here is the legacy single-binding placeholder;
-/// the per-direction sub-bindings live in [`default_gesture_binding`] and
-/// are what the UI now edits.
+/// `GestureButton`'s entry here is vestigial: in the merged [`Binding`] model
+/// the gesture button defaults to [`Binding::Gesture`] (see
+/// [`default_binding_for`]), so this single-action value is never the source of
+/// truth for it. It is retained only so the per-button-`Action` callers (the
+/// hook map, scroll defaults, labels) stay total.
 #[must_use]
 pub fn default_binding(button: ButtonId) -> Action {
     match button {
@@ -1318,6 +1398,28 @@ pub fn default_gesture_binding(direction: GestureDirection) -> Action {
         GestureDirection::Left => Action::PrevTab,
         GestureDirection::Right => Action::NextTab,
         GestureDirection::Click => Action::AppExpose,
+    }
+}
+
+/// The canonical default [`Binding`] for a fresh button in the merged model.
+///
+/// [`ButtonId::GestureButton`] defaults to [`Binding::Gesture`] populated from
+/// [`default_gesture_binding`] — preserving the existing per-direction swipe
+/// behavior — so the GUI mode toggle and the runtime agree it starts in gesture
+/// mode. Every other button defaults to [`Binding::Single`] of its
+/// [`default_binding`]. This is the single source of truth for "what an
+/// un-customized button does"; both the GUI's `AppState` and the agent-side
+/// projection must derive from it so they never disagree.
+#[must_use]
+pub fn default_binding_for(button: ButtonId) -> Binding {
+    match button {
+        ButtonId::GestureButton => Binding::Gesture(
+            GestureDirection::ALL
+                .into_iter()
+                .map(|d| (d, default_gesture_binding(d)))
+                .collect(),
+        ),
+        other => Binding::Single(default_binding(other)),
     }
 }
 
@@ -1732,6 +1834,95 @@ mod tests {
                 "catalog must not contain CustomShortcut"
             );
         }
+    }
+
+    // ── Binding (merged model) serde routing ──────────────────────────────────
+
+    /// On-disk shape: a `ButtonId` → [`Binding`] map, as `DeviceConfig.bindings`
+    /// serializes it.
+    #[derive(Serialize, Deserialize)]
+    struct BindingWrapper {
+        bindings: BTreeMap<ButtonId, Binding>,
+    }
+
+    fn binding_roundtrip(bindings: BTreeMap<ButtonId, Binding>) -> BTreeMap<ButtonId, Binding> {
+        let toml = toml::to_string_pretty(&BindingWrapper { bindings }).expect("serialize");
+        toml::from_str::<BindingWrapper>(&toml)
+            .expect("deserialize")
+            .bindings
+    }
+
+    #[test]
+    fn binding_single_roundtrips_including_payload_variants() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(ButtonId::Back, Binding::Single(Action::BrowserBack));
+        bindings.insert(
+            ButtonId::DpiToggle,
+            Binding::Single(Action::SetDpiPreset(2)),
+        );
+        bindings.insert(
+            ButtonId::Forward,
+            Binding::Single(Action::CustomShortcut(KeyCombo {
+                modifiers: KeyCombo::MOD_CMD,
+                key_code: 0x23,
+                display: "⌘P".into(),
+            })),
+        );
+        let back = binding_roundtrip(bindings);
+        assert_eq!(back[&ButtonId::Back], Binding::Single(Action::BrowserBack));
+        assert_eq!(
+            back[&ButtonId::DpiToggle],
+            Binding::Single(Action::SetDpiPreset(2))
+        );
+        assert!(matches!(
+            back[&ButtonId::Forward],
+            Binding::Single(Action::CustomShortcut(_))
+        ));
+    }
+
+    #[test]
+    fn binding_gesture_roundtrips() {
+        let mut map = BTreeMap::new();
+        map.insert(GestureDirection::Up, Action::Copy);
+        map.insert(GestureDirection::Click, Action::Paste);
+        let mut bindings = BTreeMap::new();
+        bindings.insert(ButtonId::GestureButton, Binding::Gesture(map.clone()));
+        let back = binding_roundtrip(bindings);
+        assert_eq!(back[&ButtonId::GestureButton], Binding::Gesture(map));
+    }
+
+    /// The untagged-routing safety guard. A TOML table keyed by ANY
+    /// [`GestureDirection`] name must deserialize as [`Binding::Gesture`], never
+    /// [`Binding::Single`]. If a future [`Action`] payload variant is ever named
+    /// `Up`/`Down`/`Left`/`Right`/`Click`, the table would parse as `Single`
+    /// first and this test fails — catching the silent mis-route at CI time.
+    #[test]
+    fn binding_direction_keyed_table_routes_to_gesture() {
+        for dir in GestureDirection::ALL {
+            // `GestureDirection`'s serde key equals its `Display`/variant name.
+            let toml = format!("bindings.GestureButton.{dir} = \"None\"");
+            let parsed = toml::from_str::<BindingWrapper>(&toml).expect("deserialize");
+            assert!(
+                matches!(
+                    parsed.bindings[&ButtonId::GestureButton],
+                    Binding::Gesture(_)
+                ),
+                "a {dir}-keyed table must route to Gesture, not Single"
+            );
+        }
+    }
+
+    /// The collision case: a payload [`Action`] also serializes as a single-key
+    /// table, but untagged must keep it [`Binding::Single`] (it parses as a valid
+    /// externally-tagged `Action` before the `Gesture` arm is tried).
+    #[test]
+    fn binding_payload_action_stays_single() {
+        let toml = "bindings.DpiToggle.SetDpiPreset = 2";
+        let parsed = toml::from_str::<BindingWrapper>(toml).expect("deserialize");
+        assert_eq!(
+            parsed.bindings[&ButtonId::DpiToggle],
+            Binding::Single(Action::SetDpiPreset(2))
+        );
     }
 
     // ── Gesture classification ────────────────────────────────────────────────
