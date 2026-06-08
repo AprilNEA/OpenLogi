@@ -1,4 +1,4 @@
-# OpenLogi GUI zh-TW translations. Managed by Crowdin; edit translations there when possible.
+# OpenLogi GUI en translations. Managed by Crowdin; edit source text there when possible.
 _version: 1
 "No devices connected": "沒有已連線的裝置"
 "Devices": "裝置"
@@ -143,8 +143,8 @@ _version: 1
 "Reload Page": "重新載入頁面"
 "Mission Control": "Mission Control"
 "App Exposé": "App Exposé"
-"Previous Desktop": "上一個桌面"
-"Next Desktop": "下一個桌面"
+"Previous Desktop": "Previous Desktop"
+"Next Desktop": "Next Desktop"
 "Show Desktop": "顯示桌面"
 "Launchpad": "啟動台"
 "Lock Screen": "鎖定螢幕"
