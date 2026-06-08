@@ -23,6 +23,7 @@ use gpui_component::v_flex;
 use openlogi_agent_core::ipc::{FoundDevice, PairingUpdate};
 use openlogi_hid::{Click, PasskeyMethod, ReceiverSelector};
 
+use crate::app_menu::CloseWindow;
 use crate::ipc_client::Command;
 use crate::state::AppState;
 use crate::theme::{self, Palette};
@@ -138,6 +139,7 @@ impl Render for AddDeviceView {
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .p_6()
             .gap_5()
             .child(
