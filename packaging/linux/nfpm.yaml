@@ -8,9 +8,9 @@
 #   VERSION=0.6.0 nfpm package --packager rpm --target target/release
 
 name: openlogi
-version: "v${VERSION}"
+version: "${VERSION}"
 arch: amd64
-maintainer: OpenLogi Contributors <https://github.com/AprilNEA/OpenLogi>
+maintainer: OpenLogi Contributors <dev@aprilnea.me>
 description: |-
   Logitech HID++ device control — remap buttons, DPI, and SmartShift.
   An open-source, local-first alternative to Logi Options+. No account,

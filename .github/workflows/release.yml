@@ -547,7 +547,10 @@ jobs:
 
       - name: Install system dependencies and nfpm
         run: |
-          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' \
+          curl -fsSL https://repo.goreleaser.com/apt/gpg.key \
+            | gpg --dearmor \
+            | sudo tee /usr/share/keyrings/goreleaser-archive-keyring.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/goreleaser-archive-keyring.gpg] https://repo.goreleaser.com/apt/ /" \
             | sudo tee /etc/apt/sources.list.d/goreleaser.list
           sudo apt-get update
           sudo apt-get install -y \
