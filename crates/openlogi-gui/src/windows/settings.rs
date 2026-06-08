@@ -20,6 +20,7 @@ use openlogi_core::config::{
     DEFAULT_THUMBWHEEL_SENSITIVITY, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
 };
 
+use crate::app_menu::CloseWindow;
 use crate::platform::permissions::{self, Permission, PermissionStatus};
 use crate::state::AppState;
 use crate::theme::{self, Palette};
@@ -146,6 +147,7 @@ impl Render for SettingsView {
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .child(
                 Settings::new("settings")
                     .sidebar_width(px(210.))

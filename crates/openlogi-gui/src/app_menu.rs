@@ -3,8 +3,8 @@
 //! GPUI's menu support is driven by registered actions + a `Keymap`: the
 //! platform layer reads bindings via `cx.set_menus` and stamps the matching
 //! `keyEquivalent` onto each `NSMenuItem`. App-level actions (Hide, Quit)
-//! get global listeners; window-level actions (Minimize, Zoom) are attached
-//! to the root view in [`crate::app`].
+//! get global listeners; window-level actions (Close, Minimize, Zoom) are
+//! attached to window root views.
 //!
 //! On Linux/Windows the menus + key bindings are stored but never surfaced
 //! in a top-of-screen bar — calling `install` there is a harmless no-op.
