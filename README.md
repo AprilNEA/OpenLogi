@@ -48,7 +48,7 @@ macOS and Linux are supported. Windows support is planned — see
 | Capability | State |
 |---|---|
 | Discover Bolt receivers + list paired devices (CLI + GUI) | ✅ |
-| Unifying receivers (Bolt successor) | ✅ |
+| Unifying receivers (older protocol, replaced by Bolt) | ✅ |
 | Bluetooth-direct / wired devices (no receiver) | ✅ |
 | Battery percentage / charge state | ✅ (online devices) |
 | Interactive GUI: carousel, mouse diagram, action picker | ✅ macOS + Linux |
@@ -118,21 +118,6 @@ and distros without systemd.
 
 To build from source, see [DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-### Linux
-
-There are no pre-built Linux packages yet. Build from source and install the
-udev rules so OpenLogi can open `/dev/uinput` and `/dev/hidraw*` without `sudo`:
-
-```sh
-git clone https://github.com/AprilNEA/OpenLogi
-cd OpenLogi
-cargo build --release
-sudo cp packaging/linux/udev/70-openlogi.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
-```
-
-See [docs/INSTALL-linux.md](docs/INSTALL-linux.md) for full instructions,
-autostart setup, and known limitations.
 
 ## Usage (CLI)
 
