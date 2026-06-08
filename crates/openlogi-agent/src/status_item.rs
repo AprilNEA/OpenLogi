@@ -13,9 +13,9 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
-use objc2::{MainThreadMarker, MainThreadOnly};
+use objc2::{AnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem};
-use objc2_foundation::NSString;
+use objc2_foundation::{NSData, NSString};
 
 /// `NSVariableStatusItemLength` — a status item sized to its content.
 const VARIABLE_LENGTH: f64 = -1.0;
@@ -24,29 +24,6 @@ const VARIABLE_LENGTH: f64 = -1.0;
 /// owns it; the tray keeps it for the app's lifetime.
 pub(crate) fn create_status_item() -> Retained<NSStatusItem> {
     NSStatusBar::systemStatusBar().statusItemWithLength(VARIABLE_LENGTH)
-}
-
-/// Use an SF Symbol as the status-item icon, falling back to a text title.
-pub(crate) fn set_symbol_icon(
-    item: &NSStatusItem,
-    mtm: MainThreadMarker,
-    symbol: &str,
-    description: &str,
-    fallback_title: &str,
-) {
-    let Some(button) = item.button(mtm) else {
-        return;
-    };
-    match NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        &NSString::from_str(symbol),
-        Some(&NSString::from_str(description)),
-    ) {
-        Some(image) => {
-            image.setTemplate(true);
-            button.setImage(Some(&image));
-        }
-        None => button.setTitle(&NSString::from_str(fallback_title)),
-    }
 }
 
 /// Create a menu with AppKit auto-enabling disabled (the agent manages item
@@ -88,6 +65,33 @@ pub(crate) fn new_action_item(
     // (see the doc comment) — there is no dangling-target window.
     unsafe { item.setTarget(Some(target)) };
     item
+}
+
+/// Set a custom PNG as the status-item icon (template image). Pass the @2x
+/// PNG data; the image size is set to half the pixel dimensions so macOS picks
+/// the right resolution on both Retina and non-Retina displays.
+pub(crate) fn set_png_icon(
+    item: &NSStatusItem,
+    mtm: MainThreadMarker,
+    png_2x: &[u8],
+    fallback_title: &str,
+) {
+    let Some(button) = item.button(mtm) else {
+        return;
+    };
+    let data = NSData::with_bytes(png_2x);
+    match NSImage::initWithData(NSImage::alloc(), &data) {
+        Some(image) => {
+            let px = image.size();
+            image.setSize(objc2_foundation::NSSize::new(
+                px.width / 2.0,
+                px.height / 2.0,
+            ));
+            image.setTemplate(true);
+            button.setImage(Some(&image));
+        }
+        None => button.setTitle(&NSString::from_str(fallback_title)),
+    }
 }
 
 /// Append a separator to `menu`.

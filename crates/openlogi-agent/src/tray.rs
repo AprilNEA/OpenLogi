@@ -136,11 +136,10 @@ fn install_status_item(
 ) {
     let target = MenuTarget::new(mtm);
     let status_item = status_item::create_status_item();
-    status_item::set_symbol_icon(
+    status_item::set_png_icon(
         &status_item,
         mtm,
-        "computermouse.fill",
-        "OpenLogi",
+        include_bytes!("../assets/tray-icon@2x.png"),
         "OpenLogi",
     );
     let menu = status_item::new_menu(mtm);
