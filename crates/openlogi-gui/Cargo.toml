@@ -70,3 +70,8 @@ single binary; device renders are fetched on demand on first launch.
 osx_minimum_system_version = "13.0"
 icon = ["icon/AppIcon.icns"]
 resources = ["assets/**/*"]
+
+[package.metadata.i18n]
+available-locales = ["en", "ja", "ru", "zh-CN", "zh-HK", "zh-TW", "it"]
+default-locale = "en"
+load-path = "locales"

@@ -54,6 +54,8 @@ mirror CI and packaging:
 devenv tasks run openlogi:gui      # run the desktop app
 devenv tasks run openlogi:check    # fmt + clippy + tests (run before committing)
 devenv tasks run openlogi:dmg      # build the macOS DMG
+devenv tasks run openlogi:i18n-upload    # upload English source strings to Crowdin
+devenv tasks run openlogi:i18n-download  # download translations and run i18n tests
 ```
 
 The first time you `cd` into the repo after pulling a change to `devenv.nix`,

@@ -112,13 +112,7 @@ impl SettingsView {
             .filter(|code| !code.is_empty())
             .map(ToOwned::to_owned);
 
-        cx.update_global::<AppState, _>(|s, _| s.set_language(language));
-        // `t!` reads the locale at render time, so a repaint is what actually
-        // applies the switch; the app menu isn't in any window's view tree, so
-        // re-title it too. (The menu-bar item is the agent's now and localizes
-        // independently.)
-        cx.refresh_windows();
-        crate::app_menu::rebuild(cx);
+        cx.update_global::<AppState, _>(|s, cx| s.set_language(language, cx));
     }
 }
 

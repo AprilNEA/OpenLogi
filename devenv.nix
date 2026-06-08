@@ -26,6 +26,7 @@ in
     sccache
     prek
     create-dmg
+    crowdin-cli
   ];
 
   languages.rust = {
@@ -63,6 +64,18 @@ in
         cargo fmt --all -- --check
         cargo clippy --workspace --all-targets -- -D warnings
         cargo test --workspace
+      '';
+    };
+    "openlogi:i18n-upload" = {
+      description = "Upload English source strings to Crowdin.";
+      exec = "crowdin upload sources";
+    };
+    "openlogi:i18n-download" = {
+      description = "Download translated locale files from Crowdin.";
+      exec = ''
+        set -e
+        crowdin download
+        cargo test -p openlogi-gui i18n
       '';
     };
     "openlogi:assets" = {

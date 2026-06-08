@@ -1,11 +1,11 @@
 //! UI localization plumbing.
 //!
-//! Translations live in `crates/openlogi-gui/locales/app.yml` and are loaded
-//! at compile time by the `rust_i18n::i18n!` macro in `main.rs`. Call sites use
-//! the [`tr!`](crate::tr) helper (or `rust_i18n::t!`) with the **English string
-//! as the key** — a missing entry falls back to that English text, so the file
-//! carries only the translated `ja` / `ru` / `zh-CN` / `zh-HK` / `zh-TW` / `it`
-//! columns; English is the key itself.
+//! Translations live in `crates/openlogi-gui/locales/*.yml` and are loaded at
+//! compile time by the `rust_i18n::i18n!` macro in `main.rs`. Crowdin manages one
+//! file per locale: `en.yml` is the source file, and `ja` / `ru` / `zh-CN` /
+//! `zh-HK` / `zh-TW` / `it` are downloaded as translated YAML files. Call sites
+//! use the [`tr!`](crate::tr) helper (or `rust_i18n::t!`) with the **English
+//! string as the key**.
 //!
 //! The current locale is a process-global atomic inside `rust_i18n`. Setting it
 //! re-localizes both our own call sites *and* gpui-component's built-in widget
@@ -17,7 +17,7 @@
 use openlogi_core::config::AppSettings;
 
 /// Locales the GUI ships, as `(code, native name)`. The codes match the
-/// sub-keys in `locales/app.yml`; `en` / `zh-CN` / `zh-HK` / `it` also match
+/// `locales/*.yml` filenames; `en` / `zh-CN` / `zh-HK` / `it` also match
 /// gpui-component's bundled `ui.yml`, so choosing one localizes the framework's
 /// own widgets too. `ja`, `ru`, and `zh-TW` are *not* in `ui.yml`, so under
 /// those locales our app strings localize but the framework's built-in widget
@@ -142,7 +142,7 @@ mod tests {
         );
     }
 
-    /// End-to-end check that `locales/app.yml` loaded and the gettext-style
+    /// End-to-end check that `locales/*.yml` loaded and the gettext-style
     /// English keys match — a typo'd key silently falls back to English, which
     /// this catches. All locale-dependent assertions live in this one test on
     /// purpose: `rust_i18n`'s locale is a process-global, so splitting them into
@@ -173,7 +173,7 @@ mod tests {
         assert_ne!(
             rust_i18n::t!(BLURB),
             BLURB,
-            "blurb key missing from app.yml"
+            "blurb key missing from zh-CN.yml"
         );
 
         // Exhaustive: every non-parameterized device/action label has a `zh-CN`
@@ -210,7 +210,7 @@ mod tests {
         assert_ne!(
             rust_i18n::t!(BLURB),
             BLURB,
-            "blurb key missing from zh-TW app.yml"
+            "blurb key missing from zh-TW.yml"
         );
 
         rust_i18n::set_locale("it");
@@ -218,9 +218,32 @@ mod tests {
         assert_eq!(rust_i18n::t!("Left Click"), "Click sinistro");
         assert_eq!(rust_i18n::t!("Cancel"), "Annulla");
 
-        // English has no column: every key falls back to the English source.
+        // English is the Crowdin source locale.
         rust_i18n::set_locale("en");
         assert_eq!(rust_i18n::t!("Settings"), "Settings");
         assert_eq!(rust_i18n::t!(BLURB), BLURB);
+    }
+
+    #[test]
+    fn locale_files_have_the_same_keys() {
+        let source = locale_keys(include_str!("../locales/en.yml"));
+        for (locale, file) in [
+            ("ja", include_str!("../locales/ja.yml")),
+            ("ru", include_str!("../locales/ru.yml")),
+            ("zh-CN", include_str!("../locales/zh-CN.yml")),
+            ("zh-HK", include_str!("../locales/zh-HK.yml")),
+            ("zh-TW", include_str!("../locales/zh-TW.yml")),
+            ("it", include_str!("../locales/it.yml")),
+        ] {
+            let keys = locale_keys(file);
+            assert_eq!(keys, source, "{locale}.yml keys drifted from en.yml");
+        }
+    }
+
+    fn locale_keys(file: &str) -> Vec<&str> {
+        file.lines()
+            .filter_map(|line| line.strip_prefix('"'))
+            .filter_map(|line| line.split_once("\": ").map(|(key, _)| key))
+            .collect()
     }
 }

@@ -36,9 +36,10 @@ mod state;
 mod theme;
 mod windows;
 
-// Loads `crates/openlogi-gui/locales/*.yml` at compile time and generates the
-// `t!`/`tr!` lookup backend for this crate. `fallback = "en"` matches the codes
-// gpui-component ships, so the framework's own widgets localize alongside ours.
+// Loads the Crowdin-managed `crates/openlogi-gui/locales/*.yml` files at compile
+// time and generates the `t!`/`tr!` lookup backend for this crate. `fallback =
+// "en"` matches the codes gpui-component ships, so the framework's own widgets
+// localize alongside ours.
 rust_i18n::i18n!("locales", fallback = "en");
 
 use std::sync::Arc;

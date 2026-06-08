@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use gpui::Global;
+use gpui::{App, Global};
 use openlogi_core::config::{AppSettings, Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
@@ -916,11 +916,10 @@ impl AppState {
         self.config.app_settings.language.as_deref()
     }
 
-    /// Set the UI language (`None` = follow system), persist it, and switch the
-    /// process-global locale live via [`crate::i18n`]. The caller must refresh
-    /// open windows and rebuild the menu so everything re-renders. No-op when
-    /// unchanged.
-    pub fn set_language(&mut self, language: Option<String>) {
+    /// Set the UI language (`None` = follow system), persist it, switch the
+    /// process-global locale live via [`crate::i18n`], and repaint open UI.
+    /// No-op when unchanged.
+    pub fn set_language(&mut self, language: Option<String>, cx: &mut App) {
         if self.config.app_settings.language == language {
             return;
         }
@@ -929,6 +928,8 @@ impl AppState {
             warn!(error = %e, "could not persist language setting");
         }
         crate::i18n::activate(self.config.app_settings.language.as_deref());
+        cx.refresh_windows();
+        crate::app_menu::rebuild(cx);
     }
 
     /// Update a single binding in memory, on disk, and in the shared hook
