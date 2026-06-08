@@ -1,0 +1,64 @@
+# nfpm package descriptor for OpenLogi Linux packages (.deb / .rpm).
+#
+# Build with the xtask:
+#   cargo run -p xtask -- package-linux
+#
+# Or directly (requires nfpm in PATH and VERSION env var set):
+#   VERSION=0.6.0 nfpm package --packager deb --target target/release
+#   VERSION=0.6.0 nfpm package --packager rpm --target target/release
+
+name: openlogi
+version: "v${VERSION}"
+arch: amd64
+maintainer: OpenLogi Contributors <https://github.com/AprilNEA/OpenLogi>
+description: |-
+  Logitech HID++ device control — remap buttons, DPI, and SmartShift.
+  An open-source, local-first alternative to Logi Options+. No account,
+  no telemetry; configuration lives in a plain TOML file.
+homepage: https://github.com/AprilNEA/OpenLogi
+license: Apache-2.0 OR MIT
+
+contents:
+  # ── binaries ────────────────────────────────────────────────────────────────
+  - src: target/release/openlogi
+    dst: /usr/bin/openlogi
+    file_info:
+      mode: 0755
+
+  - src: target/release/openlogi-gui
+    dst: /usr/bin/openlogi-gui
+    file_info:
+      mode: 0755
+
+  - src: target/release/openlogi-agent
+    dst: /usr/bin/openlogi-agent
+    file_info:
+      mode: 0755
+
+  # ── udev rules ──────────────────────────────────────────────────────────────
+  - src: packaging/linux/udev/70-openlogi.rules
+    dst: /etc/udev/rules.d/70-openlogi.rules
+    file_info:
+      mode: 0644
+
+  # ── systemd user unit ───────────────────────────────────────────────────────
+  - src: packaging/linux/systemd/openlogi-agent.service
+    dst: /usr/lib/systemd/user/openlogi-agent.service
+    file_info:
+      mode: 0644
+
+  # ── XDG desktop entry ───────────────────────────────────────────────────────
+  - src: packaging/linux/desktop/openlogi.desktop
+    dst: /usr/share/applications/openlogi.desktop
+    file_info:
+      mode: 0644
+
+  # ── icon ────────────────────────────────────────────────────────────────────
+  - src: design/icon/openlogi.png
+    dst: /usr/share/icons/hicolor/512x512/apps/openlogi.png
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: packaging/linux/nfpm-scripts/postinstall.sh
+  preremove: packaging/linux/nfpm-scripts/preremove.sh
