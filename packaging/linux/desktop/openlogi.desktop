@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=OpenLogi
+Comment=Logitech HID++ device control — remap buttons, DPI, SmartShift
+Exec=openlogi-gui
+Icon=openlogi
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=logitech;mouse;hid;remap;dpi;
+StartupNotify=true

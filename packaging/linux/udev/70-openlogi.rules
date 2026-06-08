@@ -1,0 +1,23 @@
+# OpenLogi udev rules
+#
+# Grants the active-seat user read/write access to Logitech HID devices and the
+# uinput kernel module — no group membership required on systems running
+# systemd-logind (uaccess tag).
+#
+# Install:
+#   sudo cp 70-openlogi.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#
+# Non-systemd fallback (SysV init, OpenRC, etc.):
+#   Replace TAG+="uaccess" with MODE="0660", GROUP="input" and add your user to
+#   the 'input' group: sudo usermod -aG input $USER  (re-login required).
+
+# Logitech HID++ receivers and directly-connected devices (hidraw interface).
+# Covers Bolt (0xC548), Unifying (0xC52B), and any other Logitech receiver PID.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", TAG+="uaccess"
+
+# uinput virtual device node — needed for the evdev/uinput input hook.
+# OPTIONS+="static_node=uinput" creates the node at boot even before any device
+# is plugged in, so the agent can open it without a trigger.
+KERNEL=="uinput", TAG+="uaccess", OPTIONS+="static_node=uinput"

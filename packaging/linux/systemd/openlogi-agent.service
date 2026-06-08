@@ -1,0 +1,22 @@
+# OpenLogi background agent — packaged user unit.
+#
+# This file is installed to /usr/lib/systemd/user/ by the package manager (or
+# install.sh). It is the system-provided template; the agent's launch_at_login
+# setting writes its own copy to $XDG_CONFIG_HOME/systemd/user/ — both coexist,
+# enabling either works.
+#
+# Enable for the current user:
+#   systemctl --user enable --now openlogi-agent.service
+
+[Unit]
+Description=OpenLogi background agent (Logitech HID++ device control)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/openlogi-agent
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
