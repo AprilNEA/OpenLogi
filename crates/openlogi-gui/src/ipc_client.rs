@@ -13,9 +13,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use openlogi_agent_core::ipc::{
-    AgentClient, AgentStatus, GuiCommand, PROTOCOL_VERSION, PairingUpdate,
-};
+use openlogi_agent_core::ipc::{AgentClient, AgentStatus, PROTOCOL_VERSION, PairingUpdate};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
@@ -36,7 +34,6 @@ const SPAWN_RETRY_PERIOD: Duration = Duration::from_secs(30);
 pub struct PollUpdate {
     pub inventory: Vec<DeviceInventory>,
     pub status: AgentStatus,
-    pub gui_command: Option<GuiCommand>,
 }
 
 /// A device command sent from the GPUI thread to the client thread. Reads carry
@@ -270,15 +267,7 @@ async fn poll(
     };
     let inventory = client.inventory(context::current()).await.map_err(|_| ())?;
     let status = client.status(context::current()).await.map_err(|_| ())?;
-    let gui_command = client
-        .take_gui_command(context::current())
-        .await
-        .map_err(|_| ())?;
-    let _ = update_tx.send(PollUpdate {
-        inventory,
-        status,
-        gui_command,
-    });
+    let _ = update_tx.send(PollUpdate { inventory, status });
     Ok(())
 }
 

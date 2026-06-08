@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// independent of the crate version. The GUI checks it via
 /// [`Agent::protocol_version`] on connect and refuses to drive a mismatch
 /// (transient only: both binaries ship in one `.app` and update atomically).
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Agent health the GUI surfaces: the Accessibility gate, whether the hook is
 /// live, and the autostart toggle state.
@@ -59,19 +59,6 @@ pub enum PairingUpdate {
     Failed(String),
 }
 
-/// A GUI action requested by the always-on agent, usually from the macOS
-/// menu-bar status item. The GUI polls and consumes these commands over IPC
-/// after the agent launches / foregrounds it.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum GuiCommand {
-    /// Open the Settings window.
-    OpenSettings,
-    /// Open the About window.
-    OpenAbout,
-    /// Check for updates and show the About window where updater status lives.
-    CheckForUpdates,
-}
-
 #[tarpc::service]
 pub trait Agent {
     /// Wire-protocol version, for the connect handshake.
@@ -104,9 +91,6 @@ pub trait Agent {
     /// Prompt for Accessibility from the agent, so the system dialog names the
     /// agent — the actually-trusted binary — rather than the GUI.
     async fn request_accessibility_prompt();
-    /// Consume the next GUI command requested by the agent's menu-bar status
-    /// item. `None` means there is no pending command.
-    async fn take_gui_command() -> Option<GuiCommand>;
     /// Begin a pairing session against `selector`. The agent owns all device
     /// I/O, so pairing (which opens the receiver) runs here, not in the GUI —
     /// the GUI opening a receiver channel would clash with the agent's live

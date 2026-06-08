@@ -14,11 +14,10 @@ mod status_item;
 #[cfg(target_os = "macos")]
 mod tray;
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use openlogi_agent_core::ipc::GuiCommand;
 use openlogi_agent_core::orchestrator::Orchestrator;
 use openlogi_agent_core::{hook_runtime, watchers};
 use openlogi_core::config::Config;
@@ -65,8 +64,6 @@ fn main() {
         }
     };
 
-    let gui_command = Arc::new(StdMutex::new(None::<GuiCommand>));
-
     // macOS hosts the menu-bar item, which needs an NSApplication run loop on
     // the process main thread — so the async core (orchestrator, IPC, watchers,
     // hook) runs on the tokio runtime on a dedicated thread, and the main thread
@@ -78,21 +75,18 @@ fn main() {
         let show_in_menu_bar = config.app_settings.show_in_menu_bar;
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
-            .spawn({
-                let gui_command = Arc::clone(&gui_command);
-                move || runtime.block_on(run(config, gui_command))
-            })
+            .spawn(move || runtime.block_on(run(config)))
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
             return;
         }
-        tray::run_app_loop(show_in_menu_bar, gui_command);
+        tray::run_app_loop(show_in_menu_bar);
     }
     #[cfg(not(target_os = "macos"))]
-    runtime.block_on(run(config, gui_command));
+    runtime.block_on(run(config));
 }
 
-async fn run(config: Config, gui_command: Arc<StdMutex<Option<GuiCommand>>>) {
+async fn run(config: Config) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
     // LaunchAgent, before `config` moves into the orchestrator.
     launch_agent::reconcile(config.app_settings.launch_at_login);
@@ -143,7 +137,6 @@ async fn run(config: Config, gui_command: Arc<StdMutex<Option<GuiCommand>>>) {
                 shared: shared.clone(),
                 hook_installed: Arc::clone(&hook_installed),
                 pairing: Arc::clone(&pairing),
-                gui_command,
             };
             tokio::spawn(server::run(server, socket_path));
         }

@@ -51,7 +51,6 @@ use gpui::{
     WindowBounds, WindowOptions, px,
 };
 use gpui_component::{ActiveTheme, Root, Theme, ThemeMode};
-use openlogi_agent_core::ipc::GuiCommand;
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, DeviceModelInfo};
 use tracing::{info, warn};
@@ -60,12 +59,31 @@ use tracing_subscriber::EnvFilter;
 use crate::app::AppView;
 use crate::state::AppState;
 
+/// A startup action requested via a CLI flag from the agent's tray menu.
+enum StartupAction {
+    OpenSettings,
+    OpenAbout,
+    CheckForUpdates,
+}
+
+fn parse_startup_action() -> Option<StartupAction> {
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("--open-settings") => Some(StartupAction::OpenSettings),
+        Some("--open-about") => Some(StartupAction::OpenAbout),
+        Some("--check-for-updates") => Some(StartupAction::CheckForUpdates),
+        _ => None,
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "startup orchestration: watcher spawns + the GPUI run/event loop read most clearly inline"
 )]
 fn main() -> Result<()> {
     init_tracing();
+
+    let startup_action = parse_startup_action();
 
     let _guard = match openlogi_core::single_instance::acquire("openlogi.lock") {
         Ok(g) => g,
@@ -164,6 +182,17 @@ fn main() -> Result<()> {
                 }
             });
 
+            // Execute the startup action requested via CLI flag (from the
+            // agent's tray menu). Runs after the main window opens so action
+            // handlers that need the window can find it.
+            if let Some(action) = startup_action {
+                cx.update(|cx| match action {
+                    StartupAction::OpenSettings => windows::settings::open(cx),
+                    StartupAction::OpenAbout => windows::about::open(cx),
+                    StartupAction::CheckForUpdates => app_menu::check_for_updates(cx),
+                });
+            }
+
             // Asset depots are fetched in the background when devices with
             // model info first appear — startup no longer blocks on it. The
             // sync runs once on success; a failed attempt is retried (see
@@ -207,9 +236,6 @@ fn main() -> Result<()> {
                                 state.accessibility_granted =
                                     update.status.accessibility_granted;
                             });
-                            if let Some(command) = update.gui_command {
-                                handle_gui_command(&command, cx);
-                            }
                             cx.refresh_windows();
                         });
                     }
@@ -226,14 +252,6 @@ fn main() -> Result<()> {
     });
 
     Ok(())
-}
-
-fn handle_gui_command(command: &GuiCommand, cx: &mut gpui::App) {
-    match command {
-        GuiCommand::OpenSettings => windows::settings::open(cx),
-        GuiCommand::OpenAbout => windows::about::open(cx),
-        GuiCommand::CheckForUpdates => app_menu::check_for_updates(cx),
-    }
 }
 
 /// Asset-sync state, stored in an [`AtomicU8`] and polled on each inventory

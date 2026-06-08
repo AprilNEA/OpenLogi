@@ -5,12 +5,12 @@
 //! "apply now" / "read" commands here, and polls inventory/status.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
 
 use futures::StreamExt as _;
 use openlogi_agent_core::hardware;
-use openlogi_agent_core::ipc::{Agent, AgentStatus, GuiCommand, PROTOCOL_VERSION, PairingUpdate};
+use openlogi_agent_core::ipc::{Agent, AgentStatus, PROTOCOL_VERSION, PairingUpdate};
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
@@ -33,7 +33,6 @@ pub struct AgentServer {
     pub shared: SharedRuntime,
     pub hook_installed: Arc<AtomicBool>,
     pub pairing: Arc<PairingManager>,
-    pub gui_command: Arc<StdMutex<Option<GuiCommand>>>,
 }
 
 impl Agent for AgentServer {
@@ -113,16 +112,6 @@ impl Agent for AgentServer {
 
     async fn request_accessibility_prompt(self, _: Context) {
         Hook::prompt_accessibility();
-    }
-
-    async fn take_gui_command(self, _: Context) -> Option<GuiCommand> {
-        match self.gui_command.lock() {
-            Ok(mut command) => command.take(),
-            Err(e) => {
-                warn!(error = %e, "GUI command slot poisoned");
-                None
-            }
-        }
     }
 
     async fn start_pairing(self, _: Context, selector: ReceiverSelector) {
