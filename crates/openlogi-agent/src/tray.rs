@@ -4,32 +4,26 @@
 //! carries "Open OpenLogi", GUI-directed actions, help links, and "Quit
 //! OpenLogi". Clicks fire on the main thread's AppKit run loop.
 //!
-//! GUI-directed actions use two complementary delivery paths:
-//! - **Cold start** (GUI not running): `open -b … --args --open-settings` passes
-//!   a CLI flag that the GUI processes on startup.
-//! - **Warm** (GUI already running): an `NSDistributedNotification` is delivered
-//!   to the GUI's observer instantly — no poll delay.
+//! GUI-directed actions open `openlogi://` URLs which macOS delivers to the
+//! GUI via Apple Events — works for both cold start (app launched then URL
+//! delivered) and warm reactivation (URL delivered to running app).
 //!
 //! macOS-only. AppKit objects are `Retained<T>` (no #99-style leaks); the run
 //! loop owns the main thread for the agent's lifetime.
 
 #![expect(
     unsafe_code,
-    reason = "the objc2 calls marked unsafe (super-init, the wrapped init-with-action/set-target, notification post) are localized here and in status_item"
+    reason = "objc2 calls: super-init, init-with-action/set-target — localized here and in status_item"
 )]
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-use objc2_foundation::{
-    NSDictionary, NSDistributedNotificationCenter, NSNotificationName, NSString,
-};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage};
+use objc2_foundation::NSString;
 use tracing::{info, warn};
 
 use crate::status_item;
-
-const NOTIFICATION_NAME: &str = "org.openlogi.gui-command";
 
 define_class!(
     // SAFETY: NSObject has no subclassing requirements, and `MenuTarget` does
@@ -42,25 +36,22 @@ define_class!(
     impl MenuTarget {
         #[unsafe(method(openOpenLogi:))]
         fn open_openlogi(&self, _sender: Option<&AnyObject>) {
-            launch_gui(None);
+            open_url("openlogi://show");
         }
 
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: Option<&AnyObject>) {
-            send_gui_command("open-settings");
-            launch_gui(Some("--open-settings"));
+            open_url("openlogi://open-settings");
         }
 
         #[unsafe(method(openAbout:))]
         fn open_about(&self, _sender: Option<&AnyObject>) {
-            send_gui_command("open-about");
-            launch_gui(Some("--open-about"));
+            open_url("openlogi://open-about");
         }
 
         #[unsafe(method(checkForUpdates:))]
         fn check_for_updates(&self, _sender: Option<&AnyObject>) {
-            send_gui_command("check-for-updates");
-            launch_gui(Some("--check-for-updates"));
+            open_url("openlogi://check-for-updates");
         }
 
         #[unsafe(method(openHelp:))]
@@ -80,6 +71,10 @@ define_class!(
 
         #[unsafe(method(quitOpenLogi:))]
         fn quit_openlogi(&self, _sender: Option<&AnyObject>) {
+            // Blocking wait is fine here — the agent is about to exit anyway.
+            let _ = std::process::Command::new("open")
+                .arg("openlogi://quit")
+                .output();
             info!("menu-bar Quit — exiting agent");
             std::process::exit(0);
         }
@@ -95,58 +90,10 @@ impl MenuTarget {
     }
 }
 
-/// Post a distributed notification so an already-running GUI picks up the
-/// command immediately. If the GUI isn't running the notification is lost —
-/// the CLI flag in `launch_gui` covers that case.
-fn send_gui_command(command: &str) {
-    let center = NSDistributedNotificationCenter::defaultCenter();
-    let name = NSNotificationName::from_str(NOTIFICATION_NAME);
-    let key = NSString::from_str("command");
-    let value = NSString::from_str(command);
-    let keys = [std::ptr::from_ref::<AnyObject>(key.as_ref())];
-    let values = [std::ptr::from_ref::<AnyObject>(value.as_ref())];
-    // SAFETY: keys and values are valid NSString pointers of matching count.
-    let user_info = unsafe {
-        NSDictionary::dictionaryWithObjects_forKeys_count(
-            std::ptr::from_ref(values.as_slice()) as *mut _,
-            std::ptr::from_ref(keys.as_slice()) as *mut _,
-            1,
-        )
-    };
-    // SAFETY: name, user_info are valid; object is nil.
-    unsafe {
-        center.postNotificationName_object_userInfo_deliverImmediately(
-            &name,
-            None,
-            Some(&user_info),
-            true,
-        );
-    }
-}
-
-/// Launch / foreground the GUI, optionally passing a CLI flag (e.g.
-/// `--open-settings`) so the GUI opens directly to the requested screen.
-/// `open -b … --args` forwards everything after `--args` to the launched
-/// binary; when the app is already running `open -b` foregrounds it but
-/// `--args` is ignored (the single-instance guard in the GUI exits the new
-/// process before it reaches the window code).
-fn launch_gui(flag: Option<&str>) {
-    const BUNDLE_ID: &str = "org.openlogi.openlogi";
-    let mut cmd = std::process::Command::new("open");
-    cmd.args(["-b", BUNDLE_ID]);
-    if let Some(f) = flag {
-        cmd.args(["--args", f]);
-    }
-    match cmd.spawn() {
-        Ok(_) => info!(flag, "menu-bar — launching GUI ({BUNDLE_ID})"),
-        Err(e) => warn!(error = %e, flag, "could not launch the GUI from the menu bar"),
-    }
-}
-
 fn open_url(url: &str) {
     match std::process::Command::new("open").arg(url).spawn() {
-        Ok(_) => info!(url, "menu-bar link opened"),
-        Err(e) => warn!(error = %e, url, "could not open menu-bar link"),
+        Ok(_) => info!(url, "menu-bar — opening URL"),
+        Err(e) => warn!(error = %e, url, "could not open URL from menu bar"),
     }
 }
 
@@ -197,31 +144,51 @@ fn install_status_item(
         "OpenLogi",
     );
     let menu = status_item::new_menu(mtm);
-    let open = status_item::new_action_item(mtm, "Open OpenLogi", sel!(openOpenLogi:), &target);
-    menu.addItem(&open);
+
+    let show =
+        status_item::new_action_item(mtm, "Show Main Window", sel!(openOpenLogi:), &target, "m");
+    menu.addItem(&show);
     status_item::add_separator(&menu, mtm);
-    let settings = status_item::new_action_item(mtm, "Settings…", sel!(openSettings:), &target);
+
+    let settings =
+        status_item::new_action_item(mtm, "Settings…", sel!(openSettings:), &target, ",");
     menu.addItem(&settings);
-    let about = status_item::new_action_item(mtm, "About OpenLogi", sel!(openAbout:), &target);
+    let about = status_item::new_action_item(mtm, "About OpenLogi", sel!(openAbout:), &target, "");
     menu.addItem(&about);
-    let updates =
-        status_item::new_action_item(mtm, "Check for Updates…", sel!(checkForUpdates:), &target);
+    let updates = status_item::new_action_item(
+        mtm,
+        "Check for Updates…",
+        sel!(checkForUpdates:),
+        &target,
+        "u",
+    );
     menu.addItem(&updates);
     status_item::add_separator(&menu, mtm);
-    let help = status_item::new_action_item(mtm, "OpenLogi Help", sel!(openHelp:), &target);
+
+    let help = status_item::new_action_item(mtm, "OpenLogi Help", sel!(openHelp:), &target, "");
     menu.addItem(&help);
     let repository = status_item::new_action_item(
         mtm,
         "Open GitHub Repository",
         sel!(openRepository:),
         &target,
+        "",
     );
     menu.addItem(&repository);
     let release =
-        status_item::new_action_item(mtm, "Latest Release", sel!(openLatestRelease:), &target);
+        status_item::new_action_item(mtm, "Latest Release", sel!(openLatestRelease:), &target, "");
     menu.addItem(&release);
     status_item::add_separator(&menu, mtm);
-    let quit = status_item::new_action_item(mtm, "Quit OpenLogi", sel!(quitOpenLogi:), &target);
+
+    let quit =
+        status_item::new_action_item(mtm, "Quit OpenLogi", sel!(quitOpenLogi:), &target, "q");
+    if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str("xmark.square"),
+        Some(&NSString::from_str("Quit")),
+    ) {
+        image.setTemplate(true);
+        quit.setImage(Some(&image));
+    }
     menu.addItem(&quit);
     status_item.setMenu(Some(&menu));
 

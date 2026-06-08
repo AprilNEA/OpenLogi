@@ -59,26 +59,52 @@ use tracing_subscriber::EnvFilter;
 use crate::app::AppView;
 use crate::state::AppState;
 
-use crate::platform::notification::GuiCommand;
+/// A GUI action requested by the agent's tray menu via `openlogi://` URL.
+#[derive(Clone, Debug)]
+enum GuiCommand {
+    Show,
+    OpenSettings,
+    OpenAbout,
+    CheckForUpdates,
+    Quit,
+}
 
-fn parse_startup_command() -> Option<GuiCommand> {
-    std::env::args().nth(1).and_then(|a| match a.as_str() {
-        "--open-settings" => Some(GuiCommand::OpenSettings),
-        "--open-about" => Some(GuiCommand::OpenAbout),
-        "--check-for-updates" => Some(GuiCommand::CheckForUpdates),
-        _ => None,
-    })
+impl GuiCommand {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "show" => Some(Self::Show),
+            "open-settings" => Some(Self::OpenSettings),
+            "open-about" => Some(Self::OpenAbout),
+            "check-for-updates" => Some(Self::CheckForUpdates),
+            "quit" => Some(Self::Quit),
+            _ => None,
+        }
+    }
 }
 
 fn parse_url_command(url: &str) -> Option<GuiCommand> {
-    GuiCommand::parse(url.strip_prefix("openlogi://")?)
+    let path = url.strip_prefix("openlogi://")?;
+    let command = path.split(['/', '?']).next().unwrap_or(path);
+    let result = GuiCommand::parse(command);
+    if result.is_none() {
+        warn!(url, "unknown openlogi:// command — ignoring");
+    }
+    result
 }
 
 fn dispatch_gui_command(command: &GuiCommand, cx: &mut gpui::App) {
+    if matches!(command, GuiCommand::Quit) {
+        cx.quit();
+        return;
+    }
+    if cx.windows().is_empty() {
+        open_main_window(&[], cx);
+    }
     match command {
         GuiCommand::OpenSettings => windows::settings::open(cx),
         GuiCommand::OpenAbout => windows::about::open(cx),
         GuiCommand::CheckForUpdates => app_menu::check_for_updates(cx),
+        GuiCommand::Show | GuiCommand::Quit => {}
     }
 }
 
@@ -88,8 +114,6 @@ fn dispatch_gui_command(command: &GuiCommand, cx: &mut gpui::App) {
 )]
 fn main() -> Result<()> {
     init_tracing();
-
-    let startup_command = parse_startup_command();
 
     let _guard = match openlogi_core::single_instance::acquire("openlogi.lock") {
         Ok(g) => g,
@@ -134,11 +158,10 @@ fn main() -> Result<()> {
     // `Icon` would fail to load.
     let app = gpui_platform::application().with_assets(app_assets::AppAssets);
 
-    // Channel for GUI commands arriving while the app is running — from the
-    // agent's distributed notification (warm) or a `openlogi://` URL (packaged).
+    // URL scheme: `open openlogi://open-settings` from the agent's tray or
+    // external apps. Works for both cold start (macOS launches the app then
+    // delivers the URL) and warm reactivation (delivered to the running app).
     let (gui_cmd_tx, mut gui_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<GuiCommand>();
-
-    // URL scheme: `open openlogi://settings` from external apps or shortcuts.
     app.on_open_urls({
         let tx = gui_cmd_tx.clone();
         move |urls| {
@@ -156,13 +179,6 @@ fn main() -> Result<()> {
     app.run(move |cx| {
         gpui_component::init(cx);
         app_menu::install(cx);
-
-        // Subscribe to the agent's distributed notification so tray actions
-        // reach the already-running GUI instantly. The observer + center must
-        // outlive the app, so we stash them in a global.
-        #[cfg(target_os = "macos")]
-        let _notification_guard = objc2::MainThreadMarker::new()
-            .map(|mtm| platform::notification::subscribe(mtm, gui_cmd_tx));
 
         // Seed the Add Device window's initial state. Its buttons drive pairing
         // through the agent over IPC; the agent's pairing long-poll feeds events
@@ -210,12 +226,6 @@ fn main() -> Result<()> {
                     windows::update_consent::open(cx);
                 }
             });
-
-            // Execute the startup command requested via CLI flag (cold start
-            // from the agent's tray menu).
-            if let Some(cmd) = startup_command {
-                cx.update(|cx| dispatch_gui_command(&cmd, cx));
-            }
 
             // Asset depots are fetched in the background when devices with
             // model info first appear — startup no longer blocks on it. The

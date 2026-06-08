@@ -55,6 +55,16 @@ fi
 # stale link. Fall back to a copy if the bundle ever lands on another volume.
 ln -f "$bin" "$MACOS/openlogi-gui" 2>/dev/null || cp -f "$bin" "$MACOS/openlogi-gui"
 
+# Register the dev .app with LaunchServices so the `openlogi://` URL scheme
+# works during development. Only re-register when the Info.plist was updated
+# this run — avoids the (normally ~10 ms but occasionally multi-second)
+# lsregister cost on every incremental rebuild.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [ -x "$LSREGISTER" ] && [ "$PLIST_SRC" -nt "$PLIST.lsregistered" ]; then
+  "$LSREGISTER" -R "$APP" 2>/dev/null || true
+  touch "$PLIST.lsregistered"
+fi
+
 # Embed the headless agent so the GUI can auto-spawn it in dev. The GUI's IPC
 # client (ipc_client::agent_binary_path) looks for the agent as the embedded
 # login-item helper beside the GUI executable — exactly the production layout

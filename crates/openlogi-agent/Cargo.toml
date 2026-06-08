@@ -31,7 +31,7 @@ tracing-subscriber = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication"] }
-objc2-foundation = { version = "0.3.2", features = ["NSString", "NSNotification", "NSDictionary"] }
+objc2-foundation = { version = "0.3.2", features = ["NSString"] }
 
 [lints]
 workspace = true

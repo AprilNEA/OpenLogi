@@ -62,11 +62,15 @@ pub(crate) fn new_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
 /// `target` is stored as a *weak* reference by AppKit, so the caller must keep
 /// it alive for as long as the item can be clicked (the tray holds the
 /// `Retained` target for the app's lifetime).
+///
+/// `key` is the key-equivalent string (e.g. `"m"` for ⌘M); pass `""` for none.
+/// The default modifier mask is ⌘ (Command).
 pub(crate) fn new_action_item(
     mtm: MainThreadMarker,
     title: &str,
     action: Sel,
     target: &AnyObject,
+    key: &str,
 ) -> Retained<NSMenuItem> {
     // SAFETY: `initWithTitle:action:keyEquivalent:` is NSMenuItem's designated
     // initializer; the two `NSString`s outlive the call and `action` is a
@@ -76,7 +80,7 @@ pub(crate) fn new_action_item(
             NSMenuItem::alloc(mtm),
             &NSString::from_str(title),
             Some(action),
-            &NSString::from_str(""),
+            &NSString::from_str(key),
         )
     };
     // SAFETY: `target` is a live Objective-C object that responds to `action`.
