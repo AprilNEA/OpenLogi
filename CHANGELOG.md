@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.4](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.5.3...openlogi-core-v0.5.4) - 2026-06-07
+## [0.6.0](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.5.3...openlogi-core-v0.6.0) - 2026-06-07
 
 ### Added
 
