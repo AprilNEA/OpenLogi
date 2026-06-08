@@ -159,6 +159,63 @@ jobs:
           name: OpenLogi-macos-dmg-${{ matrix.arch }}
           path: dist/*.dmg
 
+  release-notes:
+    name: Generate release notes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: scripts/release-notes/pnpm-lock.yaml
+
+      - name: Load Amp release-notes credentials from 1Password
+        id: release_notes_config
+        continue-on-error: true
+        uses: 1password/load-secrets-action@v4
+        with:
+          export-env: false
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          AMP_API_KEY: ${{ secrets.OP_AMP_SECRET_ITEM }}/credential
+
+      - name: Mint release-notes GitHub App token
+        id: release_notes_app_token
+        continue-on-error: true
+        uses: ./.github/actions/github-app-token-from-1password
+        with:
+          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+
+      - name: Install release-notes dependencies
+        run: pnpm --dir scripts/release-notes install --frozen-lockfile
+
+      - name: Generate GitHub Release notes
+        env:
+          AMP_API_KEY: ${{ steps.release_notes_config.outputs.AMP_API_KEY }}
+          GH_TOKEN: ${{ steps.release_notes_app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          node scripts/release-notes/generate.ts \
+            --tag "$GITHUB_REF_NAME" \
+            --output .release/RELEASE_NOTES.md
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OpenLogi-release-notes
+          path: .release/RELEASE_NOTES.md
+
   # Single owner of the GitHub Release. softprops/action-gh-release@v3 creates the
   # release as a draft, uploads every asset to that (mutable) draft, then publishes
   # it as its final step — so the release only becomes immutable once all DMGs and
@@ -167,7 +224,7 @@ jobs:
   publish:
     name: Publish release
     runs-on: ubuntu-latest
-    needs: dmg
+    needs: [dmg, release-notes]
     permissions:
       contents: write
     steps:
@@ -183,6 +240,11 @@ jobs:
           pattern: OpenLogi-macos-dmg-*
           path: dist
           merge-multiple: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: OpenLogi-release-notes
+          path: .release
 
       - name: Generate checksums
         run: |
@@ -288,15 +350,15 @@ jobs:
       # a draft, uploads every file, and only then flips it to published. That keeps
       # the release mutable for the whole upload, which is what avoids the "immutable
       # release" rejection. latest.json is intentionally not attached — it lives in
-      # R2 only.
+      # R2 only; RELEASE_NOTES.md is kept outside dist for the same reason.
       - name: Publish GitHub Release with assets
         uses: softprops/action-gh-release@v3
         with:
+          body_path: .release/RELEASE_NOTES.md
           files: |
             dist/*.dmg
             dist/*.minisig
             dist/SHA256SUMS
-          generate_release_notes: true
           fail_on_unmatched_files: true
 
   homebrew-tap:
@@ -306,37 +368,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Load GitHub App credentials from 1Password
-        id: load_secrets
-        uses: 1password/load-secrets-action@v4
-        with:
-          export-env: false
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          GITHUB_APP_ID: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_ID
-          GITHUB_APP_PRIVATE_KEY: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_PRIVATE_KEY
-
-      # The App private key is stored base64-encoded in 1Password (a raw PEM's
-      # newlines get mangled to spaces on paste, which breaks key decoding).
-      # Decode it here; base64 ignores whitespace, so it survives re-mangling.
-      - name: Decode GitHub App private key
-        id: app_key
-        env:
-          APP_KEY_B64: ${{ steps.load_secrets.outputs.GITHUB_APP_PRIVATE_KEY }}
-        run: |
-          key="$(printf '%s' "$APP_KEY_B64" | tr -d '[:space:]' | base64 -d)"
-          {
-            echo 'pem<<__PEM__'
-            printf '%s\n' "$key"
-            echo '__PEM__'
-          } >> "$GITHUB_OUTPUT"
-
       - name: Mint homebrew-tap token (GitHub App)
         id: tap_token
-        uses: actions/create-github-app-token@v3
+        uses: ./.github/actions/github-app-token-from-1password
         with:
-          client-id: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
-          private-key: ${{ steps.app_key.outputs.pem }}
+          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
           owner: AprilNEA
           repositories: homebrew-tap
 
