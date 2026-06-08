@@ -2,7 +2,7 @@
 
 use openlogi_agent_core::device_order::DeviceStableId;
 use openlogi_core::device::{BatteryInfo, Capabilities, DeviceInventory, DeviceKind};
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use openlogi_hid::DeviceRoute;
 use tracing::debug;
 
 use crate::asset::{AssetResolver, ResolvedAsset};
@@ -44,11 +44,27 @@ pub(super) fn build_device_list(
     let mut list = Vec::new();
     for inv in inventories {
         for paired in &inv.paired {
-            let Some(model) = paired.model_info.as_ref() else {
-                continue;
-            };
-            let config_key = model.config_key();
-            let asset = cache.resolve(model, paired.codename.as_deref());
+            let (config_key, asset, serial_number, unit_id) =
+                if let Some(model) = paired.model_info.as_ref() {
+                    let asset = cache.resolve(model, paired.codename.as_deref());
+                    (
+                        model.config_key(),
+                        asset,
+                        model.serial_number.clone(),
+                        model.unit_id,
+                    )
+                } else {
+                    // No HID++ 2.0 model info — HID++ 1.0 device or feature walk
+                    // timed out. Surface the device anyway using the wpid (or slot
+                    // as a last resort) as a stable config key so it appears in the
+                    // carousel and its settings survive across sessions.
+                    let key = paired.wpid.map_or_else(
+                        || format!("slot{}", paired.slot),
+                        |w| format!("wpid{w:04x}"),
+                    );
+                    (key, None, None, [0u8; 4])
+                };
+
             let display_name = asset
                 .as_ref()
                 .map(|a| a.display_name.clone())
@@ -59,9 +75,9 @@ pub(super) fn build_device_list(
                 config_key,
                 display_name,
                 asset,
-                serial_number: model.serial_number.clone(),
-                unit_id: model.unit_id,
-                route: device_route(inv, paired.slot),
+                serial_number,
+                unit_id,
+                route: DeviceRoute::device_route_for(inv, paired.slot),
                 kind,
                 capabilities: paired.capabilities,
                 slot: paired.slot,
@@ -121,28 +137,6 @@ fn demo_keyboard() -> DeviceRecord {
         slot: 0,
         online: true,
         battery: None,
-    }
-}
-
-/// Build the [`DeviceRoute`] HID++ writes use to reach a device.
-///
-/// A Bolt-paired device routes through its receiver UID + slot. A directly
-/// attached one (USB cable / Bluetooth) carries no receiver UID and sits at
-/// [`DIRECT_DEVICE_INDEX`] — it routes by the HID node's vendor/product id
-/// instead. A Bolt device whose receiver UID couldn't be read gets no route
-/// (`None`), so hardware writes are skipped rather than mis-routed to the
-/// receiver's own pid.
-fn device_route(inv: &DeviceInventory, slot: u8) -> Option<DeviceRoute> {
-    match &inv.receiver.unique_id {
-        Some(receiver_uid) => Some(DeviceRoute::Bolt {
-            receiver_uid: receiver_uid.clone(),
-            slot,
-        }),
-        None if slot == DIRECT_DEVICE_INDEX => Some(DeviceRoute::Direct {
-            vendor_id: inv.receiver.vendor_id,
-            product_id: inv.receiver.product_id,
-        }),
-        None => None,
     }
 }
 
@@ -213,7 +207,64 @@ fn prettify_codename(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceKind, effective_kind};
+    use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
+
+    use crate::asset::AssetResolver;
+
+    use super::{build_device_list, effective_kind};
+
+    fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
+        PairedDevice {
+            slot,
+            codename: None,
+            wpid,
+            kind: DeviceKind::Keyboard,
+            online: true,
+            battery: None,
+            model_info: None,
+            capabilities: None,
+        }
+    }
+
+    fn inventory_with(devices: Vec<PairedDevice>) -> DeviceInventory {
+        DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Unifying Receiver".into(),
+                vendor_id: 0x046d,
+                product_id: 0xc52b,
+                unique_id: Some("DA2699E1".into()),
+            },
+            paired: devices,
+        }
+    }
+
+    #[test]
+    fn no_model_info_uses_wpid_as_config_key() {
+        let inv = inventory_with(vec![paired_device_no_model_info(1, Some(0x4076))]);
+        let cache = AssetResolver::new();
+        let list = build_device_list(&[inv], &cache);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].config_key, "wpid4076");
+        assert!(list[0].serial_number.is_none());
+        assert_eq!(list[0].unit_id, [0u8; 4]);
+    }
+
+    #[test]
+    fn no_model_info_falls_back_to_slot_when_no_wpid() {
+        let inv = inventory_with(vec![paired_device_no_model_info(3, None)]);
+        let cache = AssetResolver::new();
+        let list = build_device_list(&[inv], &cache);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].config_key, "slot3");
+    }
+
+    #[test]
+    fn no_model_info_display_name_falls_back_to_slot() {
+        let inv = inventory_with(vec![paired_device_no_model_info(2, Some(0x4051))]);
+        let cache = AssetResolver::new();
+        let list = build_device_list(&[inv], &cache);
+        assert_eq!(list[0].display_name, "Slot 2");
+    }
 
     #[test]
     fn asset_kind_overrides_a_misreporting_hid_kind() {

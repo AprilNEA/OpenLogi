@@ -16,7 +16,7 @@ use std::sync::{Arc, RwLock};
 
 use openlogi_core::config::Config;
 use openlogi_core::device::DeviceInventory;
-use openlogi_hid::{CaptureChannel, DIRECT_DEVICE_INDEX, DeviceRoute};
+use openlogi_hid::{CaptureChannel, DeviceRoute};
 use tracing::warn;
 
 use crate::DpiCycleState;
@@ -268,7 +268,7 @@ fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
             };
             devices.push(AgentDevice {
                 config_key: model.config_key(),
-                route: device_route(inv, paired.slot),
+                route: DeviceRoute::device_route_for(inv, paired.slot),
                 slot: paired.slot,
                 serial: model.serial_number.clone(),
                 unit_id: model.unit_id,
@@ -300,25 +300,6 @@ fn pick_current(devices: &[AgentDevice], saved: Option<&str>) -> usize {
     saved
         .and_then(|key| devices.iter().position(|d| d.config_key == key))
         .unwrap_or(0)
-}
-
-/// Build the [`DeviceRoute`] HID++ writes use to reach a device. A Bolt-paired
-/// device routes through its receiver UID + slot; a directly attached one
-/// (USB / Bluetooth) carries no receiver UID and sits at [`DIRECT_DEVICE_INDEX`],
-/// routing by vendor/product id. A Bolt device whose receiver UID is unknown
-/// gets no route, so writes are skipped rather than mis-routed.
-fn device_route(inv: &DeviceInventory, slot: u8) -> Option<DeviceRoute> {
-    match &inv.receiver.unique_id {
-        Some(receiver_uid) => Some(DeviceRoute::Bolt {
-            receiver_uid: receiver_uid.clone(),
-            slot,
-        }),
-        None if slot == DIRECT_DEVICE_INDEX => Some(DeviceRoute::Direct {
-            vendor_id: inv.receiver.vendor_id,
-            product_id: inv.receiver.product_id,
-        }),
-        None => None,
-    }
 }
 
 /// Replace the value behind an `RwLock`, logging (not panicking) on poison so a

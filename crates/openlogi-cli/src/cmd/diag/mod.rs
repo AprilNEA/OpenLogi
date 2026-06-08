@@ -51,19 +51,15 @@ async fn online_devices() -> Result<Vec<Candidate>> {
     let inventories = openlogi_hid::enumerate().await?;
     let mut out = Vec::new();
     for inv in inventories {
-        for paired in inv.paired.into_iter().filter(|p| p.online) {
-            let route = match &inv.receiver.unique_id {
-                Some(uid) => DeviceRoute::Bolt {
-                    receiver_uid: uid.clone(),
-                    slot: paired.slot,
-                },
-                None => DeviceRoute::Direct {
+        for paired in inv.paired.iter().filter(|p| p.online) {
+            let route =
+                DeviceRoute::device_route_for(&inv, paired.slot).unwrap_or(DeviceRoute::Direct {
                     vendor_id: inv.receiver.vendor_id,
                     product_id: inv.receiver.product_id,
-                },
-            };
+                });
             let name = paired
                 .codename
+                .clone()
                 .unwrap_or_else(|| format!("Slot {}", paired.slot));
             out.push(Candidate { route, name });
         }

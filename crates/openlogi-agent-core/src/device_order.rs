@@ -19,10 +19,6 @@ pub enum DeviceStableId {
         receiver_uid: String,
         slot: u8,
     },
-    Unifying {
-        receiver_uid: String,
-        slot: u8,
-    },
     Direct {
         vendor_id: u16,
         product_id: u16,
@@ -63,11 +59,10 @@ impl DeviceStableId {
         unit_id: [u8; 4],
     ) -> Self {
         match route {
-            Some(DeviceRoute::Bolt { receiver_uid, slot }) => Self::Bolt {
-                receiver_uid: receiver_uid.to_ascii_lowercase(),
-                slot: *slot,
-            },
-            Some(DeviceRoute::Unifying { receiver_uid, slot }) => Self::Unifying {
+            Some(
+                DeviceRoute::Bolt { receiver_uid, slot }
+                | DeviceRoute::Unifying { receiver_uid, slot },
+            ) => Self::Bolt {
                 receiver_uid: receiver_uid.to_ascii_lowercase(),
                 slot: *slot,
             },
@@ -84,5 +79,44 @@ impl DeviceStableId {
                 identity: DeviceIdentity::from_parts(serial, unit_id),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_hid::DeviceRoute;
+
+    use super::DeviceStableId;
+
+    #[test]
+    fn unifying_route_maps_to_bolt_stable_id() {
+        let route = DeviceRoute::Unifying {
+            receiver_uid: "DA2699E1".into(),
+            slot: 2,
+        };
+        let id = DeviceStableId::from_parts(Some(&route), 2, None, [0; 4]);
+        // Unifying and Bolt share the same stable-id variant so the GUI and
+        // agent agree on carousel order regardless of receiver family.
+        assert!(
+            matches!(id, DeviceStableId::Bolt { ref receiver_uid, slot: 2 }
+                if receiver_uid == "da2699e1"),
+            "Unifying route should map to DeviceStableId::Bolt with case-folded uid"
+        );
+    }
+
+    #[test]
+    fn bolt_and_unifying_same_uid_slot_produce_identical_stable_id() {
+        let bolt = DeviceRoute::Bolt {
+            receiver_uid: "AABB".into(),
+            slot: 1,
+        };
+        let unifying = DeviceRoute::Unifying {
+            receiver_uid: "AABB".into(),
+            slot: 1,
+        };
+        assert_eq!(
+            DeviceStableId::from_parts(Some(&bolt), 1, None, [0; 4]),
+            DeviceStableId::from_parts(Some(&unifying), 1, None, [0; 4]),
+        );
     }
 }

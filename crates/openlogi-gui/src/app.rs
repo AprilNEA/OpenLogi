@@ -78,22 +78,24 @@ impl DetailTab {
     /// Each panel is gated on the device's actual [`Capabilities`] — the HID++
     /// features it announced — not on its [`DeviceKind`]. A panel shows iff the
     /// device can do that thing, so a misclassified device can't lose its
-    /// panels (issue #127) and a keyboard's future button config won't be hidden
-    /// by a kind check. Devices we never probed (offline at startup) have no
+    /// panels (issue #127). Devices we never probed (offline at startup) have no
     /// measured capabilities; we presume a set from their kind so a sleeping
     /// mouse still shows its (host-side) button bindings.
+    ///
+    /// The Buttons panel renders a *mouse-model* silhouette with hotspots. It is
+    /// only useful for pointer-type devices (Mouse / Trackball) or when the device
+    /// has a resolved asset that provides its own correct layout. A keyboard that
+    /// exposes ReprogControls via HID++ but has no asset would get the generic
+    /// mouse fallback hotspots — confusing and wrong. Suppress the Buttons tab for
+    /// such devices until a proper keyboard-layout UI is available.
     fn tabs_for(record: &DeviceRecord) -> Vec<Self> {
         let caps = record
             .capabilities
             .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
-        // A real keyboard exposes reprogrammable controls (media / G-keys) that
-        // the HID++ probe reports as `buttons`, but those aren't the mouse remap
-        // section — so a keyboard only earns the Buttons tab when it's also a
-        // pointing device (i.e. actually a mouse the registry mislabelled, the
-        // #127 case). Non-keyboards keep the capability-driven behaviour.
-        let pointer_device = caps.pointer || record.kind != DeviceKind::Keyboard;
+        let can_show_mouse_model = record.asset.is_some()
+            || matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
         let mut tabs = Vec::new();
-        if caps.buttons && pointer_device {
+        if caps.buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
         }
         if caps.pointer {
@@ -1473,8 +1475,8 @@ mod tests {
     }
 
     /// Tabs follow measured capabilities, not kind — the core of the #127 fix.
-    /// A device the registry mislabels (kind=Keyboard) but that exposes button +
-    /// pointer features still gets its Buttons/Pointer tabs and no lighting.
+    /// A device the Bolt register mislabels as Keyboard but whose 0x0005 probe
+    /// returns Mouse ends up with kind=Mouse; measured caps drive the tabs.
     #[test]
     fn tabs_follow_capabilities_not_kind() {
         let caps = Some(Capabilities {
@@ -1482,10 +1484,29 @@ mod tests {
             pointer: true,
             lighting: false,
         });
-        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+        // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
         assert!(tabs.contains(&DetailTab::Buttons));
         assert!(tabs.contains(&DetailTab::Pointer));
         assert!(!tabs.contains(&DetailTab::Lighting));
+    }
+
+    /// A keyboard that exposes ReprogControls (buttons=true) but has no resolved
+    /// asset should not get the mouse-model Buttons panel — the generic mouse
+    /// hotspot layout (Middle Click, DPI Toggle, …) is wrong for a keyboard.
+    #[test]
+    fn keyboard_without_asset_hides_buttons_tab() {
+        let caps = Some(Capabilities {
+            buttons: true,
+            pointer: false,
+            lighting: true,
+        });
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+        assert!(
+            !tabs.contains(&DetailTab::Buttons),
+            "mouse model shown for keyboard"
+        );
+        assert!(tabs.contains(&DetailTab::Lighting));
     }
 
     /// Each panel is independent: a lighting-only device (e.g. a keyboard with
