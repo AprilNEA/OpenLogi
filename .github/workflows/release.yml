@@ -545,18 +545,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libfontconfig1-dev libfreetype-dev libxcb1-dev libxkbcommon-dev
-
-      - name: Install nfpm
+      - name: Install system dependencies and nfpm
         run: |
           echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' \
             | sudo tee /etc/apt/sources.list.d/goreleaser.list
           sudo apt-get update
-          sudo apt-get install -y nfpm
+          sudo apt-get install -y \
+            libfontconfig1-dev libfreetype-dev libxcb1-dev libxkbcommon-dev nfpm
 
       - name: Build and package
         run: cargo run -p xtask -- package-linux

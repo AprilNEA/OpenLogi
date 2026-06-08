@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use clap::Parser;
 
 use crate::util::{absolutize, ensure_command, ensure_file, repo_root, run};
@@ -32,7 +32,6 @@ pub(crate) fn package_linux(args: &PackageLinux) -> Result<()> {
 
     ensure_command("nfpm")?;
 
-    let version = workspace_version(&root)?;
     let output = absolutize(&root, &args.output);
     let config = root.join("packaging/linux/nfpm.yaml");
 
@@ -43,26 +42,11 @@ pub(crate) fn package_linux(args: &PackageLinux) -> Result<()> {
             .arg(&config)
             .arg("--target")
             .arg(&output)
-            .env("VERSION", &version)
+            .env("VERSION", env!("CARGO_PKG_VERSION"))
             .current_dir(&root))?;
     }
 
     println!();
     println!("Linux packages written to {}", output.display());
     Ok(())
-}
-
-fn workspace_version(root: &Path) -> Result<String> {
-    let toml = std::fs::read_to_string(root.join("Cargo.toml"))
-        .context("could not read workspace Cargo.toml")?;
-    for line in toml.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("version") {
-            let rest = rest.trim_start_matches([' ', '\t', '=', '"']).trim_end_matches('"');
-            if !rest.is_empty() && rest != "workspace = true" {
-                return Ok(rest.to_owned());
-            }
-        }
-    }
-    anyhow::bail!("could not find version field in workspace Cargo.toml")
 }
