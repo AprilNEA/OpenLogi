@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "hardware-support"]
 readme = "README.md"
 
 [dependencies]
-openlogi-cli = { path = "crates/openlogi-cli", version = "0.6.1" }
+openlogi-cli = { path = "crates/openlogi-cli", version = "0.6.2" }
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 
@@ -35,7 +35,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -44,7 +44,7 @@ authors = ["AprilNEA <dev@aprilnea.me>"]
 description = "Lightweight, local-first alternative to Logitech Options+ for HID++ devices"
 
 [workspace.dependencies]
-hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.6.1" }
+hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.6.2" }
 async-hid = "0.4"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time"] }
 futures-lite = "2"

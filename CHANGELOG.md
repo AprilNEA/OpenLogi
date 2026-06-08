@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2](https://github.com/AprilNEA/OpenLogi/compare/v0.6.1...v0.6.2) - 2026-06-08
+
+### Added
+
+- *(i18n)* integrate Crowdin localization workflow ([#174](https://github.com/AprilNEA/OpenLogi/pull/174))
+
+### Other
+
+- switch release notes generation to Codex ([#177](https://github.com/AprilNEA/OpenLogi/pull/177))
+- add code of conduct
+
 ## [0.6.1](https://github.com/AprilNEA/OpenLogi/compare/openlogi-cli-v0.6.0...openlogi-cli-v0.6.1) - 2026-06-08
 
 ### Fixed

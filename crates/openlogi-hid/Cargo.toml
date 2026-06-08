@@ -11,7 +11,7 @@ keywords = ["logitech", "hidpp", "hid", "mouse", "async"]
 categories = ["hardware-support", "asynchronous"]
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", version = "0.6.1" }
+openlogi-core = { path = "../openlogi-core", version = "0.6.2" }
 hidpp = { workspace = true }
 async-hid = { workspace = true }
 tokio = { workspace = true }
