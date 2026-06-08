@@ -1,4 +1,4 @@
-# OpenLogi GUI ja translations. Managed by Crowdin; edit translations there when possible.
+# OpenLogi GUI en translations. Managed by Crowdin; edit source text there when possible.
 _version: 1
 "No devices connected": "デバイスが接続されていません"
 "Devices": "デバイス"
