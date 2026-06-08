@@ -12,5 +12,15 @@
   <key>CFBundleVersion</key><string>0.0.1</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>org.openlogi.openlogi</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>openlogi</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>

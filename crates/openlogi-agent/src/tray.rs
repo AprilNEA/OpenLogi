@@ -2,25 +2,34 @@
 //!
 //! The always-on agent hosts the menu bar (the GUI is on-demand). The item
 //! carries "Open OpenLogi", GUI-directed actions, help links, and "Quit
-//! OpenLogi". Clicks fire on the main thread's AppKit run loop; GUI-directed
-//! actions pass a CLI flag to the GUI via `open -b … --args <flag>` so the
-//! window opens directly to the right screen — no IPC round-trip, no poll delay.
+//! OpenLogi". Clicks fire on the main thread's AppKit run loop.
+//!
+//! GUI-directed actions use two complementary delivery paths:
+//! - **Cold start** (GUI not running): `open -b … --args --open-settings` passes
+//!   a CLI flag that the GUI processes on startup.
+//! - **Warm** (GUI already running): an `NSDistributedNotification` is delivered
+//!   to the GUI's observer instantly — no poll delay.
 //!
 //! macOS-only. AppKit objects are `Retained<T>` (no #99-style leaks); the run
 //! loop owns the main thread for the agent's lifetime.
 
 #![expect(
     unsafe_code,
-    reason = "the objc2 calls marked unsafe (super-init, the wrapped init-with-action/set-target) are localized here and in status_item"
+    reason = "the objc2 calls marked unsafe (super-init, the wrapped init-with-action/set-target, notification post) are localized here and in status_item"
 )]
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+use objc2_foundation::{
+    NSDictionary, NSDistributedNotificationCenter, NSNotificationName, NSString,
+};
 use tracing::{info, warn};
 
 use crate::status_item;
+
+const NOTIFICATION_NAME: &str = "org.openlogi.gui-command";
 
 define_class!(
     // SAFETY: NSObject has no subclassing requirements, and `MenuTarget` does
@@ -38,16 +47,19 @@ define_class!(
 
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: Option<&AnyObject>) {
+            send_gui_command("open-settings");
             launch_gui(Some("--open-settings"));
         }
 
         #[unsafe(method(openAbout:))]
         fn open_about(&self, _sender: Option<&AnyObject>) {
+            send_gui_command("open-about");
             launch_gui(Some("--open-about"));
         }
 
         #[unsafe(method(checkForUpdates:))]
         fn check_for_updates(&self, _sender: Option<&AnyObject>) {
+            send_gui_command("check-for-updates");
             launch_gui(Some("--check-for-updates"));
         }
 
@@ -80,6 +92,35 @@ impl MenuTarget {
         // SAFETY: `init` initializes our freshly-allocated NSObject subclass and
         // returns it (the two-phase construction objc2's `define_class!` uses).
         unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Post a distributed notification so an already-running GUI picks up the
+/// command immediately. If the GUI isn't running the notification is lost —
+/// the CLI flag in `launch_gui` covers that case.
+fn send_gui_command(command: &str) {
+    let center = NSDistributedNotificationCenter::defaultCenter();
+    let name = NSNotificationName::from_str(NOTIFICATION_NAME);
+    let key = NSString::from_str("command");
+    let value = NSString::from_str(command);
+    let keys = [std::ptr::from_ref::<AnyObject>(key.as_ref())];
+    let values = [std::ptr::from_ref::<AnyObject>(value.as_ref())];
+    // SAFETY: keys and values are valid NSString pointers of matching count.
+    let user_info = unsafe {
+        NSDictionary::dictionaryWithObjects_forKeys_count(
+            std::ptr::from_ref(values.as_slice()) as *mut _,
+            std::ptr::from_ref(keys.as_slice()) as *mut _,
+            1,
+        )
+    };
+    // SAFETY: name, user_info are valid; object is nil.
+    unsafe {
+        center.postNotificationName_object_userInfo_deliverImmediately(
+            &name,
+            None,
+            Some(&user_info),
+            true,
+        );
     }
 }
 

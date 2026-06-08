@@ -41,7 +41,7 @@ gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.4
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication"] }
-objc2-foundation = { version = "0.3.2", features = ["NSString"] }
+objc2-foundation = { version = "0.3.2", features = ["NSString", "NSNotification", "NSDictionary"] }
 
 # unsafe_code stays denied; the status-item/tray modules opt in locally with
 # #[expect(unsafe_code)] for the few objc2 calls (init-with-action, set-target,

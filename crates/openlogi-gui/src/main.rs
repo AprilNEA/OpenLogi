@@ -59,20 +59,26 @@ use tracing_subscriber::EnvFilter;
 use crate::app::AppView;
 use crate::state::AppState;
 
-/// A startup action requested via a CLI flag from the agent's tray menu.
-enum StartupAction {
-    OpenSettings,
-    OpenAbout,
-    CheckForUpdates,
+use crate::platform::notification::GuiCommand;
+
+fn parse_startup_command() -> Option<GuiCommand> {
+    std::env::args().nth(1).and_then(|a| match a.as_str() {
+        "--open-settings" => Some(GuiCommand::OpenSettings),
+        "--open-about" => Some(GuiCommand::OpenAbout),
+        "--check-for-updates" => Some(GuiCommand::CheckForUpdates),
+        _ => None,
+    })
 }
 
-fn parse_startup_action() -> Option<StartupAction> {
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("--open-settings") => Some(StartupAction::OpenSettings),
-        Some("--open-about") => Some(StartupAction::OpenAbout),
-        Some("--check-for-updates") => Some(StartupAction::CheckForUpdates),
-        _ => None,
+fn parse_url_command(url: &str) -> Option<GuiCommand> {
+    GuiCommand::parse(url.strip_prefix("openlogi://")?)
+}
+
+fn dispatch_gui_command(command: &GuiCommand, cx: &mut gpui::App) {
+    match command {
+        GuiCommand::OpenSettings => windows::settings::open(cx),
+        GuiCommand::OpenAbout => windows::about::open(cx),
+        GuiCommand::CheckForUpdates => app_menu::check_for_updates(cx),
     }
 }
 
@@ -83,7 +89,7 @@ fn parse_startup_action() -> Option<StartupAction> {
 fn main() -> Result<()> {
     init_tracing();
 
-    let startup_action = parse_startup_action();
+    let startup_command = parse_startup_command();
 
     let _guard = match openlogi_core::single_instance::acquire("openlogi.lock") {
         Ok(g) => g,
@@ -128,12 +134,35 @@ fn main() -> Result<()> {
     // `Icon` would fail to load.
     let app = gpui_platform::application().with_assets(app_assets::AppAssets);
 
+    // Channel for GUI commands arriving while the app is running — from the
+    // agent's distributed notification (warm) or a `openlogi://` URL (packaged).
+    let (gui_cmd_tx, mut gui_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<GuiCommand>();
+
+    // URL scheme: `open openlogi://settings` from external apps or shortcuts.
+    app.on_open_urls({
+        let tx = gui_cmd_tx.clone();
+        move |urls| {
+            for url in &urls {
+                if let Some(cmd) = parse_url_command(url) {
+                    let _ = tx.send(cmd);
+                }
+            }
+        }
+    });
+
     // Reopen the window when the app is relaunched with none open (dock click).
     app.on_reopen(|cx| open_main_window(&[], cx));
 
     app.run(move |cx| {
         gpui_component::init(cx);
         app_menu::install(cx);
+
+        // Subscribe to the agent's distributed notification so tray actions
+        // reach the already-running GUI instantly. The observer + center must
+        // outlive the app, so we stash them in a global.
+        #[cfg(target_os = "macos")]
+        let _notification_guard = objc2::MainThreadMarker::new()
+            .map(|mtm| platform::notification::subscribe(mtm, gui_cmd_tx));
 
         // Seed the Add Device window's initial state. Its buttons drive pairing
         // through the agent over IPC; the agent's pairing long-poll feeds events
@@ -182,15 +211,10 @@ fn main() -> Result<()> {
                 }
             });
 
-            // Execute the startup action requested via CLI flag (from the
-            // agent's tray menu). Runs after the main window opens so action
-            // handlers that need the window can find it.
-            if let Some(action) = startup_action {
-                cx.update(|cx| match action {
-                    StartupAction::OpenSettings => windows::settings::open(cx),
-                    StartupAction::OpenAbout => windows::about::open(cx),
-                    StartupAction::CheckForUpdates => app_menu::check_for_updates(cx),
-                });
+            // Execute the startup command requested via CLI flag (cold start
+            // from the agent's tray menu).
+            if let Some(cmd) = startup_command {
+                cx.update(|cx| dispatch_gui_command(&cmd, cx));
             }
 
             // Asset depots are fetched in the background when devices with
@@ -243,6 +267,9 @@ fn main() -> Result<()> {
                         cx.update(|cx| {
                             windows::add_device::apply_update(cx, update);
                         });
+                    }
+                    Some(cmd) = gui_cmd_rx.recv() => {
+                        cx.update(|cx| dispatch_gui_command(&cmd, cx));
                     }
                     else => break,
                 }
