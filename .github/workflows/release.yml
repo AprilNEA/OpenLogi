@@ -180,7 +180,7 @@ jobs:
           cache: pnpm
           cache-dependency-path: scripts/release-notes/pnpm-lock.yaml
 
-      - name: Load Amp release-notes credentials from 1Password
+      - name: Load Codex release-notes credentials from 1Password
         id: release_notes_config
         continue-on-error: true
         uses: 1password/load-secrets-action@v4
@@ -188,7 +188,9 @@ jobs:
           export-env: false
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          AMP_API_KEY: ${{ secrets.OP_AMP_SECRET_ITEM }}/credential
+          CODEX_ACCESS_TOKEN: ${{ secrets.OP_CODEX_SECRET_ITEM }}/credential
+          CHATGPT_USERNAME: ${{ secrets.OP_CODEX_SECRET_ITEM }}/username
+          CODEX_ENDPOINT: ${{ secrets.OP_CODEX_SECRET_ITEM }}/ENDPOINT
 
       - name: Mint release-notes GitHub App token
         id: release_notes_app_token
@@ -203,7 +205,9 @@ jobs:
 
       - name: Generate GitHub Release notes
         env:
-          AMP_API_KEY: ${{ steps.release_notes_config.outputs.AMP_API_KEY }}
+          CODEX_ACCESS_TOKEN: ${{ steps.release_notes_config.outputs.CODEX_ACCESS_TOKEN }}
+          CHATGPT_USERNAME: ${{ steps.release_notes_config.outputs.CHATGPT_USERNAME }}
+          CODEX_ENDPOINT: ${{ steps.release_notes_config.outputs.CODEX_ENDPOINT }}
           GH_TOKEN: ${{ steps.release_notes_app_token.outputs.token }}
         run: |
           set -euo pipefail

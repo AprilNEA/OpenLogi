@@ -8,9 +8,6 @@ importers:
 
   .:
     devDependencies:
-      '@ampcode/sdk':
-        specifier: 0.1.0-20260605144103-g77da114
-        version: 0.1.0-20260605144103-g77da114
       '@octokit/rest':
         specifier: ^22.0.1
         version: 22.0.1
@@ -23,45 +20,14 @@ importers:
       lodash-es:
         specifier: ^4.18.1
         version: 4.18.1
+      openai:
+        specifier: ^6.42.0
+        version: 6.42.0
       semver:
         specifier: ^7.8.2
         version: 7.8.2
 
 packages:
-
-  '@ampcode/cli-darwin-arm64@0.0.1780884556-g9cd342':
-    resolution: {integrity: sha512-T74jB3MWp+qCZr4uGvj+eBZw63QY3R35/ay9r0idHhPvryBqK0fxD9jbYu5xIn3BGf5mOxCp/j+bISSrqr3hmg==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@ampcode/cli-darwin-x64@0.0.1780884556-g9cd342':
-    resolution: {integrity: sha512-GQMy8q6hWdt1Z9gK6JN261LFuTvlYZiTfwGRzwDATHEN1dXq9+XihCeUiKaK9MZWopAl5fQBWYaJBlRWp+VP+g==}
-    cpu: [x64]
-    os: [darwin]
-
-  '@ampcode/cli-linux-arm64@0.0.1780884556-g9cd342':
-    resolution: {integrity: sha512-2bL+Br9GGxXAMguOO/FyWRHY1/X37+kD7hjOJ6affUJIdF510fv5XiywB8w1kvnhrUd3XwdMB4WdcZg0zA7Bcw==}
-    cpu: [arm64]
-    os: [linux]
-
-  '@ampcode/cli-linux-x64@0.0.1780884556-g9cd342':
-    resolution: {integrity: sha512-O2vdZ49LzRnbq/V6kWnBh7XyQmaXp7aID30uYB6YFXx0IB1bqaQ05YXAuuINtXMqCdrKVb/ZP5nh+EcFcWUDHg==}
-    cpu: [x64]
-    os: [linux]
-
-  '@ampcode/cli-win32-x64@0.0.1780884556-g9cd342':
-    resolution: {integrity: sha512-7rlYQhQPS3aYZ9r3d5iIy3pLOXF+1DVWhu0EEd7R3ZOhv0F7fSEL3Zl5HqN5+QOx+LjbGgKhtn+6OUUwZG6i4Q==}
-    cpu: [x64]
-    os: [win32]
-
-  '@ampcode/cli@0.0.1780884556-g9cd342':
-    resolution: {integrity: sha512-kJbVr7n70izNwqF0dvWvptm+phEgNS8ELme7+pdCo6Ayr4WAfvf5L6Dyxz8gpFNvJajE6GIf8MaM8O3te1Um7g==}
-    hasBin: true
-
-  '@ampcode/sdk@0.1.0-20260605144103-g77da114':
-    resolution: {integrity: sha512-EIo9xy/qQMSNWKKmID2sOGUCVEPtnE3mMKgtw5LInedCy3U99LVK83BB45rqWGaqaCnzu99GkPruoqgIE/kyvw==}
-    engines: {node: '>=18'}
-    hasBin: true
 
   '@octokit/auth-token@6.0.0':
     resolution: {integrity: sha512-P4YJBPdPSpWTQ1NU4XYdvHvXJJDxM6YwpS0FZHRgP7YFkdVxsWcpWGy/NVqlAA7PcPCnMacXlRm1y2PFZRWL/w==}
@@ -140,6 +106,17 @@ packages:
   lodash-es@4.18.1:
     resolution: {integrity: sha512-J8xewKD/Gk22OZbhpOVSwcs60zhd95ESDwezOFuA3/099925PdHJ7OFHNTGtajL3AlZkykD32HykiMo+BIBI8A==}
 
+  openai@6.42.0:
+    resolution: {integrity: sha512-1WFEt/uXMXOLhYRNkgJWo08Y2YNvNwpVU72K7ibrWgWpNOXd4VojXLbe6SQ4bLiUQ3Y8jz4IiyVkylJCL1DtZg==}
+    peerDependencies:
+      ws: ^8.18.0
+      zod: ^3.25 || ^4.0
+    peerDependenciesMeta:
+      ws:
+        optional: true
+      zod:
+        optional: true
+
   remove-markdown@0.5.5:
     resolution: {integrity: sha512-lMR8tOtDqazFT6W2bZidoXwkptMdF3pCxpri0AEokHg0sZlC2GdoLqnoaxsEj1o7/BtXV1MKtT3YviA1t7rW7g==}
 
@@ -151,38 +128,7 @@ packages:
   universal-user-agent@7.0.3:
     resolution: {integrity: sha512-TmnEAEAsBJVZM/AADELsK76llnwcf9vMKuPz8JflO1frO8Lchitr0fNaN9d+Ap0BjKtqWqd/J17qeDnXh8CL2A==}
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
-
 snapshots:
-
-  '@ampcode/cli-darwin-arm64@0.0.1780884556-g9cd342':
-    optional: true
-
-  '@ampcode/cli-darwin-x64@0.0.1780884556-g9cd342':
-    optional: true
-
-  '@ampcode/cli-linux-arm64@0.0.1780884556-g9cd342':
-    optional: true
-
-  '@ampcode/cli-linux-x64@0.0.1780884556-g9cd342':
-    optional: true
-
-  '@ampcode/cli-win32-x64@0.0.1780884556-g9cd342':
-    optional: true
-
-  '@ampcode/cli@0.0.1780884556-g9cd342':
-    optionalDependencies:
-      '@ampcode/cli-darwin-arm64': 0.0.1780884556-g9cd342
-      '@ampcode/cli-darwin-x64': 0.0.1780884556-g9cd342
-      '@ampcode/cli-linux-arm64': 0.0.1780884556-g9cd342
-      '@ampcode/cli-linux-x64': 0.0.1780884556-g9cd342
-      '@ampcode/cli-win32-x64': 0.0.1780884556-g9cd342
-
-  '@ampcode/sdk@0.1.0-20260605144103-g77da114':
-    dependencies:
-      '@ampcode/cli': 0.0.1780884556-g9cd342
-      zod: 3.25.76
 
   '@octokit/auth-token@6.0.0': {}
 
@@ -264,10 +210,10 @@ snapshots:
 
   lodash-es@4.18.1: {}
 
+  openai@6.42.0: {}
+
   remove-markdown@0.5.5: {}
 
   semver@7.8.2: {}
 
   universal-user-agent@7.0.3: {}
-
-  zod@3.25.76: {}

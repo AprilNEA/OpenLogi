@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import { Command } from "commander";
 import parseChangelog from "changelog-parser";
 import { Octokit } from "@octokit/rest";
+import OpenAI from "openai";
 import semver from "semver";
 import { truncate, uniqBy } from "lodash-es";
 
@@ -129,20 +130,23 @@ ${truncate(commits, { length: 80_000, omission: "\n\n[truncated]" })}
 `;
 
 let notes = "";
-if (process.env.AMP_API_KEY) {
+const codexAccessToken = process.env.CODEX_ACCESS_TOKEN || process.env.OPENAI_API_KEY;
+if (codexAccessToken) {
   try {
-    const { execute } = await import("@ampcode/sdk");
-    for await (const message of execute({ prompt, options: { cwd: process.cwd() } })) {
-      if (message.type === "result") {
-        if (message.is_error) throw new Error(message.error ?? "Amp returned an error");
-        notes = message.result ?? "";
-      }
-    }
+    const response = await new OpenAI({
+      apiKey: codexAccessToken,
+      baseURL: process.env.CODEX_ENDPOINT || "https://chatgpt.com/backend-api/codex",
+      defaultHeaders: process.env.CHATGPT_USERNAME ? { "ChatGPT-Account-ID": process.env.CHATGPT_USERNAME } : undefined,
+    }).responses.create({
+      model: process.env.CODEX_MODEL || "gpt-5.5",
+      input: prompt,
+    });
+    notes = response.output_text ?? "";
   } catch (error) {
-    console.warn(`AI release notes unavailable: ${error.message}`);
+    console.warn(`Codex release notes unavailable: ${error instanceof Error ? error.message : String(error)}`);
   }
 } else {
-  console.warn("AI release notes unavailable: AMP_API_KEY is not set");
+  console.warn("Codex release notes unavailable: CODEX_ACCESS_TOKEN is not set");
 }
 
 if (!notes.trim()) {
