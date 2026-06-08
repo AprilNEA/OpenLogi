@@ -1,24 +1,24 @@
-//! Popover content for binding mouse buttons, plus the gesture button's
-//! cascading menu.
+//! Popover content for binding mouse buttons, plus the gesture button's custom
+//! two-level menu.
 //!
 //! - [`action_picker`] — one button → one [`Action`], rendered as a custom flat
 //!   list inside a gpui-component [`Popover`](gpui_component::popover::Popover).
 //!   Generic over the entity that should be notified after a binding changes so
 //!   the trigger re-renders with the new label.
-//! - [`build_gesture_menu`] — the gesture button's two-level
-//!   [`PopupMenu`](gpui_component::menu::PopupMenu): one submenu per
-//!   [`GestureDirection`], each listing the full action catalog with the
-//!   current binding checked. Picking an action commits straight to
-//!   [`AppState`], whose global observers re-render the model, so the menu
-//!   needs no observer.
+//! - [`gesture_overview`] — the gesture button's custom multi-level menu: a
+//!   plus-shaped navigator card (level 1) listing all five [`GestureDirection`]s
+//!   with their bound actions, and — once a direction is activated — a separate
+//!   action-list card (level 2) that flies out beside it. The two are distinct
+//!   floating cards (own surface + height), so this reads like a cascading menu
+//!   while staying fully custom-styled. The active direction is scratch state on
+//!   the [`MouseModelView`].
 //!
-//! The [`Popover`] wraps the [`action_picker`] content in a styled surface
-//! (background, border, shadow, `p_3` padding), so the layout here stays flat:
-//! no extra card background, no extra outer padding. Rows are transparent until
-//! hovered; the active binding is marked with accent text plus a check glyph
-//! rather than a filled box. The [`PopupMenu`] draws its own surface and check
-//! marks, so the gesture menu defers entirely to the framework's styling.
+//! The [`action_picker`] [`Popover`] uses the framework's styled surface; the
+//! gesture menu uses `appearance(false)` and draws its own card surfaces, since
+//! its two levels need independent panels. Rows are transparent until hovered;
+//! the active binding is marked with accent text plus a check glyph.
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::{
@@ -26,16 +26,12 @@ use gpui::{
     IntoElement, ParentElement, StatefulInteractiveElement as _, Styled, Window, div, hsla,
     prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::{
-    h_flex,
-    menu::{PopupMenu, PopupMenuItem},
-    popover::PopoverState,
-    v_flex,
-};
+use gpui_component::{h_flex, popover::PopoverState, v_flex};
 
 use crate::data::mouse_buttons::{
     Action, ButtonId, Category, GestureDirection, default_gesture_binding,
 };
+use crate::mouse_model::view::MouseModelView;
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette};
 
@@ -85,58 +81,187 @@ pub fn action_picker<T: 'static>(
         .into_any_element()
 }
 
-/// Build the gesture button's two-level [`PopupMenu`]: one submenu per
-/// [`GestureDirection`], each opening the full action catalog with the current
-/// binding checked. Picking an action commits it to [`AppState`] and dismisses
-/// the whole menu.
-pub fn build_gesture_menu(
-    mut menu: PopupMenu,
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
-    for dir in GestureDirection::ALL {
-        // Glyph prefix gives the directional cue the old list had; the bound
-        // action shows up as the checked row inside each submenu.
-        let label = format!("{}  {}", dir.glyph(), tr!(dir.label()));
-        menu = menu.submenu(label, window, cx, move |submenu, _window, cx| {
-            gesture_action_submenu(dir, submenu, cx)
-        });
-    }
-    menu
+/// Floor width of a single direction cell in the plus navigator. Three sit side
+/// by side in the middle row, so the plus is roughly `3×` this plus gaps.
+const GESTURE_CELL_W: f32 = 104.;
+
+/// Build the gesture button's custom two-level menu: the plus navigator card
+/// (level 1) plus, once a direction is activated, its action-list card (level 2)
+/// flown out beside it. The two are separate floating cards — own surface and
+/// height — so it reads like a cascading menu without sharing one box. The
+/// active direction is scratch UI state on the [`MouseModelView`] (`None` until
+/// a cell is clicked → only the plus shows), reset on popover close. Mutating it
+/// re-renders the view, which re-renders this open popover's content.
+pub fn gesture_overview(
+    view: &Entity<MouseModelView>,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
+    let pal = theme::palette(cx);
+    let active = view.read(cx).gesture_selected_dir();
+    h_flex()
+        .items_start()
+        .gap_2()
+        .child(plus_card(view, active, pal, cx))
+        // The flyout card only appears once a direction is activated.
+        .when_some(active, |row, dir| row.child(flyout_card(dir, view, pal, cx)))
+        .into_any_element()
 }
 
-/// Populate one direction's action submenu: the category-grouped catalog with
-/// the current binding checked and a commit-on-click handler per row. The
-/// submenu scrolls (the catalog is taller than the window) — it has no further
-/// submenus of its own, so scrolling is allowed.
-fn gesture_action_submenu(
-    direction: GestureDirection,
-    submenu: PopupMenu,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
+/// Apply the floating-card surface (own bg, border, rounding, shadow, padding)
+/// shared by both menu levels so they read as separate panels.
+fn gesture_card(pal: Palette) -> gpui::Stateful<gpui::Div> {
+    v_flex()
+        .id("gesture-card")
+        .bg(pal.surface)
+        .border_1()
+        .border_color(pal.border)
+        .rounded_lg()
+        .shadow_lg()
+        .p_1p5()
+}
+
+/// Level 1: the plus navigator. `Up` on top, `Left`/`Click`/`Right` across the
+/// middle, `Down` on the bottom. Each cell shows its glyph + label and bound
+/// action; the `active` cell (if any) is accented. Clicking a cell activates
+/// that direction (flying out the level-2 card) without committing.
+fn plus_card(
+    view: &Entity<MouseModelView>,
+    active: Option<GestureDirection>,
+    pal: Palette,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
+    let actions: BTreeMap<GestureDirection, Action> = GestureDirection::ALL
+        .into_iter()
+        .map(|d| {
+            let action = cx
+                .try_global::<AppState>()
+                .and_then(|s| s.gesture_bindings.get(&d).cloned())
+                .unwrap_or_else(|| default_gesture_binding(d));
+            (d, action)
+        })
+        .collect();
+
+    let view = view.clone();
+    let on_select: SelectFn = Rc::new(move |dir, cx| {
+        view.update(cx, |v, vcx| {
+            // Toggle: clicking the already-active cell again closes its flyout.
+            let next = (v.gesture_selected_dir() != Some(dir)).then_some(dir);
+            v.set_gesture_selected_dir(next);
+            vcx.notify();
+        });
+    });
+    let cell = |dir: GestureDirection| {
+        direction_cell(dir, &actions[&dir], active == Some(dir), &on_select, pal)
+    };
+
+    gesture_card(pal)
+        .gap_1p5()
+        .child(
+            h_flex()
+                .w_full()
+                .justify_center()
+                .child(cell(GestureDirection::Up)),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .justify_center()
+                .gap_1p5()
+                .child(cell(GestureDirection::Left))
+                .child(cell(GestureDirection::Click))
+                .child(cell(GestureDirection::Right)),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .justify_center()
+                .child(cell(GestureDirection::Down)),
+        )
+        .into_any_element()
+}
+
+/// One direction's cell in the plus: a fixed-width clickable card with the
+/// direction glyph + label above its bound-action label. The `active` cell is
+/// accented (border + faint fill); a default binding's action is muted.
+fn direction_cell(
+    dir: GestureDirection,
+    current: &Action,
+    active: bool,
+    on_select: &SelectFn,
+    pal: Palette,
+) -> AnyElement {
+    let idx = match dir {
+        GestureDirection::Up => 0usize,
+        GestureDirection::Down => 1,
+        GestureDirection::Left => 2,
+        GestureDirection::Right => 3,
+        GestureDirection::Click => 4,
+    };
+    let header = format!("{}  {}", dir.glyph(), tr!(dir.label()));
+    let action_label = tr!(current.label());
+    let is_default = *current == default_gesture_binding(dir);
+    let on_select = on_select.clone();
+    v_flex()
+        .id(("gesture-cell", idx))
+        .w(px(GESTURE_CELL_W))
+        .gap(px(2.))
+        .px_2()
+        .py_1p5()
+        .rounded_md()
+        .border_1()
+        .border_color(if active {
+            rgb(ACCENT_BLUE).into()
+        } else {
+            pal.border
+        })
+        .when(active, |s| s.bg(hsla(0.6, 0.9, 0.6, 0.10)))
+        .hover(move |s| s.bg(pal.surface_hover))
+        .child(div().text_xs().text_color(pal.text_muted).child(header))
+        .child(
+            div()
+                .text_sm()
+                .text_color(if is_default {
+                    pal.text_muted
+                } else {
+                    pal.text_primary
+                })
+                .child(action_label),
+        )
+        .on_click(move |_event, _window, cx| on_select(dir, cx))
+        .into_any_element()
+}
+
+/// Level 2: the `dir` direction's action picker, flown out as its own card —
+/// the category-grouped catalog with the current binding checked. Picking
+/// commits and stays open, so the level-1 cell + checkmark update in place and
+/// the user can keep editing other directions.
+fn flyout_card(
+    dir: GestureDirection,
+    view: &Entity<MouseModelView>,
+    pal: Palette,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
     let current = cx
         .try_global::<AppState>()
-        .and_then(|s| s.gesture_bindings.get(&direction).cloned())
-        .unwrap_or_else(|| default_gesture_binding(direction));
+        .and_then(|s| s.gesture_bindings.get(&dir).cloned())
+        .unwrap_or_else(|| default_gesture_binding(dir));
 
-    let mut submenu = submenu.scrollable(true).max_h(px(POPOVER_LIST_MAX_H));
-    for (category, actions) in grouped_catalog() {
-        submenu = submenu.label(tr!(category.label()));
-        for action in actions {
-            let checked = action == current;
-            let label = tr!(action.label());
-            let commit = action;
-            submenu = submenu.item(PopupMenuItem::new(label).checked(checked).on_click(
-                move |_event, _window, cx| {
-                    let action = commit.clone();
-                    cx.update_global::<AppState, _>(move |state, _| {
-                        state.commit_gesture_binding(direction, action);
-                    });
-                },
-            ));
-        }
-    }
-    submenu
+    let view_pick = view.clone();
+    let on_pick: PickFn = Rc::new(move |action, _window, cx| {
+        cx.update_global::<AppState, _>(|state, _| state.commit_gesture_binding(dir, action));
+        // Stay open; re-render so the level-1 cell + checkmark update.
+        view_pick.update(cx, |_, vcx| vcx.notify());
+    });
+
+    gesture_card(pal)
+        .min_w(px(POPOVER_W))
+        .child(title(format!("{}  {}", dir.glyph(), tr!(dir.label())), pal))
+        .child(divider(pal))
+        .child(scroll_list(
+            "gesture-dir-scroll",
+            action_rows("gesture-action", Some(&current), &on_pick, pal),
+        ))
+        .into_any_element()
 }
 
 // ── Shared building blocks ──────────────────────────────────────────────────
@@ -145,6 +270,10 @@ fn gesture_action_submenu(
 /// be shared between the button picker and any future custom picker, which
 /// differ only in what they do after committing.
 type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
+
+/// Callback invoked when a plus cell is clicked: activate that direction so its
+/// level-2 flyout card appears. Boxed so the shared cell builder stays one type.
+type SelectFn = Rc<dyn Fn(GestureDirection, &mut App)>;
 
 /// The action catalog grouped by [`Category`], preserving catalog order within
 /// each group and first-seen order across groups.

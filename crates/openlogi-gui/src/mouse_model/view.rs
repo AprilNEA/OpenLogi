@@ -1,13 +1,14 @@
 use gpui::{
-    Anchor, AnyElement, App, Context, DismissEvent, ElementId, Entity, Focusable as _, FontWeight,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Render, RenderOnce,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img, px, rgb,
+    Anchor, AnyElement, App, Context, ElementId, Entity, FontWeight, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Render, RenderOnce, StatefulInteractiveElement as _,
+    Styled, Subscription, Window, canvas, div, hsla, img, px, rgb,
 };
-use gpui_component::{Selectable, h_flex, menu::PopupMenu, popover::Popover, v_flex};
+use gpui_component::{Selectable, h_flex, popover::Popover, v_flex};
 
 use crate::asset::ResolvedAsset;
 use crate::data::mouse_buttons::{
-    Action, ButtonId, Hotspot, MOUSE_MODEL_SIZE, default_binding, default_hotspots,
+    Action, ButtonId, GestureDirection, Hotspot, MOUSE_MODEL_SIZE, default_binding,
+    default_hotspots,
 };
 use crate::mouse_model::geometry::{
     asset_dimensions_for_png, asset_hotspots_for_png, default_labels, labels_from_hotspots,
@@ -15,7 +16,7 @@ use crate::mouse_model::geometry::{
 use crate::mouse_model::leader_lines::{
     Geometry as LeaderGeometry, Label, Side, paint as paint_leader_lines,
 };
-use crate::mouse_model::picker::{action_picker, build_gesture_menu};
+use crate::mouse_model::picker::{action_picker, gesture_overview};
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette};
 
@@ -31,6 +32,12 @@ const HOTSPOT_DOT: f32 = 12.;
 /// Interactive mouse model with button hotspots.
 pub struct MouseModelView {
     hovered: Option<ButtonId>,
+    /// Which gesture direction the open gesture menu has activated (so its
+    /// level-2 flyout card shows), or `None` for the plus-only state. Scratch UI
+    /// state owned here (like [`Self::hovered`]) rather than in window-keyed
+    /// state, so the popover's `on_open_change` — which runs outside paint — can
+    /// reset it without tripping gpui's render-only guard.
+    gesture_active_dir: Option<GestureDirection>,
     _state_obs: Subscription,
 }
 
@@ -40,8 +47,20 @@ impl MouseModelView {
         let state_obs = cx.observe_global::<AppState>(|_view, cx| cx.notify());
         Self {
             hovered: None,
+            gesture_active_dir: None,
             _state_obs: state_obs,
         }
+    }
+
+    /// The gesture direction whose level-2 flyout is open, if any.
+    pub(crate) fn gesture_selected_dir(&self) -> Option<GestureDirection> {
+        self.gesture_active_dir
+    }
+
+    /// Set (or clear, with `None`) the activated gesture direction. Callers must
+    /// `cx.notify()` to re-render.
+    pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
+        self.gesture_active_dir = dir;
     }
 }
 
@@ -206,60 +225,36 @@ fn hotspots_layer(
         )
 }
 
-/// One-shot cache for the gesture button's [`PopupMenu`] entity so the
-/// popover's per-frame `content` closure reuses it instead of rebuilding —
-/// rebuilding every frame would reset submenu hover state, so a hovered-open
-/// submenu would snap shut. Cleared on dismiss so the next open rebuilds with
-/// fresh `checked` state. Mirrors gpui-component's `DropdownMenu`.
-#[derive(Default)]
-struct GestureMenuState {
-    menu: Option<Entity<PopupMenu>>,
-}
-
 /// Wrap `trigger` in a left-click [`Popover`] hosting the gesture button's
-/// native cascading [`PopupMenu`]. The popover surface is suppressed
-/// (`appearance(false)`) because the menu draws its own; outside-click dismissal
-/// is driven by the menu and relayed here via [`DismissEvent`].
-fn gesture_menu_popover<Tr>(
+/// custom two-level menu (see [`gesture_overview`]). `appearance(false)` because
+/// the menu draws its own card surfaces (plus + flyout); `overlay_closable`
+/// stays on so an outside click dismisses and re-clicking the trigger toggles.
+/// Closing resets the activated direction (scratch state on the view) so the
+/// next open starts on the plus.
+fn gesture_overview_popover<Tr>(
     popover_id: impl Into<ElementId>,
-    state_key: impl Into<ElementId>,
     anchor: Anchor,
     trigger: Tr,
+    view: Entity<MouseModelView>,
 ) -> impl IntoElement
 where
     Tr: Selectable + IntoElement + 'static,
 {
-    let state_key = state_key.into();
+    let view_reset = view.clone();
     Popover::new(popover_id)
         .appearance(false)
-        .overlay_closable(false)
         .mouse_button(MouseButton::Left)
         .anchor(anchor)
         .trigger(trigger)
-        .content(move |_state, window, cx| {
-            let menu_state =
-                window.use_keyed_state(state_key.clone(), cx, |_, _| GestureMenuState::default());
-            if let Some(menu) = menu_state.read(cx).menu.clone() {
-                return menu;
+        .on_open_change(move |open, _window, cx| {
+            if !*open {
+                view_reset.update(cx, |v, vcx| {
+                    v.set_gesture_selected_dir(None);
+                    vcx.notify();
+                });
             }
-
-            let menu = PopupMenu::build(window, cx, build_gesture_menu);
-            menu_state.update(cx, |state, _| state.menu = Some(menu.clone()));
-            menu.focus_handle(cx).focus(window, cx);
-
-            // Closing the menu (pick or outside-click) emits DismissEvent; relay
-            // it to the host popover and drop the cache so the next open rebuilds.
-            let popover_state = cx.entity();
-            let cache = menu_state.clone();
-            window
-                .subscribe(&menu, cx, move |_, _: &DismissEvent, window, cx| {
-                    popover_state.update(cx, |state, cx| state.dismiss(window, cx));
-                    cache.update(cx, |state, _| state.menu = None);
-                })
-                .detach();
-
-            menu
         })
+        .content(move |_state, _window, cx| gesture_overview(&view, cx))
 }
 
 /// Position the popover wrapper at the label's slot in the side gutter and
@@ -296,11 +291,11 @@ fn label_popover(
         view: view.clone(),
     };
     let popover: AnyElement = if label.id == ButtonId::GestureButton {
-        gesture_menu_popover(
+        gesture_overview_popover(
             ("label-popover", idx),
-            ("label-gesture-menu", idx),
             Anchor::TopLeft,
             trigger,
+            view.clone(),
         )
         .into_any_element()
     } else {
@@ -498,11 +493,11 @@ fn hotspot_popover(
         selected: false,
     };
     let popover: AnyElement = if hotspot.id == ButtonId::GestureButton {
-        gesture_menu_popover(
+        gesture_overview_popover(
             ("hotspot-popover", idx),
-            ("hotspot-gesture-menu", idx),
             Anchor::TopRight,
             trigger,
+            view.clone(),
         )
         .into_any_element()
     } else {
