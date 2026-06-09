@@ -626,10 +626,7 @@ fn x11_candidate() -> Option<Box<dyn FrontmostSource>> {
 /// support none of these fall through to the X11/XWayland path (which resolves
 /// XWayland windows, `None` for native Wayland apps).
 fn wayland_candidates() -> Vec<Candidate> {
-    vec![
-        wlr_foreign_toplevel::candidate,
-        gnome_shell::candidate,
-    ]
+    vec![wlr_foreign_toplevel::candidate, gnome_shell::candidate]
 }
 
 /// Pick the frontmost backend for this session, trying each candidate in order
