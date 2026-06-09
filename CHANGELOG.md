@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.2...openlogi-core-v0.6.3) - 2026-06-09
+
+### Added
+
+- *(core)* unify button + gesture bindings into one Binding map
+
+### Fixed
+
+- *(core)* harden gesture Binding defaults, migration, and projection
+
 ## [0.6.2](https://github.com/AprilNEA/OpenLogi/compare/v0.6.1...v0.6.2) - 2026-06-08
 
 ### Added
