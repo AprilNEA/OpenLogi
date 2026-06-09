@@ -626,6 +626,21 @@ impl Binding {
             *self = Binding::Gesture(map);
         }
     }
+
+    /// Fill any unbound directions of a [`Gesture`](Binding::Gesture) binding
+    /// with their canonical [`default_gesture_binding`], so a button promoted to
+    /// the gesture role always exposes the full five-direction set — rather than
+    /// leaving swipe arms the GUI renders as defaults but the runtime never
+    /// dispatches. A no-op on [`Single`](Binding::Single) and on directions
+    /// already bound (existing user choices are preserved).
+    pub fn fill_gesture_defaults(&mut self) {
+        if let Binding::Gesture(map) = self {
+            for dir in GestureDirection::ALL {
+                map.entry(dir)
+                    .or_insert_with(|| default_gesture_binding(dir));
+            }
+        }
+    }
 }
 
 impl From<Action> for Binding {

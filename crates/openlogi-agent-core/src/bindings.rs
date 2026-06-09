@@ -93,20 +93,23 @@ pub fn oshook_gestures_for(
     let Some(key) = config_key else {
         return BTreeMap::new();
     };
-    config
-        .bindings_for(key)
-        .into_iter()
-        .filter(|(id, _)| {
-            matches!(
-                id,
-                ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward
-            )
-        })
-        .filter_map(|(id, binding)| match binding {
-            Binding::Gesture(map) => Some((id, map)),
-            Binding::Single(_) => None,
-        })
-        .collect()
+    // Only an OS-hook button (Middle/Back/Forward) as the device's gesture owner
+    // feeds the OS hook: the thumb pad is captured over HID++, and a non-owner
+    // button is dispatched as its single click action. Returning *only* the owner
+    // keeps the runtime in lockstep with `gesture_owner` and the GUI, so a stray
+    // second gesture map (e.g. a hand-edited config) can't make two buttons fire.
+    let Some(owner) = config.gesture_owner(key).filter(|id| {
+        matches!(
+            id,
+            ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward
+        )
+    }) else {
+        return BTreeMap::new();
+    };
+    match config.bindings_for(key).remove(&owner) {
+        Some(Binding::Gesture(map)) => BTreeMap::from([(owner, map)]),
+        _ => BTreeMap::new(),
+    }
 }
 
 #[cfg(test)]
