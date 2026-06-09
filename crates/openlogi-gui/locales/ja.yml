@@ -108,6 +108,8 @@ _version: 1
 "Unbound": "未割り当て"
 "Default": "デフォルト"
 "5 directions": "5 方向"
+"Thumb pad": "サムパッド"
+"Middle": "中ボタン"
 "DPI Preset %{index}": "DPI プリセット %{index}"
 "Gesture %{name}": "ジェスチャー %{name}"
 "Left Click": "左クリック"
