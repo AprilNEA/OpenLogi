@@ -16,7 +16,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::binding::{Action, Binding, ButtonId, GestureDirection};
+use crate::binding::{Action, Binding, ButtonId, GestureDirection, default_binding_for};
 use crate::paths::{self, PathsError};
 
 /// The schema version the current build produces. Bumped on breaking layout
@@ -275,6 +275,19 @@ impl From<RawDeviceConfig> for DeviceConfig {
                 .or_insert_with(|| Binding::Gesture(raw.gesture_bindings));
         }
         for (button, action) in raw.button_bindings {
+            // A legacy `button_bindings[GestureButton]` is vestigial and must not
+            // become a `Binding::Single`: the gesture button never dispatched
+            // through the per-button map (it is not an OS-hook button, and its
+            // plain press routes through the gesture `Click` slot — see
+            // agent-core `bindings_for`). A `Single` here would be unreachable —
+            // the GUI hides it and the runtime ignores it — while folding it into
+            // `Click` would resurrect a dead binding as a behavior change. Drop
+            // it: the gesture map (re-homed above) already owns this button, and
+            // an absent entry falls back to the canonical default, exactly as
+            // pre-v2.
+            if button == ButtonId::GestureButton {
+                continue;
+            }
             bindings.entry(button).or_insert(Binding::Single(action));
         }
 
@@ -422,9 +435,14 @@ impl Config {
     }
 
     /// Records `action` for one `direction` of `button`'s gesture binding,
-    /// creating the device entry if needed. A button with no binding (or a
-    /// [`Binding::Single`]) is upgraded to [`Binding::Gesture`], preserving any
-    /// prior single action as the [`GestureDirection::Click`] entry.
+    /// creating the device entry if needed.
+    ///
+    /// A button with no binding yet is seeded from its canonical
+    /// [`default_binding_for`] — for [`ButtonId::GestureButton`] that is the full
+    /// default direction map (including a [`GestureDirection::Click`]), so the
+    /// merged map never persists a gesture binding whose click projection is a
+    /// no-op. A prior [`Binding::Single`] is upgraded to [`Binding::Gesture`],
+    /// preserving its action as the `Click` entry.
     pub fn set_gesture_direction(
         &mut self,
         device_key: &str,
@@ -438,7 +456,7 @@ impl Config {
             .or_default()
             .bindings
             .entry(button)
-            .or_insert_with(|| Binding::Gesture(BTreeMap::new()));
+            .or_insert_with(|| default_binding_for(button));
         if let Binding::Single(prev) = entry {
             let mut map = BTreeMap::new();
             map.insert(GestureDirection::Click, prev.clone());
@@ -691,18 +709,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_schema_version() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        fs::write(&path, "schema_version = 99\n").expect("write");
-        let err = Config::load_from_path(&path).expect_err("should fail");
-        assert!(matches!(
-            err,
-            ConfigError::UnsupportedSchemaVersion { found: 99, .. }
-        ));
-    }
-
-    #[test]
     fn dpi_presets_roundtrip_per_device() {
         let mut cfg = Config::default();
         cfg.set_dpi_presets("2b042", vec![800, 1600, 3200]);
@@ -926,6 +932,38 @@ Down = \"Paste\"
     }
 
     #[test]
+    fn migration_drops_vestigial_lone_gesture_button_single() {
+        // A v1 file with only `button_bindings[GestureButton]` and no
+        // `gesture_bindings` (the pre-gesture-picker shape). That entry never
+        // dispatched in v1 — the gesture button's plain press routes through the
+        // gesture `Click` slot, not the per-button map — so migrating it to a
+        // `Binding::Single` would leave an unreachable entry the GUI hides and the
+        // runtime ignores. It must be dropped, not shadow the gesture path.
+        let v1 = "\
+schema_version = 1
+
+[devices.2b042.button_bindings]
+GestureButton = \"MissionControl\"
+Back = \"BrowserBack\"
+";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, v1).expect("write");
+
+        let bindings = Config::load_from_path(&path)
+            .expect("load v1")
+            .bindings_for("2b042");
+        // An ordinary button still migrates to a `Single`...
+        assert_eq!(
+            bindings.get(&ButtonId::Back),
+            Some(&Binding::Single(Action::BrowserBack))
+        );
+        // ...but the vestigial gesture-button single is gone, leaving the button
+        // to fall back to its canonical default rather than an unreachable entry.
+        assert_eq!(bindings.get(&ButtonId::GestureButton), None);
+    }
+
+    #[test]
     fn rejects_newer_schema_version_but_accepts_v1() {
         // A future version is rejected loudly; the current and older versions
         // load (older ones migrate through the shim).
@@ -965,6 +1003,34 @@ Down = \"Paste\"
                 assert_eq!(map.get(&GestureDirection::Up), Some(&Action::Copy));
             }
             other => panic!("expected Gesture after upgrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_gesture_direction_on_fresh_gesture_button_seeds_click() {
+        // Binding one direction on a never-configured gesture button must still
+        // persist a `Click`, so the click projection is the canonical default
+        // rather than `Action::None` (which reads as a no-op press).
+        let mut cfg = Config::default();
+        cfg.set_gesture_direction(
+            "2b042",
+            ButtonId::GestureButton,
+            GestureDirection::Up,
+            Action::Copy,
+        );
+
+        match cfg.bindings_for("2b042").get(&ButtonId::GestureButton) {
+            Some(Binding::Gesture(map)) => {
+                assert_eq!(map.get(&GestureDirection::Up), Some(&Action::Copy));
+                assert_eq!(
+                    map.get(&GestureDirection::Click),
+                    Some(&crate::binding::default_gesture_binding(
+                        GestureDirection::Click
+                    )),
+                    "a fresh gesture button must seed a Click from its default"
+                );
+            }
+            other => panic!("expected Gesture, got {other:?}"),
         }
     }
 }

@@ -1407,9 +1407,13 @@ pub fn default_gesture_binding(direction: GestureDirection) -> Action {
 /// [`default_gesture_binding`] — preserving the existing per-direction swipe
 /// behavior — so the GUI mode toggle and the runtime agree it starts in gesture
 /// mode. Every other button defaults to [`Binding::Single`] of its
-/// [`default_binding`]. This is the single source of truth for "what an
-/// un-customized button does"; both the GUI's `AppState` and the agent-side
-/// projection must derive from it so they never disagree.
+/// [`default_binding`].
+///
+/// This is the seed when a button is first promoted to a gesture binding (see
+/// [`Config::set_gesture_direction`](crate::config::Config::set_gesture_direction)),
+/// so a freshly-customized gesture button always carries a full default
+/// direction map — including a [`GestureDirection::Click`] — rather than a sparse
+/// map whose click would project to a no-op [`Action::None`].
 #[must_use]
 pub fn default_binding_for(button: ButtonId) -> Binding {
     match button {

@@ -115,8 +115,11 @@ pub struct AppState {
     /// carousel selection changes.
     pub button_bindings: BTreeMap<ButtonId, Action>,
     /// Per-direction sub-bindings for the gesture button on the currently
-    /// selected device. Edited via the gesture picker; persistence shape
-    /// lives in [`openlogi_core::config::DeviceConfig::gesture_bindings`].
+    /// selected device. Edited via the gesture picker; persisted as a
+    /// [`Binding::Gesture`] entry under [`ButtonId::GestureButton`] in the
+    /// device's unified binding map ([`DeviceConfig::bindings`]).
+    ///
+    /// [`DeviceConfig::bindings`]: openlogi_core::config::DeviceConfig::bindings
     pub gesture_bindings: BTreeMap<GestureDirection, Action>,
     pub dpi: u32,
     /// DPI capability state keyed by [`DeviceRecord::config_key`]. Loaded

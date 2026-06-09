@@ -34,6 +34,14 @@ pub fn bindings_for(
         .map(|b| (b, default_binding(b)))
         .collect();
     for (k, binding) in stored {
+        // A gesture binding with no explicit `Click` has no opinion on the
+        // plain-press action, so leave the button's default seed in place rather
+        // than clobbering it with the `Action::None` that `click_action()` would
+        // project. (An explicit `Single(Action::None)` — a user-disabled button —
+        // still overrides, as it should.)
+        if binding.is_gesture() && binding.direction_action(GestureDirection::Click).is_none() {
+            continue;
+        }
         bindings.insert(k, binding.click_action());
     }
     bindings
@@ -58,4 +66,43 @@ pub fn gesture_bindings_for(
         bindings.insert(k, v);
     }
     bindings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlogi_core::binding::Binding;
+
+    #[test]
+    fn click_less_gesture_keeps_default_click_in_projection() {
+        // A gesture binding with no explicit `Click` (a migrated sparse v1 map or
+        // a hand-edited config) must not project to `Action::None` and silently
+        // disable the button — the button's default click survives.
+        let mut cfg = Config::default();
+        let mut map = BTreeMap::new();
+        map.insert(GestureDirection::Up, Action::Copy);
+        cfg.set_binding("2b042", ButtonId::GestureButton, Binding::Gesture(map));
+
+        let projected = bindings_for(&cfg, Some("2b042"), None);
+        assert_eq!(
+            projected.get(&ButtonId::GestureButton),
+            Some(&default_binding(ButtonId::GestureButton)),
+            "a Click-less gesture must keep the default click, not None"
+        );
+    }
+
+    #[test]
+    fn explicit_gesture_click_overrides_default_in_projection() {
+        // A gesture binding that DOES define `Click` projects that action.
+        let mut cfg = Config::default();
+        let mut map = BTreeMap::new();
+        map.insert(GestureDirection::Click, Action::Paste);
+        cfg.set_binding("2b042", ButtonId::GestureButton, Binding::Gesture(map));
+
+        let projected = bindings_for(&cfg, Some("2b042"), None);
+        assert_eq!(
+            projected.get(&ButtonId::GestureButton),
+            Some(&Action::Paste)
+        );
+    }
 }

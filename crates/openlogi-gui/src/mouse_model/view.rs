@@ -127,17 +127,18 @@ impl Render for MouseModelView {
                         icon: Some(GESTURE_BUTTON_ICON),
                     }
                 } else {
-                    match bindings.get(&label.id) {
-                        Some(action) => BindingLabel {
-                            text: localized_action_label(action),
-                            is_default: *action == default_binding(label.id),
-                            icon: Some(action_icon_path(action)),
-                        },
-                        None => BindingLabel {
-                            text: tr!("Unbound"),
-                            is_default: false,
-                            icon: None,
-                        },
+                    // `bindings` is seeded for every `ButtonId::ALL` (agent-core
+                    // `bindings_for`), so a rendered non-gesture button always
+                    // resolves; fall back to the button's own default to stay
+                    // total without inventing an unreachable "Unbound" state.
+                    let action = bindings
+                        .get(&label.id)
+                        .cloned()
+                        .unwrap_or_else(|| default_binding(label.id));
+                    BindingLabel {
+                        text: localized_action_label(&action),
+                        is_default: action == default_binding(label.id),
+                        icon: Some(action_icon_path(&action)),
                     }
                 };
                 label_popover(
