@@ -123,11 +123,12 @@ impl Orchestrator {
         let key = self.current_key();
         // One write publishes both hook maps atomically, so a button press during
         // an owner switch can't observe a half-updated state.
+        let app = self.current_app.as_deref();
         write_value(
             &self.shared.hook_maps,
             HookMaps {
-                bindings: bindings_for(&self.config, key, self.current_app.as_deref()),
-                gestures: oshook_gestures_for(&self.config, key),
+                bindings: bindings_for(&self.config, key, app),
+                gestures: oshook_gestures_for(&self.config, key, app),
             },
             "hook_maps",
         );
@@ -187,25 +188,26 @@ impl Orchestrator {
         self.config.app_settings.launch_at_login
     }
 
-    /// Foreground-app change → re-overlay per-app bindings (hook map only;
-    /// gestures and DPI are not app-scoped).
+    /// Foreground-app change → re-overlay per-app bindings on the hook maps (DPI
+    /// and the thumb-pad gesture map are not app-scoped, so they're untouched).
+    /// Both hook maps are recomputed: a per-app override of the gesture owner
+    /// turns it into a single action for that app, dropping it from the OS-hook
+    /// gesture set — so the gesture map is app-scoped too.
     pub fn set_current_app(&mut self, bundle: Option<String>) {
         if bundle == self.current_app {
             return;
         }
         self.current_app = bundle;
-        // Only the per-app single-action bindings change on an app switch (gestures
-        // and DPI aren't app-scoped), so update that field in place under the one
-        // lock and leave the gesture map untouched.
-        let bindings = bindings_for(
-            &self.config,
-            self.current_key(),
-            self.current_app.as_deref(),
+        let key = self.current_key();
+        let app = self.current_app.as_deref();
+        write_value(
+            &self.shared.hook_maps,
+            HookMaps {
+                bindings: bindings_for(&self.config, key, app),
+                gestures: oshook_gestures_for(&self.config, key, app),
+            },
+            "hook_maps",
         );
-        match self.shared.hook_maps.write() {
-            Ok(mut maps) => maps.bindings = bindings,
-            Err(e) => warn!(error = %e, lock = "hook_maps", "lock poisoned — keeping stale value"),
-        }
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.

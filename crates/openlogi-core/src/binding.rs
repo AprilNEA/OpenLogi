@@ -54,6 +54,21 @@ impl ButtonId {
         ButtonId::GestureButton,
     ];
 
+    /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
+    /// remaps: Middle, Back, or Forward. The primary L/R clicks always pass
+    /// through (suppressing them would brick the mouse), and the DPI / thumb /
+    /// dedicated gesture controls aren't visible to the OS hook at all (they're
+    /// captured over HID++). These are exactly the buttons that can become an
+    /// OS-hook gesture button, so the hook's remap gate and the gesture-owner
+    /// projection share this one definition.
+    #[must_use]
+    pub fn is_os_hook_button(self) -> bool {
+        matches!(
+            self,
+            ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward
+        )
+    }
+
     /// Human-readable label for popovers and tooltips.
     #[must_use]
     pub fn label(self) -> &'static str {

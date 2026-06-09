@@ -119,10 +119,7 @@ pub fn start(
             // (suppressing them would brick the mouse), and the DPI / thumb /
             // dedicated gesture button aren't visible to the tap at all — the
             // dedicated gesture button is captured separately over HID++.
-            if !matches!(
-                id,
-                ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward
-            ) {
+            if !id.is_os_hook_button() {
                 return EventDisposition::PassThrough;
             }
 

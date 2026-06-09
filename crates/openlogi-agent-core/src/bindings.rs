@@ -78,17 +78,24 @@ pub fn gesture_bindings_for(
 }
 
 /// Per-direction maps for the OS-hook gesture buttons (Middle/Back/Forward in
-/// gesture mode) on `config_key`, for the OS hook to resolve a hold+swipe.
+/// gesture mode) on `config_key`, with `app_bundle`'s per-app overlay applied,
+/// for the OS hook to resolve a hold+swipe.
 ///
 /// Unlike [`gesture_bindings_for`] (the dedicated HID++ gesture button, which
 /// seeds every direction from [`default_gesture_binding`]), these are the raw
 /// stored maps — a swipe direction the user left unbound simply does nothing.
 /// The dedicated gesture button is intentionally excluded: it never reaches the
 /// OS hook (it's captured over HID++), so it has no entry here.
+///
+/// A per-app override of the owner button turns it into a [`Binding::Single`]
+/// for that app, so it stops being a gesture button there and falls through to
+/// the single-action path (which applies the override) — mirroring how a single
+/// binding is overridden per app.
 #[must_use]
 pub fn oshook_gestures_for(
     config: &Config,
     config_key: Option<&str>,
+    app_bundle: Option<&str>,
 ) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
     let Some(key) = config_key else {
         return BTreeMap::new();
@@ -98,15 +105,15 @@ pub fn oshook_gestures_for(
     // button is dispatched as its single click action. Returning *only* the owner
     // keeps the runtime in lockstep with `gesture_owner` and the GUI, so a stray
     // second gesture map (e.g. a hand-edited config) can't make two buttons fire.
-    let Some(owner) = config.gesture_owner(key).filter(|id| {
-        matches!(
-            id,
-            ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward
-        )
-    }) else {
+    let Some(owner) = config
+        .gesture_owner(key)
+        .filter(|id| id.is_os_hook_button())
+    else {
         return BTreeMap::new();
     };
-    match config.bindings_for(key).remove(&owner) {
+    // Read the per-app *effective* map: a per-app override replaces the owner with
+    // a `Single`, dropping it from the gesture set for that app.
+    match config.effective_bindings(key, app_bundle).remove(&owner) {
         Some(Binding::Gesture(map)) => BTreeMap::from([(owner, map)]),
         _ => BTreeMap::new(),
     }
@@ -171,7 +178,7 @@ mod tests {
             )])),
         );
 
-        let oshook = oshook_gestures_for(&cfg, Some("2b042"));
+        let oshook = oshook_gestures_for(&cfg, Some("2b042"), None);
         assert_eq!(oshook.len(), 1, "only the gesture-mode Back belongs here");
         assert_eq!(
             oshook.get(&ButtonId::Back),
@@ -179,6 +186,36 @@ mod tests {
         );
         assert!(!oshook.contains_key(&ButtonId::MiddleClick));
         assert!(!oshook.contains_key(&ButtonId::GestureButton));
+    }
+
+    #[test]
+    fn per_app_override_drops_the_owner_from_the_oshook_gesture_set() {
+        // Back is the gesture owner globally...
+        let mut cfg = Config::default();
+        cfg.set_gesture_owner("2b042", ButtonId::Back);
+        assert!(
+            oshook_gestures_for(&cfg, Some("2b042"), None).contains_key(&ButtonId::Back),
+            "Back gestures globally"
+        );
+
+        // ...but a per-app override makes it a single action in that app, so it
+        // must drop out of the gesture set there (and fall through to the
+        // single-action path, which applies the override).
+        cfg.set_per_app_binding(
+            "2b042",
+            "com.apple.Safari",
+            ButtonId::Back,
+            Some(Action::NextTab),
+        );
+        assert!(
+            oshook_gestures_for(&cfg, Some("2b042"), Some("com.apple.Safari")).is_empty(),
+            "a per-app override of the owner removes it from the gesture set"
+        );
+        // Other apps are unaffected — Back still gestures.
+        assert!(
+            oshook_gestures_for(&cfg, Some("2b042"), Some("com.other.App"))
+                .contains_key(&ButtonId::Back)
+        );
     }
 
     #[test]
