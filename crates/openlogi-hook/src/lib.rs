@@ -53,6 +53,12 @@ pub enum MouseEvent {
         /// Positive = down, negative = up.
         delta_y: i32,
     },
+    /// The OS interrupted event capture (on macOS, the tap was disabled by a
+    /// timeout or by competing user input). Any in-progress gesture hold must be
+    /// cancelled: a button-up dropped during the gap would otherwise leave a
+    /// stale hold that the next stray pointer move turns into a phantom swipe.
+    /// Carries no data and is always passed through.
+    CaptureInterrupted,
 }
 
 /// What the hook callback wants the OS to do with the captured event.

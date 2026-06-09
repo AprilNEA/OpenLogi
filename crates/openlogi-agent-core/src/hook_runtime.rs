@@ -5,8 +5,9 @@
 //! the binding map, lazy hook installation, and action dispatch for both hook
 //! and gesture events.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use openlogi_core::binding::{
     Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
@@ -66,13 +67,23 @@ impl HoldState {
             None
         }
     }
+
+    /// Cancel any in-progress hold without firing anything — used when the OS
+    /// interrupts capture. A dropped button-up would otherwise leave a stale hold
+    /// that the next stray pointer move turns into a phantom swipe.
+    fn cancel(&mut self) {
+        self.button = None;
+        self.swipe.end();
+    }
 }
 
-/// Lock the hold accumulator, recovering the guard if a previous callback
-/// panicked while holding it — a poisoned lock must never wedge the input hook.
-fn lock_hold(hold: &Mutex<HoldState>) -> std::sync::MutexGuard<'_, HoldState> {
-    hold.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+thread_local! {
+    /// In-progress gesture hold, one instance per hook-callback thread: the
+    /// single macOS tap thread, or — on Linux — one thread per device, so two
+    /// mice never share a hold (a press on one can't hijack the other's swipe).
+    /// Thread-local rather than a shared `Mutex` keeps the hot path lock-free and
+    /// free of cross-thread contention on the freeze-sensitive callback.
+    static HOLD: RefCell<HoldState> = RefCell::new(HoldState::default());
 }
 
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not
@@ -91,11 +102,8 @@ pub fn start(
         return None;
     }
 
-    // Per-hold pointer accumulator. Touched only from the hook callback, which
-    // runs serially on one thread, so the mutex is always uncontended (and the
-    // callback must never block — see the freeze-hazard note in `macos.rs`).
-    let hold = Mutex::new(HoldState::default());
-
+    // The per-hold pointer accumulator lives in the thread-local `HOLD`; the
+    // callback must never block — see the freeze-hazard note in `macos.rs`.
     let result = Hook::start(move |event| match event {
         MouseEvent::Button { id, pressed } => {
             // The CGEventTap only sees standard buttons 0-4. We remap
@@ -117,15 +125,15 @@ pub fn start(
             if pressed {
                 let is_gesture = hook_gestures.read().is_ok_and(|g| g.contains_key(&id));
                 if is_gesture {
-                    lock_hold(&hold).begin(id);
+                    HOLD.with_borrow_mut(|h| h.begin(id));
                     return EventDisposition::Suppress;
                 }
             } else {
-                // Release: end the hold and drop the `hold` guard *before* any
+                // Release: end the hold and release the `HOLD` borrow *before* any
                 // dispatch — the callback must stay lock-light, since a
-                // synthesized event could otherwise re-enter the tap and re-lock
-                // the non-reentrant `hold` mutex (self-deadlock, freeze hazard).
-                let ended = lock_hold(&hold).end(id);
+                // synthesized event could otherwise re-enter the tap and re-borrow
+                // `HOLD` (a RefCell double-borrow panic, freeze hazard).
+                let ended = HOLD.with_borrow_mut(|h| h.end(id));
                 if let Some(was_click) = ended {
                     if was_click {
                         // No swipe committed → fire the plain click. Resolve to an
@@ -169,7 +177,7 @@ pub fn start(
             // Always pass through so the cursor keeps moving — the swipe is read,
             // not consumed (the B2 cursor-drift tradeoff vs. a HID++ raw-XY divert
             // that would freeze the pointer).
-            let commit = lock_hold(&hold).accumulate(delta_x, delta_y);
+            let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
             if let Some((button, dir)) = commit {
                 // Resolve to an owned action and drop the read guard before
                 // dispatch (same lock-light rule as the release arm).
@@ -182,6 +190,12 @@ pub fn start(
                     dispatch_action(&action, &dpi_cycle, &capture);
                 }
             }
+            EventDisposition::PassThrough
+        }
+        MouseEvent::CaptureInterrupted => {
+            // The OS dropped events (tap disabled); cancel any hold so a lost
+            // button-up can't later commit a phantom swipe off ordinary motion.
+            HOLD.with_borrow_mut(HoldState::cancel);
             EventDisposition::PassThrough
         }
         MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
