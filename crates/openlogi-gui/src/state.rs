@@ -114,10 +114,11 @@ pub struct AppState {
     /// Bindings for the *currently selected* device. Reloaded whenever the
     /// carousel selection changes.
     pub button_bindings: BTreeMap<ButtonId, Action>,
-    /// Per-direction sub-bindings for the gesture button on the currently
-    /// selected device. Edited via the gesture picker; persisted as a
-    /// [`Binding::Gesture`] entry under [`ButtonId::GestureButton`] in the
-    /// device's unified binding map ([`DeviceConfig::bindings`]).
+    /// Per-direction sub-bindings for the current device's gesture owner. Edited
+    /// via the gesture picker and persisted as a [`Binding::Gesture`] entry under
+    /// the owning button — the thumb pad ([`ButtonId::GestureButton`]) by default,
+    /// or a promoted Middle/Back/Forward — in the device's unified binding map
+    /// ([`DeviceConfig::bindings`]). Rebuilt by the `gesture_bindings_for_current` helper.
     ///
     /// [`DeviceConfig::bindings`]: openlogi_core::config::DeviceConfig::bindings
     pub gesture_bindings: BTreeMap<GestureDirection, Action>,

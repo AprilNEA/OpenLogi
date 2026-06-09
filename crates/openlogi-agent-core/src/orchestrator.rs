@@ -118,18 +118,25 @@ impl Orchestrator {
         self.devices.get(self.current).and_then(|d| d.route.clone())
     }
 
+    /// Build the OS-hook callback's maps for `key` + foreground `app`. Both hook
+    /// sub-maps are app-scoped (a per-app override can demote the gesture owner),
+    /// so they're built together here and published under one lock — keeping
+    /// `rebuild` and `set_current_app` from drifting into a half-populated write.
+    fn hook_maps_for(&self, key: Option<&str>, app: Option<&str>) -> HookMaps {
+        HookMaps {
+            bindings: bindings_for(&self.config, key, app),
+            gestures: oshook_gestures_for(&self.config, key, app),
+        }
+    }
+
     /// Rewrite every shared map from the current config + selected device.
     fn rebuild(&self) {
         let key = self.current_key();
         // One write publishes both hook maps atomically, so a button press during
         // an owner switch can't observe a half-updated state.
-        let app = self.current_app.as_deref();
         write_value(
             &self.shared.hook_maps,
-            HookMaps {
-                bindings: bindings_for(&self.config, key, app),
-                gestures: oshook_gestures_for(&self.config, key, app),
-            },
+            self.hook_maps_for(key, self.current_app.as_deref()),
             "hook_maps",
         );
         write_value(
@@ -198,14 +205,9 @@ impl Orchestrator {
             return;
         }
         self.current_app = bundle;
-        let key = self.current_key();
-        let app = self.current_app.as_deref();
         write_value(
             &self.shared.hook_maps,
-            HookMaps {
-                bindings: bindings_for(&self.config, key, app),
-                gestures: oshook_gestures_for(&self.config, key, app),
-            },
+            self.hook_maps_for(self.current_key(), self.current_app.as_deref()),
             "hook_maps",
         );
     }

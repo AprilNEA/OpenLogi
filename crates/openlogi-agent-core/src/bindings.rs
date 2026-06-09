@@ -82,10 +82,14 @@ pub fn gesture_bindings_for(
 /// for the OS hook to resolve a hold+swipe.
 ///
 /// Unlike [`gesture_bindings_for`] (the dedicated HID++ gesture button, which
-/// seeds every direction from [`default_gesture_binding`]), these are the raw
-/// stored maps — a swipe direction the user left unbound simply does nothing.
-/// The dedicated gesture button is intentionally excluded: it never reaches the
-/// OS hook (it's captured over HID++), so it has no entry here.
+/// seeds every direction from [`default_gesture_binding`] at projection time),
+/// this returns the owner's raw stored map. In practice that map is already
+/// fully populated — [`Config::set_gesture_owner`] seeds all five directions via
+/// [`Binding::fill_gesture_defaults`] when a button is promoted — so only a
+/// hand-edited sparse map leaves a direction unbound, in which case that swipe
+/// simply does nothing. The dedicated gesture button is intentionally excluded:
+/// it never reaches the OS hook (it's captured over HID++), so it has no entry
+/// here.
 ///
 /// A per-app override of the owner button turns it into a [`Binding::Single`]
 /// for that app, so it stops being a gesture button there and falls through to

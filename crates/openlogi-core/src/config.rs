@@ -228,15 +228,27 @@ impl Serialize for GestureOwner {
     }
 }
 
-impl<'de> Deserialize<'de> for GestureOwner {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::IntoDeserializer;
-        let s = String::deserialize(deserializer)?;
-        if s == "Off" {
-            return Ok(GestureOwner::Off);
-        }
-        ButtonId::deserialize(s.as_str().into_deserializer()).map(GestureOwner::Button)
+/// Lenient field deserializer for [`RawDeviceConfig::gesture_owner`]. An
+/// unrecognized or miscased value (`"back"`, a typo, a future-version button
+/// name) is treated as absent — i.e. "infer the owner" — rather than failing the
+/// whole-document parse and reverting *every* device's settings to defaults.
+/// Mirrors [`deserialize_brightness`], which clamps a bad value instead of
+/// erroring; a hand-editable config should degrade one field, not the document.
+fn deserialize_gesture_owner<'de, D>(deserializer: D) -> Result<Option<GestureOwner>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    if s == "Off" {
+        return Ok(Some(GestureOwner::Off));
     }
+    // Parse the button name with a throwaway error type so an unknown token maps
+    // to `None` (infer) rather than propagating an error.
+    let button = ButtonId::deserialize(
+        serde::de::value::StrDeserializer::<serde::de::value::Error>::new(&s),
+    )
+    .ok();
+    Ok(button.map(GestureOwner::Button))
 }
 
 /// Settings scoped to a single physical device (keyed by HID++ model+ext).
@@ -287,8 +299,10 @@ pub struct DeviceConfig {
 #[derive(Deserialize)]
 struct RawDeviceConfig {
     /// Explicit gesture owner (v2.1+). Absent on older configs → `None` → the
-    /// owner is inferred in [`Config::gesture_owner`].
-    #[serde(default)]
+    /// owner is inferred in [`Config::gesture_owner`]. A present-but-invalid
+    /// value is tolerated as `None` (infer), not a parse error — see
+    /// [`deserialize_gesture_owner`].
+    #[serde(default, deserialize_with = "deserialize_gesture_owner")]
     gesture_owner: Option<GestureOwner>,
     /// v2 shape — present on already-migrated files; wins on any key collision.
     #[serde(default)]
@@ -498,6 +512,19 @@ impl Config {
         direction: GestureDirection,
         action: Action,
     ) {
+        if let Binding::Gesture(map) = self.ensure_gesture_binding(device_key, button) {
+            map.insert(direction, action);
+        }
+    }
+
+    /// Ensure `button` on `device_key` is a [`Binding::Gesture`], creating the
+    /// device + a default binding if needed and upgrading a [`Binding::Single`]
+    /// in place (its action kept as the [`GestureDirection::Click`]). Returns the
+    /// entry so the caller can finish it — seed every direction
+    /// ([`Binding::fill_gesture_defaults`]) or set just one. Shared by
+    /// [`Self::set_gesture_owner`] and [`Self::set_gesture_direction`] so the two
+    /// promote a button into gesture mode identically.
+    fn ensure_gesture_binding(&mut self, device_key: &str, button: ButtonId) -> &mut Binding {
         let entry = self
             .devices
             .entry(device_key.to_string())
@@ -506,9 +533,7 @@ impl Config {
             .entry(button)
             .or_insert_with(|| default_binding_for(button));
         entry.upgrade_to_gesture();
-        if let Binding::Gesture(map) = entry {
-            map.insert(direction, action);
-        }
+        entry
     }
 
     /// The button that owns `device_key`'s single gesture role, or `None` when
@@ -567,14 +592,12 @@ impl Config {
     /// and unbound directions are seeded from [`default_gesture_binding`] so every
     /// gesture button exposes the same full five-direction set.
     pub fn set_gesture_owner(&mut self, device_key: &str, button: ButtonId) {
-        let device = self.devices.entry(device_key.to_string()).or_default();
-        device.gesture_owner = Some(GestureOwner::Button(button));
-        let entry = device
-            .bindings
-            .entry(button)
-            .or_insert_with(|| default_binding_for(button));
-        entry.upgrade_to_gesture();
-        entry.fill_gesture_defaults();
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gesture_owner = Some(GestureOwner::Button(button));
+        self.ensure_gesture_binding(device_key, button)
+            .fill_gesture_defaults();
     }
 
     /// Turn gestures off for `device_key`, recording the explicit "off" choice.
@@ -1312,5 +1335,34 @@ Back = \"BrowserBack\"
         let body = toml::to_string_pretty(&cfg).expect("serialize");
         assert!(body.contains("gesture_owner = \"Back\""), "got: {body}");
         assert!(body.contains("gesture_owner = \"Off\""), "got: {body}");
+    }
+
+    #[test]
+    fn invalid_gesture_owner_string_is_tolerated_not_fatal() {
+        // A hand-edit typo in gesture_owner must NOT fail the whole-document parse
+        // (which would revert every device's settings to defaults). It degrades
+        // to "infer" while the rest of the device config survives.
+        let toml = "\
+schema_version = 2
+
+[devices.2b042]
+gesture_owner = \"bogus\"
+
+[devices.2b042.bindings]
+Back = \"Copy\"
+";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, toml).expect("write");
+
+        let cfg =
+            Config::load_from_path(&path).expect("an invalid gesture_owner must not fail the load");
+        // The rest of the device config survived...
+        assert_eq!(
+            cfg.bindings_for("2b042").get(&ButtonId::Back),
+            Some(&Binding::Single(Action::Copy))
+        );
+        // ...and the bad owner degraded to inference (thumb-pad default here).
+        assert_eq!(cfg.gesture_owner("2b042"), Some(ButtonId::GestureButton));
     }
 }

@@ -184,8 +184,10 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             // The run-loop slice re-enables the tap (see `thread_main`); surface
             // the interruption so the runtime cancels any in-progress hold — a
             // button-up dropped during the gap must not later fire a phantom
-            // swipe off ordinary cursor motion.
-            warn!("CGEventTap disabled by OS (type={etype:?}); re-enabling, cancelling any hold");
+            // swipe off ordinary cursor motion. Logged at debug, not warn:
+            // TapDisabledByUserInput fires during ordinary heavy input bursts and
+            // self-heals next slice, so it isn't worth a warning each time.
+            debug!("CGEventTap disabled by OS (type={etype:?}); re-enabling, cancelling any hold");
             Some(MouseEvent::CaptureInterrupted)
         }
         _ => None,
