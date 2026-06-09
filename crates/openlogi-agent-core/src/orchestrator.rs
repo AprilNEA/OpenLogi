@@ -22,7 +22,7 @@ use tracing::warn;
 use crate::DpiCycleState;
 use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
 use crate::device_order::DeviceStableId;
-use crate::hook_runtime::{BindingMap, HookGestures};
+use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::watchers::gesture::GestureBindings;
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -42,10 +42,10 @@ struct AgentDevice {
 /// on each rebuild and the background threads observe them on their next read.
 #[derive(Clone)]
 pub struct SharedRuntime {
-    pub hook_bindings: BindingMap,
-    /// Per-direction maps for OS-hook gesture buttons (Middle/Back/Forward in
-    /// gesture mode), read by the CGEventTap callback to resolve a hold+swipe.
-    pub hook_gestures: HookGestures,
+    /// The OS-hook callback's single-action + gesture maps, behind one lock so a
+    /// rebuild publishes both atomically (see [`HookMaps`]). Also read by the
+    /// gesture watcher for the thumb-wheel/DPI-button single actions.
+    pub hook_maps: SharedHookMaps,
     pub gesture_bindings: GestureBindings,
     pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
     pub thumbwheel_sensitivity: Arc<AtomicI32>,
@@ -80,8 +80,7 @@ impl Orchestrator {
     #[must_use]
     pub fn new(config: Config) -> Self {
         let shared = SharedRuntime {
-            hook_bindings: Arc::new(RwLock::new(BTreeMap::new())),
-            hook_gestures: Arc::new(RwLock::new(BTreeMap::new())),
+            hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
             dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
             thumbwheel_sensitivity: Arc::new(AtomicI32::new(
@@ -122,15 +121,15 @@ impl Orchestrator {
     /// Rewrite every shared map from the current config + selected device.
     fn rebuild(&self) {
         let key = self.current_key();
+        // One write publishes both hook maps atomically, so a button press during
+        // an owner switch can't observe a half-updated state.
         write_value(
-            &self.shared.hook_bindings,
-            bindings_for(&self.config, key, self.current_app.as_deref()),
-            "hook_bindings",
-        );
-        write_value(
-            &self.shared.hook_gestures,
-            oshook_gestures_for(&self.config, key),
-            "hook_gestures",
+            &self.shared.hook_maps,
+            HookMaps {
+                bindings: bindings_for(&self.config, key, self.current_app.as_deref()),
+                gestures: oshook_gestures_for(&self.config, key),
+            },
+            "hook_maps",
         );
         write_value(
             &self.shared.gesture_bindings,
@@ -195,15 +194,18 @@ impl Orchestrator {
             return;
         }
         self.current_app = bundle;
-        write_value(
-            &self.shared.hook_bindings,
-            bindings_for(
-                &self.config,
-                self.current_key(),
-                self.current_app.as_deref(),
-            ),
-            "hook_bindings",
+        // Only the per-app single-action bindings change on an app switch (gestures
+        // and DPI aren't app-scoped), so update that field in place under the one
+        // lock and leave the gesture map untouched.
+        let bindings = bindings_for(
+            &self.config,
+            self.current_key(),
+            self.current_app.as_deref(),
         );
+        match self.shared.hook_maps.write() {
+            Ok(mut maps) => maps.bindings = bindings,
+            Err(e) => warn!(error = %e, lock = "hook_maps", "lock poisoned — keeping stale value"),
+        }
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.

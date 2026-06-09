@@ -19,15 +19,24 @@ use tracing::{info, warn};
 use crate::DpiCycleState;
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 
-/// Shared binding map threaded between the config owner and the hook callback.
-pub type BindingMap = Arc<RwLock<BTreeMap<ButtonId, Action>>>;
+/// The two button maps the OS-hook callback reads, kept behind ONE lock so a
+/// config rebuild publishes both atomically — a press during an owner switch can
+/// never see the new single-action bindings against the old gesture map (or vice
+/// versa), and the common case reads one lock instead of two.
+#[derive(Default)]
+pub struct HookMaps {
+    /// Per-button single action — the single-action dispatch path.
+    pub bindings: BTreeMap<ButtonId, Action>,
+    /// Per-direction maps for the OS-hook gesture buttons (Middle/Back/Forward in
+    /// gesture mode), so a hold+swipe resolves to a bound action. The dedicated
+    /// HID++ gesture button (0x00c3) uses the gesture watcher's separate map
+    /// instead — it never reaches the OS hook.
+    pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+}
 
-/// Shared per-direction maps for the OS-hook gesture buttons (Middle/Back/
-/// Forward in gesture mode), threaded into the hook callback so a hold+swipe
-/// resolves to a bound action. The dedicated HID++ gesture button (0x00c3) uses
-/// the separate per-direction map on the gesture watcher instead — it never
-/// reaches the OS hook.
-pub type HookGestures = Arc<RwLock<BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>>>;
+/// Shared, atomically-published [`HookMaps`], threaded between the config owner
+/// (orchestrator), the OS-hook callback, and the gesture watcher.
+pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
 
 /// Tracks which OS-hook button (Middle/Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
@@ -89,8 +98,7 @@ thread_local! {
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not
 /// granted or on an unsupported platform — the app continues without crashing.
 pub fn start(
-    bindings: BindingMap,
-    hook_gestures: HookGestures,
+    hooks: SharedHookMaps,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture: CaptureChannel,
 ) -> Option<Hook> {
@@ -123,7 +131,7 @@ pub fn start(
             // only fire the plain `Click` when no swipe committed. The cursor is
             // free to drift via the pass-through `Moved` events during the hold.
             if pressed {
-                let is_gesture = hook_gestures.read().is_ok_and(|g| g.contains_key(&id));
+                let is_gesture = hooks.read().is_ok_and(|m| m.gestures.contains_key(&id));
                 if is_gesture {
                     HOLD.with_borrow_mut(|h| h.begin(id));
                     return EventDisposition::Suppress;
@@ -139,10 +147,10 @@ pub fn start(
                         // No swipe committed → fire the plain click. Resolve to an
                         // owned action (so no lock is held across dispatch), then
                         // dispatch with the guard already dropped.
-                        let action = hook_gestures
+                        let action = hooks
                             .read()
                             .ok()
-                            .map(|g| resolve_gesture_click(&g, id));
+                            .map(|m| resolve_gesture_click(&m.gestures, id));
                         if let Some(action) = action {
                             info!(button = %id, action = %action.label(), "gesture click → executing bound action");
                             dispatch_action(&action, &dpi_cycle, &capture);
@@ -153,7 +161,7 @@ pub fn start(
             }
 
             // Single-action button.
-            let action = bindings.read().ok().and_then(|g| g.get(&id).cloned());
+            let action = hooks.read().ok().and_then(|m| m.bindings.get(&id).cloned());
             let Some(action) = action else {
                 // Unbound → leave the physical button to the OS.
                 return EventDisposition::PassThrough;
@@ -181,10 +189,11 @@ pub fn start(
             if let Some((button, dir)) = commit {
                 // Resolve to an owned action and drop the read guard before
                 // dispatch (same lock-light rule as the release arm).
-                let action = hook_gestures
-                    .read()
-                    .ok()
-                    .and_then(|g| g.get(&button).and_then(|m| m.get(&dir).cloned()));
+                let action = hooks.read().ok().and_then(|m| {
+                    m.gestures
+                        .get(&button)
+                        .and_then(|dirs| dirs.get(&dir).cloned())
+                });
                 if let Some(action) = action {
                     info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
                     dispatch_action(&action, &dpi_cycle, &capture);

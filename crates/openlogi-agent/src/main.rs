@@ -116,7 +116,7 @@ async fn run(config: Config) {
     // shared maps and dispatches bound actions itself; the two pairing flags let
     // it release its capture session while a pairing session owns the receiver.
     watchers::gesture::spawn(
-        shared.hook_bindings.clone(),
+        shared.hook_maps.clone(),
         shared.gesture_bindings.clone(),
         shared.dpi_cycle.clone(),
         shared.capture_channel.clone(),
@@ -165,8 +165,7 @@ async fn run(config: Config) {
                 if granted && hook.is_none() {
                     info!("accessibility granted — installing OS mouse hook");
                     hook = hook_runtime::start(
-                        shared.hook_bindings.clone(),
-                        shared.hook_gestures.clone(),
+                        shared.hook_maps.clone(),
                         shared.dpi_cycle.clone(),
                         shared.capture_channel.clone(),
                     );
