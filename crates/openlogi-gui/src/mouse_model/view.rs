@@ -32,6 +32,15 @@ const CARD_EDGE_INSET: f32 = SIDE_GAP + (SIDE_W - LABEL_W);
 
 const HOTSPOT_DOT: f32 = 12.;
 
+/// Vertical space around the model that it can't draw into: the detail header
+/// and footer, the buttons-tab padding, and the gesture selector row above the
+/// canvas. The model scales to fit whatever viewport height remains.
+const MODEL_VERTICAL_RESERVE: f32 = 224.;
+/// Floor for the scaled model height. Below this the evenly-slotted side labels
+/// (≈[`LABEL_H`] each) start to overlap; the window's minimum height is sized to
+/// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
+const MODEL_MIN_H: f32 = 448.;
+
 /// Interactive mouse model with button hotspots.
 pub struct MouseModelView {
     hovered: Option<ButtonId>,
@@ -68,7 +77,7 @@ impl MouseModelView {
 }
 
 impl Render for MouseModelView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (asset, active, bindings, gesture_owner) = cx
             .try_global::<AppState>()
             .map(|s| {
@@ -81,16 +90,14 @@ impl Render for MouseModelView {
             })
             .unwrap_or_default();
 
-        let (mouse_w, mouse_h) = MOUSE_MODEL_SIZE;
-        let (mouse_w, mouse_h, hotspots, labels) = match asset.as_ref() {
-            Some(a) => {
-                let (w, h) = asset_dimensions_for_png(a, mouse_h);
-                let hotspots = asset_hotspots_for_png(a, w, h);
-                let labels = labels_from_hotspots(&hotspots);
-                (w, h, hotspots, labels)
-            }
-            None => (mouse_w, mouse_h, default_hotspots(), default_labels()),
-        };
+        // Scale the model to the viewport height so it always fits the content
+        // area. An oversized model would otherwise overflow and compress the
+        // fixed header/footer. Capped at the design height; floored so the side
+        // labels stay readable (the window's min height keeps the viewport above
+        // the floor — see `main`).
+        let viewport_h = f32::from(window.viewport_size().height);
+        let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
+        let (mouse_w, mouse_h, hotspots, labels) = scaled_model(asset.as_ref(), target_h);
 
         let canvas_w = SIDE_W + SIDE_GAP + mouse_w;
         let canvas_h = mouse_h;
@@ -179,6 +186,42 @@ impl Render for MouseModelView {
     }
 }
 
+/// Model geometry at `target_h`, scaled to fit. With a real asset the hotspots
+/// and labels are recomputed from the scaled dimensions; the synthetic
+/// silhouette's authored coordinates are scaled by the same factor. Returns
+/// `(mouse_w, mouse_h, hotspots, labels)`.
+fn scaled_model(
+    asset: Option<&ResolvedAsset>,
+    target_h: f32,
+) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
+    if let Some(a) = asset {
+        let (w, h) = asset_dimensions_for_png(a, target_h);
+        let hotspots = asset_hotspots_for_png(a, w, h);
+        let labels = labels_from_hotspots(&hotspots, h);
+        (w, h, hotspots, labels)
+    } else {
+        let scale = target_h / MOUSE_MODEL_SIZE.1;
+        let hotspots = default_hotspots()
+            .into_iter()
+            .map(|hs| Hotspot {
+                x: hs.x * scale,
+                y: hs.y * scale,
+                w: hs.w * scale,
+                h: hs.h * scale,
+                ..hs
+            })
+            .collect();
+        let labels = default_labels()
+            .into_iter()
+            .map(|l| Label {
+                y: l.y * scale,
+                ..l
+            })
+            .collect();
+        (MOUSE_MODEL_SIZE.0 * scale, target_h, hotspots, labels)
+    }
+}
+
 /// The gesture-capable buttons present on this device, in a stable display
 /// order: the dedicated thumb pad first, then the OS-hook Middle/Back/Forward.
 fn gesture_capable_buttons(labels: &[Label]) -> Vec<ButtonId> {
@@ -224,7 +267,7 @@ fn gesture_owner_selector(
             div()
                 .text_xs()
                 .text_color(pal.text_muted)
-                .child(tr!("Gesture button")),
+                .child(tr!("Gesture Button")),
         )
         .children(
             capable

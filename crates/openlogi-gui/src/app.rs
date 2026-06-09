@@ -330,14 +330,32 @@ impl Render for AppView {
         window.set_window_title(&main_window_title(show_device, cx));
 
         let (header_el, content_el) = if show_device {
+            // Resolve the active section once and share it between the header
+            // (which renders the section tabs) and the body, so the two can't
+            // disagree about which tab is live. The stored tab may not belong to
+            // this device — it can linger across a hot-plug onto a different kind
+            // — so fall back to the device's first tab for display, without
+            // mutating `active_tab`.
+            let record = cx
+                .try_global::<AppState>()
+                .and_then(AppState::current_record)
+                .cloned();
+            let tabs = record
+                .as_ref()
+                .map_or_else(|| vec![DetailTab::Device], DetailTab::tabs_for);
+            let active = if tabs.contains(&self.active_tab) {
+                self.active_tab
+            } else {
+                tabs.first().copied().unwrap_or(DetailTab::Device)
+            };
             (
-                detail_header(pal, cx).into_any_element(),
+                detail_header(record.as_ref(), &tabs, active, pal, cx).into_any_element(),
                 detail_content(
                     &self.mouse_model,
                     &self.dpi_panel,
                     &self.smartshift_panel,
                     &self.lighting_panel,
-                    self.active_tab,
+                    active,
                     pal,
                     cx,
                 )
@@ -391,15 +409,33 @@ fn home_header(pal: Palette) -> impl IntoElement {
         .child(add_device_button(pal))
 }
 
-/// Device-detail top bar: a back affordance returning to the gallery, the
-/// active device's name, its connection status, and the Add-Device button.
-fn detail_header(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let record = cx
-        .try_global::<AppState>()
-        .and_then(AppState::current_record)
-        .cloned();
+/// Device-detail top bar, in three zones: a back affordance + device name
+/// (leading), the section tabs as a centred segmented control (middle), and the
+/// connection status + Add-Device button (trailing). Hoisting the tabs here —
+/// rather than a separate row beneath the bar — gives the section body the full
+/// remaining height. A device with a single section shows no tab strip.
+fn detail_header(
+    record: Option<&DeviceRecord>,
+    tabs: &[DetailTab],
+    active: DetailTab,
+    pal: Palette,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let name = record.map_or_else(|| tr!("Device").to_string(), |r| r.display_name.clone());
+    let online = record.map(|r| r.online);
+    // Only a real choice gets a strip; a lone section (e.g. a keyboard with just
+    // the info tab) would render a one-segment control, which reads as broken.
+    // `into_any_element` here severs the returned element from `cx`'s lifetime
+    // (RPIT would otherwise capture it), so the borrow ends with this call and
+    // `back_button` below can take `cx` again.
+    let tab_strip = (tabs.len() > 1).then(|| detail_tabs(tabs, active, cx).into_any_element());
     h_flex()
         .h(px(HEADER_H))
+        // Fixed-height chrome must never shrink: a tab whose body overflows the
+        // viewport would otherwise squeeze this shrinkable bar, so the header
+        // height would visibly change between tabs. The body (flex_1 + its own
+        // scroll) absorbs the overflow instead.
+        .flex_shrink_0()
         .w_full()
         .px_5()
         .gap_3()
@@ -409,17 +445,17 @@ fn detail_header(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         .child(back_button(pal, cx))
         .child(
             div()
-                .flex_1()
                 .min_w_0()
                 .text_lg()
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(
-                    record
-                        .as_ref()
-                        .map_or_else(|| tr!("Device").to_string(), |r| r.display_name.clone()),
-                ),
+                .child(name),
         )
-        .when_some(record, |this, r| this.child(status_badge(r.online, pal)))
+        // Flexible spacers on either side centre the segmented tabs in the space
+        // left between the leading and trailing zones.
+        .child(div().flex_1())
+        .children(tab_strip)
+        .child(div().flex_1())
+        .when_some(online, |this, online| this.child(status_badge(online, pal)))
         .child(add_device_button(pal))
 }
 
@@ -699,9 +735,11 @@ fn main_window_title(show_device: bool, cx: &Context<AppView>) -> SharedString {
         )
 }
 
-/// The device-detail body: a tab bar over the active device's sections (which
-/// vary by kind — see [`DetailTab::tabs_for`]), with the active section filling
-/// the rest of the screen.
+/// The device-detail body: the active section, filling the height between the
+/// header and the footer. Which sections exist — and the segmented control that
+/// switches them — is the header's job (see [`detail_header`] and
+/// [`DetailTab::tabs_for`]); `active` arrives pre-resolved against this device's
+/// tab set, so this only has to render the chosen section.
 fn detail_content(
     mouse_model: &Entity<MouseModelView>,
     dpi_panel: &Entity<DpiPanel>,
@@ -711,34 +749,18 @@ fn detail_content(
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    let tabs = cx
-        .try_global::<AppState>()
-        .and_then(AppState::current_record)
-        .map_or_else(|| vec![DetailTab::Device], DetailTab::tabs_for);
-    // The stored tab may not belong to this device — e.g. it lingered across a
-    // hot-plug onto a different kind. Fall back to the device's first tab.
-    let active = if tabs.contains(&active) {
-        active
-    } else {
-        tabs.first().copied().unwrap_or(DetailTab::Device)
-    };
-    let content = match active {
+    match active {
         DetailTab::Buttons => buttons_tab(mouse_model).into_any_element(),
         DetailTab::Pointer => pointer_tab(dpi_panel, smartshift_panel, pal).into_any_element(),
         DetailTab::Lighting => lighting_tab(lighting_panel, pal).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
-    };
-    v_flex()
-        .flex_1()
-        .w_full()
-        .min_h_0()
-        .child(detail_tab_bar(&tabs, active, cx))
-        .child(content)
+    }
 }
 
-/// The detail screen's tab bar, built from the active device's tab set. Clicking
-/// a tab swaps the active section.
-fn detail_tab_bar(
+/// The device's sections as a compact, centred segmented control for the
+/// header. Clicking a segment swaps the active section. Only called with more
+/// than one tab — see [`detail_header`].
+fn detail_tabs(
     tabs: &[DetailTab],
     active: DetailTab,
     cx: &mut Context<AppView>,
@@ -747,35 +769,33 @@ fn detail_tab_bar(
     // Owned copy so the click handler can map a clicked index back to its tab
     // without borrowing the caller's slice.
     let order = tabs.to_vec();
-    div().w_full().px_5().pt_3().child(
-        TabBar::new("detail-tabs")
-            .underline()
-            .w_full()
-            .selected_index(active_ix)
-            .children(tabs.iter().map(|t| t.label()))
-            .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                this.active_tab = order.get(*ix).copied().unwrap_or(DetailTab::Device);
-                cx.notify();
-            })),
-    )
+    TabBar::new("detail-tabs")
+        .segmented()
+        .selected_index(active_ix)
+        .children(tabs.iter().map(|t| t.label()))
+        .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+            this.active_tab = order.get(*ix).copied().unwrap_or(DetailTab::Device);
+            cx.notify();
+        }))
 }
 
-/// Buttons tab: the mouse model with clickable hotspots, centred with a max
-/// width so it doesn't stretch across a wide window.
+/// Buttons tab: the mouse model with clickable hotspots, horizontally centred
+/// with a max width so it doesn't stretch across a wide window.
+///
+/// A `v_flex` (top-aligned), like the pointer/device/lighting tabs — *not* an
+/// `h_flex`, which carries an implicit `items_center` and would vertically
+/// centre the fixed-height model. That left a tall header-to-content gap that
+/// collapsed to the top-aligned card tabs on switch — a visible vertical jump.
+/// Top-aligning every tab keeps the content's start fixed across switches.
 fn buttons_tab(mouse_model: &Entity<MouseModelView>) -> impl IntoElement {
-    h_flex()
+    v_flex()
         .flex_1()
         .w_full()
         .min_h_0()
+        .items_center()
         .justify_center()
         .p_6()
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .max_w(px(760.))
-                .child(mouse_model.clone()),
-        )
+        .child(div().w_full().max_w(px(760.)).child(mouse_model.clone()))
 }
 
 /// Pointer tab: the DPI panel and the SmartShift wheel controls, each in a
@@ -1209,6 +1229,8 @@ fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
 fn footer(pal: Palette, granted: bool) -> impl IntoElement {
     h_flex()
         .h(px(FOOTER_H))
+        // Fixed chrome — never shrink when a tab body overflows (see `detail_header`).
+        .flex_shrink_0()
         .w_full()
         .px_5()
         .gap_4()

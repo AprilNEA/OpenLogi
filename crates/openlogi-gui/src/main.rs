@@ -324,7 +324,10 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
     let bounds = Bounds::centered(None, Size::new(px(1100.), px(750.)), cx);
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(Size::new(px(720.), px(520.))),
+        // Min height keeps the buttons tab's mouse model above its scale floor
+        // (`MODEL_MIN_H` + the chrome/padding reserve) so its side labels never
+        // overlap; below this the model can't shrink further without crowding.
+        window_min_size: Some(Size::new(px(720.), px(680.))),
         titlebar: Some(TitlebarOptions {
             title: Some(SharedString::from("OpenLogi")),
             appears_transparent: false,
