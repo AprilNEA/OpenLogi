@@ -423,4 +423,31 @@ mod tests {
         );
         assert!(rx.try_recv().is_err(), "a held DPI button presses once");
     }
+
+    #[test]
+    fn a_dpi_button_re_presses_after_a_release() {
+        // Rising-edge detection must re-arm: press → release → press is two
+        // distinct presses. The release (a frame without the CID) is what resets
+        // the edge; without it a re-press would be swallowed as "still held".
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = CaptureAccum::default();
+        let dpi = reprog_controls::DPI_MODE_SHIFT_CIDS[0];
+        let down = RawControlEvent::DivertedButtons([dpi, 0, 0, 0]);
+        let up = RawControlEvent::DivertedButtons([0, 0, 0, 0]);
+
+        handle_reprog(&mut acc, down, &[dpi], &tx);
+        handle_reprog(&mut acc, up, &[dpi], &tx);
+        handle_reprog(&mut acc, down, &[dpi], &tx);
+
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle))
+        );
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle)),
+            "a release re-arms the rising edge"
+        );
+        assert!(rx.try_recv().is_err());
+    }
 }
