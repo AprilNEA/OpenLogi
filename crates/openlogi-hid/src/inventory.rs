@@ -730,15 +730,16 @@ async fn probe_unifying_slot(
 
     let probe_result = timeout(
         UNIFYING_SLOT_PROBE,
-        probe_or_reuse(channel, slot, Some(id), cached, event.online, tick),
+        probe_or_reuse(channel, slot, Some(id.clone()), cached, event.online, tick),
     )
     .await;
     let (probe, outcome) = if let Ok(r) = probe_result {
         r
     } else {
         debug!(slot, budget = ?UNIFYING_SLOT_PROBE,
-            "Unifying slot probe timed out; device will appear without capabilities");
-        (ProbedFeatures::default(), CacheOutcome::Unkeyed)
+            "Unifying slot probe timed out; using cached data if available");
+        let probe = cached.map_or_else(ProbedFeatures::default, |c| c.probe.clone());
+        (probe, CacheOutcome::Seen(id))
     };
 
     let device = PairedDevice {
