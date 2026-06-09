@@ -1,9 +1,9 @@
 use gpui::{
-    Anchor, AnyElement, App, Context, ElementId, Entity, FontWeight, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Render, RenderOnce, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, canvas, div, hsla, img, px, rgb,
+    Anchor, AnyElement, App, Context, ElementId, Entity, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, Render, RenderOnce, StatefulInteractiveElement as _, Styled,
+    Subscription, Window, canvas, div, hsla, img, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::{Selectable, h_flex, popover::Popover, v_flex};
+use gpui_component::{Icon, IconName, Selectable, h_flex, popover::Popover, v_flex};
 
 use crate::asset::ResolvedAsset;
 use crate::data::mouse_buttons::{
@@ -16,7 +16,9 @@ use crate::mouse_model::geometry::{
 use crate::mouse_model::leader_lines::{
     Geometry as LeaderGeometry, Label, Side, paint as paint_leader_lines,
 };
-use crate::mouse_model::picker::{action_picker, gesture_overview};
+use crate::mouse_model::picker::{
+    GESTURE_BUTTON_ICON, action_icon_path, action_picker, gesture_overview,
+};
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette};
 
@@ -122,16 +124,19 @@ impl Render for MouseModelView {
                     BindingLabel {
                         text: tr!("5 directions"),
                         is_default: false,
+                        icon: Some(GESTURE_BUTTON_ICON),
                     }
                 } else {
                     match bindings.get(&label.id) {
                         Some(action) => BindingLabel {
                             text: localized_action_label(action),
                             is_default: *action == default_binding(label.id),
+                            icon: Some(action_icon_path(action)),
                         },
                         None => BindingLabel {
                             text: tr!("Unbound"),
                             is_default: false,
+                            icon: None,
                         },
                     }
                 };
@@ -300,6 +305,9 @@ fn label_popover(
         .into_any_element()
     } else {
         Popover::new(("label-popover", idx))
+            // `action_picker` draws its own `menu_card` surface, matching the
+            // gesture menu — so suppress the framework popover surface.
+            .appearance(false)
             .anchor(Anchor::TopLeft)
             .mouse_button(MouseButton::Left)
             .trigger(trigger)
@@ -319,6 +327,9 @@ fn label_popover(
 struct BindingLabel {
     text: gpui::SharedString,
     is_default: bool,
+    /// Vendored action-icon asset path (see [`action_icon_path`]) for the
+    /// card's leading glyph, or `None` for the gesture summary / unbound.
+    icon: Option<&'static str>,
 }
 
 #[derive(IntoElement)]
@@ -355,17 +366,18 @@ impl RenderOnce for LabelTrigger {
         } else {
             pal.text_primary
         };
-        let binding = if self.binding.is_default {
-            tr!("Default")
-        } else {
-            self.binding.text
-        };
-        div()
+        // Always show the action the button actually performs; the muted colour
+        // (set above for `is_default`) is what signals "not customised" — more
+        // informative than the bare word "Default".
+        let binding = self.binding.text;
+        let binding_icon = self.binding.icon;
+        v_flex()
             .id(self.id)
             .w(px(LABEL_W))
             .h(px(LABEL_H))
             .px_3()
-            .py_2()
+            .justify_center()
+            .gap_0p5()
             .rounded_md()
             .border_1()
             .border_color(if highlighted {
@@ -380,35 +392,50 @@ impl RenderOnce for LabelTrigger {
             })
             .cursor_pointer()
             .hover(move |s| s.bg(pal.surface))
+            // Button name — the caption (xs / muted), the same size as the
+            // popover title and category headers it shares the binding flow with.
             .child(
-                v_flex()
-                    .gap_1()
+                div()
+                    .text_xs()
+                    .text_color(pal.text_muted)
+                    .child(tr!(self.label.id.label())),
+            )
+            // Current binding — the value (sm), the same size as the action rows
+            // it edits. Colour, not weight or size, carries the default / set /
+            // highlighted state.
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    // Leading action icon (same glyph as the picker rows), tinted
+                    // with the value so it tracks the default / set / highlighted
+                    // state. Absent for the gesture summary / unbound.
+                    .when_some(binding_icon, |row, path| {
+                        row.child(
+                            svg()
+                                .path(path)
+                                .size_4()
+                                .flex_none()
+                                .text_color(binding_color),
+                        )
+                    })
                     .child(
-                        h_flex()
-                            .items_center()
-                            .gap_1p5()
-                            .text_xs()
-                            .text_color(pal.text_muted)
-                            .child(div().text_xs().child("•"))
-                            .child(tr!(self.label.id.label())),
+                        // Shrink + ellipsis so a long action name (e.g. "Mission
+                        // Control") doesn't push the chevron out of the fixed card.
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_sm()
+                            .text_color(binding_color)
+                            .child(binding),
                     )
                     .child(
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(if self.binding.is_default {
-                                        FontWeight::NORMAL
-                                    } else {
-                                        FontWeight::SEMIBOLD
-                                    })
-                                    .text_color(binding_color)
-                                    .child(binding),
-                            )
-                            .child(div().text_sm().text_color(pal.text_muted).child("›")),
+                        Icon::new(IconName::ChevronRight)
+                            .size_3()
+                            .text_color(pal.text_muted),
                     ),
             )
             .on_hover(move |hovered, _window, cx| {
@@ -502,6 +529,9 @@ fn hotspot_popover(
         .into_any_element()
     } else {
         Popover::new(("hotspot-popover", idx))
+            // `action_picker` draws its own `menu_card` surface, matching the
+            // gesture menu — so suppress the framework popover surface.
+            .appearance(false)
             .anchor(Anchor::TopRight)
             .mouse_button(MouseButton::Left)
             .trigger(trigger)
