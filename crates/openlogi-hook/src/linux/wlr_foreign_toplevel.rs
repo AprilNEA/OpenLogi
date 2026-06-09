@@ -20,17 +20,34 @@
 //! [`connect`](WlrForeignToplevelSource::connect) returns `None` there and the
 //! caller falls through to the next backend candidate.
 //!
+//! ## Dispatch model
+//!
 //! The protocol is event-driven, but the [`super::FrontmostSource`] contract is
-//! a synchronous poll (~1 Hz from `openlogi-gui::app_watcher`). To bridge that,
-//! the connection, event queue, and accumulated state are kept alive in the
-//! backend and a `roundtrip` is performed on each poll to drain pending events
-//! (focus changes, new / closed windows) before reading the active toplevel.
+//! a synchronous poll (~1 Hz from `openlogi-gui::app_watcher`). Two primitives
+//! bridge that gap:
+//!
+//! - **`drain_events`** (poll path) — flushes pending writes, then attempts a
+//!   non-blocking `prepare_read` + `read` with a short 25 ms `poll(2)` cap.
+//!   If nothing arrives in time the last known state is returned unchanged;
+//!   millisecond-stale frontmost data is acceptable by design.
+//!
+//! - **`timed_roundtrip`** (init path) — sends `wl_display.sync`, then loops
+//!   `flush` → `poll(2)` → `read` → `dispatch_pending` until the sync callback
+//!   fires or `INIT_TIMEOUT` (5 s) expires. If the deadline is hit the candidate
+//!   returns `None` so backend selection falls through — the same contract as
+//!   every other backend.
+//!
+//! Both helpers use `poll(2)` via the `libc` crate (already a Linux dependency)
+//! with `Instant`-based remaining-time accounting and `EINTR` retry.
 
 use std::collections::HashMap;
+use std::os::unix::io::AsRawFd;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 use wayland_client::backend::ObjectId;
+use wayland_client::protocol::wl_callback;
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, event_created_child};
 use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::{
@@ -46,6 +63,15 @@ use super::FrontmostSource;
 /// (`app_id`, `state`, `done`, `closed`) exist since v1, so binding is capped
 /// here to stay within what `wayland-protocols-wlr` generates.
 const MANAGER_MAX_VERSION: u32 = 3;
+
+/// Deadline for the two `wl_display.sync` round-trips in `Session::open`.
+/// Mirrors `gnome_shell::METHOD_TIMEOUT`: both guard the `FRONTMOST_SOURCE`
+/// `LazyLock` initializer against a stalled compositor socket.
+const INIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Maximum time the poll-path drain will wait for new Wayland events. Stale
+/// frontmost data within this window is acceptable by design.
+const POLL_CAP_MS: u64 = 25;
 
 /// Accumulated per-toplevel data. wlr sends individual property events and then
 /// a `done` marking a consistent snapshot, so updates are staged in `pending_*`
@@ -66,6 +92,9 @@ struct State {
     /// Set when the compositor sends `finished`; triggers a reconnect on the
     /// next poll instead of permanently disabling the backend.
     finished: bool,
+    /// Flipped to `true` by the `wl_callback::Done` handler; used by
+    /// `timed_roundtrip` to detect that the sync echo arrived.
+    sync_done: bool,
 }
 
 impl Dispatch<WlRegistry, ()> for State {
@@ -175,6 +204,21 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for State {
     }
 }
 
+impl Dispatch<wl_callback::WlCallback, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            state.sync_done = true;
+        }
+    }
+}
+
 /// The `state` event carries a `wl_array` of native-endian `u32` state values.
 /// A toplevel is frontmost iff the `activated` value is present in that set.
 fn is_activated(states: &[u8]) -> bool {
@@ -184,6 +228,116 @@ fn is_activated(states: &[u8]) -> bool {
         let value = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         State::try_from(value).is_ok_and(|s| s == State::Activated)
     })
+}
+
+/// Returns the milliseconds remaining until `deadline`, clamped to `[0, i32::MAX]`
+/// for use as a `libc::poll` timeout. Returns 0 when the deadline has passed.
+fn millis_until(deadline: Instant) -> i32 {
+    i32::try_from(
+        deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .min(i32::MAX as u128),
+    )
+    .unwrap_or(i32::MAX)
+}
+
+/// Calls `poll(2)` on `fd` (waiting for `POLLIN | POLLERR`) with a deadline.
+/// Retries on `EINTR` with the remaining time. Returns `true` if the fd became
+/// readable, `false` on timeout or error.
+fn poll_fd(fd: libc::c_int, deadline: Instant) -> bool {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN | libc::POLLERR,
+        revents: 0,
+    };
+    loop {
+        let timeout_ms = millis_until(deadline);
+        if timeout_ms == 0 {
+            return false;
+        }
+        let r = unsafe { libc::poll(&raw mut pfd, 1, timeout_ms) };
+        if r > 0 {
+            return true;
+        }
+        if r == 0 {
+            return false;
+        }
+        // r < 0 — check errno
+        let e = unsafe { *libc::__errno_location() };
+        if e != libc::EINTR {
+            return false;
+        }
+        // EINTR: retry with remaining deadline
+    }
+}
+
+/// Sends `wl_display.sync` and spins `flush → poll → read → dispatch_pending`
+/// until the sync callback fires or `deadline` is reached. Returns `true` on
+/// success, `false` on timeout or connection error.
+fn timed_roundtrip(
+    conn: &Connection,
+    queue: &mut EventQueue<State>,
+    state: &mut State,
+    deadline: Instant,
+) -> bool {
+    state.sync_done = false;
+    let qh = queue.handle();
+    conn.display().sync(&qh, ());
+
+    loop {
+        if queue.flush().is_err() {
+            return false;
+        }
+        if queue.dispatch_pending(state).is_err() {
+            return false;
+        }
+        if state.sync_done {
+            return true;
+        }
+        if millis_until(deadline) == 0 {
+            return false;
+        }
+
+        match queue.prepare_read() {
+            None => {
+                // Events are already buffered; loop back to dispatch.
+            }
+            Some(guard) => {
+                let fd = guard.connection_fd().as_raw_fd();
+                if !poll_fd(fd, deadline) {
+                    // Timed out or error — candidate falls through.
+                    return false;
+                }
+                if guard.read().is_err() {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+/// Drains pending compositor events without blocking longer than `POLL_CAP_MS`.
+/// Used on every frontmost poll. Stale data within the cap is acceptable by
+/// design; errors are silently ignored so the last known state is returned.
+fn drain_events(queue: &mut EventQueue<State>, state: &mut State) {
+    let _ = queue.flush();
+    let _ = queue.dispatch_pending(state);
+
+    let deadline = Instant::now() + Duration::from_millis(POLL_CAP_MS);
+    match queue.prepare_read() {
+        None => {
+            // Already had buffered events; dispatch_pending above handled them.
+        }
+        Some(guard) => {
+            let fd = guard.connection_fd().as_raw_fd();
+            if poll_fd(fd, deadline) {
+                let _ = guard.read();
+                let _ = queue.dispatch_pending(state);
+            }
+            // If poll timed out, guard is dropped here and we return stale state.
+        }
+    }
 }
 
 /// One live Wayland session: connection + event queue + dispatch state.
@@ -200,8 +354,9 @@ struct Session {
 
 impl Session {
     /// Open a fresh connection, bind the manager, and do the initial two
-    /// round-trips to populate the toplevel list. Returns `None` when the
-    /// compositor doesn't advertise the protocol or the connection fails.
+    /// timed round-trips to populate the toplevel list. Returns `None` when
+    /// the compositor doesn't advertise the protocol, the connection fails,
+    /// or either round-trip exceeds `INIT_TIMEOUT`.
     fn open() -> Option<Self> {
         let conn = Connection::connect_to_env()
             .map_err(|e| debug!("wlr-foreign-toplevel: no Wayland connection: {e}"))
@@ -209,15 +364,15 @@ impl Session {
         let mut queue = conn.new_event_queue();
         let qh = queue.handle();
 
-        // Registering the registry triggers `global` events on the next
-        // round-trip, where the manager is bound if the compositor advertises
-        // it. The registry handle is only needed for that round-trip.
+        // Registering the registry triggers `global` events on the first
+        // round-trip, where the manager is bound if the compositor advertises it.
         let _registry = conn.display().get_registry(&qh, ());
         let mut state = State::default();
-        queue
-            .roundtrip(&mut state)
-            .map_err(|e| debug!("wlr-foreign-toplevel: registry roundtrip failed: {e}"))
-            .ok()?;
+
+        if !timed_roundtrip(&conn, &mut queue, &mut state, Instant::now() + INIT_TIMEOUT) {
+            debug!("wlr-foreign-toplevel: registry round-trip timed out or failed");
+            return None;
+        }
         if state.manager.is_none() {
             debug!("wlr-foreign-toplevel: compositor does not advertise the protocol");
             return None;
@@ -225,10 +380,10 @@ impl Session {
 
         // Second round-trip: receive the initial toplevel list and properties,
         // so the first poll already has the active window.
-        queue
-            .roundtrip(&mut state)
-            .map_err(|e| debug!("wlr-foreign-toplevel: initial roundtrip failed: {e}"))
-            .ok()?;
+        if !timed_roundtrip(&conn, &mut queue, &mut state, Instant::now() + INIT_TIMEOUT) {
+            debug!("wlr-foreign-toplevel: initial toplevel round-trip timed out or failed");
+            return None;
+        }
 
         Some(Self {
             _conn: conn,
@@ -261,19 +416,20 @@ impl FrontmostSource for WlrForeignToplevelSource {
 
         // Reconnect when the compositor sent `Finished` (compositor reload /
         // restart) or when a prior reconnect attempt failed.
-        let needs_reconnect = guard.as_ref().map_or(true, |s| s.state.finished);
+        let needs_reconnect = guard.as_ref().is_none_or(|s| s.state.finished);
         if needs_reconnect {
             *guard = Session::open();
-            match &*guard {
-                Some(_) => info!("wlr-foreign-toplevel: reconnected"),
-                None => debug!("wlr-foreign-toplevel: reconnect pending, retrying next poll"),
+            if guard.is_some() {
+                info!("wlr-foreign-toplevel: reconnected");
+            } else {
+                debug!("wlr-foreign-toplevel: reconnect pending, retrying next poll");
             }
         }
 
         let Session { queue, state, .. } = guard.as_mut()?;
-        queue.roundtrip(state).ok()?;
+        drain_events(queue, state);
         if state.finished {
-            // `Finished` arrived during this poll; reconnect on the next call.
+            // `Finished` arrived during this drain; reconnect on the next call.
             return None;
         }
 
@@ -292,4 +448,27 @@ impl FrontmostSource for WlrForeignToplevelSource {
 /// Candidate constructor registered in [`super::wayland_candidates`].
 pub(super) fn candidate() -> Option<Box<dyn FrontmostSource>> {
     WlrForeignToplevelSource::connect().map(|s| Box::new(s) as Box<dyn FrontmostSource>)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::millis_until;
+
+    #[test]
+    fn millis_until_elapsed_deadline_is_zero() {
+        // `deadline` is captured before the call; by the time `millis_until`
+        // reads `Instant::now()` the deadline is at or before now, so
+        // `saturating_duration_since` returns `Duration::ZERO` → 0 ms.
+        let deadline = Instant::now();
+        assert_eq!(millis_until(deadline), 0);
+    }
+
+    #[test]
+    fn millis_until_future_deadline_is_positive() {
+        let future = Instant::now() + Duration::from_secs(10);
+        let ms = millis_until(future);
+        assert!(ms > 0 && ms <= 10_000);
+    }
 }
