@@ -103,6 +103,12 @@ impl Render for MouseModelView {
 
         let hotspots_outer = hotspots.clone();
         let labels_outer = labels.clone();
+        // Resolve the gesture owner against the buttons this device actually has:
+        // a mouse with no thumb pad must not surface the default thumb-pad owner
+        // (it has none) — the role then reads as "Off" until the user picks a
+        // present button. Display-only; the stored config still infers as usual.
+        let capable = gesture_capable_buttons(&labels_outer);
+        let gesture_owner = gesture_owner.filter(|id| capable.contains(id));
         let leader_canvas = leader_canvas(hotspots, labels, highlight, mouse_left, mouse_w);
         let breathing_art = breathing_art(asset.as_ref(), mouse_left, mouse_w, mouse_h, pal);
         let hotspots_layer = hotspots_layer(
@@ -112,10 +118,9 @@ impl Render for MouseModelView {
             mouse_h,
             hovered,
             active,
+            gesture_owner,
             &view,
         );
-
-        let capable = gesture_capable_buttons(&labels_outer);
         let canvas = div()
             .relative()
             .w(px(canvas_w))
@@ -321,6 +326,10 @@ fn breathing_art(
         .child(device_art)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "layout inputs + hover/active/owner state; bundling would just hide the dependency"
+)]
 fn hotspots_layer(
     hotspots: &[Hotspot],
     mouse_left: f32,
@@ -328,6 +337,7 @@ fn hotspots_layer(
     mouse_h: f32,
     hovered: Option<ButtonId>,
     active: Option<ButtonId>,
+    gesture_owner: Option<ButtonId>,
     view: &Entity<MouseModelView>,
 ) -> impl IntoElement {
     div()
@@ -336,12 +346,9 @@ fn hotspots_layer(
         .top(px(0.))
         .w(px(mouse_w))
         .h(px(mouse_h))
-        .children(
-            hotspots
-                .iter()
-                .enumerate()
-                .map(|(idx, hotspot)| hotspot_popover(idx, *hotspot, hovered, active, view)),
-        )
+        .children(hotspots.iter().enumerate().map(|(idx, hotspot)| {
+            hotspot_popover(idx, *hotspot, hovered, active, gesture_owner, view)
+        }))
 }
 
 /// Wrap `trigger` in a left-click [`Popover`] hosting the gesture button's
@@ -624,6 +631,7 @@ fn hotspot_popover(
     hotspot: Hotspot,
     hovered: Option<ButtonId>,
     active: Option<ButtonId>,
+    gesture_owner: Option<ButtonId>,
     view: &Entity<MouseModelView>,
 ) -> AnyElement {
     let view = view.clone();
@@ -634,7 +642,11 @@ fn hotspot_popover(
         view: view.clone(),
         selected: false,
     };
-    let popover: AnyElement = if hotspot.id == ButtonId::GestureButton {
+    // Open the gesture menu only for the button that currently OWNS gestures —
+    // matching the side-label path — so a promoted Middle/Back/Forward opens it
+    // here too, a demoted thumb pad opens the plain picker, and (when gestures
+    // are off) no hotspot re-enters the gesture editor.
+    let popover: AnyElement = if Some(hotspot.id) == gesture_owner {
         gesture_overview_popover(
             ("hotspot-popover", idx),
             Anchor::TopRight,

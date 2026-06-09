@@ -975,8 +975,9 @@ impl AppState {
         match self.config.gesture_owner(key) {
             // The dedicated thumb pad seeds every direction from the defaults.
             Some(ButtonId::GestureButton) => gesture_bindings_for(&self.config, Some(key)),
-            // A promoted OS-hook button shows only what the user bound (its swipe
-            // arms start unbound) — read its raw stored direction map.
+            // A promoted OS-hook button is shown from its raw stored map (which
+            // `set_gesture_owner` seeds with full defaults), so the menu matches
+            // exactly what `oshook_gestures_for` dispatches — no seeding here.
             Some(owner) => match self.config.bindings_for(key).get(&owner) {
                 Some(Binding::Gesture(map)) => map.clone(),
                 _ => BTreeMap::new(),
@@ -1021,20 +1022,25 @@ impl AppState {
     /// Update a single gesture-button sub-binding in memory, on disk, and in the
     /// shared gesture map the watcher thread reads.
     pub fn commit_gesture_binding(&mut self, direction: GestureDirection, action: Action) {
-        self.gesture_bindings.insert(direction, action.clone());
-
         let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
             debug!(
                 ?direction,
-                "no active device key — gesture binding kept in memory only"
+                "no active device key — gesture binding edit ignored"
             );
             return;
         };
-        // Edit whichever button is the gesture owner — not always the thumb pad.
-        let owner = self
-            .config
-            .gesture_owner(&key)
-            .unwrap_or(ButtonId::GestureButton);
+        // Edit whichever button owns gestures — not always the thumb pad. When
+        // gestures are off, a stray edit must NOT silently re-enable them on the
+        // thumb pad (the gesture editor shouldn't be reachable in that state):
+        // no-op instead.
+        let Some(owner) = self.config.gesture_owner(&key) else {
+            debug!(
+                ?direction,
+                "gestures are off — ignoring gesture binding edit"
+            );
+            return;
+        };
+        self.gesture_bindings.insert(direction, action.clone());
         self.config
             .set_gesture_direction(&key, owner, direction, action);
         if let Err(e) = self.config.save_atomic() {
