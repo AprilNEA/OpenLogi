@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use wayland_client::backend::ObjectId;
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, event_created_child};
@@ -63,7 +63,8 @@ struct Toplevel {
 struct State {
     manager: Option<ZwlrForeignToplevelManagerV1>,
     toplevels: HashMap<ObjectId, Toplevel>,
-    /// Set when the compositor sends `finished`; the manager is then defunct.
+    /// Set when the compositor sends `finished`; triggers a reconnect on the
+    /// next poll instead of permanently disabling the backend.
     finished: bool,
 }
 
@@ -106,13 +107,11 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for State {
                 state.toplevels.insert(toplevel.id(), Toplevel::default());
             }
             zwlr_foreign_toplevel_manager_v1::Event::Finished => {
-                // sway emits this on config reload and compositor restart. The
-                // manager is now defunct and the backend is cached for the
-                // process lifetime, so per-app profiles stay disabled until the
-                // hook is restarted.
+                // The compositor is reloading or restarting. Mark the session
+                // finished; the next poll will reconnect automatically.
                 warn!(
-                    "wlr-foreign-toplevel: compositor sent Finished — per-app \
-                     profiles disabled until the hook restarts"
+                    "wlr-foreign-toplevel: compositor sent Finished — \
+                     will reconnect on next poll"
                 );
                 state.finished = true;
                 state.manager = None;
@@ -187,25 +186,23 @@ fn is_activated(states: &[u8]) -> bool {
     })
 }
 
-/// Wayland frontmost backend. Holds the connection, event queue, and dispatch
-/// state alive for the process; each poll drains events and reads the active
-/// toplevel's `app_id`.
-struct WlrForeignToplevelSource {
-    // Kept alive so the protocol objects owned by the queue stay valid.
-    #[allow(dead_code)]
-    conn: Connection,
-    // Behind a mutex because the trait polls through `&self` while `roundtrip`
-    // needs `&mut`. The queue is only ever touched here, at ~1 Hz.
-    dispatcher: Mutex<Dispatcher>,
-}
-
-struct Dispatcher {
+/// One live Wayland session: connection + event queue + dispatch state.
+///
+/// Grouping all three behind a single mutex means the whole session can be
+/// dropped and rebuilt atomically when the compositor sends `Finished`.
+struct Session {
+    // Held for RAII — even though `Connection` is Arc-backed, keeping an
+    // explicit handle here ensures the connection outlives the queue.
+    _conn: Connection,
     queue: EventQueue<State>,
     state: State,
 }
 
-impl WlrForeignToplevelSource {
-    fn connect() -> Option<Self> {
+impl Session {
+    /// Open a fresh connection, bind the manager, and do the initial two
+    /// round-trips to populate the toplevel list. Returns `None` when the
+    /// compositor doesn't advertise the protocol or the connection fails.
+    fn open() -> Option<Self> {
         let conn = Connection::connect_to_env()
             .map_err(|e| debug!("wlr-foreign-toplevel: no Wayland connection: {e}"))
             .ok()?;
@@ -234,20 +231,49 @@ impl WlrForeignToplevelSource {
             .ok()?;
 
         Some(Self {
-            conn,
-            dispatcher: Mutex::new(Dispatcher { queue, state }),
+            _conn: conn,
+            queue,
+            state,
+        })
+    }
+}
+
+/// Wayland frontmost backend. Holds the session behind a mutex so the whole
+/// connection can be rebuilt on compositor restart without touching callers.
+struct WlrForeignToplevelSource {
+    // Active session, or `None` when the last reconnect attempt failed.
+    // The mutex bridges the event-driven Wayland runtime to the synchronous
+    // poll contract; the session is only ever touched here, at ~1 Hz.
+    session: Mutex<Option<Session>>,
+}
+
+impl WlrForeignToplevelSource {
+    fn connect() -> Option<Self> {
+        Session::open().map(|s| Self {
+            session: Mutex::new(Some(s)),
         })
     }
 }
 
 impl FrontmostSource for WlrForeignToplevelSource {
     fn frontmost_bundle_id(&self) -> Option<String> {
-        let mut guard = self.dispatcher.lock().ok()?;
-        let Dispatcher { queue, state } = &mut *guard;
+        let mut guard = self.session.lock().ok()?;
 
-        // Drain focus changes and new / closed windows since the last poll.
+        // Reconnect when the compositor sent `Finished` (compositor reload /
+        // restart) or when a prior reconnect attempt failed.
+        let needs_reconnect = guard.as_ref().map_or(true, |s| s.state.finished);
+        if needs_reconnect {
+            *guard = Session::open();
+            match &*guard {
+                Some(_) => info!("wlr-foreign-toplevel: reconnected"),
+                None => debug!("wlr-foreign-toplevel: reconnect pending, retrying next poll"),
+            }
+        }
+
+        let Session { queue, state, .. } = guard.as_mut()?;
         queue.roundtrip(state).ok()?;
         if state.finished {
+            // `Finished` arrived during this poll; reconnect on the next call.
             return None;
         }
 

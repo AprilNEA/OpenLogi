@@ -467,8 +467,8 @@ fn device_thread(
 // The frontmost-app reader is backend-driven so that Wayland support can be
 // added without touching callers. Exactly one backend is selected at startup
 // from the session environment (see `detect_frontmost_source`) and cached in
-// `FRONTMOST_SOURCE` for the process lifetime. Today only the X11 backend
-// exists; Wayland-native backends slot into `wayland_candidates`.
+// `FRONTMOST_SOURCE` for the process lifetime. The X11, wlr-foreign-toplevel,
+// and gnome-shell backends are all available; see `wayland_candidates`.
 
 mod gnome_shell;
 mod wlr_foreign_toplevel;
@@ -671,8 +671,8 @@ static FRONTMOST_SOURCE: LazyLock<Box<dyn FrontmostSource>> =
 /// `None` when unavailable. Dispatches to the backend chosen at startup.
 ///
 /// On an X11 session this is the `WM_CLASS` class component (e.g. "Firefox").
-/// On a pure Wayland session it is currently `None` until a Wayland backend is
-/// added; XWayland windows are still resolved via the X11 backend.
+/// On a Wayland session the wlr-foreign-toplevel or gnome-shell backend is used
+/// when available; XWayland windows fall back to the X11 backend.
 pub(crate) fn frontmost_bundle_id() -> Option<String> {
     FRONTMOST_SOURCE.frontmost_bundle_id()
 }
