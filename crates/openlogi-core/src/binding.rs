@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -182,6 +183,91 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
         } else {
             GestureDirection::Up
         })
+    }
+}
+
+/// The mid-swipe state machine shared by both gesture-capture paths: the HID++
+/// thumb pad (`openlogi-hid`'s `0x1b04` raw-XY divert) and the OS-hook
+/// Middle/Back/Forward buttons (`openlogi-agent-core`'s CGEventTap). A gesture
+/// button's hold accumulates travel; the instant the dominant axis commits a
+/// direction — after the button has been held [`GESTURE_HOLD_FOR_SWIPE`], so a
+/// quick click whose cursor drifted doesn't count — [`Self::accumulate`] returns
+/// that direction exactly once, like Logitech Options+. A hold that never
+/// commits is a plain click, reported by [`Self::end`].
+///
+/// The two paths differ only in *what identifies the held control* (a
+/// [`ButtonId`] for the OS hook, a diverted CID for the thumb pad), so each owns
+/// that and embeds this for the shared travel logic. Keeping the logic in one
+/// place is deliberate: the two copies it replaced had already drifted apart
+/// (one resolved a swipe only on release), which mis-fired the click.
+#[derive(Debug, Default)]
+pub struct SwipeAccumulator {
+    /// When the current hold began, or `None` when not holding. Gates a
+    /// deliberate swipe against a quick click whose cursor happened to move.
+    held_since: Option<Instant>,
+    /// Accumulated raw-XY travel since the hold began (saturating, so an
+    /// arbitrarily long hold can never overflow).
+    dx: i32,
+    dy: i32,
+    /// Set once a direction has committed this hold, so it fires exactly once
+    /// and the release isn't then also read as a click.
+    fired: bool,
+}
+
+impl SwipeAccumulator {
+    /// Begin a fresh hold, resetting the travel accumulator and commit state.
+    pub fn begin(&mut self) {
+        self.held_since = Some(Instant::now());
+        self.dx = 0;
+        self.dy = 0;
+        self.fired = false;
+    }
+
+    /// Whether a hold is in progress (between [`Self::begin`] and [`Self::end`]),
+    /// so callers can do rising/falling-edge detection without a second flag.
+    #[must_use]
+    pub fn is_holding(&self) -> bool {
+        self.held_since.is_some()
+    }
+
+    /// Feed a pointer-move / raw-XY delta into the current hold. Returns
+    /// `Some(direction)` exactly once per hold — the instant travel commits, and
+    /// only after the hold passes [`GESTURE_HOLD_FOR_SWIPE`] — and `None` while
+    /// still too short, already committed, or not holding.
+    pub fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
+        if self.fired || self.held_since.is_none() {
+            return None;
+        }
+        self.dx = self.dx.saturating_add(dx);
+        self.dy = self.dy.saturating_add(dy);
+        let held_long_enough = self
+            .held_since
+            .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
+        if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
+            self.fired = true;
+            return Some(dir);
+        }
+        None
+    }
+
+    /// End the current hold. Returns `true` when it never committed a swipe — the
+    /// caller should fire the plain `Click` action — and `false` when a swipe
+    /// already fired mid-motion.
+    pub fn end(&mut self) -> bool {
+        let was_click = !self.fired;
+        self.held_since = None;
+        was_click
+    }
+
+    /// Test-only seam: backdate the current hold so its [`GESTURE_HOLD_FOR_SWIPE`]
+    /// gate is already satisfied, letting a test exercise a committed swipe
+    /// without sleeping. Real code never calls this — [`Self::begin`] records the
+    /// true start instant. A no-op when not currently holding.
+    #[doc(hidden)]
+    pub fn backdate_hold_for_test(&mut self) {
+        if self.held_since.is_some() {
+            self.held_since = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2);
+        }
     }
 }
 
@@ -521,6 +607,18 @@ impl Binding {
     #[must_use]
     pub fn is_gesture(&self) -> bool {
         matches!(self, Binding::Gesture(_))
+    }
+
+    /// Promote a [`Single`](Binding::Single) binding in place to a
+    /// [`Gesture`](Binding::Gesture), keeping its action as the
+    /// [`GestureDirection::Click`] entry and leaving the swipe arms unbound.
+    /// A no-op when this is already a [`Gesture`].
+    pub fn upgrade_to_gesture(&mut self) {
+        if let Binding::Single(action) = self {
+            let mut map = BTreeMap::new();
+            map.insert(GestureDirection::Click, action.clone());
+            *self = Binding::Gesture(map);
+        }
     }
 }
 
@@ -1972,6 +2070,58 @@ mod tests {
         // Past the threshold but too diagonal (cross axis beyond the band).
         assert_eq!(detect_swipe(60, 60), None);
         assert_eq!(detect_swipe(-60, -60), None);
+    }
+
+    // ── SwipeAccumulator (the shared mid-swipe state machine) ─────────────────
+
+    #[test]
+    fn accumulator_commits_a_direction_once_after_the_hold_gate() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        // A clear rightward swipe commits exactly once, mid-motion.
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        // Further travel in the same hold must not re-fire.
+        assert_eq!(acc.accumulate(50, 0), None);
+    }
+
+    #[test]
+    fn accumulator_does_not_commit_before_the_hold_gate() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin(); // held_since = now, so the gate is not yet satisfied
+        // A big delta arriving immediately (a quick click whose cursor drifted)
+        // must not commit.
+        assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0), None);
+        // Once held long enough, the next delta commits.
+        acc.backdate_hold_for_test();
+        assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0).is_some());
+    }
+
+    #[test]
+    fn accumulator_end_reports_click_only_when_no_swipe_fired() {
+        // A hold with only tiny drift never commits → end() is a click.
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(acc.accumulate(2, -1), None);
+        assert!(acc.end(), "a hold that never swiped is a click");
+
+        // A hold that committed a swipe → end() is not a click.
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0).is_some());
+        assert!(!acc.end(), "a committed swipe must not also click");
+    }
+
+    #[test]
+    fn accumulator_ignores_motion_when_not_holding() {
+        let mut acc = SwipeAccumulator::default();
+        assert!(!acc.is_holding());
+        // Travel outside a hold is dropped, never committing a stray swipe.
+        assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0), None);
     }
 
     // ── TOML roundtrip ────────────────────────────────────────────────────────

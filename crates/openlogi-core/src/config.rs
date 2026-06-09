@@ -459,11 +459,7 @@ impl Config {
             .bindings
             .entry(button)
             .or_insert_with(|| default_binding_for(button));
-        if let Binding::Single(prev) = entry {
-            let mut map = BTreeMap::new();
-            map.insert(GestureDirection::Click, prev.clone());
-            *entry = Binding::Gesture(map);
-        }
+        entry.upgrade_to_gesture();
         if let Binding::Gesture(map) = entry {
             map.insert(direction, action);
         }
@@ -535,11 +531,7 @@ impl Config {
             .bindings
             .entry(button)
             .or_insert_with(|| default_binding_for(button));
-        if let Binding::Single(prev) = entry {
-            let mut map = BTreeMap::new();
-            map.insert(GestureDirection::Click, prev.clone());
-            *entry = Binding::Gesture(map);
-        }
+        entry.upgrade_to_gesture();
         demoted
     }
 

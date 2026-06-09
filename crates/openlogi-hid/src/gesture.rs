@@ -16,10 +16,9 @@
 //! is therefore only diverted when its click is actually bound.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::Instant;
 
 use hidpp::{channel::HidppChannel, device::Device, protocol::v20};
-use openlogi_core::binding::{ButtonId, GESTURE_HOLD_FOR_SWIPE, GestureDirection, detect_swipe};
+use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -71,16 +70,8 @@ pub enum GestureError {
 /// because the channel's read thread invokes the listener by shared reference.
 #[derive(Default)]
 struct CaptureAccum {
-    /// Whether the gesture button is currently held.
-    gesture_held: bool,
-    /// When the current hold began — gates swipe vs. click by duration.
-    held_since: Option<Instant>,
-    /// Accumulated raw-XY travel since the press began.
-    dx: i32,
-    dy: i32,
-    /// Whether a directional swipe has already committed during this hold.
-    /// Gestures fire mid-swipe (like Options+) and once per press.
-    fired: bool,
+    /// Mid-swipe state for the diverted thumb-pad gesture button (raw-XY).
+    swipe: SwipeAccumulator,
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
     dpi_down: bool,
@@ -326,17 +317,11 @@ fn handle_reprog(
     match event {
         RawControlEvent::DivertedButtons(cids) => {
             let gesture_held = cids.contains(&reprog_controls::GESTURE_BUTTON_CID);
-            if gesture_held && !acc.gesture_held {
-                acc.gesture_held = true;
-                acc.held_since = Some(Instant::now());
-                acc.dx = 0;
-                acc.dy = 0;
-                acc.fired = false;
-            } else if !gesture_held && acc.gesture_held {
-                acc.gesture_held = false;
-                acc.held_since = None;
+            if gesture_held && !acc.swipe.is_holding() {
+                acc.swipe.begin();
+            } else if !gesture_held && acc.swipe.is_holding() {
                 // A press that never committed a direction is a plain click.
-                if !acc.fired {
+                if acc.swipe.end() {
                     debug!("gesture click");
                     let _ = sink.send(CapturedInput::Gesture(GestureDirection::Click));
                 }
@@ -349,21 +334,12 @@ fn handle_reprog(
             acc.dpi_down = dpi_down;
         }
         RawControlEvent::RawXy { dx, dy } => {
-            // Accumulate until a clean direction commits, then fire immediately
-            // and ignore the rest of the hold (one gesture per press).
-            if acc.gesture_held && !acc.fired {
-                acc.dx = acc.dx.saturating_add(i32::from(dx));
-                acc.dy = acc.dy.saturating_add(i32::from(dy));
-                // Held long enough to be a deliberate gesture, not a tap whose
-                // cursor happened to be in motion? Only then does travel commit.
-                let held = acc
-                    .held_since
-                    .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
-                if held && let Some(direction) = detect_swipe(acc.dx, acc.dy) {
-                    debug!(?direction, dx = acc.dx, dy = acc.dy, "gesture committed");
-                    acc.fired = true;
-                    let _ = sink.send(CapturedInput::Gesture(direction));
-                }
+            // Commit the instant a clean direction emerges (mid-swipe, once per
+            // hold); the accumulator gates on hold duration internally and drops
+            // travel that arrives outside a hold.
+            if let Some(direction) = acc.swipe.accumulate(i32::from(dx), i32::from(dy)) {
+                debug!(?direction, "gesture committed");
+                let _ = sink.send(CapturedInput::Gesture(direction));
             }
         }
     }
@@ -411,7 +387,7 @@ mod tests {
 
         handle_reprog(&mut acc, press(), &[], &tx);
         // Pretend the button has been held well past the swipe gate.
-        acc.held_since = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2);
+        acc.swipe.backdate_hold_for_test();
         handle_reprog(
             &mut acc,
             RawControlEvent::RawXy { dx: 120, dy: 5 },
