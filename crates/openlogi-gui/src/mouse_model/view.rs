@@ -1,7 +1,8 @@
 use gpui::{
-    Anchor, AnyElement, App, Context, ElementId, Entity, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Render, RenderOnce, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, canvas, div, hsla, img, prelude::FluentBuilder as _, px, rgb, svg,
+    Anchor, AnyElement, App, BorrowAppContext as _, Context, ElementId, Entity, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Render, RenderOnce, StatefulInteractiveElement as _,
+    Styled, Subscription, Window, canvas, div, hsla, img, prelude::FluentBuilder as _, px, rgb,
+    svg,
 };
 use gpui_component::{Icon, IconName, Selectable, h_flex, popover::Popover, v_flex};
 
@@ -68,13 +69,14 @@ impl MouseModelView {
 
 impl Render for MouseModelView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (asset, active, bindings) = cx
+        let (asset, active, bindings, gesture_owner) = cx
             .try_global::<AppState>()
             .map(|s| {
                 (
                     s.current_record().and_then(|r| r.asset.clone()),
                     s.active_button,
                     s.button_bindings.clone(),
+                    s.current_gesture_owner(),
                 )
             })
             .unwrap_or_default();
@@ -113,14 +115,15 @@ impl Render for MouseModelView {
             &view,
         );
 
-        div()
+        let capable = gesture_capable_buttons(&labels_outer);
+        let canvas = div()
             .relative()
             .w(px(canvas_w))
             .h(px(canvas_h))
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
-                let binding = if label.id == ButtonId::GestureButton {
+                let binding = if Some(label.id) == gesture_owner {
                     BindingLabel {
                         text: tr!("5 directions"),
                         is_default: false,
@@ -150,11 +153,121 @@ impl Render for MouseModelView {
                     mouse_w,
                     hovered,
                     active,
+                    gesture_owner,
                     &view,
                 )
             }))
-            .child(hotspots_layer)
+            .child(hotspots_layer);
+
+        // The gesture-button selector sits above the mouse: a single-select of
+        // the device's gesture-capable buttons (the dedicated thumb pad plus the
+        // OS-hook Middle/Back/Forward) makes the one-gesture-button-per-device
+        // lock visible and obvious — pick one and its card opens the gesture
+        // menu, the rest stay single-action.
+        v_flex()
+            .w(px(canvas_w))
+            .gap_4()
+            .when(!capable.is_empty(), |col| {
+                col.child(gesture_owner_selector(&capable, gesture_owner, &view, pal))
+            })
+            .child(canvas)
     }
+}
+
+/// The gesture-capable buttons present on this device, in a stable display
+/// order: the dedicated thumb pad first, then the OS-hook Middle/Back/Forward.
+fn gesture_capable_buttons(labels: &[Label]) -> Vec<ButtonId> {
+    const ORDER: [ButtonId; 4] = [
+        ButtonId::GestureButton,
+        ButtonId::MiddleClick,
+        ButtonId::Back,
+        ButtonId::Forward,
+    ];
+    ORDER
+        .into_iter()
+        .filter(|id| labels.iter().any(|l| l.id == *id))
+        .collect()
+}
+
+/// Short, context-appropriate name for a gesture-button choice. In a selector
+/// *of* gesture buttons, calling the thumb pad "Gesture Button" would be
+/// circular, so it reads "Thumb pad" here.
+fn gesture_owner_label(btn: ButtonId) -> &'static str {
+    match btn {
+        ButtonId::GestureButton => "Thumb pad",
+        ButtonId::MiddleClick => "Middle",
+        ButtonId::Back => "Back",
+        ButtonId::Forward => "Forward",
+        other => other.label(),
+    }
+}
+
+/// The "Gesture button: ( … )" single-select row above the mouse. The single
+/// select makes the one-gesture-button-per-device lock visible; picking a button
+/// commits it as the owner (demoting any previous one).
+fn gesture_owner_selector(
+    capable: &[ButtonId],
+    owner: Option<ButtonId>,
+    view: &Entity<MouseModelView>,
+    pal: Palette,
+) -> impl IntoElement {
+    h_flex()
+        .items_center()
+        .gap_2()
+        .pl(px(SIDE_W + SIDE_GAP))
+        .child(
+            div()
+                .text_xs()
+                .text_color(pal.text_muted)
+                .child(tr!("Gesture button")),
+        )
+        .children(
+            capable
+                .iter()
+                .map(|&btn| owner_chip(Some(btn), owner, view, pal)),
+        )
+        .child(owner_chip(None, owner, view, pal))
+}
+
+/// One selectable chip in [`gesture_owner_selector`]. Clicking commits the new
+/// gesture owner via [`AppState::commit_gesture_owner`].
+fn owner_chip(
+    btn: Option<ButtonId>,
+    owner: Option<ButtonId>,
+    view: &Entity<MouseModelView>,
+    pal: Palette,
+) -> AnyElement {
+    let selected = btn == owner;
+    let text = match btn {
+        Some(b) => tr!(gesture_owner_label(b)),
+        None => tr!("Off"),
+    };
+    let id_part = btn.map_or(0usize, |b| b as usize + 1);
+    let tint = hsla(0.6, 0.9, 0.6, 0.12);
+    let tint_border = hsla(0.6, 0.9, 0.6, 0.5);
+    let view = view.clone();
+    div()
+        .id(("gesture-owner", id_part))
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .border_1()
+        .border_color(if selected { tint_border } else { pal.border })
+        .text_xs()
+        .text_color(if selected {
+            pal.text_primary
+        } else {
+            pal.text_muted
+        })
+        .when(selected, |s| s.bg(tint))
+        .when(!selected, |s| s.hover(|s| s.bg(pal.surface_hover)))
+        .cursor_pointer()
+        .child(text)
+        .on_click(move |_event, _window, cx| {
+            cx.update_global::<AppState, _>(|state, _| state.commit_gesture_owner(btn));
+            view.update(cx, |_, vcx| vcx.notify());
+        })
+        .into_any_element()
 }
 
 fn leader_canvas(
@@ -281,6 +394,7 @@ fn label_popover(
     mouse_w: f32,
     hovered: Option<ButtonId>,
     active: Option<ButtonId>,
+    gesture_owner: Option<ButtonId>,
     view: &Entity<MouseModelView>,
 ) -> AnyElement {
     let x = match label.side {
@@ -296,7 +410,7 @@ fn label_popover(
         selected: false,
         view: view.clone(),
     };
-    let popover: AnyElement = if label.id == ButtonId::GestureButton {
+    let popover: AnyElement = if Some(label.id) == gesture_owner {
         gesture_overview_popover(
             ("label-popover", idx),
             Anchor::TopLeft,

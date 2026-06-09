@@ -969,10 +969,53 @@ impl AppState {
     }
 
     fn gesture_bindings_for_current(&self) -> BTreeMap<GestureDirection, Action> {
-        gesture_bindings_for(
-            &self.config,
-            self.current_record().map(|r| r.config_key.as_str()),
-        )
+        let Some(key) = self.current_record().map(|r| r.config_key.as_str()) else {
+            return BTreeMap::new();
+        };
+        match self.config.gesture_owner(key) {
+            // The dedicated thumb pad seeds every direction from the defaults.
+            Some(ButtonId::GestureButton) => gesture_bindings_for(&self.config, Some(key)),
+            // A promoted OS-hook button shows only what the user bound (its swipe
+            // arms start unbound) — read its raw stored direction map.
+            Some(owner) => match self.config.bindings_for(key).get(&owner) {
+                Some(Binding::Gesture(map)) => map.clone(),
+                _ => BTreeMap::new(),
+            },
+            None => BTreeMap::new(),
+        }
+    }
+
+    /// The current device's gesture button — the [`Binding::Gesture`] owner — or
+    /// `None` when no button is in gesture mode. Drives which button's card opens
+    /// the gesture menu rather than the single-action picker.
+    #[must_use]
+    pub fn current_gesture_owner(&self) -> Option<ButtonId> {
+        let key = self.current_record()?.config_key.as_str();
+        self.config.gesture_owner(key)
+    }
+
+    /// Make `button` the current device's gesture button (or clear it with
+    /// `None`), enforcing the one-gesture-button-per-device lock. Persists, tells
+    /// the agent to rebuild, and refreshes the projected maps the UI reads.
+    pub fn commit_gesture_owner(&mut self, button: Option<ButtonId>) {
+        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
+            return;
+        };
+        match button {
+            Some(b) => {
+                self.config.set_gesture_owner(&key, b);
+            }
+            None => {
+                self.config.disable_gestures(&key);
+            }
+        }
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist gesture-button change to config.toml");
+        }
+        // The owner change shuffles bindings between the single + gesture maps.
+        self.button_bindings = self.bindings_for_current();
+        self.gesture_bindings = self.gesture_bindings_for_current();
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 
     /// Update a single gesture-button sub-binding in memory, on disk, and in the
@@ -987,8 +1030,13 @@ impl AppState {
             );
             return;
         };
+        // Edit whichever button is the gesture owner — not always the thumb pad.
+        let owner = self
+            .config
+            .gesture_owner(&key)
+            .unwrap_or(ButtonId::GestureButton);
         self.config
-            .set_gesture_direction(&key, ButtonId::GestureButton, direction, action);
+            .set_gesture_direction(&key, owner, direction, action);
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist gesture binding to config.toml");
         }
