@@ -7,8 +7,11 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, detect_swipe};
+use openlogi_core::binding::{
+    Action, ButtonId, GESTURE_HOLD_FOR_SWIPE, GestureDirection, detect_swipe,
+};
 use openlogi_hid::CaptureChannel;
 use openlogi_hook::{EventDisposition, Hook, MouseEvent};
 use tracing::{info, warn};
@@ -26,43 +29,64 @@ pub type BindingMap = Arc<RwLock<BTreeMap<ButtonId, Action>>>;
 /// reaches the OS hook.
 pub type HookGestures = Arc<RwLock<BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>>>;
 
-/// Pointer-movement accumulator for an in-progress gesture-button hold: which
-/// button is held (between its down and up) and the summed movement, so the
-/// release can resolve a swipe direction via [`detect_swipe`].
+/// Tracks an in-progress gesture-button hold and commits a swipe *mid-motion*,
+/// the moment travel passes [`detect_swipe`] (like Logitech Options+), rather
+/// than waiting for release — matching the HID++ thumb-pad path in
+/// `openlogi-hid`. A press that never commits a direction is a plain click,
+/// fired on release.
 #[derive(Default)]
 struct HoldState {
     button: Option<ButtonId>,
     dx: i32,
     dy: i32,
+    held_since: Option<Instant>,
+    /// Set once a swipe has committed this hold, so it fires exactly once and
+    /// the release doesn't then also fire the click.
+    fired: bool,
 }
 
 impl HoldState {
-    /// Begin a hold for `button`, resetting the accumulated movement.
+    /// Begin a hold for `button`, resetting the accumulator and commit state.
     fn begin(&mut self, button: ButtonId) {
         self.button = Some(button);
         self.dx = 0;
         self.dy = 0;
+        self.held_since = Some(Instant::now());
+        self.fired = false;
     }
 
-    /// Add a pointer-move delta to the in-progress hold. Saturating, so a very
-    /// long hold can never overflow (the direction is all that matters).
-    fn accumulate(&mut self, dx: i32, dy: i32) {
+    /// Feed a pointer-move delta. Once the button has been held past
+    /// [`GESTURE_HOLD_FOR_SWIPE`] (so a quick click whose cursor drifted doesn't
+    /// count) and the travel commits to a direction, returns
+    /// `Some((button, direction))` exactly once per hold; the caller dispatches
+    /// it. Returns `None` while still too short, already fired, or not holding.
+    /// Saturating, so a very long hold can never overflow.
+    fn accumulate(&mut self, dx: i32, dy: i32) -> Option<(ButtonId, GestureDirection)> {
+        let button = self.button?;
+        if self.fired {
+            return None;
+        }
         self.dx = self.dx.saturating_add(dx);
         self.dy = self.dy.saturating_add(dy);
+        let held_long_enough = self
+            .held_since
+            .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
+        if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
+            self.fired = true;
+            return Some((button, dir));
+        }
+        None
     }
 
-    /// Whether a gesture button is currently held.
-    fn is_holding(&self) -> bool {
-        self.button.is_some()
-    }
-
-    /// End the hold for `button`, returning the accumulated `(dx, dy)` — but only
-    /// if `button` is the one being held, so a stray release of another button is
-    /// ignored.
-    fn end(&mut self, button: ButtonId) -> Option<(i32, i32)> {
+    /// End the hold for `button`. Returns `Some(true)` when it ended a hold that
+    /// never committed a swipe (the caller should fire the `Click` action),
+    /// `Some(false)` when a swipe already fired, and `None` for a stray release
+    /// of a button we weren't holding.
+    fn end(&mut self, button: ButtonId) -> Option<bool> {
         if self.button == Some(button) {
+            let was_click = !self.fired;
             self.button = None;
-            Some((self.dx, self.dy))
+            Some(was_click)
         } else {
             None
         }
@@ -111,26 +135,25 @@ pub fn start(
                 return EventDisposition::PassThrough;
             }
 
-            // Gesture button: suppress the native click and, on release, resolve
-            // the held movement to a swipe direction (or a plain Click when the
-            // pointer barely moved). The button-down is recorded; the cursor is
-            // free to drift via the pass-through `Moved` events between them.
+            // Gesture button: suppress the native click and begin a hold. The
+            // swipe commits mid-motion in the `Moved` arm; here, on release, we
+            // only fire the plain `Click` when no swipe committed. The cursor is
+            // free to drift via the pass-through `Moved` events during the hold.
             if pressed {
                 let is_gesture = hook_gestures.read().is_ok_and(|g| g.contains_key(&id));
                 if is_gesture {
                     lock_hold(&hold).begin(id);
                     return EventDisposition::Suppress;
                 }
-            } else if let Some((dx, dy)) = lock_hold(&hold).end(id) {
-                if let Some(map) = hook_gestures.read().ok().and_then(|g| g.get(&id).cloned()) {
-                    let action = match detect_swipe(dx, dy) {
-                        Some(dir) => map.get(&dir).cloned(),
-                        None => map.get(&GestureDirection::Click).cloned(),
-                    };
-                    if let Some(action) = action {
-                        info!(button = %id, dx, dy, action = %action.label(), "gesture → executing bound action");
-                        dispatch_action(&action, &dpi_cycle, &capture);
-                    }
+            } else if let Some(was_click) = lock_hold(&hold).end(id) {
+                if was_click
+                    && let Some(action) = hook_gestures.read().ok().and_then(|g| {
+                        g.get(&id)
+                            .and_then(|m| m.get(&GestureDirection::Click).cloned())
+                    })
+                {
+                    info!(button = %id, action = %action.label(), "gesture click → executing bound action");
+                    dispatch_action(&action, &dpi_cycle, &capture);
                 }
                 return EventDisposition::Suppress;
             }
@@ -156,12 +179,19 @@ pub fn start(
             EventDisposition::Suppress
         }
         MouseEvent::Moved { delta_x, delta_y } => {
-            // Feed an in-progress gesture hold; always pass through so the cursor
-            // keeps moving. The swipe is read, not consumed — the B2 cursor-drift
-            // tradeoff vs. a HID++ raw-XY divert that would freeze the pointer.
-            let mut guard = lock_hold(&hold);
-            if guard.is_holding() {
-                guard.accumulate(delta_x, delta_y);
+            // Feed an in-progress hold; a committed swipe fires here, mid-motion.
+            // Always pass through so the cursor keeps moving — the swipe is read,
+            // not consumed (the B2 cursor-drift tradeoff vs. a HID++ raw-XY divert
+            // that would freeze the pointer).
+            let commit = lock_hold(&hold).accumulate(delta_x, delta_y);
+            if let Some((button, dir)) = commit
+                && let Some(action) = hook_gestures
+                    .read()
+                    .ok()
+                    .and_then(|g| g.get(&button).and_then(|m| m.get(&dir).cloned()))
+            {
+                info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
+                dispatch_action(&action, &dpi_cycle, &capture);
             }
             EventDisposition::PassThrough
         }
@@ -244,50 +274,59 @@ pub fn dispatch_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openlogi_core::binding::GESTURE_SWIPE_THRESHOLD;
 
-    #[test]
-    fn hold_accumulates_movement_between_begin_and_end() {
-        let mut hold = HoldState::default();
-        assert!(!hold.is_holding());
-
-        hold.begin(ButtonId::Back);
-        assert!(hold.is_holding());
-        hold.accumulate(3, -1);
-        hold.accumulate(2, -4);
-
-        // `end` of the held button returns the summed movement and clears the hold.
-        assert_eq!(hold.end(ButtonId::Back), Some((5, -5)));
-        assert!(!hold.is_holding());
+    /// Backdate the hold so it is past the minimum-hold gate and a swipe can
+    /// commit — without sleeping in the test.
+    fn held_long_enough(hold: &mut HoldState) {
+        hold.held_since = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2);
     }
 
     #[test]
-    fn hold_begin_resets_prior_accumulation() {
+    fn swipe_commits_once_mid_motion_and_suppresses_the_click() {
         let mut hold = HoldState::default();
         hold.begin(ButtonId::Back);
-        hold.accumulate(10, 10);
-        // A fresh press starts a clean accumulator.
+        held_long_enough(&mut hold);
+
+        // A clear rightward swipe commits exactly once, mid-motion.
+        assert_eq!(
+            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some((ButtonId::Back, GestureDirection::Right))
+        );
+        // Further motion in the same hold must not re-fire.
+        assert_eq!(hold.accumulate(50, 0), None);
+        // A release after a committed swipe is NOT a click.
+        assert_eq!(hold.end(ButtonId::Back), Some(false));
+    }
+
+    #[test]
+    fn hold_without_a_swipe_is_a_click_on_release() {
+        let mut hold = HoldState::default();
         hold.begin(ButtonId::Forward);
-        hold.accumulate(1, 2);
-        assert_eq!(hold.end(ButtonId::Forward), Some((1, 2)));
+        held_long_enough(&mut hold);
+        // Tiny drift never commits a direction...
+        assert_eq!(hold.accumulate(2, -1), None);
+        // ...so the release fires the plain click.
+        assert_eq!(hold.end(ButtonId::Forward), Some(true));
     }
 
     #[test]
-    fn hold_end_ignores_a_different_button() {
+    fn swipe_does_not_commit_before_the_minimum_hold() {
+        let mut hold = HoldState::default();
+        hold.begin(ButtonId::MiddleClick); // held_since = now
+        // A big delta arriving immediately (a quick click whose cursor drifted)
+        // must not commit — the hold is younger than GESTURE_HOLD_FOR_SWIPE.
+        assert_eq!(hold.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0), None);
+        // Once held long enough, the next delta commits.
+        held_long_enough(&mut hold);
+        assert!(hold.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0).is_some());
+    }
+
+    #[test]
+    fn end_ignores_a_different_button() {
         let mut hold = HoldState::default();
         hold.begin(ButtonId::Back);
-        hold.accumulate(4, 4);
-        // Releasing a button we aren't holding must not end the hold.
         assert_eq!(hold.end(ButtonId::Forward), None);
-        assert!(hold.is_holding());
-        assert_eq!(hold.end(ButtonId::Back), Some((4, 4)));
-    }
-
-    #[test]
-    fn hold_accumulation_saturates_instead_of_overflowing() {
-        let mut hold = HoldState::default();
-        hold.begin(ButtonId::MiddleClick);
-        hold.accumulate(i32::MAX, i32::MIN);
-        hold.accumulate(i32::MAX, i32::MIN);
-        assert_eq!(hold.end(ButtonId::MiddleClick), Some((i32::MAX, i32::MIN)));
+        assert_eq!(hold.end(ButtonId::Back), Some(true));
     }
 }

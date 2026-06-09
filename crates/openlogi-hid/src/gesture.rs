@@ -16,10 +16,10 @@
 //! is therefore only diverted when its click is actually bound.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use hidpp::{channel::HidppChannel, device::Device, protocol::v20};
-use openlogi_core::binding::{ButtonId, GestureDirection, detect_swipe};
+use openlogi_core::binding::{ButtonId, GESTURE_HOLD_FOR_SWIPE, GestureDirection, detect_swipe};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -66,10 +66,6 @@ pub enum GestureError {
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
 }
-
-/// Minimum hold before raw-XY travel counts as a swipe. A quicker tap stays a
-/// plain click even if the cursor was moving when it fired.
-const GESTURE_HOLD_FOR_SWIPE: Duration = Duration::from_millis(160);
 
 /// Movement + button state accumulated across messages. Lives behind a `Mutex`
 /// because the channel's read thread invokes the listener by shared reference.

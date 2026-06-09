@@ -469,24 +469,36 @@ impl Config {
         }
     }
 
-    /// The device's gesture button — the single [`ButtonId`] whose binding is a
-    /// [`Binding::Gesture`]. At most one per device (the v1 one-gesture-button
-    /// lock). If a hand-edited config carries several, [`ButtonId::GestureButton`]
-    /// wins: it is the HID++ raw-XY owner, the only button that consumes the
-    /// per-device raw-XY stream. Otherwise the lowest-ordered gesture button.
+    /// The device's gesture button, or `None` when gestures are turned off.
+    ///
+    /// The dedicated thumb pad ([`ButtonId::GestureButton`]) is the *default*
+    /// gesture button: it owns the role whenever it's left at its default or set
+    /// to a [`Binding::Gesture`]. An explicitly-configured OS-hook button
+    /// (Middle/Back/Forward in gesture mode) takes the role over, silencing the
+    /// thumb pad. The thumb pad is off only when it has been explicitly demoted
+    /// to a [`Binding::Single`] (the "Off" selection) with no other gesture
+    /// button set. At most one button gestures per device.
     #[must_use]
     pub fn gesture_owner(&self, device_key: &str) -> Option<ButtonId> {
-        let bindings = &self.devices.get(device_key)?.bindings;
-        if matches!(
-            bindings.get(&ButtonId::GestureButton),
-            Some(Binding::Gesture(_))
-        ) {
-            return Some(ButtonId::GestureButton);
+        if let Some(bindings) = self.devices.get(device_key).map(|d| &d.bindings) {
+            // An explicit OS-hook gesture button takes over from the thumb pad.
+            if let Some((id, _)) = bindings
+                .iter()
+                .find(|(id, b)| **id != ButtonId::GestureButton && b.is_gesture())
+            {
+                return Some(*id);
+            }
+            // Thumb pad explicitly demoted (and nothing else set) → gestures off.
+            if matches!(
+                bindings.get(&ButtonId::GestureButton),
+                Some(Binding::Single(_))
+            ) {
+                return None;
+            }
         }
-        bindings
-            .iter()
-            .find(|(_, binding)| binding.is_gesture())
-            .map(|(id, _)| *id)
+        // No config, or the thumb pad left at its default / a gesture binding:
+        // the thumb pad owns the gesture role.
+        Some(ButtonId::GestureButton)
     }
 
     /// Make `button` the device's sole gesture button, enforcing the
@@ -547,6 +559,22 @@ impl Config {
             _ => return,
         };
         device.bindings.insert(button, Binding::Single(click));
+    }
+
+    /// Turn gestures off entirely for `device_key`: demote every OS-hook gesture
+    /// button and mark the thumb pad explicitly off, so [`Self::gesture_owner`]
+    /// returns `None` rather than falling back to the thumb-pad default. (Plain
+    /// [`Self::demote_gesture_to_single`] on a never-configured thumb pad is a
+    /// no-op, which would leave it the default owner — hence the explicit marker.)
+    pub fn disable_gestures(&mut self, device_key: &str) {
+        for button in [ButtonId::MiddleClick, ButtonId::Back, ButtonId::Forward] {
+            self.demote_gesture_to_single(device_key, button);
+        }
+        self.set_binding(
+            device_key,
+            ButtonId::GestureButton,
+            Binding::Single(Action::None),
+        );
     }
 
     /// Resolve the effective binding map for `device_key`, overlaying the
@@ -1118,13 +1146,12 @@ Back = \"BrowserBack\"
     }
 
     #[test]
-    fn gesture_owner_reports_the_single_gesture_button() {
+    fn gesture_owner_defaults_to_thumb_pad_yields_to_oshook_and_can_be_off() {
         let mut cfg = Config::default();
-        // No gesture binding yet.
-        assert_eq!(cfg.gesture_owner("2b042"), None);
+        // Default: the thumb pad owns the gesture role even with no config.
+        assert_eq!(cfg.gesture_owner("2b042"), Some(ButtonId::GestureButton));
 
-        // One ordinary single + one gesture button.
-        cfg.set_binding("2b042", ButtonId::Back, Action::BrowserBack.into());
+        // A thumb-pad gesture binding keeps it the owner.
         cfg.set_gesture_direction(
             "2b042",
             ButtonId::GestureButton,
@@ -1133,14 +1160,18 @@ Back = \"BrowserBack\"
         );
         assert_eq!(cfg.gesture_owner("2b042"), Some(ButtonId::GestureButton));
 
-        // Defensive: a hand-edited config with two gesture buttons resolves to
-        // GestureButton (the raw-XY owner), not the other.
+        // An explicit OS-hook gesture button takes the role over.
         cfg.set_binding(
             "2b042",
             ButtonId::Forward,
             Binding::Gesture(BTreeMap::from([(GestureDirection::Up, Action::Copy)])),
         );
-        assert_eq!(cfg.gesture_owner("2b042"), Some(ButtonId::GestureButton));
+        assert_eq!(cfg.gesture_owner("2b042"), Some(ButtonId::Forward));
+
+        // Turning gestures off explicitly yields `None` (not the thumb-pad default).
+        let mut off = Config::default();
+        off.disable_gestures("2b042");
+        assert_eq!(off.gesture_owner("2b042"), None);
     }
 
     #[test]
