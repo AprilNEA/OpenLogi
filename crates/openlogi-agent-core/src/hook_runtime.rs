@@ -185,11 +185,17 @@ pub fn start(
             let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
             if let Some((button, dir)) = commit {
                 // Resolve to an owned action and drop the read guard before
-                // dispatch (same lock-light rule as the release arm).
-                let action = hooks.read().ok().and_then(|m| {
+                // dispatch (same lock-light rule as the release arm). The button
+                // can leave the gesture set mid-hold (a per-app rebuild); the
+                // commit has already armed `fired`, so the release won't fire a
+                // click. Fall back to the same click action the release path uses
+                // so the suppressed press is never swallowed into nothing —
+                // symmetric with `resolve_gesture_click`.
+                let action = hooks.read().ok().map(|m| {
                     m.gestures
                         .get(&button)
                         .and_then(|dirs| dirs.get(&dir).cloned())
+                        .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
                 });
                 if let Some(action) = action {
                     info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
