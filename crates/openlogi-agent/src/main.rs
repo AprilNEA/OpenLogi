@@ -166,6 +166,7 @@ async fn run(config: Config) {
                     info!("accessibility granted — installing OS mouse hook");
                     hook = hook_runtime::start(
                         shared.hook_bindings.clone(),
+                        shared.hook_gestures.clone(),
                         shared.dpi_cycle.clone(),
                         shared.capture_channel.clone(),
                     );

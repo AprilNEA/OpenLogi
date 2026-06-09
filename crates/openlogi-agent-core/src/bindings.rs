@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use openlogi_core::binding::{
-    Action, ButtonId, GestureDirection, default_binding, default_gesture_binding,
+    Action, Binding, ButtonId, GestureDirection, default_binding, default_gesture_binding,
 };
 use openlogi_core::config::Config;
 
@@ -68,10 +68,41 @@ pub fn gesture_bindings_for(
     bindings
 }
 
+/// Per-direction maps for the OS-hook gesture buttons (Middle/Back/Forward in
+/// gesture mode) on `config_key`, for the OS hook to resolve a hold+swipe.
+///
+/// Unlike [`gesture_bindings_for`] (the dedicated HID++ gesture button, which
+/// seeds every direction from [`default_gesture_binding`]), these are the raw
+/// stored maps — a swipe direction the user left unbound simply does nothing.
+/// The dedicated gesture button is intentionally excluded: it never reaches the
+/// OS hook (it's captured over HID++), so it has no entry here.
+#[must_use]
+pub fn oshook_gestures_for(
+    config: &Config,
+    config_key: Option<&str>,
+) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
+    let Some(key) = config_key else {
+        return BTreeMap::new();
+    };
+    config
+        .bindings_for(key)
+        .into_iter()
+        .filter(|(id, _)| {
+            matches!(
+                id,
+                ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward
+            )
+        })
+        .filter_map(|(id, binding)| match binding {
+            Binding::Gesture(map) => Some((id, map)),
+            Binding::Single(_) => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openlogi_core::binding::Binding;
 
     #[test]
     fn click_less_gesture_keeps_default_click_in_projection() {
@@ -104,5 +135,37 @@ mod tests {
             projected.get(&ButtonId::GestureButton),
             Some(&Action::Paste)
         );
+    }
+
+    #[test]
+    fn oshook_gestures_collects_only_os_hook_gesture_buttons() {
+        let mut cfg = Config::default();
+        // A gesture-mode Back (an OS-hook button) — included, raw map preserved.
+        cfg.set_binding(
+            "2b042",
+            ButtonId::Back,
+            Binding::Gesture(BTreeMap::from([(GestureDirection::Up, Action::Copy)])),
+        );
+        // A single-mode Middle — excluded (not a gesture button).
+        cfg.set_binding("2b042", ButtonId::MiddleClick, Action::MiddleClick.into());
+        // The dedicated HID++ gesture button — excluded (it never reaches the
+        // OS hook, so it must not appear in the hook's gesture map).
+        cfg.set_binding(
+            "2b042",
+            ButtonId::GestureButton,
+            Binding::Gesture(BTreeMap::from([(
+                GestureDirection::Up,
+                Action::MissionControl,
+            )])),
+        );
+
+        let oshook = oshook_gestures_for(&cfg, Some("2b042"));
+        assert_eq!(oshook.len(), 1, "only the gesture-mode Back belongs here");
+        assert_eq!(
+            oshook.get(&ButtonId::Back),
+            Some(&BTreeMap::from([(GestureDirection::Up, Action::Copy)]))
+        );
+        assert!(!oshook.contains_key(&ButtonId::MiddleClick));
+        assert!(!oshook.contains_key(&ButtonId::GestureButton));
     }
 }

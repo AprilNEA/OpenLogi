@@ -31,6 +31,10 @@ fn mouse_event_clone_and_debug() {
             delta_x: 1.0,
             delta_y: -1.5,
         },
+        MouseEvent::Moved {
+            delta_x: 3,
+            delta_y: -2,
+        },
     ];
     for e in &events {
         let cloned = e.clone();

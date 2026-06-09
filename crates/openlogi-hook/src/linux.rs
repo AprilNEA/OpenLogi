@@ -223,28 +223,43 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
                 pressed: value != 0,
             })
         }
-        #[allow(clippy::cast_precision_loss)] // scroll deltas fit comfortably in f32 mantissa
-        EventSummary::RelativeAxis(_, axis, value) => {
-            let v = value as f32;
-            if hires_scroll {
-                match axis {
-                    RelativeAxisCode::REL_WHEEL_HI_RES => {
-                        Some(scroll(0.0, v / HIRES_UNITS_PER_TICK))
+        EventSummary::RelativeAxis(_, axis, value) => match axis {
+            // Pointer movement feeds gesture-button swipe detection. Emitted as a
+            // `Moved` and always passed through, so the cursor keeps moving while
+            // a held gesture button accumulates the swipe (the B2 cursor-drift
+            // design).
+            RelativeAxisCode::REL_X => Some(MouseEvent::Moved {
+                delta_x: value,
+                delta_y: 0,
+            }),
+            RelativeAxisCode::REL_Y => Some(MouseEvent::Moved {
+                delta_x: 0,
+                delta_y: value,
+            }),
+            _ => {
+                #[allow(clippy::cast_precision_loss)]
+                // scroll deltas fit comfortably in f32 mantissa
+                let v = value as f32;
+                if hires_scroll {
+                    match axis {
+                        RelativeAxisCode::REL_WHEEL_HI_RES => {
+                            Some(scroll(0.0, v / HIRES_UNITS_PER_TICK))
+                        }
+                        RelativeAxisCode::REL_HWHEEL_HI_RES => {
+                            Some(scroll(v / HIRES_UNITS_PER_TICK, 0.0))
+                        }
+                        // Low-res ticks are redundant when hi-res is active.
+                        _ => None,
                     }
-                    RelativeAxisCode::REL_HWHEEL_HI_RES => {
-                        Some(scroll(v / HIRES_UNITS_PER_TICK, 0.0))
+                } else {
+                    match axis {
+                        RelativeAxisCode::REL_WHEEL => Some(scroll(0.0, v)),
+                        RelativeAxisCode::REL_HWHEEL => Some(scroll(v, 0.0)),
+                        _ => None,
                     }
-                    // Low-res ticks are redundant when hi-res is active.
-                    _ => None,
-                }
-            } else {
-                match axis {
-                    RelativeAxisCode::REL_WHEEL => Some(scroll(0.0, v)),
-                    RelativeAxisCode::REL_HWHEEL => Some(scroll(v, 0.0)),
-                    _ => None,
                 }
             }
-        }
+        },
         _ => None,
     }
 }
@@ -523,6 +538,32 @@ mod tests {
             Some(MouseEvent::Button {
                 id: ButtonId::Forward,
                 pressed: true
+            })
+        ));
+    }
+
+    // ── movement ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn translate_rel_x_returns_horizontal_move() {
+        let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_X.0, 7);
+        assert!(matches!(
+            translate(&event, false),
+            Some(MouseEvent::Moved {
+                delta_x: 7,
+                delta_y: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn translate_rel_y_returns_vertical_move() {
+        let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_Y.0, -4);
+        assert!(matches!(
+            translate(&event, false),
+            Some(MouseEvent::Moved {
+                delta_x: 0,
+                delta_y: -4
             })
         ));
     }

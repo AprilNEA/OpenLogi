@@ -20,9 +20,9 @@ use openlogi_hid::{CaptureChannel, DIRECT_DEVICE_INDEX, DeviceRoute};
 use tracing::warn;
 
 use crate::DpiCycleState;
-use crate::bindings::{bindings_for, gesture_bindings_for};
+use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
 use crate::device_order::DeviceStableId;
-use crate::hook_runtime::BindingMap;
+use crate::hook_runtime::{BindingMap, HookGestures};
 use crate::watchers::gesture::GestureBindings;
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -43,6 +43,9 @@ struct AgentDevice {
 #[derive(Clone)]
 pub struct SharedRuntime {
     pub hook_bindings: BindingMap,
+    /// Per-direction maps for OS-hook gesture buttons (Middle/Back/Forward in
+    /// gesture mode), read by the CGEventTap callback to resolve a hold+swipe.
+    pub hook_gestures: HookGestures,
     pub gesture_bindings: GestureBindings,
     pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
     pub thumbwheel_sensitivity: Arc<AtomicI32>,
@@ -78,6 +81,7 @@ impl Orchestrator {
     pub fn new(config: Config) -> Self {
         let shared = SharedRuntime {
             hook_bindings: Arc::new(RwLock::new(BTreeMap::new())),
+            hook_gestures: Arc::new(RwLock::new(BTreeMap::new())),
             gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
             dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
             thumbwheel_sensitivity: Arc::new(AtomicI32::new(
@@ -122,6 +126,11 @@ impl Orchestrator {
             &self.shared.hook_bindings,
             bindings_for(&self.config, key, self.current_app.as_deref()),
             "hook_bindings",
+        );
+        write_value(
+            &self.shared.hook_gestures,
+            oshook_gestures_for(&self.config, key),
+            "hook_gestures",
         );
         write_value(
             &self.shared.gesture_bindings,

@@ -44,6 +44,15 @@ pub enum MouseEvent {
         /// Positive = down, negative = up.
         delta_y: f32,
     },
+    /// Pointer movement, in device units. Emitted so a held gesture button can
+    /// accumulate a swipe; the callback passes these through (the cursor keeps
+    /// moving) and only reads them while a gesture button is down.
+    Moved {
+        /// Positive = right, negative = left.
+        delta_x: i32,
+        /// Positive = down, negative = up.
+        delta_y: i32,
+    },
 }
 
 /// What the hook callback wants the OS to do with the captured event.
