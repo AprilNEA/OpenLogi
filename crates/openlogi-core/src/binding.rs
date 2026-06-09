@@ -138,6 +138,11 @@ pub const GESTURE_SWIPE_THRESHOLD: i32 = 50;
 /// Maximum cross-axis travel allowed at the threshold, so only a reasonably
 /// straight swipe commits. Grows with the dominant axis (`max(deadzone, 35%)`).
 pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
+/// Minimum time a gesture button must be held before its travel can commit to a
+/// swipe. Distinguishes a deliberate hold-and-swipe from a quick click whose
+/// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
+/// pad and the OS-hook Middle/Back/Forward).
+pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::from_millis(160);
 
 /// Classify the *running* raw-XY travel of a held gesture button into a
 /// directional swipe, the instant it commits — or `None` while it's still too
@@ -987,11 +992,20 @@ const VK_Z: u16 = 0x06;
 #[cfg(target_os = "macos")]
 const VK_TAB: u16 = 0x30;
 
+/// Stamped into the `EVENT_SOURCE_USER_DATA` field of every mouse event
+/// [`Action::execute`] synthesizes on macOS, so OpenLogi's own `CGEventTap` can
+/// recognize and skip its own injections. Without it, a gesture/button action
+/// that posts a mouse button (e.g. a remapped `MiddleClick`) would re-enter the
+/// hook — and for a gesture button, be misread as a fresh hold, looping. The
+/// value is arbitrary but distinctive ("OLGI"); real events carry `0` here.
+pub const SYNTHETIC_EVENT_USER_DATA: i64 = 0x4F4C_4749;
+
 /// Platform helpers for synthesising OS-level input events on macOS.
 #[cfg(target_os = "macos")]
 mod macos {
     use core_graphics::event::{
-        CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, ScrollEventUnit,
+        CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
+        ScrollEventUnit,
     };
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     use core_graphics::geometry::CGPoint;
@@ -1020,6 +1034,13 @@ mod macos {
         };
         for (kind, phase) in [(down, "down"), (up, "up")] {
             if let Ok(ev) = CGEvent::new_mouse_event(src.clone(), kind, location, button) {
+                // Mark it ours so our own CGEventTap skips it instead of treating
+                // a remapped click (e.g. a gesture button's `MiddleClick`) as a
+                // fresh button event and re-entering the hook.
+                ev.set_integer_value_field(
+                    EventField::EVENT_SOURCE_USER_DATA,
+                    super::SYNTHETIC_EVENT_USER_DATA,
+                );
                 ev.post(CGEventTapLocation::HID);
             } else {
                 tracing::warn!(phase, "CGEvent::new_mouse_event failed");

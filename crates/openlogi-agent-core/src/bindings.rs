@@ -54,6 +54,15 @@ pub fn gesture_bindings_for(
     config: &Config,
     config_key: Option<&str>,
 ) -> BTreeMap<GestureDirection, Action> {
+    // The thumb pad (HID++ 0x00c3) only gestures while it is the device's gesture
+    // owner. When the user moves the role to an OS-hook button (Middle/Back/
+    // Forward) or turns gestures off, return an empty map so the gesture watcher
+    // dispatches nothing — otherwise the always-seeded defaults would keep the
+    // thumb pad firing regardless of the selection.
+    let owner = config_key.and_then(|key| config.gesture_owner(key));
+    if owner != Some(ButtonId::GestureButton) {
+        return BTreeMap::new();
+    }
     let stored = config_key
         .map(|key| config.gesture_bindings_for(key))
         .unwrap_or_default();
@@ -167,5 +176,25 @@ mod tests {
         );
         assert!(!oshook.contains_key(&ButtonId::MiddleClick));
         assert!(!oshook.contains_key(&ButtonId::GestureButton));
+    }
+
+    #[test]
+    fn gesture_bindings_silent_when_thumb_pad_is_not_the_owner() {
+        let mut cfg = Config::default();
+        // Default device: the thumb pad owns gestures, so its defaults are seeded.
+        let defaults = gesture_bindings_for(&cfg, Some("2b042"));
+        assert_eq!(
+            defaults.get(&GestureDirection::Up),
+            Some(&default_gesture_binding(GestureDirection::Up)),
+            "the default gesture owner is the thumb pad"
+        );
+
+        // Move the gesture role to an OS-hook button: the thumb pad goes silent,
+        // so the watcher dispatches nothing for 0x00c3.
+        cfg.set_gesture_owner("2b042", ButtonId::Back);
+        assert!(
+            gesture_bindings_for(&cfg, Some("2b042")).is_empty(),
+            "thumb pad must dispatch nothing once another button owns gestures"
+        );
     }
 }

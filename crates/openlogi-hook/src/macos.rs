@@ -103,6 +103,14 @@ fn button_number_to_id(n: i64) -> Option<ButtonId> {
 /// Convert a `CGEvent` to our [`MouseEvent`] vocabulary. Returns `None`
 /// for event types we don't translate (e.g. move events, unknown buttons).
 fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
+    // Skip events OpenLogi itself synthesised ([`Action::execute`] stamps them),
+    // so a remapped click we posted doesn't re-enter the hook as real input and,
+    // for a gesture button, get misread as a fresh hold.
+    if event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
+        == openlogi_core::binding::SYNTHETIC_EVENT_USER_DATA
+    {
+        return None;
+    }
     match etype {
         CGEventType::LeftMouseDown => Some(MouseEvent::Button {
             id: ButtonId::LeftClick,
@@ -139,6 +147,24 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             Some(MouseEvent::Scroll {
                 delta_x: dx as f32,
                 delta_y: dy as f32,
+            })
+        }
+        // Pointer movement feeds gesture-button swipe detection. While a button
+        // is physically held the OS reports *Dragged rather than MouseMoved, so
+        // a gesture button's hold-and-swipe arrives here as OtherMouseDragged.
+        CGEventType::MouseMoved
+        | CGEventType::LeftMouseDragged
+        | CGEventType::RightMouseDragged
+        | CGEventType::OtherMouseDragged => {
+            let dx = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X);
+            let dy = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y);
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "per-event pointer deltas are small integers, far within i32"
+            )]
+            Some(MouseEvent::Moved {
+                delta_x: dx as i32,
+                delta_y: dy as i32,
             })
         }
         CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
@@ -201,6 +227,14 @@ fn thread_main(
         CGEventType::OtherMouseDown,
         CGEventType::OtherMouseUp,
         CGEventType::ScrollWheel,
+        // Pointer movement, for gesture-button hold+swipe. A held button makes
+        // the OS emit *Dragged rather than MouseMoved, so all four are needed.
+        // The callback stays lock-light (see `hook_runtime`) so this high-rate
+        // stream can't stall the tap.
+        CGEventType::MouseMoved,
+        CGEventType::LeftMouseDragged,
+        CGEventType::RightMouseDragged,
+        CGEventType::OtherMouseDragged,
     ];
 
     let tap_result = CGEventTap::new(
