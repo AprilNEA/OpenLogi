@@ -91,10 +91,10 @@ fi
 SYSTEMD_UNIT_DIR=/usr/lib/systemd/user
 if [ -d "$SYSTEMD_UNIT_DIR" ] || command -v systemctl > /dev/null 2>&1; then
     echo "Installing systemd user unit …"
-    # Rewrite ExecStart to match the actual install prefix. Escape the
-    # replacement string so sed metacharacters (& \ |) in the path are literal.
-    ESCAPED_EXEC="$(printf '%s\n' "${BINDIR}/openlogi-agent" | sed 's|[&\\|]|\\&|g')"
-    sed "s|ExecStart=.*|ExecStart=${ESCAPED_EXEC}|" \
+    # Expand the @BINDIR@ placeholder to match the actual install prefix.
+    # Escape the replacement so sed metacharacters (& \ |) in the path are literal.
+    ESCAPED_BINDIR="$(printf '%s\n' "${BINDIR}" | sed 's|[&\\|]|\\&|g')"
+    sed "s|@BINDIR@|${ESCAPED_BINDIR}|g" \
         "${SCRIPT_DIR}/systemd/openlogi-agent.service" \
         | sudo tee "${SYSTEMD_UNIT_DIR}/openlogi-agent.service" > /dev/null
     # Best-effort daemon-reload for the invoking user so a reinstall picks up

@@ -1,8 +1,10 @@
 # OpenLogi background agent — packaged user unit.
 #
-# This file is installed to /usr/lib/systemd/user/ by the package manager (or
-# install.sh). It is the system-provided template; the agent's launch_at_login
-# setting writes its own copy to $XDG_CONFIG_HOME/systemd/user/ — both coexist,
+# This file is a template — @BINDIR@ is substituted at install time:
+#   - nfpm (.deb/.rpm): postinstall.sh expands it to /usr/bin
+#   - install.sh: expanded to PREFIX/bin (default /usr/local/bin)
+# The agent's launch_at_login setting writes its own copy to
+# $XDG_CONFIG_HOME/systemd/user/ using the current binary path — both coexist,
 # enabling either works.
 #
 # Enable for the current user:
@@ -14,7 +16,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/openlogi-agent
+ExecStart=@BINDIR@/openlogi-agent
 Restart=on-failure
 RestartSec=5
 
