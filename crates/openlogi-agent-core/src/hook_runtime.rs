@@ -8,7 +8,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, SwipeAccumulator};
+use openlogi_core::binding::{
+    Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
+};
 use openlogi_hid::CaptureChannel;
 use openlogi_hook::{EventDisposition, Hook, MouseEvent};
 use tracing::{info, warn};
@@ -118,17 +120,28 @@ pub fn start(
                     lock_hold(&hold).begin(id);
                     return EventDisposition::Suppress;
                 }
-            } else if let Some(was_click) = lock_hold(&hold).end(id) {
-                if was_click
-                    && let Some(action) = hook_gestures.read().ok().and_then(|g| {
-                        g.get(&id)
-                            .and_then(|m| m.get(&GestureDirection::Click).cloned())
-                    })
-                {
-                    info!(button = %id, action = %action.label(), "gesture click → executing bound action");
-                    dispatch_action(&action, &dpi_cycle, &capture);
+            } else {
+                // Release: end the hold and drop the `hold` guard *before* any
+                // dispatch — the callback must stay lock-light, since a
+                // synthesized event could otherwise re-enter the tap and re-lock
+                // the non-reentrant `hold` mutex (self-deadlock, freeze hazard).
+                let ended = lock_hold(&hold).end(id);
+                if let Some(was_click) = ended {
+                    if was_click {
+                        // No swipe committed → fire the plain click. Resolve to an
+                        // owned action (so no lock is held across dispatch), then
+                        // dispatch with the guard already dropped.
+                        let action = hook_gestures
+                            .read()
+                            .ok()
+                            .map(|g| resolve_gesture_click(&g, id));
+                        if let Some(action) = action {
+                            info!(button = %id, action = %action.label(), "gesture click → executing bound action");
+                            dispatch_action(&action, &dpi_cycle, &capture);
+                        }
+                    }
+                    return EventDisposition::Suppress;
                 }
-                return EventDisposition::Suppress;
             }
 
             // Single-action button.
@@ -157,14 +170,17 @@ pub fn start(
             // not consumed (the B2 cursor-drift tradeoff vs. a HID++ raw-XY divert
             // that would freeze the pointer).
             let commit = lock_hold(&hold).accumulate(delta_x, delta_y);
-            if let Some((button, dir)) = commit
-                && let Some(action) = hook_gestures
+            if let Some((button, dir)) = commit {
+                // Resolve to an owned action and drop the read guard before
+                // dispatch (same lock-light rule as the release arm).
+                let action = hook_gestures
                     .read()
                     .ok()
-                    .and_then(|g| g.get(&button).and_then(|m| m.get(&dir).cloned()))
-            {
-                info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
-                dispatch_action(&action, &dpi_cycle, &capture);
+                    .and_then(|g| g.get(&button).and_then(|m| m.get(&dir).cloned()));
+                if let Some(action) = action {
+                    info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
+                    dispatch_action(&action, &dpi_cycle, &capture);
+                }
             }
             EventDisposition::PassThrough
         }
@@ -181,6 +197,22 @@ pub fn start(
             None
         }
     }
+}
+
+/// The action a gesture button's plain (no-swipe) click should fire: its
+/// explicit [`GestureDirection::Click`] entry — honoring an explicit
+/// [`Action::None`] ("Do Nothing") — or the button's [`default_binding`] when
+/// the gesture map has no `Click` key (a sparse / hand-edited map, or the button
+/// left the gesture set mid-hold). The fallback guarantees a gesture button's
+/// suppressed press is never swallowed into nothing.
+fn resolve_gesture_click(
+    gestures: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    id: ButtonId,
+) -> Action {
+    gestures
+        .get(&id)
+        .and_then(|m| m.get(&GestureDirection::Click).cloned())
+        .unwrap_or_else(|| default_binding(id))
 }
 
 /// Whether `action` is just `id`'s own native click — i.e. the button is mapped
@@ -281,5 +313,48 @@ mod tests {
         assert_eq!(hold.end(ButtonId::Forward), None);
         // ...and ending the held button with no swipe is a plain click.
         assert_eq!(hold.end(ButtonId::Back), Some(true));
+    }
+
+    #[test]
+    fn resolve_gesture_click_prefers_explicit_then_falls_back_to_default() {
+        // Explicit Click action wins.
+        let gestures = BTreeMap::from([(
+            ButtonId::Back,
+            BTreeMap::from([(GestureDirection::Click, Action::Copy)]),
+        )]);
+        assert_eq!(
+            resolve_gesture_click(&gestures, ButtonId::Back),
+            Action::Copy
+        );
+
+        // Explicit `Click = None` ("Do Nothing") is respected, NOT overridden by
+        // the default — the button intentionally does nothing on a plain click.
+        let off = BTreeMap::from([(
+            ButtonId::Back,
+            BTreeMap::from([(GestureDirection::Click, Action::None)]),
+        )]);
+        assert_eq!(resolve_gesture_click(&off, ButtonId::Back), Action::None);
+    }
+
+    #[test]
+    fn resolve_gesture_click_falls_back_when_click_is_absent() {
+        // A gesture map with no Click key (sparse/hand-edited) falls back to the
+        // button's default, so the suppressed press is never swallowed.
+        let no_click = BTreeMap::from([(
+            ButtonId::Back,
+            BTreeMap::from([(GestureDirection::Up, Action::Copy)]),
+        )]);
+        assert_eq!(
+            resolve_gesture_click(&no_click, ButtonId::Back),
+            default_binding(ButtonId::Back)
+        );
+
+        // The button missing from the map entirely (e.g. removed by a config
+        // reload mid-hold) also falls back to its default rather than nothing.
+        let empty = BTreeMap::new();
+        assert_eq!(
+            resolve_gesture_click(&empty, ButtonId::Forward),
+            default_binding(ButtonId::Forward)
+        );
     }
 }
