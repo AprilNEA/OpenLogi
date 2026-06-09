@@ -142,7 +142,8 @@ async fn manage(
     capture_idle: Arc<AtomicBool>,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
-    let mut current: Option<(DeviceRoute, bool)> = None;
+    // (route, capture_thumbwheel, divert_gesture_button)
+    let mut current: Option<(DeviceRoute, bool, bool)> = None;
     let mut stop: Option<oneshot::Sender<()>> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut accumulators = WheelAccumulators::default();
@@ -169,7 +170,19 @@ async fn manage(
                 } else {
                     let target = dpi_cycle.read().ok().and_then(|guard| guard.target.clone());
                     let sensitivity = thumbwheel_sensitivity.load(Ordering::Relaxed);
-                    target.map(|t| (t, thumbwheel_armed(&button_bindings, sensitivity)))
+                    // Divert the thumb pad only while it owns the gesture role. The
+                    // shared gesture map is non-empty exactly then (gesture_bindings_for
+                    // gates on the owner), so it doubles as that signal — no need to
+                    // thread the full config in. Re-evaluated each tick, so a
+                    // ReloadConfig owner change restarts the session accordingly.
+                    let divert_gesture = gesture_bindings.read().is_ok_and(|g| !g.is_empty());
+                    target.map(|t| {
+                        (
+                            t,
+                            thumbwheel_armed(&button_bindings, sensitivity),
+                            divert_gesture,
+                        )
+                    })
                 };
                 if want == current {
                     continue;
@@ -182,13 +195,20 @@ async fn manage(
                 }
                 current.clone_from(&want);
                 capture_idle.store(want.is_none(), Ordering::Relaxed);
-                if let Some((route, capture_thumbwheel)) = want {
+                if let Some((route, capture_thumbwheel, divert_gesture_button)) = want {
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
                     let slot = Arc::clone(&capture_channel);
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            run_capture_session(route, capture_thumbwheel, sink, stop_rx, slot).await
+                        if let Err(e) = run_capture_session(
+                            route,
+                            capture_thumbwheel,
+                            divert_gesture_button,
+                            sink,
+                            stop_rx,
+                            slot,
+                        )
+                        .await
                         {
                             debug!(error = %e, "capture session ended");
                         }

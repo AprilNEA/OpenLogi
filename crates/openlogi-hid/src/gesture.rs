@@ -81,6 +81,12 @@ struct CaptureAccum {
 /// `capture_thumbwheel`) the thumb wheel on `route` until `shutdown` resolves,
 /// forwarding each event to `sink`.
 ///
+/// The gesture button (raw-XY) is diverted only when `divert_gesture_button` —
+/// i.e. it is the device's gesture owner. When the user moves the gesture role
+/// to an OS-hook button or turns gestures off, the thumb pad is left undiverted
+/// so it keeps its native behavior instead of being captured-and-swallowed. The
+/// DPI/ModeShift capture and the channel-reuse slot are independent of this.
+///
 /// Opens and holds one HID++ channel, diverts whichever of those controls the
 /// device exposes, and listens. Returns once `shutdown` fires (or its sender is
 /// dropped), after restoring every diverted control. Setup errors are returned;
@@ -88,6 +94,7 @@ struct CaptureAccum {
 pub async fn run_capture_session(
     route: DeviceRoute,
     capture_thumbwheel: bool,
+    divert_gesture_button: bool,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
@@ -96,7 +103,13 @@ pub async fn run_capture_session(
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
     let device_index = route.device_index();
-    let armed = arm_controls(&chan, device_index, capture_thumbwheel).await?;
+    let armed = arm_controls(
+        &chan,
+        device_index,
+        capture_thumbwheel,
+        divert_gesture_button,
+    )
+    .await?;
 
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
@@ -199,6 +212,7 @@ async fn arm_controls(
     chan: &Arc<HidppChannel>,
     slot: u8,
     capture_thumbwheel: bool,
+    divert_gesture_button: bool,
 ) -> Result<ArmedControls, GestureError> {
     let device = Device::new(Arc::clone(chan), slot)
         .await
@@ -216,9 +230,12 @@ async fn arm_controls(
         let rc = ReprogControlsV4::new(Arc::clone(chan), slot, info.index);
         let controls = enumerate_controls(&rc).await?;
 
-        if controls
-            .iter()
-            .any(|c| c.cid == reprog_controls::GESTURE_BUTTON_CID && c.supports_raw_xy())
+        // Only divert the gesture button when it owns the gesture role; otherwise
+        // leave it native (a non-owner thumb pad must not be captured-and-dropped).
+        if divert_gesture_button
+            && controls
+                .iter()
+                .any(|c| c.cid == reprog_controls::GESTURE_BUTTON_CID && c.supports_raw_xy())
         {
             rc.set_cid_reporting(reprog_controls::GESTURE_BUTTON_CID, true, true)
                 .await
