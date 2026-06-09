@@ -16,7 +16,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::binding::{Action, Binding, ButtonId, GestureDirection, default_binding_for};
+use crate::binding::{
+    Action, Binding, ButtonId, GestureDirection, default_binding, default_binding_for,
+};
 use crate::paths::{self, PathsError};
 
 /// The schema version the current build produces. Bumped on breaking layout
@@ -467,6 +469,86 @@ impl Config {
         }
     }
 
+    /// The device's gesture button — the single [`ButtonId`] whose binding is a
+    /// [`Binding::Gesture`]. At most one per device (the v1 one-gesture-button
+    /// lock). If a hand-edited config carries several, [`ButtonId::GestureButton`]
+    /// wins: it is the HID++ raw-XY owner, the only button that consumes the
+    /// per-device raw-XY stream. Otherwise the lowest-ordered gesture button.
+    #[must_use]
+    pub fn gesture_owner(&self, device_key: &str) -> Option<ButtonId> {
+        let bindings = &self.devices.get(device_key)?.bindings;
+        if matches!(
+            bindings.get(&ButtonId::GestureButton),
+            Some(Binding::Gesture(_))
+        ) {
+            return Some(ButtonId::GestureButton);
+        }
+        bindings
+            .iter()
+            .find(|(_, binding)| binding.is_gesture())
+            .map(|(id, _)| *id)
+    }
+
+    /// Make `button` the device's sole gesture button, enforcing the
+    /// one-gesture-button-per-device lock: every *other* button currently in
+    /// gesture mode is demoted to a [`Binding::Single`] of its click action.
+    /// `button` is upgraded to a gesture binding if it isn't already, non-
+    /// destructively — a prior [`Binding::Single`] is kept as the
+    /// [`GestureDirection::Click`] entry with the swipe arms left unbound, and a
+    /// fresh button is seeded from [`default_binding_for`] (so the dedicated
+    /// gesture button gets its full default direction map).
+    ///
+    /// Returns the demoted buttons so the GUI can explain the swap — normally
+    /// zero or one, more only from a hand-edited config.
+    pub fn set_gesture_owner(&mut self, device_key: &str, button: ButtonId) -> Vec<ButtonId> {
+        let demoted: Vec<ButtonId> = self
+            .devices
+            .get(device_key)
+            .map(|device| {
+                device
+                    .bindings
+                    .iter()
+                    .filter(|(id, binding)| **id != button && binding.is_gesture())
+                    .map(|(id, _)| *id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for &other in &demoted {
+            self.demote_gesture_to_single(device_key, other);
+        }
+        let entry = self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .bindings
+            .entry(button)
+            .or_insert_with(|| default_binding_for(button));
+        if let Binding::Single(prev) = entry {
+            let mut map = BTreeMap::new();
+            map.insert(GestureDirection::Click, prev.clone());
+            *entry = Binding::Gesture(map);
+        }
+        demoted
+    }
+
+    /// Demote `button` from a gesture binding back to a [`Binding::Single`],
+    /// keeping its explicit [`GestureDirection::Click`] action (or the button's
+    /// [`default_binding`] when the gesture map had no click). A no-op when
+    /// `button` is not currently a gesture binding.
+    pub fn demote_gesture_to_single(&mut self, device_key: &str, button: ButtonId) {
+        let Some(device) = self.devices.get_mut(device_key) else {
+            return;
+        };
+        let click = match device.bindings.get(&button) {
+            Some(Binding::Gesture(map)) => map
+                .get(&GestureDirection::Click)
+                .cloned()
+                .unwrap_or_else(|| default_binding(button)),
+            _ => return,
+        };
+        device.bindings.insert(button, Binding::Single(click));
+    }
+
     /// Resolve the effective binding map for `device_key`, overlaying the
     /// per-app entry for `bundle_id` (if any) on top of the global per-device
     /// `bindings`. A per-app override replaces the whole button with a
@@ -606,6 +688,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
+    use crate::binding::default_gesture_binding;
 
     fn write_and_read(config: &Config) -> Config {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1032,5 +1115,114 @@ Back = \"BrowserBack\"
             }
             other => panic!("expected Gesture, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn gesture_owner_reports_the_single_gesture_button() {
+        let mut cfg = Config::default();
+        // No gesture binding yet.
+        assert_eq!(cfg.gesture_owner("2b042"), None);
+
+        // One ordinary single + one gesture button.
+        cfg.set_binding("2b042", ButtonId::Back, Action::BrowserBack.into());
+        cfg.set_gesture_direction(
+            "2b042",
+            ButtonId::GestureButton,
+            GestureDirection::Up,
+            Action::MissionControl,
+        );
+        assert_eq!(cfg.gesture_owner("2b042"), Some(ButtonId::GestureButton));
+
+        // Defensive: a hand-edited config with two gesture buttons resolves to
+        // GestureButton (the raw-XY owner), not the other.
+        cfg.set_binding(
+            "2b042",
+            ButtonId::Forward,
+            Binding::Gesture(BTreeMap::from([(GestureDirection::Up, Action::Copy)])),
+        );
+        assert_eq!(cfg.gesture_owner("2b042"), Some(ButtonId::GestureButton));
+    }
+
+    #[test]
+    fn set_gesture_owner_enforces_single_gesture_lock() {
+        let mut cfg = Config::default();
+        // GestureButton starts as the gesture button (full default map).
+        cfg.set_gesture_owner("2b042", ButtonId::GestureButton);
+        cfg.set_binding("2b042", ButtonId::Back, Action::BrowserBack.into());
+
+        // Promote Back: the previous owner must be demoted, preserving its click.
+        let demoted = cfg.set_gesture_owner("2b042", ButtonId::Back);
+        assert_eq!(demoted, vec![ButtonId::GestureButton]);
+        assert_eq!(cfg.gesture_owner("2b042"), Some(ButtonId::Back));
+
+        let bindings = cfg.bindings_for("2b042");
+        // GestureButton fell back to a single of its prior click (AppExpose).
+        assert_eq!(
+            bindings.get(&ButtonId::GestureButton),
+            Some(&Binding::Single(default_gesture_binding(
+                GestureDirection::Click
+            )))
+        );
+        // Back became a gesture binding, keeping its single action as Click and
+        // leaving the swipe arms unbound.
+        match bindings.get(&ButtonId::Back) {
+            Some(Binding::Gesture(map)) => {
+                assert_eq!(
+                    map.get(&GestureDirection::Click),
+                    Some(&Action::BrowserBack)
+                );
+                assert_eq!(map.get(&GestureDirection::Up), None, "arms start unbound");
+            }
+            other => panic!("expected Back to be a gesture binding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_gesture_owner_seeds_dedicated_button_with_full_default() {
+        let mut cfg = Config::default();
+        assert!(
+            cfg.set_gesture_owner("2b042", ButtonId::GestureButton)
+                .is_empty()
+        );
+        match cfg.bindings_for("2b042").get(&ButtonId::GestureButton) {
+            Some(Binding::Gesture(map)) => {
+                // The dedicated gesture button gets its full default direction map.
+                for dir in GestureDirection::ALL {
+                    assert_eq!(map.get(&dir), Some(&default_gesture_binding(dir)));
+                }
+            }
+            other => panic!("expected full default gesture map, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demote_gesture_to_single_keeps_click_or_falls_back() {
+        let mut cfg = Config::default();
+        // Explicit Click is preserved.
+        cfg.set_binding(
+            "2b042",
+            ButtonId::Back,
+            Binding::Gesture(BTreeMap::from([
+                (GestureDirection::Click, Action::Paste),
+                (GestureDirection::Up, Action::Copy),
+            ])),
+        );
+        cfg.demote_gesture_to_single("2b042", ButtonId::Back);
+        assert_eq!(
+            cfg.bindings_for("2b042").get(&ButtonId::Back),
+            Some(&Binding::Single(Action::Paste))
+        );
+
+        // A click-less gesture falls back to the button's default single action.
+        cfg.set_binding(
+            "2b042",
+            ButtonId::Forward,
+            Binding::Gesture(BTreeMap::from([(GestureDirection::Up, Action::Copy)])),
+        );
+        cfg.demote_gesture_to_single("2b042", ButtonId::Forward);
+        assert_eq!(
+            cfg.bindings_for("2b042").get(&ButtonId::Forward),
+            Some(&Binding::Single(default_binding(ButtonId::Forward)))
+        );
     }
 }
