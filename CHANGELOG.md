@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.6](https://github.com/AprilNEA/OpenLogi/compare/openlogi-hidpp-v0.6.5...openlogi-hidpp-v0.6.6) - 2026-06-10
+
+### Fixed
+
+- *(hidpp)* bound device-controlled name lengths in Bolt parsing ([#200](https://github.com/AprilNEA/OpenLogi/pull/200))
+
 ## [0.6.5](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.4...openlogi-core-v0.6.5) - 2026-06-10
 
 ### Other
