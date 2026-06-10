@@ -11,6 +11,7 @@ use hidpp::{
     channel::HidppChannel,
     device::Device,
     feature::{
+        CreatableFeature,
         device_information::DeviceInformationFeature,
         device_type_and_name::{DeviceType as HidppDeviceType, DeviceTypeAndNameFeature},
         unified_battery::{
@@ -68,10 +69,11 @@ pub enum InventoryError {
 /// How many `enumerate` ticks a device's probe is reused before a fresh read.
 /// The expensive part of a probe (the `enumerate_features` feature-table walk)
 /// reads *immutable* data — model, capabilities, marketing type — so it never
-/// needs re-reading for a known device. Only the battery is volatile, and a
-/// coarse battery bucket tolerates being up to `REFRESH_TICKS` ticks stale; at
-/// the GUI's ~2s tick that is ~30s. New and cache-stale devices are still probed
-/// in full, so this only skips redundant work for steady-state devices.
+/// needs re-reading for a known device; the periodic full probe is kept only as
+/// a self-healing pass (e.g. a firmware update reshuffling the feature table).
+/// The volatile battery does NOT ride this window: cache hits re-read it every
+/// tick through the memoized feature index (see [`read_battery`]), so it stays
+/// as fresh as it was before the cache existed (#153).
 const REFRESH_TICKS: u64 = 15;
 
 /// Stable identity used to memoize a device's probe across `enumerate` ticks.
@@ -97,15 +99,22 @@ const CACHE_MISS_GRACE: u8 = 3;
 #[derive(Clone)]
 struct Cached {
     probe: ProbedFeatures,
+    /// Runtime index of the `UnifiedBattery` feature in this device's feature
+    /// table, captured by the full probe. Lets cache hits re-read the volatile
+    /// battery in one round-trip — no `Device::new` ping, no table walk.
+    /// `None` when the device exposes no `0x1004`.
+    battery_index: Option<u8>,
     probed_tick: u64,
 }
 
 /// What a probed device contributes to the cache this tick. The key lets stale
-/// entries be evicted; `Fresh` also carries the value to insert. `Unkeyed` is a
+/// entries be evicted; `Fresh` (a full probe) and `Update` (a cache hit whose
+/// volatile battery was re-read) also carry the value to insert. `Unkeyed` is a
 /// device we can't (or won't) cache — an all-zero unit id, or a rejected
 /// non-peripheral — so its key is neither inserted nor kept alive.
 enum CacheOutcome {
     Fresh(CacheKey, Cached),
+    Update(CacheKey, Cached),
     Seen(CacheKey),
     Unkeyed,
 }
@@ -134,7 +143,7 @@ async fn probe_or_reuse(
     tick: u64,
 ) -> (ProbedFeatures, CacheOutcome) {
     if online && cached.is_none_or(|c| is_stale(c, tick)) {
-        let fresh = probe_features(channel, index).await;
+        let (fresh, battery_index) = probe_features(channel, index).await;
         // `capabilities` is `Some` exactly when the feature-table walk succeeded;
         // only then is the probe worth caching.
         if fresh.capabilities.is_some() {
@@ -142,6 +151,7 @@ async fn probe_or_reuse(
                 Some(key) => {
                     let value = Cached {
                         probe: fresh.clone(),
+                        battery_index,
                         probed_tick: tick,
                     };
                     (fresh, CacheOutcome::Fresh(key, value))
@@ -151,13 +161,29 @@ async fn probe_or_reuse(
         }
         // Re-probe failed: don't cache the failure. Fall back to the last-known
         // data so a transient glitch doesn't drop the device or its battery.
+        // No battery re-read either — the device just proved unresponsive.
         return match cached {
             Some(c) => (c.probe.clone(), seen(id)),
             None => (fresh, seen(id)),
         };
     }
     match cached {
-        Some(c) => (c.probe.clone(), seen(id)),
+        Some(c) => {
+            // Cache hit: the immutable data is reused as-is, but the battery is
+            // volatile (#153) — re-read just it through the memoized feature
+            // index and fold the reading back into the cache. A failed read
+            // (asleep, mid-host-switch) keeps the last-known value.
+            if online
+                && let Some(feature_index) = c.battery_index
+                && let Some(key) = id.clone()
+                && let Some(battery) = read_battery(channel, index, feature_index).await
+            {
+                let mut entry = c.clone();
+                entry.probe.battery = Some(battery);
+                return (entry.probe.clone(), CacheOutcome::Update(key, entry));
+            }
+            (c.probe.clone(), seen(id))
+        }
         None => (ProbedFeatures::default(), seen(id)),
     }
 }
@@ -236,7 +262,7 @@ impl Enumerator {
         let mut seen_keys = HashSet::new();
         for outcome in outcomes {
             match outcome {
-                CacheOutcome::Fresh(key, cached) => {
+                CacheOutcome::Fresh(key, cached) | CacheOutcome::Update(key, cached) => {
                     seen_keys.insert(key.clone());
                     self.cache.insert(key, cached);
                 }
@@ -532,6 +558,39 @@ struct ProbedFeatures {
     capabilities: Option<Capabilities>,
 }
 
+/// Read just the battery by addressing the `UnifiedBattery` feature at its
+/// known runtime `feature_index` — one round-trip, with no `Device::new` ping
+/// and no feature-table walk. This is both the full probe's battery read (the
+/// walk just produced the index) and the cheap per-tick refresh for cache hits.
+/// `None` when the device doesn't answer (asleep, switched hosts).
+async fn read_battery(
+    channel: &Arc<HidppChannel>,
+    slot: u8,
+    feature_index: u8,
+) -> Option<BatteryInfo> {
+    let feature = UnifiedBatteryFeature::new(Arc::clone(channel), slot, feature_index);
+    feature
+        .get_battery_info()
+        .await
+        .ok()
+        .map(|info| BatteryInfo {
+            percentage: info.charging_percentage,
+            level: map_battery_level(info.level),
+            status: map_battery_status(info.status),
+        })
+}
+
+/// Runtime index of the `UnifiedBattery` feature in an enumerated feature-ID
+/// table, for [`read_battery`]. The table is 1-based (index 0 is the implicit
+/// root feature, which enumeration omits).
+fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Option<u8> {
+    ids.into_iter()
+        .position(|id| id == UnifiedBatteryFeature::ID)
+        // A feature table holds at most `u8::MAX` entries (its count is a u8),
+        // so the 1-based index always fits.
+        .and_then(|pos| u8::try_from(pos + 1).ok())
+}
+
 /// Open a HID++ session for `slot` and read everything we care about (battery,
 /// device-information, `0x0005` device type, and the feature table that drives
 /// [`Capabilities`]) in one shot. Device sessions are expensive (multi-round-
@@ -539,39 +598,36 @@ struct ProbedFeatures {
 /// `enumerate_features` — the feature table is the Vec that enumeration already
 /// returns, so capabilities cost no extra round-trip.
 ///
+/// Also returns the `UnifiedBattery` runtime index found by the walk, so later
+/// ticks can refresh the battery without repeating it.
+///
 /// Only online, responsive devices reach here.
-async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> ProbedFeatures {
+async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> (ProbedFeatures, Option<u8>) {
     let mut device = match Device::new(Arc::clone(channel), slot).await {
         Ok(d) => d,
         Err(e) => {
             debug!(slot, error = ?e, "Device::new failed");
-            return ProbedFeatures::default();
+            return (ProbedFeatures::default(), None);
         }
     };
     // The enumeration response IS the device's feature-ID table — capture it
     // for capability derivation instead of discarding it.
+    let mut battery_index = None;
     let capabilities = match device.enumerate_features().await {
         Ok(Some(features)) => {
             let ids: Vec<u16> = features.iter().map(|f| f.id).collect();
+            battery_index = battery_feature_index(ids.iter().copied());
             Some(Capabilities::from_feature_ids(&ids))
         }
         Ok(None) => None,
         Err(e) => {
             debug!(slot, error = ?e, "enumerate_features failed");
-            return ProbedFeatures::default();
+            return (ProbedFeatures::default(), None);
         }
     };
 
-    let battery = match device.get_feature::<UnifiedBatteryFeature>() {
-        Some(feature) => feature
-            .get_battery_info()
-            .await
-            .ok()
-            .map(|info| BatteryInfo {
-                percentage: info.charging_percentage,
-                level: map_battery_level(info.level),
-                status: map_battery_status(info.status),
-            }),
+    let battery = match battery_index {
+        Some(feature_index) => read_battery(channel, slot, feature_index).await,
         None => None,
     };
 
@@ -626,12 +682,15 @@ async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> ProbedFeatures
         None => None,
     };
 
-    ProbedFeatures {
-        battery,
-        model_info,
-        kind,
-        capabilities,
-    }
+    (
+        ProbedFeatures {
+            battery,
+            model_info,
+            kind,
+            capabilities,
+        },
+        battery_index,
+    )
 }
 
 fn normalize_serial_number(serial: &str) -> Option<String> {
@@ -718,12 +777,14 @@ mod tests {
 
     use super::{
         CACHE_MISS_GRACE, CacheKey, Cached, DeviceKind, Enumerator, ProbedFeatures, REFRESH_TICKS,
-        is_stale, resolve_device_kind,
+        UnifiedBatteryFeature, battery_feature_index, is_stale, resolve_device_kind,
     };
+    use hidpp::feature::CreatableFeature as _;
 
     fn cache_entry(probed_tick: u64) -> Cached {
         Cached {
             probe: ProbedFeatures::default(),
+            battery_index: None,
             probed_tick,
         }
     }
@@ -774,6 +835,7 @@ mod tests {
     fn cached_probe_is_reused_until_refresh_ticks() {
         let cached = Cached {
             probe: ProbedFeatures::default(),
+            battery_index: None,
             probed_tick: 10,
         };
         assert!(!is_stale(&cached, 10), "same tick is fresh");
@@ -785,6 +847,25 @@ mod tests {
             is_stale(&cached, 10 + REFRESH_TICKS),
             "at the window the probe is refreshed"
         );
+    }
+
+    #[test]
+    fn battery_index_is_one_based_in_the_enumerated_table() {
+        // `enumerate_features` omits the root feature (index 0), so the first
+        // enumerated entry sits at runtime index 1.
+        let table = [0x0001, UnifiedBatteryFeature::ID, 0x2201];
+        assert_eq!(battery_feature_index(table), Some(2));
+        assert_eq!(
+            battery_feature_index([UnifiedBatteryFeature::ID]),
+            Some(1),
+            "first entry maps to index 1, not 0"
+        );
+    }
+
+    #[test]
+    fn no_battery_feature_means_no_index() {
+        assert_eq!(battery_feature_index([0x0001, 0x2201, 0x1b04]), None);
+        assert_eq!(battery_feature_index([]), None);
     }
 
     #[test]
