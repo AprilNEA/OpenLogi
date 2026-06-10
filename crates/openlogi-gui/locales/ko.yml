@@ -108,6 +108,8 @@ _version: 1
 "Unbound": "할당되지 않음"
 "Default": "기본값"
 "5 directions": "5방향"
+"Thumb pad": "엄지 패드"
+"Middle": "가운데 버튼"
 "DPI Preset %{index}": "DPI 프리셋 %{index}"
 "Gesture %{name}": "제스처 %{name}"
 "Left Click": "왼쪽 클릭"

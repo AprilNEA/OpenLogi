@@ -108,6 +108,8 @@ _version: 1
 "Unbound": "Ikke tildelt"
 "Default": "Standard"
 "5 directions": "5 retninger"
+"Thumb pad": "Tommelfelt"
+"Middle": "Midterknap"
 "DPI Preset %{index}": "DPI-forindstilling %{index}"
 "Gesture %{name}": "Bevægelse %{name}"
 "Left Click": "Venstreklik"

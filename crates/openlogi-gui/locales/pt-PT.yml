@@ -108,6 +108,8 @@ _version: 1
 "Unbound": "Não atribuído"
 "Default": "Predefinição"
 "5 directions": "5 direções"
+"Thumb pad": "Apoio do polegar"
+"Middle": "Central"
 "DPI Preset %{index}": "Predefinição de DPI %{index}"
 "Gesture %{name}": "Gesto %{name}"
 "Left Click": "Clique esquerdo"

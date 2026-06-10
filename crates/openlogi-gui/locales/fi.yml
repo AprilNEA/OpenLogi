@@ -108,6 +108,8 @@ _version: 1
 "Unbound": "Ei määritetty"
 "Default": "Oletus"
 "5 directions": "5 suuntaa"
+"Thumb pad": "Peukaloalusta"
+"Middle": "Keskipainike"
 "DPI Preset %{index}": "DPI-esiasetus %{index}"
 "Gesture %{name}": "Ele %{name}"
 "Left Click": "Vasen napsautus"

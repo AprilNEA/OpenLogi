@@ -108,6 +108,8 @@ _version: 1
 "Unbound": "Niet toegewezen"
 "Default": "Standaard"
 "5 directions": "5 richtingen"
+"Thumb pad": "Duimsteun"
+"Middle": "Middenknop"
 "DPI Preset %{index}": "DPI-voorinstelling %{index}"
 "Gesture %{name}": "Gebaar %{name}"
 "Left Click": "Linkerklik"
