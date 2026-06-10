@@ -747,6 +747,16 @@ mod tests {
     }
 
     #[test]
+    fn discovery_name_rejects_invalid_utf8() {
+        let mut payload = [0u8; 17];
+        payload[3] = 2;
+        payload[4] = 0xff;
+        payload[5] = 0xfe;
+
+        assert_eq!(parse_discovery_name(&payload), None);
+    }
+
+    #[test]
     fn codename_with_oversized_length_clamps_to_available_chunk() {
         let mut response = [0u8; 16];
         response[2] = 200;
