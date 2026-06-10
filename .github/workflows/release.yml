@@ -162,6 +162,11 @@ jobs:
   windows:
     name: Windows CLI (x86_64)
     runs-on: windows-2025
+    # A hung signing/login call must become a normal failure (which publish
+    # tolerates), not a 6-hour stall: publish waits for this job to reach a
+    # terminal state before its own gate is even evaluated. Healthy runs take
+    # ~8 minutes (v0.6.4 measured ~4.6 min up to the signing step).
+    timeout-minutes: 30
     permissions:
       # Mint an OIDC token so azure/login can exchange it for an Azure access token
       # via a federated credential — no client secret is stored in GitHub.
@@ -176,7 +181,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      # No rust-cache here: this workflow runs only on tag refs, whose saved
+      # caches no future tag can restore (and no default-branch job produces a
+      # matching key), so the save was pure overhead churning the cache quota.
 
       # Azure signing config lives in 1Password, matching the macOS job's secret flow.
       # load-secrets-action is a node action, so it runs on Windows runners too. The
@@ -195,6 +202,28 @@ jobs:
           AZURE_SIGNING_ENDPOINT: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_SIGNING_ENDPOINT
           AZURE_SIGNING_ACCOUNT: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_SIGNING_ACCOUNT
           AZURE_CERT_PROFILE: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_CERT_PROFILE
+
+      # load-secrets-action silently skips values that aren't op:// references
+      # (e.g. when OP_AZURE_SECRET_ITEM is unset) and emits empty outputs for
+      # empty fields — without this gate the job only fails minutes later, in
+      # azure/login, with an error that never names the real cause.
+      - name: Validate Azure signing config
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ steps.azure_config.outputs.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ steps.azure_config.outputs.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ steps.azure_config.outputs.AZURE_SUBSCRIPTION_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERT_PROFILE: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
+        run: |
+          set -euo pipefail
+          : "${AZURE_CLIENT_ID:?Configure AZURE_CLIENT_ID in the Azure 1Password item}"
+          : "${AZURE_TENANT_ID:?Configure AZURE_TENANT_ID in the Azure 1Password item}"
+          : "${AZURE_SUBSCRIPTION_ID:?Configure AZURE_SUBSCRIPTION_ID in the Azure 1Password item}"
+          : "${AZURE_SIGNING_ENDPOINT:?Configure AZURE_SIGNING_ENDPOINT in the Azure 1Password item}"
+          : "${AZURE_SIGNING_ACCOUNT:?Configure AZURE_SIGNING_ACCOUNT in the Azure 1Password item}"
+          : "${AZURE_CERT_PROFILE:?Configure AZURE_CERT_PROFILE in the Azure 1Password item}"
 
       # Only the `openlogi` CLI compiles on Windows from master today — the agent and
       # GUI are excluded from the Windows build (see ci.yml's `clippy (windows)`), so
@@ -222,10 +251,13 @@ jobs:
           signing-account-name: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
           files: ${{ github.workspace }}\target\release\openlogi.exe
-          file-digest: SHA256
-          # Timestamping is mandatory: without it the signature expires after 3 days.
+          # Timestamping is mandatory: without it the signature expires after
+          # 3 days. https beats the action's http default; the file/timestamp
+          # digests stay on the action's SHA256 defaults.
           timestamp-rfc3161: https://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
+          # Tag-only workflow: the action's four dependency caches save to
+          # per-tag refs no future run can restore, so skip them.
+          cache-dependencies: false
 
       - name: Verify the binary is signed
         shell: pwsh
@@ -233,10 +265,13 @@ jobs:
           $sig = Get-AuthenticodeSignature target\release\openlogi.exe
           $sig | Format-List
           # The signing step above already fails on error; this guards against it
-          # silently producing an unsigned binary. Status is logged but not gated on,
-          # since chain validity depends on the runner's trust store.
-          if ($null -eq $sig.SignerCertificate) {
-            Write-Error "openlogi.exe has no Authenticode signature"
+          # silently producing an unsigned or corrupted binary. NotSigned and
+          # HashMismatch (bytes no longer match the signature) are trust-store
+          # independent and always ship-blockers; NotTrusted/UnknownError depend
+          # on the runner's trust store, so they stay log-only.
+          if ($null -eq $sig.SignerCertificate -or
+              "$($sig.Status)" -in 'NotSigned', 'HashMismatch') {
+            Write-Error "openlogi.exe Authenticode signature is invalid: $($sig.Status)"
             exit 1
           }
 
@@ -251,6 +286,9 @@ jobs:
         with:
           name: OpenLogi-windows-x86_64
           path: dist/*.exe
+          # 'warn' (the default) would let a no-exe job stay green, and publish
+          # would then die at the by-name download instead of shipping DMG-only.
+          if-no-files-found: error
 
   release-notes:
     name: Generate release notes
@@ -326,6 +364,10 @@ jobs:
     # its failure block the macOS release. `!cancelled()` removes the implicit
     # "all needs succeeded" gate, so the required deps are checked explicitly here —
     # windows is deliberately absent from this condition.
+    # NOTE: after such a partial publish, do NOT "re-run failed jobs" — publish
+    # re-runs as windows' dependent and fails against the now-immutable release
+    # (and would overwrite immutable-cached R2 objects). A missed .exe ships
+    # with the next tag instead.
     if: ${{ !cancelled() && needs.macos.result == 'success' && needs.release-notes.result == 'success' }}
     permissions:
       contents: write
@@ -358,9 +400,12 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
+          # The DMGs are the release gate — fail loudly if none arrived (with
+          # nullglob alone, sha256sum with zero args would silently hash stdin).
+          compgen -G '*.dmg' > /dev/null
           # nullglob: when the Windows job didn't ship an .exe, *.exe drops to
-          # nothing instead of erroring on a literal pattern, so the DMGs are hashed
-          # alone. *.dmg always matches (macOS is the release gate).
+          # nothing instead of erroring on a literal pattern, so the DMGs are
+          # hashed alone.
           shopt -s nullglob
           sha256sum *.dmg *.exe > SHA256SUMS
 
@@ -447,9 +492,15 @@ jobs:
           release_prefix="s3://${R2_BUCKET}/releases/${GITHUB_REF_NAME}"
           channel_manifest="s3://${R2_BUCKET}/channels/stable/latest.json"
 
+          # The exe's distribution channel is the GitHub Release; nothing in
+          # the updater bucket references it (latest.json and the minisign
+          # loop are dmg-only), so keep it out of the immutable releases/
+          # prefix. SHA256SUMS still lists it — it describes the GitHub
+          # Release's asset set.
           aws s3 cp dist/ "$release_prefix/" \
             --recursive \
             --exclude latest.json \
+            --exclude "*.exe" \
             --cache-control "public, max-age=31536000, immutable" \
             --endpoint-url "$endpoint"
 
