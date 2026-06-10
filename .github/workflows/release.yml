@@ -252,9 +252,12 @@ jobs:
           certificate-profile-name: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
           files: ${{ github.workspace }}\target\release\openlogi.exe
           # Timestamping is mandatory: without it the signature expires after
-          # 3 days. https beats the action's http default; the file/timestamp
-          # digests stay on the action's SHA256 defaults.
-          timestamp-rfc3161: https://timestamp.acs.microsoft.com
+          # 3 days. The URL must stay http — SignTool rejects an https /tr up
+          # front ("SignTool Error: Invalid Timestamp URL", v0.6.5) before
+          # even contacting Azure. The RFC3161 response is itself signed, so
+          # http transport does not weaken it. The file/timestamp digests stay
+          # on the action's SHA256 defaults.
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
           # Tag-only workflow: the action's four dependency caches save to
           # per-tag refs no future run can restore, so skip them.
           cache-dependencies: false
