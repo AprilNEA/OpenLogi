@@ -598,8 +598,8 @@ async fn resolve_feature_index(
 }
 
 /// Set a solid colour via `ColorLedEffects` (`0x8070`): a fixed effect per zone,
-/// persisted to flash, replacing any onboard profile. `FeatureUnsupported` when
-/// the device exposes no `0x8070`.
+/// stored in RAM only (overrides the running onboard profile without touching
+/// flash). `FeatureUnsupported` when the device exposes no `0x8070`.
 async fn set_color_effects(route: &DeviceRoute, r: u8, g: u8, b: u8) -> Result<(), WriteError> {
     let device_index = route.device_index();
     let feature_index = resolve_feature_index(route, COLOR_LED_EFFECTS_FEATURE)
