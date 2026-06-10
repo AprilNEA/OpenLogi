@@ -12,7 +12,7 @@ env:
   DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
 
 jobs:
-  dmg:
+  macos:
     name: macOS DMG (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -321,12 +321,12 @@ jobs:
   publish:
     name: Publish release
     runs-on: ubuntu-latest
-    needs: [dmg, windows, release-notes]
+    needs: [macos, windows, release-notes]
     # Wait for the Windows job (so a successful .exe can be attached) but do NOT let
     # its failure block the macOS release. `!cancelled()` removes the implicit
     # "all needs succeeded" gate, so the required deps are checked explicitly here —
     # windows is deliberately absent from this condition.
-    if: ${{ !cancelled() && needs.dmg.result == 'success' && needs.release-notes.result == 'success' }}
+    if: ${{ !cancelled() && needs.macos.result == 'success' && needs.release-notes.result == 'success' }}
     permissions:
       contents: write
     steps:
