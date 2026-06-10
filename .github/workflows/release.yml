@@ -160,13 +160,15 @@ jobs:
           path: dist/*.dmg
 
   windows:
-    name: Windows CLI (x86_64)
+    name: Windows GUI (x86_64)
     runs-on: windows-2025
     # A hung signing/login call must become a normal failure (which publish
     # tolerates), not a 6-hour stall: publish waits for this job to reach a
-    # terminal state before its own gate is even evaluated. Healthy runs take
-    # ~8 minutes (v0.6.4 measured ~4.6 min up to the signing step).
-    timeout-minutes: 30
+    # terminal state before its own gate is even evaluated. The GUI release
+    # build (thin LTO, codegen-units=1, the whole GPUI stack) dominates the
+    # runtime on the 4-core runner, hence a looser budget than the ~8-minute
+    # CLI-only runs needed.
+    timeout-minutes: 60
     permissions:
       # Mint an OIDC token so azure/login can exchange it for an Azure access token
       # via a federated credential — no client secret is stored in GitHub.
@@ -225,11 +227,12 @@ jobs:
           : "${AZURE_SIGNING_ACCOUNT:?Configure AZURE_SIGNING_ACCOUNT in the Azure 1Password item}"
           : "${AZURE_CERT_PROFILE:?Configure AZURE_CERT_PROFILE in the Azure 1Password item}"
 
-      # Only the `openlogi` CLI compiles on Windows from master today — the agent and
-      # GUI are excluded from the Windows build (see ci.yml's `clippy (windows)`), so
-      # this signs and ships `openlogi.exe` alone until the Windows agent/GUI land.
-      - name: Build OpenLogi CLI
-        run: cargo build --release -p openlogi
+      # Windows ships the GUI as its single artifact, mirroring what the macOS
+      # DMG carries. The headless agent (ported in #167) joins the artifact set
+      # once it has been runtime-tested on a real Windows box; the CLI stays
+      # cargo-install-only, as on the other platforms.
+      - name: Build OpenLogi GUI
+        run: cargo build --release -p openlogi-gui
 
       # Federated (passwordless) login. Requires an app registration whose federated
       # credential subject is `repo:AprilNEA/OpenLogi:environment:release`, granted the
@@ -244,13 +247,13 @@ jobs:
       # Authenticode-signs via Artifact Signing (ex-Trusted Signing). The action only
       # runs on Windows runners. azure/login leaves an az CLI session that the action's
       # default AzureCliCredential picks up, so no azure-* secret inputs are needed.
-      - name: Sign openlogi.exe with Artifact Signing
+      - name: Sign openlogi-gui.exe with Artifact Signing
         uses: azure/artifact-signing-action@v2
         with:
           endpoint: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
           signing-account-name: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
-          files: ${{ github.workspace }}\target\release\openlogi.exe
+          files: ${{ github.workspace }}\target\release\openlogi-gui.exe
           # Timestamping is mandatory: without it the signature expires after
           # 3 days. The URL must stay http — SignTool rejects an https /tr up
           # front ("SignTool Error: Invalid Timestamp URL", v0.6.5) before
@@ -265,7 +268,7 @@ jobs:
       - name: Verify the binary is signed
         shell: pwsh
         run: |
-          $sig = Get-AuthenticodeSignature target\release\openlogi.exe
+          $sig = Get-AuthenticodeSignature target\release\openlogi-gui.exe
           $sig | Format-List
           # The signing step above already fails on error; this guards against it
           # silently producing an unsigned or corrupted binary. NotSigned and
@@ -274,16 +277,17 @@ jobs:
           # on the runner's trust store, so they stay log-only.
           if ($null -eq $sig.SignerCertificate -or
               "$($sig.Status)" -in 'NotSigned', 'HashMismatch') {
-            Write-Error "openlogi.exe Authenticode signature is invalid: $($sig.Status)"
+            Write-Error "openlogi-gui.exe Authenticode signature is invalid: $($sig.Status)"
             exit 1
           }
 
-      - name: Collect signed CLI artifact
+      - name: Collect signed GUI artifact
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
+          # Renaming after signing is safe: Authenticode lives in the PE file.
           $ref = $env:GITHUB_REF_NAME -replace '/', '-'
-          Copy-Item target\release\openlogi.exe "dist\OpenLogi-$ref-windows-x86_64.exe"
+          Copy-Item target\release\openlogi-gui.exe "dist\OpenLogi-$ref-windows-x86_64.exe"
 
       - uses: actions/upload-artifact@v7
         with:
