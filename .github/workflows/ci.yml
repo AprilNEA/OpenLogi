@@ -104,10 +104,10 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # openlogi-gui's GPUI backend doesn't build on Windows yet — restrict to
-      # the platform-agnostic crates so the workspace stays green on push. clippy
-      # subsumes `cargo check` and additionally lints the Windows-only code paths
-      # (the WH_MOUSE_LL hook, SendInput synthesis, native HID writer, the
-      # composite HID++ channel, and the agent's HKCU-Run autostart) that the
-      # Linux/macOS clippy jobs never compile.
-      - run: cargo clippy -p openlogi-core -p openlogi-hidpp -p openlogi-hid -p openlogi-assets -p openlogi-cli -p openlogi -p openlogi-hook -p openlogi-agent -p openlogi-agent-core --all-targets -- -D warnings
+      # Whole workspace, matching the Linux jobs — GPUI's DirectX backend
+      # covers the GUI on Windows. clippy subsumes `cargo check` and
+      # additionally lints the Windows-only code paths (the WH_MOUSE_LL hook,
+      # SendInput synthesis, native HID writer, the composite HID++ channel,
+      # and the agent's HKCU-Run autostart) that the Linux/macOS clippy jobs
+      # never compile.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
