@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.5](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.4...openlogi-core-v0.6.5) - 2026-06-10
+
+### Other
+
+- collapse nested ifs flagged by current stable clippy ([#197](https://github.com/AprilNEA/OpenLogi/pull/197))
+
 ## [0.6.4](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.3...openlogi-core-v0.6.4) - 2026-06-10
 
 ### Added

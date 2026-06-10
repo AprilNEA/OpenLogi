@@ -9,7 +9,7 @@ authors.workspace = true
 description = "OS-level mouse-event hook for OpenLogi. macOS via CGEventTap; Linux via evdev+uinput; Windows via WH_MOUSE_LL."
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", version = "0.6.4" }
+openlogi-core = { path = "../openlogi-core", version = "0.6.5" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
