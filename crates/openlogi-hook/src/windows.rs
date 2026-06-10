@@ -68,10 +68,10 @@ pub(crate) fn stop(mut inner: HookInner) {
             "could not post WM_QUIT to Windows hook thread"
         );
     }
-    if let Some(join) = inner.join.take() {
-        if let Err(e) = join.join() {
-            tracing::warn!(?e, "Windows hook thread panicked while stopping");
-        }
+    if let Some(join) = inner.join.take()
+        && let Err(e) = join.join()
+    {
+        tracing::warn!(?e, "Windows hook thread panicked while stopping");
     }
 }
 

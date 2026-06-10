@@ -129,23 +129,23 @@ pub async fn run_capture_session(
                 return;
             }
             let msg = v20::Message::from(raw);
-            if let Some(idx) = reprog_index {
-                if let Some(event) = reprog_controls::decode_event(&msg, device_index, idx) {
-                    // Recover the guard even if a prior holder panicked — the
-                    // critical section is panic-free, so the data is consistent.
-                    let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
-                    handle_reprog(&mut acc, event, &dpi_set, &sink);
-                    return;
-                }
+            if let Some(idx) = reprog_index
+                && let Some(event) = reprog_controls::decode_event(&msg, device_index, idx)
+            {
+                // Recover the guard even if a prior holder panicked — the
+                // critical section is panic-free, so the data is consistent.
+                let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
+                handle_reprog(&mut acc, event, &dpi_set, &sink);
+                return;
             }
-            if let Some(idx) = thumb_index {
-                if let Some(event) = thumbwheel::decode_event(&msg, device_index, idx) {
-                    if event.single_tap {
-                        let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::Thumbwheel));
-                    }
-                    if event.rotation != 0 {
-                        let _ = sink.send(CapturedInput::Scroll(event.rotation));
-                    }
+            if let Some(idx) = thumb_index
+                && let Some(event) = thumbwheel::decode_event(&msg, device_index, idx)
+            {
+                if event.single_tap {
+                    let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::Thumbwheel));
+                }
+                if event.rotation != 0 {
+                    let _ = sink.send(CapturedInput::Scroll(event.rotation));
                 }
             }
         }
@@ -254,32 +254,31 @@ async fn arm_controls(
     }
 
     let mut thumb: Option<(Thumbwheel, u8)> = None;
-    if capture_thumbwheel {
-        if let Some(info) = device
+    if capture_thumbwheel
+        && let Some(info) = device
             .root()
             .get_feature(thumbwheel::FEATURE_ID)
             .await
             .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
-        {
-            let tw = Thumbwheel::new(Arc::clone(chan), slot, info.index);
-            // Consume the getInfo error here, before the next await: Hidpp20Error
-            // isn't Send, so holding it across an await would make this future
-            // (spawned on tokio) non-Send.
-            let supports_single_tap = match tw.get_info().await {
-                Ok(twinfo) => twinfo.supports_single_tap,
-                Err(e) => {
-                    warn!(error = ?e, "thumb wheel getInfo failed");
-                    false
-                }
-            };
-            if supports_single_tap {
-                tw.set_reporting(true, false)
-                    .await
-                    .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-                thumb = Some((tw, info.index));
-            } else {
-                debug!("thumb wheel reports no single tap — click not capturable");
+    {
+        let tw = Thumbwheel::new(Arc::clone(chan), slot, info.index);
+        // Consume the getInfo error here, before the next await: Hidpp20Error
+        // isn't Send, so holding it across an await would make this future
+        // (spawned on tokio) non-Send.
+        let supports_single_tap = match tw.get_info().await {
+            Ok(twinfo) => twinfo.supports_single_tap,
+            Err(e) => {
+                warn!(error = ?e, "thumb wheel getInfo failed");
+                false
             }
+        };
+        if supports_single_tap {
+            tw.set_reporting(true, false)
+                .await
+                .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+            thumb = Some((tw, info.index));
+        } else {
+            debug!("thumb wheel reports no single tap — click not capturable");
         }
     }
 

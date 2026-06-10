@@ -343,14 +343,13 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
 /// a window closed while the app kept running can be brought back.
 fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
     let existing = cx.default_global::<windows::WindowRegistry>().main;
-    if let Some(handle) = existing {
-        if handle
+    if let Some(handle) = existing
+        && handle
             .update(cx, |_, window, _| window.activate_window())
             .is_ok()
-        {
-            cx.activate(true);
-            return;
-        }
+    {
+        cx.activate(true);
+        return;
     }
 
     let options = main_window_options(cx);

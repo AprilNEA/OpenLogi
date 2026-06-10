@@ -1820,10 +1820,10 @@ mod linux {
         let _ = &*VIRTUAL_INPUT;
         // Give udev a moment to create the /dev node.
         std::thread::sleep(std::time::Duration::from_millis(150));
-        if let Some(m) = &*VIRTUAL_INPUT {
-            if let Ok(mut guard) = m.lock() {
-                return guard.enumerate_dev_nodes_blocking().ok()?.flatten().next();
-            }
+        if let Some(m) = &*VIRTUAL_INPUT
+            && let Ok(mut guard) = m.lock()
+        {
+            return guard.enumerate_dev_nodes_blocking().ok()?.flatten().next();
         }
         None
     }

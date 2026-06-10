@@ -113,10 +113,10 @@ fn sync_depot(
     // points `device_buttons_image` at a distinct side view. Fetch it only
     // when the registry lists it so front-only devices don't 404; failure
     // is non-fatal (the GUI falls back to the hero render).
-    if let Some(side) = entry.preferred_file(&BUTTONS_RENDER_FILES) {
-        if let Err(e) = fetch_to_cache(client, &entry.asset_path, &dir, entry, side) {
-            warn!(depot, error = %e, "buttons render fetch failed");
-        }
+    if let Some(side) = entry.preferred_file(&BUTTONS_RENDER_FILES)
+        && let Err(e) = fetch_to_cache(client, &entry.asset_path, &dir, entry, side)
+    {
+        warn!(depot, error = %e, "buttons render fetch failed");
     }
 
     // Optional second pass: download the colour variant PNGs matching

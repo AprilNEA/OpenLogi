@@ -627,11 +627,11 @@ impl Config {
             return BTreeMap::new();
         };
         let mut out = device.bindings.clone();
-        if let Some(bid) = bundle_id {
-            if let Some(overlay) = device.per_app_bindings.get(bid) {
-                for (k, v) in overlay {
-                    out.insert(*k, Binding::Single(v.clone()));
-                }
+        if let Some(bid) = bundle_id
+            && let Some(overlay) = device.per_app_bindings.get(bid)
+        {
+            for (k, v) in overlay {
+                out.insert(*k, Binding::Single(v.clone()));
             }
         }
         out
