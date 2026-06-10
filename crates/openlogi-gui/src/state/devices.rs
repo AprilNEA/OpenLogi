@@ -26,10 +26,11 @@ pub struct DeviceRecord {
     pub unit_id: [u8; 4],
     pub route: Option<DeviceRoute>,
     pub kind: DeviceKind,
-    /// Configuration capabilities from the device's HID++ feature table. `None`
-    /// when the device couldn't be probed (offline); the snapshot merge carries
-    /// the last-known value forward, and the UI falls back to
-    /// [`Capabilities::presumed_from_kind`] for a never-probed device.
+    /// Configuration capabilities from the device's HID++ feature table.
+    /// Continuity across sleep lives in the hid layer: its probe cache keeps
+    /// serving the last-known capabilities for a known-but-offline device, so
+    /// this is `None` only for a device never probed since the agent started —
+    /// and the UI then falls back to [`Capabilities::presumed_from_kind`].
     pub capabilities: Option<Capabilities>,
     pub slot: u8,
     pub online: bool,
@@ -145,16 +146,26 @@ fn device_route(inv: &DeviceInventory, slot: u8) -> Option<DeviceRoute> {
     }
 }
 
-/// Pick a device's [`DeviceKind`], preferring the asset registry's curated type
-/// over the runtime HID++ classification.
+/// Last step of the device-kind precedence chain:
 ///
-/// The registry type is per-model and human-maintained, so a device that
-/// matched a known depot is classified by what that model *is* — not by a Bolt
-/// pairing register that can misreport (the failure behind #127). We fall back
-/// to `hid_kind` when there is no asset or its type is `Unknown`. A genuine
-/// disagreement is logged at debug (the list rebuilds on every snapshot, so a
-/// louder level would spam); it flags a HID++ source we shouldn't trust for
-/// that device.
+/// > **asset registry** > HID++ `0x0005` > Bolt pairing register
+///
+/// The two HID++ sources are already folded into `hid_kind` by
+/// `resolve_device_kind` (`crates/openlogi-hid/src/inventory.rs`); this applies
+/// the final override. Adding a kind source means slotting it into this one
+/// chain — here if it should beat the HID++ sources, in `resolve_device_kind`
+/// otherwise — and updating both docs.
+///
+/// The registry type wins because it is per-model and human-maintained, so a
+/// device that matched a known depot is classified by what that model *is* —
+/// not by a Bolt pairing register that can misreport (the failure behind #127).
+/// We fall back to `hid_kind` when there is no asset or its type is `Unknown`.
+/// A genuine disagreement is logged at debug (the list rebuilds on every
+/// snapshot, so a louder level would spam); it flags a HID++ source we
+/// shouldn't trust for that device.
+///
+/// Kind is cosmetic (icon / label) since #127: config panels gate on
+/// [`Capabilities`], never on kind, so a wrong pick can't hide functionality.
 fn effective_kind(hid_kind: DeviceKind, asset_kind: Option<DeviceKind>) -> DeviceKind {
     let Some(asset_kind) = asset_kind.filter(|k| *k != DeviceKind::Unknown) else {
         return hid_kind;

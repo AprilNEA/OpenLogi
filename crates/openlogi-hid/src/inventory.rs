@@ -674,8 +674,14 @@ fn map_device_type(ty: HidppDeviceType) -> DeviceKind {
     }
 }
 
-/// Resolve a device's kind, preferring the device's own HID++ `0x0005` report
-/// (`probed`) over the receiver-supplied `register` kind.
+/// First step of the device-kind precedence chain:
+///
+/// > asset registry > **HID++ `0x0005`** > **Bolt pairing register**
+///
+/// This folds the two HID++ sources; the GUI applies the final asset-registry
+/// override in `effective_kind` (`crates/openlogi-gui/src/state/devices.rs`).
+/// Adding a kind source means slotting it into this one chain — and updating
+/// both docs.
 ///
 /// `0x0005` is the device's self-reported marketing type and is authoritative;
 /// the Bolt pairing register is a coarser hint that can misreport (e.g. an
