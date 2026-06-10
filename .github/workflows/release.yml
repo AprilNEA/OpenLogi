@@ -159,6 +159,99 @@ jobs:
           name: OpenLogi-macos-dmg-${{ matrix.arch }}
           path: dist/*.dmg
 
+  windows:
+    name: Windows CLI (x86_64)
+    runs-on: windows-2025
+    permissions:
+      # Mint an OIDC token so azure/login can exchange it for an Azure access token
+      # via a federated credential — no client secret is stored in GitHub.
+      id-token: write
+      contents: read
+    # The federated credential's subject is bound to this GitHub environment, so the
+    # OIDC `sub` claim stays stable (repo:AprilNEA/OpenLogi:environment:release)
+    # instead of changing with every tag ref.
+    environment: release
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Azure signing config lives in 1Password, matching the macOS job's secret flow.
+      # load-secrets-action is a node action, so it runs on Windows runners too. The
+      # client/tenant/subscription IDs are not secrets under OIDC, but are centralised
+      # here so all release config has a single source of truth.
+      - name: Load Azure signing config from 1Password
+        id: azure_config
+        uses: 1password/load-secrets-action@v4
+        with:
+          export-env: false
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          AZURE_CLIENT_ID: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_CLIENT_ID
+          AZURE_TENANT_ID: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_TENANT_ID
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_SUBSCRIPTION_ID
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_SIGNING_ENDPOINT
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_SIGNING_ACCOUNT
+          AZURE_CERT_PROFILE: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_CERT_PROFILE
+
+      # Only the `openlogi` CLI compiles on Windows from master today — the agent and
+      # GUI are excluded from the Windows build (see ci.yml's `clippy (windows)`), so
+      # this signs and ships `openlogi.exe` alone until the Windows agent/GUI land.
+      - name: Build OpenLogi CLI
+        run: cargo build --release -p openlogi
+
+      # Federated (passwordless) login. Requires an app registration whose federated
+      # credential subject is `repo:AprilNEA/OpenLogi:environment:release`, granted the
+      # "Artifact Signing Certificate Profile Signer" role on the signing account.
+      - name: Azure login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ steps.azure_config.outputs.AZURE_CLIENT_ID }}
+          tenant-id: ${{ steps.azure_config.outputs.AZURE_TENANT_ID }}
+          subscription-id: ${{ steps.azure_config.outputs.AZURE_SUBSCRIPTION_ID }}
+
+      # Authenticode-signs via Artifact Signing (ex-Trusted Signing). The action only
+      # runs on Windows runners. azure/login leaves an az CLI session that the action's
+      # default AzureCliCredential picks up, so no azure-* secret inputs are needed.
+      - name: Sign openlogi.exe with Artifact Signing
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
+          files: ${{ github.workspace }}\target\release\openlogi.exe
+          file-digest: SHA256
+          # Timestamping is mandatory: without it the signature expires after 3 days.
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify the binary is signed
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature target\release\openlogi.exe
+          $sig | Format-List
+          # The signing step above already fails on error; this guards against it
+          # silently producing an unsigned binary. Status is logged but not gated on,
+          # since chain validity depends on the runner's trust store.
+          if ($null -eq $sig.SignerCertificate) {
+            Write-Error "openlogi.exe has no Authenticode signature"
+            exit 1
+          }
+
+      - name: Collect signed CLI artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $ref = $env:GITHUB_REF_NAME -replace '/', '-'
+          Copy-Item target\release\openlogi.exe "dist\OpenLogi-$ref-windows-x86_64.exe"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OpenLogi-windows-x86_64
+          path: dist/*.exe
+
   release-notes:
     name: Generate release notes
     runs-on: ubuntu-latest
@@ -228,7 +321,12 @@ jobs:
   publish:
     name: Publish release
     runs-on: ubuntu-latest
-    needs: [dmg, release-notes]
+    needs: [dmg, windows, release-notes]
+    # Wait for the Windows job (so a successful .exe can be attached) but do NOT let
+    # its failure block the macOS release. `!cancelled()` removes the implicit
+    # "all needs succeeded" gate, so the required deps are checked explicitly here —
+    # windows is deliberately absent from this condition.
+    if: ${{ !cancelled() && needs.dmg.result == 'success' && needs.release-notes.result == 'success' }}
     permissions:
       contents: write
     steps:
@@ -245,6 +343,13 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Present only when the independent Windows job succeeded; skipped otherwise.
+      - uses: actions/download-artifact@v8
+        if: ${{ needs.windows.result == 'success' }}
+        with:
+          name: OpenLogi-windows-x86_64
+          path: dist
+
       - uses: actions/download-artifact@v8
         with:
           name: OpenLogi-release-notes
@@ -253,7 +358,11 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum *.dmg > SHA256SUMS
+          # nullglob: when the Windows job didn't ship an .exe, *.exe drops to
+          # nothing instead of erroring on a literal pattern, so the DMGs are hashed
+          # alone. *.dmg always matches (macOS is the release gate).
+          shopt -s nullglob
+          sha256sum *.dmg *.exe > SHA256SUMS
 
       - name: Load static updater publishing config from 1Password
         id: r2_config
@@ -363,6 +472,7 @@ jobs:
             dist/*.dmg
             dist/*.minisig
             dist/SHA256SUMS
+            ${{ needs.windows.result == 'success' && 'dist/*.exe' || '' }}
           fail_on_unmatched_files: true
 
   homebrew-tap:
