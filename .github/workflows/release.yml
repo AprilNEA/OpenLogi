@@ -224,7 +224,7 @@ jobs:
           files: ${{ github.workspace }}\target\release\openlogi.exe
           file-digest: SHA256
           # Timestamping is mandatory: without it the signature expires after 3 days.
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-rfc3161: https://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
       - name: Verify the binary is signed
