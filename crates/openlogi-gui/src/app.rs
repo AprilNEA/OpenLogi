@@ -609,7 +609,7 @@ fn lighting_overlay(record: &DeviceRecord, cx: &App) -> Option<PathBuf> {
         .filter(|l| l.enabled)?;
     let asset = record.asset.as_ref()?;
     asset.hero_image_path.as_ref()?;
-    let path = crate::asset::glow_path(&asset.depot, &lighting.color);
+    let path = crate::asset::glow_path(&asset.depot, &lighting.color)?;
     state.glow_is_ready(&path).then_some(path)
 }
 
@@ -633,7 +633,7 @@ fn glow_job(state: &AppState, record: &DeviceRecord) -> Option<GlowJob> {
     let asset = record.asset.as_ref()?;
     asset.hero_image_path.as_ref()?;
     Some(GlowJob {
-        cache: crate::asset::glow_path(&asset.depot, &lighting.color),
+        cache: crate::asset::glow_path(&asset.depot, &lighting.color)?,
         depot: asset.depot.clone(),
         hex: lighting.color,
     })

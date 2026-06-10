@@ -75,11 +75,11 @@ pub(crate) fn ensure_glow_png(depot: &str, hex: &str) -> Option<PathBuf> {
     Some(out)
 }
 
-/// Cache path for a depot's glow overlay at colour `hex` (pure — no IO).
-pub(crate) fn glow_path(depot: &str, hex: &str) -> PathBuf {
-    super::paths::user_cache_root()
-        .join(depot)
-        .join(format!("glow-{hex}.png"))
+/// Cache path for a depot's glow overlay at colour `hex` (stat-only — no
+/// writes). `None` when the depot name isn't a safe single path component,
+/// so read-side lookups stay inside the cache root just like the writers.
+pub(crate) fn glow_path(depot: &str, hex: &str) -> Option<PathBuf> {
+    Some(depot_dir(depot)?.join(format!("glow-{hex}.png")))
 }
 
 /// Validated `<user_cache_root>/<depot>` — `None` (with a warn) when the

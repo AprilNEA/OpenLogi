@@ -97,8 +97,7 @@ impl AssetClient {
     /// Fetch `<base>/index.json`, write it into `dir`, and return the parsed index.
     pub fn fetch_index_to_dir(&self, dir: &Path) -> Result<Index> {
         let (raw, index) = self.fetch_index_raw()?;
-        let local = dir.join(INDEX_NAME);
-        fs::write(&local, &raw).with_context(|| format!("write {}", local.display()))?;
+        write_replace(&dir.join(INDEX_NAME), &raw)?;
         Ok(index)
     }
 
@@ -113,13 +112,11 @@ impl AssetClient {
 
     /// Fetch a per-depot file into `dir`, returning the number of bytes
     /// written. `name` comes from remote metadata, so it is validated down
-    /// to a single path component and the destination must not be a symlink
-    /// before anything touches the filesystem.
+    /// to a single path component before any path is built.
     fn fetch_file_to_dir(&self, asset_path: &str, dir: &Path, name: &str) -> Result<usize> {
         let dst = safe_component_path(dir, name, "asset file name")?;
-        reject_symlink(&dst)?;
         let bytes = self.fetch_file(asset_path, name)?;
-        fs::write(&dst, &bytes).with_context(|| format!("write {}", dst.display()))?;
+        write_replace(&dst, &bytes)?;
         Ok(bytes.len())
     }
 
@@ -231,16 +228,37 @@ pub fn safe_component_path(base: &Path, component: &str, label: &str) -> Result<
     }
 }
 
-/// Refuse to write through a symlink planted at `path`, which would redirect
-/// an asset write anywhere the process can reach.
-fn reject_symlink(path: &Path) -> Result<()> {
-    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        bail!(
-            "refusing to write asset through symlink: {}",
-            path.display()
-        );
+/// Write `bytes` beside `dst` and atomically rename into place.
+///
+/// `create_new` refuses to open through anything pre-planted at the temp
+/// path (`O_EXCL` never follows symlinks), and `rename` *replaces* a symlink
+/// sitting at `dst` instead of writing through it — together they close the
+/// check-to-write race a symlink check followed by a plain `fs::write` would
+/// leave open. The rename also means a concurrent reader sees the old file
+/// or the new one, never a half-written one.
+fn write_replace(dst: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let mut tmp_name = dst.as_os_str().to_owned();
+    tmp_name.push(".part");
+    let tmp = PathBuf::from(tmp_name);
+    // A stale `.part` from a crashed sync would fail `create_new`; it never
+    // holds verified data, so clear it.
+    let _ = fs::remove_file(&tmp);
+    let mut file = fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .with_context(|| format!("create {}", tmp.display()))?;
+    let written = file
+        .write_all(bytes)
+        .with_context(|| format!("write {}", tmp.display()));
+    drop(file);
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
     }
-    Ok(())
+    fs::rename(&tmp, dst).with_context(|| format!("replace {}", dst.display()))
 }
 
 /// Hex SHA-256 of an in-memory blob.
@@ -267,9 +285,46 @@ pub fn cached_matches(path: &Path, expected_sha: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_retryable, safe_component_path};
+    use super::{is_retryable, safe_component_path, write_replace};
     use std::path::Path;
     use ureq::Error;
+
+    #[test]
+    #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
+    fn write_replace_overwrites_in_place() {
+        let dir = std::env::temp_dir().join(format!("openlogi-http-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let dst = dir.join("a.png");
+
+        write_replace(&dst, b"one").expect("first write");
+        write_replace(&dst, b"two").expect("replace");
+
+        assert_eq!(std::fs::read(&dst).expect("read back"), b"two");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
+    fn write_replace_replaces_a_planted_symlink_instead_of_following_it() {
+        let dir =
+            std::env::temp_dir().join(format!("openlogi-http-symlink-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, b"untouched").expect("seed victim");
+        let dst = dir.join("b.png");
+        std::os::unix::fs::symlink(&victim, &dst).expect("plant symlink");
+
+        write_replace(&dst, b"payload").expect("write through planted link");
+
+        // The link target must be untouched, and the link itself must now be
+        // a regular file holding the payload.
+        assert_eq!(std::fs::read(&victim).expect("victim intact"), b"untouched");
+        let meta = std::fs::symlink_metadata(&dst).expect("stat dst");
+        assert!(meta.file_type().is_file());
+        assert_eq!(std::fs::read(&dst).expect("read dst"), b"payload");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn safe_component_path_accepts_plain_names() {
