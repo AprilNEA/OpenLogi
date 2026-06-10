@@ -9,6 +9,7 @@
 
 use std::num::NonZeroU8;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_hid::AsyncHidWrite;
 use hidpp::{
@@ -480,17 +481,22 @@ pub async fn set_dpi(route: &DeviceRoute, dpi: u16) -> Result<(), WriteError> {
     .await
 }
 
-/// HID++ `PerKeyLighting` feature — drives the per-key RGB on wired G-series
-/// keyboards. Its feature *index* varies per device, so it's resolved at runtime.
+/// HID++ `PerKeyLighting` (`0x8080`) — streams each key's colour individually.
+/// Its feature *index* varies per device, so it's resolved at runtime.
 const PER_KEY_LIGHTING_FEATURE: u16 = 0x8080;
+/// HID++ `ColorLedEffects` (`0x8070`) — the keyboard's effect engine. Writing a
+/// *fixed* effect here replaces a running onboard profile, which a per-key
+/// (`0x8080`) write can't override on G-series keyboards (the firmware keeps
+/// replaying its stored effect). Preferred for a solid colour for that reason.
+const COLOR_LED_EFFECTS_FEATURE: u16 = 0x8070;
 
-// HID++ 2.0 report ids for the 0x8080 per-key frames: 0x12 is the 64-byte "very
-// long" report that streams a batch of (keyID, R, G, B) entries; 0x11 is the
-// 20-byte "long" report that commits the streamed frame.
+// HID++ 2.0 report ids: 0x12 is the 64-byte "very long" report that streams a
+// batch of (keyID, R, G, B) entries; 0x11 is the 20-byte "long" report used both
+// to commit a per-key frame and to carry a single `ColorLedEffects` request.
 const REPORT_SET_KEYS: u8 = 0x12;
-const REPORT_FRAME_END: u8 = 0x11;
+const REPORT_LONG: u8 = 0x11;
 // Function byte = `function_id << 4 | software_id`. Software id 0xa just tags our
-// requests; function 0x3 streams a key range, 0x5 ends/commits the frame.
+// requests; for 0x8080: function 0x3 streams a key range, 0x5 commits the frame.
 const SW_ID: u8 = 0x0a;
 const FN_SET_KEY_RANGE: u8 = 0x3;
 const FN_FRAME_END: u8 = 0x5;
@@ -499,24 +505,83 @@ const FN_FRAME_END: u8 = 0x5;
 const SET_RANGE_MODE: u8 = 0x01;
 const KEYS_PER_FRAME: u8 = 0x0e;
 
-/// Set a keyboard's per-key RGB to a solid `(r, g, b)` colour via HID++
-/// `PerKeyLighting` (`0x8080`): stream every key's colour in 64-byte `0x12`
-/// "set group keys" frames, then commit the frame.
+// 0x8070 `ColorLedEffects`: function 0x3 is `setZoneEffect(zone, effect, …)`.
+// Effect 0x01 is the fixed/static single colour. The trailing persistence byte
+// is RAM-only (0x00): the effect shows live and overrides the running onboard
+// profile without touching flash. Reboot survival comes from the agent
+// re-applying the saved colour on device arrival (orchestrator reapply), so
+// flashing on every colour pick — which would wear the controller — is avoided.
+const FN_SET_ZONE_EFFECT: u8 = 0x3;
+const EFFECT_FIXED: u8 = 0x01;
+const PERSIST_RAM_ONLY: u8 = 0x00;
+// G-series report a small zone count; writing a few covers every real zone (a
+// write to a non-existent zone is a harmless no-op). Paced because the
+// controller drops back-to-back reports.
+const MAX_LIGHTING_ZONES: u8 = 4;
+const FRAME_GAP: Duration = Duration::from_millis(8);
+
+/// Which HID++ lighting path drives a solid keyboard colour. [`Auto`] is what
+/// the GUI/agent use; the explicit variants exist for the `diag` A/B test.
 ///
-/// The `0x8080` feature index is resolved per device (it differs across the
-/// G-series), so this isn't tied to the G513. `FeatureUnsupported` when the
-/// device exposes no `0x8080` (e.g. a non-RGB peripheral).
+/// [`Auto`]: LightingMethod::Auto
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LightingMethod {
+    /// Prefer `ColorLedEffects` (`0x8070`), falling back to `PerKeyLighting`
+    /// (`0x8080`) when the device exposes no effect engine.
+    Auto,
+    /// Force `ColorLedEffects` (`0x8070`) — the fixed-effect override.
+    Effects,
+    /// Force `PerKeyLighting` (`0x8080`) — the per-key stream.
+    PerKey,
+}
+
+/// Set a keyboard to a solid `(r, g, b)` colour, choosing the HID++ path
+/// automatically: the `0x8070` effect engine (which overrides the onboard
+/// profile) when present, else the `0x8080` per-key stream. `FeatureUnsupported`
+/// when the device exposes neither.
 pub async fn set_keyboard_color(
     route: &DeviceRoute,
     r: u8,
     g: u8,
     b: u8,
 ) -> Result<(), WriteError> {
-    // Resolve this device's runtime feature index for 0x8080 over the HID++
-    // channel; the per-key frames are then sent as raw 0x12 reports (which the
-    // typed channel can't model) on a freshly opened writer.
+    set_keyboard_color_with(route, LightingMethod::Auto, r, g, b).await
+}
+
+/// [`set_keyboard_color`] with an explicit [`LightingMethod`]. `Auto` tries
+/// `0x8070` first and falls back to `0x8080` only when the effect engine is
+/// absent (a missing-`0x8070` `FeatureUnsupported`); any other error propagates.
+pub async fn set_keyboard_color_with(
+    route: &DeviceRoute,
+    method: LightingMethod,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> Result<(), WriteError> {
+    match method {
+        LightingMethod::PerKey => set_color_per_key(route, r, g, b).await,
+        LightingMethod::Effects => set_color_effects(route, r, g, b).await,
+        LightingMethod::Auto => match set_color_effects(route, r, g, b).await {
+            Err(WriteError::FeatureUnsupported { feature_hex })
+                if feature_hex == COLOR_LED_EFFECTS_FEATURE =>
+            {
+                debug!("no 0x8070 effect engine — falling back to 0x8080 per-key");
+                set_color_per_key(route, r, g, b).await
+            }
+            other => other,
+        },
+    }
+}
+
+/// Resolve `route`'s runtime feature *index* for HID++ `feature_id`. `Ok(None)`
+/// when the device doesn't expose it; the index differs per device, so callers
+/// can't hard-code it.
+async fn resolve_feature_index(
+    route: &DeviceRoute,
+    feature_id: u16,
+) -> Result<Option<u8>, WriteError> {
     let device_index = route.device_index();
-    let feature_index = with_route(route, move |channel| async move {
+    with_route(route, move |channel| async move {
         let device = Device::new(Arc::clone(&channel), device_index)
             .await
             .map_err(|_| WriteError::DeviceUnreachable {
@@ -524,15 +589,63 @@ pub async fn set_keyboard_color(
             })?;
         let info = device
             .root()
-            .get_feature(PER_KEY_LIGHTING_FEATURE)
+            .get_feature(feature_id)
             .await
-            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?
-            .ok_or(WriteError::FeatureUnsupported {
-                feature_hex: PER_KEY_LIGHTING_FEATURE,
-            })?;
-        Ok(info.index)
+            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+        Ok(info.map(|i| i.index))
     })
-    .await?;
+    .await
+}
+
+/// Set a solid colour via `ColorLedEffects` (`0x8070`): a fixed effect per zone,
+/// persisted to flash, replacing any onboard profile. `FeatureUnsupported` when
+/// the device exposes no `0x8070`.
+async fn set_color_effects(route: &DeviceRoute, r: u8, g: u8, b: u8) -> Result<(), WriteError> {
+    let device_index = route.device_index();
+    let feature_index = resolve_feature_index(route, COLOR_LED_EFFECTS_FEATURE)
+        .await?
+        .ok_or(WriteError::FeatureUnsupported {
+            feature_hex: COLOR_LED_EFFECTS_FEATURE,
+        })?;
+
+    let Some(mut writer) = crate::transport::open_route_writer(route).await? else {
+        return Err(WriteError::DeviceNotFound);
+    };
+    for zone in 0..MAX_LIGHTING_ZONES {
+        let mut rep = vec![0u8; 20];
+        rep[0] = REPORT_LONG;
+        rep[1] = device_index;
+        rep[2] = feature_index;
+        rep[3] = (FN_SET_ZONE_EFFECT << 4) | SW_ID;
+        rep[4] = zone;
+        rep[5] = EFFECT_FIXED;
+        rep[6] = r;
+        rep[7] = g;
+        rep[8] = b;
+        rep[16] = PERSIST_RAM_ONLY;
+        writer
+            .write_output_report(&rep)
+            .await
+            .map_err(WriteError::from)?;
+        tokio::time::sleep(FRAME_GAP).await;
+    }
+    debug!(
+        device_index,
+        feature_index, r, g, b, "set keyboard colour via 0x8070"
+    );
+    Ok(())
+}
+
+/// Set a solid colour via `PerKeyLighting` (`0x8080`): stream every key's colour
+/// in 64-byte `0x12` frames, then commit. `FeatureUnsupported` when the device
+/// exposes no `0x8080`.
+async fn set_color_per_key(route: &DeviceRoute, r: u8, g: u8, b: u8) -> Result<(), WriteError> {
+    let device_index = route.device_index();
+    let feature_index = resolve_feature_index(route, PER_KEY_LIGHTING_FEATURE)
+        .await?
+        .ok_or(WriteError::FeatureUnsupported {
+            feature_hex: PER_KEY_LIGHTING_FEATURE,
+        })?;
 
     let Some(mut writer) = crate::transport::open_route_writer(route).await? else {
         return Err(WriteError::DeviceNotFound);
@@ -563,7 +676,7 @@ pub async fn set_keyboard_color(
             .map_err(WriteError::from)?;
     }
     let mut commit = vec![0u8; 20];
-    commit[0] = REPORT_FRAME_END;
+    commit[0] = REPORT_LONG;
     commit[1] = device_index;
     commit[2] = feature_index;
     commit[3] = (FN_FRAME_END << 4) | SW_ID;
@@ -573,7 +686,7 @@ pub async fn set_keyboard_color(
         .map_err(WriteError::from)?;
     debug!(
         device_index,
-        feature_index, r, g, b, "wrote keyboard colour"
+        feature_index, r, g, b, "set keyboard colour via 0x8080"
     );
     Ok(())
 }

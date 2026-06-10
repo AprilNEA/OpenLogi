@@ -5,8 +5,28 @@
 //! wired G-series keyboard — by VID/PID, so it isn't tied to one model.
 
 use anyhow::{Result, anyhow};
-use clap::Args;
-use openlogi_hid::DeviceRoute;
+use clap::{Args, ValueEnum};
+use openlogi_hid::{DeviceRoute, LightingMethod};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum Method {
+    /// Prefer 0x8070 ColorLedEffects, fall back to 0x8080 per-key (default).
+    Auto,
+    /// Force 0x8070 ColorLedEffects (the fixed-effect onboard override).
+    Effects,
+    /// Force 0x8080 PerKeyLighting (the per-key stream).
+    Perkey,
+}
+
+impl From<Method> for LightingMethod {
+    fn from(m: Method) -> Self {
+        match m {
+            Method::Auto => Self::Auto,
+            Method::Effects => Self::Effects,
+            Method::Perkey => Self::PerKey,
+        }
+    }
+}
 
 #[derive(Debug, Args)]
 pub struct LightingArgs {
@@ -17,6 +37,10 @@ pub struct LightingArgs {
     /// (case-insensitive). Useful when several keyboards are connected.
     #[arg(long, value_name = "NAME")]
     pub device: Option<String>,
+
+    /// Which HID++ lighting path to drive.
+    #[arg(long, value_enum, default_value_t = Method::Auto)]
+    pub method: Method,
 }
 
 pub async fn run(args: LightingArgs) -> Result<()> {
@@ -67,8 +91,9 @@ pub async fn run(args: LightingArgs) -> Result<()> {
             }
         })?;
 
-    println!("setting {name} ({route}) to #{r:02x}{g:02x}{b:02x}");
-    openlogi_hid::set_keyboard_color(&route, r, g, b).await?;
+    let method: LightingMethod = args.method.into();
+    println!("setting {name} ({route}) to #{r:02x}{g:02x}{b:02x} via {method:?}");
+    openlogi_hid::set_keyboard_color_with(&route, method, r, g, b).await?;
     println!("done — {name} should now be solid #{r:02x}{g:02x}{b:02x}");
     Ok(())
 }
