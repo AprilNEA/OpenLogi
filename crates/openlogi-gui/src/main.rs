@@ -4,6 +4,13 @@
 //! the main thread, so we can't move it onto a tokio runtime). Live polling
 //! lands when there's something to react to.
 
+// Without this Windows runs the exe as a console app and pops a terminal
+// window behind the UI. Debug builds keep the console so logs stay visible.
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 /// Translate `key` (an English msgid) to the current locale and wrap it as a
 /// [`gpui::SharedString`], ready for `.child(...)` / `.label(...)` / menu items.
 /// Forwards `rust_i18n` interpolation, e.g. `tr!("Bind %{name}", name => x)`.
