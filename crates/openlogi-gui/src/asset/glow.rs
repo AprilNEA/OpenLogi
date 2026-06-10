@@ -50,7 +50,8 @@ struct MetaGlow {
 /// can't be written. Cached under the writable user dir keyed by `depot`, so it
 /// survives a read-only `.app` bundle.
 pub(crate) fn ensure_glow_png(depot: &str, hex: &str) -> Option<PathBuf> {
-    let out = glow_path(depot, hex);
+    let dir = depot_dir(depot)?;
+    let out = dir.join(format!("glow-{hex}.png"));
     if out.exists() {
         return Some(out);
     }
@@ -58,8 +59,7 @@ pub(crate) fn ensure_glow_png(depot: &str, hex: &str) -> Option<PathBuf> {
     let color = Rgba([r, g, b, 255]);
     let overlay = render_mask(&read_baked_mask(depot)?, color)?;
 
-    let dir = out.parent()?;
-    std::fs::create_dir_all(dir).ok()?;
+    std::fs::create_dir_all(&dir).ok()?;
     // Write atomically (temp + rename) so a concurrent render never loads a
     // half-written PNG; gpui caches an image-load *failure* permanently. For the
     // same reason we keep every colour variant on disk (bounded by the small
@@ -82,10 +82,23 @@ pub(crate) fn glow_path(depot: &str, hex: &str) -> PathBuf {
         .join(format!("glow-{hex}.png"))
 }
 
+/// Validated `<user_cache_root>/<depot>` — `None` (with a warn) when the
+/// index-supplied depot name isn't a single safe path component, so glow
+/// IO can never leave the cache root.
+fn depot_dir(depot: &str) -> Option<PathBuf> {
+    openlogi_assets::http::safe_component_path(
+        &super::paths::user_cache_root(),
+        depot,
+        "asset depot",
+    )
+    .map_err(|e| warn!(depot, error = %e, "glow: refusing depot dir"))
+    .ok()
+}
+
 /// Read the precomputed `glow` mask from the depot's metadata, ignoring every
 /// other field (so the keyboard-schema hotspot data is irrelevant here).
 fn read_baked_mask(depot: &str) -> Option<GlowMask> {
-    let dir = super::paths::user_cache_root().join(depot);
+    let dir = depot_dir(depot)?;
     META_FILES.iter().find_map(|name| {
         let text = std::fs::read_to_string(dir.join(name)).ok()?;
         serde_json::from_str::<MetaGlow>(&text).ok()?.glow

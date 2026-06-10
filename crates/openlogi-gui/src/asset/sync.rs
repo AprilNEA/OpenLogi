@@ -99,7 +99,7 @@ fn sync_depot(
     entry: &DeviceEntry,
     ext: u8,
 ) -> Result<()> {
-    let dir = cache_root.join(depot);
+    let dir = http::safe_component_path(cache_root, depot, "asset depot")?;
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
 
     // Baseline: hotspot metadata + manifest + hero render, in whichever
@@ -145,9 +145,9 @@ fn sync_depot(
 }
 
 /// Fetch a single named file from `<server>/<asset_path>/<name>` into
-/// `<dir>/<name>`. SHA-checked against `entry.files`; missing registry
-/// entry trips a warn but doesn't bail (some depots ship one-off files
-/// not yet rolled into the registry).
+/// `<dir>/<name>`. SHA-checked against `entry.files`; a name the registry
+/// doesn't list is skipped (warn) — everything written to the cache must
+/// carry a registry hash, so a tampered host can't plant unverified files.
 fn fetch_to_cache(
     client: &http::AssetClient,
     asset_path: &str,
@@ -163,10 +163,8 @@ fn fetch_to_cache(
     } else {
         warn!(
             file = name,
-            "registry lists no entry — fetching without sha verify"
+            "registry lists no entry — skipping unverified asset"
         );
-        let bytes = client.fetch_file_to_dir(asset_path, dir, name)?;
-        info!(file = name, bytes, "downloaded");
     }
     Ok(())
 }

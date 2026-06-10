@@ -11,10 +11,10 @@
 //! no relation to a host, so they stay off the client.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use backon::{BlockingRetryable, ExponentialBuilder};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
@@ -104,35 +104,46 @@ impl AssetClient {
 
     /// GET a per-depot file, e.g.
     /// `fetch_file("v1/devices/mx_master_4/", "front_core.png")`.
-    pub fn fetch_file(&self, asset_path: &str, name: &str) -> Result<Vec<u8>> {
+    fn fetch_file(&self, asset_path: &str, name: &str) -> Result<Vec<u8>> {
         let asset_path = asset_path.trim_start_matches('/');
         let url = format!("{}/{asset_path}{name}", self.base);
         debug!(%url, "fetching file");
         self.get_bytes(&url)
     }
 
-    /// Fetch a per-depot file into `dir`, returning the number of bytes written.
-    pub fn fetch_file_to_dir(&self, asset_path: &str, dir: &Path, name: &str) -> Result<usize> {
-        let dst = dir.join(name);
+    /// Fetch a per-depot file into `dir`, returning the number of bytes
+    /// written. `name` comes from remote metadata, so it is validated down
+    /// to a single path component and the destination must not be a symlink
+    /// before anything touches the filesystem.
+    fn fetch_file_to_dir(&self, asset_path: &str, dir: &Path, name: &str) -> Result<usize> {
+        let dst = safe_component_path(dir, name, "asset file name")?;
+        reject_symlink(&dst)?;
         let bytes = self.fetch_file(asset_path, name)?;
         fs::write(&dst, &bytes).with_context(|| format!("write {}", dst.display()))?;
         Ok(bytes.len())
     }
 
     /// Fetch `file` into `dir` unless a file already there matches its
-    /// `sha256`. The cache-skip primitive shared by the CLI bundle sync and
-    /// the GUI runtime sync — callers branch on [`FetchOutcome`] to do their
-    /// own progress reporting.
+    /// `sha256`; a fresh download is verified against the same hash and
+    /// removed on mismatch, so nothing unverified survives on disk. The
+    /// cache-skip primitive shared by the CLI bundle sync and the GUI
+    /// runtime sync — callers branch on [`FetchOutcome`] to do their own
+    /// progress reporting.
     pub fn fetch_entry_if_stale(
         &self,
         asset_path: &str,
         dir: &Path,
         file: &FileEntry,
     ) -> Result<FetchOutcome> {
-        if cached_matches(&dir.join(&file.name), &file.sha256) {
+        let dst = safe_component_path(dir, &file.name, "asset file name")?;
+        if cached_matches(&dst, &file.sha256) {
             return Ok(FetchOutcome::CacheHit);
         }
         let bytes = self.fetch_file_to_dir(asset_path, dir, &file.name)?;
+        if !cached_matches(&dst, &file.sha256) {
+            let _ = fs::remove_file(&dst);
+            bail!("downloaded asset checksum mismatch: {}", dst.display());
+        }
         Ok(FetchOutcome::Fetched { bytes })
     }
 
@@ -199,6 +210,39 @@ pub fn read_bytes(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("read {}", path.display()))
 }
 
+/// Join one untrusted registry component onto a trusted directory.
+///
+/// Remote asset metadata is expected to carry depot and file *names*, not
+/// paths. Rejecting separators, absolute prefixes, and `.`/`..` keeps every
+/// sync write inside the cache or bundle directory chosen by the caller.
+pub fn safe_component_path(base: &Path, component: &str, label: &str) -> Result<PathBuf> {
+    if component.is_empty() {
+        bail!("{label} is empty");
+    }
+    // `Path::components` never yields separators on the platform that didn't
+    // produce them, so reject both kinds explicitly before consulting it.
+    if component.contains('/') || component.contains('\\') {
+        bail!("{label} must be a single path component: {component}");
+    }
+    let mut parts = Path::new(component).components();
+    match (parts.next(), parts.next()) {
+        (Some(Component::Normal(_)), None) => Ok(base.join(component)),
+        _ => bail!("{label} must be a safe relative path component: {component}"),
+    }
+}
+
+/// Refuse to write through a symlink planted at `path`, which would redirect
+/// an asset write anywhere the process can reach.
+fn reject_symlink(path: &Path) -> Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        bail!(
+            "refusing to write asset through symlink: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Hex SHA-256 of an in-memory blob.
 #[must_use]
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -223,8 +267,39 @@ pub fn cached_matches(path: &Path, expected_sha: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_retryable;
+    use super::{is_retryable, safe_component_path};
+    use std::path::Path;
     use ureq::Error;
+
+    #[test]
+    fn safe_component_path_accepts_plain_names() {
+        assert_eq!(
+            safe_component_path(Path::new("/cache"), "front_core.png", "asset").ok(),
+            Some(Path::new("/cache").join("front_core.png"))
+        );
+        assert_eq!(
+            safe_component_path(Path::new("/cache"), "mx_master_4", "depot").ok(),
+            Some(Path::new("/cache").join("mx_master_4"))
+        );
+    }
+
+    #[test]
+    fn safe_component_path_rejects_traversal_and_separators() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "../LaunchAgents/x",
+            "nested/file.png",
+            "nested\\file.png",
+            "/etc/passwd",
+        ] {
+            assert!(
+                safe_component_path(Path::new("/cache"), name, "asset").is_err(),
+                "{name:?} should be rejected"
+            );
+        }
+    }
 
     #[test]
     fn retries_transient_failures_not_permanent_ones() {
