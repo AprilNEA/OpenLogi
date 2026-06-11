@@ -15,10 +15,20 @@ env:
 
 jobs:
   sign:
-    name: Windows signing dry-run (x86_64)
+    name: Windows signing dry-run (${{ matrix.arch }})
     runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
     # Matches release.yml's windows job: the GUI release build dominates.
     timeout-minutes: 60
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
     permissions:
       id-token: write
       contents: read
@@ -29,6 +39,8 @@ jobs:
       - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Load Azure signing config from 1Password
         id: azure_config
@@ -63,7 +75,7 @@ jobs:
           : "${AZURE_CERT_PROFILE:?Configure AZURE_CERT_PROFILE in the Azure 1Password item}"
 
       - name: Build OpenLogi GUI
-        run: cargo build --release -p openlogi-gui
+        run: cargo build --release -p openlogi-gui --target ${{ matrix.target }}
 
       - name: Azure login (OIDC)
         uses: azure/login@v3
@@ -78,7 +90,7 @@ jobs:
           endpoint: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
           signing-account-name: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
-          files: ${{ github.workspace }}\target\release\openlogi-gui.exe
+          files: ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-gui.exe
           # Must stay http — SignTool rejects an https /tr ("Invalid Timestamp
           # URL", v0.6.5). The RFC3161 response is itself signed.
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
@@ -87,7 +99,7 @@ jobs:
       - name: Verify the binary is signed
         shell: pwsh
         run: |
-          $sig = Get-AuthenticodeSignature target\release\openlogi-gui.exe
+          $sig = Get-AuthenticodeSignature target\${{ matrix.target }}\release\openlogi-gui.exe
           $sig | Format-List
           # NotSigned and HashMismatch are trust-store independent and always
           # ship-blockers; NotTrusted/UnknownError depend on the runner's

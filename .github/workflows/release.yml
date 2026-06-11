@@ -160,8 +160,19 @@ jobs:
           path: dist/*.dmg
 
   windows:
-    name: Windows GUI (x86_64)
+    name: Windows GUI (${{ matrix.arch }})
+    # Both arches build on the x86_64 runner — arm64 as an MSVC cross-compile.
+    # Native Arm runners are not an option: artifact-signing-action refuses to
+    # run on them, while the signing itself is arch-agnostic over the PE file.
     runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
     # A hung signing/login call must become a normal failure (which publish
     # tolerates), not a 6-hour stall: publish waits for this job to reach a
     # terminal state before its own gate is even evaluated. The GUI release
@@ -169,6 +180,12 @@ jobs:
     # runtime on the 4-core runner, hence a looser budget than the ~8-minute
     # CLI-only runs needed.
     timeout-minutes: 60
+    env:
+      # Static CRT: a bare exe must not depend on the VC++ Redistributable —
+      # the v0.6.6 exe died on clean machines with "VCRUNTIME140.dll was not
+      # found". The explicit --target below keeps the flag off host build
+      # scripts, which RUSTFLAGS would otherwise also reach.
+      RUSTFLAGS: -C target-feature=+crt-static
     permissions:
       # Mint an OIDC token so azure/login can exchange it for an Azure access token
       # via a federated credential — no client secret is stored in GitHub.
@@ -182,6 +199,8 @@ jobs:
       - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       # No rust-cache here: this workflow runs only on tag refs, whose saved
       # caches no future tag can restore (and no default-branch job produces a
@@ -232,7 +251,7 @@ jobs:
       # once it has been runtime-tested on a real Windows box; the CLI stays
       # cargo-install-only, as on the other platforms.
       - name: Build OpenLogi GUI
-        run: cargo build --release -p openlogi-gui
+        run: cargo build --release -p openlogi-gui --target ${{ matrix.target }}
 
       # Federated (passwordless) login. Requires an app registration whose federated
       # credential subject is `repo:AprilNEA/OpenLogi:environment:release`, granted the
@@ -253,7 +272,7 @@ jobs:
           endpoint: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
           signing-account-name: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
-          files: ${{ github.workspace }}\target\release\openlogi-gui.exe
+          files: ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-gui.exe
           # Timestamping is mandatory: without it the signature expires after
           # 3 days. The URL must stay http — SignTool rejects an https /tr up
           # front ("SignTool Error: Invalid Timestamp URL", v0.6.5) before
@@ -268,7 +287,7 @@ jobs:
       - name: Verify the binary is signed
         shell: pwsh
         run: |
-          $sig = Get-AuthenticodeSignature target\release\openlogi-gui.exe
+          $sig = Get-AuthenticodeSignature target\${{ matrix.target }}\release\openlogi-gui.exe
           $sig | Format-List
           # The signing step above already fails on error; this guards against it
           # silently producing an unsigned or corrupted binary. NotSigned and
@@ -287,11 +306,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           # Renaming after signing is safe: Authenticode lives in the PE file.
           $ref = $env:GITHUB_REF_NAME -replace '/', '-'
-          Copy-Item target\release\openlogi-gui.exe "dist\OpenLogi-$ref-windows-x86_64.exe"
+          Copy-Item target\${{ matrix.target }}\release\openlogi-gui.exe "dist\OpenLogi-$ref-windows-${{ matrix.arch }}.exe"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: OpenLogi-windows-x86_64
+          name: OpenLogi-windows-${{ matrix.arch }}
           path: dist/*.exe
           # 'warn' (the default) would let a no-exe job stay green, and publish
           # would then die at the by-name download instead of shipping DMG-only.
@@ -392,12 +411,15 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # Present only when the independent Windows job succeeded; skipped otherwise.
+      # Present only when the independent Windows matrix succeeded; skipped
+      # otherwise. The result is the matrix aggregate, so the exe set is
+      # all-or-nothing — one failed arch drops both exes from the release.
       - uses: actions/download-artifact@v8
         if: ${{ needs.windows.result == 'success' }}
         with:
-          name: OpenLogi-windows-x86_64
+          pattern: OpenLogi-windows-*
           path: dist
+          merge-multiple: true
 
       - uses: actions/download-artifact@v8
         with:
