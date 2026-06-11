@@ -1288,7 +1288,13 @@ mod macos {
     }
 
     /// Post a media/system key event (play/pause, track navigation, volume).
+    ///
+    /// Runs on the hook/gesture dispatch threads, which have no run loop to
+    /// drain autorelease pools, and both `NSEvent` creation and the `CGEvent`
+    /// getter autorelease temporaries — so the exchange sits inside an
+    /// explicit `autoreleasepool`, same as the hook's `frontmost_bundle_id`.
     pub(super) fn post_media_key(nx_key: i32) {
+        use objc2::rc::autoreleasepool;
         use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
         use objc2_core_graphics::{CGEvent, CGEventTapLocation};
         use objc2_foundation::NSPoint;
@@ -1297,30 +1303,32 @@ mod macos {
         const NX_KEY_DOWN: i32 = 0x0A;
         const NX_KEY_UP: i32 = 0x0B;
 
-        for (state, phase) in [(NX_KEY_DOWN, "down"), (NX_KEY_UP, "up")] {
-            // data1 layout for subtype 8: high word is NX_KEYTYPE_*, next byte
-            // is key state (0x0A down, 0x0B up), low bit is repeat (0 here).
-            let data1 = ((nx_key << 16) | (state << 8)) as isize;
-            let Some(ns_event) = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
-                NSEventType::SystemDefined,
-                NSPoint::new(0.0, 0.0),
-                NSEventModifierFlags::empty(),
-                0.0,
-                0,
-                None,
-                NX_SUBTYPE_AUX_CONTROL_BUTTONS,
-                data1,
-                0,
-            ) else {
-                tracing::warn!(nx_key, phase, "NSEvent::otherEventWithType failed");
-                return;
-            };
-            let Some(cg_event) = ns_event.CGEvent() else {
-                tracing::warn!(nx_key, phase, "NSEvent::CGEvent failed");
-                return;
-            };
-            CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&cg_event));
-        }
+        autoreleasepool(|_| {
+            for (state, phase) in [(NX_KEY_DOWN, "down"), (NX_KEY_UP, "up")] {
+                // data1 layout for subtype 8: high word is NX_KEYTYPE_*, next byte
+                // is key state (0x0A down, 0x0B up), low bit is repeat (0 here).
+                let data1 = ((nx_key << 16) | (state << 8)) as isize;
+                let Some(ns_event) = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+                    NSEventType::SystemDefined,
+                    NSPoint::new(0.0, 0.0),
+                    NSEventModifierFlags::empty(),
+                    0.0,
+                    0,
+                    None,
+                    NX_SUBTYPE_AUX_CONTROL_BUTTONS,
+                    data1,
+                    0,
+                ) else {
+                    tracing::warn!(nx_key, phase, "NSEvent::otherEventWithType failed");
+                    return;
+                };
+                let Some(cg_event) = ns_event.CGEvent() else {
+                    tracing::warn!(nx_key, phase, "NSEvent::CGEvent failed");
+                    return;
+                };
+                CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&cg_event));
+            }
+        });
     }
 
     /// Post a synthetic scroll event for `action` (one of the `Scroll*` variants).
