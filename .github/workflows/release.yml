@@ -4,6 +4,14 @@ on:
   push:
     tags:
       - "v*"
+  # Manual, publish-free full build: produces the signed/notarized DMGs and
+  # the signed exes as run artifacts. Everything publish-side (GitHub
+  # Release, R2 / channels/stable/latest.json, homebrew-tap) is tag-gated
+  # below, so a branch dispatch cannot create a release named after the
+  # branch, overwrite the updater channel, or ping the tap. Do NOT dispatch
+  # on an existing v* tag — that re-enters the full publish path against an
+  # immutable release.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -318,6 +326,9 @@ jobs:
 
   release-notes:
     name: Generate release notes
+    # Tag runs only: the generator diffs from the previous tag, and its only
+    # consumer (publish) is tag-gated too.
+    if: ${{ github.ref_type == 'tag' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -394,7 +405,7 @@ jobs:
     # re-runs as windows' dependent and fails against the now-immutable release
     # (and would overwrite immutable-cached R2 objects). A missed .exe ships
     # with the next tag instead.
-    if: ${{ !cancelled() && needs.macos.result == 'success' && needs.release-notes.result == 'success' }}
+    if: ${{ github.ref_type == 'tag' && !cancelled() && needs.macos.result == 'success' && needs.release-notes.result == 'success' }}
     permissions:
       contents: write
     steps:
