@@ -93,23 +93,32 @@ fn replace_stale() -> Option<InstanceGuard> {
         "lock holder speaks an older protocol — taking over"
     );
 
-    let mut signalled = false;
-    for pid in agent_pids() {
-        // `kill(1)` over raw libc: no unsafe, and the pid came from pgrep
-        // moments ago — at worst the signal misses a just-exited process.
-        let done = std::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status()
-            .is_ok_and(|s| s.success());
-        if done {
-            info!(pid, "sent SIGTERM to the stale agent");
-            signalled = true;
-        } else {
-            warn!(pid, "could not signal the stale agent");
+    let pids = agent_pids();
+    if pids.is_empty() {
+        // The holder answered the handshake a moment ago but no process is
+        // findable now: it exited on its own (or pgrep is missing). Nothing
+        // to signal either way — let the lock retry below decide whether the
+        // lock is actually free, instead of exiting as a duplicate.
+        info!("stale agent already gone — trying for its lock");
+    } else {
+        let mut signalled = false;
+        for pid in pids {
+            // `kill(1)` over raw libc: no unsafe, and the pid came from pgrep
+            // moments ago — at worst the signal misses a just-exited process.
+            let done = std::process::Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status()
+                .is_ok_and(|s| s.success());
+            if done {
+                info!(pid, "sent SIGTERM to the stale agent");
+                signalled = true;
+            } else {
+                warn!(pid, "could not signal the stale agent");
+            }
         }
-    }
-    if !signalled {
-        return None;
+        if !signalled {
+            return None;
+        }
     }
 
     let (attempts, delay) = LOCK_RETRY;
