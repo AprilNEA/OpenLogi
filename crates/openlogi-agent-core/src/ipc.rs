@@ -18,15 +18,26 @@ use serde::{Deserialize, Serialize};
 /// independent of the crate version. The GUI checks it via
 /// [`Agent::protocol_version`] on connect and refuses to drive a mismatch
 /// (transient only: both binaries ship in one `.app` and update atomically).
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// v2: [`AgentStatus::inventory_ready`] added.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Agent health the GUI surfaces: the Accessibility gate, whether the hook is
 /// live, and the autostart toggle state.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a status snapshot of independent flags, not a state machine — folding them into enums would only complicate the wire format"
+)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentStatus {
     pub accessibility_granted: bool,
     pub hook_installed: bool,
     pub launch_at_login: bool,
+    /// Whether the agent's first device enumeration has completed. While
+    /// `false`, an empty [`Agent::inventory`] means "still scanning", not "no
+    /// devices" — the GUI keeps its scanning state instead of declaring the
+    /// device list empty.
+    pub inventory_ready: bool,
     pub protocol_version: u32,
     pub agent_version: String,
 }

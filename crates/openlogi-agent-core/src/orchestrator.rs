@@ -70,6 +70,11 @@ pub struct Orchestrator {
     /// GUI's `inventory()` polls without re-enumerating (the agent owns all
     /// device I/O).
     last_inventory: Vec<DeviceInventory>,
+    /// Whether [`Self::refresh_inventory`] has run at least once. Until then
+    /// [`Self::last_inventory`] is empty because nothing has been *checked*
+    /// yet, not because no devices exist — the IPC `status` reports this so
+    /// the GUI can tell the two apart.
+    enumerated: bool,
     shared: SharedRuntime,
 }
 
@@ -96,6 +101,7 @@ impl Orchestrator {
             current: 0,
             current_app: None,
             last_inventory: Vec::new(),
+            enumerated: false,
             shared,
         };
         orch.rebuild();
@@ -168,6 +174,9 @@ impl Orchestrator {
     /// index, so running it every 2s tick on an unchanged set would snap DPI
     /// back to `preset[0]` (and burn three `RwLock` writes) for nothing.
     pub fn refresh_inventory(&mut self, inventories: &[DeviceInventory]) {
+        // Even an empty snapshot is a *completed* enumeration — the watcher
+        // skips failed ticks — so the device set is now known either way.
+        self.enumerated = true;
         self.last_inventory = inventories.to_vec();
         let devices = build_devices(inventories);
         let changed = devices.len() != self.devices.len()
@@ -206,6 +215,13 @@ impl Orchestrator {
     #[must_use]
     pub fn inventory(&self) -> Vec<DeviceInventory> {
         self.last_inventory.clone()
+    }
+
+    /// Whether the first device enumeration has completed (for the IPC
+    /// `status` poll) — distinguishes "still scanning" from "no devices".
+    #[must_use]
+    pub fn inventory_ready(&self) -> bool {
+        self.enumerated
     }
 
     /// Whether autostart is enabled in the current config (for IPC `status`).
@@ -312,5 +328,23 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
     match lock.write() {
         Ok(mut guard) => *guard = value,
         Err(e) => warn!(error = %e, lock = name, "lock poisoned — keeping stale value"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Orchestrator;
+    use openlogi_core::config::Config;
+
+    /// An *empty* snapshot still flips `inventory_ready`: the watcher only
+    /// forwards completed enumerations, so "checked and found nothing" must not
+    /// be reported as "still scanning" — that's the whole distinction the flag
+    /// exists to carry.
+    #[test]
+    fn empty_refresh_marks_inventory_ready() {
+        let mut orch = Orchestrator::new(Config::default());
+        assert!(!orch.inventory_ready());
+        orch.refresh_inventory(&[]);
+        assert!(orch.inventory_ready());
     }
 }
