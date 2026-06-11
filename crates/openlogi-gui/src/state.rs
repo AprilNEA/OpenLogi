@@ -352,12 +352,16 @@ impl AppState {
     /// Replace [`Self::device_list`] from a fresh inventory snapshot,
     /// preserving the carousel selection by `config_key` when possible. If
     /// the previously-selected device disappeared, the selection falls back
-    /// to index 0.
+    /// to index 0. Returns whether anything actually changed.
     ///
-    /// No-op when the new list has the same `config_key` sequence as the
-    /// current one — avoids spurious `observe_global` notifications during
-    /// quiet polling cycles (P1.6).
-    pub fn refresh_inventories(&mut self, inventories: &[DeviceInventory], cache: &AssetResolver) {
+    /// No-op (returning `false`) when the new list has the same `config_key`
+    /// sequence as the current one — the caller skips the window refresh, and
+    /// quiet polling cycles cause no spurious re-renders (P1.6).
+    pub fn refresh_inventories(
+        &mut self,
+        inventories: &[DeviceInventory],
+        cache: &AssetResolver,
+    ) -> bool {
         let new_list = build_device_list(inventories, cache);
         let merged_list = self.merge_inventory_snapshot(new_list);
         // Compare routes too, not just config_key: a device can reconnect on a
@@ -370,7 +374,7 @@ impl AppState {
                 .zip(self.device_list.iter())
                 .all(|(a, b)| a.config_key == b.config_key && a.route == b.route);
         if unchanged {
-            return;
+            return false;
         }
 
         let previous_key = self.current_record().map(|r| r.config_key.clone());
@@ -424,6 +428,7 @@ impl AppState {
         self.gesture_bindings = self.gesture_bindings_for_current();
         // Display state only — the agent runs its own inventory watcher and
         // rebuilds the live binding/DPI maps itself.
+        true
     }
 
     fn merge_inventory_snapshot(&mut self, new_list: Vec<DeviceRecord>) -> Vec<DeviceRecord> {
