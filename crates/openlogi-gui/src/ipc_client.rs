@@ -124,7 +124,14 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
                             match poll(&mut client, &update_tx).await {
                                 Ok(Some(true)) if !steady => {
                                     steady = true;
-                                    interval = tokio::time::interval(poll_period);
+                                    // `interval_at`: a fresh `interval` ticks
+                                    // immediately, which would fire a redundant
+                                    // back-to-back poll right after the one
+                                    // that just confirmed readiness.
+                                    interval = tokio::time::interval_at(
+                                        tokio::time::Instant::now() + poll_period,
+                                        poll_period,
+                                    );
                                 }
                                 Ok(_) => {}
                                 Err(()) => {
