@@ -261,9 +261,13 @@ fn main() -> Result<()> {
                             let cache = asset::AssetResolver::new();
                             cx.update_global::<AppState, _>(|state, _| {
                                 state.refresh_inventories(&update.inventory, &cache);
-                                state.scanning = false;
+                                // A freshly-(re)started agent serves an empty
+                                // inventory until its own first enumeration
+                                // completes; only its say-so downgrades the
+                                // empty state from "Scanning…" to "No devices".
+                                state.scanning = !update.status.inventory_ready;
                                 state.accessibility_granted =
-                                    update.status.accessibility_granted;
+                                    Some(update.status.accessibility_granted);
                             });
                             cx.refresh_windows();
                         });

@@ -193,6 +193,7 @@ _version: 1
 "Needed to read HID++ data, including Bluetooth-direct mice.": "Απαιτείται για την ανάγνωση δεδομένων HID++, συμπεριλαμβανομένων ποντικιών απευθείας μέσω Bluetooth."
 "Allows OpenLogi to use CoreBluetooth (not required for HID access).": "Επιτρέπει στο OpenLogi να χρησιμοποιεί το CoreBluetooth (δεν απαιτείται για πρόσβαση HID)."
 "Scanning for devices…": "Αναζήτηση συσκευών…"
+"Connecting to the background service…": "Σύνδεση με την υπηρεσία παρασκηνίου…"
 "Thumb Wheel Up": "Πλαϊνός τροχός πάνω"
 "Thumb Wheel Down": "Πλαϊνός τροχός κάτω"
 "Do Nothing": "Καμία ενέργεια"

@@ -7,10 +7,11 @@ use gpui::{
     prelude::FluentBuilder as _, px, relative, rgb,
 };
 use gpui_component::{
-    Icon, IconName,
+    Icon, IconName, Sizable as _,
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
     scroll::ScrollableElement as _,
+    spinner::Spinner,
     tab::TabBar,
     tooltip::Tooltip,
     v_flex,
@@ -343,9 +344,20 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
 
-        let granted = cx
+        // The agent is the source of truth for both the permission state and
+        // the device list, and neither is known until its first IPC snapshot
+        // lands. Hold a neutral connecting frame until then: rendering the
+        // permission gate (and then the empty state) off the assumed-denied
+        // defaults flashed both screens at every already-set-up user on
+        // launch. A missing global gets the same neutral frame — it's equally
+        // "nothing is known yet".
+        let Some(granted) = cx
             .try_global::<AppState>()
-            .is_none_or(|s| s.accessibility_granted);
+            .and_then(|s| s.accessibility_granted)
+        else {
+            window.set_window_title("OpenLogi");
+            return connecting_view(pal);
+        };
         if !granted && !self.accessibility_dismissed {
             window.set_window_title("OpenLogi");
             return Self::accessibility_gate(pal, cx);
@@ -1259,6 +1271,30 @@ fn relative_percent(value: u8) -> gpui::DefiniteLength {
 
 fn file_url(path: &std::path::Path) -> String {
     format!("file://{}", path.to_string_lossy().replace(' ', "%20"))
+}
+
+/// Whole-window placeholder shown from window-open until the agent's first
+/// IPC snapshot lands — normally a fraction of a second, or for as long as the
+/// agent is genuinely unreachable (crashed / not yet spawned), where "still
+/// connecting" is the only true statement. Deliberately neutral: no chrome, no
+/// claims about permissions or devices. The spinner's repeating animation only
+/// runs while this view is mounted, so it can't pin the render loop once the
+/// real UI replaces it.
+fn connecting_view(pal: Palette) -> AnyElement {
+    v_flex()
+        .size_full()
+        .bg(pal.bg)
+        .items_center()
+        .justify_center()
+        .gap_3()
+        .child(Spinner::new().large().color(pal.text_muted))
+        .child(
+            div()
+                .text_sm()
+                .text_color(pal.text_muted)
+                .child(tr!("Connecting to the background service…")),
+        )
+        .into_any_element()
 }
 
 /// Body shown when no device is connected. The inventory watcher keeps polling

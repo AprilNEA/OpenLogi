@@ -193,6 +193,7 @@ _version: 1
 "Needed to read HID++ data, including Bluetooth-direct mice.": "Tarvitaan HID++-tietojen lukemiseen, mukaan lukien suoraan Bluetoothiin liitetyt hiiret."
 "Allows OpenLogi to use CoreBluetooth (not required for HID access).": "Sallii OpenLogin käyttää CoreBluetoothia (ei vaadita HID-käyttöön)."
 "Scanning for devices…": "Etsitään laitteita…"
+"Connecting to the background service…": "Yhdistetään taustapalveluun…"
 "Thumb Wheel Up": "Peukalorulla ylös"
 "Thumb Wheel Down": "Peukalorulla alas"
 "Do Nothing": "Älä tee mitään"

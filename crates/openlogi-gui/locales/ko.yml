@@ -193,6 +193,7 @@ _version: 1
 "Needed to read HID++ data, including Bluetooth-direct mice.": "블루투스 직접 연결 마우스를 포함한 HID++ 데이터를 읽는 데 필요합니다."
 "Allows OpenLogi to use CoreBluetooth (not required for HID access).": "OpenLogi가 CoreBluetooth를 사용할 수 있도록 허용합니다(HID 접근에는 필요하지 않음)."
 "Scanning for devices…": "기기 검색 중…"
+"Connecting to the background service…": "백그라운드 서비스에 연결하는 중…"
 "Thumb Wheel Up": "썸휠 위로"
 "Thumb Wheel Down": "썸휠 아래로"
 "Do Nothing": "동작 없음"

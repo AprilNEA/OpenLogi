@@ -249,13 +249,16 @@ fn permissions_page(pal: Palette) -> SettingPage {
                     tr!("Needed for gesture and button remapping (event tap)."),
                     Permission::Accessibility,
                     |cx| {
-                        if cx
+                        // The agent owns the hook, so this is *its* grant,
+                        // reported over IPC; before the first snapshot the
+                        // state is genuinely unknown, not denied.
+                        match cx
                             .try_global::<AppState>()
-                            .is_some_and(|s| s.accessibility_granted)
+                            .and_then(|s| s.accessibility_granted)
                         {
-                            PermissionStatus::Granted
-                        } else {
-                            PermissionStatus::Denied
+                            Some(true) => PermissionStatus::Granted,
+                            Some(false) => PermissionStatus::Denied,
+                            None => PermissionStatus::Unknown,
                         }
                     },
                     pal,

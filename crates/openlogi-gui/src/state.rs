@@ -103,14 +103,17 @@ pub struct AppState {
     /// The hotspot the user most recently armed by clicking. Drives the
     /// "selected button" outline on the mouse model and the popover content.
     pub active_button: Option<ButtonId>,
-    /// Whether the process holds macOS Accessibility permission. Drives the
-    /// permission gate; flipped by the accessibility watcher when the user
-    /// grants access. Always `true` on platforms without the concept.
-    pub accessibility_granted: bool,
-    /// Whether the first device enumeration is still in flight. Startup no
-    /// longer blocks on enumeration (see `main`); this drives the "Scanning…"
-    /// vs "No devices connected" empty state and is cleared once the inventory
-    /// watcher delivers its first snapshot.
+    /// Whether the *agent* holds macOS Accessibility permission, or `None`
+    /// until the first IPC status snapshot arrives. Drives the permission
+    /// gate — which must not flash "not granted" at an authorized user while
+    /// the answer is simply not in yet, so `None` renders as a connecting
+    /// placeholder instead (see `AppView::render`).
+    pub accessibility_granted: Option<bool>,
+    /// Whether the agent's first device enumeration is still in flight. Drives
+    /// the "Scanning…" vs "No devices connected" empty state; tracks
+    /// `AgentStatus::inventory_ready` on every IPC snapshot, so an empty
+    /// device list reads as "no devices" only once the agent has actually
+    /// completed an enumeration.
     pub scanning: bool,
     /// Bindings for the *currently selected* device. Reloaded whenever the
     /// carousel selection changes.
@@ -199,7 +202,10 @@ impl AppState {
             active_button: None,
             // Updated from the agent's IPC `status` poll; the GUI no longer runs
             // the hook, so it can't meaningfully query Accessibility itself.
-            accessibility_granted: false,
+            // `None` (not `false`) until that first poll lands: rendering the
+            // permission gate off an assumed denial flashed it at every
+            // already-authorized user on launch.
+            accessibility_granted: None,
             scanning: true,
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),

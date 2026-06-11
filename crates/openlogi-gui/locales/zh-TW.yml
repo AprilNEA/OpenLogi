@@ -193,6 +193,7 @@ _version: 1
 "Needed to read HID++ data, including Bluetooth-direct mice.": "需要此權限才能讀取 HID++ 資料，包括藍牙直連滑鼠。"
 "Allows OpenLogi to use CoreBluetooth (not required for HID access).": "允許 OpenLogi 使用 CoreBluetooth（HID 存取不需要）。"
 "Scanning for devices…": "正在掃描裝置…"
+"Connecting to the background service…": "正在連線背景服務…"
 "Thumb Wheel Up": "拇指滾輪向上"
 "Thumb Wheel Down": "拇指滾輪向下"
 "Do Nothing": "不執行任何操作"

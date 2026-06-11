@@ -193,6 +193,7 @@ _version: 1
 "Needed to read HID++ data, including Bluetooth-direct mice.": "Erforderlich zum Lesen von HID++-Daten, einschließlich Bluetooth-Direktmäusen."
 "Allows OpenLogi to use CoreBluetooth (not required for HID access).": "Erlaubt OpenLogi die Nutzung von CoreBluetooth (für HID-Zugriff nicht erforderlich)."
 "Scanning for devices…": "Suche nach Geräten…"
+"Connecting to the background service…": "Verbindung zum Hintergrunddienst wird hergestellt…"
 "Thumb Wheel Up": "Daumenrad nach oben"
 "Thumb Wheel Down": "Daumenrad nach unten"
 "Do Nothing": "Nichts tun"
