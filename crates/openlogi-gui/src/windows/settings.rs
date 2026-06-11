@@ -33,6 +33,8 @@ use crate::platform::permissions::{self, PermissionStatus};
 use crate::state::AppState;
 use crate::theme::{self, Palette};
 use crate::windows::{self, AuxWindow};
+#[cfg(target_os = "macos")]
+use gpui::StatefulInteractiveElement as _;
 
 /// Standalone Settings window root view.
 pub struct SettingsView {
