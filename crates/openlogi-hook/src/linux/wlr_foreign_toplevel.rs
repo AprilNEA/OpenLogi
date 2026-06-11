@@ -367,8 +367,9 @@ impl Session {
         // round-trip, where the manager is bound if the compositor advertises it.
         let _registry = conn.display().get_registry(&qh, ());
         let mut state = State::default();
+        let deadline = Instant::now() + INIT_TIMEOUT;
 
-        if !timed_roundtrip(&conn, &mut queue, &mut state, Instant::now() + INIT_TIMEOUT) {
+        if !timed_roundtrip(&conn, &mut queue, &mut state, deadline) {
             debug!("wlr-foreign-toplevel: registry round-trip timed out or failed");
             return None;
         }
@@ -379,7 +380,7 @@ impl Session {
 
         // Second round-trip: receive the initial toplevel list and properties,
         // so the first poll already has the active window.
-        if !timed_roundtrip(&conn, &mut queue, &mut state, Instant::now() + INIT_TIMEOUT) {
+        if !timed_roundtrip(&conn, &mut queue, &mut state, deadline) {
             debug!("wlr-foreign-toplevel: initial toplevel round-trip timed out or failed");
             return None;
         }
