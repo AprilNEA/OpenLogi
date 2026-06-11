@@ -8,6 +8,7 @@
 
 mod launch_agent;
 mod pairing;
+mod self_restart;
 mod server;
 #[cfg(target_os = "macos")]
 mod status_item;
@@ -47,6 +48,11 @@ fn main() {
             return;
         }
     };
+
+    // Watch our own executable and restart as the new image when an app update
+    // replaces it — see `self_restart`. Only the lock-holding (real) agent
+    // watches, so a losing duplicate can't restart anything.
+    self_restart::spawn();
 
     let config = Config::load_or_default().unwrap_or_else(|e| {
         warn!(error = %e, "could not load config.toml; using defaults");
