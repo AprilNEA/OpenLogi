@@ -30,7 +30,9 @@ use crate::smartshift::{SmartShiftFeatureV0, SmartShiftMode, SmartShiftStatus};
 // classifies a device read/write error as permanent (FeatureUnsupported /
 // EmptyDpiList) vs transient, so the discriminating variant must survive the
 // wire — stringifying it would collapse every case to "transient" and a device
-// that genuinely lacks a feature would be re-probed forever.
+// that genuinely lacks a feature would be re-probed forever. Variant order is
+// therefore wire format: changes require a `PROTOCOL_VERSION` bump (guarded
+// by `openlogi-agent-core/tests/wire_format.rs`).
 #[derive(Debug, Clone, Error, Serialize, Deserialize)]
 pub enum WriteError {
     // `async_hid::HidError` isn't `Serialize`, so carry its message as text; the
@@ -150,6 +152,10 @@ impl DpiCapabilities {
 }
 
 /// Current DPI plus the supported values reported by the device.
+///
+/// Crosses the agent↔GUI IPC (`read_dpi`, [`DpiCapabilities`] included), so
+/// field order is wire format — changes require a `PROTOCOL_VERSION` bump
+/// (guarded by `openlogi-agent-core/tests/wire_format.rs`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DpiInfo {
     /// DPI currently configured on sensor 0.
@@ -478,6 +484,21 @@ pub async fn set_dpi(route: &DeviceRoute, dpi: u16) -> Result<(), WriteError> {
 /// keyboards. Its feature *index* varies per device, so it's resolved at runtime.
 const PER_KEY_LIGHTING_FEATURE: u16 = 0x8080;
 
+// HID++ 2.0 report ids for the 0x8080 per-key frames: 0x12 is the 64-byte "very
+// long" report that streams a batch of (keyID, R, G, B) entries; 0x11 is the
+// 20-byte "long" report that commits the streamed frame.
+const REPORT_SET_KEYS: u8 = 0x12;
+const REPORT_FRAME_END: u8 = 0x11;
+// Function byte = `function_id << 4 | software_id`. Software id 0xa just tags our
+// requests; function 0x3 streams a key range, 0x5 ends/commits the frame.
+const SW_ID: u8 = 0x0a;
+const FN_SET_KEY_RANGE: u8 = 0x3;
+const FN_FRAME_END: u8 = 0x5;
+// Fixed bytes of the "set key range" payload: a mode flag (byte 5) and the
+// per-frame entry count (byte 7), which is also the chunk size below.
+const SET_RANGE_MODE: u8 = 0x01;
+const KEYS_PER_FRAME: u8 = 0x0e;
+
 /// Set a keyboard's per-key RGB to a solid `(r, g, b)` colour via HID++
 /// `PerKeyLighting` (`0x8080`): stream every key's colour in 64-byte `0x12`
 /// "set group keys" frames, then commit the frame.
@@ -521,14 +542,14 @@ pub async fn set_keyboard_color(
     // keyboard usage range (incl. modifiers at `0xe0..`) so every key lights,
     // then commit the frame.
     let key_ids: Vec<u8> = (0x00u8..=0xe8).collect();
-    for chunk in key_ids.chunks(14) {
+    for chunk in key_ids.chunks(KEYS_PER_FRAME as usize) {
         let mut rep = vec![0u8; 64];
-        rep[0] = 0x12;
+        rep[0] = REPORT_SET_KEYS;
         rep[1] = device_index;
         rep[2] = feature_index;
-        rep[3] = 0x3a;
-        rep[5] = 0x01;
-        rep[7] = 0x0e;
+        rep[3] = (FN_SET_KEY_RANGE << 4) | SW_ID;
+        rep[5] = SET_RANGE_MODE;
+        rep[7] = KEYS_PER_FRAME;
         for (i, &key) in chunk.iter().enumerate() {
             let off = 8 + i * 4;
             rep[off] = key;
@@ -542,10 +563,10 @@ pub async fn set_keyboard_color(
             .map_err(WriteError::from)?;
     }
     let mut commit = vec![0u8; 20];
-    commit[0] = 0x11;
+    commit[0] = REPORT_FRAME_END;
     commit[1] = device_index;
     commit[2] = feature_index;
-    commit[3] = 0x5a;
+    commit[3] = (FN_FRAME_END << 4) | SW_ID;
     writer
         .write_output_report(&commit)
         .await

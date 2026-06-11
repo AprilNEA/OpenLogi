@@ -8,6 +8,10 @@
 
 mod route;
 mod transport;
+// Native Win32 HID report-write fallback, used by the Windows composite channel
+// in `transport` when async-hid's async write path fails.
+#[cfg(target_os = "windows")]
+mod windows_hid;
 
 pub mod gesture;
 pub mod inventory;

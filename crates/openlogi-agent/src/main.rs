@@ -8,9 +8,11 @@
 
 mod launch_agent;
 mod pairing;
+mod self_restart;
 mod server;
 #[cfg(target_os = "macos")]
 mod status_item;
+mod takeover;
 #[cfg(target_os = "macos")]
 mod tray;
 
@@ -39,14 +41,28 @@ fn main() {
     let _guard = match openlogi_core::single_instance::acquire("agent.lock") {
         Ok(g) => g,
         Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
-            info!(path = %path.display(), "another openlogi-agent is already running — exiting");
-            return;
+            // The holder may be a leftover from before this binary's update —
+            // a pre-self-restart agent never exits on its own, and it would
+            // wedge the (newer) GUI on its connecting screen forever. If it
+            // provably speaks an older protocol, replace it; otherwise exit
+            // as the duplicate we are.
+            let Some(g) = takeover::try_replace_stale() else {
+                info!(path = %path.display(), "another openlogi-agent is already running — exiting");
+                return;
+            };
+            info!("replaced a stale agent — continuing as the new one");
+            g
         }
         Err(e) => {
             warn!(error = %e, "single-instance check failed — exiting");
             return;
         }
     };
+
+    // Watch our own executable and restart as the new image when an app update
+    // replaces it — see `self_restart`. Only the lock-holding (real) agent
+    // watches, so a losing duplicate can't restart anything.
+    self_restart::spawn();
 
     let config = Config::load_or_default().unwrap_or_else(|e| {
         warn!(error = %e, "could not load config.toml; using defaults");
@@ -116,7 +132,7 @@ async fn run(config: Config) {
     // shared maps and dispatches bound actions itself; the two pairing flags let
     // it release its capture session while a pairing session owns the receiver.
     watchers::gesture::spawn(
-        shared.hook_bindings.clone(),
+        shared.hook_maps.clone(),
         shared.gesture_bindings.clone(),
         shared.dpi_cycle.clone(),
         shared.capture_channel.clone(),
@@ -130,18 +146,15 @@ async fn run(config: Config) {
     let mut accessibility_rx = watchers::accessibility::spawn(Duration::from_millis(1200));
 
     // IPC server: the GUI connects here for device state + "apply now" commands.
-    match openlogi_core::paths::agent_socket_path() {
-        Ok(socket_path) => {
-            let server = AgentServer {
-                orchestrator: Arc::clone(&orchestrator),
-                shared: shared.clone(),
-                hook_installed: Arc::clone(&hook_installed),
-                pairing: Arc::clone(&pairing),
-            };
-            tokio::spawn(server::run(server, socket_path));
-        }
-        Err(e) => warn!(error = %e, "could not resolve IPC socket path; IPC disabled"),
-    }
+    // The endpoint (Unix socket / Windows named pipe) is resolved inside
+    // `transport::bind`, called by `server::run`.
+    let server = AgentServer {
+        orchestrator: Arc::clone(&orchestrator),
+        shared: shared.clone(),
+        hook_installed: Arc::clone(&hook_installed),
+        pairing: Arc::clone(&pairing),
+    };
+    tokio::spawn(server::run(server));
 
     // The CGEventTap hook is installed once Accessibility is granted and dropped
     // if it's revoked (the tap self-disables on revoke regardless; dropping the
@@ -149,11 +162,26 @@ async fn run(config: Config) {
     let mut hook: Option<Hook> = None;
 
     info!("openlogi-agent started");
+    // Set once the inventory channel closes (the watcher thread died), so the
+    // select stops polling a permanently-ready closed receiver.
+    let mut inventory_open = true;
     loop {
         tokio::select! {
-            Some(inventories) = inventory_rx.recv() => {
-                orchestrator.lock().await.refresh_inventory(&inventories);
-            }
+            event = inventory_rx.recv(), if inventory_open => match event {
+                Some(watchers::inventory::InventoryEvent::Snapshot(inventories)) => {
+                    orchestrator.lock().await.refresh_inventory(&inventories);
+                }
+                Some(watchers::inventory::InventoryEvent::Unavailable) => {
+                    orchestrator.lock().await.mark_inventory_unavailable();
+                }
+                // Watcher thread death (e.g. a panic inside the HID backend's
+                // enumerate) — without a snapshot the GUI would scan forever.
+                None => {
+                    warn!("inventory watcher channel closed — marking enumeration unavailable");
+                    orchestrator.lock().await.mark_inventory_unavailable();
+                    inventory_open = false;
+                }
+            },
             Some(bundle) = app_rx.recv() => {
                 orchestrator.lock().await.set_current_app(bundle);
             }
@@ -165,7 +193,7 @@ async fn run(config: Config) {
                 if granted && hook.is_none() {
                     info!("accessibility granted — installing OS mouse hook");
                     hook = hook_runtime::start(
-                        shared.hook_bindings.clone(),
+                        shared.hook_maps.clone(),
                         shared.dpi_cycle.clone(),
                         shared.capture_channel.clone(),
                     );

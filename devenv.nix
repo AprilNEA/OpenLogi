@@ -40,6 +40,13 @@ in
       "rust-analyzer"
       "rust-src"
     ];
+    # Cross target for linting the Windows-only code paths locally. `cargo
+    # clippy --target` is check-only (no linking), so this needs the target's
+    # rust-std but NOT a mingw cross-linker; the agent's dep tree is pure Rust
+    # plus prebuilt import libs (no `cc`-compiled C), so it lints cleanly. It is
+    # a fast proxy for CI's authoritative `clippy (windows)` (msvc); building a
+    # runnable .exe would additionally need pkgsCross.mingwW64 and is out of scope.
+    targets = [ "x86_64-pc-windows-gnu" ];
   };
 
   enterShell = ''
@@ -76,6 +83,22 @@ in
         set -e
         crowdin download
         cargo test -p openlogi-gui i18n
+      '';
+    };
+    "openlogi:check-windows" = {
+      description = "Lint the Windows code paths locally (check-only cross lint).";
+      # `clippy --target` is check-only (no linker needed), but a C-compiling
+      # build dep DOES need a cross C toolchain: openlogi-{assets,cli} and the
+      # root `openlogi` pull ureq -> ring, whose curve25519.c can't cross-compile
+      # from macOS without mingw. They have no Windows-specific code, so lint the
+      # ring-free agent/leaf subset here; CI's clippy (windows) covers the rest
+      # natively on windows-latest. The GUI is excluded (GPUI has no Windows
+      # backend).
+      exec = ''
+        cargo clippy --target x86_64-pc-windows-gnu \
+          -p openlogi-core -p openlogi-hidpp -p openlogi-hid -p openlogi-hook \
+          -p openlogi-agent -p openlogi-agent-core \
+          --all-targets -- -D warnings
       '';
     };
     "openlogi:assets" = {

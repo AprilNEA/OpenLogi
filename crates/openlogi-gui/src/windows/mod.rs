@@ -62,13 +62,12 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
     // Already open? Focus it and bail. A closed window leaves a stale handle
     // whose `update` errors, falling through to a fresh open.
     let existing = *slot(cx.default_global::<WindowRegistry>());
-    if let Some(handle) = existing {
-        if handle
+    if let Some(handle) = existing
+        && handle
             .update(cx, |_, window, _| window.activate_window())
             .is_ok()
-        {
-            return;
-        }
+    {
+        return;
     }
 
     let bounds = Bounds::centered(None, size, cx);

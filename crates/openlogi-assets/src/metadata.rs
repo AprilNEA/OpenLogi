@@ -43,7 +43,7 @@ use serde::Deserialize;
 
 use crate::http;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Metadata {
     pub images: Vec<ImageEntry>,
 }

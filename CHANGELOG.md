@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.6](https://github.com/AprilNEA/OpenLogi/compare/openlogi-hidpp-v0.6.5...openlogi-hidpp-v0.6.6) - 2026-06-10
+
+### Fixed
+
+- *(hidpp)* bound device-controlled name lengths in Bolt parsing ([#200](https://github.com/AprilNEA/OpenLogi/pull/200))
+
+## [0.6.5](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.4...openlogi-core-v0.6.5) - 2026-06-10
+
+### Other
+
+- collapse nested ifs flagged by current stable clippy ([#197](https://github.com/AprilNEA/OpenLogi/pull/197))
+
+## [0.6.4](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.3...openlogi-core-v0.6.4) - 2026-06-10
+
+### Added
+
+- *(core)* complete the macOS->Windows CustomShortcut keycode map
+- *(windows)* native input + HID++ leaf support
+- *(openlogi-gui)* expand UI to 19 fully-translated locales ([#24](https://github.com/AprilNEA/OpenLogi/pull/24))
+- *(gui)* glow keyboard card in lighting colour ([#185](https://github.com/AprilNEA/OpenLogi/pull/185))
+
+## [0.6.3](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.2...openlogi-core-v0.6.3) - 2026-06-09
+
+### Added
+
+- *(core)* unify button + gesture bindings into one Binding map
+
+### Fixed
+
+- *(core)* harden gesture Binding defaults, migration, and projection
+
 ## [0.6.2](https://github.com/AprilNEA/OpenLogi/compare/v0.6.1...v0.6.2) - 2026-06-08
 
 ### Added

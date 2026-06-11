@@ -207,6 +207,6 @@ fn clamp_brightness(raw: f32) -> u8 {
 }
 
 /// Parse `"RRGGBB"` to a `0xRRGGBB` int for `rgb()`. Falls back to white.
-fn parse_hex(hex: &str) -> u32 {
+pub(crate) fn parse_hex(hex: &str) -> u32 {
     u32::from_str_radix(hex, 16).unwrap_or(0x00ff_ffff)
 }

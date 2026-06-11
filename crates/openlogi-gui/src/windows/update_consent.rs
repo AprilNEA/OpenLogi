@@ -55,10 +55,8 @@ pub fn open(cx: &mut App) {
 /// Persist the user's answer, run one check if they opted in, and close.
 fn answer(enabled: bool, window: &mut Window, cx: &mut App) {
     cx.update_global::<AppState, _>(|state, _| state.record_update_consent(enabled));
-    if enabled {
-        if let Some(updater) = crate::platform::updater::shared(cx) {
-            updater.update(cx, Updater::check);
-        }
+    if enabled && let Some(updater) = crate::platform::updater::shared(cx) {
+        updater.update(cx, Updater::check);
     }
     window.remove_window();
 }

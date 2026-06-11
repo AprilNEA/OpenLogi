@@ -8,13 +8,14 @@
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
     IntoElement, ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, px, rgb,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     IconName, IndexPath, Sizable, h_flex,
     select::{Select, SelectEvent, SelectItem, SelectState},
     setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
     slider::{Slider, SliderEvent, SliderState},
+    v_flex,
 };
 use openlogi_core::config::{
     DEFAULT_THUMBWHEEL_SENSITIVITY, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
@@ -248,13 +249,15 @@ fn permissions_page(pal: Palette) -> SettingPage {
                     tr!("Needed for gesture and button remapping (event tap)."),
                     Permission::Accessibility,
                     |cx| {
-                        if cx
-                            .try_global::<AppState>()
-                            .is_some_and(|s| s.accessibility_granted)
-                        {
-                            PermissionStatus::Granted
-                        } else {
-                            PermissionStatus::Denied
+                        // The agent owns the hook, so this is *its* grant,
+                        // reported over IPC; while not connected the state is
+                        // genuinely unknown, not denied.
+                        match cx.try_global::<AppState>().and_then(AppState::agent_status) {
+                            Some(status) if status.accessibility_granted => {
+                                PermissionStatus::Granted
+                            }
+                            Some(_) => PermissionStatus::Denied,
+                            None => PermissionStatus::Unknown,
                         }
                     },
                     pal,
@@ -439,23 +442,32 @@ fn language_select_field(
 )]
 fn sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> AnyElement {
     let value = slider.read(cx).value().start().round() as i32;
-    let label = if value == DEFAULT_THUMBWHEEL_SENSITIVITY {
-        format!("{value} ({})", rust_i18n::t!("Default"))
-    } else {
-        value.to_string()
-    };
+    let is_default = value == DEFAULT_THUMBWHEEL_SENSITIVITY;
     let pal = theme::palette(cx);
-    h_flex()
+    v_flex()
         .flex_shrink_0()
-        .items_center()
-        .gap_3()
-        .child(div().w(px(180.)).child(Slider::new(slider)))
+        .gap_1()
         .child(
-            div()
-                .w(px(72.))
-                .text_sm()
-                .text_color(pal.text_muted)
-                .child(label),
+            h_flex()
+                .items_center()
+                .gap_3()
+                .child(div().w(px(180.)).child(Slider::new(slider)))
+                .child(
+                    div()
+                        .w(px(72.))
+                        .text_sm()
+                        .text_color(pal.text_muted)
+                        .child(value.to_string()),
+                ),
         )
+        .when(is_default, |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(pal.text_muted)
+                    .whitespace_nowrap()
+                    .child(format!("({})", rust_i18n::t!("Default"))),
+            )
+        })
         .into_any_element()
 }

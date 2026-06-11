@@ -25,7 +25,9 @@ use std::io;
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
 #[cfg(target_os = "macos")]
-use tracing::{info, warn};
+use tracing::info;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use tracing::warn;
 
 /// Stable launch-agent identifier for the background agent.
 #[cfg(target_os = "macos")]
@@ -46,7 +48,11 @@ pub fn reconcile(enabled: bool) {
             warn!(error = %e, enabled, "agent LaunchAgent reconcile failed");
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    if let Err(e) = reconcile_windows(enabled) {
+        warn!(error = %e, enabled, "agent autostart reconcile failed");
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         if enabled {
             debug!("launch_at_login set but no autostart backend on this platform");
@@ -148,6 +154,47 @@ fn xml_escape(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+/// HKCU autostart subkey + value name for the agent.
+#[cfg(target_os = "windows")]
+const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(target_os = "windows")]
+const RUN_VALUE: &str = "OpenLogiAgent";
+
+/// Windows autostart: keep `HKCU\…\Run\OpenLogiAgent` pointed at the running
+/// agent executable so the next login relaunches it, or remove it when disabled.
+///
+/// Unlike the macOS LaunchAgent there is no crash-respawn — a Run-key entry only
+/// fires once at login. A future SCM/Task Scheduler backend could add restart
+/// semantics; the login-launch path is enough for the headless agent today.
+#[cfg(target_os = "windows")]
+fn reconcile_windows(enabled: bool) -> std::io::Result<()> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+
+    let (run, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(RUN_SUBKEY)?;
+    if enabled {
+        let exe = std::env::current_exe()?;
+        // Windows parses Run-key values as command lines, so a bare path with
+        // spaces (e.g. under "C:\Program Files\") is split at the first space and
+        // the launch silently fails. Quote it. Built via OsString so a non-UTF-8
+        // path survives exactly (no lossy `display()`).
+        let mut quoted = std::ffi::OsString::from("\"");
+        quoted.push(exe.as_os_str());
+        quoted.push("\"");
+        run.set_value(RUN_VALUE, &quoted)?;
+        debug!(value = RUN_VALUE, "agent autostart registry value set");
+    } else {
+        match run.delete_value(RUN_VALUE) {
+            Ok(()) => debug!(value = RUN_VALUE, "agent autostart registry value removed"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                debug!("agent autostart registry value already absent");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(all(test, target_os = "macos"))]

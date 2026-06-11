@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use crate::DpiCycleState;
-use crate::hook_runtime::{self, BindingMap};
+use crate::hook_runtime::{self, SharedHookMaps};
 
 /// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
 /// direction). The watcher reads it to map a captured swipe to a bound action.
@@ -73,7 +73,7 @@ fn action_threshold(sensitivity: i32) -> i32 {
 /// keeps one capture session pointed at the active device and dispatches each
 /// captured input.
 pub fn spawn(
-    button_bindings: BindingMap,
+    hook_maps: SharedHookMaps,
     gesture_bindings: GestureBindings,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
@@ -93,7 +93,7 @@ pub fn spawn(
             }
         };
         runtime.block_on(manage(
-            button_bindings,
+            hook_maps,
             gesture_bindings,
             dpi_cycle,
             capture_channel,
@@ -110,11 +110,11 @@ pub fn spawn(
 /// We divert when the sensitivity leaves its default (so we can scale scroll
 /// ourselves) or when the click or either rotation direction is rebound away
 /// from its default; otherwise the OS scrolls the wheel natively.
-fn thumbwheel_armed(button_bindings: &BindingMap, sensitivity: i32) -> bool {
+fn thumbwheel_armed(hook_maps: &SharedHookMaps, sensitivity: i32) -> bool {
     if sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY {
         return true;
     }
-    button_bindings.read().ok().is_some_and(|guard| {
+    hook_maps.read().ok().is_some_and(|maps| {
         [
             ButtonId::Thumbwheel,
             ButtonId::ThumbwheelScrollUp,
@@ -122,7 +122,7 @@ fn thumbwheel_armed(button_bindings: &BindingMap, sensitivity: i32) -> bool {
         ]
         .iter()
         .any(|&button| {
-            guard
+            maps.bindings
                 .get(&button)
                 .is_some_and(|action| *action != default_binding(button))
         })
@@ -133,7 +133,7 @@ fn thumbwheel_armed(button_bindings: &BindingMap, sensitivity: i32) -> bool {
 /// device or the thumb-wheel arming changes, and dispatch incoming inputs. Runs
 /// for the lifetime of the process.
 async fn manage(
-    button_bindings: BindingMap,
+    hook_maps: SharedHookMaps,
     gesture_bindings: GestureBindings,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
@@ -142,7 +142,8 @@ async fn manage(
     capture_idle: Arc<AtomicBool>,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
-    let mut current: Option<(DeviceRoute, bool)> = None;
+    // (route, capture_thumbwheel, divert_gesture_button)
+    let mut current: Option<(DeviceRoute, bool, bool)> = None;
     let mut stop: Option<oneshot::Sender<()>> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut accumulators = WheelAccumulators::default();
@@ -153,7 +154,7 @@ async fn manage(
                 dispatch(
                     input,
                     &mut accumulators,
-                    &button_bindings,
+                    &hook_maps,
                     &gesture_bindings,
                     &dpi_cycle,
                     &capture_channel,
@@ -169,7 +170,19 @@ async fn manage(
                 } else {
                     let target = dpi_cycle.read().ok().and_then(|guard| guard.target.clone());
                     let sensitivity = thumbwheel_sensitivity.load(Ordering::Relaxed);
-                    target.map(|t| (t, thumbwheel_armed(&button_bindings, sensitivity)))
+                    // Divert the thumb pad only while it owns the gesture role. The
+                    // shared gesture map is non-empty exactly then (gesture_bindings_for
+                    // gates on the owner), so it doubles as that signal — no need to
+                    // thread the full config in. Re-evaluated each tick, so a
+                    // ReloadConfig owner change restarts the session accordingly.
+                    let divert_gesture = gesture_bindings.read().is_ok_and(|g| !g.is_empty());
+                    target.map(|t| {
+                        (
+                            t,
+                            thumbwheel_armed(&hook_maps, sensitivity),
+                            divert_gesture,
+                        )
+                    })
                 };
                 if want == current {
                     continue;
@@ -182,13 +195,20 @@ async fn manage(
                 }
                 current.clone_from(&want);
                 capture_idle.store(want.is_none(), Ordering::Relaxed);
-                if let Some((route, capture_thumbwheel)) = want {
+                if let Some((route, capture_thumbwheel, divert_gesture_button)) = want {
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
                     let slot = Arc::clone(&capture_channel);
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            run_capture_session(route, capture_thumbwheel, sink, stop_rx, slot).await
+                        if let Err(e) = run_capture_session(
+                            route,
+                            capture_thumbwheel,
+                            divert_gesture_button,
+                            sink,
+                            stop_rx,
+                            slot,
+                        )
+                        .await
                         {
                             debug!(error = %e, "capture session ended");
                         }
@@ -237,7 +257,7 @@ enum WheelOutput {
 fn dispatch(
     input: CapturedInput,
     accumulators: &mut WheelAccumulators,
-    button_bindings: &BindingMap,
+    hook_maps: &SharedHookMaps,
     gesture_bindings: &GestureBindings,
     dpi_cycle: &Arc<RwLock<DpiCycleState>>,
     capture: &CaptureChannel,
@@ -257,10 +277,10 @@ fn dispatch(
             }
         }
         CapturedInput::ButtonPressed(button) => {
-            let action = button_bindings
+            let action = hook_maps
                 .read()
                 .ok()
-                .and_then(|guard| guard.get(&button).cloned());
+                .and_then(|maps| maps.bindings.get(&button).cloned());
             if let Some(action) = action {
                 debug!(?button, action = %action.label(), "HID++ button → action");
                 hook_runtime::dispatch_action(&action, dpi_cycle, capture);
@@ -276,10 +296,10 @@ fn dispatch(
             } else {
                 ButtonId::ThumbwheelScrollDown
             };
-            let action = button_bindings
+            let action = hook_maps
                 .read()
                 .ok()
-                .and_then(|guard| guard.get(&button).cloned())
+                .and_then(|maps| maps.bindings.get(&button).cloned())
                 .unwrap_or_else(|| default_binding(button));
             let sensitivity = thumbwheel_sensitivity.load(Ordering::Relaxed);
             let dir = if up {

@@ -15,9 +15,13 @@ openlogi-core = { path = "../openlogi-core" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 serde = { workspace = true }
-tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1", "unix"] }
+tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
+interprocess = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+bincode = "1.3"

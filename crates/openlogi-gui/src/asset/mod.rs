@@ -13,9 +13,12 @@
 //! ultimately to the synthetic silhouette. The write side ([`sync::sync`])
 //! always targets the user cache — the bundle is read-only.
 
+mod glow;
 mod images;
 mod paths;
 pub mod sync;
+
+pub(crate) use self::glow::{ensure_glow_png, glow_path};
 
 use std::path::{Path, PathBuf};
 
@@ -183,8 +186,8 @@ impl AssetResolver {
             let metadata = match Metadata::load_from(&meta_path) {
                 Ok(m) => m,
                 Err(e) => {
-                    warn!(depot, root = %root.display(), file = meta_name, error = ?e, "failed to parse device metadata");
-                    continue;
+                    warn!(depot, root = %root.display(), file = meta_name, error = ?e, "device metadata unparseable — rendering image without hotspots");
+                    Metadata::default()
                 }
             };
             let (png_width, png_height) = match read_png_dimensions(&image_path) {

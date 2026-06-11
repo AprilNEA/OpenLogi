@@ -11,10 +11,10 @@
 //! no relation to a host, so they stay off the client.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use backon::{BlockingRetryable, ExponentialBuilder};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
@@ -97,42 +97,50 @@ impl AssetClient {
     /// Fetch `<base>/index.json`, write it into `dir`, and return the parsed index.
     pub fn fetch_index_to_dir(&self, dir: &Path) -> Result<Index> {
         let (raw, index) = self.fetch_index_raw()?;
-        let local = dir.join(INDEX_NAME);
-        fs::write(&local, &raw).with_context(|| format!("write {}", local.display()))?;
+        write_replace(&dir.join(INDEX_NAME), &raw)?;
         Ok(index)
     }
 
     /// GET a per-depot file, e.g.
     /// `fetch_file("v1/devices/mx_master_4/", "front_core.png")`.
-    pub fn fetch_file(&self, asset_path: &str, name: &str) -> Result<Vec<u8>> {
+    fn fetch_file(&self, asset_path: &str, name: &str) -> Result<Vec<u8>> {
         let asset_path = asset_path.trim_start_matches('/');
         let url = format!("{}/{asset_path}{name}", self.base);
         debug!(%url, "fetching file");
         self.get_bytes(&url)
     }
 
-    /// Fetch a per-depot file into `dir`, returning the number of bytes written.
-    pub fn fetch_file_to_dir(&self, asset_path: &str, dir: &Path, name: &str) -> Result<usize> {
-        let dst = dir.join(name);
+    /// Fetch a per-depot file into `dir`, returning the number of bytes
+    /// written. `name` comes from remote metadata, so it is validated down
+    /// to a single path component before any path is built.
+    fn fetch_file_to_dir(&self, asset_path: &str, dir: &Path, name: &str) -> Result<usize> {
+        let dst = safe_component_path(dir, name, "asset file name")?;
         let bytes = self.fetch_file(asset_path, name)?;
-        fs::write(&dst, &bytes).with_context(|| format!("write {}", dst.display()))?;
+        write_replace(&dst, &bytes)?;
         Ok(bytes.len())
     }
 
     /// Fetch `file` into `dir` unless a file already there matches its
-    /// `sha256`. The cache-skip primitive shared by the CLI bundle sync and
-    /// the GUI runtime sync — callers branch on [`FetchOutcome`] to do their
-    /// own progress reporting.
+    /// `sha256`; a fresh download is verified against the same hash and
+    /// removed on mismatch, so nothing unverified survives on disk. The
+    /// cache-skip primitive shared by the CLI bundle sync and the GUI
+    /// runtime sync — callers branch on [`FetchOutcome`] to do their own
+    /// progress reporting.
     pub fn fetch_entry_if_stale(
         &self,
         asset_path: &str,
         dir: &Path,
         file: &FileEntry,
     ) -> Result<FetchOutcome> {
-        if cached_matches(&dir.join(&file.name), &file.sha256) {
+        let dst = safe_component_path(dir, &file.name, "asset file name")?;
+        if cached_matches(&dst, &file.sha256) {
             return Ok(FetchOutcome::CacheHit);
         }
         let bytes = self.fetch_file_to_dir(asset_path, dir, &file.name)?;
+        if !cached_matches(&dst, &file.sha256) {
+            let _ = fs::remove_file(&dst);
+            bail!("downloaded asset checksum mismatch: {}", dst.display());
+        }
         Ok(FetchOutcome::Fetched { bytes })
     }
 
@@ -199,6 +207,60 @@ pub fn read_bytes(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("read {}", path.display()))
 }
 
+/// Join one untrusted registry component onto a trusted directory.
+///
+/// Remote asset metadata is expected to carry depot and file *names*, not
+/// paths. Rejecting separators, absolute prefixes, and `.`/`..` keeps every
+/// sync write inside the cache or bundle directory chosen by the caller.
+pub fn safe_component_path(base: &Path, component: &str, label: &str) -> Result<PathBuf> {
+    if component.is_empty() {
+        bail!("{label} is empty");
+    }
+    // `Path::components` never yields separators on the platform that didn't
+    // produce them, so reject both kinds explicitly before consulting it.
+    if component.contains('/') || component.contains('\\') {
+        bail!("{label} must be a single path component: {component}");
+    }
+    let mut parts = Path::new(component).components();
+    match (parts.next(), parts.next()) {
+        (Some(Component::Normal(_)), None) => Ok(base.join(component)),
+        _ => bail!("{label} must be a safe relative path component: {component}"),
+    }
+}
+
+/// Write `bytes` beside `dst` and atomically rename into place.
+///
+/// `create_new` refuses to open through anything pre-planted at the temp
+/// path (`O_EXCL` never follows symlinks), and `rename` *replaces* a symlink
+/// sitting at `dst` instead of writing through it — together they close the
+/// check-to-write race a symlink check followed by a plain `fs::write` would
+/// leave open. The rename also means a concurrent reader sees the old file
+/// or the new one, never a half-written one.
+fn write_replace(dst: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let mut tmp_name = dst.as_os_str().to_owned();
+    tmp_name.push(".part");
+    let tmp = PathBuf::from(tmp_name);
+    // A stale `.part` from a crashed sync would fail `create_new`; it never
+    // holds verified data, so clear it.
+    let _ = fs::remove_file(&tmp);
+    let mut file = fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .with_context(|| format!("create {}", tmp.display()))?;
+    let written = file
+        .write_all(bytes)
+        .with_context(|| format!("write {}", tmp.display()));
+    drop(file);
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    fs::rename(&tmp, dst).with_context(|| format!("replace {}", dst.display()))
+}
+
 /// Hex SHA-256 of an in-memory blob.
 #[must_use]
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -223,8 +285,76 @@ pub fn cached_matches(path: &Path, expected_sha: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_retryable;
+    use super::{is_retryable, safe_component_path, write_replace};
+    use std::path::Path;
     use ureq::Error;
+
+    #[test]
+    #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
+    fn write_replace_overwrites_in_place() {
+        let dir = std::env::temp_dir().join(format!("openlogi-http-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let dst = dir.join("a.png");
+
+        write_replace(&dst, b"one").expect("first write");
+        write_replace(&dst, b"two").expect("replace");
+
+        assert_eq!(std::fs::read(&dst).expect("read back"), b"two");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
+    fn write_replace_replaces_a_planted_symlink_instead_of_following_it() {
+        let dir =
+            std::env::temp_dir().join(format!("openlogi-http-symlink-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, b"untouched").expect("seed victim");
+        let dst = dir.join("b.png");
+        std::os::unix::fs::symlink(&victim, &dst).expect("plant symlink");
+
+        write_replace(&dst, b"payload").expect("write through planted link");
+
+        // The link target must be untouched, and the link itself must now be
+        // a regular file holding the payload.
+        assert_eq!(std::fs::read(&victim).expect("victim intact"), b"untouched");
+        let meta = std::fs::symlink_metadata(&dst).expect("stat dst");
+        assert!(meta.file_type().is_file());
+        assert_eq!(std::fs::read(&dst).expect("read dst"), b"payload");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn safe_component_path_accepts_plain_names() {
+        assert_eq!(
+            safe_component_path(Path::new("/cache"), "front_core.png", "asset").ok(),
+            Some(Path::new("/cache").join("front_core.png"))
+        );
+        assert_eq!(
+            safe_component_path(Path::new("/cache"), "mx_master_4", "depot").ok(),
+            Some(Path::new("/cache").join("mx_master_4"))
+        );
+    }
+
+    #[test]
+    fn safe_component_path_rejects_traversal_and_separators() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "../LaunchAgents/x",
+            "nested/file.png",
+            "nested\\file.png",
+            "/etc/passwd",
+        ] {
+            assert!(
+                safe_component_path(Path::new("/cache"), name, "asset").is_err(),
+                "{name:?} should be rejected"
+            );
+        }
+    }
 
     #[test]
     fn retries_transient_failures_not_permanent_ones() {

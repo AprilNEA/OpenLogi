@@ -79,7 +79,14 @@ pub trait RawHidChannel: Sync + Send + 'static {
     /// should be discarded and must not be returned by any succeeding call to
     /// [`Self::read_report`].
     ///
-    /// Returns the exact amount or read bytes on success.
+    /// Returns the exact amount or read bytes on success. An `Err` is treated
+    /// as transient: the [`HidppChannel`] read loop logs it and retries, so an
+    /// implementation must not surface a condition that will never clear (it
+    /// would busy-spin the loop). For a *permanent* failure — the device is
+    /// gone and no report will ever arrive — the future may instead park
+    /// forever. That is sound because the read loop always races this future
+    /// against the channel's close signal in a `select!`; any other caller
+    /// must do the same and must not await `read_report` bare.
     async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Sync + Send>>;
 
     /// If the implementation already knows whether the underlying HID channel
@@ -440,13 +447,22 @@ impl HidppChannel {
 
         let (sender, receiver) = oneshot::channel::<HidppMessage>();
 
-        self.pending_messages
-            .lock()
-            .unwrap()
-            .push_back(PendingMessage {
+        {
+            let mut pending = self.pending_messages.lock().unwrap();
+            // Drop abandoned requests before queuing this one: a caller that
+            // timed out (or was cancelled) drops its receiver, leaving its
+            // `PendingMessage` behind since only a *matching response* removes an
+            // entry. On a short-lived channel that didn't matter, but a channel
+            // reused across inventory ticks would otherwise accumulate stale
+            // entries unboundedly — and a late response could be mis-delivered to
+            // a recycled software id. `is_canceled()` is true once the receiver
+            // is gone, so this prunes exactly the give-ups.
+            pending.retain(|m| !m.sender.is_canceled());
+            pending.push_back(PendingMessage {
                 response_predicate: Box::new(response_predicate),
                 sender,
             });
+        }
 
         self.send_and_forget(msg).await?;
 

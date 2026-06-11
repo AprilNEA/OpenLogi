@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, BoxShadow, Context, Div, Entity,
     FontWeight, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
@@ -5,10 +7,11 @@ use gpui::{
     prelude::FluentBuilder as _, px, relative, rgb,
 };
 use gpui_component::{
-    Icon, IconName,
+    Icon, IconName, Sizable as _,
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
     scroll::ScrollableElement as _,
+    spinner::Spinner,
     tab::TabBar,
     tooltip::Tooltip,
     v_flex,
@@ -19,6 +22,8 @@ use openlogi_core::device::{
 use openlogi_hid::DeviceRoute;
 use tracing::info;
 
+use openlogi_agent_core::ipc::InventoryHealth;
+
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::asset::AssetResolver;
 use crate::components::carousel::Carousel;
@@ -26,7 +31,7 @@ use crate::components::dpi_panel::DpiPanel;
 use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::mouse_model::view::MouseModelView;
-use crate::state::{AppState, DeviceRecord};
+use crate::state::{AgentLink, AppState, DeviceRecord};
 use crate::theme::{self, FOOTER_H, HEADER_H, Palette};
 
 /// Which screen the root view is showing.
@@ -83,8 +88,14 @@ impl DetailTab {
         let caps = record
             .capabilities
             .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
+        // A real keyboard exposes reprogrammable controls (media / G-keys) that
+        // the HID++ probe reports as `buttons`, but those aren't the mouse remap
+        // section — so a keyboard only earns the Buttons tab when it's also a
+        // pointing device (i.e. actually a mouse the registry mislabelled, the
+        // #127 case). Non-keyboards keep the capability-driven behaviour.
+        let pointer_device = caps.pointer || record.kind != DeviceKind::Keyboard;
         let mut tabs = Vec::new();
-        if caps.buttons {
+        if caps.buttons && pointer_device {
             tabs.push(Self::Buttons);
         }
         if caps.pointer {
@@ -134,6 +145,44 @@ pub struct AppView {
 }
 
 impl AppView {
+    /// Generate any missing keyboard glow overlays off the render thread, once
+    /// each. The gallery only reads the cached PNG ([`lighting_overlay`]); when a
+    /// worker finishes it refreshes the windows and the next render shows it.
+    fn ensure_glow(cx: &mut Context<Self>) {
+        let jobs: Vec<GlowJob> = {
+            let Some(state) = cx.try_global::<AppState>() else {
+                return;
+            };
+            state
+                .device_list
+                .iter()
+                .filter_map(|record| glow_job(state, record))
+                .collect()
+        };
+        for job in jobs {
+            let first = cx.update_global::<AppState, _>(|state, _| {
+                state.mark_glow_attempted(job.cache.clone())
+            });
+            if !first {
+                continue;
+            }
+            let GlowJob { cache, depot, hex } = job;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::asset::ensure_glow_png(&depot, &hex).is_some());
+            });
+            cx.spawn(async move |_view, cx| {
+                if matches!(rx.await, Ok(true)) {
+                    cx.update_global::<AppState, _>(|state, cx| {
+                        state.mark_glow_ready(cache);
+                        cx.refresh_windows();
+                    });
+                }
+            })
+            .detach();
+        }
+    }
+
     /// Construct the root view and its child entities.
     pub fn new(_inventories: &[DeviceInventory], cx: &mut Context<Self>) -> Self {
         let cache = AssetResolver::new();
@@ -297,18 +346,55 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
 
-        let granted = cx
+        // Every frame — including the pre-connection and error frames — hangs
+        // off this root, so the window actions (⌘W / ⌘M / zoom) work from the
+        // first frame on, not only once the full UI is up.
+        let root = v_flex()
+            .size_full()
+            .bg(pal.bg)
+            .text_color(pal.text_primary)
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &Minimize, window, _| window.minimize_window())
+            .on_action(|_: &Zoom, window, _| window.zoom_window());
+
+        // The agent is the source of truth for both the permission state and
+        // the device list; `AgentLink` is everything the GUI knows about it.
+        // Until the first snapshot lands, hold a neutral connecting frame:
+        // rendering the permission gate (and then the empty state) off
+        // assumed-denied defaults flashed both screens at every already-set-up
+        // user on launch. A missing global reads the same way — "nothing is
+        // known yet".
+        let link = cx
             .try_global::<AppState>()
-            .is_none_or(|s| s.accessibility_granted);
+            .map_or(AgentLink::Connecting, |s| s.agent_link().clone());
+        let status = match link {
+            AgentLink::Connecting => {
+                window.set_window_title("OpenLogi");
+                return root.child(connecting_body(pal)).into_any_element();
+            }
+            AgentLink::Unreachable => {
+                window.set_window_title("OpenLogi");
+                return root.child(unreachable_body(pal)).into_any_element();
+            }
+            AgentLink::OutdatedGui => {
+                window.set_window_title("OpenLogi");
+                return root.child(outdated_gui_body(pal)).into_any_element();
+            }
+            AgentLink::Ready(status) => status,
+        };
+
+        let granted = status.accessibility_granted;
         if !granted && !self.accessibility_dismissed {
             window.set_window_title("OpenLogi");
-            return Self::accessibility_gate(pal, cx);
+            return root
+                .child(Self::accessibility_gate(pal, cx))
+                .into_any_element();
         }
+        Self::ensure_glow(cx);
 
         let has_device = cx
             .try_global::<AppState>()
             .is_some_and(|s| !s.device_list.is_empty());
-        let scanning = cx.try_global::<AppState>().is_some_and(|s| s.scanning);
 
         // Resolve the route. A detail route lives only while its device is
         // still the live selection; if a hot-plug dropped or reordered it (or
@@ -330,14 +416,32 @@ impl Render for AppView {
         window.set_window_title(&main_window_title(show_device, cx));
 
         let (header_el, content_el) = if show_device {
+            // Resolve the active section once and share it between the header
+            // (which renders the section tabs) and the body, so the two can't
+            // disagree about which tab is live. The stored tab may not belong to
+            // this device — it can linger across a hot-plug onto a different kind
+            // — so fall back to the device's first tab for display, without
+            // mutating `active_tab`.
+            let record = cx
+                .try_global::<AppState>()
+                .and_then(AppState::current_record)
+                .cloned();
+            let tabs = record
+                .as_ref()
+                .map_or_else(|| vec![DetailTab::Device], DetailTab::tabs_for);
+            let active = if tabs.contains(&self.active_tab) {
+                self.active_tab
+            } else {
+                tabs.first().copied().unwrap_or(DetailTab::Device)
+            };
             (
-                detail_header(pal, cx).into_any_element(),
+                detail_header(record.as_ref(), &tabs, active, pal, cx).into_any_element(),
                 detail_content(
                     &self.mouse_model,
                     &self.dpi_panel,
                     &self.smartshift_panel,
                     &self.lighting_panel,
-                    self.active_tab,
+                    active,
                     pal,
                     cx,
                 )
@@ -349,19 +453,16 @@ impl Render for AppView {
                 if has_device {
                     device_gallery(cx).into_any_element()
                 } else {
-                    device_empty_state(pal, scanning)
+                    match status.inventory {
+                        InventoryHealth::Scanning => device_scanning_state(pal),
+                        InventoryHealth::Unavailable => scanning_unavailable_state(pal),
+                        InventoryHealth::Ready => device_empty_state(pal),
+                    }
                 },
             )
         };
 
-        v_flex()
-            .size_full()
-            .bg(pal.bg)
-            .text_color(pal.text_primary)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
-            .child(header_el)
+        root.child(header_el)
             .child(content_el)
             .child(footer(pal, granted))
             .into_any_element()
@@ -391,15 +492,33 @@ fn home_header(pal: Palette) -> impl IntoElement {
         .child(add_device_button(pal))
 }
 
-/// Device-detail top bar: a back affordance returning to the gallery, the
-/// active device's name, its connection status, and the Add-Device button.
-fn detail_header(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let record = cx
-        .try_global::<AppState>()
-        .and_then(AppState::current_record)
-        .cloned();
+/// Device-detail top bar, in three zones: a back affordance + device name
+/// (leading), the section tabs as a centred segmented control (middle), and the
+/// connection status + Add-Device button (trailing). Hoisting the tabs here —
+/// rather than a separate row beneath the bar — gives the section body the full
+/// remaining height. A device with a single section shows no tab strip.
+fn detail_header(
+    record: Option<&DeviceRecord>,
+    tabs: &[DetailTab],
+    active: DetailTab,
+    pal: Palette,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let name = record.map_or_else(|| tr!("Device").to_string(), |r| r.display_name.clone());
+    let online = record.map(|r| r.online);
+    // Only a real choice gets a strip; a lone section (e.g. a keyboard with just
+    // the info tab) would render a one-segment control, which reads as broken.
+    // `into_any_element` here severs the returned element from `cx`'s lifetime
+    // (RPIT would otherwise capture it), so the borrow ends with this call and
+    // `back_button` below can take `cx` again.
+    let tab_strip = (tabs.len() > 1).then(|| detail_tabs(tabs, active, cx).into_any_element());
     h_flex()
         .h(px(HEADER_H))
+        // Fixed-height chrome must never shrink: a tab whose body overflows the
+        // viewport would otherwise squeeze this shrinkable bar, so the header
+        // height would visibly change between tabs. The body (flex_1 + its own
+        // scroll) absorbs the overflow instead.
+        .flex_shrink_0()
         .w_full()
         .px_5()
         .gap_3()
@@ -409,17 +528,17 @@ fn detail_header(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         .child(back_button(pal, cx))
         .child(
             div()
-                .flex_1()
                 .min_w_0()
                 .text_lg()
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(
-                    record
-                        .as_ref()
-                        .map_or_else(|| tr!("Device").to_string(), |r| r.display_name.clone()),
-                ),
+                .child(name),
         )
-        .when_some(record, |this, r| this.child(status_badge(r.online, pal)))
+        // Flexible spacers on either side centre the segmented tabs in the space
+        // left between the leading and trailing zones.
+        .child(div().flex_1())
+        .children(tab_strip)
+        .child(div().flex_1())
+        .when_some(online, |this, online| this.child(status_badge(online, pal)))
         .child(add_device_button(pal))
 }
 
@@ -494,8 +613,9 @@ fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                     return div().into_any_element();
                 };
                 let key = record.config_key.clone();
+                let glow = lighting_overlay(&record, cx);
                 let view = view.clone();
-                device_card(&record, focused, pal)
+                device_card(&record, focused, glow, pal)
                     .id(("device-card", idx))
                     .cursor_pointer()
                     .hover(move |s| s.bg(pal.surface))
@@ -511,13 +631,57 @@ fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
     )
 }
 
+/// Path to the cached inter-key colour overlay for a light-up keyboard, if it
+/// has been generated. Generation runs off the render thread in
+/// [`AppView::ensure_glow`]; this lookup only stats the cache. `None` unless the
+/// device is a keyboard with lighting enabled and the overlay exists yet.
+fn lighting_overlay(record: &DeviceRecord, cx: &App) -> Option<PathBuf> {
+    if record.kind != DeviceKind::Keyboard {
+        return None;
+    }
+    let state = cx.try_global::<AppState>()?;
+    let lighting = state
+        .lighting_for(&record.config_key)
+        .filter(|l| l.enabled)?;
+    let asset = record.asset.as_ref()?;
+    asset.hero_image_path.as_ref()?;
+    let path = crate::asset::glow_path(&asset.depot, &lighting.color)?;
+    state.glow_is_ready(&path).then_some(path)
+}
+
+/// A pending off-thread glow generation: the cache path to fill plus the inputs
+/// [`crate::asset::ensure_glow_png`] needs.
+struct GlowJob {
+    cache: PathBuf,
+    depot: String,
+    hex: String,
+}
+
+/// The glow job for `record` when it's a keyboard with lighting enabled and a
+/// resolved photo; `None` otherwise.
+fn glow_job(state: &AppState, record: &DeviceRecord) -> Option<GlowJob> {
+    if record.kind != DeviceKind::Keyboard {
+        return None;
+    }
+    let lighting = state
+        .lighting_for(&record.config_key)
+        .filter(|l| l.enabled)?;
+    let asset = record.asset.as_ref()?;
+    asset.hero_image_path.as_ref()?;
+    Some(GlowJob {
+        cache: crate::asset::glow_path(&asset.depot, &lighting.color)?,
+        depot: asset.depot.clone(),
+        hex: lighting.color,
+    })
+}
+
 /// A device card in the Home gallery: the device photo floating on the window
 /// background above the name, connectivity dot, kind/slot, and battery. Fixed
 /// width so cards stay equal in the scrollable row. The active device wears a
 /// faint accent ring; inactive cards reserve the same 1px border in a
 /// transparent colour so selection never nudges the layout. Returns a bare
 /// [`Div`] so the gallery can wire the click handler.
-fn device_card(record: &DeviceRecord, active: bool, pal: Palette) -> Div {
+fn device_card(record: &DeviceRecord, active: bool, glow: Option<PathBuf>, pal: Palette) -> Div {
     let ring = if active {
         rgb(theme::ACCENT_BLUE).into()
     } else {
@@ -534,12 +698,23 @@ fn device_card(record: &DeviceRecord, active: bool, pal: Palette) -> Div {
         .border_color(ring)
         .child(
             div()
+                .relative()
                 .w_full()
                 .h(px(theme::GALLERY_PHOTO_H))
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(device_image(record, pal)),
+                .child(device_image(record, pal))
+                .when_some(glow, |this, path| {
+                    this.child(
+                        img(path)
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .opacity(0.6),
+                    )
+                }),
         )
         .child(
             v_flex()
@@ -699,9 +874,11 @@ fn main_window_title(show_device: bool, cx: &Context<AppView>) -> SharedString {
         )
 }
 
-/// The device-detail body: a tab bar over the active device's sections (which
-/// vary by kind — see [`DetailTab::tabs_for`]), with the active section filling
-/// the rest of the screen.
+/// The device-detail body: the active section, filling the height between the
+/// header and the footer. Which sections exist — and the segmented control that
+/// switches them — is the header's job (see [`detail_header`] and
+/// [`DetailTab::tabs_for`]); `active` arrives pre-resolved against this device's
+/// tab set, so this only has to render the chosen section.
 fn detail_content(
     mouse_model: &Entity<MouseModelView>,
     dpi_panel: &Entity<DpiPanel>,
@@ -711,34 +888,18 @@ fn detail_content(
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    let tabs = cx
-        .try_global::<AppState>()
-        .and_then(AppState::current_record)
-        .map_or_else(|| vec![DetailTab::Device], DetailTab::tabs_for);
-    // The stored tab may not belong to this device — e.g. it lingered across a
-    // hot-plug onto a different kind. Fall back to the device's first tab.
-    let active = if tabs.contains(&active) {
-        active
-    } else {
-        tabs.first().copied().unwrap_or(DetailTab::Device)
-    };
-    let content = match active {
+    match active {
         DetailTab::Buttons => buttons_tab(mouse_model).into_any_element(),
         DetailTab::Pointer => pointer_tab(dpi_panel, smartshift_panel, pal).into_any_element(),
         DetailTab::Lighting => lighting_tab(lighting_panel, pal).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
-    };
-    v_flex()
-        .flex_1()
-        .w_full()
-        .min_h_0()
-        .child(detail_tab_bar(&tabs, active, cx))
-        .child(content)
+    }
 }
 
-/// The detail screen's tab bar, built from the active device's tab set. Clicking
-/// a tab swaps the active section.
-fn detail_tab_bar(
+/// The device's sections as a compact, centred segmented control for the
+/// header. Clicking a segment swaps the active section. Only called with more
+/// than one tab — see [`detail_header`].
+fn detail_tabs(
     tabs: &[DetailTab],
     active: DetailTab,
     cx: &mut Context<AppView>,
@@ -747,35 +908,33 @@ fn detail_tab_bar(
     // Owned copy so the click handler can map a clicked index back to its tab
     // without borrowing the caller's slice.
     let order = tabs.to_vec();
-    div().w_full().px_5().pt_3().child(
-        TabBar::new("detail-tabs")
-            .underline()
-            .w_full()
-            .selected_index(active_ix)
-            .children(tabs.iter().map(|t| t.label()))
-            .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                this.active_tab = order.get(*ix).copied().unwrap_or(DetailTab::Device);
-                cx.notify();
-            })),
-    )
+    TabBar::new("detail-tabs")
+        .segmented()
+        .selected_index(active_ix)
+        .children(tabs.iter().map(|t| t.label()))
+        .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+            this.active_tab = order.get(*ix).copied().unwrap_or(DetailTab::Device);
+            cx.notify();
+        }))
 }
 
-/// Buttons tab: the mouse model with clickable hotspots, centred with a max
-/// width so it doesn't stretch across a wide window.
+/// Buttons tab: the mouse model with clickable hotspots, horizontally centred
+/// with a max width so it doesn't stretch across a wide window.
+///
+/// A `v_flex` (top-aligned), like the pointer/device/lighting tabs — *not* an
+/// `h_flex`, which carries an implicit `items_center` and would vertically
+/// centre the fixed-height model. That left a tall header-to-content gap that
+/// collapsed to the top-aligned card tabs on switch — a visible vertical jump.
+/// Top-aligning every tab keeps the content's start fixed across switches.
 fn buttons_tab(mouse_model: &Entity<MouseModelView>) -> impl IntoElement {
-    h_flex()
+    v_flex()
         .flex_1()
         .w_full()
         .min_h_0()
+        .items_center()
         .justify_center()
         .p_6()
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .max_w(px(760.))
-                .child(mouse_model.clone()),
-        )
+        .child(div().w_full().max_w(px(760.)).child(mouse_model.clone()))
 }
 
 /// Pointer tab: the DPI panel and the SmartShift wheel controls, each in a
@@ -1138,10 +1297,143 @@ fn file_url(path: &std::path::Path) -> String {
     format!("file://{}", path.to_string_lossy().replace(' ', "%20"))
 }
 
-/// Body shown when no device is connected. The inventory watcher keeps polling
-/// (every 2 s) and `AppView`'s `AppState` observer swaps the device UI back in
-/// the moment one appears, so this is purely a wait-and-pair placeholder.
-fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
+/// Centered spinner over a muted one-line caption — the quiet "still working"
+/// body shared by the pre-connection frame and the scanning state, so the two
+/// loading phases render as one continuous frame with only the caption
+/// changing. The spinner's repeating animation re-renders the window every
+/// frame while mounted, which is fine *because* both loading states are
+/// bounded: the connecting frame downgrades to the static
+/// [`unreachable_body`] when no snapshot arrives, and the scanning state ends
+/// with the agent reporting `Ready` or `Unavailable`.
+fn loading_body(caption: SharedString, pal: Palette) -> Div {
+    v_flex()
+        .items_center()
+        .justify_center()
+        .gap_3()
+        .child(Spinner::new().large().color(pal.text_muted))
+        .child(div().text_sm().text_color(pal.text_muted).child(caption))
+}
+
+/// Static centered notice — icon, headline, muted caption — for the
+/// connection-problem frames. Unlike [`loading_body`] there is deliberately
+/// no animation: these frames can stay up indefinitely, and an infinite
+/// animation would pin the render loop for as long as they do (the same
+/// reasoning as the status dot's fixed glow).
+fn notice_body(headline: SharedString, caption: SharedString, pal: Palette) -> Div {
+    v_flex()
+        .items_center()
+        .justify_center()
+        .gap_4()
+        .p_8()
+        .child(
+            Icon::new(IconName::TriangleAlert)
+                .size_8()
+                .text_color(rgb(theme::STATUS_CONNECTING)),
+        )
+        .child(
+            div()
+                .text_xl()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(headline),
+        )
+        .child(
+            div()
+                .max_w(px(440.))
+                .text_sm()
+                .text_center()
+                .text_color(pal.text_muted)
+                .child(caption),
+        )
+}
+
+/// Whole-window placeholder shown from window-open until the agent's first
+/// IPC snapshot lands — normally a fraction of a second. Deliberately
+/// neutral: no chrome, no claims about permissions or devices. If the agent
+/// stays unreachable, the IPC client downgrades the link and
+/// [`unreachable_body`] replaces this frame.
+fn connecting_body(pal: Palette) -> AnyElement {
+    loading_body(tr!("Connecting to the background service…"), pal)
+        .size_full()
+        .into_any_element()
+}
+
+/// Whole-window frame once the agent has been unreachable well past startup:
+/// the spinner would be a lie at this point. Polling (and the spawn retry)
+/// keeps running underneath, and the first snapshot swaps the real UI back in.
+fn unreachable_body(pal: Palette) -> AnyElement {
+    notice_body(
+        tr!("Can't reach the background service"),
+        tr!("OpenLogi keeps retrying — if this persists, try reinstalling the app."),
+        pal,
+    )
+    .size_full()
+    .into_any_element()
+}
+
+/// Whole-window frame when the *agent* answered with a newer IPC protocol
+/// than this process speaks: the app bundle was updated while this window
+/// stayed open, and only a relaunch loads the new GUI. Without this frame the
+/// window would keep showing live-looking but frozen state.
+fn outdated_gui_body(pal: Palette) -> AnyElement {
+    notice_body(
+        tr!("OpenLogi was updated"),
+        tr!("This window is from the previous version — relaunch to finish the update."),
+        pal,
+    )
+    .size_full()
+    .child(
+        div()
+            .id("relaunch-gui")
+            .mt_1()
+            .px_4()
+            .py_2()
+            .rounded_md()
+            .bg(rgb(theme::ACCENT_BLUE))
+            .text_color(rgb(0x00ff_ffff))
+            .font_weight(FontWeight::MEDIUM)
+            .cursor_pointer()
+            .child(tr!("Relaunch OpenLogi"))
+            .on_click(|_, _, cx| cx.restart()),
+    )
+    .into_any_element()
+}
+
+/// Home body while the agent's first enumeration is still in flight: the
+/// device set is *unknown*, not empty, so this keeps the quiet loading frame
+/// rather than flashing the add-device empty state (icon, headline, CTA) at a
+/// user whose devices are about to appear. Swaps to the gallery, to
+/// [`device_empty_state`], or to [`scanning_unavailable_state`] the moment
+/// the agent reports where its enumeration landed.
+fn device_scanning_state(pal: Palette) -> AnyElement {
+    loading_body(tr!("Scanning for devices…"), pal)
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .into_any_element()
+}
+
+/// Home body when the agent reports enumeration as broken
+/// ([`InventoryHealth::Unavailable`]): scanning never completed and won't
+/// just by waiting, so showing a spinner (or claiming "no devices") would
+/// both be wrong. The agent keeps retrying and a recovery flows back in as a
+/// regular snapshot.
+fn scanning_unavailable_state(pal: Palette) -> AnyElement {
+    notice_body(
+        tr!("Device scanning is unavailable"),
+        tr!("The background service couldn't scan for devices — check its log for details."),
+        pal,
+    )
+    .flex_1()
+    .w_full()
+    .min_h_0()
+    .into_any_element()
+}
+
+/// Body shown when the agent has completed an enumeration and found no
+/// devices. The polling keeps running and `AppView`'s `AppState` observer
+/// swaps the device UI back in the moment one appears, so this is purely a
+/// wait-and-pair placeholder.
+fn device_empty_state(pal: Palette) -> AnyElement {
     v_flex()
         .flex_1()
         .w_full()
@@ -1159,11 +1451,7 @@ fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
             div()
                 .text_xl()
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(if scanning {
-                    tr!("Scanning for devices…")
-                } else {
-                    tr!("No devices connected")
-                }),
+                .child(tr!("No devices connected")),
         )
         .child(
             div()
@@ -1209,6 +1497,8 @@ fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
 fn footer(pal: Palette, granted: bool) -> impl IntoElement {
     h_flex()
         .h(px(FOOTER_H))
+        // Fixed chrome — never shrink when a tab body overflows (see `detail_header`).
+        .flex_shrink_0()
         .w_full()
         .px_5()
         .gap_4()

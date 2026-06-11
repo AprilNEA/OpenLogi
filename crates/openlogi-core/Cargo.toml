@@ -39,3 +39,7 @@ objc2-app-kit = { version = "0.3.2", features = [
 ] }
 objc2-core-graphics = { version = "0.3.2", features = ["CGEvent"] }
 objc2-foundation = "0.3.2"
+
+# SendInput-based action synthesis (Action::execute_windows).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_UI_Input_KeyboardAndMouse"] }

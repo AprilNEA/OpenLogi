@@ -73,8 +73,10 @@ pub struct Capabilities {
     pub buttons: bool,
     /// Adjustable pointer resolution — HID++ `0x2201` / `0x2202` (AdjustableDpi).
     pub pointer: bool,
-    /// Controllable lighting — HID++ `0x8040`/`0x8070`/`0x8071`/`0x8080`/`0x8081`
-    /// (RGB) or `0x1981`–`0x1983`/`0x1990` (backlight/illumination).
+    /// Per-key RGB the lighting panel can actually drive — HID++ `PerKeyLighting`
+    /// (`0x8080`), the feature `set_keyboard_color` writes. Legacy/zone/backlight
+    /// lighting families aren't driven by the panel, so they don't flip this and
+    /// don't earn an inert Lighting tab.
     pub lighting: bool,
 }
 
@@ -85,9 +87,10 @@ impl Capabilities {
     pub fn from_feature_ids(ids: &[u16]) -> Self {
         const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
-        const LIGHTING: [u16; 9] = [
-            0x8040, 0x8070, 0x8071, 0x8080, 0x8081, 0x1981, 0x1982, 0x1983, 0x1990,
-        ];
+        // Only PerKeyLighting (0x8080) — the feature the lighting panel drives via
+        // `set_keyboard_color`. Advertising a non-per-key family (legacy 0x8070,
+        // backlight 0x198x) would otherwise earn a tab the panel can't drive.
+        const LIGHTING: [u16; 1] = [0x8080];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
             buttons: has(&BUTTONS),
@@ -227,6 +230,14 @@ pub struct PairedDevice {
     pub capabilities: Option<Capabilities>,
 }
 
+/// One receiver and its paired devices — the unit the agent's inventory
+/// snapshot is made of.
+///
+/// Crosses the agent↔GUI IPC (everything it embeds too: [`ReceiverInfo`],
+/// [`PairedDevice`], battery/model-info/capability types). bincode encodes
+/// field and variant *order*, so reordering, retyping, or wrapping any field
+/// in this tree is a wire-format change and requires a `PROTOCOL_VERSION`
+/// bump (guarded by `openlogi-agent-core/tests/wire_format.rs`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceInventory {
     pub receiver: ReceiverInfo,

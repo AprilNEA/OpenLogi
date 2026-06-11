@@ -13,6 +13,7 @@ pub mod hardware;
 pub mod hook_runtime;
 pub mod ipc;
 pub mod orchestrator;
+pub mod transport;
 pub mod watchers;
 
 pub use dpi::DpiCycleState;

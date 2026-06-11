@@ -6,7 +6,9 @@
 //! the TOML config keys/values use the enum variant identifiers verbatim, so
 //! renames are migration events.
 
+use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +53,21 @@ impl ButtonId {
         ButtonId::ThumbwheelScrollDown,
         ButtonId::GestureButton,
     ];
+
+    /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
+    /// remaps: Middle, Back, or Forward. The primary L/R clicks always pass
+    /// through (suppressing them would brick the mouse), and the DPI / thumb /
+    /// dedicated gesture controls aren't visible to the OS hook at all (they're
+    /// captured over HID++). These are exactly the buttons that can become an
+    /// OS-hook gesture button, so the hook's remap gate and the gesture-owner
+    /// projection share this one definition.
+    #[must_use]
+    pub fn is_os_hook_button(self) -> bool {
+        matches!(
+            self,
+            ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward
+        )
+    }
 
     /// Human-readable label for popovers and tooltips.
     #[must_use]
@@ -137,6 +154,11 @@ pub const GESTURE_SWIPE_THRESHOLD: i32 = 50;
 /// Maximum cross-axis travel allowed at the threshold, so only a reasonably
 /// straight swipe commits. Grows with the dominant axis (`max(deadzone, 35%)`).
 pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
+/// Minimum time a gesture button must be held before its travel can commit to a
+/// swipe. Distinguishes a deliberate hold-and-swipe from a quick click whose
+/// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
+/// pad and the OS-hook Middle/Back/Forward).
+pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::from_millis(160);
 
 /// Classify the *running* raw-XY travel of a held gesture button into a
 /// directional swipe, the instant it commits — or `None` while it's still too
@@ -152,12 +174,17 @@ pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
 /// down), so an upward swipe (negative `dy`) maps to [`GestureDirection::Up`].
 #[must_use]
 pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
-    let (abs_x, abs_y) = (dx.abs(), dy.abs());
+    // Saturating throughout: a [`SwipeAccumulator`] hold that never commits (a
+    // sustained diagonal) keeps summing travel, so `dx`/`dy` can reach the i32
+    // bounds. `i32::MIN.abs()` would panic and a plain `dominant * 35` would
+    // overflow — and a panic in the input-hook callback is exactly the freeze
+    // hazard we must never hit. The clamp is inert in the normal range.
+    let (abs_x, abs_y) = (dx.saturating_abs(), dy.saturating_abs());
     let dominant = abs_x.max(abs_y);
     if dominant < GESTURE_SWIPE_THRESHOLD {
         return None;
     }
-    let cross_limit = GESTURE_SWIPE_DEADZONE.max(dominant * 35 / 100);
+    let cross_limit = GESTURE_SWIPE_DEADZONE.max(dominant.saturating_mul(35) / 100);
     if abs_x > abs_y {
         if abs_y > cross_limit {
             return None;
@@ -176,6 +203,92 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
         } else {
             GestureDirection::Up
         })
+    }
+}
+
+/// The mid-swipe state machine shared by both gesture-capture paths: the HID++
+/// thumb pad (`openlogi-hid`'s `0x1b04` raw-XY divert) and the OS-hook
+/// Middle/Back/Forward buttons (`openlogi-agent-core`'s CGEventTap). A gesture
+/// button's hold accumulates travel; the instant the dominant axis commits a
+/// direction — after the button has been held [`GESTURE_HOLD_FOR_SWIPE`], so a
+/// quick click whose cursor drifted doesn't count — [`Self::accumulate`] returns
+/// that direction exactly once, like Logitech Options+. A hold that never
+/// commits is a plain click, reported by [`Self::end`].
+///
+/// The two paths differ only in *what identifies the held control* (a
+/// [`ButtonId`] for the OS hook, a diverted CID for the thumb pad), so each owns
+/// that and embeds this for the shared travel logic. Keeping the logic in one
+/// place is deliberate: the two copies it replaced had already drifted apart
+/// (one resolved a swipe only on release), which mis-fired the click.
+#[derive(Debug, Default)]
+pub struct SwipeAccumulator {
+    /// When the current hold began, or `None` when not holding. Gates a
+    /// deliberate swipe against a quick click whose cursor happened to move.
+    held_since: Option<Instant>,
+    /// Accumulated raw-XY travel since the hold began (saturating, so an
+    /// arbitrarily long hold can never overflow).
+    dx: i32,
+    dy: i32,
+    /// Set once a direction has committed this hold, so it fires exactly once
+    /// and the release isn't then also read as a click.
+    fired: bool,
+}
+
+impl SwipeAccumulator {
+    /// Begin a fresh hold, resetting the travel accumulator and commit state.
+    pub fn begin(&mut self) {
+        self.held_since = Some(Instant::now());
+        self.dx = 0;
+        self.dy = 0;
+        self.fired = false;
+    }
+
+    /// Whether a hold is in progress (between [`Self::begin`] and [`Self::end`]),
+    /// so callers can do rising/falling-edge detection without a second flag.
+    #[must_use]
+    pub fn is_holding(&self) -> bool {
+        self.held_since.is_some()
+    }
+
+    /// Feed a pointer-move / raw-XY delta into the current hold. Returns
+    /// `Some(direction)` exactly once per hold — the instant travel commits, and
+    /// only after the hold passes [`GESTURE_HOLD_FOR_SWIPE`] — and `None` while
+    /// still too short, already committed, or not holding.
+    pub fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
+        if self.fired || self.held_since.is_none() {
+            return None;
+        }
+        self.dx = self.dx.saturating_add(dx);
+        self.dy = self.dy.saturating_add(dy);
+        let held_long_enough = self
+            .held_since
+            .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
+        if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
+            self.fired = true;
+            return Some(dir);
+        }
+        None
+    }
+
+    /// End the current hold. Returns `true` when an in-progress hold ended
+    /// without committing a swipe — the caller should fire the plain `Click`
+    /// action — and `false` when a swipe already fired mid-motion, or when there
+    /// was no hold to end (a stray release reports no click).
+    pub fn end(&mut self) -> bool {
+        let was_click = self.held_since.is_some() && !self.fired;
+        self.held_since = None;
+        was_click
+    }
+
+    /// Test-only seam: backdate the current hold so its [`GESTURE_HOLD_FOR_SWIPE`]
+    /// gate is already satisfied, letting a test exercise a committed swipe
+    /// without sleeping. Real code never calls this — [`Self::begin`] records the
+    /// true start instant. A no-op when not currently holding.
+    #[doc(hidden)]
+    pub fn backdate_hold_for_test(&mut self) {
+        if self.held_since.is_some() {
+            self.held_since = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2);
+        }
     }
 }
 
@@ -447,6 +560,110 @@ impl KeyCombo {
     }
 }
 
+/// What a single rebindable [`ButtonId`] does: either one [`Action`], or — for a
+/// raw-XY-capable button placed in gesture mode — a per-[`GestureDirection`]
+/// map (hold + swipe up/down/left/right, or a plain click).
+///
+/// There has only ever been one binding map per device; a gesture binding is
+/// just a binding whose payload is a direction map instead of a single action.
+///
+/// # Serialization
+///
+/// `#[serde(untagged)]`: [`Single`](Binding::Single) serializes exactly as the
+/// bare [`Action`] did before (a string `"BrowserBack"`, or a single-key table
+/// for the payload variants), and [`Gesture`](Binding::Gesture) serializes as a
+/// table keyed by [`GestureDirection`] names (`Up`/`Down`/`Left`/`Right`/
+/// `Click`).
+///
+/// The two arms are disambiguated by the **zero overlap** between [`Action`]
+/// variant names and [`GestureDirection`] variant names — untagged tries
+/// `Single(Action)` first, and a table keyed by `Up` etc. cannot parse as an
+/// externally-tagged `Action`, so it falls through to `Gesture`. A payload
+/// action like `{ SetDpiPreset = 2 }` is a valid externally-tagged `Action`, so
+/// it stays `Single` and never reaches the `Gesture` arm. This invariant is the
+/// entire safety basis for untagged routing; the `binding_untagged_*` tests
+/// guard it (a future `Action` named `Up`/`Down`/`Left`/`Right`/`Click` would
+/// silently mis-route, and those tests would fail).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Binding {
+    /// One action, fired on press. The shape every non-gesture button uses.
+    Single(Action),
+    /// Per-direction sub-bindings for a button in gesture mode. Keyed by the
+    /// committed swipe direction, with [`GestureDirection::Click`] holding the
+    /// plain-click (no-swipe) action.
+    Gesture(BTreeMap<GestureDirection, Action>),
+}
+
+impl Binding {
+    /// The plain-click action for this binding: the [`Single`](Binding::Single)
+    /// action, or the [`Gesture`](Binding::Gesture) map's
+    /// [`Click`](GestureDirection::Click) entry. Falls back to [`Action::None`]
+    /// when a gesture binding has no explicit `Click`.
+    ///
+    /// Lets the click-dispatch path stay binding-shape-agnostic.
+    #[must_use]
+    pub fn click_action(&self) -> Action {
+        match self {
+            Binding::Single(action) => action.clone(),
+            Binding::Gesture(map) => map
+                .get(&GestureDirection::Click)
+                .cloned()
+                .unwrap_or(Action::None),
+        }
+    }
+
+    /// The action bound to `direction`, if this is a gesture binding.
+    /// [`Single`](Binding::Single) has no directions and returns `None`.
+    #[must_use]
+    pub fn direction_action(&self, direction: GestureDirection) -> Option<&Action> {
+        match self {
+            Binding::Single(_) => None,
+            Binding::Gesture(map) => map.get(&direction),
+        }
+    }
+
+    /// Whether this binding drives raw-XY swipe capture (the
+    /// [`Gesture`](Binding::Gesture) arm).
+    #[must_use]
+    pub fn is_gesture(&self) -> bool {
+        matches!(self, Binding::Gesture(_))
+    }
+
+    /// Promote a [`Single`](Binding::Single) binding in place to a
+    /// [`Gesture`](Binding::Gesture), keeping its action as the
+    /// [`GestureDirection::Click`] entry and leaving the swipe arms unbound.
+    /// A no-op when this is already a [`Gesture`].
+    pub fn upgrade_to_gesture(&mut self) {
+        if let Binding::Single(action) = self {
+            let mut map = BTreeMap::new();
+            map.insert(GestureDirection::Click, action.clone());
+            *self = Binding::Gesture(map);
+        }
+    }
+
+    /// Fill any unbound directions of a [`Gesture`](Binding::Gesture) binding
+    /// with their canonical [`default_gesture_binding`], so a button promoted to
+    /// the gesture role always exposes the full five-direction set — rather than
+    /// leaving swipe arms the GUI renders as defaults but the runtime never
+    /// dispatches. A no-op on [`Single`](Binding::Single) and on directions
+    /// already bound (existing user choices are preserved).
+    pub fn fill_gesture_defaults(&mut self) {
+        if let Binding::Gesture(map) = self {
+            for dir in GestureDirection::ALL {
+                map.entry(dir)
+                    .or_insert_with(|| default_gesture_binding(dir));
+            }
+        }
+    }
+}
+
+impl From<Action> for Binding {
+    fn from(action: Action) -> Self {
+        Binding::Single(action)
+    }
+}
+
 impl Action {
     /// Display label for the popover row.
     ///
@@ -624,6 +841,12 @@ impl Action {
     /// skipped (debug-logged). `CustomShortcut` maps macOS `kVK_*` codes to
     /// Linux key codes; macOS Cmd maps to Ctrl.
     ///
+    /// On Windows, key and mouse events are synthesised via `SendInput`. The
+    /// macOS window-manager actions map to their Windows equivalents (e.g.
+    /// `MissionControl` → Win+Tab, `ShowDesktop` → Win+D); `CustomShortcut`
+    /// maps macOS `kVK_*` codes to Windows virtual-key codes, with Cmd mapped to
+    /// Ctrl.
+    ///
     /// On other platforms a warning is logged and the function returns
     /// immediately — the binary compiles clean on all targets.
     pub fn execute(&self) {
@@ -633,7 +856,10 @@ impl Action {
         #[cfg(target_os = "linux")]
         self.execute_linux();
 
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        self.execute_windows();
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             tracing::warn!(
                 action = self.label(),
@@ -845,6 +1071,71 @@ impl Action {
             }
         }
     }
+
+    /// Windows implementation: synthesise events via `SendInput`. macOS
+    /// window-manager actions map to their Windows equivalents; `CustomShortcut`
+    /// maps macOS `kVK_*` codes to Windows virtual-key codes (Cmd → Ctrl).
+    #[cfg(target_os = "windows")]
+    fn execute_windows(&self) {
+        match self {
+            Action::LeftClick => windows::post_click(windows::MouseButton::Left),
+            Action::RightClick => windows::post_click(windows::MouseButton::Right),
+            Action::MiddleClick => windows::post_click(windows::MouseButton::Middle),
+            Action::Copy => windows::post_key(windows::VK_C, &[windows::VK_CONTROL]),
+            Action::Paste => windows::post_key(windows::VK_V, &[windows::VK_CONTROL]),
+            Action::Cut => windows::post_key(windows::VK_X, &[windows::VK_CONTROL]),
+            Action::Undo => windows::post_key(windows::VK_Z, &[windows::VK_CONTROL]),
+            Action::Redo => windows::post_key(windows::VK_Y, &[windows::VK_CONTROL]),
+            Action::SelectAll => windows::post_key(windows::VK_A, &[windows::VK_CONTROL]),
+            Action::Find => windows::post_key(windows::VK_F, &[windows::VK_CONTROL]),
+            Action::Save => windows::post_key(windows::VK_S, &[windows::VK_CONTROL]),
+            Action::BrowserBack => windows::post_key(windows::VK_BROWSER_BACK, &[]),
+            Action::BrowserForward => windows::post_key(windows::VK_BROWSER_FORWARD, &[]),
+            Action::NewTab => windows::post_key(windows::VK_T, &[windows::VK_CONTROL]),
+            Action::CloseTab => windows::post_key(windows::VK_W, &[windows::VK_CONTROL]),
+            Action::ReopenTab => {
+                windows::post_key(windows::VK_T, &[windows::VK_CONTROL, windows::VK_SHIFT]);
+            }
+            Action::NextTab => windows::post_key(windows::VK_TAB, &[windows::VK_CONTROL]),
+            Action::PrevTab => {
+                windows::post_key(windows::VK_TAB, &[windows::VK_CONTROL, windows::VK_SHIFT]);
+            }
+            Action::ReloadPage => windows::post_key(windows::VK_R, &[windows::VK_CONTROL]),
+            Action::MissionControl | Action::AppExpose => {
+                windows::post_key(windows::VK_TAB, &[windows::VK_LWIN]);
+            }
+            Action::PreviousDesktop => {
+                windows::post_key(windows::VK_LEFT, &[windows::VK_LWIN, windows::VK_CONTROL]);
+            }
+            Action::NextDesktop => {
+                windows::post_key(windows::VK_RIGHT, &[windows::VK_LWIN, windows::VK_CONTROL]);
+            }
+            Action::ShowDesktop => windows::post_key(windows::VK_D, &[windows::VK_LWIN]),
+            Action::LaunchpadShow => windows::post_key(windows::VK_LWIN, &[]),
+            Action::LockScreen => windows::post_key(windows::VK_L, &[windows::VK_LWIN]),
+            Action::Screenshot => {
+                windows::post_key(windows::VK_S, &[windows::VK_LWIN, windows::VK_SHIFT]);
+            }
+            Action::PlayPause => windows::post_key(windows::VK_MEDIA_PLAY_PAUSE, &[]),
+            Action::NextTrack => windows::post_key(windows::VK_MEDIA_NEXT_TRACK, &[]),
+            Action::PrevTrack => windows::post_key(windows::VK_MEDIA_PREV_TRACK, &[]),
+            Action::VolumeUp => windows::post_key(windows::VK_VOLUME_UP, &[]),
+            Action::VolumeDown => windows::post_key(windows::VK_VOLUME_DOWN, &[]),
+            Action::MuteVolume => windows::post_key(windows::VK_VOLUME_MUTE, &[]),
+            Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::ToggleSmartShift => {
+                tracing::debug!(
+                    action = self.label(),
+                    "device action handled by hook/HID layer"
+                );
+            }
+            Action::ScrollUp
+            | Action::ScrollDown
+            | Action::HorizontalScrollLeft
+            | Action::HorizontalScrollRight => windows::post_scroll(self),
+            Action::CustomShortcut(combo) => windows::post_custom_shortcut(combo),
+            Action::None => {}
+        }
+    }
 }
 
 /// Synthesise a horizontal scroll of `delta` wheel lines at the current focus.
@@ -867,7 +1158,10 @@ pub fn post_horizontal_scroll(delta: i32) {
     #[cfg(target_os = "linux")]
     linux::scroll(evdev::RelativeAxisCode::REL_HWHEEL, delta);
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    windows::post_horizontal_scroll(delta);
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let _ = delta;
 }
 
@@ -909,11 +1203,20 @@ const VK_Z: u16 = 0x06;
 #[cfg(target_os = "macos")]
 const VK_TAB: u16 = 0x30;
 
+/// Stamped into the `EVENT_SOURCE_USER_DATA` field of every mouse event
+/// [`Action::execute`] synthesizes on macOS, so OpenLogi's own `CGEventTap` can
+/// recognize and skip its own injections. Without it, a gesture/button action
+/// that posts a mouse button (e.g. a remapped `MiddleClick`) would re-enter the
+/// hook — and for a gesture button, be misread as a fresh hold, looping. The
+/// value is arbitrary but distinctive ("OLGI"); real events carry `0` here.
+pub const SYNTHETIC_EVENT_USER_DATA: i64 = 0x4F4C_4749;
+
 /// Platform helpers for synthesising OS-level input events on macOS.
 #[cfg(target_os = "macos")]
 mod macos {
     use core_graphics::event::{
-        CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, ScrollEventUnit,
+        CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
+        ScrollEventUnit,
     };
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     use core_graphics::geometry::CGPoint;
@@ -950,6 +1253,13 @@ mod macos {
         };
         for (kind, phase) in [(down, "down"), (up, "up")] {
             if let Ok(ev) = CGEvent::new_mouse_event(src.clone(), kind, location, button) {
+                // Mark it ours so our own CGEventTap skips it instead of treating
+                // a remapped click (e.g. a gesture button's `MiddleClick`) as a
+                // fresh button event and re-entering the hook.
+                ev.set_integer_value_field(
+                    EventField::EVENT_SOURCE_USER_DATA,
+                    super::SYNTHETIC_EVENT_USER_DATA,
+                );
                 ev.post(CGEventTapLocation::HID);
             } else {
                 tracing::warn!(phase, "CGEvent::new_mouse_event failed");
@@ -1306,9 +1616,11 @@ mod macos {
 /// (per-direction, see [`default_gesture_binding`]). The bindings persist
 /// regardless so the user only configures once.
 ///
-/// `GestureButton`'s entry here is the legacy single-binding placeholder;
-/// the per-direction sub-bindings live in [`default_gesture_binding`] and
-/// are what the UI now edits.
+/// `GestureButton`'s entry here is vestigial: in the merged [`Binding`] model
+/// the gesture button defaults to [`Binding::Gesture`] (see
+/// [`default_binding_for`]), so this single-action value is never the source of
+/// truth for it. It is retained only so the per-button-`Action` callers (the
+/// hook map, scroll defaults, labels) stay total.
 #[must_use]
 pub fn default_binding(button: ButtonId) -> Action {
     match button {
@@ -1341,6 +1653,32 @@ pub fn default_gesture_binding(direction: GestureDirection) -> Action {
         GestureDirection::Left => Action::PrevTab,
         GestureDirection::Right => Action::NextTab,
         GestureDirection::Click => Action::AppExpose,
+    }
+}
+
+/// The canonical default [`Binding`] for a fresh button in the merged model.
+///
+/// [`ButtonId::GestureButton`] defaults to [`Binding::Gesture`] populated from
+/// [`default_gesture_binding`] — preserving the existing per-direction swipe
+/// behavior — so the GUI mode toggle and the runtime agree it starts in gesture
+/// mode. Every other button defaults to [`Binding::Single`] of its
+/// [`default_binding`].
+///
+/// This is the seed when a button is first promoted to a gesture binding (see
+/// [`Config::set_gesture_direction`](crate::config::Config::set_gesture_direction)),
+/// so a freshly-customized gesture button always carries a full default
+/// direction map — including a [`GestureDirection::Click`] — rather than a sparse
+/// map whose click would project to a no-op [`Action::None`].
+#[must_use]
+pub fn default_binding_for(button: ButtonId) -> Binding {
+    match button {
+        ButtonId::GestureButton => Binding::Gesture(
+            GestureDirection::ALL
+                .into_iter()
+                .map(|d| (d, default_gesture_binding(d)))
+                .collect(),
+        ),
+        other => Binding::Single(default_binding(other)),
     }
 }
 
@@ -1505,10 +1843,10 @@ mod linux {
         let _ = &*VIRTUAL_INPUT;
         // Give udev a moment to create the /dev node.
         std::thread::sleep(std::time::Duration::from_millis(150));
-        if let Some(m) = &*VIRTUAL_INPUT {
-            if let Ok(mut guard) = m.lock() {
-                return guard.enumerate_dev_nodes_blocking().ok()?.flatten().next();
-            }
+        if let Some(m) = &*VIRTUAL_INPUT
+            && let Ok(mut guard) = m.lock()
+        {
+            return guard.enumerate_dev_nodes_blocking().ok()?.flatten().next();
         }
         None
     }
@@ -1716,6 +2054,305 @@ mod linux {
     }
 }
 
+/// Translate a macOS virtual key code (`kVK_*`, captured when a `CustomShortcut`
+/// was recorded on macOS) to the equivalent Windows virtual-key code, so a chord
+/// synced from a Mac fires the right key on Windows.
+///
+/// Covers letters, digits, the ANSI punctuation keys, whitespace/editing keys,
+/// navigation, and F1–F20 — every key a shortcut realistically uses. Modifier
+/// keys are applied separately from `KeyCombo::modifiers`; the numeric keypad,
+/// media, and volume keys are intentionally omitted (they are modifiers or
+/// already have dedicated actions). `None` for an unmapped code, which
+/// `post_custom_shortcut` warns-and-drops.
+///
+/// Source codes: `<HIToolbox/Events.h>` kVK_* constants. Targets: Win32
+/// virtual-key codes (letters/digits are their ASCII values; F1 = 0x70).
+#[cfg_attr(
+    not(target_os = "windows"),
+    allow(
+        dead_code,
+        reason = "pure key-code table is exercised by host unit tests; its only runtime caller is the Windows-gated post_custom_shortcut"
+    )
+)]
+fn mac_virtual_key_to_windows(key_code: u16) -> Option<u16> {
+    Some(match key_code {
+        // ── Letters (Windows VK_A..VK_Z = ASCII 'A'..'Z') ──
+        0x00 => 0x41, // A
+        0x0B => 0x42, // B
+        0x08 => 0x43, // C
+        0x02 => 0x44, // D
+        0x0E => 0x45, // E
+        0x03 => 0x46, // F
+        0x05 => 0x47, // G
+        0x04 => 0x48, // H
+        0x22 => 0x49, // I
+        0x26 => 0x4A, // J
+        0x28 => 0x4B, // K
+        0x25 => 0x4C, // L
+        0x2E => 0x4D, // M
+        0x2D => 0x4E, // N
+        0x1F => 0x4F, // O
+        0x23 => 0x50, // P
+        0x0C => 0x51, // Q
+        0x0F => 0x52, // R
+        0x01 => 0x53, // S
+        0x11 => 0x54, // T
+        0x20 => 0x55, // U
+        0x09 => 0x56, // V
+        0x0D => 0x57, // W
+        0x07 => 0x58, // X
+        0x10 => 0x59, // Y
+        0x06 => 0x5A, // Z
+        // ── Digits (Windows VK_0..VK_9 = ASCII '0'..'9') ──
+        0x1D => 0x30, // 0
+        0x12 => 0x31, // 1
+        0x13 => 0x32, // 2
+        0x14 => 0x33, // 3
+        0x15 => 0x34, // 4
+        0x17 => 0x35, // 5
+        0x16 => 0x36, // 6
+        0x1A => 0x37, // 7
+        0x1C => 0x38, // 8
+        0x19 => 0x39, // 9
+        // ── ANSI punctuation (Windows VK_OEM_*) ──
+        0x1B => 0xBD, // -  VK_OEM_MINUS
+        0x18 => 0xBB, // =  VK_OEM_PLUS
+        0x21 => 0xDB, // [  VK_OEM_4
+        0x1E => 0xDD, // ]  VK_OEM_6
+        0x2A => 0xDC, // \  VK_OEM_5
+        0x29 => 0xBA, // ;  VK_OEM_1
+        0x27 => 0xDE, // '  VK_OEM_7
+        0x2B => 0xBC, // ,  VK_OEM_COMMA
+        0x2F => 0xBE, // .  VK_OEM_PERIOD
+        0x2C => 0xBF, // /  VK_OEM_2
+        0x32 => 0xC0, // `  VK_OEM_3
+        // ── Whitespace / editing ──
+        0x24 => 0x0D, // Return     VK_RETURN
+        0x30 => 0x09, // Tab        VK_TAB
+        0x31 => 0x20, // Space      VK_SPACE
+        0x33 => 0x08, // Backspace  VK_BACK
+        0x35 => 0x1B, // Escape     VK_ESCAPE
+        // ── Navigation ──
+        0x73 => 0x24, // Home          VK_HOME
+        0x77 => 0x23, // End           VK_END
+        0x74 => 0x21, // PageUp        VK_PRIOR
+        0x79 => 0x22, // PageDown      VK_NEXT
+        0x75 => 0x2E, // ForwardDelete VK_DELETE
+        0x7B => 0x25, // LeftArrow     VK_LEFT
+        0x7C => 0x27, // RightArrow    VK_RIGHT
+        0x7D => 0x28, // DownArrow     VK_DOWN
+        0x7E => 0x26, // UpArrow       VK_UP
+        // ── Function keys (Windows VK_F1 = 0x70, sequential through VK_F24) ──
+        0x7A => 0x70, // F1
+        0x78 => 0x71, // F2
+        0x63 => 0x72, // F3
+        0x76 => 0x73, // F4
+        0x60 => 0x74, // F5
+        0x61 => 0x75, // F6
+        0x62 => 0x76, // F7
+        0x64 => 0x77, // F8
+        0x65 => 0x78, // F9
+        0x6D => 0x79, // F10
+        0x67 => 0x7A, // F11
+        0x6F => 0x7B, // F12
+        0x69 => 0x7C, // F13
+        0x6B => 0x7D, // F14
+        0x71 => 0x7E, // F15
+        0x6A => 0x7F, // F16
+        0x40 => 0x80, // F17
+        0x4F => 0x81, // F18
+        0x50 => 0x82, // F19
+        0x5A => 0x83, // F20
+        _ => return None,
+    })
+}
+
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code, reason = "SendInput is the Win32 API for synthetic input")]
+mod windows {
+    use std::mem::size_of;
+
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+        MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+        MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+        MOUSEINPUT, SendInput,
+    };
+
+    use crate::binding::{Action, KeyCombo};
+
+    const WHEEL_DELTA: i32 = 120;
+
+    pub(super) const VK_A: u16 = 0x41;
+    pub(super) const VK_C: u16 = 0x43;
+    pub(super) const VK_D: u16 = 0x44;
+    pub(super) const VK_F: u16 = 0x46;
+    pub(super) const VK_L: u16 = 0x4C;
+    pub(super) const VK_R: u16 = 0x52;
+    pub(super) const VK_S: u16 = 0x53;
+    pub(super) const VK_T: u16 = 0x54;
+    pub(super) const VK_V: u16 = 0x56;
+    pub(super) const VK_W: u16 = 0x57;
+    pub(super) const VK_X: u16 = 0x58;
+    pub(super) const VK_Y: u16 = 0x59;
+    pub(super) const VK_Z: u16 = 0x5A;
+    pub(super) const VK_TAB: u16 = 0x09;
+    pub(super) const VK_LEFT: u16 = 0x25;
+    pub(super) const VK_RIGHT: u16 = 0x27;
+    pub(super) const VK_SHIFT: u16 = 0x10;
+    pub(super) const VK_CONTROL: u16 = 0x11;
+    pub(super) const VK_MENU: u16 = 0x12;
+    pub(super) const VK_LWIN: u16 = 0x5B;
+    pub(super) const VK_BROWSER_BACK: u16 = 0xA6;
+    pub(super) const VK_BROWSER_FORWARD: u16 = 0xA7;
+    pub(super) const VK_VOLUME_MUTE: u16 = 0xAD;
+    pub(super) const VK_VOLUME_DOWN: u16 = 0xAE;
+    pub(super) const VK_VOLUME_UP: u16 = 0xAF;
+    pub(super) const VK_MEDIA_NEXT_TRACK: u16 = 0xB0;
+    pub(super) const VK_MEDIA_PREV_TRACK: u16 = 0xB1;
+    pub(super) const VK_MEDIA_PLAY_PAUSE: u16 = 0xB3;
+
+    #[derive(Clone, Copy)]
+    pub(super) enum MouseButton {
+        Left,
+        Right,
+        Middle,
+    }
+
+    pub(super) fn post_click(button: MouseButton) {
+        let (down, up) = match button {
+            MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+            MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+            MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+        };
+        send_inputs(&[mouse_input(down, 0), mouse_input(up, 0)]);
+    }
+
+    pub(super) fn post_key(vk: u16, modifiers: &[u16]) {
+        let mut inputs = Vec::with_capacity(modifiers.len() * 2 + 2);
+        for modifier in modifiers {
+            inputs.push(key_input(*modifier, false));
+        }
+        inputs.push(key_input(vk, false));
+        inputs.push(key_input(vk, true));
+        for modifier in modifiers.iter().rev() {
+            inputs.push(key_input(*modifier, true));
+        }
+        send_inputs(&inputs);
+    }
+
+    pub(super) fn post_scroll(action: &Action) {
+        let (flags, data) = match action {
+            Action::ScrollUp => (MOUSEEVENTF_WHEEL, WHEEL_DELTA),
+            Action::ScrollDown => (MOUSEEVENTF_WHEEL, -WHEEL_DELTA),
+            Action::HorizontalScrollLeft => (MOUSEEVENTF_HWHEEL, -WHEEL_DELTA),
+            Action::HorizontalScrollRight => (MOUSEEVENTF_HWHEEL, WHEEL_DELTA),
+            _ => return,
+        };
+        send_inputs(&[mouse_input(flags, data)]);
+    }
+
+    pub(super) fn post_horizontal_scroll(delta: i32) {
+        if delta == 0 {
+            return;
+        }
+        send_inputs(&[mouse_input(
+            MOUSEEVENTF_HWHEEL,
+            delta.saturating_mul(WHEEL_DELTA),
+        )]);
+    }
+
+    pub(super) fn post_custom_shortcut(combo: &KeyCombo) {
+        if combo.key_code == 0 {
+            tracing::warn!(
+                chord = %combo.rendered_label(),
+                "CustomShortcut with no key code; press ignored"
+            );
+            return;
+        }
+        let Some(vk) = super::mac_virtual_key_to_windows(combo.key_code) else {
+            tracing::warn!(
+                key_code = combo.key_code,
+                chord = %combo.rendered_label(),
+                "CustomShortcut key has no Windows mapping yet; press ignored"
+            );
+            return;
+        };
+
+        let mut modifiers = Vec::new();
+        if combo.modifiers & KeyCombo::MOD_CMD != 0 {
+            modifiers.push(VK_CONTROL);
+        }
+        if combo.modifiers & KeyCombo::MOD_SHIFT != 0 {
+            modifiers.push(VK_SHIFT);
+        }
+        if combo.modifiers & KeyCombo::MOD_CTRL != 0 && !modifiers.contains(&VK_CONTROL) {
+            modifiers.push(VK_CONTROL);
+        }
+        if combo.modifiers & KeyCombo::MOD_OPTION != 0 {
+            modifiers.push(VK_MENU);
+        }
+        post_key(vk, &modifiers);
+    }
+
+    fn send_inputs(inputs: &[INPUT]) {
+        let Ok(input_count) = u32::try_from(inputs.len()) else {
+            tracing::warn!(
+                requested = inputs.len(),
+                "too many SendInput events requested"
+            );
+            return;
+        };
+        let Ok(input_size) = i32::try_from(size_of::<INPUT>()) else {
+            tracing::warn!("INPUT size does not fit the Win32 SendInput contract");
+            return;
+        };
+        let sent = unsafe { SendInput(input_count, inputs.as_ptr(), input_size) };
+        if sent != input_count {
+            tracing::warn!(
+                requested = inputs.len(),
+                sent,
+                "SendInput accepted fewer events than requested"
+            );
+        }
+    }
+
+    fn key_input(vk: u16, key_up: bool) -> INPUT {
+        let mut flags = 0;
+        if key_up {
+            flags |= KEYEVENTF_KEYUP;
+        }
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    fn mouse_input(flags: u32, data: i32) -> INPUT {
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: u32::from_ne_bytes(data.to_ne_bytes()),
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
@@ -1757,6 +2394,110 @@ mod tests {
         }
     }
 
+    #[test]
+    fn custom_shortcut_keycodes_map_across_categories() {
+        // One representative per category, checked against independently-known
+        // (kVK → Win32 VK) facts, so a systematic error (swapped digits,
+        // off-by-one F-keys, a wrong OEM code) is caught without restating the
+        // whole table.
+        assert_eq!(mac_virtual_key_to_windows(0x00), Some(0x41)); // A → VK_A
+        assert_eq!(mac_virtual_key_to_windows(0x12), Some(0x31)); // 1 → VK_1
+        assert_eq!(mac_virtual_key_to_windows(0x7A), Some(0x70)); // F1 → VK_F1
+        assert_eq!(mac_virtual_key_to_windows(0x7B), Some(0x25)); // LeftArrow → VK_LEFT
+        assert_eq!(mac_virtual_key_to_windows(0x31), Some(0x20)); // Space → VK_SPACE
+        assert_eq!(mac_virtual_key_to_windows(0x29), Some(0xBA)); // ; → VK_OEM_1
+        assert_eq!(mac_virtual_key_to_windows(0x37), None); // Command is a modifier, not a key
+    }
+
+    // ── Binding (merged model) serde routing ──────────────────────────────────
+
+    /// On-disk shape: a `ButtonId` → [`Binding`] map, as `DeviceConfig.bindings`
+    /// serializes it.
+    #[derive(Serialize, Deserialize)]
+    struct BindingWrapper {
+        bindings: BTreeMap<ButtonId, Binding>,
+    }
+
+    fn binding_roundtrip(bindings: BTreeMap<ButtonId, Binding>) -> BTreeMap<ButtonId, Binding> {
+        let toml = toml::to_string_pretty(&BindingWrapper { bindings }).expect("serialize");
+        toml::from_str::<BindingWrapper>(&toml)
+            .expect("deserialize")
+            .bindings
+    }
+
+    #[test]
+    fn binding_single_roundtrips_including_payload_variants() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(ButtonId::Back, Binding::Single(Action::BrowserBack));
+        bindings.insert(
+            ButtonId::DpiToggle,
+            Binding::Single(Action::SetDpiPreset(2)),
+        );
+        bindings.insert(
+            ButtonId::Forward,
+            Binding::Single(Action::CustomShortcut(KeyCombo {
+                modifiers: KeyCombo::MOD_CMD,
+                key_code: 0x23,
+                display: "⌘P".into(),
+            })),
+        );
+        let back = binding_roundtrip(bindings);
+        assert_eq!(back[&ButtonId::Back], Binding::Single(Action::BrowserBack));
+        assert_eq!(
+            back[&ButtonId::DpiToggle],
+            Binding::Single(Action::SetDpiPreset(2))
+        );
+        assert!(matches!(
+            back[&ButtonId::Forward],
+            Binding::Single(Action::CustomShortcut(_))
+        ));
+    }
+
+    #[test]
+    fn binding_gesture_roundtrips() {
+        let mut map = BTreeMap::new();
+        map.insert(GestureDirection::Up, Action::Copy);
+        map.insert(GestureDirection::Click, Action::Paste);
+        let mut bindings = BTreeMap::new();
+        bindings.insert(ButtonId::GestureButton, Binding::Gesture(map.clone()));
+        let back = binding_roundtrip(bindings);
+        assert_eq!(back[&ButtonId::GestureButton], Binding::Gesture(map));
+    }
+
+    /// The untagged-routing safety guard. A TOML table keyed by ANY
+    /// [`GestureDirection`] name must deserialize as [`Binding::Gesture`], never
+    /// [`Binding::Single`]. If a future [`Action`] payload variant is ever named
+    /// `Up`/`Down`/`Left`/`Right`/`Click`, the table would parse as `Single`
+    /// first and this test fails — catching the silent mis-route at CI time.
+    #[test]
+    fn binding_direction_keyed_table_routes_to_gesture() {
+        for dir in GestureDirection::ALL {
+            // `GestureDirection`'s serde key equals its `Display`/variant name.
+            let toml = format!("bindings.GestureButton.{dir} = \"None\"");
+            let parsed = toml::from_str::<BindingWrapper>(&toml).expect("deserialize");
+            assert!(
+                matches!(
+                    parsed.bindings[&ButtonId::GestureButton],
+                    Binding::Gesture(_)
+                ),
+                "a {dir}-keyed table must route to Gesture, not Single"
+            );
+        }
+    }
+
+    /// The collision case: a payload [`Action`] also serializes as a single-key
+    /// table, but untagged must keep it [`Binding::Single`] (it parses as a valid
+    /// externally-tagged `Action` before the `Gesture` arm is tried).
+    #[test]
+    fn binding_payload_action_stays_single() {
+        let toml = "bindings.DpiToggle.SetDpiPreset = 2";
+        let parsed = toml::from_str::<BindingWrapper>(toml).expect("deserialize");
+        assert_eq!(
+            parsed.bindings[&ButtonId::DpiToggle],
+            Binding::Single(Action::SetDpiPreset(2))
+        );
+    }
+
     // ── Gesture classification ────────────────────────────────────────────────
 
     #[test]
@@ -1779,6 +2520,170 @@ mod tests {
         // Past the threshold but too diagonal (cross axis beyond the band).
         assert_eq!(detect_swipe(60, 60), None);
         assert_eq!(detect_swipe(-60, -60), None);
+    }
+
+    #[test]
+    fn detect_swipe_threshold_and_cross_band_boundaries() {
+        // The threshold bound is inclusive (`< THRESHOLD` rejects), so exactly at
+        // it commits and one below does not.
+        assert_eq!(
+            detect_swipe(GESTURE_SWIPE_THRESHOLD, 0),
+            Some(GestureDirection::Right)
+        );
+        assert_eq!(detect_swipe(GESTURE_SWIPE_THRESHOLD - 1, 0), None);
+
+        // The cross-axis band is max(deadzone, 35% of dominant). For a large
+        // dominant the 35% term wins (200 → 70): 69 commits, 71 is too diagonal.
+        assert_eq!(detect_swipe(200, 69), Some(GestureDirection::Right));
+        assert_eq!(detect_swipe(200, 71), None);
+        // For a small dominant the 40-unit floor wins (100 → max(40, 35) = 40).
+        assert_eq!(detect_swipe(100, 39), Some(GestureDirection::Right));
+        assert_eq!(detect_swipe(100, 41), None);
+    }
+
+    #[test]
+    fn detect_swipe_does_not_panic_on_extreme_values() {
+        // Saturated accumulator travel can reach the i32 bounds. `i32::MIN.abs()`
+        // panics and `dominant * 35` overflows — both must be clamped, not crash.
+        assert_eq!(detect_swipe(i32::MAX, 0), Some(GestureDirection::Right));
+        assert_eq!(detect_swipe(i32::MIN, 0), Some(GestureDirection::Left));
+        assert_eq!(detect_swipe(0, i32::MAX), Some(GestureDirection::Down));
+        assert_eq!(detect_swipe(0, i32::MIN), Some(GestureDirection::Up));
+        // A diagonal at the extremes is still rejected, without panicking.
+        assert_eq!(detect_swipe(i32::MIN, i32::MIN), None);
+    }
+
+    // ── SwipeAccumulator (the shared mid-swipe state machine) ─────────────────
+
+    #[test]
+    fn accumulator_commits_a_direction_once_after_the_hold_gate() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        // A clear rightward swipe commits exactly once, mid-motion.
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        // Further travel in the same hold must not re-fire.
+        assert_eq!(acc.accumulate(50, 0), None);
+    }
+
+    #[test]
+    fn accumulator_does_not_commit_before_the_hold_gate() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin(); // held_since = now, so the gate is not yet satisfied
+        // A big delta arriving immediately (a quick click whose cursor drifted)
+        // must not commit.
+        assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0), None);
+        // Once held long enough, the next delta commits.
+        acc.backdate_hold_for_test();
+        assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0).is_some());
+    }
+
+    #[test]
+    fn accumulator_end_reports_click_only_when_no_swipe_fired() {
+        // A hold with only tiny drift never commits → end() is a click.
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(acc.accumulate(2, -1), None);
+        assert!(acc.end(), "a hold that never swiped is a click");
+
+        // A hold that committed a swipe → end() is not a click.
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0).is_some());
+        assert!(!acc.end(), "a committed swipe must not also click");
+    }
+
+    #[test]
+    fn accumulator_ignores_motion_when_not_holding() {
+        let mut acc = SwipeAccumulator::default();
+        assert!(!acc.is_holding());
+        // Travel outside a hold is dropped, never committing a stray swipe.
+        assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0), None);
+    }
+
+    #[test]
+    fn accumulator_sums_sub_threshold_deltas_until_they_commit() {
+        // The whole reason for an accumulator (vs. detect_swipe on one delta):
+        // several deltas each too small to commit on their own must sum across
+        // the hold until the running total crosses the threshold, then commit.
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        // Just under half the threshold: one or two steps never reach it, three do.
+        let step = GESTURE_SWIPE_THRESHOLD / 2 - 1;
+        assert_eq!(acc.accumulate(step, 0), None, "one step is sub-threshold");
+        assert_eq!(acc.accumulate(step, 0), None, "two steps still under");
+        assert_eq!(
+            acc.accumulate(step, 0),
+            Some(GestureDirection::Right),
+            "the running sum finally crosses the threshold"
+        );
+    }
+
+    #[test]
+    fn accumulator_saturates_instead_of_overflowing() {
+        // The doc promises an arbitrarily long hold can't overflow. A perfect
+        // diagonal never commits, so travel keeps summing; feed deltas that would
+        // overflow both an i32 sum and a naive cross-band multiply — both must
+        // saturate, not panic (debug builds panic on overflow).
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(i32::MAX, i32::MAX),
+            None,
+            "a diagonal never commits"
+        );
+        assert_eq!(
+            acc.accumulate(i32::MAX, i32::MAX),
+            None,
+            "the saturating sum must not panic"
+        );
+        // A clean axis on a fresh hold still commits with a saturated magnitude.
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(acc.accumulate(i32::MAX, 0), Some(GestureDirection::Right));
+    }
+
+    #[test]
+    fn accumulator_begin_recovers_a_stale_hold() {
+        // A missed release (e.g. focus loss between press and release) can leave
+        // a dangling hold that already fired with travel in some direction. A
+        // fresh begin() must wipe both the `fired` latch and the travel, so the
+        // next press isn't poisoned by the old one.
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        // Stale hold commits LEFT (negative dx) and latches `fired`.
+        assert_eq!(
+            acc.accumulate(-(GESTURE_SWIPE_THRESHOLD + 10), 0),
+            Some(GestureDirection::Left)
+        );
+        // No end() — a dropped release, then a fresh press.
+        acc.begin();
+        acc.backdate_hold_for_test();
+        // Had `fired` leaked this would be None; had the negative travel leaked it
+        // would commit Left. Committing Right proves begin() reset both.
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+    }
+
+    #[test]
+    fn accumulator_end_without_a_hold_is_not_a_click() {
+        // end() in isolation (no begin) must not claim a click — there was no
+        // hold — so a stray release can't be read as a press.
+        let mut acc = SwipeAccumulator::default();
+        assert!(!acc.end(), "a release with no hold is not a click");
+        // A redundant second release after a real hold already ended is inert too.
+        acc.begin();
+        assert!(acc.end(), "the held release is a click");
+        assert!(!acc.end(), "the redundant second release is not a click");
     }
 
     // ── TOML roundtrip ────────────────────────────────────────────────────────

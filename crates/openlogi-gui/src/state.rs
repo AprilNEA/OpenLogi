@@ -14,7 +14,8 @@
     reason = "fields are read once their owning component lands in UI.md phases 2–4"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use gpui::{App, Global};
 use openlogi_core::config::{AppSettings, Config, Lighting};
@@ -31,13 +32,37 @@ pub use devices::DeviceRecord;
 pub use openlogi_agent_core::DpiCycleState;
 
 use crate::asset::AssetResolver;
-use crate::data::mouse_buttons::{Action, ButtonId, GestureDirection};
+use crate::data::mouse_buttons::{Action, Binding, ButtonId, GestureDirection};
 use crate::state::devices::{build_device_list, pick_initial_device, sort_device_list};
 use openlogi_agent_core::bindings::{bindings_for, gesture_bindings_for};
 
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
 pub const DEFAULT_DPI: u32 = 1600;
+
+/// The GUI's view of the agent connection: the latest status snapshot, or the
+/// reason there isn't one. One value instead of per-fact mirror fields
+/// (granted / scanning / …) so a future writer can't update half of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentLink {
+    /// No snapshot yet — the window just opened, or the agent is still
+    /// starting. Render a neutral connecting frame: claiming "denied" or "no
+    /// devices" before the first snapshot flashed both at every
+    /// already-set-up user (the original startup bug).
+    Connecting,
+    /// Still no snapshot well past startup: the agent is genuinely
+    /// unreachable (binary missing, repeated spawn failures). Rendered as a
+    /// static error frame; polling continues and a snapshot upgrades this
+    /// back to [`Self::Ready`].
+    Unreachable,
+    /// The agent answered the handshake with a *newer* protocol than this
+    /// process speaks — the app was updated on disk while this GUI stayed
+    /// running. Only relaunching helps; without this state the window would
+    /// keep showing a live-looking but frozen UI.
+    OutdatedGui,
+    /// Connected and current: the agent's latest status snapshot.
+    Ready(openlogi_agent_core::ipc::AgentStatus),
+}
 
 /// Inventory snapshots can briefly miss a real device while another HID++
 /// request is in flight. Keep the previous record through this many
@@ -102,21 +127,21 @@ pub struct AppState {
     /// The hotspot the user most recently armed by clicking. Drives the
     /// "selected button" outline on the mouse model and the popover content.
     pub active_button: Option<ButtonId>,
-    /// Whether the process holds macOS Accessibility permission. Drives the
-    /// permission gate; flipped by the accessibility watcher when the user
-    /// grants access. Always `true` on platforms without the concept.
-    pub accessibility_granted: bool,
-    /// Whether the first device enumeration is still in flight. Startup no
-    /// longer blocks on enumeration (see `main`); this drives the "Scanning…"
-    /// vs "No devices connected" empty state and is cleared once the inventory
-    /// watcher delivers its first snapshot.
-    pub scanning: bool,
+    /// Everything the GUI knows about the agent connection — the last status
+    /// snapshot, or why there isn't one. The render path branches on this
+    /// single value, so the permission gate, the scanning state, and the
+    /// connection-problem frames can never disagree about what the agent said.
+    agent_link: AgentLink,
     /// Bindings for the *currently selected* device. Reloaded whenever the
     /// carousel selection changes.
     pub button_bindings: BTreeMap<ButtonId, Action>,
-    /// Per-direction sub-bindings for the gesture button on the currently
-    /// selected device. Edited via the gesture picker; persistence shape
-    /// lives in [`openlogi_core::config::DeviceConfig::gesture_bindings`].
+    /// Per-direction sub-bindings for the current device's gesture owner. Edited
+    /// via the gesture picker and persisted as a [`Binding::Gesture`] entry under
+    /// the owning button — the thumb pad ([`ButtonId::GestureButton`]) by default,
+    /// or a promoted Middle/Back/Forward — in the device's unified binding map
+    /// ([`DeviceConfig::bindings`]). Rebuilt by the `gesture_bindings_for_current` helper.
+    ///
+    /// [`DeviceConfig::bindings`]: openlogi_core::config::DeviceConfig::bindings
     pub gesture_bindings: BTreeMap<GestureDirection, Action>,
     pub dpi: u32,
     /// DPI capability state keyed by [`DeviceRecord::config_key`]. Loaded
@@ -141,6 +166,14 @@ pub struct AppState {
     /// Consecutive failed SmartShift read attempts, keyed by
     /// [`DeviceRecord::config_key`] — mirrors [`Self::dpi_load_attempts`].
     smartshift_load_attempts: BTreeMap<String, u8>,
+    /// Glow-overlay cache paths we've already spawned generation for, so each
+    /// `(depot, colour)` is attempted exactly once — even when the depot ships
+    /// no mask and no file is ever written (otherwise the worker's
+    /// `refresh_windows` would re-trigger generation every frame, forever).
+    glow_attempted: HashSet<PathBuf>,
+    /// Glow-overlay cache paths whose PNG is generated and ready to render, so
+    /// `lighting_overlay` never stats the filesystem on the render thread.
+    glow_ready: HashSet<PathBuf>,
     /// Devices whose SmartShift was just written optimistically and still need a
     /// confirming re-read, keyed by [`DeviceRecord::config_key`]. A fire-and-
     /// forget write can be rejected/timed-out by a sleeping device, so the panel
@@ -184,10 +217,10 @@ impl AppState {
             current_device,
             current_app_bundle: None,
             active_button: None,
-            // Updated from the agent's IPC `status` poll; the GUI no longer runs
-            // the hook, so it can't meaningfully query Accessibility itself.
-            accessibility_granted: false,
-            scanning: true,
+            // Updated from the agent's IPC poll; the GUI no longer runs the
+            // hook, so it can't meaningfully query Accessibility (or devices)
+            // itself.
+            agent_link: AgentLink::Connecting,
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),
             dpi: DEFAULT_DPI,
@@ -196,6 +229,8 @@ impl AppState {
             dpi_load_attempts: BTreeMap::new(),
             smartshift_by_device: BTreeMap::new(),
             smartshift_load_attempts: BTreeMap::new(),
+            glow_attempted: HashSet::new(),
+            glow_ready: HashSet::new(),
             smartshift_pending_confirm: std::collections::BTreeSet::new(),
             device_list,
             config,
@@ -286,15 +321,51 @@ impl AppState {
         self.device_list.get(self.current_device)
     }
 
+    /// The agent connection state the render path branches on.
+    #[must_use]
+    pub fn agent_link(&self) -> &AgentLink {
+        &self.agent_link
+    }
+
+    /// The latest agent status snapshot — `None` while not connected (any
+    /// non-[`AgentLink::Ready`] state), which readers like the Settings
+    /// permission rows surface as "unknown", not "denied".
+    #[must_use]
+    pub fn agent_status(&self) -> Option<&openlogi_agent_core::ipc::AgentStatus> {
+        match &self.agent_link {
+            AgentLink::Ready(status) => Some(status),
+            _ => None,
+        }
+    }
+
+    /// Replace the link, reporting whether it actually changed — the steady
+    /// IPC poll mostly delivers identical snapshots, and the caller skips the
+    /// window refresh for those.
+    pub fn set_agent_link(&mut self, link: AgentLink) -> bool {
+        if self.agent_link == link {
+            return false;
+        }
+        self.agent_link = link;
+        true
+    }
+
     /// Replace [`Self::device_list`] from a fresh inventory snapshot,
     /// preserving the carousel selection by `config_key` when possible. If
     /// the previously-selected device disappeared, the selection falls back
-    /// to index 0.
+    /// to index 0. Returns whether anything actually changed.
     ///
-    /// No-op when the new list has the same `config_key` sequence as the
-    /// current one — avoids spurious `observe_global` notifications during
-    /// quiet polling cycles (P1.6).
-    pub fn refresh_inventories(&mut self, inventories: &[DeviceInventory], cache: &AssetResolver) {
+    /// No-op (returning `false`) when the new list has the same `config_key`
+    /// sequence as the current one — the caller skips the window refresh, and
+    /// quiet polling cycles cause no spurious re-renders (P1.6). `force`
+    /// pushes through that early-return: the records embed resolved asset
+    /// paths, so a completed asset sync needs one rebuild even though the
+    /// device *set* is unchanged.
+    pub fn refresh_inventories(
+        &mut self,
+        inventories: &[DeviceInventory],
+        cache: &AssetResolver,
+        force: bool,
+    ) -> bool {
         let new_list = build_device_list(inventories, cache);
         let merged_list = self.merge_inventory_snapshot(new_list);
         // Compare routes too, not just config_key: a device can reconnect on a
@@ -306,8 +377,8 @@ impl AppState {
                 .iter()
                 .zip(self.device_list.iter())
                 .all(|(a, b)| a.config_key == b.config_key && a.route == b.route);
-        if unchanged {
-            return;
+        if unchanged && !force {
+            return false;
         }
 
         let previous_key = self.current_record().map(|r| r.config_key.clone());
@@ -361,6 +432,7 @@ impl AppState {
         self.gesture_bindings = self.gesture_bindings_for_current();
         // Display state only — the agent runs its own inventory watcher and
         // rebuilds the live binding/DPI maps itself.
+        true
     }
 
     fn merge_inventory_snapshot(&mut self, new_list: Vec<DeviceRecord>) -> Vec<DeviceRecord> {
@@ -371,15 +443,8 @@ impl AppState {
         let mut merged = Vec::with_capacity(by_key.len().max(self.device_list.len()));
 
         for previous in &self.device_list {
-            if let Some(mut record) = by_key.remove(&previous.config_key) {
+            if let Some(record) = by_key.remove(&previous.config_key) {
                 self.inventory_misses.remove(&previous.config_key);
-                // Capabilities can only be measured while the device is online.
-                // When a known device goes offline (or a probe fails) the fresh
-                // record carries `None`; keep the last-known set so a sleeping
-                // mouse doesn't lose its button/pointer panels.
-                if record.capabilities.is_none() {
-                    record.capabilities = previous.capabilities;
-                }
                 merged.push(record);
                 continue;
             }
@@ -803,6 +868,30 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// The stored lighting config for `key`, or `None` when unset.
+    #[must_use]
+    pub fn lighting_for(&self, key: &str) -> Option<Lighting> {
+        self.config.lighting(key)
+    }
+
+    /// Claim `path` for a one-shot glow generation; `true` the first time, so the
+    /// caller spawns the worker exactly once per `(depot, colour)`.
+    pub fn mark_glow_attempted(&mut self, path: PathBuf) -> bool {
+        self.glow_attempted.insert(path)
+    }
+
+    /// Record that `path`'s overlay PNG is generated and ready to render.
+    pub fn mark_glow_ready(&mut self, path: PathBuf) {
+        self.glow_ready.insert(path);
+    }
+
+    /// Whether `path`'s overlay PNG is ready — a cheap in-memory check so the
+    /// render thread never stats the filesystem.
+    #[must_use]
+    pub fn glow_is_ready(&self, path: &Path) -> bool {
+        self.glow_ready.contains(path)
+    }
+
     /// Persist a new lighting config for the active device and push it to the
     /// hardware (best-effort). No-op when no device is selected.
     pub fn commit_lighting(&mut self, lighting: Lighting) {
@@ -948,7 +1037,8 @@ impl AppState {
             );
             return;
         };
-        self.config.set_binding(&key, button, action);
+        self.config
+            .set_binding(&key, button, Binding::Single(action));
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist binding to config.toml");
         }
@@ -965,25 +1055,80 @@ impl AppState {
     }
 
     fn gesture_bindings_for_current(&self) -> BTreeMap<GestureDirection, Action> {
-        gesture_bindings_for(
-            &self.config,
-            self.current_record().map(|r| r.config_key.as_str()),
-        )
+        let Some(key) = self.current_record().map(|r| r.config_key.as_str()) else {
+            return BTreeMap::new();
+        };
+        match self.config.gesture_owner(key) {
+            // The dedicated thumb pad seeds every direction from the defaults.
+            Some(ButtonId::GestureButton) => gesture_bindings_for(&self.config, Some(key)),
+            // A promoted OS-hook button is shown from its raw stored map (which
+            // `set_gesture_owner` seeds with full defaults), so the menu matches
+            // exactly what `oshook_gestures_for` dispatches — no seeding here.
+            Some(owner) => match self.config.bindings_for(key).get(&owner) {
+                Some(Binding::Gesture(map)) => map.clone(),
+                _ => BTreeMap::new(),
+            },
+            None => BTreeMap::new(),
+        }
+    }
+
+    /// The current device's gesture button — the [`Binding::Gesture`] owner — or
+    /// `None` when no button is in gesture mode. Drives which button's card opens
+    /// the gesture menu rather than the single-action picker.
+    #[must_use]
+    pub fn current_gesture_owner(&self) -> Option<ButtonId> {
+        let key = self.current_record()?.config_key.as_str();
+        self.config.gesture_owner(key)
+    }
+
+    /// Make `button` the current device's gesture button (or clear it with
+    /// `None`), enforcing the one-gesture-button-per-device lock. Persists, tells
+    /// the agent to rebuild, and refreshes the projected maps the UI reads.
+    pub fn commit_gesture_owner(&mut self, button: Option<ButtonId>) {
+        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
+            return;
+        };
+        match button {
+            Some(b) => {
+                self.config.set_gesture_owner(&key, b);
+            }
+            None => {
+                self.config.disable_gestures(&key);
+            }
+        }
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist gesture-button change to config.toml");
+        }
+        // The owner change shuffles bindings between the single + gesture maps.
+        self.button_bindings = self.bindings_for_current();
+        self.gesture_bindings = self.gesture_bindings_for_current();
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 
     /// Update a single gesture-button sub-binding in memory, on disk, and in the
     /// shared gesture map the watcher thread reads.
     pub fn commit_gesture_binding(&mut self, direction: GestureDirection, action: Action) {
-        self.gesture_bindings.insert(direction, action.clone());
-
         let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
             debug!(
                 ?direction,
-                "no active device key — gesture binding kept in memory only"
+                "no active device key — gesture binding edit ignored"
             );
             return;
         };
-        self.config.set_gesture_binding(&key, direction, action);
+        // Edit whichever button owns gestures — not always the thumb pad. When
+        // gestures are off, a stray edit must NOT silently re-enable them on the
+        // thumb pad (the gesture editor shouldn't be reachable in that state):
+        // no-op instead.
+        let Some(owner) = self.config.gesture_owner(&key) else {
+            debug!(
+                ?direction,
+                "gestures are off — ignoring gesture binding edit"
+            );
+            return;
+        };
+        self.gesture_bindings.insert(direction, action.clone());
+        self.config
+            .set_gesture_direction(&key, owner, direction, action);
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist gesture binding to config.toml");
         }

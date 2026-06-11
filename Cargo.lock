@@ -318,9 +318,9 @@ dependencies = [
 
 [[package]]
 name = "async-hid"
-version = "0.4.4"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aab637ea12169f6c473eaed9fe56843490146e3d431dbe408ca86d92edf79c2e"
+checksum = "3633346d0989f6a13133ebce8cbd7b17d8f971513172397c452d438e1e0841e6"
 dependencies = [
  "async-io",
  "atomic-waker",
@@ -1623,6 +1623,12 @@ checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
  "libloading",
 ]
+
+[[package]]
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
 
 [[package]]
 name = "document-features"
@@ -3433,6 +3439,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "interprocess"
+version = "2.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "069323743400cb7ab06a8fe5c1ed911d36b6919ec531661d034c89083629595b"
+dependencies = [
+ "doctest-file",
+ "futures-core",
+ "libc",
+ "recvmsg",
+ "tokio",
+ "widestring",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "inventory"
 version = "0.3.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4251,9 +4272,9 @@ dependencies = [
 
 [[package]]
 name = "num-conv"
-version = "0.1.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51d515d32fb182ee37cda2ccdcb92950d6a3c2893aa280e540671c2cd0f3b1d9"
+checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
 name = "num-derive"
@@ -4632,7 +4653,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi"
-version = "0.6.2"
+version = "0.6.6"
 dependencies = [
  "anyhow",
  "openlogi-cli",
@@ -4641,9 +4662,10 @@ dependencies = [
 
 [[package]]
 name = "openlogi-agent"
-version = "0.6.2"
+version = "0.6.6"
 dependencies = [
  "futures",
+ "interprocess",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -4655,12 +4677,15 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "winreg",
 ]
 
 [[package]]
 name = "openlogi-agent-core"
-version = "0.6.2"
+version = "0.6.6"
 dependencies = [
+ "bincode",
+ "interprocess",
  "openlogi-core",
  "openlogi-hid",
  "openlogi-hook",
@@ -4672,7 +4697,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-assets"
-version = "0.6.2"
+version = "0.6.6"
 dependencies = [
  "anyhow",
  "backon",
@@ -4685,7 +4710,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-cli"
-version = "0.6.2"
+version = "0.6.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -4699,7 +4724,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-core"
-version = "0.6.2"
+version = "0.6.6"
 dependencies = [
  "core-foundation 0.10.0",
  "core-graphics 0.25.0",
@@ -4715,12 +4740,13 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
  "zbus",
 ]
 
 [[package]]
 name = "openlogi-gui"
-version = "0.6.2"
+version = "0.6.6"
 dependencies = [
  "anyhow",
  "gpui",
@@ -4728,6 +4754,8 @@ dependencies = [
  "gpui-component-assets",
  "gpui-updater",
  "gpui_platform",
+ "image",
+ "interprocess",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -4737,6 +4765,8 @@ dependencies = [
  "openlogi-hid",
  "openlogi-hook",
  "rust-i18n",
+ "serde",
+ "serde_json",
  "sys-locale",
  "tarpc",
  "thiserror 2.0.18",
@@ -4748,7 +4778,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hid"
-version = "0.6.2"
+version = "0.6.6"
 dependencies = [
  "async-hid",
  "futures-concurrency",
@@ -4760,11 +4790,12 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "openlogi-hidpp"
-version = "0.6.2"
+version = "0.6.6"
 dependencies = [
  "async-channel 2.5.0",
  "async-trait",
@@ -4780,7 +4811,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hook"
-version = "0.6.2"
+version = "0.6.6"
 dependencies = [
  "core-foundation 0.10.0",
  "core-graphics 0.25.0",
@@ -4793,6 +4824,7 @@ dependencies = [
  "openlogi-core",
  "thiserror 2.0.18",
  "tracing",
+ "windows-sys 0.61.2",
  "x11rb",
 ]
 
@@ -5536,6 +5568,12 @@ dependencies = [
  "core_maths",
  "font-types",
 ]
+
+[[package]]
+name = "recvmsg"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
 
 [[package]]
 name = "redox_syscall"
@@ -6854,9 +6892,9 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.45"
+version = "0.3.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9e442fc33d7fdb45aa9bfeb312c095964abdf596f7567261062b2a7107aaabd"
+checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
 dependencies = [
  "deranged",
  "itoa",
@@ -6869,15 +6907,15 @@ dependencies = [
 
 [[package]]
 name = "time-core"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b36ee98fd31ec7426d599183e8fe26932a8dc1fb76ddb6214d05493377d34ca"
+checksum = "7694e1cfe791f8d31026952abf09c69ca6f6fa4e1a1229e18988f06a04a12dca"
 
 [[package]]
 name = "time-macros"
-version = "0.2.25"
+version = "0.2.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e552d1249bf61ac2a52db88179fd0673def1e1ad8243a00d9ec9ed71fee3dd"
+checksum = "2e70e4c5a0e0a8a4823ad65dfe1a6930e4f4d756dcd9dd7939022b5e8c501215"
 dependencies = [
  "num-conv",
  "time-core",
@@ -8090,6 +8128,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8856,7 +8900,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.6.2"
+version = "0.6.6"
 dependencies = [
  "anyhow",
  "clap",

@@ -49,10 +49,10 @@ pub async fn run(args: LightingArgs) -> Result<()> {
                     inv.receiver.vendor_id, inv.receiver.product_id
                 )
             });
-            if let Some(ref n) = needle {
-                if !name.to_lowercase().contains(n.as_str()) {
-                    return None;
-                }
+            if let Some(ref n) = needle
+                && !name.to_lowercase().contains(n.as_str())
+            {
+                return None;
             }
             let route = DeviceRoute::Direct {
                 vendor_id: inv.receiver.vendor_id,

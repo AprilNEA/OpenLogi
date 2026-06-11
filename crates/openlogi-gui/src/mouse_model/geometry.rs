@@ -129,11 +129,12 @@ fn with_thumbwheel_rotation(mut hotspots: Vec<Hotspot>) -> Vec<Hotspot> {
     clippy::cast_precision_loss,
     reason = "hotspot count is bounded by ButtonId variants — well under f32 mantissa"
 )]
-pub fn labels_from_hotspots(hotspots: &[Hotspot]) -> Vec<Label> {
+pub fn labels_from_hotspots(hotspots: &[Hotspot], mouse_h: f32) -> Vec<Label> {
     if hotspots.is_empty() {
         return Vec::new();
     }
-    let mouse_h = MOUSE_MODEL_SIZE.1;
+    // Even vertical slots across the (possibly scaled) model height, so the
+    // labels track the model when it shrinks to fit the viewport.
     let step = mouse_h / (hotspots.len() as f32 + 1.);
 
     let mut ranks: Vec<usize> = (0..hotspots.len()).collect();
@@ -270,7 +271,7 @@ mod tests {
     #[test]
     fn labels_track_hotspots_and_avoid_crossing() {
         let hotspots = default_hotspots();
-        let labels = labels_from_hotspots(&hotspots);
+        let labels = labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1);
         assert_eq!(labels.len(), hotspots.len());
 
         let mut ys: Vec<f32> = labels.iter().map(|l| l.y).collect();

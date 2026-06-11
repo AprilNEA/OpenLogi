@@ -35,7 +35,7 @@ OpenLogi talks to Logitech HID++ mice over a Logi Bolt receiver — or a
 Bluetooth-direct / wired connection — without running Logi Options+. It ships
 two binaries:
 
-- **[OpenLogi GUI](crates/openlogi-gui)** — a GPUI desktop app: an interactive mouse diagram with clickable hotspots, a per-button action picker (39 built-in actions plus recorded custom shortcuts), DPI presets, a SmartShift panel (wheel mode, sensitivity, permanent ratchet), per-application profile overlays, a device carousel that switches between paired devices live, and a Settings window with a UI localized into six languages.
+- **[OpenLogi GUI](crates/openlogi-gui)** — a GPUI desktop app: an interactive mouse diagram with clickable hotspots, a per-button action picker (39 built-in actions plus recorded custom shortcuts), DPI presets, a SmartShift panel (wheel mode, sensitivity, permanent ratchet), per-application profile overlays, a device carousel that switches between paired devices live, and a Settings window with a UI localized into 20 languages.
 - **[OpenLogi CLI](crates/openlogi-cli)** — a CLI for headless inventory (`list`) plus asset-sync and on-device diagnostic subcommands.
 
 Everything is local: bindings live in a plain TOML file, button presses are remapped through the OS event tap, and DPI / SmartShift changes are written straight to the device over HID++.
@@ -57,7 +57,7 @@ macOS is supported today; Linux and Windows are coming soon — see
 | SmartShift wheel: mode toggle + sensitivity + permanent-ratchet panel (HID++ `0x2111`) | ✅ macOS |
 | Per-application profile overlays (auto-switch on app focus) | ✅ macOS |
 | Settings window: launch-at-login, update check, menu-bar, permissions, language | ✅ macOS |
-| Interface localization (6 languages: en, ja, ru, zh-CN, zh-HK, zh-TW) | ✅ macOS |
+| Interface localization (20 languages: da, de, el, en, es, fi, fr, it, ja, ko, nb, nl, pl, pt-BR, pt-PT, ru, sv, zh-CN, zh-HK, zh-TW) | ✅ macOS |
 | Gesture-button per-direction bindings | 🟡 configurable; hardware capture pending |
 | Middle / mode-shift / thumbwheel button capture | 🟡 configurable; hook owns side buttons only |
 | Linux / Windows event hook | ❌ stub (`Unsupported`) |

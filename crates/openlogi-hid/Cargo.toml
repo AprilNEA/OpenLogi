@@ -11,7 +11,7 @@ keywords = ["logitech", "hidpp", "hid", "mouse", "async"]
 categories = ["hardware-support", "asynchronous"]
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", version = "0.6.2" }
+openlogi-core = { path = "../openlogi-core", version = "0.6.6" }
 hidpp = { workspace = true }
 async-hid = { workspace = true }
 tokio = { workspace = true }
@@ -21,6 +21,19 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 num_enum = { workspace = true }
 futures-concurrency = "7"
+
+# Native Win32 HID report writes (windows_hid.rs) — a fallback for async-hid's
+# write path on Windows, plus the composite short/long endpoint handling in
+# transport.rs.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Foundation",
+    # CreateFileW's signature references PSECURITY_ATTRIBUTES, so it is only
+    # exposed when Win32_Security is also enabled.
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+] }
 
 [lints]
 workspace = true

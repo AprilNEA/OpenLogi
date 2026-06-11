@@ -4,6 +4,13 @@
 //! the main thread, so we can't move it onto a tokio runtime). Live polling
 //! lands when there's something to react to.
 
+// Without this Windows runs the exe as a console app and pops a terminal
+// window behind the UI. Debug builds keep the console so logs stay visible.
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 /// Translate `key` (an English msgid) to the current locale and wrap it as a
 /// [`gpui::SharedString`], ready for `.child(...)` / `.label(...)` / menu items.
 /// Forwards `rust_i18n` interpolation, e.g. `tr!("Bind %{name}", name => x)`.
@@ -91,6 +98,16 @@ fn dispatch_gui_command(command: DeeplinkCommand, cx: &mut gpui::App) {
 fn ensure_main_window(cx: &mut gpui::App) {
     if cx.windows().is_empty() {
         open_main_window(&[], cx);
+    }
+}
+
+/// Update [`AppState`]'s agent link, refreshing the windows only when it
+/// actually changed (the IPC client may repeat a notice across reconnect
+/// episodes).
+fn set_agent_link(link: state::AgentLink, cx: &mut gpui::App) {
+    let changed = cx.update_global::<AppState, _>(|state, _| state.set_agent_link(link));
+    if changed {
+        cx.refresh_windows();
     }
 }
 
@@ -223,9 +240,20 @@ fn main() -> Result<()> {
             let sync_state = Arc::new(AtomicU8::new(SYNC_IDLE));
             let mut sync_attempts: u32 = 0;
             let mut last_sync_at: Option<Instant> = None;
+            // The asset resolver stats the cache roots and parses the (possibly
+            // hundreds-of-KB) index.json, so build it once and reuse it across
+            // snapshots — rebuilding only when the background sync lands new
+            // assets (below). Rebuilding per snapshot was pure waste: the
+            // unchanged-list early-return discarded the fresh records anyway.
+            let mut cache = asset::AssetResolver::new();
+            let mut synced_assets_applied = false;
+            // Cleared when the IPC update channel closes (the client thread
+            // died), so the select stops polling a closed receiver.
+            let mut ipc_open = true;
             loop {
                 tokio::select! {
-                    Some(update) = ipc_updates.recv() => {
+                    update = ipc_updates.recv(), if ipc_open => match update {
+                        Some(ipc_client::GuiUpdate::Snapshot(update)) => {
                         // Kick off (or retry) the one-shot asset sync once a
                         // snapshot carries model info (an empty / unresolved one
                         // would strand the device on the silhouette).
@@ -250,17 +278,52 @@ fn main() -> Result<()> {
                                 state.store(next, Ordering::Release);
                             });
                         }
+                        // A completed sync may have put real photos where
+                        // silhouettes were resolved: rebuild the resolver once
+                        // and force the next merge through the unchanged-list
+                        // early-return so the fresh records become visible.
+                        let force_refresh = state == SYNC_DONE && !synced_assets_applied;
+                        if force_refresh {
+                            synced_assets_applied = true;
+                            cache = asset::AssetResolver::new();
+                        }
                         cx.update(|cx| {
-                            let cache = asset::AssetResolver::new();
-                            cx.update_global::<AppState, _>(|state, _| {
-                                state.refresh_inventories(&update.inventory, &cache);
-                                state.scanning = false;
-                                state.accessibility_granted =
-                                    update.status.accessibility_granted;
+                            let changed = cx.update_global::<AppState, _>(|state, _| {
+                                // Merge only *completed* enumerations. A not-yet-ready
+                                // agent can only serve an empty pre-enumeration list, and
+                                // counting those as misses would wipe the device list (and
+                                // pop an open detail page) on every agent restart: at the
+                                // 250 ms reconnect cadence the miss grace burns in ~750 ms
+                                // while a fresh enumeration takes 1.5–5 s.
+                                let merged = update.status.inventory
+                                    == openlogi_agent_core::ipc::InventoryHealth::Ready
+                                    && state.refresh_inventories(&update.inventory, &cache, force_refresh);
+                                // Bitwise `|`: the link must be set even when the
+                                // merge already reported a change.
+                                merged | state.set_agent_link(state::AgentLink::Ready(update.status))
                             });
-                            cx.refresh_windows();
+                            // The steady poll mostly repeats an identical snapshot;
+                            // skip the full-window invalidation for those.
+                            if changed {
+                                cx.refresh_windows();
+                            }
                         });
-                    }
+                        }
+                        Some(ipc_client::GuiUpdate::Unreachable) => {
+                            cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
+                        }
+                        Some(ipc_client::GuiUpdate::OutdatedGui) => {
+                            cx.update(|cx| set_agent_link(state::AgentLink::OutdatedGui, cx));
+                        }
+                        // The IPC client thread is gone (runtime / thread spawn
+                        // failure) — without this the window would show its
+                        // connecting spinner forever.
+                        None => {
+                            ipc_open = false;
+                            warn!("IPC update channel closed — agent state unavailable");
+                            cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
+                        }
+                    },
                     Some(update) = ipc_pairing.recv() => {
                         cx.update(|cx| {
                             windows::add_device::apply_update(cx, update);
@@ -324,7 +387,10 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
     let bounds = Bounds::centered(None, Size::new(px(1100.), px(750.)), cx);
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(Size::new(px(720.), px(520.))),
+        // Min height keeps the buttons tab's mouse model above its scale floor
+        // (`MODEL_MIN_H` + the chrome/padding reserve) so its side labels never
+        // overlap; below this the model can't shrink further without crowding.
+        window_min_size: Some(Size::new(px(720.), px(680.))),
         titlebar: Some(TitlebarOptions {
             title: Some(SharedString::from("OpenLogi")),
             appears_transparent: false,
@@ -340,14 +406,13 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
 /// a window closed while the app kept running can be brought back.
 fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
     let existing = cx.default_global::<windows::WindowRegistry>().main;
-    if let Some(handle) = existing {
-        if handle
+    if let Some(handle) = existing
+        && handle
             .update(cx, |_, window, _| window.activate_window())
             .is_ok()
-        {
-            cx.activate(true);
-            return;
-        }
+    {
+        cx.activate(true);
+        return;
     }
 
     let options = main_window_options(cx);
