@@ -74,7 +74,7 @@ jobs:
           : "${AZURE_SIGNING_ACCOUNT:?Configure AZURE_SIGNING_ACCOUNT in the Azure 1Password item}"
           : "${AZURE_CERT_PROFILE:?Configure AZURE_CERT_PROFILE in the Azure 1Password item}"
 
-      - name: Build OpenLogi GUI
+      - name: Build OpenLogi
         run: cargo build --release -p openlogi-gui --target ${{ matrix.target }}
 
       - name: Azure login (OIDC)
