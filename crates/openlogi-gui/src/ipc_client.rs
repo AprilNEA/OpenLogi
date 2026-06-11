@@ -29,6 +29,14 @@ use tracing::{debug, info, warn};
 /// tight loop, short enough that a quit / crashed agent is recovered promptly.
 const SPAWN_RETRY_PERIOD: Duration = Duration::from_secs(30);
 
+/// Poll cadence until the agent reports its first completed enumeration
+/// (`AgentStatus::inventory_ready`). The steady `poll_period` is tuned for
+/// quiet background refresh; at startup it would leave the window on its
+/// loading frame for up to a full period *after* the agent already knows the
+/// devices. A status+inventory round every 250 ms is noise for the agent and
+/// gets the gallery up moments after enumeration lands.
+const STARTUP_POLL_PERIOD: Duration = Duration::from_millis(250);
+
 /// A poll snapshot pushed to the GPUI loop every `poll_period`.
 pub struct PollUpdate {
     pub inventory: Vec<DeviceInventory>,
@@ -104,12 +112,28 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
                 // tight respawn loop, while a crashed / quit agent is still
                 // recovered without restarting the GUI.
                 let mut last_spawn_attempt: Option<Instant> = None;
-                let mut interval = tokio::time::interval(poll_period);
+                // Fast cadence until the agent's first completed enumeration
+                // reaches the GUI, then drop to the steady period; back to
+                // fast whenever the connection is lost, so an agent restart
+                // (binary-update exec, crash) re-converges just as quickly.
+                let mut interval = tokio::time::interval(STARTUP_POLL_PERIOD);
+                let mut steady = false;
                 loop {
                     tokio::select! {
                         _ = interval.tick() => {
-                            if poll(&mut client, &update_tx).await.is_err() {
-                                client = None; // drop a dead connection; reconnect next tick
+                            match poll(&mut client, &update_tx).await {
+                                Ok(Some(true)) if !steady => {
+                                    steady = true;
+                                    interval = tokio::time::interval(poll_period);
+                                }
+                                Ok(_) => {}
+                                Err(()) => {
+                                    client = None; // drop a dead connection; reconnect next tick
+                                    if steady {
+                                        steady = false;
+                                        interval = tokio::time::interval(STARTUP_POLL_PERIOD);
+                                    }
+                                }
                             }
                             if client.is_none()
                                 && last_spawn_attempt
@@ -255,18 +279,22 @@ async fn ensure(client: &mut Option<AgentClient>) -> std::io::Result<&AgentClien
     }
 }
 
-/// Poll inventory + status and push a snapshot. `Err` on a dropped connection.
+/// Poll inventory + status and push a snapshot. `Ok(Some(inventory_ready))`
+/// when a snapshot was delivered — the caller uses the readiness to pick its
+/// poll cadence — `Ok(None)` when the agent isn't reachable yet, and `Err` on
+/// a dropped connection.
 async fn poll(
     client: &mut Option<AgentClient>,
     update_tx: &mpsc::UnboundedSender<PollUpdate>,
-) -> Result<(), ()> {
+) -> Result<Option<bool>, ()> {
     let Ok(client) = ensure(client).await else {
-        return Ok(()); // agent not up yet; try again next tick (keep `client` None)
+        return Ok(None); // agent not up yet; try again next tick (keep `client` None)
     };
     let inventory = client.inventory(context::current()).await.map_err(|_| ())?;
     let status = client.status(context::current()).await.map_err(|_| ())?;
+    let ready = status.inventory_ready;
     let _ = update_tx.send(PollUpdate { inventory, status });
-    Ok(())
+    Ok(Some(ready))
 }
 
 /// Run one device command. `Err` signals a dropped connection so the caller
