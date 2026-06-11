@@ -25,6 +25,7 @@
 //! install guide).
 
 /// Tri-state result of a permission query.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PermissionStatus {
     /// The app may use the capability.
@@ -85,6 +86,7 @@ pub fn input_device_access() -> PermissionStatus {
 /// - `hidraw_ok`: `Some(true)` = Logitech hidraw accessible, `Some(false)` =
 ///   Logitech hidraw present but not accessible, `None` = no Logitech hidraw
 ///   present at all.
+#[cfg(target_os = "linux")]
 pub(crate) fn classify(uinput_ok: bool, hidraw_ok: Option<bool>) -> PermissionStatus {
     match (uinput_ok, hidraw_ok) {
         (true, Some(true)) => PermissionStatus::Granted,
@@ -265,7 +267,7 @@ pub(crate) mod linux {
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

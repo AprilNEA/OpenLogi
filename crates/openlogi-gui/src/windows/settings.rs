@@ -5,13 +5,15 @@
 //! Uses gpui-component's Settings widget so page navigation, search, and the
 //! left sidebar share the same behaviour as the rest of that component set.
 
-use gpui::{
-    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ParentElement as _, Render, SharedString, Size, Styled as _, Subscription,
-    Window, div, prelude::FluentBuilder as _, px, rgb,
-};
 #[cfg(target_os = "macos")]
 use gpui::StatefulInteractiveElement as _;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use gpui::rgb;
+use gpui::{
+    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
+    IntoElement, ParentElement as _, Render, SharedString, Size, Styled as _, Subscription, Window,
+    div, prelude::FluentBuilder as _, px,
+};
 use gpui_component::{
     IconName, IndexPath, Sizable, h_flex,
     select::{Select, SelectEvent, SelectItem, SelectState},
@@ -26,6 +28,7 @@ use openlogi_core::config::{
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 #[cfg(target_os = "macos")]
 use crate::platform::permissions::Permission;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::platform::permissions::{self, PermissionStatus};
 use crate::state::AppState;
 use crate::theme::{self, Palette};
@@ -241,6 +244,10 @@ fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPage {
         .group(group)
 }
 
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux")),
+    allow(unused_variables)
+)]
 fn permissions_page(pal: Palette) -> SettingPage {
     let page = SettingPage::new(tr!("Permissions"))
         .icon(IconName::Info)
