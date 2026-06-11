@@ -111,13 +111,12 @@ impl Dispatch<WlRegistry, ()> for State {
             interface,
             version,
         } = event
+            && interface == ZwlrForeignToplevelManagerV1::interface().name
         {
-            if interface == ZwlrForeignToplevelManagerV1::interface().name {
-                let version = version.min(MANAGER_MAX_VERSION);
-                let manager =
-                    registry.bind::<ZwlrForeignToplevelManagerV1, (), Self>(name, version, qh, ());
-                state.manager = Some(manager);
-            }
+            let version = version.min(MANAGER_MAX_VERSION);
+            let manager =
+                registry.bind::<ZwlrForeignToplevelManagerV1, (), Self>(name, version, qh, ());
+            state.manager = Some(manager);
         }
     }
 }
