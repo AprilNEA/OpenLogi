@@ -491,7 +491,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y minisign
 
-      - name: Sign updater artifacts
+      - name: Sign release artifacts with minisign
         env:
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
           OPENLOGI_UPDATE_MINISIGN_SECRET_KEY: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_MINISIGN_SECRET_KEY }}
@@ -505,7 +505,13 @@ jobs:
           # newline mangled to a space — see the GitHub App key note above).
           # `tr -d` drops any wrapping whitespace before decoding.
           printf '%s' "$OPENLOGI_UPDATE_MINISIGN_SECRET_KEY" | tr -d '[:space:]' | base64 -d > "$key_file"
-          for artifact in dist/*.dmg; do
+          # The exes get the same minisign treatment as the DMGs: manual
+          # verification today, and the future Windows auto-updater needs the
+          # detached signatures to exist for every shipped version. nullglob:
+          # the exe set is best-effort per arch leg, so *.exe may match
+          # nothing; the DMGs are guaranteed by the publish gate.
+          shopt -s nullglob
+          for artifact in dist/*.dmg dist/*.exe; do
             minisign -S -m "$artifact" -s "$key_file" -x "$artifact.minisig" -W
             minisign -V -m "$artifact" -P "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" -x "$artifact.minisig"
           done
@@ -535,15 +541,16 @@ jobs:
           release_prefix="s3://${R2_BUCKET}/releases/${GITHUB_REF_NAME}"
           channel_manifest="s3://${R2_BUCKET}/channels/stable/latest.json"
 
-          # The exe's distribution channel is the GitHub Release; nothing in
-          # the updater bucket references it (latest.json and the minisign
-          # loop are dmg-only), so keep it out of the immutable releases/
-          # prefix. SHA256SUMS still lists it — it describes the GitHub
-          # Release's asset set.
+          # The exe's distribution channel is the GitHub Release; latest.json
+          # is still dmg-only, so nothing in the updater bucket references the
+          # exe or its minisig — keep both out of the immutable releases/
+          # prefix until the Windows auto-updater lands. SHA256SUMS still
+          # lists the exes — it describes the GitHub Release's asset set.
           aws s3 cp dist/ "$release_prefix/" \
             --recursive \
             --exclude latest.json \
             --exclude "*.exe" \
+            --exclude "*.exe.minisig" \
             --cache-control "public, max-age=31536000, immutable" \
             --endpoint-url "$endpoint"
 
