@@ -234,6 +234,9 @@ fn reconcile_linux(enabled: bool) -> io::Result<()> {
     match (desired.as_deref(), current.as_deref()) {
         (Some(want), Some(have)) if want == have => {
             debug!(path = %path.display(), "systemd user unit already current");
+            // Re-enable unconditionally: the unit file is current but the user
+            // may have manually disabled the service since the last reconcile.
+            run_systemctl(&["enable", UNIT_NAME]);
         }
         (Some(want), _) => {
             if let Some(parent) = path.parent() {
