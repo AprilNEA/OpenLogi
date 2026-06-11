@@ -240,6 +240,13 @@ fn main() -> Result<()> {
             let sync_state = Arc::new(AtomicU8::new(SYNC_IDLE));
             let mut sync_attempts: u32 = 0;
             let mut last_sync_at: Option<Instant> = None;
+            // The asset resolver stats the cache roots and parses the (possibly
+            // hundreds-of-KB) index.json, so build it once and reuse it across
+            // snapshots — rebuilding only when the background sync lands new
+            // assets (below). Rebuilding per snapshot was pure waste: the
+            // unchanged-list early-return discarded the fresh records anyway.
+            let mut cache = asset::AssetResolver::new();
+            let mut synced_assets_applied = false;
             // Cleared when the IPC update channel closes (the client thread
             // died), so the select stops polling a closed receiver.
             let mut ipc_open = true;
@@ -271,8 +278,16 @@ fn main() -> Result<()> {
                                 state.store(next, Ordering::Release);
                             });
                         }
+                        // A completed sync may have put real photos where
+                        // silhouettes were resolved: rebuild the resolver once
+                        // and force the next merge through the unchanged-list
+                        // early-return so the fresh records become visible.
+                        let force_refresh = state == SYNC_DONE && !synced_assets_applied;
+                        if force_refresh {
+                            synced_assets_applied = true;
+                            cache = asset::AssetResolver::new();
+                        }
                         cx.update(|cx| {
-                            let cache = asset::AssetResolver::new();
                             let changed = cx.update_global::<AppState, _>(|state, _| {
                                 // Merge only *completed* enumerations. A not-yet-ready
                                 // agent can only serve an empty pre-enumeration list, and
@@ -282,7 +297,7 @@ fn main() -> Result<()> {
                                 // while a fresh enumeration takes 1.5–5 s.
                                 let merged = update.status.inventory
                                     == openlogi_agent_core::ipc::InventoryHealth::Ready
-                                    && state.refresh_inventories(&update.inventory, &cache);
+                                    && state.refresh_inventories(&update.inventory, &cache, force_refresh);
                                 // Bitwise `|`: the link must be set even when the
                                 // merge already reported a change.
                                 merged | state.set_agent_link(state::AgentLink::Ready(update.status))

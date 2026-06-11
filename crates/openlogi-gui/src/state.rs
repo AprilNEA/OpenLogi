@@ -356,11 +356,15 @@ impl AppState {
     ///
     /// No-op (returning `false`) when the new list has the same `config_key`
     /// sequence as the current one — the caller skips the window refresh, and
-    /// quiet polling cycles cause no spurious re-renders (P1.6).
+    /// quiet polling cycles cause no spurious re-renders (P1.6). `force`
+    /// pushes through that early-return: the records embed resolved asset
+    /// paths, so a completed asset sync needs one rebuild even though the
+    /// device *set* is unchanged.
     pub fn refresh_inventories(
         &mut self,
         inventories: &[DeviceInventory],
         cache: &AssetResolver,
+        force: bool,
     ) -> bool {
         let new_list = build_device_list(inventories, cache);
         let merged_list = self.merge_inventory_snapshot(new_list);
@@ -373,7 +377,7 @@ impl AppState {
                 .iter()
                 .zip(self.device_list.iter())
                 .all(|(a, b)| a.config_key == b.config_key && a.route == b.route);
-        if unchanged {
+        if unchanged && !force {
             return false;
         }
 
