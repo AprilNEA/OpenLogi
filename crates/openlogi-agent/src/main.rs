@@ -12,6 +12,7 @@ mod self_restart;
 mod server;
 #[cfg(target_os = "macos")]
 mod status_item;
+mod takeover;
 #[cfg(target_os = "macos")]
 mod tray;
 
@@ -40,8 +41,17 @@ fn main() {
     let _guard = match openlogi_core::single_instance::acquire("agent.lock") {
         Ok(g) => g,
         Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
-            info!(path = %path.display(), "another openlogi-agent is already running — exiting");
-            return;
+            // The holder may be a leftover from before this binary's update —
+            // a pre-self-restart agent never exits on its own, and it would
+            // wedge the (newer) GUI on its connecting screen forever. If it
+            // provably speaks an older protocol, replace it; otherwise exit
+            // as the duplicate we are.
+            let Some(g) = takeover::try_replace_stale() else {
+                info!(path = %path.display(), "another openlogi-agent is already running — exiting");
+                return;
+            };
+            info!("replaced a stale agent — continuing as the new one");
+            g
         }
         Err(e) => {
             warn!(error = %e, "single-instance check failed — exiting");
