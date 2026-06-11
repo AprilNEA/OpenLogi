@@ -393,7 +393,10 @@ jobs:
           : "${AZURE_CERT_PROFILE:?Configure AZURE_CERT_PROFILE in the Azure 1Password item}"
 
       - name: Install the WiX toolset
-        run: dotnet tool install --global wix --version "6.*"
+        # Pinned exactly: a WiX point release can silently change the produced
+        # MSI (validation, cab layout), and nothing in CI installs the MSI, so
+        # drift would only surface on end-user machines. Bump deliberately.
+        run: dotnet tool install --global wix --version 6.0.2
 
       - name: Build the MSI
         shell: pwsh
@@ -406,6 +409,14 @@ jobs:
             $version = '0.0.0'
           }
           $exe = Get-ChildItem signed-exe\*.exe | Select-Object -First 1
+          # Upstream invariants (upload's if-no-files-found: error, the
+          # by-name download) should make this unreachable; the guard turns a
+          # confusing "$null.FullName -> empty -d ExeFile" wix error into a
+          # named cause if those invariants ever shift.
+          if ($null -eq $exe) {
+            Write-Error "No signed exe found in signed-exe\ — nothing to package"
+            exit 1
+          }
           New-Item -ItemType Directory -Force -Path out | Out-Null
           wix build packaging\windows\OpenLogi.wxs `
             -arch ${{ matrix.msi_platform }} `
