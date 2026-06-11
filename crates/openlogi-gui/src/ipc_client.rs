@@ -13,7 +13,9 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use openlogi_agent_core::ipc::{AgentClient, AgentStatus, PROTOCOL_VERSION, PairingUpdate};
+use openlogi_agent_core::ipc::{
+    AgentClient, AgentStatus, InventoryHealth, PROTOCOL_VERSION, PairingUpdate,
+};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
@@ -299,7 +301,7 @@ async fn poll(
     };
     let inventory = client.inventory(context::current()).await.map_err(|_| ())?;
     let status = client.status(context::current()).await.map_err(|_| ())?;
-    let ready = status.inventory_ready;
+    let ready = status.inventory == InventoryHealth::Ready;
     let _ = update_tx.send(PollUpdate { inventory, status });
     Ok(Some(ready))
 }

@@ -162,11 +162,26 @@ async fn run(config: Config) {
     let mut hook: Option<Hook> = None;
 
     info!("openlogi-agent started");
+    // Set once the inventory channel closes (the watcher thread died), so the
+    // select stops polling a permanently-ready closed receiver.
+    let mut inventory_open = true;
     loop {
         tokio::select! {
-            Some(inventories) = inventory_rx.recv() => {
-                orchestrator.lock().await.refresh_inventory(&inventories);
-            }
+            event = inventory_rx.recv(), if inventory_open => match event {
+                Some(watchers::inventory::InventoryEvent::Snapshot(inventories)) => {
+                    orchestrator.lock().await.refresh_inventory(&inventories);
+                }
+                Some(watchers::inventory::InventoryEvent::Unavailable) => {
+                    orchestrator.lock().await.mark_inventory_unavailable();
+                }
+                // Watcher thread death (e.g. a panic inside the HID backend's
+                // enumerate) — without a snapshot the GUI would scan forever.
+                None => {
+                    warn!("inventory watcher channel closed — marking enumeration unavailable");
+                    orchestrator.lock().await.mark_inventory_unavailable();
+                    inventory_open = false;
+                }
+            },
             Some(bundle) = app_rx.recv() => {
                 orchestrator.lock().await.set_current_app(bundle);
             }

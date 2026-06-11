@@ -265,7 +265,8 @@ fn main() -> Result<()> {
                                 // inventory until its own first enumeration
                                 // completes; only its say-so downgrades the
                                 // empty state from "Scanning…" to "No devices".
-                                state.scanning = !update.status.inventory_ready;
+                                state.scanning = update.status.inventory
+                                    == openlogi_agent_core::ipc::InventoryHealth::Scanning;
                                 state.accessibility_granted =
                                     Some(update.status.accessibility_granted);
                             });

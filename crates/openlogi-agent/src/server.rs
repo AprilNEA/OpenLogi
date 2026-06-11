@@ -43,15 +43,15 @@ impl Agent for AgentServer {
     }
 
     async fn status(self, _: Context) -> AgentStatus {
-        let (launch_at_login, inventory_ready) = {
+        let (launch_at_login, inventory) = {
             let orch = self.orchestrator.lock().await;
-            (orch.launch_at_login(), orch.inventory_ready())
+            (orch.launch_at_login(), orch.inventory_health())
         };
         AgentStatus {
             accessibility_granted: Hook::has_accessibility(),
             hook_installed: self.hook_installed.load(Ordering::Relaxed),
             launch_at_login,
-            inventory_ready,
+            inventory,
             protocol_version: PROTOCOL_VERSION,
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
         }
