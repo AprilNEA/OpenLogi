@@ -261,14 +261,7 @@ fn main() -> Result<()> {
                             let cache = asset::AssetResolver::new();
                             cx.update_global::<AppState, _>(|state, _| {
                                 state.refresh_inventories(&update.inventory, &cache);
-                                // A freshly-(re)started agent serves an empty
-                                // inventory until its own first enumeration
-                                // completes; only its say-so downgrades the
-                                // empty state from "Scanning…" to "No devices".
-                                state.scanning = update.status.inventory
-                                    == openlogi_agent_core::ipc::InventoryHealth::Scanning;
-                                state.accessibility_granted =
-                                    Some(update.status.accessibility_granted);
+                                state.set_agent_link(state::AgentLink::Ready(update.status));
                             });
                             cx.refresh_windows();
                         });

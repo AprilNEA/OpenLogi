@@ -40,6 +40,30 @@ use openlogi_agent_core::bindings::{bindings_for, gesture_bindings_for};
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
 pub const DEFAULT_DPI: u32 = 1600;
 
+/// The GUI's view of the agent connection: the latest status snapshot, or the
+/// reason there isn't one. One value instead of per-fact mirror fields
+/// (granted / scanning / …) so a future writer can't update half of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentLink {
+    /// No snapshot yet — the window just opened, or the agent is still
+    /// starting. Render a neutral connecting frame: claiming "denied" or "no
+    /// devices" before the first snapshot flashed both at every
+    /// already-set-up user (the original startup bug).
+    Connecting,
+    /// Still no snapshot well past startup: the agent is genuinely
+    /// unreachable (binary missing, repeated spawn failures). Rendered as a
+    /// static error frame; polling continues and a snapshot upgrades this
+    /// back to [`Self::Ready`].
+    Unreachable,
+    /// The agent answered the handshake with a *newer* protocol than this
+    /// process speaks — the app was updated on disk while this GUI stayed
+    /// running. Only relaunching helps; without this state the window would
+    /// keep showing a live-looking but frozen UI.
+    OutdatedGui,
+    /// Connected and current: the agent's latest status snapshot.
+    Ready(openlogi_agent_core::ipc::AgentStatus),
+}
+
 /// Inventory snapshots can briefly miss a real device while another HID++
 /// request is in flight. Keep the previous record through this many
 /// consecutive misses so a transient probe timeout does not make the carousel
@@ -103,18 +127,11 @@ pub struct AppState {
     /// The hotspot the user most recently armed by clicking. Drives the
     /// "selected button" outline on the mouse model and the popover content.
     pub active_button: Option<ButtonId>,
-    /// Whether the *agent* holds macOS Accessibility permission, or `None`
-    /// until the first IPC status snapshot arrives. Drives the permission
-    /// gate — which must not flash "not granted" at an authorized user while
-    /// the answer is simply not in yet, so `None` renders as a connecting
-    /// placeholder instead (see `AppView::render`).
-    pub accessibility_granted: Option<bool>,
-    /// Whether the agent's first device enumeration is still in flight. Drives
-    /// the "Scanning…" vs "No devices connected" empty state; tracks
-    /// `AgentStatus::inventory_ready` on every IPC snapshot, so an empty
-    /// device list reads as "no devices" only once the agent has actually
-    /// completed an enumeration.
-    pub scanning: bool,
+    /// Everything the GUI knows about the agent connection — the last status
+    /// snapshot, or why there isn't one. The render path branches on this
+    /// single value, so the permission gate, the scanning state, and the
+    /// connection-problem frames can never disagree about what the agent said.
+    agent_link: AgentLink,
     /// Bindings for the *currently selected* device. Reloaded whenever the
     /// carousel selection changes.
     pub button_bindings: BTreeMap<ButtonId, Action>,
@@ -200,13 +217,10 @@ impl AppState {
             current_device,
             current_app_bundle: None,
             active_button: None,
-            // Updated from the agent's IPC `status` poll; the GUI no longer runs
-            // the hook, so it can't meaningfully query Accessibility itself.
-            // `None` (not `false`) until that first poll lands: rendering the
-            // permission gate off an assumed denial flashed it at every
-            // already-authorized user on launch.
-            accessibility_granted: None,
-            scanning: true,
+            // Updated from the agent's IPC poll; the GUI no longer runs the
+            // hook, so it can't meaningfully query Accessibility (or devices)
+            // itself.
+            agent_link: AgentLink::Connecting,
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),
             dpi: DEFAULT_DPI,
@@ -305,6 +319,34 @@ impl AppState {
     #[must_use]
     pub fn current_record(&self) -> Option<&DeviceRecord> {
         self.device_list.get(self.current_device)
+    }
+
+    /// The agent connection state the render path branches on.
+    #[must_use]
+    pub fn agent_link(&self) -> &AgentLink {
+        &self.agent_link
+    }
+
+    /// The latest agent status snapshot — `None` while not connected (any
+    /// non-[`AgentLink::Ready`] state), which readers like the Settings
+    /// permission rows surface as "unknown", not "denied".
+    #[must_use]
+    pub fn agent_status(&self) -> Option<&openlogi_agent_core::ipc::AgentStatus> {
+        match &self.agent_link {
+            AgentLink::Ready(status) => Some(status),
+            _ => None,
+        }
+    }
+
+    /// Replace the link, reporting whether it actually changed — the steady
+    /// IPC poll mostly delivers identical snapshots, and the caller skips the
+    /// window refresh for those.
+    pub fn set_agent_link(&mut self, link: AgentLink) -> bool {
+        if self.agent_link == link {
+            return false;
+        }
+        self.agent_link = link;
+        true
     }
 
     /// Replace [`Self::device_list`] from a fresh inventory snapshot,

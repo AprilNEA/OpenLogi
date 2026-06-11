@@ -250,14 +250,13 @@ fn permissions_page(pal: Palette) -> SettingPage {
                     Permission::Accessibility,
                     |cx| {
                         // The agent owns the hook, so this is *its* grant,
-                        // reported over IPC; before the first snapshot the
-                        // state is genuinely unknown, not denied.
-                        match cx
-                            .try_global::<AppState>()
-                            .and_then(|s| s.accessibility_granted)
-                        {
-                            Some(true) => PermissionStatus::Granted,
-                            Some(false) => PermissionStatus::Denied,
+                        // reported over IPC; while not connected the state is
+                        // genuinely unknown, not denied.
+                        match cx.try_global::<AppState>().and_then(AppState::agent_status) {
+                            Some(status) if status.accessibility_granted => {
+                                PermissionStatus::Granted
+                            }
+                            Some(_) => PermissionStatus::Denied,
                             None => PermissionStatus::Unknown,
                         }
                     },
