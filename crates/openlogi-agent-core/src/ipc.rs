@@ -73,6 +73,16 @@ pub enum PairingUpdate {
 #[tarpc::service]
 pub trait Agent {
     /// Wire-protocol version, for the connect handshake.
+    ///
+    /// Method *order* is part of the wire format: tarpc generates one request
+    /// enum from this trait and bincode encodes the variant index, so this
+    /// method must stay **first** — and new methods must be appended at the
+    /// end, never inserted — or the handshake itself stops decoding across a
+    /// version skew and a mismatch can no longer be detected and reported.
+    /// There is deliberately no minor version / compat negotiation: GUI and
+    /// agent ship in one bundle and the agent re-execs itself when its binary
+    /// is replaced, so strict equality plus a clean refusal is the whole
+    /// contract (see [`PROTOCOL_VERSION`]).
     async fn protocol_version() -> u32;
     /// Accessibility / hook / autostart state for the GUI gate + settings.
     async fn status() -> AgentStatus;
