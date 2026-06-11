@@ -59,20 +59,3 @@ pub(crate) fn package_linux(args: &PackageLinux) -> Result<()> {
     println!("Linux packages written to {}", output.display());
     Ok(())
 }
-
-fn workspace_version(root: &Path) -> Result<String> {
-    let toml = std::fs::read_to_string(root.join("Cargo.toml"))
-        .context("could not read workspace Cargo.toml")?;
-    for line in toml.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("version") {
-            let rest = rest
-                .trim_start_matches([' ', '\t', '=', '"'])
-                .trim_end_matches('"');
-            if !rest.is_empty() && rest != "workspace = true" {
-                return Ok(rest.to_owned());
-            }
-        }
-    }
-    anyhow::bail!("could not find version field in workspace Cargo.toml")
-}
