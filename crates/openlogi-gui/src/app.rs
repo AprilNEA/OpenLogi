@@ -425,8 +425,10 @@ impl Render for AppView {
                 home_header(pal).into_any_element(),
                 if has_device {
                     device_gallery(cx).into_any_element()
+                } else if scanning {
+                    device_scanning_state(pal)
                 } else {
-                    device_empty_state(pal, scanning)
+                    device_empty_state(pal)
                 },
             )
         };
@@ -1273,34 +1275,51 @@ fn file_url(path: &std::path::Path) -> String {
     format!("file://{}", path.to_string_lossy().replace(' ', "%20"))
 }
 
-/// Whole-window placeholder shown from window-open until the agent's first
-/// IPC snapshot lands — normally a fraction of a second, or for as long as the
-/// agent is genuinely unreachable (crashed / not yet spawned), where "still
-/// connecting" is the only true statement. Deliberately neutral: no chrome, no
-/// claims about permissions or devices. The spinner's repeating animation only
-/// runs while this view is mounted, so it can't pin the render loop once the
-/// real UI replaces it.
-fn connecting_view(pal: Palette) -> AnyElement {
+/// Centered spinner over a muted one-line caption — the quiet "still working"
+/// body shared by the pre-connection frame and the scanning state, so the two
+/// loading phases render as one continuous frame with only the caption
+/// changing. The spinner's repeating animation only runs while a loading view
+/// is mounted, so it can't pin the render loop once the real UI replaces it.
+fn loading_body(caption: SharedString, pal: Palette) -> Div {
     v_flex()
-        .size_full()
-        .bg(pal.bg)
         .items_center()
         .justify_center()
         .gap_3()
         .child(Spinner::new().large().color(pal.text_muted))
-        .child(
-            div()
-                .text_sm()
-                .text_color(pal.text_muted)
-                .child(tr!("Connecting to the background service…")),
-        )
+        .child(div().text_sm().text_color(pal.text_muted).child(caption))
+}
+
+/// Whole-window placeholder shown from window-open until the agent's first
+/// IPC snapshot lands — normally a fraction of a second, or for as long as the
+/// agent is genuinely unreachable (crashed / not yet spawned), where "still
+/// connecting" is the only true statement. Deliberately neutral: no chrome, no
+/// claims about permissions or devices.
+fn connecting_view(pal: Palette) -> AnyElement {
+    loading_body(tr!("Connecting to the background service…"), pal)
+        .size_full()
+        .bg(pal.bg)
+        .text_color(pal.text_primary)
         .into_any_element()
 }
 
-/// Body shown when no device is connected. The inventory watcher keeps polling
-/// (every 2 s) and `AppView`'s `AppState` observer swaps the device UI back in
-/// the moment one appears, so this is purely a wait-and-pair placeholder.
-fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
+/// Home body while the agent's first enumeration is still in flight: the
+/// device set is *unknown*, not empty, so this keeps the quiet loading frame
+/// rather than flashing the add-device empty state (icon, headline, CTA) at a
+/// user whose devices are about to appear. Swaps to the gallery or to
+/// [`device_empty_state`] the moment the agent reports a completed scan.
+fn device_scanning_state(pal: Palette) -> AnyElement {
+    loading_body(tr!("Scanning for devices…"), pal)
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .into_any_element()
+}
+
+/// Body shown when the agent has completed an enumeration and found no
+/// devices. The polling keeps running and `AppView`'s `AppState` observer
+/// swaps the device UI back in the moment one appears, so this is purely a
+/// wait-and-pair placeholder.
+fn device_empty_state(pal: Palette) -> AnyElement {
     v_flex()
         .flex_1()
         .w_full()
@@ -1318,11 +1337,7 @@ fn device_empty_state(pal: Palette, scanning: bool) -> AnyElement {
             div()
                 .text_xl()
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(if scanning {
-                    tr!("Scanning for devices…")
-                } else {
-                    tr!("No devices connected")
-                }),
+                .child(tr!("No devices connected")),
         )
         .child(
             div()
