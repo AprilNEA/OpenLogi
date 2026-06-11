@@ -7,9 +7,11 @@
 
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
+    IntoElement, ParentElement as _, Render, SharedString, Size, Styled as _, Subscription,
+    Window, div, prelude::FluentBuilder as _, px, rgb,
 };
+#[cfg(target_os = "macos")]
+use gpui::StatefulInteractiveElement as _;
 use gpui_component::{
     IconName, IndexPath, Sizable, h_flex,
     select::{Select, SelectEvent, SelectItem, SelectState},
@@ -422,39 +424,35 @@ fn permission_field(
     permission: Permission,
     pal: Palette,
 ) -> impl IntoElement {
-    let row = h_flex()
+    h_flex()
         .flex_shrink_0()
         .items_center()
         .gap_3()
-        .child(status_badge(status));
-
-    #[cfg(target_os = "macos")]
-    let row = row.child(
-        div()
-            .id(id)
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .border_1()
-            .border_color(pal.border)
-            .text_xs()
-            .cursor_pointer()
-            .hover(move |s| s.bg(pal.surface_hover))
-            .child(tr!("Open"))
-            .on_click(move |_, _, cx| {
-                // Accessibility must be prompted in the agent (it owns the
-                // hook); prompting in the GUI would authorize the wrong
-                // binary. Other panes just deep-link to System Settings.
-                if matches!(permission, Permission::Accessibility)
-                    && let Some(state) = cx.try_global::<crate::state::AppState>()
-                {
-                    state.request_accessibility_prompt();
-                }
-                permissions::open_pane(permission);
-            }),
-    );
-
-    row
+        .child(status_badge(status))
+        .child(
+            div()
+                .id(id)
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(pal.border)
+                .text_xs()
+                .cursor_pointer()
+                .hover(move |s| s.bg(pal.surface_hover))
+                .child(tr!("Open"))
+                .on_click(move |_, _, cx| {
+                    // Accessibility must be prompted in the agent (it owns the
+                    // hook); prompting in the GUI would authorize the wrong
+                    // binary. Other panes just deep-link to System Settings.
+                    if matches!(permission, Permission::Accessibility)
+                        && let Some(state) = cx.try_global::<crate::state::AppState>()
+                    {
+                        state.request_accessibility_prompt();
+                    }
+                    permissions::open_pane(permission);
+                }),
+        )
 }
 
 /// The language picker field. "Follow system" clears the stored preference
