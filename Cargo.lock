@@ -4681,6 +4681,7 @@ dependencies = [
 name = "openlogi-agent-core"
 version = "0.6.6"
 dependencies = [
+ "bincode",
  "interprocess",
  "openlogi-core",
  "openlogi-hid",

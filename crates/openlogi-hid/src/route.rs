@@ -30,6 +30,10 @@ use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 pub const DIRECT_DEVICE_INDEX: u8 = 0xff;
 
 /// How to reach a controllable HID++ device.
+///
+/// Crosses the agent↔GUI IPC (every per-device RPC takes one), so variant and
+/// field order are wire format — changes require a `PROTOCOL_VERSION` bump
+/// (guarded by `openlogi-agent-core/tests/wire_format.rs`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceRoute {
     /// Paired to a Logi Bolt receiver. `receiver_uid` disambiguates multiple

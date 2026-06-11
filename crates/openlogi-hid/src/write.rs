@@ -30,7 +30,9 @@ use crate::smartshift::{SmartShiftFeatureV0, SmartShiftMode, SmartShiftStatus};
 // classifies a device read/write error as permanent (FeatureUnsupported /
 // EmptyDpiList) vs transient, so the discriminating variant must survive the
 // wire — stringifying it would collapse every case to "transient" and a device
-// that genuinely lacks a feature would be re-probed forever.
+// that genuinely lacks a feature would be re-probed forever. Variant order is
+// therefore wire format: changes require a `PROTOCOL_VERSION` bump (guarded
+// by `openlogi-agent-core/tests/wire_format.rs`).
 #[derive(Debug, Clone, Error, Serialize, Deserialize)]
 pub enum WriteError {
     // `async_hid::HidError` isn't `Serialize`, so carry its message as text; the
@@ -150,6 +152,10 @@ impl DpiCapabilities {
 }
 
 /// Current DPI plus the supported values reported by the device.
+///
+/// Crosses the agent↔GUI IPC (`read_dpi`, [`DpiCapabilities`] included), so
+/// field order is wire format — changes require a `PROTOCOL_VERSION` bump
+/// (guarded by `openlogi-agent-core/tests/wire_format.rs`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DpiInfo {
     /// DPI currently configured on sensor 0.
