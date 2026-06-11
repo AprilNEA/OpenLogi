@@ -509,21 +509,30 @@ fn spawn_agent() {
 }
 
 /// Resolve the agent executable relative to the running GUI: a sibling in the
-/// cargo target dir (dev), else the embedded `OpenLogiAgent.app` login-item
-/// helper (packaged build).
+/// cargo target dir (dev, and the flat Windows install layout), else the
+/// embedded `OpenLogiAgent.app` login-item helper (packaged macOS build).
 fn agent_binary_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    let sibling = dir.join("openlogi-agent");
+    // EXE_SUFFIX, or the Windows lookup misses `openlogi-agent.exe` and the
+    // spawn retry — the only thing that restarts an updated agent there, since
+    // Windows has no exec and the Run-key autostart only fires at login —
+    // silently never works.
+    let sibling = dir.join(format!("openlogi-agent{}", std::env::consts::EXE_SUFFIX));
     if sibling.exists() {
         return Some(sibling);
     }
     // Packaged: …/OpenLogi.app/Contents/MacOS/openlogi-gui → the helper at
     // …/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent
-    let helper = dir
-        .parent()?
-        .join("Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent");
-    helper.exists().then_some(helper)
+    #[cfg(target_os = "macos")]
+    {
+        let helper = dir
+            .parent()?
+            .join("Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent");
+        return helper.exists().then_some(helper);
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
 }
 
 /// Why [`ensure`] couldn't produce a usable client.

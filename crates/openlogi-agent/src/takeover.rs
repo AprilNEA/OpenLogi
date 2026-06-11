@@ -23,10 +23,15 @@
 //! and whichever copy loses the ensuing lock race exits cleanly. Either way
 //! exactly one up-to-date agent survives.
 
+#[cfg(unix)]
 use std::time::Duration;
 
-use openlogi_core::single_instance::{self, InstanceError, InstanceGuard};
-use tracing::{info, warn};
+use openlogi_core::single_instance::InstanceGuard;
+#[cfg(unix)]
+use openlogi_core::single_instance::{self, InstanceError};
+use tracing::info;
+#[cfg(unix)]
+use tracing::warn;
 
 /// How long to wait for the protocol handshake against the lock holder. The
 /// agent answers from memory; a holder that can't answer in this window is
