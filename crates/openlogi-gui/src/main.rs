@@ -260,7 +260,17 @@ fn main() -> Result<()> {
                         cx.update(|cx| {
                             let cache = asset::AssetResolver::new();
                             cx.update_global::<AppState, _>(|state, _| {
-                                state.refresh_inventories(&update.inventory, &cache);
+                                // Merge only *completed* enumerations. A not-yet-ready
+                                // agent can only serve an empty pre-enumeration list, and
+                                // counting those as misses would wipe the device list (and
+                                // pop an open detail page) on every agent restart: at the
+                                // 250 ms reconnect cadence the miss grace burns in ~750 ms
+                                // while a fresh enumeration takes 1.5–5 s.
+                                if update.status.inventory
+                                    == openlogi_agent_core::ipc::InventoryHealth::Ready
+                                {
+                                    state.refresh_inventories(&update.inventory, &cache);
+                                }
                                 state.set_agent_link(state::AgentLink::Ready(update.status));
                             });
                             cx.refresh_windows();
