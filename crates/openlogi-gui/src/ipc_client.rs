@@ -529,7 +529,7 @@ fn agent_binary_path() -> Option<PathBuf> {
         let helper = dir
             .parent()?
             .join("Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent");
-        return helper.exists().then_some(helper);
+        helper.exists().then_some(helper)
     }
     #[cfg(not(target_os = "macos"))]
     None
