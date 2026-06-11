@@ -411,11 +411,13 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # Present only when the independent Windows matrix succeeded; skipped
-      # otherwise. The result is the matrix aggregate, so the exe set is
-      # all-or-nothing — one failed arch drops both exes from the release.
+      # Best-effort per arch — deliberately NOT gated on needs.windows.result:
+      # that is the matrix aggregate, and the proven x86_64 exe must not be
+      # held hostage by the experimental arm64 leg (or vice versa). Each leg
+      # uploads its artifact only after its exe is built, signed, and verified,
+      # so whatever arrived is safe to ship. A pattern download that matches
+      # nothing succeeds with an empty dist (unlike by-name, which fails).
       - uses: actions/download-artifact@v8
-        if: ${{ needs.windows.result == 'success' }}
         with:
           pattern: OpenLogi-windows-*
           path: dist
@@ -437,6 +439,18 @@ jobs:
           # hashed alone.
           shopt -s nullglob
           sha256sum *.dmg *.exe > SHA256SUMS
+
+      # softprops' `files` can't list a glob that matches nothing without
+      # tripping fail_on_unmatched_files, and the exe set now varies per arch
+      # leg — record whether any exe actually arrived.
+      - name: Detect shipped Windows binaries
+        id: windows_exes
+        run: |
+          if compgen -G 'dist/*.exe' > /dev/null; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Load static updater publishing config from 1Password
         id: r2_config
@@ -552,7 +566,7 @@ jobs:
             dist/*.dmg
             dist/*.minisig
             dist/SHA256SUMS
-            ${{ needs.windows.result == 'success' && 'dist/*.exe' || '' }}
+            ${{ steps.windows_exes.outputs.present == 'true' && 'dist/*.exe' || '' }}
           fail_on_unmatched_files: true
 
   homebrew-tap:
