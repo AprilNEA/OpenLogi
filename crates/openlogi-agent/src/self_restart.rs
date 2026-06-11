@@ -79,7 +79,10 @@ fn restart(path: &Path) -> ! {
         path = %path.display(),
         "executable changed on disk — restarting as the new binary"
     );
-    let err = std::process::Command::new(path).exec();
+    // Forward our argv (none today) so a future flag survives the restart.
+    let err = std::process::Command::new(path)
+        .args(std::env::args_os().skip(1))
+        .exec();
     warn!(error = %err, "exec of the updated agent failed — exiting for the respawner");
     std::process::exit(1);
 }
