@@ -299,11 +299,16 @@ fn main() -> Result<()> {
                                 // counting those as misses would wipe the device list (and
                                 // pop an open detail page) on every agent restart: at the
                                 // 250 ms reconnect cadence the miss grace burns in ~750 ms
-                                // while a fresh enumeration takes 1.5–5 s.
-                                let merged = update.status.inventory
-                                    == openlogi_agent_core::ipc::InventoryHealth::Ready
+                                // while a fresh enumeration takes 1.5–5 s. The diagnostics
+                                // snapshot shares the gate so a report copied during that
+                                // window keeps the receivers the UI is still showing.
+                                let ready = update.status.inventory
+                                    == openlogi_agent_core::ipc::InventoryHealth::Ready;
+                                let merged = ready
                                     && state.refresh_inventories(&update.inventory, &cache, force_refresh);
-                                state.store_agent_snapshot(&update.inventory, &update.status);
+                                if ready {
+                                    state.store_inventory_snapshot(&update.inventory);
+                                }
                                 // Bitwise `|`: the link must be set even when the
                                 // merge already reported a change.
                                 merged | state.set_agent_link(state::AgentLink::Ready(update.status))

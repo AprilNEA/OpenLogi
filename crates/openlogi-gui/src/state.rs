@@ -35,7 +35,6 @@ use crate::asset::AssetResolver;
 use crate::data::mouse_buttons::{Action, Binding, ButtonId, GestureDirection};
 use crate::state::devices::{build_device_list, pick_initial_device, sort_device_list};
 use openlogi_agent_core::bindings::{bindings_for, gesture_bindings_for};
-use openlogi_agent_core::ipc::AgentStatus;
 
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
@@ -194,9 +193,11 @@ pub struct AppState {
     /// rebuild, and "apply now" device changes (DPI / SmartShift / lighting)
     /// go out as their own commands. The GUI never opens a device itself.
     ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
-    /// Latest agent status snapshot from the IPC poll, kept for the diagnostics report.
-    last_status: Option<AgentStatus>,
-    /// Latest raw inventory snapshot from the IPC poll, kept for diagnostics transports and receivers.
+    /// Raw inventory from the last *completed* enumeration, kept for the
+    /// diagnostics report (receivers + transports). The poll path only stores
+    /// [`InventoryHealth::Ready`](openlogi_agent_core::ipc::InventoryHealth)
+    /// snapshots, so an agent restart's empty pre-enumeration list never
+    /// blanks a report copied during the reconnect window.
     last_inventory: Vec<DeviceInventory>,
 }
 
@@ -240,7 +241,6 @@ impl AppState {
             device_list,
             config,
             ipc_commands,
-            last_status: None,
             last_inventory: Vec::new(),
         };
         state.button_bindings = state.bindings_for_current();
@@ -263,19 +263,14 @@ impl AppState {
         self.ipc_commands.clone()
     }
 
-    /// Cache the latest IPC poll snapshot (raw inventory + agent status) for the diagnostics report.
-    pub fn store_agent_snapshot(&mut self, inventory: &[DeviceInventory], status: &AgentStatus) {
+    /// Cache a *completed* inventory snapshot for the diagnostics report.
+    /// Callers gate on [`InventoryHealth::Ready`](openlogi_agent_core::ipc::InventoryHealth) —
+    /// see [`Self::last_inventory`].
+    pub fn store_inventory_snapshot(&mut self, inventory: &[DeviceInventory]) {
         self.last_inventory = inventory.to_vec();
-        self.last_status = Some(status.clone());
     }
 
-    /// The latest agent status snapshot, or `None` before the first poll lands.
-    #[must_use]
-    pub fn last_status(&self) -> Option<&AgentStatus> {
-        self.last_status.as_ref()
-    }
-
-    /// The latest raw inventory snapshot, used by diagnostics for transports and receivers.
+    /// The last completed inventory snapshot, used by diagnostics for transports and receivers.
     #[must_use]
     pub fn last_inventory(&self) -> &[DeviceInventory] {
         &self.last_inventory

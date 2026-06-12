@@ -3,11 +3,11 @@
 use std::path::Path;
 
 use gpui::App;
-use openlogi_agent_core::ipc::PROTOCOL_VERSION;
+use openlogi_agent_core::ipc::{InventoryHealth, PROTOCOL_VERSION};
 use openlogi_core::device::{DeviceInventory, PairedDevice};
 use openlogi_core::diagnostics::{
-    AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport, ReceiverDiag,
-    RenderState,
+    AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport, InventoryState,
+    ReceiverDiag, RenderState,
 };
 use openlogi_hid::DeviceRoute;
 
@@ -34,7 +34,9 @@ pub fn collect(cx: &App) -> DiagnosticsReport {
 }
 
 fn app_info(state: Option<&AppState>, running_from_bundle: bool) -> AppInfo {
-    let status = state.and_then(AppState::last_status);
+    // The live agent link, not a retained copy: a report copied while the
+    // agent is down must say "not connected", not replay the last status.
+    let status = state.and_then(AppState::agent_status);
     let settings = state.map(AppState::app_settings);
     let config = state.map(AppState::config_summary);
     let build_profile = if cfg!(debug_assertions) {
@@ -48,6 +50,7 @@ fn app_info(state: Option<&AppState>, running_from_bundle: bool) -> AppInfo {
         agent_version: status.map(|s| s.agent_version.clone()),
         protocol_gui: PROTOCOL_VERSION,
         protocol_agent: status.map(|s| s.protocol_version),
+        inventory: status.map(|s| inventory_state(s.inventory)),
         os: std::env::consts::OS.to_string(),
         os_version: crate::platform::os::os_version(),
         arch: arch_label().to_string(),
@@ -62,6 +65,14 @@ fn app_info(state: Option<&AppState>, running_from_bundle: bool) -> AppInfo {
         config_schema_version: config.map(|(version, _)| version),
         configured_device_count: config.map(|(_, count)| count),
         running_from_bundle,
+    }
+}
+
+fn inventory_state(health: InventoryHealth) -> InventoryState {
+    match health {
+        InventoryHealth::Scanning => InventoryState::Scanning,
+        InventoryHealth::Ready => InventoryState::Ready,
+        InventoryHealth::Unavailable => InventoryState::Unavailable,
     }
 }
 

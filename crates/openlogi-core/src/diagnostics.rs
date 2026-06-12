@@ -37,6 +37,19 @@ pub enum RenderState {
     Silhouette,
 }
 
+/// Agent-side device-enumeration health — explains an empty or stale device
+/// section (e.g. a report copied while the agent is still scanning).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryState {
+    /// The first enumeration hasn't completed yet — the device set is unknown.
+    Scanning,
+    /// Enumeration completed; the device section is authoritative.
+    Ready,
+    /// Enumeration failed and is no longer retried; details in the agent log.
+    Unavailable,
+}
+
 /// A receiver, by model only — never its `unique_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiverDiag {
@@ -80,6 +93,9 @@ pub struct AppInfo {
     pub agent_version: Option<String>,
     pub protocol_gui: u32,
     pub protocol_agent: Option<u32>,
+    /// Enumeration health behind the device section, `None` when the agent
+    /// status is unavailable.
+    pub inventory: Option<InventoryState>,
     /// Raw `std::env::consts::OS` (`"macos"` / `"linux"` / `"windows"`).
     pub os: String,
     pub os_version: Option<String>,
@@ -154,6 +170,15 @@ impl DiagnosticsReport {
             None => format!("GUI {} / agent —", a.protocol_gui),
         };
         let _ = writeln!(out, "- IPC protocol: {proto}");
+        let inventory = match a.inventory {
+            Some(InventoryState::Ready) => "ready",
+            Some(InventoryState::Scanning) => "scanning (first enumeration in progress)",
+            Some(InventoryState::Unavailable) => {
+                "⚠️ unavailable (enumeration failed — see agent log)"
+            }
+            None => "—",
+        };
+        let _ = writeln!(out, "- Inventory: {inventory}");
         let os = match &a.os_version {
             Some(v) => format!("{} {} ({})", os_label(&a.os), v, a.arch),
             None => format!("{} ({})", os_label(&a.os), a.arch),
@@ -431,7 +456,7 @@ fn opt_num<T: std::fmt::Display>(value: Option<T>) -> String {
 mod tests {
     use super::{
         AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport,
-        ReceiverDiag, RenderState,
+        InventoryState, ReceiverDiag, RenderState,
     };
     use crate::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceKind, DeviceTransports,
@@ -444,6 +469,7 @@ mod tests {
             agent_version: Some("0.6.6".to_string()),
             protocol_gui: 1,
             protocol_agent: Some(1),
+            inventory: Some(InventoryState::Ready),
             os: "macos".to_string(),
             os_version: Some("15.5".to_string()),
             arch: "arm64".to_string(),
@@ -546,6 +572,7 @@ mod tests {
         assert!(md.contains("- OpenLogi (GUI): v0.6.6 (release)"));
         assert!(md.contains("- Agent: v0.6.6 (connected)"));
         assert!(md.contains("- IPC protocol: GUI 1 / agent 1"));
+        assert!(md.contains("- Inventory: ready"));
         assert!(md.contains("- OS: macOS 15.5 (arm64)"));
         assert!(
             md.contains("- Source: app bundle · Index: loaded (142 models) · User cache: present")
@@ -624,11 +651,30 @@ mod tests {
         let mut report = sample();
         report.app.agent_version = None;
         report.app.protocol_agent = None;
+        report.app.inventory = None;
         report.app.hook_installed = None;
         report.app.launch_at_login = None;
         let md = report.to_markdown();
         assert!(md.contains("- Agent: not connected"));
         assert!(md.contains("GUI 1 / agent —"));
+        assert!(md.contains("- Inventory: —"));
         assert!(md.contains("Input hook: unknown"));
+    }
+
+    #[test]
+    fn incomplete_enumeration_is_flagged() {
+        let mut report = sample();
+        report.app.inventory = Some(InventoryState::Scanning);
+        assert!(
+            report
+                .to_markdown()
+                .contains("- Inventory: scanning (first enumeration in progress)")
+        );
+        report.app.inventory = Some(InventoryState::Unavailable);
+        assert!(
+            report
+                .to_markdown()
+                .contains("- Inventory: ⚠️ unavailable (enumeration failed — see agent log)")
+        );
     }
 }
