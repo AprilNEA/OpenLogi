@@ -11,8 +11,8 @@
 //! runs at [`STARTUP_POLL_PERIOD`] until the agent's first completed
 //! enumeration and again after any disconnect (an agent self-exec on update, a
 //! crash), and [`spawn_agent`] relaunches the binary when the socket stays
-//! down — there is no launchd dependency here (`KeepAlive` only acts when the
-//! agent *exits*, and autostart may be off entirely). When the agent stays
+//! down — preferably through the platform's service manager when one is
+//! configured, otherwise as a direct child process. When the agent stays
 //! unreachable or answers with a newer protocol, that is pushed to the GUI as
 //! a [`GuiUpdate`] so the window can say so instead of spinning forever.
 
@@ -495,16 +495,48 @@ async fn poll_pairing_once(
 /// the binary can't be found / started — the user may start it via launchd or by
 /// hand, and the poll loop keeps retrying the connection regardless.
 fn spawn_agent() {
+    #[cfg(target_os = "linux")]
+    if start_systemd_agent() {
+        return;
+    }
+
     let Some(path) = agent_binary_path() else {
         warn!(
             "agent not reachable and its binary wasn't found next to the GUI — \
-             start it via launchd or by hand"
+             start it via the service manager or by hand"
         );
         return;
     };
     match std::process::Command::new(&path).spawn() {
         Ok(_) => info!(path = %path.display(), "agent not running — launched it"),
         Err(e) => warn!(error = %e, path = %path.display(), "could not launch the agent"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn start_systemd_agent() -> bool {
+    let status = std::process::Command::new("systemctl")
+        .args(["--user", "start", "openlogi-agent.service"])
+        .status();
+    match status {
+        Ok(status) if status.success() => {
+            info!("agent not running — started openlogi-agent.service");
+            true
+        }
+        Ok(status) => {
+            debug!(
+                code = status.code(),
+                "could not start openlogi-agent.service; falling back to direct agent launch"
+            );
+            false
+        }
+        Err(e) => {
+            debug!(
+                error = %e,
+                "could not run systemctl --user; falling back to direct agent launch"
+            );
+            false
+        }
     }
 }
 
