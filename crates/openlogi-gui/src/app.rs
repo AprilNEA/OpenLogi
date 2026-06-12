@@ -372,15 +372,30 @@ impl Render for AppView {
         let status = match link {
             AgentLink::Connecting => {
                 window.set_window_title("OpenLogi");
-                return root.child(connecting_body(pal)).into_any_element();
+                return crate::window_chrome::frame(
+                    "OpenLogi",
+                    root.child(connecting_body(pal)),
+                    window,
+                    cx,
+                );
             }
             AgentLink::Unreachable => {
                 window.set_window_title("OpenLogi");
-                return root.child(unreachable_body(pal)).into_any_element();
+                return crate::window_chrome::frame(
+                    "OpenLogi",
+                    root.child(unreachable_body(pal)),
+                    window,
+                    cx,
+                );
             }
             AgentLink::OutdatedGui => {
                 window.set_window_title("OpenLogi");
-                return root.child(outdated_gui_body(pal)).into_any_element();
+                return crate::window_chrome::frame(
+                    "OpenLogi",
+                    root.child(outdated_gui_body(pal)),
+                    window,
+                    cx,
+                );
             }
             AgentLink::Ready(status) => status,
         };
@@ -388,9 +403,12 @@ impl Render for AppView {
         let granted = status.accessibility_granted;
         if !granted && !self.accessibility_dismissed {
             window.set_window_title("OpenLogi");
-            return root
-                .child(Self::accessibility_gate(pal, cx))
-                .into_any_element();
+            return crate::window_chrome::frame(
+                "OpenLogi",
+                root.child(Self::accessibility_gate(pal, cx)),
+                window,
+                cx,
+            );
         }
         Self::ensure_glow(cx);
 
@@ -415,7 +433,8 @@ impl Render for AppView {
             self.route = Route::Home;
         }
 
-        window.set_window_title(&main_window_title(show_device, cx));
+        let title = main_window_title(show_device, cx);
+        window.set_window_title(&title);
 
         let (header_el, content_el) = if show_device {
             // Resolve the active section once and share it between the header
@@ -464,10 +483,14 @@ impl Render for AppView {
             )
         };
 
-        root.child(header_el)
-            .child(content_el)
-            .child(footer(pal, granted))
-            .into_any_element()
+        crate::window_chrome::frame(
+            title,
+            root.child(header_el)
+                .child(content_el)
+                .child(footer(pal, granted)),
+            window,
+            cx,
+        )
     }
 }
 

@@ -42,6 +42,7 @@ mod mouse_model;
 mod platform;
 mod state;
 mod theme;
+mod window_chrome;
 mod windows;
 
 // Loads the Crowdin-managed `crates/openlogi-gui/locales/*.yml` files at compile
@@ -67,6 +68,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::app::AppView;
 use crate::state::AppState;
+
+pub(crate) const APP_ID: &str = "openlogi";
 
 fn dispatch_gui_command(command: DeeplinkCommand, cx: &mut gpui::App) {
     use DeeplinkCommand as Cmd;
@@ -432,6 +435,8 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
             appears_transparent: false,
             traffic_light_position: None,
         }),
+        app_id: Some(APP_ID.to_string()),
+        icon: app_assets::app_icon(),
         ..WindowOptions::default()
     }
 }

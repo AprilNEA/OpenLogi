@@ -31,6 +31,10 @@ use tracing_subscriber::EnvFilter;
 use crate::server::AgentServer;
 
 fn main() {
+    if handle_probe_args() {
+        return;
+    }
+
     init_tracing();
 
     // Single-instance guard: the agent owns all device I/O, the CGEventTap, and
@@ -100,6 +104,38 @@ fn main() {
     }
     #[cfg(not(target_os = "macos"))]
     runtime.block_on(run(config));
+}
+
+fn handle_probe_args() -> bool {
+    let mut args = std::env::args().skip(1);
+    let Some(arg) = args.next() else {
+        return false;
+    };
+    if arg != "--check-uinput" {
+        return false;
+    }
+    if args.next().is_some() {
+        eprintln!("usage: openlogi-agent --check-uinput");
+        std::process::exit(2);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match std::fs::OpenOptions::new().write(true).open("/dev/uinput") {
+            Ok(_) => {
+                println!("uinput OK");
+                true
+            }
+            Err(e) => {
+                eprintln!("uinput not writable: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        eprintln!("--check-uinput is only supported on Linux");
+        std::process::exit(2);
+    }
 }
 
 async fn run(config: Config) {

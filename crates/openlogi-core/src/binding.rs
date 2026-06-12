@@ -672,6 +672,14 @@ impl From<Action> for Binding {
     }
 }
 
+fn platform_label(default: &'static str, linux: &'static str) -> String {
+    if cfg!(target_os = "linux") {
+        linux.into()
+    } else {
+        default.into()
+    }
+}
+
 impl Action {
     /// Display label for the popover row.
     ///
@@ -703,12 +711,12 @@ impl Action {
             Action::NextTab => "Next Tab".into(),
             Action::PrevTab => "Previous Tab".into(),
             Action::ReloadPage => "Reload Page".into(),
-            Action::MissionControl => "Mission Control".into(),
-            Action::AppExpose => "App Exposé".into(),
-            Action::PreviousDesktop => "Previous Desktop".into(),
-            Action::NextDesktop => "Next Desktop".into(),
+            Action::MissionControl => platform_label("Mission Control", "Activities Overview"),
+            Action::AppExpose => platform_label("App Exposé", "App Windows"),
+            Action::PreviousDesktop => platform_label("Previous Desktop", "Previous Workspace"),
+            Action::NextDesktop => platform_label("Next Desktop", "Next Workspace"),
             Action::ShowDesktop => "Show Desktop".into(),
-            Action::LaunchpadShow => "Launchpad".into(),
+            Action::LaunchpadShow => platform_label("Launchpad", "Applications"),
             Action::LockScreen => "Lock Screen".into(),
             Action::Screenshot => "Screenshot".into(),
             Action::PlayPause => "Play / Pause".into(),
@@ -851,11 +859,10 @@ impl Action {
     /// handled at the hook/HID layer, logging a trace here.
     ///
     /// On Linux, key and scroll events are injected via a lazily-created `uinput`
-    /// virtual device. Mouse clicks inject `BTN_*` events. macOS-only window
-    /// manager actions (`MissionControl`, `AppExpose`, `ShowDesktop`,
-    /// `LaunchpadShow`) have no universal Linux equivalent and are silently
-    /// skipped (debug-logged). `CustomShortcut` maps macOS `kVK_*` codes to
-    /// Linux key codes; macOS Cmd maps to Ctrl.
+    /// virtual device. Mouse clicks inject `BTN_*` events. Desktop-navigation
+    /// actions read GNOME's configured keybindings when available, then fall
+    /// back to common Ubuntu/GNOME shortcuts. `CustomShortcut` maps macOS
+    /// `kVK_*` codes to Linux key codes; macOS Cmd maps to Ctrl.
     ///
     /// On Windows, key and mouse events are synthesised via `SendInput`. The
     /// macOS window-manager actions map to their Windows equivalents (e.g.
@@ -891,6 +898,7 @@ impl Action {
         let ctrl = KeyCode::KEY_LEFTCTRL;
         let shift = KeyCode::KEY_LEFTSHIFT;
         let alt = KeyCode::KEY_LEFTALT;
+        let meta = KeyCode::KEY_LEFTMETA;
         match self {
             // ── Mouse clicks ──────────────────────────────────────────────────
             Action::LeftClick => linux::click(KeyCode::BTN_LEFT),
@@ -919,20 +927,60 @@ impl Action {
             Action::NextTab => linux::press_key(&[ctrl], KeyCode::KEY_TAB),
             Action::PrevTab => linux::press_key(&[ctrl, shift], KeyCode::KEY_TAB),
             Action::ReloadPage => linux::press_key(&[ctrl], KeyCode::KEY_R),
-            // ── Navigation — macOS-specific ───────────────────────────────────
-            // No universal Linux equivalent; the compositor shortcut varies.
-            Action::MissionControl
-            | Action::AppExpose
-            | Action::ShowDesktop
-            | Action::LaunchpadShow => {
-                tracing::debug!(
-                    action = self.label(),
-                    "no Linux equivalent — action skipped"
-                );
-            }
-            // Ctrl+Alt+←/→ is the default in GNOME and KDE.
-            Action::PreviousDesktop => linux::press_key(&[ctrl, alt], KeyCode::KEY_LEFT),
-            Action::NextDesktop => linux::press_key(&[ctrl, alt], KeyCode::KEY_RIGHT),
+            // ── Desktop navigation ───────────────────────────────────────────
+            // Prefer the user's GNOME shortcut settings on Linux desktops that
+            // expose them; fall back to common GNOME/Ubuntu chords.
+            Action::MissionControl => linux::press_gsettings_shortcut(
+                "org.gnome.shell.keybindings",
+                "toggle-overview",
+                &[],
+                meta,
+            ),
+            Action::AppExpose => linux::press_gsettings_shortcut(
+                "org.gnome.desktop.wm.keybindings",
+                "switch-group",
+                &[meta],
+                KeyCode::KEY_GRAVE,
+            ),
+            Action::PreviousDesktop => linux::press_gsettings_shortcut_any(
+                &[
+                    (
+                        "org.gnome.desktop.wm.keybindings",
+                        "switch-to-workspace-left",
+                    ),
+                    ("org.gnome.desktop.wm.keybindings", "switch-to-workspace-up"),
+                ],
+                &[alt],
+                &[ctrl, alt],
+                KeyCode::KEY_LEFT,
+            ),
+            Action::NextDesktop => linux::press_gsettings_shortcut_any(
+                &[
+                    (
+                        "org.gnome.desktop.wm.keybindings",
+                        "switch-to-workspace-right",
+                    ),
+                    (
+                        "org.gnome.desktop.wm.keybindings",
+                        "switch-to-workspace-down",
+                    ),
+                ],
+                &[alt],
+                &[ctrl, alt],
+                KeyCode::KEY_RIGHT,
+            ),
+            Action::ShowDesktop => linux::press_gsettings_shortcut(
+                "org.gnome.desktop.wm.keybindings",
+                "show-desktop",
+                &[meta],
+                KeyCode::KEY_D,
+            ),
+            Action::LaunchpadShow => linux::press_gsettings_shortcut(
+                "org.gnome.shell.keybindings",
+                "toggle-application-view",
+                &[meta],
+                KeyCode::KEY_A,
+            ),
             // ── System ────────────────────────────────────────────────────────
             // logind LockSessions() via the system bus; falls back to Super+L.
             Action::LockScreen => linux::lock_screen(),
@@ -1768,12 +1816,20 @@ mod linux {
     use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
     use zbus::blocking::Connection as DbusConn;
 
-    const DEVICE_NAME: &str = "OpenLogi action injector";
+    const KEYBOARD_DEVICE_NAME: &str = "OpenLogi action keyboard";
+    const POINTER_DEVICE_NAME: &str = "OpenLogi action pointer";
 
-    static VIRTUAL_INPUT: LazyLock<Option<Mutex<VirtualDevice>>> = LazyLock::new(|| {
-        build()
+    static VIRTUAL_KEYBOARD: LazyLock<Option<Mutex<VirtualDevice>>> = LazyLock::new(|| {
+        build_keyboard()
             .map(Mutex::new)
-            .map_err(|e| tracing::warn!("failed to create uinput action device: {e}"))
+            .map_err(|e| tracing::warn!("failed to create uinput action keyboard: {e}"))
+            .ok()
+    });
+
+    static VIRTUAL_POINTER: LazyLock<Option<Mutex<VirtualDevice>>> = LazyLock::new(|| {
+        build_pointer()
+            .map(Mutex::new)
+            .map_err(|e| tracing::warn!("failed to create uinput action pointer: {e}"))
             .ok()
     });
 
@@ -1812,15 +1868,31 @@ mod linux {
         // Multimedia
         KeyCode::KEY_PLAYPAUSE, KeyCode::KEY_NEXTSONG, KeyCode::KEY_PREVIOUSSONG,
         KeyCode::KEY_VOLUMEUP,  KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_MUTE,
+    ];
+
+    #[rustfmt::skip]
+    const POINTER_KEY_CAPABILITIES: &[KeyCode] = &[
         // Mouse buttons (injected as EV_KEY with BTN_* codes). The side pair
         // must be registered here or the kernel silently drops their events.
         KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE,
         KeyCode::BTN_SIDE, KeyCode::BTN_EXTRA,
     ];
 
-    fn build() -> io::Result<VirtualDevice> {
+    fn build_keyboard() -> io::Result<VirtualDevice> {
         let mut keys = AttributeSet::<KeyCode>::default();
         for &k in KEY_CAPABILITIES {
+            keys.insert(k);
+        }
+
+        VirtualDevice::builder()?
+            .name(KEYBOARD_DEVICE_NAME)
+            .with_keys(&keys)?
+            .build()
+    }
+
+    fn build_pointer() -> io::Result<VirtualDevice> {
+        let mut keys = AttributeSet::<KeyCode>::default();
+        for &k in POINTER_KEY_CAPABILITIES {
             keys.insert(k);
         }
 
@@ -1834,14 +1906,14 @@ mod linux {
         }
 
         VirtualDevice::builder()?
-            .name(DEVICE_NAME)
+            .name(POINTER_DEVICE_NAME)
             .with_keys(&keys)?
             .with_relative_axes(&axes)?
             .build()
     }
 
-    fn emit(events: &[InputEvent]) {
-        if let Some(m) = &*VIRTUAL_INPUT {
+    fn emit_to(device: &LazyLock<Option<Mutex<VirtualDevice>>>, events: &[InputEvent]) {
+        if let Some(m) = &**device {
             if let Ok(mut guard) = m.lock() {
                 if let Err(e) = guard.emit(events) {
                     tracing::warn!("uinput action emit failed: {e}");
@@ -1881,7 +1953,7 @@ mod linux {
         }
         down.push(key_ev(key, 1));
         down.push(syn());
-        emit(&down);
+        emit_to(&VIRTUAL_KEYBOARD, &down);
 
         // Up phase.
         let mut up: Vec<InputEvent> = Vec::with_capacity(mods.len() + 2);
@@ -1890,18 +1962,149 @@ mod linux {
             up.push(key_ev(m, 0));
         }
         up.push(syn());
-        emit(&up);
+        emit_to(&VIRTUAL_KEYBOARD, &up);
+    }
+
+    /// Press the first configured GNOME accelerator for `schema.key`, falling
+    /// back to `fallback_mods + fallback_key` when GNOME is unavailable, the
+    /// setting is empty, or the accelerator uses a key we do not map yet.
+    pub(super) fn press_gsettings_shortcut(
+        schema: &str,
+        key: &str,
+        fallback_mods: &[KeyCode],
+        fallback_key: KeyCode,
+    ) {
+        press_gsettings_shortcut_any(&[(schema, key)], &[], fallback_mods, fallback_key);
+    }
+
+    /// Like [`press_gsettings_shortcut`], but tries several settings in order.
+    pub(super) fn press_gsettings_shortcut_any(
+        settings: &[(&str, &str)],
+        preferred_mods: &[KeyCode],
+        fallback_mods: &[KeyCode],
+        fallback_key: KeyCode,
+    ) {
+        let mut first_configured = None;
+        for (schema, key) in settings {
+            for (mods, key_code) in configured_shortcuts(schema, key) {
+                if first_configured.is_none() {
+                    first_configured = Some((mods.clone(), key_code));
+                }
+                if !preferred_mods.is_empty() && mods == preferred_mods {
+                    press_key(&mods, key_code);
+                    return;
+                }
+            }
+        }
+        if let Some((mods, key_code)) = first_configured {
+            press_key(&mods, key_code);
+            return;
+        }
+        press_key(fallback_mods, fallback_key);
+    }
+
+    fn configured_shortcuts(schema: &str, key: &str) -> Vec<(Vec<KeyCode>, KeyCode)> {
+        let output = std::process::Command::new("gsettings")
+            .args(["get", schema, key])
+            .output()
+            .ok();
+        let Some(output) = output else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        let Ok(stdout) = String::from_utf8(output.stdout) else {
+            return Vec::new();
+        };
+        accelerator_values(&stdout)
+            .into_iter()
+            .filter_map(|shortcut| parse_accelerator(shortcut))
+            .collect()
+    }
+
+    pub(super) fn accelerator_values(gsettings_output: &str) -> Vec<&str> {
+        let mut values = Vec::new();
+        let mut rest = gsettings_output;
+        while let Some(start) = rest.find('\'') {
+            rest = &rest[start + 1..];
+            let Some(end) = rest.find('\'') else {
+                break;
+            };
+            let value = &rest[..end];
+            if !value.is_empty() {
+                values.push(value);
+            }
+            rest = &rest[end + 1..];
+        }
+        values
+    }
+
+    pub(super) fn parse_accelerator(accelerator: &str) -> Option<(Vec<KeyCode>, KeyCode)> {
+        let mut rest = accelerator.trim();
+        let mut mods = Vec::new();
+        while let Some(after_open) = rest.strip_prefix('<') {
+            let Some(end) = after_open.find('>') else {
+                break;
+            };
+            let modifier = &after_open[..end];
+            if let Some(key) = modifier_keycode(modifier)
+                && !mods.contains(&key)
+            {
+                mods.push(key);
+            }
+            rest = &after_open[end + 1..];
+        }
+        key_name_to_keycode(rest).map(|key| (mods, key))
+    }
+
+    fn modifier_keycode(name: &str) -> Option<KeyCode> {
+        match name.to_ascii_lowercase().as_str() {
+            "control" | "ctrl" | "primary" => Some(KeyCode::KEY_LEFTCTRL),
+            "shift" => Some(KeyCode::KEY_LEFTSHIFT),
+            "alt" | "mod1" => Some(KeyCode::KEY_LEFTALT),
+            "super" | "meta" | "mod4" => Some(KeyCode::KEY_LEFTMETA),
+            _ => None,
+        }
+    }
+
+    fn key_name_to_keycode(name: &str) -> Option<KeyCode> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "a" => KeyCode::KEY_A,
+            "d" => KeyCode::KEY_D,
+            "l" => KeyCode::KEY_L,
+            "0" => KeyCode::KEY_0,
+            "1" => KeyCode::KEY_1,
+            "2" => KeyCode::KEY_2,
+            "3" => KeyCode::KEY_3,
+            "4" => KeyCode::KEY_4,
+            "5" => KeyCode::KEY_5,
+            "6" => KeyCode::KEY_6,
+            "7" => KeyCode::KEY_7,
+            "8" => KeyCode::KEY_8,
+            "9" => KeyCode::KEY_9,
+            "tab" => KeyCode::KEY_TAB,
+            "above_tab" | "grave" => KeyCode::KEY_GRAVE,
+            "left" => KeyCode::KEY_LEFT,
+            "right" => KeyCode::KEY_RIGHT,
+            "up" => KeyCode::KEY_UP,
+            "down" => KeyCode::KEY_DOWN,
+            "page_up" | "pageup" => KeyCode::KEY_PAGEUP,
+            "page_down" | "pagedown" => KeyCode::KEY_PAGEDOWN,
+            "print" | "sysrq" => KeyCode::KEY_SYSRQ,
+            _ => return None,
+        })
     }
 
     /// Inject a button-down in one SYN frame and button-up in a second.
     pub(super) fn click(button: KeyCode) {
-        emit(&[key_ev(button, 1), syn()]);
-        emit(&[key_ev(button, 0), syn()]);
+        emit_to(&VIRTUAL_POINTER, &[key_ev(button, 1), syn()]);
+        emit_to(&VIRTUAL_POINTER, &[key_ev(button, 0), syn()]);
     }
 
     /// Inject a single relative-axis delta followed by `SYN_REPORT`.
     pub(super) fn scroll(axis: RelativeAxisCode, value: i32) {
-        emit(&[rel_ev(axis, value), syn()]);
+        emit_to(&VIRTUAL_POINTER, &[rel_ev(axis, value), syn()]);
     }
 
     /// Force the virtual device to initialise (if it hasn't already) and return
@@ -1913,10 +2116,10 @@ mod linux {
     /// within a few milliseconds of the `ioctl`).
     pub(super) fn device_node() -> Option<std::path::PathBuf> {
         // Touch the LazyLock to force initialisation.
-        let _ = &*VIRTUAL_INPUT;
+        let _ = &*VIRTUAL_KEYBOARD;
         // Give udev a moment to create the /dev node.
         std::thread::sleep(std::time::Duration::from_millis(150));
-        if let Some(m) = &*VIRTUAL_INPUT
+        if let Some(m) = &*VIRTUAL_KEYBOARD
             && let Ok(mut guard) = m.lock()
         {
             return guard.enumerate_dev_nodes_blocking().ok()?.flatten().next();
@@ -3043,6 +3246,59 @@ mod tests {
         fn unmapped_code_returns_none() {
             assert_eq!(macos_vk_to_linux(0xFF), None);
             assert_eq!(macos_vk_to_linux(0x34), None); // gap in the kVK table
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    mod linux_accelerators {
+        use evdev::KeyCode;
+
+        use crate::binding::linux::{accelerator_values, parse_accelerator};
+
+        #[test]
+        fn extracts_gsettings_string_array_values() {
+            assert_eq!(
+                accelerator_values("['<Super>Page_Down', '<Control><Alt>Down']\n"),
+                vec!["<Super>Page_Down", "<Control><Alt>Down"]
+            );
+            assert!(accelerator_values("@as []\n").is_empty());
+        }
+
+        #[test]
+        fn parses_super_page_down() {
+            let (mods, key) = parse_accelerator("<Super>Page_Down").expect("parse");
+            assert_eq!(mods, vec![KeyCode::KEY_LEFTMETA]);
+            assert_eq!(key, KeyCode::KEY_PAGEDOWN);
+        }
+
+        #[test]
+        fn parses_control_alt_up() {
+            let (mods, key) = parse_accelerator("<Control><Alt>Up").expect("parse");
+            assert_eq!(mods, vec![KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTALT]);
+            assert_eq!(key, KeyCode::KEY_UP);
+        }
+
+        #[test]
+        fn parses_alt_digit_workspace_shortcuts() {
+            let (mods, key) = parse_accelerator("<Alt>1").expect("parse");
+            assert_eq!(mods, vec![KeyCode::KEY_LEFTALT]);
+            assert_eq!(key, KeyCode::KEY_1);
+
+            let (mods, key) = parse_accelerator("<Alt>2").expect("parse");
+            assert_eq!(mods, vec![KeyCode::KEY_LEFTALT]);
+            assert_eq!(key, KeyCode::KEY_2);
+        }
+
+        #[test]
+        fn parses_above_tab_for_switch_group() {
+            let (mods, key) = parse_accelerator("<Super>Above_Tab").expect("parse");
+            assert_eq!(mods, vec![KeyCode::KEY_LEFTMETA]);
+            assert_eq!(key, KeyCode::KEY_GRAVE);
+        }
+
+        #[test]
+        fn unsupported_keys_are_ignored() {
+            assert!(parse_accelerator("<Super>Frobulate").is_none());
         }
     }
 }
