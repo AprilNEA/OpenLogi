@@ -304,6 +304,10 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::None => "action-icons/ban.svg",
         Action::LeftClick | Action::RightClick => "action-icons/mouse-pointer-click.svg",
         Action::MiddleClick => "action-icons/mouse.svg",
+        // Circled arrows: visually "back/forward as a button", distinct from
+        // BrowserBack/BrowserForward's bare arrows in the Navigation section.
+        Action::MouseBack => "action-icons/circle-arrow-left.svg",
+        Action::MouseForward => "action-icons/circle-arrow-right.svg",
         Action::Copy => "action-icons/copy.svg",
         Action::Paste => "action-icons/clipboard-paste.svg",
         Action::Cut => "action-icons/scissors.svg",

@@ -1,11 +1,12 @@
-//! Startup-time HTTP sync against `assets.openlogi.org`.
+//! Background HTTP sync against `assets.openlogi.org`.
 //!
-//! Runs **before** the GUI opens. For each connected device with a
-//! [`DeviceModelInfo`], resolves the matching depot from the freshly-
-//! fetched `index.json`, then downloads any per-device files we don't
-//! already have cached (or whose sha256 differs). Failures are logged
-//! and swallowed — the GUI falls back to whatever's currently on disk
-//! and ultimately to the synthetic silhouette.
+//! Always fetches `index.json` first — even with no devices connected, so
+//! the registry is on disk before the first device needs resolving. Then,
+//! for each connected device with a [`DeviceModelInfo`], resolves the
+//! matching depot from that fresh index and downloads any per-device files
+//! we don't already have cached (or whose sha256 differs). Failures bubble
+//! up to the caller's retry/backoff; the GUI falls back to whatever's
+//! currently on disk and ultimately to the synthetic silhouette.
 
 use std::fs;
 use std::path::Path;
@@ -40,7 +41,10 @@ pub fn should_run(has_bundle: bool) -> bool {
     !has_bundle
 }
 
-/// Refresh the local cache for every model the host can plausibly want.
+/// Refresh the local cache: the shared `index.json` unconditionally, then
+/// the depots for every model in `models`. An empty `models` is a valid
+/// call — it prefetches just the index so device resolution works the
+/// moment a device first appears.
 ///
 /// Each entry pairs a device's HID++ model info with its firmware `codename`,
 /// so the depot match can fall back to the registry `displayName` for devices

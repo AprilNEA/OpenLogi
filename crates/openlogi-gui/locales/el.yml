@@ -116,6 +116,8 @@ _version: 1
 "Left Click": "Αριστερό κλικ"
 "Right Click": "Δεξί κλικ"
 "Middle Click": "Μεσαίο κλικ"
+"Back (Button 4)": "Πίσω (κουμπί 4)"
+"Forward (Button 5)": "Εμπρός (κουμπί 5)"
 "Back": "Πίσω"
 "Forward": "Εμπρός"
 "DPI Toggle": "Εναλλαγή DPI"

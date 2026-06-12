@@ -49,8 +49,7 @@ mod windows;
 // localize alongside ours.
 rust_i18n::i18n!("locales", fallback = "en");
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -232,21 +231,29 @@ fn main() -> Result<()> {
                 }
             });
 
-            // Asset depots are fetched in the background when devices with
-            // model info first appear — startup no longer blocks on it. The
-            // sync runs once on success; a failed attempt is retried (see
-            // SYNC_*) with a growing, capped delay so a permanently-down host
-            // isn't polled every tick yet a recovered one still self-heals.
-            let sync_state = Arc::new(AtomicU8::new(SYNC_IDLE));
-            let mut sync_attempts: u32 = 0;
-            let mut last_sync_at: Option<Instant> = None;
             // The asset resolver stats the cache roots and parses the (possibly
             // hundreds-of-KB) index.json, so build it once and reuse it across
             // snapshots — rebuilding only when the background sync lands new
             // assets (below). Rebuilding per snapshot was pure waste: the
             // unchanged-list early-return discarded the fresh records anyway.
             let mut cache = asset::AssetResolver::new();
-            let mut synced_assets_applied = false;
+            // Asset sync runs in the background, in two stages: the first
+            // agent snapshot — even a deviceless one — triggers an index
+            // prefetch so the registry is on disk before any device needs
+            // resolving (devices used to strand on the silhouette forever
+            // when the first model-info sighting was missed, #218); per-device
+            // depots are fetched as models appear, and a model set that grows
+            // later re-arms the sync. Failed attempts retry with a growing,
+            // capped delay so a permanently-down host isn't polled every tick
+            // yet a recovered one still self-heals.
+            let (sync_tx, mut sync_rx) = tokio::sync::mpsc::unbounded_channel::<SyncOutcome>();
+            let sync_enabled = asset::sync::should_run(cache.has_bundle_root());
+            let mut sync_running = false;
+            let mut sync_attempts: u32 = 0;
+            let mut last_sync_at: Option<Instant> = None;
+            let mut index_refreshed = false;
+            let mut synced_keys: HashSet<String> = HashSet::new();
+            let mut assets_dirty = false;
             // Cleared when the IPC update channel closes (the client thread
             // died), so the select stops polling a closed receiver.
             let mut ipc_open = true;
@@ -254,39 +261,36 @@ fn main() -> Result<()> {
                 tokio::select! {
                     update = ipc_updates.recv(), if ipc_open => match update {
                         Some(ipc_client::GuiUpdate::Snapshot(update)) => {
-                        // Kick off (or retry) the one-shot asset sync once a
-                        // snapshot carries model info (an empty / unresolved one
-                        // would strand the device on the silhouette).
-                        let state = sync_state.load(Ordering::Acquire);
+                        // Kick off (or re-arm) the background asset sync. The
+                        // index prefetch needs no devices; depot fetches fire
+                        // only for models not already synced this session.
                         let backoff_passed = last_sync_at
                             .is_none_or(|t| t.elapsed() >= sync_retry_delay(sync_attempts));
-                        if matches!(state, SYNC_IDLE | SYNC_FAILED)
+                        let pending: Vec<_> = collect_models(&update.inventory)
+                            .into_iter()
+                            .filter(|m| !synced_keys.contains(&model_key(m)))
+                            .collect();
+                        if sync_enabled
+                            && !sync_running
                             && backoff_passed
-                            && !collect_models(&update.inventory).is_empty()
+                            && (!index_refreshed || !pending.is_empty())
                         {
+                            sync_running = true;
                             sync_attempts = sync_attempts.saturating_add(1);
                             last_sync_at = Some(Instant::now());
-                            sync_state.store(SYNC_RUNNING, Ordering::Release);
-                            let inv = update.inventory.clone();
-                            let state = Arc::clone(&sync_state);
+                            let tx = sync_tx.clone();
                             std::thread::spawn(move || {
-                                let next = if sync_assets_if_needed(&inv) {
-                                    SYNC_DONE
-                                } else {
-                                    SYNC_FAILED
-                                };
-                                state.store(next, Ordering::Release);
+                                let keys = pending.iter().map(model_key).collect();
+                                let ok = run_asset_sync(&pending);
+                                let _ = tx.send(SyncOutcome { ok, keys });
                             });
                         }
                         // A completed sync may have put real photos where
-                        // silhouettes were resolved: rebuild the resolver once
-                        // and force the next merge through the unchanged-list
-                        // early-return so the fresh records become visible.
-                        let force_refresh = state == SYNC_DONE && !synced_assets_applied;
-                        if force_refresh {
-                            synced_assets_applied = true;
-                            cache = asset::AssetResolver::new();
-                        }
+                        // silhouettes were resolved: the resolver was rebuilt
+                        // when its outcome landed; force this merge through
+                        // the unchanged-list early-return so the fresh records
+                        // become visible.
+                        let force_refresh = std::mem::take(&mut assets_dirty);
                         cx.update(|cx| {
                             let changed = cx.update_global::<AppState, _>(|state, _| {
                                 // Merge only *completed* enumerations. A not-yet-ready
@@ -324,6 +328,24 @@ fn main() -> Result<()> {
                             cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
                         }
                     },
+                    // Guarded so this branch is *disabled* while no sync is in
+                    // flight — we hold a live `sync_tx`, so an unguarded recv
+                    // would pend forever and keep the `else => break` exit
+                    // from ever firing once the other channels close.
+                    Some(outcome) = sync_rx.recv(), if sync_running => {
+                        sync_running = false;
+                        if outcome.ok {
+                            // Success resets the backoff so a device appearing
+                            // later syncs immediately instead of waiting out a
+                            // stale failure delay.
+                            sync_attempts = 0;
+                            last_sync_at = None;
+                            index_refreshed = true;
+                            synced_keys.extend(outcome.keys);
+                            cache = asset::AssetResolver::new();
+                            assets_dirty = true;
+                        }
+                    }
                     Some(update) = ipc_pairing.recv() => {
                         cx.update(|cx| {
                             windows::add_device::apply_update(cx, update);
@@ -342,13 +364,29 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Asset-sync state, stored in an [`AtomicU8`] and polled on each inventory
-/// snapshot. A failed run flips back to [`SYNC_FAILED`] so the next tick
-/// retries, rather than latching the sync off for the whole session.
-const SYNC_IDLE: u8 = 0;
-const SYNC_RUNNING: u8 = 1;
-const SYNC_DONE: u8 = 2;
-const SYNC_FAILED: u8 = 3;
+/// Result of one background asset-sync run, reported back to the select
+/// loop: whether the run succeeded, and which model keys it covered (folded
+/// into the synced set on success so the same device doesn't re-sync every
+/// snapshot).
+struct SyncOutcome {
+    ok: bool,
+    keys: Vec<String>,
+}
+
+/// Session-stable identity for a synced model: the HID++ model ids plus the
+/// extended-model byte (the colour-variant selector) and the codename the
+/// depot match falls back on. Models that collapse to one key would resolve
+/// to the same depot files anyway.
+fn model_key((model, codename): &(DeviceModelInfo, Option<String>)) -> String {
+    format!(
+        "{:02x}:{:04x}:{:04x}:{:04x}:{}",
+        model.extended_model_id,
+        model.model_ids[0],
+        model.model_ids[1],
+        model.model_ids[2],
+        codename.as_deref().unwrap_or_default()
+    )
+}
 
 /// Minimum gap before re-attempting a failed sync, doubling with each
 /// consecutive attempt and capped at a minute. The first attempt is
@@ -362,22 +400,18 @@ fn sync_retry_delay(attempts: u32) -> Duration {
     Duration::from_secs(1u64 << exp).min(CAP)
 }
 
-/// Refresh the asset cache for the connected devices. Returns `true` when the
-/// sync completed (or wasn't needed) and `false` when it failed and should be
-/// retried. Runs on a dedicated background thread — the HTTP layer's blocking
-/// retries are fine here.
-fn sync_assets_if_needed(inventories: &[DeviceInventory]) -> bool {
-    let probe_cache = asset::AssetResolver::new();
-    if !asset::sync::should_run(probe_cache.has_bundle_root()) {
-        return true;
-    }
+/// Refresh the asset cache: the shared index always, plus the depots for
+/// `models`. Returns `true` when the sync completed and `false` when it
+/// failed and should be retried. Runs on a dedicated background thread —
+/// the HTTP layer's blocking retries are fine here. (Whether sync runs at
+/// all is the caller's `should_run` gate, checked once at startup.)
+fn run_asset_sync(models: &[(DeviceModelInfo, Option<String>)]) -> bool {
     let server =
         std::env::var("OPENLOGI_ASSETS").unwrap_or_else(|_| asset::sync::DEFAULT_BASE.to_string());
-    let models = collect_models(inventories);
-    match asset::sync::sync(&server, &models) {
+    match asset::sync::sync(&server, models) {
         Ok(()) => true,
         Err(e) => {
-            warn!(error = ?e, "asset sync failed — will retry on the next device snapshot");
+            warn!(error = ?e, "asset sync failed — will retry with backoff");
             false
         }
     }

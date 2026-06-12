@@ -241,15 +241,19 @@ fn resolve_gesture_click(
         .unwrap_or_else(|| default_binding(id))
 }
 
-/// Whether `action` is just `id`'s own native click — i.e. the button is mapped
-/// to the very click it already produces. In that case the hook should pass the
-/// event through to the OS rather than suppress and re-synthesise it.
+/// Whether `action` is just `id`'s own native event — i.e. the button is mapped
+/// to the very click (or extra-button press) it already produces. In that case
+/// the hook should pass the event through to the OS rather than suppress and
+/// re-synthesise it. For Back/Forward this keeps the genuine hardware button
+/// 4/5 intact instead of round-tripping it through synthesis.
 fn is_native_click(id: ButtonId, action: &Action) -> bool {
     matches!(
         (id, action),
         (ButtonId::LeftClick, Action::LeftClick)
             | (ButtonId::RightClick, Action::RightClick)
             | (ButtonId::MiddleClick, Action::MiddleClick)
+            | (ButtonId::Back, Action::MouseBack)
+            | (ButtonId::Forward, Action::MouseForward)
     )
 }
 

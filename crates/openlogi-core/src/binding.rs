@@ -369,6 +369,14 @@ pub enum Action {
     RightClick,
     /// Middle mouse button (wheel click).
     MiddleClick,
+    /// Mouse "back" side button (extra button 4). Synthesizes the real mouse
+    /// button event, which browsers and most apps interpret as "navigate back"
+    /// natively — unlike [`Action::BrowserBack`], which sends ⌘[ and is ignored
+    /// by many apps.
+    MouseBack,
+    /// Mouse "forward" side button (extra button 5). Native counterpart to
+    /// [`Action::MouseBack`]; see [`Action::BrowserForward`] for the ⌘] form.
+    MouseForward,
 
     // ── Editing ──────────────────────────────────────────────────────────────
     /// Copy the current selection (⌘C / Ctrl+C).
@@ -677,6 +685,8 @@ impl Action {
             Action::LeftClick => "Left Click".into(),
             Action::RightClick => "Right Click".into(),
             Action::MiddleClick => "Middle Click".into(),
+            Action::MouseBack => "Back (Button 4)".into(),
+            Action::MouseForward => "Forward (Button 5)".into(),
             Action::Copy => "Copy".into(),
             Action::Paste => "Paste".into(),
             Action::Cut => "Cut".into(),
@@ -722,7 +732,11 @@ impl Action {
     #[must_use]
     pub fn category(&self) -> Category {
         match self {
-            Action::LeftClick | Action::RightClick | Action::MiddleClick => Category::Mouse,
+            Action::LeftClick
+            | Action::RightClick
+            | Action::MiddleClick
+            | Action::MouseBack
+            | Action::MouseForward => Category::Mouse,
             // CustomShortcut is assigned to Editing so it doesn't need a
             // separate arm (it's not in the picker catalog).
             Action::Copy
@@ -776,6 +790,8 @@ impl Action {
             Action::LeftClick,
             Action::RightClick,
             Action::MiddleClick,
+            Action::MouseBack,
+            Action::MouseForward,
             // Editing
             Action::Copy,
             Action::Paste,
@@ -880,6 +896,10 @@ impl Action {
             Action::LeftClick => linux::click(KeyCode::BTN_LEFT),
             Action::RightClick => linux::click(KeyCode::BTN_RIGHT),
             Action::MiddleClick => linux::click(KeyCode::BTN_MIDDLE),
+            // Extra mouse buttons: BTN_SIDE/BTN_EXTRA are the evdev side
+            // buttons ("back"/"forward") browsers handle natively.
+            Action::MouseBack => linux::click(KeyCode::BTN_SIDE),
+            Action::MouseForward => linux::click(KeyCode::BTN_EXTRA),
             // ── Editing ───────────────────────────────────────────────────────
             Action::Copy => linux::press_key(&[ctrl], KeyCode::KEY_C),
             Action::Paste => linux::press_key(&[ctrl], KeyCode::KEY_V),
@@ -981,6 +1001,11 @@ impl Action {
             Action::LeftClick => macos::post_click(CGMouseButton::Left),
             Action::RightClick => macos::post_click(CGMouseButton::Right),
             Action::MiddleClick => macos::post_click(CGMouseButton::Center),
+            // Extra mouse buttons: post the real button4/5 the OS treats as
+            // back/forward. Button numbers are 0-indexed (3 = back / "button 4",
+            // 4 = forward / "button 5").
+            Action::MouseBack => macos::post_other_button(3),
+            Action::MouseForward => macos::post_other_button(4),
             // ── Editing ───────────────────────────────────────────────────────
             Action::Copy => macos::post_key(VK_C, cmd),
             Action::Paste => macos::post_key(VK_V, cmd),
@@ -1081,6 +1106,8 @@ impl Action {
             Action::LeftClick => windows::post_click(windows::MouseButton::Left),
             Action::RightClick => windows::post_click(windows::MouseButton::Right),
             Action::MiddleClick => windows::post_click(windows::MouseButton::Middle),
+            Action::MouseBack => windows::post_click(windows::MouseButton::Back),
+            Action::MouseForward => windows::post_click(windows::MouseButton::Forward),
             Action::Copy => windows::post_key(windows::VK_C, &[windows::VK_CONTROL]),
             Action::Paste => windows::post_key(windows::VK_V, &[windows::VK_CONTROL]),
             Action::Cut => windows::post_key(windows::VK_X, &[windows::VK_CONTROL]),
@@ -1253,18 +1280,54 @@ mod macos {
         };
         for (kind, phase) in [(down, "down"), (up, "up")] {
             if let Ok(ev) = CGEvent::new_mouse_event(src.clone(), kind, location, button) {
-                // Mark it ours so our own CGEventTap skips it instead of treating
-                // a remapped click (e.g. a gesture button's `MiddleClick`) as a
-                // fresh button event and re-entering the hook.
-                ev.set_integer_value_field(
-                    EventField::EVENT_SOURCE_USER_DATA,
-                    super::SYNTHETIC_EVENT_USER_DATA,
-                );
+                tag_synthetic(&ev);
                 ev.post(CGEventTapLocation::HID);
             } else {
                 tracing::warn!(phase, "CGEvent::new_mouse_event failed");
             }
         }
+    }
+
+    /// Post a down + up pair for an "extra" mouse button by its raw button
+    /// number (3 = back / "button 4", 4 = forward / "button 5"). These are the
+    /// native events browsers and most apps interpret as back/forward.
+    ///
+    /// `CGMouseButton` only names Left/Right/Center, so we create an
+    /// `OtherMouse` event and override `MOUSE_EVENT_BUTTON_NUMBER` to address
+    /// buttons ≥ 3. Tagged via [`tag_synthetic`] so OpenLogi's own event tap
+    /// ignores it instead of re-translating it into a Back/Forward press.
+    pub(super) fn post_other_button(button_number: i64) {
+        let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+            tracing::warn!("CGEventSource::new failed for extra mouse button");
+            return;
+        };
+        let location = CGEvent::new(src.clone()).map_or(CGPoint::new(0., 0.), |e| e.location());
+        for (kind, phase) in [
+            (CGEventType::OtherMouseDown, "down"),
+            (CGEventType::OtherMouseUp, "up"),
+        ] {
+            if let Ok(ev) =
+                CGEvent::new_mouse_event(src.clone(), kind, location, CGMouseButton::Center)
+            {
+                ev.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, button_number);
+                tag_synthetic(&ev);
+                ev.post(CGEventTapLocation::HID);
+            } else {
+                tracing::warn!(phase, "CGEvent::new_mouse_event failed for extra button");
+            }
+        }
+    }
+
+    /// Stamp [`SYNTHETIC_EVENT_USER_DATA`](super::SYNTHETIC_EVENT_USER_DATA)
+    /// into the event's source user-data so OpenLogi's own event tap recognises
+    /// and skips its own injections instead of treating them as fresh input
+    /// (e.g. re-translating a synthesized button 4/5 into a Back/Forward press,
+    /// or misreading a remapped click as a new gesture hold).
+    fn tag_synthetic(ev: &CGEvent) {
+        ev.set_integer_value_field(
+            EventField::EVENT_SOURCE_USER_DATA,
+            super::SYNTHETIC_EVENT_USER_DATA,
+        );
     }
 
     /// Post a key-down + key-up pair for `vk` with `flags` set.
@@ -1749,8 +1812,10 @@ mod linux {
         // Multimedia
         KeyCode::KEY_PLAYPAUSE, KeyCode::KEY_NEXTSONG, KeyCode::KEY_PREVIOUSSONG,
         KeyCode::KEY_VOLUMEUP,  KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_MUTE,
-        // Mouse buttons (injected as EV_KEY with BTN_* codes)
+        // Mouse buttons (injected as EV_KEY with BTN_* codes). The side pair
+        // must be registered here or the kernel silently drops their events.
         KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE,
+        KeyCode::BTN_SIDE, KeyCode::BTN_EXTRA,
     ];
 
     fn build() -> io::Result<VirtualDevice> {
@@ -2184,7 +2249,7 @@ mod windows {
         INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
         MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
         MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
-        MOUSEINPUT, SendInput,
+        MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
     };
 
     use crate::binding::{Action, KeyCombo};
@@ -2225,15 +2290,28 @@ mod windows {
         Left,
         Right,
         Middle,
+        /// Extra button 4 ("back").
+        Back,
+        /// Extra button 5 ("forward").
+        Forward,
     }
 
+    // XBUTTON1/XBUTTON2 from WinUser.h — windows-sys puts them behind the
+    // Win32_UI_WindowsAndMessaging feature; not worth enabling for two
+    // integers (same treatment as the VK_* codes above).
+    const XBUTTON1: i32 = 1;
+    const XBUTTON2: i32 = 2;
+
     pub(super) fn post_click(button: MouseButton) {
-        let (down, up) = match button {
-            MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-            MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-            MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+        let (down, up, data) = match button {
+            MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0),
+            MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0),
+            MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
+            // Extra buttons share the X flag pair; mouseData carries which one.
+            MouseButton::Back => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON1),
+            MouseButton::Forward => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON2),
         };
-        send_inputs(&[mouse_input(down, 0), mouse_input(up, 0)]);
+        send_inputs(&[mouse_input(down, data), mouse_input(up, data)]);
     }
 
     pub(super) fn post_key(vk: u16, modifiers: &[u16]) {

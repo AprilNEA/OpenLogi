@@ -116,6 +116,8 @@ _version: 1
 "Left Click": "左クリック"
 "Right Click": "右クリック"
 "Middle Click": "中クリック"
+"Back (Button 4)": "戻る（サイドボタン4）"
+"Forward (Button 5)": "進む（サイドボタン5）"
 "Back": "戻る"
 "Forward": "進む"
 "DPI Toggle": "DPI 切り替え"

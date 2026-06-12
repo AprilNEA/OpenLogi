@@ -116,6 +116,8 @@ _version: 1
 "Left Click": "Clic izquierdo"
 "Right Click": "Clic derecho"
 "Middle Click": "Clic central"
+"Back (Button 4)": "Atrás (botón 4)"
+"Forward (Button 5)": "Adelante (botón 5)"
 "Back": "Atrás"
 "Forward": "Adelante"
 "DPI Toggle": "Cambiar DPI"

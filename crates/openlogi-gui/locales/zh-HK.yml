@@ -116,6 +116,8 @@ _version: 1
 "Left Click": "左鍵單擊"
 "Right Click": "右鍵單擊"
 "Middle Click": "中鍵單擊"
+"Back (Button 4)": "後退（側鍵4）"
+"Forward (Button 5)": "前進（側鍵5）"
 "Back": "後退"
 "Forward": "前進"
 "DPI Toggle": "靈敏度切換"

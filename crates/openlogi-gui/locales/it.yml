@@ -116,6 +116,8 @@ _version: 1
 "Left Click": "Click sinistro"
 "Right Click": "Click destro"
 "Middle Click": "Click centrale"
+"Back (Button 4)": "Indietro (pulsante 4)"
+"Forward (Button 5)": "Avanti (pulsante 5)"
 "Back": "Indietro"
 "Forward": "Avanti"
 "DPI Toggle": "Cambia DPI"

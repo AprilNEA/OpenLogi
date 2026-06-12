@@ -116,6 +116,8 @@ _version: 1
 "Left Click": "Левый щелчок"
 "Right Click": "Правый щелчок"
 "Middle Click": "Средний щелчок"
+"Back (Button 4)": "Назад (боковая кнопка 4)"
+"Forward (Button 5)": "Вперёд (боковая кнопка 5)"
 "Back": "Назад"
 "Forward": "Вперёд"
 "DPI Toggle": "Переключение DPI"

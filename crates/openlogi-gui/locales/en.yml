@@ -116,6 +116,8 @@ _version: 1
 "Left Click": "Left Click"
 "Right Click": "Right Click"
 "Middle Click": "Middle Click"
+"Back (Button 4)": "Back (Button 4)"
+"Forward (Button 5)": "Forward (Button 5)"
 "Back": "Back"
 "Forward": "Forward"
 "DPI Toggle": "DPI Toggle"

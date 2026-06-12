@@ -116,6 +116,8 @@ _version: 1
 "Left Click": "Venstreklikk"
 "Right Click": "Høyreklikk"
 "Middle Click": "Midtklikk"
+"Back (Button 4)": "Tilbake (knapp 4)"
+"Forward (Button 5)": "Frem (knapp 5)"
 "Back": "Tilbake"
 "Forward": "Frem"
 "DPI Toggle": "DPI-veksling"
