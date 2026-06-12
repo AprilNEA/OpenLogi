@@ -155,6 +155,10 @@ const fn default_thumbwheel_sensitivity() -> i32 {
 
 /// Per-device RGB lighting: a single static color, brightness, and on/off.
 /// Deliberately basic — per-key effects are a later addition.
+///
+/// Crosses the agent↔GUI IPC (`set_lighting`), so field order is wire format —
+/// changes require a `PROTOCOL_VERSION` bump (guarded by
+/// `openlogi-agent-core/tests/wire_format.rs`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lighting {
     #[serde(default = "default_lighting_enabled")]
