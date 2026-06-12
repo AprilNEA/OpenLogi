@@ -840,8 +840,9 @@ impl AppState {
     }
 
     /// Write a full SmartShift configuration to the active device (best-effort,
-    /// on a background thread) and optimistically cache it. The device persists
-    /// the values in its own NVM, so nothing is written to `config.toml`.
+    /// on a background thread), optimistically cache it, and persist it to
+    /// `config.toml` — the values live in device RAM and reset on a power
+    /// cycle (#189), so the agent re-applies them when the device reconnects.
     /// No-op when no device is selected.
     pub fn commit_smartshift(
         &mut self,
@@ -863,6 +864,18 @@ impl AppState {
                 tunable_torque,
             ));
         }
+        self.config.set_smartshift(
+            &key,
+            openlogi_core::config::SmartShift {
+                mode: mode.into(),
+                auto_disengage,
+                tunable_torque,
+            },
+        );
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist SmartShift to config.toml");
+        }
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
         // Reflect the write immediately so the panel doesn't flicker back to
         // the previous value before a re-read lands, but queue a confirming
         // re-read: the write is fire-and-forget, so a sleeping device that
@@ -942,6 +955,32 @@ impl AppState {
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist lighting to config.toml");
         }
+        // Keep the agent's config copy fresh: it re-applies the saved colour
+        // when the keyboard reconnects, and without the reload it would
+        // replay whatever was saved the last time something *else* reloaded.
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+    }
+
+    /// Apply `dpi` to the active device (best-effort, via the agent) and
+    /// persist it per device — the sensor value lives in device RAM and resets
+    /// on a power cycle (#189), so the agent re-applies it on reconnect.
+    /// Updates the displayed value even with no device selected.
+    pub fn commit_dpi(&mut self, dpi: u32) {
+        self.dpi = dpi;
+        let Some(record) = self.current_record() else {
+            debug!("no active device — DPI change kept in memory only");
+            return;
+        };
+        let key = record.config_key.clone();
+        let route = record.route.clone();
+        if let Some(route) = route {
+            self.send_ipc(crate::ipc_client::Command::SetDpi(route, dpi));
+        }
+        self.config.set_dpi(&key, dpi);
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist DPI to config.toml");
+        }
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 
     /// App-wide settings backing the Settings window (launch-at-login,

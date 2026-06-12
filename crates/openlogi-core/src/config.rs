@@ -214,6 +214,33 @@ where
     Ok(u8::deserialize(deserializer)?.min(100))
 }
 
+/// Scroll-wheel mode for [`SmartShift`]: free-spin or ratchet (clicky).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WheelMode {
+    Free,
+    Ratchet,
+}
+
+/// Per-device SmartShift wheel configuration, persisted so the agent can
+/// re-apply it when the device reconnects: the values are written to device
+/// RAM and do not survive a power cycle (#189), despite earlier assumptions
+/// that the device kept them in NVM.
+///
+/// Config-file only — never crosses the IPC (the agent reads it from
+/// `config.toml` on reload), so it is free to evolve without a
+/// `PROTOCOL_VERSION` bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmartShift {
+    pub mode: WheelMode,
+    /// SmartShift auto-disengage threshold (`0x01`–`0xFE`, in 0.25 turn/s
+    /// steps), or `0xFF` for a permanently engaged ratchet.
+    pub auto_disengage: u8,
+    /// Tunable-torque force percentage (`1`–`100`), `0` when the device
+    /// doesn't support tunable torque.
+    pub tunable_torque: u8,
+}
+
 /// Which control owns a device's single gesture role.
 ///
 /// Stored explicitly — rather than inferred from which button happens to carry a
@@ -298,10 +325,20 @@ pub struct DeviceConfig {
     /// the cycle action becomes a no-op until the user adds at least one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dpi_presets: Vec<u32>,
+    /// The sensor DPI the user committed for this device. Persisted because
+    /// the value lives in device RAM and resets on a power cycle (#189); the
+    /// agent re-applies it when the device reconnects. `None` until the user
+    /// first changes DPI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dpi: Option<u32>,
     /// Per-device RGB lighting (static color + brightness + on/off). `None`
     /// until the user changes it, so it stays out of `config.toml` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lighting: Option<Lighting>,
+    /// Per-device SmartShift wheel configuration, re-applied on reconnect for
+    /// the same reason as [`Self::dpi`]. `None` until the user changes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smartshift: Option<SmartShift>,
 }
 
 /// Deserialize-only shim that folds the pre-v2 `button_bindings` +
@@ -330,7 +367,11 @@ struct RawDeviceConfig {
     #[serde(default)]
     dpi_presets: Vec<u32>,
     #[serde(default)]
+    dpi: Option<u32>,
+    #[serde(default)]
     lighting: Option<Lighting>,
+    #[serde(default)]
+    smartshift: Option<SmartShift>,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -369,7 +410,9 @@ impl From<RawDeviceConfig> for DeviceConfig {
             bindings,
             per_app_bindings: raw.per_app_bindings,
             dpi_presets: raw.dpi_presets,
+            dpi: raw.dpi,
             lighting: raw.lighting,
+            smartshift: raw.smartshift,
         }
     }
 }
@@ -726,6 +769,33 @@ impl Config {
             .or_default()
             .lighting = Some(lighting);
     }
+
+    /// The committed sensor DPI for `device_key`, or `None` if never set.
+    #[must_use]
+    pub fn dpi(&self, device_key: &str) -> Option<u32> {
+        self.devices.get(device_key).and_then(|d| d.dpi)
+    }
+
+    /// Record the committed sensor DPI for `device_key`, so the agent can
+    /// re-apply it when the device reconnects (#189).
+    pub fn set_dpi(&mut self, device_key: &str, dpi: u32) {
+        self.devices.entry(device_key.to_string()).or_default().dpi = Some(dpi);
+    }
+
+    /// The SmartShift wheel config for `device_key`, or `None` if never set.
+    #[must_use]
+    pub fn smartshift(&self, device_key: &str) -> Option<SmartShift> {
+        self.devices.get(device_key).and_then(|d| d.smartshift)
+    }
+
+    /// Record the SmartShift wheel config for `device_key`, so the agent can
+    /// re-apply it when the device reconnects (#189).
+    pub fn set_smartshift(&mut self, device_key: &str, smartshift: SmartShift) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .smartshift = Some(smartshift);
+    }
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -800,6 +870,38 @@ mod tests {
             })
         );
         assert_eq!(restored.lighting("absent"), None);
+    }
+
+    #[test]
+    fn dpi_roundtrips_per_device() {
+        let mut cfg = Config::default();
+        cfg.set_dpi("2b042", 1600);
+        let restored = write_and_read(&cfg);
+        assert_eq!(restored.dpi("2b042"), Some(1600));
+        assert_eq!(restored.dpi("absent"), None);
+    }
+
+    #[test]
+    fn smartshift_roundtrips_per_device() {
+        let mut cfg = Config::default();
+        cfg.set_smartshift(
+            "2b042",
+            SmartShift {
+                mode: WheelMode::Ratchet,
+                auto_disengage: 16,
+                tunable_torque: 30,
+            },
+        );
+        let restored = write_and_read(&cfg);
+        assert_eq!(
+            restored.smartshift("2b042"),
+            Some(SmartShift {
+                mode: WheelMode::Ratchet,
+                auto_disengage: 16,
+                tunable_torque: 30,
+            })
+        );
+        assert_eq!(restored.smartshift("absent"), None);
     }
 
     #[test]

@@ -174,6 +174,11 @@ async fn run(config: Config) {
                 Some(watchers::inventory::InventoryEvent::Unavailable) => {
                     orchestrator.lock().await.mark_inventory_unavailable();
                 }
+                Some(watchers::inventory::InventoryEvent::SystemWake) => {
+                    // Devices likely power-cycled during the sleep; the next
+                    // snapshot re-applies their volatile settings (#189).
+                    orchestrator.lock().await.reapply_volatile_on_next_refresh();
+                }
                 // Watcher thread death (e.g. a panic inside the HID backend's
                 // enumerate) — without a snapshot the GUI would scan forever.
                 None => {
