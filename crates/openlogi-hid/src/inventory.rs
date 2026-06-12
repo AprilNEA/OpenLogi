@@ -11,34 +11,33 @@ use hidpp::{
     channel::HidppChannel,
     device::Device,
     feature::{
-        CreatableFeature,
-        device_information::DeviceInformationFeature,
-        device_type_and_name::{DeviceType as HidppDeviceType, DeviceTypeAndNameFeature},
-        unified_battery::{
-            BatteryLevel as HidppBatteryLevel, BatteryStatus as HidppBatteryStatus,
-            UnifiedBatteryFeature,
-        },
+        CreatableFeature, device_information::DeviceInformationFeature,
+        device_type_and_name::DeviceTypeAndNameFeature, unified_battery::UnifiedBatteryFeature,
     },
     receiver::{
         self, Receiver,
         bolt::{
-            DeviceConnection as BoltDeviceConnection, DeviceKind as BoltDeviceKind,
-            Event as BoltEvent, Receiver as BoltReceiver,
+            DeviceConnection as BoltDeviceConnection, Event as BoltEvent, Receiver as BoltReceiver,
         },
         unifying::{
-            DeviceConnection as UnifyingDeviceConnection, DeviceKind as UnifyingDeviceKind,
-            Event as UnifyingEvent, Receiver as UnifyingReceiver,
+            DeviceConnection as UnifyingDeviceConnection, Event as UnifyingEvent,
+            Receiver as UnifyingReceiver,
         },
     },
 };
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
-    DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+    BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
+    PairedDevice, ReceiverInfo,
 };
 use thiserror::Error;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
+use crate::mappings::{
+    map_battery_level, map_battery_status, map_device_type, map_kind, map_unifying_kind,
+    normalize_serial_number, resolve_device_kind,
+};
+use crate::node_ledger::NodeLedger;
 use crate::route::DIRECT_DEVICE_INDEX;
 use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
@@ -225,6 +224,10 @@ pub struct Enumerator {
     /// steadily-connected node is opened once here and reused until it
     /// disconnects.
     channels: HashMap<async_hid::DeviceId, CachedChannel>,
+    /// Per-node last-good inventory + consecutive-failure counts: replays a
+    /// node's snapshot through transient probe failures and decides when its
+    /// cached channel must be dropped and reopened (see [`crate::node_ledger`]).
+    ledger: NodeLedger<async_hid::DeviceId>,
     tick: u64,
 }
 
@@ -260,6 +263,12 @@ impl Enumerator {
     /// HID candidate concurrently (so one asleep node that burns the whole
     /// `PROBE_BUDGET` can't stall the others), reusing each device's cached
     /// immutable data when it's present and fresh.
+    ///
+    /// A node the OS still lists but whose probe fails (receiver registers
+    /// unanswered, probe timeout, open failure) is **not** reported as absent:
+    /// its last completed inventory is replayed for a bounded grace and its
+    /// channel is reopened, so a transient HID++ glitch can't masquerade as
+    /// "no devices" (#218) — see [`crate::node_ledger`].
     pub async fn enumerate(&mut self) -> Result<Vec<DeviceInventory>, InventoryError> {
         self.tick = self.tick.wrapping_add(1);
         let tick = self.tick;
@@ -272,6 +281,7 @@ impl Enumerator {
         // lookups — an actual open happens only when a new device appears.
         let mut active: Vec<(async_hid::DeviceInfo, Arc<HidppChannel>)> = Vec::new();
         let mut seen_nodes: HashSet<async_hid::DeviceId> = HashSet::new();
+        let mut open_failures: Vec<async_hid::DeviceId> = Vec::new();
         for dev in candidates {
             let node = dev.id.clone();
             seen_nodes.insert(node.clone());
@@ -291,15 +301,22 @@ impl Enumerator {
                     active.push((info, channel));
                 }
                 Ok(None) => {} // speaks HID but not HID++ — not one of ours
-                Err(e) => warn!(error = ?e, "failed to open HID++ channel — retrying next tick"),
+                // The node is listed but unreachable right now — settled as a
+                // failed probe below, so its last inventory is replayed.
+                Err(e) => {
+                    warn!(error = ?e, "failed to open HID++ channel — retrying next tick");
+                    open_failures.push(node);
+                }
             }
         }
         // Drop channels for nodes that vanished this tick. A node missing from
         // the enumeration is a real disconnect (the IOHIDManager device set is
         // authoritative, unlike a HID++ probe timeout), so close the device and
         // join its read thread now instead of leaving a dead channel behind; a
-        // reconnect re-opens under a fresh node id.
+        // reconnect re-opens under a fresh node id. The ledger forgets vanished
+        // nodes for the same reason — a true disconnect must not be replayed.
         self.channels.retain(|node, _| seen_nodes.contains(node));
+        self.ledger.retain_nodes(&seen_nodes);
 
         // Probe each open channel concurrently, sharing `&cache` read-only;
         // updates are collected and applied afterwards (no `RefCell`).
@@ -308,7 +325,9 @@ impl Enumerator {
             active
                 .into_iter()
                 .map(|(info, channel)| async move {
-                    timeout(PROBE_BUDGET, probe_one(info, channel, cache, tick)).await
+                    let node = info.id.clone();
+                    let probe = timeout(PROBE_BUDGET, probe_one(info, channel, cache, tick)).await;
+                    (node, probe)
                 })
                 .collect::<Vec<_>>()
                 .join()
@@ -317,19 +336,29 @@ impl Enumerator {
 
         let mut inventories = Vec::new();
         let mut outcomes = Vec::new();
-        for result in results {
-            match result {
-                Ok(Ok((inv, mut probed))) => {
-                    inventories.extend(inv);
-                    outcomes.append(&mut probed);
-                }
-                Ok(Err(e)) => {
-                    warn!(error = ?e, "device probe failed — skipping");
-                }
-                Err(_) => {
-                    warn!(budget = ?PROBE_BUDGET, "device probe timed out — skipping (asleep/unresponsive)");
-                }
+        for (node, result) in results {
+            let probe = if let Ok(probe) = result {
+                probe
+            } else {
+                // The probe burned the whole budget — an asleep direct device,
+                // or a channel whose read loop parked on a dead handle (see
+                // `AsyncHidChannel::read_report`). Either way: "couldn't
+                // check", not "nothing there".
+                warn!(budget = ?PROBE_BUDGET, "device probe timed out — treating as a failed probe");
+                NodeProbe::failed()
+            };
+            outcomes.extend(probe.outcomes);
+            let settled = self.ledger.settle(&node, probe.healthy, probe.inventory);
+            if settled.evict_channel && self.channels.remove(&node).is_some() {
+                warn!("node probe keeps failing — dropping its channel to reopen next tick");
             }
+            inventories.extend(settled.inventory);
+        }
+        // Nodes that wouldn't open this tick still replay their last snapshot
+        // (they have no cached channel to evict).
+        for node in open_failures {
+            let settled = self.ledger.settle(&node, false, None);
+            inventories.extend(settled.inventory);
         }
 
         // Apply fresh probes and record which devices were seen this tick.
@@ -373,15 +402,34 @@ impl Enumerator {
     }
 }
 
+/// One probed node's contribution this tick: its inventory (if any), whether
+/// the node actually answered — the ledger replays the last snapshot when it
+/// didn't (see [`NodeLedger::settle`]) — and each device's cache contribution,
+/// for the caller to apply and to drive eviction.
+struct NodeProbe {
+    inventory: Option<DeviceInventory>,
+    healthy: bool,
+    outcomes: Vec<CacheOutcome>,
+}
+
+impl NodeProbe {
+    /// A probe that got no answer at all (budget timeout).
+    fn failed() -> Self {
+        Self {
+            inventory: None,
+            healthy: false,
+            outcomes: Vec::new(),
+        }
+    }
+}
+
 /// Probe one open HID++ node (channel reused across ticks by the caller).
-/// Returns its inventory (if any) plus each device's cache contribution this
-/// tick, for the caller to apply and to drive eviction.
 async fn probe_one(
     info: async_hid::DeviceInfo,
     channel: Arc<HidppChannel>,
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
-) -> Result<(Option<DeviceInventory>, Vec<CacheOutcome>), InventoryError> {
+) -> NodeProbe {
     match receiver::detect(Arc::clone(&channel)) {
         Some(Receiver::Bolt(bolt)) => probe_bolt_receiver(channel, info, bolt, cache, tick).await,
         Some(Receiver::Unifying(unifying)) => {
@@ -392,8 +440,7 @@ async fn probe_one(
             // (Bluetooth-direct, USB-C cable). HID++ at device-index 0xff
             // addresses the device's own features. Probe in case it answers.
             // P2.4 — verified path; no Bolt-pairing slot indirection needed.
-            let (inventory, outcome) = probe_direct(channel, &info, cache, tick).await;
-            Ok((inventory, vec![outcome]))
+            probe_direct(channel, &info, cache, tick).await
         }
     }
 }
@@ -404,7 +451,7 @@ async fn probe_bolt_receiver(
     bolt: BoltReceiver,
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
-) -> Result<(Option<DeviceInventory>, Vec<CacheOutcome>), InventoryError> {
+) -> NodeProbe {
     let unique_id = bolt.get_unique_id().await.ok();
     let pairing_count = bolt.count_pairings().await.ok();
     debug!(?pairing_count, "receiver reports pairing count");
@@ -434,9 +481,15 @@ async fn probe_bolt_receiver(
             "paired-device count mismatch — some slots may be unreadable"
         );
     }
+    // Authoritative only when the pairing-count register answered AND every
+    // counted slot was readable. `None` (the receiver didn't answer — e.g. a
+    // parked channel) or a shortfall is "couldn't fully check": the ledger
+    // then replays the last good snapshot instead of presenting the partial
+    // walk as the new truth (#218).
+    let complete = pairing_count.is_some_and(|count| paired.len() == usize::from(count));
 
-    Ok((
-        Some(DeviceInventory {
+    NodeProbe {
+        inventory: Some(DeviceInventory {
             receiver: ReceiverInfo {
                 name: "Logi Bolt Receiver".to_string(),
                 vendor_id: info.vendor_id,
@@ -445,8 +498,9 @@ async fn probe_bolt_receiver(
             },
             paired,
         }),
+        healthy: complete,
         outcomes,
-    ))
+    }
 }
 
 async fn probe_unifying_receiver(
@@ -455,7 +509,7 @@ async fn probe_unifying_receiver(
     unifying: UnifyingReceiver,
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
-) -> Result<(Option<DeviceInventory>, Vec<CacheOutcome>), InventoryError> {
+) -> NodeProbe {
     let unique_id = unifying.get_unique_id().await.ok();
     let pairing_count = unifying.count_pairings().await.ok();
     debug!(?pairing_count, "receiver reports pairing count");
@@ -468,7 +522,13 @@ async fn probe_unifying_receiver(
     // sub-register base than Bolt, so we don't yet poll offline paired slots.
     // Online devices are covered by the arrival drain; offline device support
     // requires resolving the correct sub-register format.
-    let connections = drain_device_arrival_unifying(&unifying).await;
+    //
+    // The drain is therefore the *only* device source on this path, so a
+    // failed arrival trigger is "couldn't check", not "no devices online":
+    // settle it as a failed probe and let the ledger replay the last snapshot.
+    let Some(connections) = drain_device_arrival_unifying(&unifying).await else {
+        return NodeProbe::failed();
+    };
     debug!(events = connections.len(), "drained device-arrival events");
 
     // Probe all online slots concurrently so a slow HID++ 2.0 feature walk on
@@ -505,9 +565,16 @@ async fn probe_unifying_receiver(
             "online devices differ from pairing count; offline devices not yet surfaced for Unifying"
         );
     }
+    // Unlike Bolt, a count/list shortfall is *expected* here (offline paired
+    // devices aren't enumerable yet), so completeness can't ride on it. The
+    // health signal is the pairing-count register answering at all: that
+    // proves the receiver round-trip worked this cycle, while `None` (e.g. a
+    // parked channel) is "couldn't fully check" — the ledger then replays the
+    // last good snapshot instead of presenting a possibly-empty list (#218).
+    let healthy = pairing_count.is_some();
 
-    Ok((
-        Some(DeviceInventory {
+    NodeProbe {
+        inventory: Some(DeviceInventory {
             receiver: ReceiverInfo {
                 name: "Unifying Receiver".to_string(),
                 vendor_id: info.vendor_id,
@@ -516,8 +583,9 @@ async fn probe_unifying_receiver(
             },
             paired,
         }),
+        healthy,
         outcomes,
-    ))
+    }
 }
 
 /// Probe a single Bolt pairing slot. Returns `None` when the slot is empty or
@@ -597,15 +665,17 @@ async fn probe_bolt_slot(
 /// themselves as a HID++ device rather than a receiver (P2.4).
 ///
 /// Addresses the device at index `0xff` (HID++'s "self" slot) and reads
-/// the same battery + model-info features the Bolt path uses. Returns
-/// `None` when the channel doesn't respond to HID++ at `0xff` (in which
-/// case it's neither a receiver nor a direct device we recognise).
+/// the same battery + model-info features the Bolt path uses. Yields no
+/// inventory when the channel doesn't respond to HID++ at `0xff` (in which
+/// case it's neither a receiver nor a direct device we recognise) — healthy
+/// only if that rejection rests on a completed feature walk, so a device
+/// that merely failed to answer is settled as a failed probe instead.
 async fn probe_direct(
     channel: Arc<HidppChannel>,
     info: &async_hid::DeviceInfo,
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
-) -> (Option<DeviceInventory>, CacheOutcome) {
+) -> NodeProbe {
     let id = CacheKey::Direct(info.id.clone());
     let cached = cache.get(&id);
     // A direct device is always "present" (its HID node is the candidate), so
@@ -622,6 +692,11 @@ async fn probe_direct(
     // at the receiver, which sits at index 0 and steals every DPI / SmartShift
     // write attempt. We reuse the capabilities the probe already derived from
     // the feature table — no extra round-trip.
+    // A completed feature-table walk is what makes this probe's verdict
+    // trustworthy: without it (the device never answered) a rejection below
+    // would be indistinguishable from a transient glitch, so the node is
+    // settled as a failed probe and its last inventory replayed.
+    let walk_succeeded = probe.capabilities.is_some();
     let caps = probe.capabilities.unwrap_or_default();
     let is_peripheral = probe.battery.is_some() || caps.buttons || caps.pointer || caps.lighting;
     if !is_peripheral {
@@ -634,7 +709,11 @@ async fn probe_direct(
         );
         // Don't cache or keep a rejected non-peripheral — `Unkeyed` lets any
         // prior entry for this node be evicted.
-        return (None, CacheOutcome::Unkeyed);
+        return NodeProbe {
+            inventory: None,
+            healthy: walk_succeeded,
+            outcomes: vec![CacheOutcome::Unkeyed],
+        };
     }
 
     // Without a Bolt receiver we don't have a wpid, codename, or pairing
@@ -662,7 +741,11 @@ async fn probe_direct(
             capabilities: probe.capabilities,
         }],
     };
-    (Some(inventory), outcome)
+    NodeProbe {
+        inventory: Some(inventory),
+        healthy: true,
+        outcomes: vec![outcome],
+    }
 }
 
 async fn drain_device_arrival(bolt: &BoltReceiver) -> Vec<BoltDeviceConnection> {
@@ -683,13 +766,17 @@ async fn drain_device_arrival(bolt: &BoltReceiver) -> Vec<BoltDeviceConnection> 
     out
 }
 
+/// `None` when the arrival trigger itself failed: unlike Bolt (whose paired
+/// list comes from the slot registers), the drain is the only Unifying device
+/// source, so the caller must treat that as a failed probe rather than an
+/// empty receiver.
 async fn drain_device_arrival_unifying(
     unifying: &UnifyingReceiver,
-) -> Vec<UnifyingDeviceConnection> {
+) -> Option<Vec<UnifyingDeviceConnection>> {
     let rx = unifying.listen();
     if let Err(e) = unifying.trigger_device_arrival().await {
         debug!(error = ?e, "trigger_device_arrival failed; receiver may report no devices");
-        return Vec::new();
+        return None;
     }
 
     let mut out = Vec::new();
@@ -700,7 +787,7 @@ async fn drain_device_arrival_unifying(
             Ok(Err(_)) | Err(_) => break,
         }
     }
-    out
+    Some(out)
 }
 
 /// Probe a Unifying slot from a live device-connection event.
@@ -932,111 +1019,13 @@ async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> (ProbedFeature
     )
 }
 
-fn normalize_serial_number(serial: &str) -> Option<String> {
-    let serial = serial.trim_matches('\0').trim().to_string();
-    (!serial.is_empty()).then_some(serial)
-}
-
-fn map_kind(k: BoltDeviceKind) -> DeviceKind {
-    match k {
-        BoltDeviceKind::Keyboard => DeviceKind::Keyboard,
-        BoltDeviceKind::Mouse => DeviceKind::Mouse,
-        BoltDeviceKind::Numpad => DeviceKind::Numpad,
-        BoltDeviceKind::Presenter => DeviceKind::Presenter,
-        BoltDeviceKind::Remote => DeviceKind::Remote,
-        BoltDeviceKind::Trackball => DeviceKind::Trackball,
-        BoltDeviceKind::Touchpad => DeviceKind::Touchpad,
-        BoltDeviceKind::Tablet => DeviceKind::Tablet,
-        BoltDeviceKind::Gamepad => DeviceKind::Gamepad,
-        BoltDeviceKind::Joystick => DeviceKind::Joystick,
-        BoltDeviceKind::Headset => DeviceKind::Headset,
-        _ => DeviceKind::Unknown,
-    }
-}
-
-fn map_unifying_kind(k: UnifyingDeviceKind) -> DeviceKind {
-    match k {
-        UnifyingDeviceKind::Keyboard => DeviceKind::Keyboard,
-        UnifyingDeviceKind::Mouse => DeviceKind::Mouse,
-        UnifyingDeviceKind::Numpad => DeviceKind::Numpad,
-        UnifyingDeviceKind::Presenter => DeviceKind::Presenter,
-        UnifyingDeviceKind::Remote => DeviceKind::Remote,
-        UnifyingDeviceKind::Trackball => DeviceKind::Trackball,
-        UnifyingDeviceKind::Touchpad => DeviceKind::Touchpad,
-        _ => DeviceKind::Unknown,
-    }
-}
-
-/// Map the HID++ `0x0005` marketing device type to our [`DeviceKind`]. Types we
-/// don't model (receiver, webcam, dock, …) fall back to [`DeviceKind::Unknown`].
-fn map_device_type(ty: HidppDeviceType) -> DeviceKind {
-    match ty {
-        HidppDeviceType::Keyboard => DeviceKind::Keyboard,
-        HidppDeviceType::Numpad => DeviceKind::Numpad,
-        HidppDeviceType::Mouse => DeviceKind::Mouse,
-        HidppDeviceType::Trackpad => DeviceKind::Touchpad,
-        HidppDeviceType::Trackball => DeviceKind::Trackball,
-        HidppDeviceType::Presenter => DeviceKind::Presenter,
-        HidppDeviceType::RemoteControl => DeviceKind::Remote,
-        HidppDeviceType::Headset => DeviceKind::Headset,
-        HidppDeviceType::Joystick => DeviceKind::Joystick,
-        HidppDeviceType::Gamepad => DeviceKind::Gamepad,
-        _ => DeviceKind::Unknown,
-    }
-}
-
-/// First step of the device-kind precedence chain:
-///
-/// > asset registry > **HID++ `0x0005`** > **Bolt pairing register**
-///
-/// This folds the two HID++ sources; the GUI applies the final asset-registry
-/// override in `effective_kind` (`crates/openlogi-gui/src/state/devices.rs`).
-/// Adding a kind source means slotting it into this one chain — and updating
-/// both docs.
-///
-/// `0x0005` is the device's self-reported marketing type and is authoritative;
-/// the Bolt pairing register is a coarser hint that can misreport (e.g. an
-/// MX Anywhere 3S surfacing as `Keyboard`, which strips its button/pointer tabs
-/// — issue #127). We therefore trust `probed` whenever it names a kind we model,
-/// falling back to `register` when the device was offline (no probe → `None`),
-/// didn't answer `0x0005`, or reported a type we don't map (`Unknown`). On the
-/// receiver-less direct path `register` is simply `Unknown`.
-fn resolve_device_kind(probed: Option<DeviceKind>, register: DeviceKind) -> DeviceKind {
-    match probed {
-        Some(kind) if kind != DeviceKind::Unknown => kind,
-        _ => register,
-    }
-}
-
-fn map_battery_level(level: HidppBatteryLevel) -> BatteryLevel {
-    match level {
-        HidppBatteryLevel::Critical => BatteryLevel::Critical,
-        HidppBatteryLevel::Low => BatteryLevel::Low,
-        HidppBatteryLevel::Good => BatteryLevel::Good,
-        HidppBatteryLevel::Full => BatteryLevel::Full,
-        _ => BatteryLevel::Unknown,
-    }
-}
-
-fn map_battery_status(status: HidppBatteryStatus) -> BatteryStatus {
-    match status {
-        HidppBatteryStatus::Discharging => BatteryStatus::Discharging,
-        HidppBatteryStatus::Charging => BatteryStatus::Charging,
-        HidppBatteryStatus::ChargingSlow => BatteryStatus::ChargingSlow,
-        HidppBatteryStatus::Full => BatteryStatus::Full,
-        HidppBatteryStatus::Error => BatteryStatus::Error,
-        _ => BatteryStatus::Unknown,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
     use super::{
-        CACHE_MISS_GRACE, CacheKey, Cached, DeviceKind, Enumerator, ProbedFeatures, REFRESH_TICKS,
-        UnifiedBatteryFeature, UnifyingDeviceKind, battery_feature_index, is_stale,
-        map_unifying_kind, resolve_device_kind,
+        CACHE_MISS_GRACE, CacheKey, Cached, Enumerator, ProbedFeatures, REFRESH_TICKS,
+        UnifiedBatteryFeature, battery_feature_index, is_stale,
     };
     use hidpp::feature::CreatableFeature as _;
 
@@ -1125,65 +1114,5 @@ mod tests {
     fn no_battery_feature_means_no_index() {
         assert_eq!(battery_feature_index([0x0001, 0x2201, 0x1b04]), None);
         assert_eq!(battery_feature_index([]), None);
-    }
-
-    #[test]
-    fn probe_overrides_a_misreporting_register() {
-        // The crux of #127: a Bolt register calling an MX Anywhere 3S a
-        // `Keyboard` must lose to the device's own `0x0005` = `Mouse`.
-        assert_eq!(
-            resolve_device_kind(Some(DeviceKind::Mouse), DeviceKind::Keyboard),
-            DeviceKind::Mouse
-        );
-    }
-
-    #[test]
-    fn probe_supplies_the_kind_on_the_direct_path() {
-        // No pairing register on the direct path (register = Unknown); the probe
-        // is what restores the button/pointer tabs for a BT-direct mouse.
-        assert_eq!(
-            resolve_device_kind(Some(DeviceKind::Mouse), DeviceKind::Unknown),
-            DeviceKind::Mouse
-        );
-    }
-
-    #[test]
-    fn register_is_the_fallback_when_the_probe_is_absent_or_unmodelled() {
-        // Offline device / no `0x0005` answer → trust the register.
-        assert_eq!(
-            resolve_device_kind(None, DeviceKind::Mouse),
-            DeviceKind::Mouse
-        );
-        // A `0x0005` type we don't model also defers to the register.
-        assert_eq!(
-            resolve_device_kind(Some(DeviceKind::Unknown), DeviceKind::Keyboard),
-            DeviceKind::Keyboard
-        );
-        // Nothing to go on → Unknown (direct path, no probe).
-        assert_eq!(
-            resolve_device_kind(None, DeviceKind::Unknown),
-            DeviceKind::Unknown
-        );
-    }
-
-    #[test]
-    fn unifying_kind_maps_all_variants() {
-        let cases = [
-            (UnifyingDeviceKind::Unknown, DeviceKind::Unknown),
-            (UnifyingDeviceKind::Keyboard, DeviceKind::Keyboard),
-            (UnifyingDeviceKind::Mouse, DeviceKind::Mouse),
-            (UnifyingDeviceKind::Numpad, DeviceKind::Numpad),
-            (UnifyingDeviceKind::Presenter, DeviceKind::Presenter),
-            (UnifyingDeviceKind::Remote, DeviceKind::Remote),
-            (UnifyingDeviceKind::Trackball, DeviceKind::Trackball),
-            (UnifyingDeviceKind::Touchpad, DeviceKind::Touchpad),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(
-                map_unifying_kind(input),
-                expected,
-                "kind {input:?} mapped incorrectly"
-            );
-        }
     }
 }

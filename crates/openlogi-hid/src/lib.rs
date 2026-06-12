@@ -6,6 +6,8 @@
 //! - [`enumerate`] — one-shot inventory of receivers + paired devices.
 //! - [`set_dpi`] — write a new sensor DPI to a connected device.
 
+mod mappings;
+mod node_ledger;
 mod route;
 mod transport;
 // Native Win32 HID report-write fallback, used by the Windows composite channel
