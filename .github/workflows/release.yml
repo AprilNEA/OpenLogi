@@ -593,6 +593,10 @@ jobs:
           mkdir -p dist
           ref_name="${GITHUB_REF_NAME:-dev}"
           ref_name="${ref_name//\//-}"
+          for pkg in target/release/*.tar.gz; do
+            [ -f "$pkg" ] || continue
+            cp "$pkg" "dist/openlogi-${ref_name}-linux-${PKG_ARCH}.tar.gz"
+          done
           for pkg in target/release/*.deb target/release/*.rpm; do
             [ -f "$pkg" ] || continue
             ext="${pkg##*.}"
@@ -671,7 +675,7 @@ jobs:
           # nothing instead of erroring on a literal pattern, so the DMGs are
           # hashed alone.
           shopt -s nullglob
-          sha256sum *.dmg *.exe *.msi *.deb *.rpm > SHA256SUMS
+          sha256sum *.dmg *.exe *.msi *.tar.gz *.deb *.rpm > SHA256SUMS
 
       # softprops' `files` can't list a glob that matches nothing without
       # tripping fail_on_unmatched_files, and the exe/msi sets vary per arch
@@ -747,11 +751,11 @@ jobs:
           # treatment as the DMGs: manual verification today, and the future
           # auto-updaters need the detached signatures to exist for every
           # shipped version.
-          # nullglob: the exe/msi/deb/rpm sets are best-effort per arch leg, so
+          # nullglob: the exe/msi/tar/deb/rpm sets are best-effort per arch leg, so
           # the globs may match nothing; the DMGs are guaranteed by the publish
           # gate.
           shopt -s nullglob
-          for artifact in dist/*.dmg dist/*.exe dist/*.msi dist/*.deb dist/*.rpm; do
+          for artifact in dist/*.dmg dist/*.exe dist/*.msi dist/*.tar.gz dist/*.deb dist/*.rpm; do
             minisign -S -m "$artifact" -s "$key_file" -x "$artifact.minisig" -W
             minisign -V -m "$artifact" -P "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" -x "$artifact.minisig"
           done
@@ -814,6 +818,7 @@ jobs:
           body_path: .release/RELEASE_NOTES.md
           files: |
             dist/*.dmg
+            dist/*.tar.gz
             dist/*.deb
             dist/*.rpm
             dist/*.minisig
