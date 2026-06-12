@@ -22,6 +22,8 @@ use openlogi_core::device::{
 use openlogi_hid::DeviceRoute;
 use tracing::info;
 
+use openlogi_agent_core::ipc::InventoryHealth;
+
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::asset::AssetResolver;
 use crate::components::carousel::Carousel;
@@ -29,7 +31,7 @@ use crate::components::dpi_panel::DpiPanel;
 use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::mouse_model::view::MouseModelView;
-use crate::state::{AppState, DeviceRecord};
+use crate::state::{AgentLink, AppState, DeviceRecord};
 use crate::theme::{self, FOOTER_H, HEADER_H, Palette};
 
 /// Which screen the root view is showing.
@@ -346,30 +348,55 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
 
+        // Every frame — including the pre-connection and error frames — hangs
+        // off this root, so the window actions (⌘W / ⌘M / zoom) work from the
+        // first frame on, not only once the full UI is up.
+        let root = v_flex()
+            .size_full()
+            .bg(pal.bg)
+            .text_color(pal.text_primary)
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &Minimize, window, _| window.minimize_window())
+            .on_action(|_: &Zoom, window, _| window.zoom_window());
+
         // The agent is the source of truth for both the permission state and
-        // the device list, and neither is known until its first IPC snapshot
-        // lands. Hold a neutral connecting frame until then: rendering the
-        // permission gate (and then the empty state) off the assumed-denied
-        // defaults flashed both screens at every already-set-up user on
-        // launch. A missing global gets the same neutral frame — it's equally
-        // "nothing is known yet".
-        let Some(granted) = cx
+        // the device list; `AgentLink` is everything the GUI knows about it.
+        // Until the first snapshot lands, hold a neutral connecting frame:
+        // rendering the permission gate (and then the empty state) off
+        // assumed-denied defaults flashed both screens at every already-set-up
+        // user on launch. A missing global reads the same way — "nothing is
+        // known yet".
+        let link = cx
             .try_global::<AppState>()
-            .and_then(|s| s.accessibility_granted)
-        else {
-            window.set_window_title("OpenLogi");
-            return connecting_view(pal);
+            .map_or(AgentLink::Connecting, |s| s.agent_link().clone());
+        let status = match link {
+            AgentLink::Connecting => {
+                window.set_window_title("OpenLogi");
+                return root.child(connecting_body(pal)).into_any_element();
+            }
+            AgentLink::Unreachable => {
+                window.set_window_title("OpenLogi");
+                return root.child(unreachable_body(pal)).into_any_element();
+            }
+            AgentLink::OutdatedGui => {
+                window.set_window_title("OpenLogi");
+                return root.child(outdated_gui_body(pal)).into_any_element();
+            }
+            AgentLink::Ready(status) => status,
         };
+
+        let granted = status.accessibility_granted;
         if !granted && !self.accessibility_dismissed {
             window.set_window_title("OpenLogi");
-            return Self::accessibility_gate(pal, cx);
+            return root
+                .child(Self::accessibility_gate(pal, cx))
+                .into_any_element();
         }
         Self::ensure_glow(cx);
 
         let has_device = cx
             .try_global::<AppState>()
             .is_some_and(|s| !s.device_list.is_empty());
-        let scanning = cx.try_global::<AppState>().is_some_and(|s| s.scanning);
 
         // Resolve the route. A detail route lives only while its device is
         // still the live selection; if a hot-plug dropped or reordered it (or
@@ -427,22 +454,17 @@ impl Render for AppView {
                 home_header(pal).into_any_element(),
                 if has_device {
                     device_gallery(cx).into_any_element()
-                } else if scanning {
-                    device_scanning_state(pal)
                 } else {
-                    device_empty_state(pal)
+                    match status.inventory {
+                        InventoryHealth::Scanning => device_scanning_state(pal),
+                        InventoryHealth::Unavailable => scanning_unavailable_state(pal),
+                        InventoryHealth::Ready => device_empty_state(pal),
+                    }
                 },
             )
         };
 
-        v_flex()
-            .size_full()
-            .bg(pal.bg)
-            .text_color(pal.text_primary)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
-            .child(header_el)
+        root.child(header_el)
             .child(content_el)
             .child(footer(pal, granted))
             .into_any_element()
@@ -1281,8 +1303,11 @@ fn file_url(path: &std::path::Path) -> String {
 /// Centered spinner over a muted one-line caption — the quiet "still working"
 /// body shared by the pre-connection frame and the scanning state, so the two
 /// loading phases render as one continuous frame with only the caption
-/// changing. The spinner's repeating animation only runs while a loading view
-/// is mounted, so it can't pin the render loop once the real UI replaces it.
+/// changing. The spinner's repeating animation re-renders the window every
+/// frame while mounted, which is fine *because* both loading states are
+/// bounded: the connecting frame downgrades to the static
+/// [`unreachable_body`] when no snapshot arrives, and the scanning state ends
+/// with the agent reporting `Ready` or `Unavailable`.
 fn loading_body(caption: SharedString, pal: Palette) -> Div {
     v_flex()
         .items_center()
@@ -1292,30 +1317,119 @@ fn loading_body(caption: SharedString, pal: Palette) -> Div {
         .child(div().text_sm().text_color(pal.text_muted).child(caption))
 }
 
+/// Static centered notice — icon, headline, muted caption — for the
+/// connection-problem frames. Unlike [`loading_body`] there is deliberately
+/// no animation: these frames can stay up indefinitely, and an infinite
+/// animation would pin the render loop for as long as they do (the same
+/// reasoning as the status dot's fixed glow).
+fn notice_body(headline: SharedString, caption: SharedString, pal: Palette) -> Div {
+    v_flex()
+        .items_center()
+        .justify_center()
+        .gap_4()
+        .p_8()
+        .child(
+            Icon::new(IconName::TriangleAlert)
+                .size_8()
+                .text_color(rgb(theme::STATUS_CONNECTING)),
+        )
+        .child(
+            div()
+                .text_xl()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(headline),
+        )
+        .child(
+            div()
+                .max_w(px(440.))
+                .text_sm()
+                .text_center()
+                .text_color(pal.text_muted)
+                .child(caption),
+        )
+}
+
 /// Whole-window placeholder shown from window-open until the agent's first
-/// IPC snapshot lands — normally a fraction of a second, or for as long as the
-/// agent is genuinely unreachable (crashed / not yet spawned), where "still
-/// connecting" is the only true statement. Deliberately neutral: no chrome, no
-/// claims about permissions or devices.
-fn connecting_view(pal: Palette) -> AnyElement {
+/// IPC snapshot lands — normally a fraction of a second. Deliberately
+/// neutral: no chrome, no claims about permissions or devices. If the agent
+/// stays unreachable, the IPC client downgrades the link and
+/// [`unreachable_body`] replaces this frame.
+fn connecting_body(pal: Palette) -> AnyElement {
     loading_body(tr!("Connecting to the background service…"), pal)
         .size_full()
-        .bg(pal.bg)
-        .text_color(pal.text_primary)
         .into_any_element()
+}
+
+/// Whole-window frame once the agent has been unreachable well past startup:
+/// the spinner would be a lie at this point. Polling (and the spawn retry)
+/// keeps running underneath, and the first snapshot swaps the real UI back in.
+fn unreachable_body(pal: Palette) -> AnyElement {
+    notice_body(
+        tr!("Can't reach the background service"),
+        tr!("OpenLogi keeps retrying — if this persists, try reinstalling the app."),
+        pal,
+    )
+    .size_full()
+    .into_any_element()
+}
+
+/// Whole-window frame when the *agent* answered with a newer IPC protocol
+/// than this process speaks: the app bundle was updated while this window
+/// stayed open, and only a relaunch loads the new GUI. Without this frame the
+/// window would keep showing live-looking but frozen state.
+fn outdated_gui_body(pal: Palette) -> AnyElement {
+    notice_body(
+        tr!("OpenLogi was updated"),
+        tr!("This window is from the previous version — relaunch to finish the update."),
+        pal,
+    )
+    .size_full()
+    .child(
+        div()
+            .id("relaunch-gui")
+            .mt_1()
+            .px_4()
+            .py_2()
+            .rounded_md()
+            .bg(rgb(theme::ACCENT_BLUE))
+            .text_color(rgb(0x00ff_ffff))
+            .font_weight(FontWeight::MEDIUM)
+            .cursor_pointer()
+            .child(tr!("Relaunch OpenLogi"))
+            .on_click(|_, _, cx| cx.restart()),
+    )
+    .into_any_element()
 }
 
 /// Home body while the agent's first enumeration is still in flight: the
 /// device set is *unknown*, not empty, so this keeps the quiet loading frame
 /// rather than flashing the add-device empty state (icon, headline, CTA) at a
-/// user whose devices are about to appear. Swaps to the gallery or to
-/// [`device_empty_state`] the moment the agent reports a completed scan.
+/// user whose devices are about to appear. Swaps to the gallery, to
+/// [`device_empty_state`], or to [`scanning_unavailable_state`] the moment
+/// the agent reports where its enumeration landed.
 fn device_scanning_state(pal: Palette) -> AnyElement {
     loading_body(tr!("Scanning for devices…"), pal)
         .flex_1()
         .w_full()
         .min_h_0()
         .into_any_element()
+}
+
+/// Home body when the agent reports enumeration as broken
+/// ([`InventoryHealth::Unavailable`]): scanning never completed and won't
+/// just by waiting, so showing a spinner (or claiming "no devices") would
+/// both be wrong. The agent keeps retrying and a recovery flows back in as a
+/// regular snapshot.
+fn scanning_unavailable_state(pal: Palette) -> AnyElement {
+    notice_body(
+        tr!("Device scanning is unavailable"),
+        tr!("The background service couldn't scan for devices — check its log for details."),
+        pal,
+    )
+    .flex_1()
+    .w_full()
+    .min_h_0()
+    .into_any_element()
 }
 
 /// Body shown when the agent has completed an enumeration and found no

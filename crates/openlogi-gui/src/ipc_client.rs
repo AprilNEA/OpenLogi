@@ -1,19 +1,27 @@
 //! Client side of the agent IPC.
 //!
 //! The agent owns all device I/O, so the GUI never opens a device — it connects
-//! to the agent's Unix socket and (a) polls inventory + status on a timer to
+//! to the agent's Unix socket and (a) polls status + inventory on a timer to
 //! drive the device list and the Accessibility gate, and (b) forwards "apply
 //! now" / "read" device commands. Both run on one dedicated OS thread with a
 //! tokio runtime (the GPUI thread owns no async runtime), mirroring the old
 //! watcher pattern: results cross back over `mpsc` to the GPUI loop.
 //!
-//! The single client connection is re-established automatically if the agent
-//! restarts (launchd `KeepAlive`), so the GUI recovers without user action.
+//! The single client connection is re-established by this loop itself: polling
+//! runs at [`STARTUP_POLL_PERIOD`] until the agent's first completed
+//! enumeration and again after any disconnect (an agent self-exec on update, a
+//! crash), and [`spawn_agent`] relaunches the binary when the socket stays
+//! down — there is no launchd dependency here (`KeepAlive` only acts when the
+//! agent *exits*, and autostart may be off entirely). When the agent stays
+//! unreachable or answers with a newer protocol, that is pushed to the GUI as
+//! a [`GuiUpdate`] so the window can say so instead of spinning forever.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use openlogi_agent_core::ipc::{AgentClient, AgentStatus, PROTOCOL_VERSION, PairingUpdate};
+use openlogi_agent_core::ipc::{
+    AgentClient, AgentStatus, InventoryHealth, PROTOCOL_VERSION, PairingUpdate,
+};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
@@ -30,14 +38,35 @@ use tracing::{debug, info, warn};
 const SPAWN_RETRY_PERIOD: Duration = Duration::from_secs(30);
 
 /// Poll cadence until the agent reports its first completed enumeration
-/// (`AgentStatus::inventory_ready`). The steady `poll_period` is tuned for
-/// quiet background refresh; at startup it would leave the window on its
-/// loading frame for up to a full period *after* the agent already knows the
-/// devices. A status+inventory round every 250 ms is noise for the agent and
-/// gets the gallery up moments after enumeration lands.
+/// ([`InventoryHealth::Ready`]). The steady `poll_period` is tuned for quiet
+/// background refresh; at startup it would leave the window on its loading
+/// frame for up to a full period *after* the agent already knows the devices.
+/// A status+inventory round every 250 ms is noise for the agent and gets the
+/// gallery up moments after enumeration lands.
 const STARTUP_POLL_PERIOD: Duration = Duration::from_millis(250);
 
-/// A poll snapshot pushed to the GPUI loop every `poll_period`.
+/// How long the fast phase may run without readiness before falling back to
+/// the steady cadence (agent start plus a worst-case first enumeration is
+/// ~6 s) — an agent that never becomes ready must not hold the loop at 4 Hz
+/// for the GUI's lifetime. Doubles as the threshold after which a snapshot-
+/// less connection is reported to the GUI as [`GuiUpdate::Unreachable`].
+const FAST_PHASE_MAX: Duration = Duration::from_secs(15);
+
+/// What the client thread tells the GPUI loop.
+pub enum GuiUpdate {
+    /// A delivered status + inventory snapshot.
+    Snapshot(PollUpdate),
+    /// No snapshot for [`FAST_PHASE_MAX`] while disconnected: the agent is
+    /// genuinely unreachable (not just starting up). Sent once per outage;
+    /// the next snapshot supersedes it.
+    Unreachable,
+    /// The agent answered the handshake with a *newer* protocol — the app was
+    /// updated on disk while this GUI kept running, and only a relaunch
+    /// helps. Sent once per episode.
+    OutdatedGui,
+}
+
+/// A poll snapshot pushed to the GPUI loop on every successful poll round.
 pub struct PollUpdate {
     pub inventory: Vec<DeviceInventory>,
     pub status: AgentStatus,
@@ -68,11 +97,11 @@ pub enum Command {
     CancelPairing,
 }
 
-/// Handle the GUI holds to talk to the agent: a stream of poll snapshots, a
+/// Handle the GUI holds to talk to the agent: a stream of poll updates, a
 /// sender for device commands, and a stream of pairing events (long-polled on a
 /// separate connection so a held pairing poll never stalls inventory).
 pub struct IpcClient {
-    pub updates: mpsc::UnboundedReceiver<PollUpdate>,
+    pub updates: mpsc::UnboundedReceiver<GuiUpdate>,
     pub commands: mpsc::UnboundedSender<Command>,
     pub pairing: mpsc::UnboundedReceiver<PairingUpdate>,
 }
@@ -99,65 +128,10 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
                 }
             };
             rt.block_on(async move {
-                // Pairing events stream on their own connection + long-poll so a
-                // held next_pairing never delays the 2s inventory/status poll.
+                // Pairing events stream on their own connection + long-poll so
+                // a held next_pairing never delays the status/inventory poll.
                 tokio::spawn(pairing_poll(pairing_tx));
-
-                let mut client: Option<AgentClient> = None;
-                // The agent is normally started by launchd, but the GUI launches
-                // it if the socket is down — invaluable in dev (one `cargo run` of
-                // the GUI brings the whole system up) and a prod fallback. Retry
-                // while the socket stays down, but rate-limited (see
-                // SPAWN_RETRY_PERIOD) so a missing / failing binary can't become a
-                // tight respawn loop, while a crashed / quit agent is still
-                // recovered without restarting the GUI.
-                let mut last_spawn_attempt: Option<Instant> = None;
-                // Fast cadence until the agent's first completed enumeration
-                // reaches the GUI, then drop to the steady period; back to
-                // fast whenever the connection is lost, so an agent restart
-                // (binary-update exec, crash) re-converges just as quickly.
-                let mut interval = tokio::time::interval(STARTUP_POLL_PERIOD);
-                let mut steady = false;
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {
-                            match poll(&mut client, &update_tx).await {
-                                Ok(Some(true)) if !steady => {
-                                    steady = true;
-                                    // `interval_at`: a fresh `interval` ticks
-                                    // immediately, which would fire a redundant
-                                    // back-to-back poll right after the one
-                                    // that just confirmed readiness.
-                                    interval = tokio::time::interval_at(
-                                        tokio::time::Instant::now() + poll_period,
-                                        poll_period,
-                                    );
-                                }
-                                Ok(_) => {}
-                                Err(()) => {
-                                    client = None; // drop a dead connection; reconnect next tick
-                                    if steady {
-                                        steady = false;
-                                        interval = tokio::time::interval(STARTUP_POLL_PERIOD);
-                                    }
-                                }
-                            }
-                            if client.is_none()
-                                && last_spawn_attempt
-                                    .is_none_or(|t| t.elapsed() >= SPAWN_RETRY_PERIOD)
-                            {
-                                spawn_agent();
-                                last_spawn_attempt = Some(Instant::now());
-                            }
-                        }
-                        cmd = cmd_rx.recv() => {
-                            let Some(cmd) = cmd else { break }; // GUI dropped the sender → shut down
-                            if handle(&mut client, cmd).await.is_err() {
-                                client = None;
-                            }
-                        }
-                    }
-                }
+                poll_loop(poll_period, &update_tx, &mut cmd_rx).await;
             });
         });
     if let Err(e) = spawn_result {
@@ -171,17 +145,317 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
     }
 }
 
+/// The poll/command select loop. Cadence policy lives in [`pacing::Pacing`];
+/// this function maps its decisions onto the tokio interval and owns the
+/// connection, the spawn retry, and the once-per-episode GUI notices.
+async fn poll_loop(
+    poll_period: Duration,
+    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
+    cmd_rx: &mut mpsc::UnboundedReceiver<Command>,
+) {
+    let mut client: Option<AgentClient> = None;
+    // The agent is normally started by launchd, but the GUI launches it if the
+    // socket is down — invaluable in dev (one `cargo run` of the GUI brings
+    // the whole system up) and a prod fallback. Retry while the socket stays
+    // down, but rate-limited (see SPAWN_RETRY_PERIOD) so a missing / failing
+    // binary can't become a tight respawn loop.
+    let mut last_spawn_attempt: Option<Instant> = None;
+    let started = Instant::now();
+    let mut last_delivery: Option<Instant> = None;
+    let mut notified_unreachable = false;
+    let mut notified_outdated = false;
+    let mut pacing = pacing::Pacing::new(poll_period, FAST_PHASE_MAX, started);
+    let mut interval = ticker(None, STARTUP_POLL_PERIOD);
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let now = Instant::now();
+                // Skip the spawn gate on the tick that *detected* a drop: an
+                // agent self-exec rebinds the socket within a tick, and
+                // spawning a duplicate right away would race it for the
+                // singleton lock (and could knock the launchd-tracked copy
+                // out of supervision via a clean duplicate-exit).
+                let mut just_disconnected = false;
+                let cadence = match poll(&mut client, update_tx).await {
+                    Ok(PollOutcome::Delivered { ready }) => {
+                        last_delivery = Some(now);
+                        notified_unreachable = false;
+                        notified_outdated = false;
+                        pacing.on_delivered(ready, now)
+                    }
+                    Ok(PollOutcome::NoAgent) => pacing.on_unreachable(now),
+                    Ok(PollOutcome::NewerAgent) => {
+                        if !notified_outdated {
+                            notified_outdated = true;
+                            let _ = update_tx.send(GuiUpdate::OutdatedGui);
+                        }
+                        pacing.on_newer_agent(now)
+                    }
+                    Err(()) => {
+                        client = None; // drop the dead connection; reconnect next tick
+                        just_disconnected = true;
+                        pacing.on_disconnect(now)
+                    }
+                };
+                if let Some(cadence) = cadence {
+                    interval = apply_cadence(cadence, &pacing);
+                }
+                if client.is_none()
+                    && !notified_unreachable
+                    && now.duration_since(last_delivery.unwrap_or(started)) >= FAST_PHASE_MAX
+                {
+                    notified_unreachable = true;
+                    let _ = update_tx.send(GuiUpdate::Unreachable);
+                }
+                if client.is_none()
+                    && !just_disconnected
+                    && last_spawn_attempt.is_none_or(|t| t.elapsed() >= SPAWN_RETRY_PERIOD)
+                {
+                    spawn_agent();
+                    last_spawn_attempt = Some(Instant::now());
+                }
+            }
+            cmd = cmd_rx.recv() => {
+                let Some(cmd) = cmd else { break }; // GUI dropped the sender → shut down
+                if handle(&mut client, cmd).await.is_err() {
+                    // Same as a poll-detected drop: back to the fast cadence
+                    // so the reconnect (agent self-exec, crash) re-converges
+                    // just as quickly as at startup.
+                    client = None;
+                    if let Some(cadence) = pacing.on_disconnect(Instant::now()) {
+                        interval = apply_cadence(cadence, &pacing);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Build the interval for a cadence decision. The fast interval ticks
+/// immediately — after a disconnect that means one instant reconnect probe,
+/// which is deliberate. The steady interval starts a full period out: the
+/// poll that triggered the switch already ran, and a fresh `interval` would
+/// fire a redundant back-to-back poll.
+fn apply_cadence(cadence: pacing::Cadence, pacing: &pacing::Pacing) -> tokio::time::Interval {
+    match cadence {
+        pacing::Cadence::Fast => ticker(None, STARTUP_POLL_PERIOD),
+        pacing::Cadence::Steady => ticker(Some(pacing.steady_period()), pacing.steady_period()),
+    }
+}
+
+/// A tokio interval that *delays* missed ticks instead of bursting them: a
+/// stalled poll (the RPC deadline is ~10 s) would otherwise accrue dozens of
+/// 250 ms ticks and replay them back-to-back once it returns.
+fn ticker(first_in: Option<Duration>, period: Duration) -> tokio::time::Interval {
+    let mut interval = match first_in {
+        Some(delay) => tokio::time::interval_at(tokio::time::Instant::now() + delay, period),
+        None => tokio::time::interval(period),
+    };
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
+}
+
+/// Poll-cadence policy: fast until the agent's first completed enumeration,
+/// steady afterwards; fast again on every disconnect; and a cap so the states
+/// where fast polling buys nothing (an agent that never becomes ready, a
+/// protocol mismatch) fall back to steady instead of running at 4 Hz forever.
+///
+/// Pure bookkeeping — the caller maps [`Cadence`] switches onto its timer —
+/// so the transitions are unit-testable.
+mod pacing {
+    use std::time::{Duration, Instant};
+
+    /// Which poll period the loop should run on.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Cadence {
+        /// `STARTUP_POLL_PERIOD` — converging on a fresh agent.
+        Fast,
+        /// The configured steady `poll_period`.
+        Steady,
+    }
+
+    pub struct Pacing {
+        steady_period: Duration,
+        fast_cap: Duration,
+        mode: Cadence,
+        /// When the current fast phase began (valid while `mode == Fast`).
+        fast_since: Instant,
+        /// The fast phase expired without readiness. Cleared by readiness, a
+        /// disconnect, or the first delivery after an outage — each starts a
+        /// genuinely new episode that deserves a fresh fast phase.
+        capped: bool,
+        /// Whether the previous tick delivered a snapshot, so the first
+        /// delivery after an outage is recognizable.
+        was_delivering: bool,
+    }
+
+    impl Pacing {
+        pub fn new(steady_period: Duration, fast_cap: Duration, now: Instant) -> Self {
+            Self {
+                steady_period,
+                fast_cap,
+                mode: Cadence::Fast,
+                fast_since: now,
+                capped: false,
+                was_delivering: false,
+            }
+        }
+
+        pub fn steady_period(&self) -> Duration {
+            self.steady_period
+        }
+
+        /// A snapshot was delivered. Ready → steady; not ready → fast until
+        /// the cap, then steady.
+        pub fn on_delivered(&mut self, ready: bool, now: Instant) -> Option<Cadence> {
+            if !self.was_delivering {
+                // First delivery after an outage: a just-(re)started agent
+                // deserves a fresh fast phase regardless of how the outage
+                // episode ended.
+                self.capped = false;
+                self.fast_since = now;
+            }
+            self.was_delivering = true;
+            if ready {
+                self.capped = false;
+                return self.switch(Cadence::Steady, now);
+            }
+            if self.capped || self.expired(now) {
+                self.capped = true;
+                return self.switch(Cadence::Steady, now);
+            }
+            self.switch(Cadence::Fast, now)
+        }
+
+        /// No agent reachable this tick (and no live connection to lose).
+        pub fn on_unreachable(&mut self, now: Instant) -> Option<Cadence> {
+            self.was_delivering = false;
+            if self.capped || self.expired(now) {
+                self.capped = true;
+                return self.switch(Cadence::Steady, now);
+            }
+            None
+        }
+
+        /// A live connection dropped — re-converge fast, fresh phase.
+        pub fn on_disconnect(&mut self, now: Instant) -> Option<Cadence> {
+            self.was_delivering = false;
+            self.capped = false;
+            self.switch(Cadence::Fast, now)
+        }
+
+        /// The agent speaks a newer protocol: only a GUI relaunch resolves
+        /// it, so fast polling buys nothing.
+        pub fn on_newer_agent(&mut self, now: Instant) -> Option<Cadence> {
+            self.was_delivering = false;
+            self.capped = true;
+            self.switch(Cadence::Steady, now)
+        }
+
+        fn expired(&self, now: Instant) -> bool {
+            self.mode == Cadence::Fast && now.duration_since(self.fast_since) >= self.fast_cap
+        }
+
+        fn switch(&mut self, to: Cadence, now: Instant) -> Option<Cadence> {
+            if self.mode == to {
+                return None;
+            }
+            if to == Cadence::Fast {
+                self.fast_since = now;
+            }
+            self.mode = to;
+            Some(to)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{Cadence, Pacing};
+        use std::time::{Duration, Instant};
+
+        const STEADY: Duration = Duration::from_secs(2);
+        const CAP: Duration = Duration::from_secs(15);
+
+        fn pacing(now: Instant) -> Pacing {
+            Pacing::new(STEADY, CAP, now)
+        }
+
+        #[test]
+        fn readiness_settles_to_steady_and_disconnect_rearms_fast() {
+            let t0 = Instant::now();
+            let mut p = pacing(t0);
+            assert_eq!(p.on_delivered(false, t0), None); // already fast
+            assert_eq!(p.on_delivered(true, t0), Some(Cadence::Steady));
+            assert_eq!(p.on_delivered(true, t0 + STEADY), None);
+            assert_eq!(p.on_disconnect(t0 + STEADY * 2), Some(Cadence::Fast));
+        }
+
+        #[test]
+        fn never_ready_falls_back_to_steady_after_the_cap() {
+            let t0 = Instant::now();
+            let mut p = pacing(t0);
+            // The first delivery opens the fast phase; the cap counts from it.
+            assert_eq!(p.on_delivered(false, t0), None);
+            assert_eq!(p.on_delivered(false, t0 + CAP / 2), None);
+            assert_eq!(p.on_delivered(false, t0 + CAP), Some(Cadence::Steady));
+            // Capped: further not-ready deliveries stay steady.
+            assert_eq!(p.on_delivered(false, t0 + CAP + STEADY), None);
+            // …but readiness still lands (and stays steady).
+            assert_eq!(p.on_delivered(true, t0 + CAP + STEADY * 2), None);
+        }
+
+        #[test]
+        fn unreachable_episode_caps_and_a_new_agent_gets_a_fresh_fast_phase() {
+            let t0 = Instant::now();
+            let mut p = pacing(t0);
+            assert_eq!(p.on_unreachable(t0 + Duration::from_secs(1)), None);
+            assert_eq!(p.on_unreachable(t0 + CAP), Some(Cadence::Steady));
+            // An agent finally comes up, still scanning: fresh fast phase
+            // despite the cap from the outage episode.
+            assert_eq!(
+                p.on_delivered(false, t0 + CAP + STEADY),
+                Some(Cadence::Fast)
+            );
+            assert_eq!(
+                p.on_delivered(true, t0 + CAP + STEADY * 2),
+                Some(Cadence::Steady)
+            );
+        }
+
+        #[test]
+        fn newer_agent_goes_steady_immediately() {
+            let t0 = Instant::now();
+            let mut p = pacing(t0);
+            assert_eq!(p.on_newer_agent(t0), Some(Cadence::Steady));
+            assert_eq!(p.on_unreachable(t0 + STEADY), None); // stays steady
+        }
+    }
+}
+
 /// Long-poll the agent's pairing event stream on a dedicated connection, pushing
 /// each [`PairingUpdate`] to the GUI. Runs for the client's lifetime; when no
 /// session is active the agent returns `None` at its hold window and we re-poll.
 async fn pairing_poll(tx: mpsc::UnboundedSender<PairingUpdate>) {
     let mut client: Option<AgentClient> = None;
+    // Whether the last forwarded update was non-terminal, i.e. the Add Device
+    // window believes a session is live. The agent guarantees a terminal event
+    // for every session end — but that guarantee dies with the process (a
+    // self-exec on update, a crash), and the replacement agent knows nothing
+    // of the session. Synthesize the failure then, or the window would sit in
+    // "Searching…" until the user cancels by hand.
+    let mut session_active = false;
     loop {
-        match poll_pairing_once(&mut client, &tx).await {
+        match poll_pairing_once(&mut client, &tx, &mut session_active).await {
             Ok(true) => {}       // delivered an event / hold elapsed; keep polling
             Ok(false) => return, // GUI dropped the pairing receiver → stop
             Err(()) => {
                 client = None; // connection dropped (agent restart) — reconnect
+                if session_active {
+                    session_active = false;
+                    let _ = tx.send(PairingUpdate::Failed(
+                        tr!("The background service restarted — try pairing again.").to_string(),
+                    ));
+                }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
@@ -193,6 +467,7 @@ async fn pairing_poll(tx: mpsc::UnboundedSender<PairingUpdate>) {
 async fn poll_pairing_once(
     client: &mut Option<AgentClient>,
     tx: &mpsc::UnboundedSender<PairingUpdate>,
+    session_active: &mut bool,
 ) -> Result<bool, ()> {
     let Ok(client) = ensure(client).await else {
         tokio::time::sleep(Duration::from_secs(1)).await; // agent not up yet
@@ -203,7 +478,13 @@ async fn poll_pairing_once(
     let mut ctx = context::current();
     ctx.deadline = Instant::now() + Duration::from_secs(25);
     match client.next_pairing(ctx).await {
-        Ok(Some(update)) => Ok(tx.send(update).is_ok()),
+        Ok(Some(update)) => {
+            *session_active = !matches!(
+                update,
+                PairingUpdate::Paired { .. } | PairingUpdate::Failed(_)
+            );
+            Ok(tx.send(update).is_ok())
+        }
         Ok(None) => Ok(true),
         Err(_) => Err(()),
     }
@@ -228,80 +509,120 @@ fn spawn_agent() {
 }
 
 /// Resolve the agent executable relative to the running GUI: a sibling in the
-/// cargo target dir (dev), else the embedded `OpenLogiAgent.app` login-item
-/// helper (packaged build).
+/// cargo target dir (dev, and the flat Windows install layout), else the
+/// embedded `OpenLogiAgent.app` login-item helper (packaged macOS build).
 fn agent_binary_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    let sibling = dir.join("openlogi-agent");
+    // EXE_SUFFIX, or the Windows lookup misses `openlogi-agent.exe` and the
+    // spawn retry — the only thing that restarts an updated agent there, since
+    // Windows has no exec and the Run-key autostart only fires at login —
+    // silently never works.
+    let sibling = dir.join(format!("openlogi-agent{}", std::env::consts::EXE_SUFFIX));
     if sibling.exists() {
         return Some(sibling);
     }
     // Packaged: …/OpenLogi.app/Contents/MacOS/openlogi-gui → the helper at
     // …/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent
-    let helper = dir
-        .parent()?
-        .join("Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent");
-    helper.exists().then_some(helper)
+    #[cfg(target_os = "macos")]
+    {
+        let helper = dir
+            .parent()?
+            .join("Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent");
+        helper.exists().then_some(helper)
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
 }
 
-/// Ensure a live client, connecting on demand. `Err` means the agent is
-/// unreachable right now (it may be starting up / restarting).
-async fn ensure(client: &mut Option<AgentClient>) -> std::io::Result<&AgentClient> {
+/// Why [`ensure`] couldn't produce a usable client.
+enum ConnectFailure {
+    /// Socket down, handshake failed, or the agent is *older* than us — in
+    /// every case the fix is an agent (re)start, which the spawn retry and
+    /// the agent-side takeover drive; keep retrying.
+    Unreachable,
+    /// The agent is *newer* than us: this GUI process is the stale side and
+    /// only a relaunch helps. Surfaced to the user as [`GuiUpdate::OutdatedGui`].
+    NewerAgent,
+}
+
+/// Ensure a live client, connecting on demand.
+async fn ensure(client: &mut Option<AgentClient>) -> Result<&AgentClient, ConnectFailure> {
     if client.is_none() {
-        let stream = openlogi_agent_core::transport::connect().await?;
+        let stream = openlogi_agent_core::transport::connect()
+            .await
+            .map_err(|_| ConnectFailure::Unreachable)?;
         let transport = openlogi_agent_core::transport::wrap(stream);
         let fresh = AgentClient::new(client::Config::default(), transport).spawn();
-        // Protocol handshake before any real RPC. A freshly-updated GUI can
-        // briefly reach an old agent (launchd hasn't restarted it yet); the
-        // mismatched bincode layouts would otherwise surface only as opaque
-        // RpcErrors and a silently empty device list. Refuse the connection
-        // with a clear log instead and keep `client` None — the next tick
-        // retries, and the versions converge once the agent restarts.
+        // Protocol handshake before any real RPC: mismatched bincode layouts
+        // would otherwise surface only as opaque RpcErrors and a silently
+        // empty device list. Refuse the connection with a clear log instead
+        // and report the direction — who is stale decides who must restart.
         match fresh.protocol_version(context::current()).await {
             Ok(version) if version == PROTOCOL_VERSION => {
                 *client = Some(fresh);
                 debug!("connected to agent IPC socket");
             }
+            Ok(version) if version < PROTOCOL_VERSION => {
+                warn!(
+                    agent = version,
+                    gui = PROTOCOL_VERSION,
+                    "agent IPC protocol is older — waiting for the agent to be replaced"
+                );
+                return Err(ConnectFailure::Unreachable);
+            }
             Ok(version) => {
                 warn!(
                     agent = version,
                     gui = PROTOCOL_VERSION,
-                    "agent IPC protocol mismatch — waiting for the agent to update/restart"
+                    "agent IPC protocol is newer — this GUI needs a relaunch"
                 );
-                return Err(std::io::Error::other("IPC protocol version mismatch"));
+                return Err(ConnectFailure::NewerAgent);
             }
-            Err(e) => {
-                return Err(std::io::Error::other(format!(
-                    "protocol handshake failed: {e}"
-                )));
+            Err(_) => {
+                return Err(ConnectFailure::Unreachable);
             }
         }
     }
     // `client` is `Some` here (just set, or already was); the `None` arm is
     // unreachable but keeps this `expect`-free.
-    match client.as_ref() {
-        Some(client) => Ok(client),
-        None => Err(std::io::Error::other("IPC client unexpectedly absent")),
-    }
+    client.as_ref().ok_or(ConnectFailure::Unreachable)
 }
 
-/// Poll inventory + status and push a snapshot. `Ok(Some(inventory_ready))`
-/// when a snapshot was delivered — the caller uses the readiness to pick its
-/// poll cadence — `Ok(None)` when the agent isn't reachable yet, and `Err` on
-/// a dropped connection.
+/// One poll round's outcome, driving the cadence policy.
+enum PollOutcome {
+    /// A snapshot was pushed; `ready` is whether enumeration has completed.
+    Delivered { ready: bool },
+    /// The agent isn't reachable (or usable) yet; nothing was pushed.
+    NoAgent,
+    /// The agent speaks a newer protocol than this GUI.
+    NewerAgent,
+}
+
+/// Poll status + inventory and push a snapshot. `Err` means a live connection
+/// dropped (the caller reconnects fast); the no-agent cases come back as
+/// [`PollOutcome`] so the caller can tell them apart from a delivery.
 async fn poll(
     client: &mut Option<AgentClient>,
-    update_tx: &mpsc::UnboundedSender<PollUpdate>,
-) -> Result<Option<bool>, ()> {
-    let Ok(client) = ensure(client).await else {
-        return Ok(None); // agent not up yet; try again next tick (keep `client` None)
+    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
+) -> Result<PollOutcome, ()> {
+    let client = match ensure(client).await {
+        Ok(client) => client,
+        Err(ConnectFailure::Unreachable) => return Ok(PollOutcome::NoAgent),
+        Err(ConnectFailure::NewerAgent) => return Ok(PollOutcome::NewerAgent),
     };
-    let inventory = client.inventory(context::current()).await.map_err(|_| ())?;
+    // Status strictly before inventory: status carries the readiness the
+    // inventory is interpreted under. Fetched the other way around, the
+    // agent's first enumeration could land *between* the two RPCs and pair an
+    // empty pre-enumeration inventory with "ready" — exactly the "No devices"
+    // flash this poll exists to prevent. The inverse pairing (fresh inventory
+    // under a stale not-ready status) is benign: devices render regardless of
+    // the scanning state, and readiness lands next tick.
     let status = client.status(context::current()).await.map_err(|_| ())?;
-    let ready = status.inventory_ready;
-    let _ = update_tx.send(PollUpdate { inventory, status });
-    Ok(Some(ready))
+    let inventory = client.inventory(context::current()).await.map_err(|_| ())?;
+    let ready = status.inventory == InventoryHealth::Ready;
+    let _ = update_tx.send(GuiUpdate::Snapshot(PollUpdate { inventory, status }));
+    Ok(PollOutcome::Delivered { ready })
 }
 
 /// Run one device command. `Err` signals a dropped connection so the caller

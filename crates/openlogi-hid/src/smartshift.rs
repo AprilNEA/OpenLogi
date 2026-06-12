@@ -32,6 +32,11 @@ use serde::{Deserialize, Serialize};
 /// `Ratchet` = clicky / smartshift-off. The discriminant is the wire byte;
 /// reserved values (`0` / `3` / future) fail [`TryFrom`] and callers fall back
 /// to whatever they consider sane.
+///
+/// Also crosses the agent↔GUI IPC — where serde encodes the variant *index*
+/// (Free=0, Ratchet=1), not the `#[repr(u8)]` firmware discriminant — so
+/// variant order is wire format and changes require a `PROTOCOL_VERSION` bump
+/// (guarded by `openlogi-agent-core/tests/wire_format.rs`).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize,
 )]
@@ -58,6 +63,10 @@ impl SmartShiftMode {
 pub const AUTO_DISENGAGE_PERMANENT: u8 = 0xff;
 
 /// Snapshot returned from [`SmartShiftFeatureV0::get_status`].
+///
+/// Crosses the agent↔GUI IPC (`read_smartshift`), so field order is wire
+/// format — changes require a `PROTOCOL_VERSION` bump (guarded by
+/// `openlogi-agent-core/tests/wire_format.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmartShiftStatus {
     pub mode: SmartShiftMode,

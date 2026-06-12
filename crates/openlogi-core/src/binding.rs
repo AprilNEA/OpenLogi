@@ -970,7 +970,6 @@ impl Action {
         let cmd = CGEventFlags::CGEventFlagCommand;
         let shift = CGEventFlags::CGEventFlagShift;
         let ctrl = CGEventFlags::CGEventFlagControl;
-        let none = CGEventFlags::CGEventFlagNull;
 
         match self {
             // Suppressed input: captured but deliberately produces no event.
@@ -1021,14 +1020,15 @@ impl Action {
             // Screenshot = Cmd+Shift+3 (kVK_ANSI_3 = 0x14)
             Action::Screenshot => macos::post_key(0x14, cmd | shift),
             // ── Media ─────────────────────────────────────────────────────────
-            // NX_KEYTYPE_PLAY=16, NEXT=17, PREVIOUS=18 via NSSystemDefined stub.
-            Action::PlayPause => macos::post_media_key(0),
-            Action::NextTrack => macos::post_media_key(1),
-            Action::PrevTrack => macos::post_media_key(2),
-            // kVK_VolumeUp/Down/Mute = 0x48/0x49/0x4A (ADB codes)
-            Action::VolumeUp => macos::post_key(0x48, none),
-            Action::VolumeDown => macos::post_key(0x49, none),
-            Action::MuteVolume => macos::post_key(0x4A, none),
+            // Media/volume controls are NX system-defined keys, not ordinary
+            // keyboard virtual-key events. Posting kVK_Volume* through
+            // CGEventCreateKeyboardEvent is ignored by macOS' volume handler.
+            Action::PlayPause => macos::post_media_key(macos::NX_KEYTYPE_PLAY),
+            Action::NextTrack => macos::post_media_key(macos::NX_KEYTYPE_NEXT),
+            Action::PrevTrack => macos::post_media_key(macos::NX_KEYTYPE_PREVIOUS),
+            Action::VolumeUp => macos::post_media_key(macos::NX_KEYTYPE_SOUND_UP),
+            Action::VolumeDown => macos::post_media_key(macos::NX_KEYTYPE_SOUND_DOWN),
+            Action::MuteVolume => macos::post_media_key(macos::NX_KEYTYPE_MUTE),
             // ── DPI / SmartShift: handled at hook/HID layer ───────────────────
             Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::ToggleSmartShift => {
                 tracing::debug!(
@@ -1223,6 +1223,14 @@ mod macos {
 
     use crate::binding::Action;
 
+    // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
+    pub(super) const NX_KEYTYPE_SOUND_UP: i32 = 0;
+    pub(super) const NX_KEYTYPE_SOUND_DOWN: i32 = 1;
+    pub(super) const NX_KEYTYPE_MUTE: i32 = 7;
+    pub(super) const NX_KEYTYPE_PLAY: i32 = 16;
+    pub(super) const NX_KEYTYPE_NEXT: i32 = 17;
+    pub(super) const NX_KEYTYPE_PREVIOUS: i32 = 18;
+
     /// Post a mouse-down + mouse-up pair for `button` at the cursor's current
     /// location.
     ///
@@ -1279,25 +1287,48 @@ mod macos {
         up.post(CGEventTapLocation::HID);
     }
 
-    /// Post a media key event (Play/Pause, Next, Previous).
+    /// Post a media/system key event (play/pause, track navigation, volume).
     ///
-    /// `kind`: 0 = play/pause, 1 = next track, 2 = previous track.
-    ///
-    /// The proper implementation uses an `NSSystemDefined` event (type 14,
-    /// subtype 8) which requires AppKit bindings. Until those land this
-    /// function logs a debug trace so manual smoke tests can confirm the
-    /// correct execution path.
-    pub(super) fn post_media_key(kind: i32) {
-        // NX_KEYTYPE_PLAY=16, NX_KEYTYPE_NEXT=17, NX_KEYTYPE_PREVIOUS=18.
-        let nx_key: i64 = match kind {
-            0 => 16,
-            1 => 17,
-            _ => 18,
-        };
-        tracing::debug!(
-            nx_key,
-            "media key event: NSSystemDefined stub — full AppKit impl tracked in P1.x"
-        );
+    /// Runs on the hook/gesture dispatch threads, which have no run loop to
+    /// drain autorelease pools, and both `NSEvent` creation and the `CGEvent`
+    /// getter autorelease temporaries — so the exchange sits inside an
+    /// explicit `autoreleasepool`, same as the hook's `frontmost_bundle_id`.
+    pub(super) fn post_media_key(nx_key: i32) {
+        use objc2::rc::autoreleasepool;
+        use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+        use objc2_core_graphics::{CGEvent, CGEventTapLocation};
+        use objc2_foundation::NSPoint;
+
+        const NX_SUBTYPE_AUX_CONTROL_BUTTONS: i16 = 8;
+        const NX_KEY_DOWN: i32 = 0x0A;
+        const NX_KEY_UP: i32 = 0x0B;
+
+        autoreleasepool(|_| {
+            for (state, phase) in [(NX_KEY_DOWN, "down"), (NX_KEY_UP, "up")] {
+                // data1 layout for subtype 8: high word is NX_KEYTYPE_*, next byte
+                // is key state (0x0A down, 0x0B up), low bit is repeat (0 here).
+                let data1 = ((nx_key << 16) | (state << 8)) as isize;
+                let Some(ns_event) = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+                    NSEventType::SystemDefined,
+                    NSPoint::new(0.0, 0.0),
+                    NSEventModifierFlags::empty(),
+                    0.0,
+                    0,
+                    None,
+                    NX_SUBTYPE_AUX_CONTROL_BUTTONS,
+                    data1,
+                    0,
+                ) else {
+                    tracing::warn!(nx_key, phase, "NSEvent::otherEventWithType failed");
+                    return;
+                };
+                let Some(cg_event) = ns_event.CGEvent() else {
+                    tracing::warn!(nx_key, phase, "NSEvent::CGEvent failed");
+                    return;
+                };
+                CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&cg_event));
+            }
+        });
     }
 
     /// Post a synthetic scroll event for `action` (one of the `Scroll*` variants).

@@ -63,7 +63,8 @@ doc_markdown = "allow"
 [package.metadata.bundle]
 name = "OpenLogi"
 identifier = "org.openlogi.openlogi"
-version = "0.1.0"
+# No `version` override — cargo-bundle falls back to the crate version, which
+# is workspace-unified. A literal here goes stale the moment release-plz bumps.
 category = "public.app-category.utilities"
 short_description = "Lightweight local-first companion for Logitech HID++ peripherals."
 long_description = """\
