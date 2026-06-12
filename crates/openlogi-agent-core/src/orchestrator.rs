@@ -36,6 +36,10 @@ struct AgentDevice {
     slot: u8,
     serial: Option<String>,
     unit_id: [u8; 4],
+    /// Live link state from the inventory snapshot. An offline→online
+    /// transition is a reconnect — the device may have power-cycled, so its
+    /// volatile settings need re-applying (#189).
+    online: bool,
 }
 
 /// The shared runtime handed to the hook and the gesture watcher. Every field
@@ -74,6 +78,10 @@ pub struct Orchestrator {
     /// the distinction (as [`InventoryHealth`]) so the GUI can tell them
     /// apart.
     inventory: InventoryState,
+    /// Set after a system wake: devices may have power-cycled while their
+    /// set/route/online state looks identical across the sleep gap, so the
+    /// next refresh re-applies volatile settings to every online device.
+    reapply_all_next_refresh: bool,
     shared: SharedRuntime,
 }
 
@@ -111,6 +119,7 @@ impl Orchestrator {
             current: 0,
             current_app: None,
             inventory: InventoryState::Pending,
+            reapply_all_next_refresh: false,
             shared,
         };
         orch.rebuild();
@@ -188,36 +197,68 @@ impl Orchestrator {
         // a recovered backend upgrades `Unavailable` back to live data).
         self.inventory = InventoryState::Ready(inventories.to_vec());
         let devices = build_devices(inventories);
+        // Volatile settings (lighting colour, sensor DPI, SmartShift) live in
+        // device RAM and reset on a power cycle, so every reconnect shape
+        // re-applies the persisted values (#189): a first sighting, a replug
+        // (new route), a wake from device sleep (offline→online), or — via the
+        // flag — a system wake where none of those are observable.
+        let reapply_all = std::mem::take(&mut self.reapply_all_next_refresh);
+        for idx in reapply_targets(&self.devices, &devices, reapply_all) {
+            self.reapply_volatile_settings(&devices[idx]);
+        }
         let changed = devices.len() != self.devices.len()
             || devices
                 .iter()
                 .zip(&self.devices)
                 .any(|(a, b)| a.config_key != b.config_key || a.route != b.route);
         if !changed {
+            // Same set and routes — but keep the fresh `online` flags, or a
+            // device that woke this tick would read as a transition forever.
+            self.devices = devices;
             return;
-        }
-        // Re-apply saved lighting to any device that just arrived — a first
-        // sighting at startup or a replug (which drops then re-adds it). A
-        // keyboard forgets its colour across a power cycle, so without this a
-        // replug goes dark until the user re-picks the colour.
-        for dev in &devices {
-            if self
-                .devices
-                .iter()
-                .any(|prev| prev.config_key == dev.config_key)
-            {
-                continue;
-            }
-            let Some(route) = dev.route.clone() else {
-                continue;
-            };
-            if let Some(lighting) = self.config.lighting(&dev.config_key).filter(|l| l.enabled) {
-                crate::hardware::set_lighting_in_background(Some(route), &lighting);
-            }
         }
         self.devices = devices;
         self.current = pick_current(&self.devices, self.config.selected_device());
         self.rebuild();
+    }
+
+    /// Force a volatile-settings re-apply for every online device on the next
+    /// inventory refresh. Called on a detected system wake: the devices were
+    /// likely power-cycled during the sleep, but the first post-wake snapshot
+    /// can look identical to the last pre-sleep one (same set, same routes,
+    /// already online), so the per-device transition triggers never fire.
+    pub fn reapply_volatile_on_next_refresh(&mut self) {
+        self.reapply_all_next_refresh = true;
+    }
+
+    /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift)
+    /// to one device, fire-and-forget on background threads. Reuses the
+    /// capture session's channel when it already points at the device, like
+    /// every other hardware write.
+    fn reapply_volatile_settings(&self, dev: &AgentDevice) {
+        let Some(route) = dev.route.clone() else {
+            return;
+        };
+        let key = &dev.config_key;
+        if let Some(lighting) = self.config.lighting(key).filter(|l| l.enabled) {
+            crate::hardware::set_lighting_in_background(Some(route.clone()), &lighting);
+        }
+        if let Some(dpi) = self.config.dpi(key) {
+            crate::hardware::write_dpi_in_background(
+                Some(&self.shared.capture_channel),
+                Some(route.clone()),
+                dpi,
+            );
+        }
+        if let Some(smartshift) = self.config.smartshift(key) {
+            crate::hardware::write_smartshift_in_background(
+                Some(&self.shared.capture_channel),
+                Some(route),
+                smartshift.mode.into(),
+                smartshift.auto_disengage,
+                smartshift.tunable_torque,
+            );
+        }
     }
 
     /// The latest inventory snapshot (for the IPC `inventory()` poll). Empty
@@ -300,6 +341,7 @@ fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
                 slot: paired.slot,
                 serial: model.serial_number.clone(),
                 unit_id: model.unit_id,
+                online: paired.online,
             });
         }
     }
@@ -318,6 +360,28 @@ fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
             .then_with(|| a.config_key.cmp(&b.config_key))
     });
     devices
+}
+
+/// Indices into `next` of devices whose volatile settings need re-applying:
+/// newly-appeared keys, route changes (a replug re-enumerating under a new
+/// node), offline→online transitions (a reconnect after device sleep), or —
+/// after a system wake — every device. Offline devices are never targeted
+/// (the write would just time out); they re-apply on their own transition.
+fn reapply_targets(prev: &[AgentDevice], next: &[AgentDevice], reapply_all: bool) -> Vec<usize> {
+    next.iter()
+        .enumerate()
+        .filter(|(_, dev)| dev.online && dev.route.is_some())
+        .filter(|(_, dev)| {
+            if reapply_all {
+                return true;
+            }
+            match prev.iter().find(|p| p.config_key == dev.config_key) {
+                None => true,
+                Some(p) => p.route != dev.route || !p.online,
+            }
+        })
+        .map(|(idx, _)| idx)
+        .collect()
 }
 
 /// Index of the selected device: the one whose `config_key` matches the saved
@@ -342,8 +406,64 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{InventoryHealth, Orchestrator};
+    use super::{AgentDevice, InventoryHealth, Orchestrator, reapply_targets};
     use openlogi_core::config::Config;
+    use openlogi_hid::DeviceRoute;
+
+    fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
+        AgentDevice {
+            config_key: key.to_string(),
+            route: Some(DeviceRoute::Bolt {
+                receiver_uid: "AA00".to_string(),
+                slot,
+            }),
+            slot,
+            serial: None,
+            unit_id: [0; 4],
+            online,
+        }
+    }
+
+    #[test]
+    fn reapply_targets_new_arrivals_and_transitions() {
+        // First sighting of an online device → re-apply.
+        assert_eq!(reapply_targets(&[], &[dev("a", 1, true)], false), vec![0]);
+        // Steady state → nothing.
+        assert!(reapply_targets(&[dev("a", 1, true)], &[dev("a", 1, true)], false).is_empty());
+        // Replug under a new route (same key, new slot) → re-apply.
+        assert_eq!(
+            reapply_targets(&[dev("a", 1, true)], &[dev("a", 2, true)], false),
+            vec![0]
+        );
+        // Waking from device sleep (offline → online) → re-apply.
+        assert_eq!(
+            reapply_targets(&[dev("a", 1, false)], &[dev("a", 1, true)], false),
+            vec![0]
+        );
+        // Going to sleep (online → offline) → nothing.
+        assert!(reapply_targets(&[dev("a", 1, true)], &[dev("a", 1, false)], false).is_empty());
+    }
+
+    #[test]
+    fn reapply_targets_skip_offline_and_routeless_devices() {
+        // A paired-but-asleep new arrival waits for its online transition —
+        // writing now would only time out against a sleeping device.
+        assert!(reapply_targets(&[], &[dev("a", 1, false)], false).is_empty());
+        let routeless = AgentDevice {
+            route: None,
+            ..dev("b", 2, true)
+        };
+        assert!(reapply_targets(&[], &[routeless], false).is_empty());
+    }
+
+    #[test]
+    fn reapply_all_targets_every_online_device() {
+        let prev = [dev("a", 1, true), dev("b", 2, false)];
+        let next = [dev("a", 1, true), dev("b", 2, false)];
+        // The post-wake snapshot looks identical to the pre-sleep one; the
+        // flag still re-applies to the online device (and only that one).
+        assert_eq!(reapply_targets(&prev, &next, true), vec![0]);
+    }
 
     /// An *empty* snapshot still flips the health to `Ready`: the watcher only
     /// forwards completed enumerations, so "checked and found nothing" must not
