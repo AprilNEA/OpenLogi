@@ -7,9 +7,10 @@ use std::{
     error::Error,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -28,6 +29,9 @@ const MAX_REPORT_DESCRIPTOR_LENGTH: usize = 4096;
 /// This is the size of the buffer incoming reports are read into.
 /// As we only care about HID++ reports, this equals to [`LONG_REPORT_LENGTH`].
 const MAX_REPORT_LENGTH: usize = LONG_REPORT_LENGTH;
+
+/// Maximum time to wait for a HID++ response before giving up on the request.
+const SEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The ID of the HID report that is used to transmit short HID++ messages.
 pub const SHORT_REPORT_ID: u8 = 0x10;
@@ -245,6 +249,9 @@ pub struct HidppChannel {
     /// All sent messages that are waiting for a response.
     pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
 
+    /// The request ID assigned to the next pending message.
+    pending_message_id: AtomicU64,
+
     /// Registered listeners that will receive notifications about incoming
     /// messages.
     message_listeners: Arc<Mutex<HashMap<u32, MessageListener>>>,
@@ -275,6 +282,9 @@ impl Drop for HidppChannel {
 
 /// Represents a message that was sent and is waiting for a response.
 struct PendingMessage {
+    /// Unique ID used to remove this request if it times out.
+    id: u64,
+
     /// The predicate that has to match for an incoming message to be classified
     /// as the response.
     response_predicate: Box<dyn Fn(&HidppMessage) -> bool + Send>,
@@ -354,6 +364,7 @@ impl HidppChannel {
             rotate_software_id: AtomicBool::new(false),
             software_id: AtomicU8::new(0x01),
             pending_messages: pending_messages_rc,
+            pending_message_id: AtomicU64::new(1),
             message_listeners: message_listeners_rc,
             read_thread_close: Some(close_sender),
             read_thread_hdl: Some(read_thread_hdl),
@@ -434,11 +445,22 @@ impl HidppChannel {
     ///
     /// If no response is expected/required, use [`Self::send_and_forget`].
     ///
-    /// The future resolves to `Ok(None)` if no response was received.
+    /// The future resolves to [`ChannelError::NoResponse`] if no matching
+    /// response arrives before the request timeout elapses.
     pub async fn send(
         &self,
         msg: HidppMessage,
         response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
+    ) -> Result<HidppMessage, ChannelError> {
+        self.send_with_timeout(msg, response_predicate, SEND_RESPONSE_TIMEOUT)
+            .await
+    }
+
+    async fn send_with_timeout(
+        &self,
+        msg: HidppMessage,
+        response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
+        timeout: Duration,
     ) -> Result<HidppMessage, ChannelError> {
         let msg = self.normalize_outgoing(msg);
         if !self.supports_msg(&msg) {
@@ -446,6 +468,7 @@ impl HidppChannel {
         }
 
         let (sender, receiver) = oneshot::channel::<HidppMessage>();
+        let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
 
         {
             let mut pending = self.pending_messages.lock().unwrap();
@@ -459,14 +482,31 @@ impl HidppChannel {
             // is gone, so this prunes exactly the give-ups.
             pending.retain(|m| !m.sender.is_canceled());
             pending.push_back(PendingMessage {
+                id: pending_id,
                 response_predicate: Box::new(response_predicate),
                 sender,
             });
         }
 
-        self.send_and_forget(msg).await?;
+        if let Err(err) = self.send_and_forget(msg).await {
+            self.remove_pending_message(pending_id);
+            return Err(err);
+        }
 
-        receiver.await.map_err(|_| ChannelError::NoResponse)
+        select! {
+            response = receiver.fuse() => response.map_err(|_| ChannelError::NoResponse),
+            _ = futures_timer::Delay::new(timeout).fuse() => {
+                self.remove_pending_message(pending_id);
+                Err(ChannelError::NoResponse)
+            }
+        }
+    }
+
+    fn remove_pending_message(&self, id: u64) {
+        let mut pending = self.pending_messages.lock().unwrap();
+        if let Some(pos) = pending.iter().position(|msg| msg.id == id) {
+            pending.remove(pos);
+        }
     }
 
     /// Sends a HID++ message across the channel and does not wait for a
@@ -559,6 +599,11 @@ fn short_payload_as_long(payload: &[u8; SHORT_REPORT_LENGTH - 1]) -> [u8; LONG_R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io,
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn short_payload_widens_preserving_header_and_padding() {
@@ -568,5 +613,244 @@ mod tests {
         assert_eq!(&long[..short.len()], &short[..]); // header + payload copied verbatim
         assert!(long[short.len()..].iter().all(|&b| b == 0)); // remainder zero-padded
         assert_eq!(long.len(), LONG_REPORT_LENGTH - 1);
+    }
+
+    #[test]
+    fn send_returns_response_before_timeout() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+
+            let request = short_msg(0x10);
+            let response = short_msg(0x20);
+            handle.queue_response(response);
+
+            let actual = channel
+                .send_with_timeout(
+                    request,
+                    move |candidate| *candidate == response,
+                    Duration::from_secs(1),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(actual, response);
+            assert_eq!(handle.written_reports().len(), 1);
+            assert_pending_empty(&channel);
+        });
+    }
+
+    #[test]
+    fn send_times_out_and_removes_pending_message() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+            let request = short_msg(0x10);
+            let response = short_msg(0x20);
+
+            let started = Instant::now();
+            let err = channel
+                .send_with_timeout(
+                    request,
+                    move |candidate| *candidate == response,
+                    Duration::from_millis(25),
+                )
+                .await
+                .unwrap_err();
+
+            assert!(matches!(err, ChannelError::NoResponse));
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert_eq!(handle.written_reports().len(), 1);
+            assert_pending_empty(&channel);
+        });
+    }
+
+    #[test]
+    fn late_response_after_timeout_is_ignored() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let listener_events = Arc::clone(&events);
+            channel.add_msg_listener(move |msg, matched| {
+                listener_events.lock().unwrap().push((msg, matched));
+            });
+
+            let request = short_msg(0x10);
+            let late_response = short_msg(0x20);
+            let err = channel
+                .send_with_timeout(
+                    request,
+                    move |candidate| *candidate == late_response,
+                    Duration::from_millis(25),
+                )
+                .await
+                .unwrap_err();
+
+            assert!(matches!(err, ChannelError::NoResponse));
+            assert_pending_empty(&channel);
+
+            handle.send_incoming(late_response).await;
+            wait_for_event_count(&events, 1).await;
+            assert_eq!(events.lock().unwrap()[0], (late_response, false));
+            assert_pending_empty(&channel);
+
+            let later_request = short_msg(0x30);
+            let later_response = short_msg(0x40);
+            handle.queue_response(later_response);
+            let actual = channel
+                .send_with_timeout(
+                    later_request,
+                    move |candidate| *candidate == later_response,
+                    Duration::from_secs(1),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(actual, later_response);
+            wait_for_event_count(&events, 2).await;
+            assert_eq!(events.lock().unwrap()[1], (later_response, true));
+            assert_pending_empty(&channel);
+        });
+    }
+
+    #[test]
+    fn send_and_forget_writes_without_pending_message() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+
+            channel.send_and_forget(short_msg(0x10)).await.unwrap();
+
+            assert_eq!(handle.written_reports().len(), 1);
+            assert_pending_empty(&channel);
+        });
+    }
+
+    #[derive(Clone)]
+    struct MockRawHidHandle {
+        incoming_tx: async_channel::Sender<Vec<u8>>,
+        written_reports: Arc<Mutex<Vec<Vec<u8>>>>,
+        responses_on_write: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    }
+
+    impl MockRawHidHandle {
+        fn queue_response(&self, msg: HidppMessage) {
+            self.responses_on_write
+                .lock()
+                .unwrap()
+                .push_back(raw_report(msg));
+        }
+
+        async fn send_incoming(&self, msg: HidppMessage) {
+            self.incoming_tx.send(raw_report(msg)).await.unwrap();
+        }
+
+        fn written_reports(&self) -> Vec<Vec<u8>> {
+            self.written_reports.lock().unwrap().clone()
+        }
+    }
+
+    struct MockRawHidChannel {
+        incoming_tx: async_channel::Sender<Vec<u8>>,
+        incoming_rx: async_channel::Receiver<Vec<u8>>,
+        written_reports: Arc<Mutex<Vec<Vec<u8>>>>,
+        responses_on_write: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    }
+
+    impl MockRawHidChannel {
+        fn new() -> (Self, MockRawHidHandle) {
+            let (incoming_tx, incoming_rx) = async_channel::unbounded();
+            let written_reports = Arc::new(Mutex::new(Vec::new()));
+            let responses_on_write = Arc::new(Mutex::new(VecDeque::new()));
+
+            let handle = MockRawHidHandle {
+                incoming_tx: incoming_tx.clone(),
+                written_reports: Arc::clone(&written_reports),
+                responses_on_write: Arc::clone(&responses_on_write),
+            };
+
+            (
+                Self {
+                    incoming_tx,
+                    incoming_rx,
+                    written_reports,
+                    responses_on_write,
+                },
+                handle,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl RawHidChannel for MockRawHidChannel {
+        fn vendor_id(&self) -> u16 {
+            0x046d
+        }
+
+        fn product_id(&self) -> u16 {
+            0xc539
+        }
+
+        async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Sync + Send>> {
+            self.written_reports.lock().unwrap().push(src.to_vec());
+            let response = self.responses_on_write.lock().unwrap().pop_front();
+            if let Some(response) = response {
+                self.incoming_tx.send(response).await.unwrap();
+            }
+
+            Ok(src.len())
+        }
+
+        async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Sync + Send>> {
+            let report = self.incoming_rx.recv().await.map_err(|_| mock_error())?;
+            let len = report.len().min(buf.len());
+            buf[..len].copy_from_slice(&report[..len]);
+            Ok(len)
+        }
+
+        fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
+            Some((true, true))
+        }
+
+        async fn get_report_descriptor(
+            &self,
+            _buf: &mut [u8],
+        ) -> Result<usize, Box<dyn Error + Sync + Send>> {
+            unreachable!("mock declares HID++ support")
+        }
+    }
+
+    fn short_msg(marker: u8) -> HidppMessage {
+        HidppMessage::Short([0xff, marker, 0x10, marker, marker, marker])
+    }
+
+    fn raw_report(msg: HidppMessage) -> Vec<u8> {
+        let mut buf = [0u8; LONG_REPORT_LENGTH];
+        let len = msg.write_raw(&mut buf);
+        buf[..len].to_vec()
+    }
+
+    fn assert_pending_empty(channel: &HidppChannel) {
+        assert!(channel.pending_messages.lock().unwrap().is_empty());
+    }
+
+    async fn wait_for_event_count(events: &Arc<Mutex<Vec<(HidppMessage, bool)>>>, count: usize) {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(1) {
+            if events.lock().unwrap().len() >= count {
+                return;
+            }
+            futures_timer::Delay::new(Duration::from_millis(10)).await;
+        }
+
+        panic!("timed out waiting for {count} listener events");
+    }
+
+    fn mock_error() -> Box<dyn Error + Sync + Send> {
+        Box::new(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "mock channel closed",
+        ))
     }
 }
