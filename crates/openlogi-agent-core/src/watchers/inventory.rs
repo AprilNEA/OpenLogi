@@ -35,6 +35,53 @@ pub enum InventoryEvent {
     Unavailable,
 }
 
+/// The watcher's cross-tick memory, factored out of the poll loop so the
+/// tick → event decision is unit-testable without spawning the thread or
+/// touching real HID.
+#[derive(Default)]
+struct WatchState {
+    /// Set once any enumeration has completed. After that, a failed tick keeps
+    /// the last good snapshot forever instead of ever reporting `Unavailable`.
+    succeeded: bool,
+    /// Consecutive failures, counted only before the first success.
+    initial_failures: u8,
+}
+
+impl WatchState {
+    /// Decide what (if anything) a watch tick emits.
+    ///
+    /// - `Ok(snapshot)` — a completed enumeration (an empty one included: that's
+    ///   a genuine disconnect) — is forwarded so the agent's device set tracks
+    ///   reality.
+    /// - `Err(..)` means "couldn't fully check" — a transient HID++ timeout or a
+    ///   partial receiver read ([`openlogi_hid::InventoryError::Incomplete`]):
+    ///   emit nothing, so the agent keeps its last good device set and live
+    ///   bindings instead of wiping them for ~one period — the flap behind #218.
+    ///   Before the *first* success there is no good set to keep, so persistent
+    ///   initial failure is reported once as [`InventoryEvent::Unavailable`]; the
+    ///   loop keeps retrying and a later success recovers.
+    fn classify(
+        &mut self,
+        result: Result<Vec<DeviceInventory>, openlogi_hid::InventoryError>,
+    ) -> Option<InventoryEvent> {
+        match result {
+            Ok(inv) => {
+                self.succeeded = true;
+                Some(InventoryEvent::Snapshot(inv))
+            }
+            Err(e) => {
+                warn!(error = ?e, "enumerate failed during watch tick — keeping last snapshot");
+                if self.succeeded {
+                    return None;
+                }
+                self.initial_failures = self.initial_failures.saturating_add(1);
+                (self.initial_failures == INITIAL_FAILURE_LIMIT)
+                    .then_some(InventoryEvent::Unavailable)
+            }
+        }
+    }
+}
+
 /// Spawn the watcher and return a receiver of inventory events. The
 /// channel is unbounded so a slow consumer cannot back-pressure the HID
 /// poll loop into stalling on a real device disconnect.
@@ -63,35 +110,14 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<InventoryEvent> {
             // across ticks — a known device's immutable data (model, features)
             // is reused instead of being re-handshaked every poll.
             let mut enumerator = openlogi_hid::Enumerator::default();
-            let mut succeeded = false;
-            let mut initial_failures: u8 = 0;
+            let mut state = WatchState::default();
             loop {
-                match rt.block_on(enumerator.enumerate()) {
-                    Ok(inv) => {
-                        succeeded = true;
-                        if worker_tx.send(InventoryEvent::Snapshot(inv)).is_err() {
-                            debug!("inventory watcher receiver dropped — exiting");
-                            return;
-                        }
-                    }
-                    // A failed enumerate means "couldn't check", NOT "no devices":
-                    // skip the tick so the agent keeps its last good device set
-                    // and live bindings instead of wiping them for ~one period. A
-                    // genuine disconnect comes back as an `Ok` empty snapshot,
-                    // which we DO forward. Before the *first* success there is no
-                    // good set to keep, so persistent failure is reported once —
-                    // the loop keeps retrying, and a later success recovers.
-                    Err(e) => {
-                        warn!(error = ?e, "enumerate failed during watch tick — keeping last snapshot");
-                        if !succeeded {
-                            initial_failures = initial_failures.saturating_add(1);
-                            if initial_failures == INITIAL_FAILURE_LIMIT
-                                && worker_tx.send(InventoryEvent::Unavailable).is_err()
-                            {
-                                return;
-                            }
-                        }
-                    }
+                let result = rt.block_on(enumerator.enumerate());
+                if let Some(event) = state.classify(result)
+                    && worker_tx.send(event).is_err()
+                {
+                    debug!("inventory watcher receiver dropped — exiting");
+                    return;
                 }
                 thread::sleep(period);
             }
@@ -105,4 +131,58 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<InventoryEvent> {
         let _ = tx.send(InventoryEvent::Unavailable);
     }
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_hid::InventoryError;
+
+    use super::{INITIAL_FAILURE_LIMIT, InventoryEvent, WatchState};
+
+    #[test]
+    fn completed_enumeration_is_forwarded_even_when_empty() {
+        let mut state = WatchState::default();
+        // A genuine "checked, nothing there" still propagates as a disconnect —
+        // the resilience must not swallow a real empty.
+        assert!(matches!(
+            state.classify(Ok(vec![])),
+            Some(InventoryEvent::Snapshot(snap)) if snap.is_empty()
+        ));
+        assert!(state.succeeded);
+    }
+
+    #[test]
+    fn incomplete_read_after_a_success_keeps_the_last_snapshot() {
+        let mut state = WatchState::default();
+        // A good tick first, so there is a last-known-good set to preserve.
+        assert!(matches!(
+            state.classify(Ok(vec![])),
+            Some(InventoryEvent::Snapshot(_))
+        ));
+        // Then transient partial reads emit nothing — the agent keeps the last
+        // snapshot instead of flapping to "No devices" (#218).
+        assert!(state.classify(Err(InventoryError::Incomplete)).is_none());
+        assert!(state.classify(Err(InventoryError::Incomplete)).is_none());
+    }
+
+    #[test]
+    fn persistent_initial_failure_reports_unavailable_once_then_recovers() {
+        let mut state = WatchState::default();
+        // No snapshot has ever landed, so repeated failure must eventually stop
+        // looking like "still scanning".
+        for _ in 1..INITIAL_FAILURE_LIMIT {
+            assert!(state.classify(Err(InventoryError::Incomplete)).is_none());
+        }
+        assert!(matches!(
+            state.classify(Err(InventoryError::Incomplete)),
+            Some(InventoryEvent::Unavailable)
+        ));
+        // Reported once, not on every later failure.
+        assert!(state.classify(Err(InventoryError::Incomplete)).is_none());
+        // …and a later success recovers with a live snapshot.
+        assert!(matches!(
+            state.classify(Ok(vec![])),
+            Some(InventoryEvent::Snapshot(_))
+        ));
+    }
 }

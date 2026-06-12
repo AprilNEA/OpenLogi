@@ -64,6 +64,15 @@ const PROBE_BUDGET: Duration = Duration::from_secs(5);
 pub enum InventoryError {
     #[error("HID transport error")]
     Hid(#[from] async_hid::HidError),
+
+    /// A receiver answered, but its paired-device list came back short of the
+    /// count it reports this cycle — a pairing slot, the pairing count, or a
+    /// whole device probe failed to read (a transient HID++ register timeout,
+    /// common on recent macOS IOHID stacks). Surfaced as an error rather than an
+    /// empty `Ok` so the polling watcher keeps its last good snapshot instead of
+    /// publishing a truncated list that flaps the GUI to "No devices" (#218).
+    #[error("enumeration incomplete — some paired devices were unreadable this cycle")]
+    Incomplete,
 }
 
 /// How many `enumerate` ticks a device's probe is reused before a fresh read.
@@ -216,6 +225,18 @@ struct CachedChannel {
     channel: Arc<HidppChannel>,
 }
 
+/// Attempts a one-shot [`enumerate`] makes when a cycle comes back
+/// [`InventoryError::Incomplete`]. The polling [`Enumerator`] keeps its last
+/// good snapshot across ticks, but a one-shot caller has no prior state to fall
+/// back on, so it retries a transient partial read a few times before giving up
+/// — the #218 flap cleared on a retry (two back-to-back isolated runs read 3
+/// devices and 0 respectively).
+const ONESHOT_ATTEMPTS: u8 = 4;
+
+/// Delay between one-shot retries. A first probe usually wakes an asleep device,
+/// so a short pause lets the next attempt read it instead of timing out again.
+const ONESHOT_RETRY_DELAY: Duration = Duration::from_millis(300);
+
 /// Enumerate all Logitech HID++ receivers visible to the current process and
 /// the devices paired to each.
 ///
@@ -230,8 +251,26 @@ struct CachedChannel {
 ///
 /// We merge the two so an MX Master that's been asleep still shows up with
 /// its codename and kind even before you click it.
+///
+/// A one-shot caller (CLI, diagnostics) has no last-known-good to fall back on,
+/// so a transient [`InventoryError::Incomplete`] cycle is retried up to
+/// [`ONESHOT_ATTEMPTS`] times here; the polling watcher instead keeps its last
+/// snapshot.
 pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
-    Enumerator::default().enumerate().await
+    // Reuse one enumerator across attempts so a retry keeps the channel it just
+    // opened (and the probe cache it warmed) rather than re-handshaking the
+    // receiver from scratch. Only `Incomplete` retries — a clean `Ok` (even an
+    // empty one) and a hard transport error both return straight away.
+    let mut enumerator = Enumerator::default();
+    let mut result = enumerator.enumerate().await;
+    let mut attempt = 1u8;
+    while attempt < ONESHOT_ATTEMPTS && matches!(result, Err(InventoryError::Incomplete)) {
+        debug!(attempt, "enumeration incomplete — retrying");
+        tokio::time::sleep(ONESHOT_RETRY_DELAY).await;
+        result = enumerator.enumerate().await;
+        attempt += 1;
+    }
+    result
 }
 
 impl Enumerator {
@@ -296,19 +335,25 @@ impl Enumerator {
 
         let mut inventories = Vec::new();
         let mut outcomes = Vec::new();
+        // A probe that timed out, or a receiver whose paired list came back
+        // short of its own reported count, leaves the snapshot missing a device
+        // that is actually connected. Track that so the cycle is reported
+        // `Incomplete` instead of publishing a truncated list (#218).
+        let mut incomplete = false;
         for result in results {
-            match result {
-                Ok((inv, mut probed)) => {
-                    inventories.extend(inv);
-                    outcomes.append(&mut probed);
-                }
-                Err(_) => {
-                    warn!(budget = ?PROBE_BUDGET, "device probe timed out — skipping (asleep/unresponsive)");
-                }
+            if let Ok((inv, mut probed, complete)) = result {
+                incomplete |= !complete;
+                inventories.extend(inv);
+                outcomes.append(&mut probed);
+            } else {
+                warn!(budget = ?PROBE_BUDGET, "device probe timed out — skipping (asleep/unresponsive)");
+                incomplete = true;
             }
         }
 
-        // Apply fresh probes and record which devices were seen this tick.
+        // Apply fresh probes and record which devices were seen this tick. Done
+        // even on an incomplete cycle so the cache stays warm for the devices
+        // that did read.
         let mut seen_keys = HashSet::new();
         for outcome in outcomes {
             match outcome {
@@ -322,6 +367,16 @@ impl Enumerator {
                 CacheOutcome::Unkeyed => {}
             }
         }
+
+        if incomplete {
+            // Don't evict — a device merely unread this cycle must keep its cache
+            // entry through the existing grace — and don't publish a short list.
+            // The caller keeps its last good snapshot. A genuine disconnect
+            // instead reads cleanly as an `Ok` carrying the receiver's real,
+            // smaller count, and is forwarded.
+            return Err(InventoryError::Incomplete);
+        }
+
         self.evict_unseen(&seen_keys);
         Ok(inventories)
     }
@@ -349,22 +404,36 @@ impl Enumerator {
     }
 }
 
+/// Whether a Bolt receiver's per-cycle read is complete: we learned how many
+/// devices it has paired and read at least that many. An unreadable count
+/// (`None`) or a short read means a HID++ register read timed out this cycle, so
+/// the snapshot is missing a device that is actually there — a transient failure
+/// to preserve last-known-good against, not "no devices" (#218). Reading *more*
+/// than the reported count is still complete (nothing is missing).
+fn receiver_read_complete(pairing_count: Option<u8>, paired_len: usize) -> bool {
+    pairing_count.is_some_and(|count| paired_len >= usize::from(count))
+}
+
 /// Probe one open HID++ node (channel reused across ticks by the caller).
-/// Returns its inventory (if any) plus each device's cache contribution this
-/// tick, for the caller to apply and to drive eviction.
+/// Returns its inventory (if any), each device's cache contribution this tick
+/// (for the caller to apply and to drive eviction), and whether the read was
+/// *complete* — `false` flags a transient partial read the caller turns into
+/// [`InventoryError::Incomplete`].
 async fn probe_one(
     info: async_hid::DeviceInfo,
     channel: Arc<HidppChannel>,
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
-) -> (Option<DeviceInventory>, Vec<CacheOutcome>) {
+) -> (Option<DeviceInventory>, Vec<CacheOutcome>, bool) {
     let Some(Receiver::Bolt(bolt)) = receiver::detect(Arc::clone(&channel)) else {
         // No receiver detected — this might be a directly-paired device
         // (Bluetooth-direct, USB-C cable). HID++ at device-index 0xff
         // addresses the device's own features. Probe in case it answers.
         // P2.4 — verified path; no Bolt-pairing slot indirection needed.
+        // The direct path has no receiver pairing count to fall short of, so a
+        // device that answers is always a complete read.
         let (inventory, outcome) = probe_direct(channel, &info, cache, tick).await;
-        return (inventory, vec![outcome]);
+        return (inventory, vec![outcome], true);
     };
 
     let unique_id = bolt.get_unique_id().await.ok();
@@ -387,13 +456,12 @@ async fn probe_one(
         }
     }
 
-    if let Some(count) = pairing_count
-        && paired.len() != usize::from(count)
-    {
+    let complete = receiver_read_complete(pairing_count, paired.len());
+    if !complete {
         warn!(
-            expected = count,
+            expected = ?pairing_count,
             found = paired.len(),
-            "paired-device count mismatch — some slots may be unreadable"
+            "receiver read incomplete this cycle — some slots unreadable; keeping last snapshot"
         );
     }
 
@@ -408,6 +476,7 @@ async fn probe_one(
             paired,
         }),
         outcomes,
+        complete,
     )
 }
 
@@ -831,7 +900,8 @@ mod tests {
 
     use super::{
         CACHE_MISS_GRACE, CacheKey, Cached, DeviceKind, Enumerator, ProbedFeatures, REFRESH_TICKS,
-        UnifiedBatteryFeature, battery_feature_index, is_stale, resolve_device_kind,
+        UnifiedBatteryFeature, battery_feature_index, is_stale, receiver_read_complete,
+        resolve_device_kind,
     };
     use hidpp::feature::CreatableFeature as _;
 
@@ -841,6 +911,30 @@ mod tests {
             battery_index: None,
             probed_tick,
         }
+    }
+
+    #[test]
+    fn read_is_complete_only_when_every_paired_device_was_read() {
+        // The healthy steady state: the receiver reports 3 pairings and all 3
+        // slots read (empty slots don't count toward the pairing count).
+        assert!(receiver_read_complete(Some(3), 3));
+        // Reading more than reported is still complete — nothing is missing.
+        assert!(receiver_read_complete(Some(2), 3));
+        // A receiver with no pairings, read cleanly, is a genuine empty.
+        assert!(receiver_read_complete(Some(0), 0));
+    }
+
+    #[test]
+    fn short_or_countless_read_is_incomplete() {
+        // The #218 flap: the receiver says 3 but a transient slot timeout left
+        // us with 2 (or 0) — a partial read, not "devices vanished".
+        assert!(!receiver_read_complete(Some(3), 2));
+        assert!(!receiver_read_complete(Some(3), 0));
+        // The pairing-count register itself failed to read: we can't even tell
+        // how many devices to expect, so treat the cycle as incomplete rather
+        // than trust a possibly-truncated list.
+        assert!(!receiver_read_complete(None, 0));
+        assert!(!receiver_read_complete(None, 3));
     }
 
     #[test]
