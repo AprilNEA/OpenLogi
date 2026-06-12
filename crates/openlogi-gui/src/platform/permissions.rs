@@ -20,6 +20,8 @@
 //!   the evdev/uinput hook.
 //! - **Read/write access to `/dev/hidraw*`** — to communicate with the Logitech
 //!   Bolt receiver or directly-connected devices over HID++.
+//! - **Read access to Logitech `/dev/input/event*` mouse nodes** — to capture
+//!   remappable button events through evdev.
 //!
 //! Both are granted by installing the OpenLogi udev rules (see the Linux
 //! install guide).
@@ -63,21 +65,23 @@ pub fn bluetooth() -> PermissionStatus {
     macos::bluetooth()
 }
 
-/// Probe Linux input-device access: `/dev/uinput` (write) and at least one
-/// Logitech `/dev/hidraw*` (read/write).
+/// Probe Linux input-device access: `/dev/uinput` (write), at least one
+/// Logitech `/dev/hidraw*` (read/write), and at least one Logitech mouse
+/// `/dev/input/event*` node (read).
 ///
 /// Returns:
-/// - `Granted` — both uinput and at least one Logitech hidraw are accessible.
-/// - `Denied` — uinput is inaccessible, or a Logitech hidraw exists but is
+/// - `Granted` — all three required node classes are accessible.
+/// - `Denied` — a required node exists but is inaccessible, or uinput is
 ///   inaccessible.
-/// - `Unknown` — uinput is accessible but no Logitech hidraw device is
-///   currently connected (nothing to report yet).
+/// - `Unknown` — uinput is accessible but no Logitech device node is currently
+///   connected (nothing to report yet).
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn input_device_access() -> PermissionStatus {
     let uinput_ok = linux::probe_uinput();
     let hidraw_ok = linux::probe_logitech_hidraw();
-    classify(uinput_ok, hidraw_ok)
+    let mouse_event_ok = linux::probe_logitech_mouse_event();
+    classify(uinput_ok, hidraw_ok, mouse_event_ok)
 }
 
 /// Pure classification logic, factored out so it is testable without device nodes.
@@ -86,12 +90,19 @@ pub fn input_device_access() -> PermissionStatus {
 /// - `hidraw_ok`: `Some(true)` = Logitech hidraw accessible, `Some(false)` =
 ///   Logitech hidraw present but not accessible, `None` = no Logitech hidraw
 ///   present at all.
+/// - `mouse_event_ok`: `Some(true)` = Logitech mouse event accessible,
+///   `Some(false)` = Logitech mouse event present but not accessible, `None` =
+///   no Logitech mouse event present at all.
 #[cfg(target_os = "linux")]
-pub(crate) fn classify(uinput_ok: bool, hidraw_ok: Option<bool>) -> PermissionStatus {
-    match (uinput_ok, hidraw_ok) {
-        (true, Some(true)) => PermissionStatus::Granted,
-        (false, _) | (_, Some(false)) => PermissionStatus::Denied,
-        (true, None) => PermissionStatus::Unknown,
+pub(crate) fn classify(
+    uinput_ok: bool,
+    hidraw_ok: Option<bool>,
+    mouse_event_ok: Option<bool>,
+) -> PermissionStatus {
+    match (uinput_ok, hidraw_ok, mouse_event_ok) {
+        (true, Some(true), Some(true)) => PermissionStatus::Granted,
+        (false, _, _) | (_, Some(false), _) | (_, _, Some(false)) => PermissionStatus::Denied,
+        (true, _, _) => PermissionStatus::Unknown,
     }
 }
 
@@ -242,6 +253,50 @@ pub(crate) mod linux {
         }
     }
 
+    /// Probe Logitech mouse event nodes.
+    ///
+    /// Returns:
+    /// - `Some(true)` — at least one Logitech mouse event node is present and
+    ///   readable.
+    /// - `Some(false)` — at least one Logitech mouse event node is present but
+    ///   permission is denied.
+    /// - `None` — no Logitech mouse event node found (nothing connected).
+    pub(crate) fn probe_logitech_mouse_event() -> Option<bool> {
+        let mut any_accessible = false;
+        let mut any_denied = false;
+
+        for entry in fs::read_dir("/sys/class/input")
+            .ok()?
+            .filter_map(Result::ok)
+        {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if !name.starts_with("event") || !is_logitech_mouse_event(&name) {
+                continue;
+            }
+            match fs::OpenOptions::new()
+                .read(true)
+                .open(Path::new("/dev/input").join(&name))
+            {
+                Ok(_) => {
+                    any_accessible = true;
+                    break;
+                }
+                Err(e) if matches!(e.kind(), ErrorKind::PermissionDenied) => any_denied = true,
+                Err(_) => {}
+            }
+        }
+
+        if any_accessible {
+            Some(true)
+        } else if any_denied {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
     /// Check whether a hidraw device belongs to Logitech by reading the HID_ID
     /// field from its sysfs uevent file.
     ///
@@ -263,6 +318,18 @@ pub(crate) mod linux {
                     .is_some_and(|vid| vid == LOGITECH_VID)
         })
     }
+
+    fn is_logitech_mouse_event(event_name: &str) -> bool {
+        let base = format!("/sys/class/input/{event_name}");
+        let Ok(vendor) = fs::read_to_string(format!("{base}/device/id/vendor")) else {
+            return false;
+        };
+        let Ok(uevent) = fs::read_to_string(format!("{base}/uevent")) else {
+            return false;
+        };
+        vendor.trim().eq_ignore_ascii_case("046d")
+            && uevent.lines().any(|line| line == "ID_INPUT_MOUSE=1")
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -273,23 +340,45 @@ mod tests {
 
     #[test]
     fn classify_granted_when_both_ok() {
-        assert_eq!(classify(true, Some(true)), PermissionStatus::Granted);
+        assert_eq!(
+            classify(true, Some(true), Some(true)),
+            PermissionStatus::Granted
+        );
     }
 
     #[test]
     fn classify_denied_when_uinput_not_ok() {
-        assert_eq!(classify(false, Some(true)), PermissionStatus::Denied);
-        assert_eq!(classify(false, Some(false)), PermissionStatus::Denied);
-        assert_eq!(classify(false, None), PermissionStatus::Denied);
+        assert_eq!(
+            classify(false, Some(true), Some(true)),
+            PermissionStatus::Denied
+        );
+        assert_eq!(
+            classify(false, Some(false), Some(true)),
+            PermissionStatus::Denied
+        );
+        assert_eq!(classify(false, None, None), PermissionStatus::Denied);
     }
 
     #[test]
     fn classify_denied_when_hidraw_denied() {
-        assert_eq!(classify(true, Some(false)), PermissionStatus::Denied);
+        assert_eq!(
+            classify(true, Some(false), Some(true)),
+            PermissionStatus::Denied
+        );
+    }
+
+    #[test]
+    fn classify_denied_when_mouse_event_denied() {
+        assert_eq!(
+            classify(true, Some(true), Some(false)),
+            PermissionStatus::Denied
+        );
     }
 
     #[test]
     fn classify_unknown_when_no_logitech_device_connected() {
-        assert_eq!(classify(true, None), PermissionStatus::Unknown);
+        assert_eq!(classify(true, None, None), PermissionStatus::Unknown);
+        assert_eq!(classify(true, Some(true), None), PermissionStatus::Unknown);
+        assert_eq!(classify(true, None, Some(true)), PermissionStatus::Unknown);
     }
 }

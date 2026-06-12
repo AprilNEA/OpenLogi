@@ -90,7 +90,7 @@ Things OpenLogi does that Options+ won't:
 | Settings window: launch-at-login, updates, permissions, language, appearance | ✅ macOS + Linux + Windows |
 | Agent status icon | ✅ macOS menu bar + Windows tray; not applicable on Linux |
 | Interface localization (20 languages: da, de, el, en, es, fi, fr, it, ja, ko, nb, nl, pl, pt-BR, pt-PT, ru, sv, zh-CN, zh-HK, zh-TW) | ✅ |
-| Linux packaging: udev rules, systemd unit, `.deb` / `.rpm` / `.pkg.tar.zst` | ✅ Linux |
+| Linux packaging: udev rules, systemd unit, `.deb` / `.rpm` / `.pkg.tar.zst` / `.tar.gz` | ✅ Linux |
 | Gesture-button per-direction bindings + live capture | ✅ (device capability dependent) |
 | Middle / mode-shift / thumbwheel button capture | ✅ middle on all platforms; mode-shift / thumbwheel device dependent |
 | Windows (agent, GUI, event hook, installer) | ✅ Windows 11 hardware validated; newer port with ongoing compatibility polish |
@@ -140,6 +140,14 @@ sudo rpm -i openlogi-*.rpm
 
 # Arch Linux
 sudo pacman -U openlogi-*.pkg.tar.zst
+```
+
+For other distributions, use the portable release tarball:
+
+```sh
+tar -xzf openlogi-*-linux-*.tar.gz
+cd openlogi-*-linux-*
+sudo packaging/linux/install.sh --prefix=/usr
 ```
 
 Packages are published for both `x86_64`/`amd64` and `arm64`/`aarch64`.

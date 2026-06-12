@@ -127,18 +127,20 @@ layout: a 760×480 background image in a 760×512 Finder window, with 128px icon
 positioned at `(212, 250)` for `OpenLogi.app` and `(548, 250)` for
 `Applications`.
 
-## Packaging Linux `.deb` / `.rpm` / `.pkg.tar.zst`
+## Packaging Linux `.deb` / `.rpm` / `.pkg.tar.zst` / `.tar.gz`
 
 Requires [nfpm](https://nfpm.goreleaser.com/) on `PATH`; the package arch is
 derived from the host (override with `PKG_ARCH`):
 
 ```sh
 cargo run -p xtask -- linux package
-# → target/release/openlogi_*.deb / .rpm / .pkg.tar.zst
+# → target/release/openlogi_*.deb / .rpm / .pkg.tar.zst / openlogi-*-linux-*.tar.gz
 ```
 
 The package contents (binaries, udev rules, systemd user unit, desktop entry,
-icon) are declared in `packaging/linux/nfpm.yaml`.
+icon) are declared in `packaging/linux/nfpm.yaml`. The portable `.tar.gz` ships
+the same three binaries plus `packaging/linux/` install metadata for distros
+without a native package.
 
 ## Release updater publishing
 
