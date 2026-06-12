@@ -30,8 +30,10 @@ const MAX_REPORT_DESCRIPTOR_LENGTH: usize = 4096;
 /// As we only care about HID++ reports, this equals to [`LONG_REPORT_LENGTH`].
 const MAX_REPORT_LENGTH: usize = LONG_REPORT_LENGTH;
 
-/// Maximum time to wait for a HID++ response before giving up on the request.
-const SEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The default time budget for a [`HidppChannel::send`] request: the report
+/// write plus the wait for a matching response. Callers that need a different
+/// budget can use [`HidppChannel::send_with_timeout`].
+pub const SEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The ID of the HID report that is used to transmit short HID++ messages.
 pub const SHORT_REPORT_ID: u8 = 0x10;
@@ -445,8 +447,10 @@ impl HidppChannel {
     ///
     /// If no response is expected/required, use [`Self::send_and_forget`].
     ///
-    /// The future resolves to [`ChannelError::NoResponse`] if no matching
-    /// response arrives before the request timeout elapses.
+    /// The whole request — the report write plus the wait for a matching
+    /// response — is bounded by [`SEND_RESPONSE_TIMEOUT`]; the future resolves
+    /// to [`ChannelError::Timeout`] on elapse. Use [`Self::send_with_timeout`]
+    /// to choose a different budget.
     pub async fn send(
         &self,
         msg: HidppMessage,
@@ -456,7 +460,20 @@ impl HidppChannel {
             .await
     }
 
-    async fn send_with_timeout(
+    /// Sends a HID++ message across the channel and waits for a response,
+    /// bounding the whole request — the report write plus the wait for a
+    /// matching response — by `timeout`.
+    ///
+    /// On elapse the request's pending entry is removed (concurrent in-flight
+    /// requests are unaffected) and [`ChannelError::Timeout`] is returned; a
+    /// response that still arrives later reaches message listeners as an
+    /// unmatched message.
+    ///
+    /// [`Self::send`] uses this with [`SEND_RESPONSE_TIMEOUT`], which suits
+    /// requests to a device that may be asleep. Requests that should fail
+    /// faster — e.g. probing a receiver that answers immediately or not at
+    /// all — can pass a tighter budget.
+    pub async fn send_with_timeout(
         &self,
         msg: HidppMessage,
         response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
@@ -472,14 +489,14 @@ impl HidppChannel {
 
         {
             let mut pending = self.pending_messages.lock().unwrap();
-            // Drop abandoned requests before queuing this one: a caller that
-            // timed out (or was cancelled) drops its receiver, leaving its
-            // `PendingMessage` behind since only a *matching response* removes an
-            // entry. On a short-lived channel that didn't matter, but a channel
-            // reused across inventory ticks would otherwise accumulate stale
-            // entries unboundedly — and a late response could be mis-delivered to
-            // a recycled software id. `is_canceled()` is true once the receiver
-            // is gone, so this prunes exactly the give-ups.
+            // Drop abandoned requests before queuing this one. Timeouts and
+            // write failures remove their entry eagerly below, but a caller
+            // cancelled mid-flight (an outer `timeout(..)` dropping the whole
+            // future) still leaves its `PendingMessage` behind. On a channel
+            // reused across inventory ticks those would accumulate unboundedly
+            // — and a late response could be mis-delivered to a recycled
+            // software id. `is_canceled()` is true once the receiver is gone,
+            // so this prunes exactly the give-ups.
             pending.retain(|m| !m.sender.is_canceled());
             pending.push_back(PendingMessage {
                 id: pending_id,
@@ -488,18 +505,30 @@ impl HidppChannel {
             });
         }
 
-        if let Err(err) = self.send_and_forget(msg).await {
+        // The deadline covers the write as well: `write_report` has no
+        // bounded-time contract of its own, so a wedged device could otherwise
+        // park `send` forever before the response wait even starts.
+        let mut request = std::pin::pin!(
+            async {
+                self.send_and_forget(msg).await?;
+                receiver.await.map_err(|_| ChannelError::NoResponse)
+            }
+            .fuse()
+        );
+
+        let result = select! {
+            result = request => result,
+            _ = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
+        };
+
+        if result.is_err() {
+            // A timeout or write failure leaves the entry queued — remove it
+            // eagerly. After a matched response the read thread has already
+            // taken it, so this is a no-op then.
             self.remove_pending_message(pending_id);
-            return Err(err);
         }
 
-        select! {
-            response = receiver.fuse() => response.map_err(|_| ChannelError::NoResponse),
-            _ = futures_timer::Delay::new(timeout).fuse() => {
-                self.remove_pending_message(pending_id);
-                Err(ChannelError::NoResponse)
-            }
-        }
+        result
     }
 
     fn remove_pending_message(&self, id: u64) {
@@ -583,6 +612,12 @@ pub enum ChannelError {
     /// Indicates that no response was received following a request.
     #[error("the device did not respond to the request")]
     NoResponse,
+
+    /// Indicates that a request did not complete within its time budget —
+    /// typically the device is asleep, out of range or connected to another
+    /// host. See [`HidppChannel::send_with_timeout`].
+    #[error("the request timed out before the device responded")]
+    Timeout,
 }
 
 /// Widen a short HID++ payload (6 bytes) to a long one (19 bytes): the HID++
@@ -658,9 +693,43 @@ mod tests {
                 .await
                 .unwrap_err();
 
-            assert!(matches!(err, ChannelError::NoResponse));
+            assert!(matches!(err, ChannelError::Timeout));
             assert!(started.elapsed() < Duration::from_secs(1));
             assert_eq!(handle.written_reports().len(), 1);
+            assert_pending_empty(&channel);
+        });
+    }
+
+    #[test]
+    fn timeout_removes_only_its_own_pending_message() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+
+            let never_answered = short_msg(0x20);
+            let slow_response = short_msg(0x21);
+
+            let timed_out = channel.send_with_timeout(
+                short_msg(0x10),
+                move |candidate| *candidate == never_answered,
+                Duration::from_millis(25),
+            );
+            let answered = channel.send_with_timeout(
+                short_msg(0x11),
+                move |candidate| *candidate == slow_response,
+                Duration::from_secs(1),
+            );
+            // Answer the second request only after the first has timed out, so
+            // a removal that took the wrong entry would fail this test.
+            let respond_late = async {
+                futures_timer::Delay::new(Duration::from_millis(100)).await;
+                handle.send_incoming(slow_response).await;
+            };
+
+            let (timed_out, answered, ()) = futures::join!(timed_out, answered, respond_late);
+
+            assert!(matches!(timed_out.unwrap_err(), ChannelError::Timeout));
+            assert_eq!(answered.unwrap(), slow_response);
             assert_pending_empty(&channel);
         });
     }
@@ -687,7 +756,7 @@ mod tests {
                 .await
                 .unwrap_err();
 
-            assert!(matches!(err, ChannelError::NoResponse));
+            assert!(matches!(err, ChannelError::Timeout));
             assert_pending_empty(&channel);
 
             handle.send_incoming(late_response).await;
