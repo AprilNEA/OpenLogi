@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.7](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.6...openlogi-core-v0.6.7) - 2026-06-12
+
+### Fixed
+
+- *(core)* post macOS volume and media keys as NX system-defined events ([#184](https://github.com/AprilNEA/OpenLogi/pull/184))
+
+### Other
+
+- *(ipc)* pin the wire format with golden bytes and mark wire types
+
 ## [0.6.6](https://github.com/AprilNEA/OpenLogi/compare/openlogi-hidpp-v0.6.5...openlogi-hidpp-v0.6.6) - 2026-06-10
 
 ### Fixed

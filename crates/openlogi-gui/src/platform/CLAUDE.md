@@ -69,7 +69,9 @@ self-disable on its own thread) is load-bearing and must stay byte-for-byte. Onl
 
 Tray code needs no pool (it runs on the main run loop, and `Retained` frees deterministically).
 The hook's `frontmost_bundle_id` runs on a watcher thread with no run loop, so it keeps an
-explicit `objc2::rc::autoreleasepool` — that's the *only* place a pool belongs.
+explicit `objc2::rc::autoreleasepool` — that's the *only* place in this crate and the hook a
+pool belongs. (`openlogi-core`'s `post_media_key` follows the same pattern for media-key
+`NSEvent`s on the dispatch threads.)
 
 ## Dependencies
 

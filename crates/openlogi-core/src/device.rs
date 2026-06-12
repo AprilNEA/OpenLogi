@@ -230,6 +230,14 @@ pub struct PairedDevice {
     pub capabilities: Option<Capabilities>,
 }
 
+/// One receiver and its paired devices — the unit the agent's inventory
+/// snapshot is made of.
+///
+/// Crosses the agent↔GUI IPC (everything it embeds too: [`ReceiverInfo`],
+/// [`PairedDevice`], battery/model-info/capability types). bincode encodes
+/// field and variant *order*, so reordering, retyping, or wrapping any field
+/// in this tree is a wire-format change and requires a `PROTOCOL_VERSION`
+/// bump (guarded by `openlogi-agent-core/tests/wire_format.rs`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceInventory {
     pub receiver: ReceiverInfo,

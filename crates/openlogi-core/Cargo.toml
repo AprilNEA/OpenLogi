@@ -31,6 +31,14 @@ zbus = "5"
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.25.0", features = ["highsierra"] }
 core-foundation = { workspace = true }
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = [
+  "NSEvent",
+  "NSGraphicsContext",
+  "objc2-core-graphics",
+] }
+objc2-core-graphics = { version = "0.3.2", features = ["CGEvent"] }
+objc2-foundation = "0.3.2"
 
 # SendInput-based action synthesis (Action::execute_windows).
 [target.'cfg(target_os = "windows")'.dependencies]
