@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.8](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.7...openlogi-core-v0.6.8) - 2026-06-12
+
+### Added
+
+- *(linux)* launch_at_login + input device access permission check ([#172](https://github.com/AprilNEA/OpenLogi/pull/172))
+- add mouse button 4 and 5 options ([#96](https://github.com/AprilNEA/OpenLogi/pull/96))
+
 ## [0.6.7](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.6...openlogi-core-v0.6.7) - 2026-06-12
 
 ### Fixed
