@@ -1,5 +1,5 @@
 > [!WARNING]
-> **OpenLogi befindet sich in aktiver Entwicklung** und ist noch nicht stabil —— Funktionen und Konfiguration können sich noch ändern. Gib dem Repo einen **Star** ⭐ und **beobachte** 👀 es, um sofort benachrichtigt zu werden, sobald ein Release erscheint.
+> **OpenLogi befindet sich in aktiver Entwicklung** und ist noch nicht stabil — Funktionen und Konfiguration können sich noch ändern. Gib dem Repo einen **Star** ⭐ und **beobachte** 👀 es, um sofort benachrichtigt zu werden, sobald ein Release erscheint.
 
 <h4 align="right"><a href="../README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja.md">日本語</a> | <strong>Deutsch</strong> | <a href="README.fr.md">Français</a> | <a href="README.ko.md">한국어</a></h4>
 
@@ -8,13 +8,13 @@
 </p>
 
 <h1 align="center">OpenLogi</h1>
-<p align="center"><strong>⚡️ Eine native, lokal-zuerst arbeitende Alternative zu Logitech Options+, geschrieben in Rust 🦀<br/>Tasten, DPI und SmartShift über HID++ neu belegen. Kein Konto, keine Telemetrie.</strong></p>
+<p align="center"><strong>⚡️ Eine native, local-first Alternative zu Logitech Options+, geschrieben in Rust 🦀<br/>Tasten, DPI und SmartShift über HID++ neu belegen. Kein Konto, keine Telemetrie.</strong></p>
 
 
 <div align="center">
     <a href="https://twitter.com/AprilNEA" target="_blank">
     <img alt="twitter" src="https://img.shields.io/badge/follow-AprilNEA-green?style=social&logo=Twitter"></a>
-    <a href="https://t.me/+u8DfyLlIqPYxZjJh" target="_blank">
+    <a href="https://t.me/+VDtkR5OSAT04NzVh" target="_blank">
     <img alt="telegram" src="https://img.shields.io/badge/chat-telegram-blueviolet?style=flat&logo=Telegram"></a>
     <a href="https://github.com/AprilNEA/OpenLogi/releases" target="_blank">
     <img alt="GitHub downloads" src="https://img.shields.io/github/downloads/AprilNEA/OpenLogi/total.svg?style=flat"></a>
@@ -25,69 +25,118 @@
 
 > **Genug von Options+? Probier OpenLogi.**
 
-Belege Tasten neu, steuere DPI und SmartShift und wechsle Profile pro App —— ohne Logitech-Konto, ohne Telemetrie und ohne die offizielle Options+-Installation. Keine Cloud, schlichte TOML-Konfiguration; die einzigen Netzwerkzugriffe sind das Laden der Gerätebilder und eine optionale, standardmäßig deaktivierte Update-Prüfung.
+Tasten neu belegen, DPI und SmartShift steuern, Profile pro App umschalten — ohne Logitech-Konto, ohne Telemetrie, ohne das offizielle Options+. Keine Cloud, Konfiguration als einfaches TOML; die einzigen Netzwerkzugriffe sind Geräte-Bilder und eine standardmäßig deaktivierte Opt-in-Updateprüfung.
 
 ---
 
 ## Was es ist
 
-OpenLogi spricht mit Logitech-HID++-Mäusen über einen Logi-Bolt-Empfänger —— oder eine direkte Bluetooth- bzw. kabelgebundene Verbindung —— ohne Logi Options+ auszuführen. Es liefert zwei Binärdateien:
+OpenLogi spricht mit Logitech-HID++-Mäusen über einen Logi-Bolt-Empfänger — oder per Bluetooth-Direktverbindung / Kabel — ganz ohne Logi Options+. Es liefert zwei Programme:
 
-- **[OpenLogi GUI](../crates/openlogi-gui)** —— eine GPUI-Desktop-App: ein interaktives Maus-Diagramm mit anklickbaren Hotspots, ein Aktions-Auswahlmenü pro Taste (39 eingebaute Aktionen plus aufgezeichnete eigene Tastenkürzel), DPI-Presets, ein SmartShift-Schalter, anwendungsspezifische Profil-Overlays, ein Geräte-Karussell, das live zwischen gekoppelten Geräten wechselt, und ein Einstellungsfenster mit einer in sechs Sprachen lokalisierten Oberfläche.
-- **[OpenLogi CLI](../crates/openlogi-cli)** —— ein CLI für die kopflose Inventarisierung (`list`) sowie Unterbefehle zur Asset-Synchronisierung und Geräte-Diagnose.
+- **[OpenLogi GUI](../crates/openlogi-gui)** — eine GPUI-Desktop-App: ein interaktives Mausdiagramm mit klickbaren Hotspots, ein Aktions-Picker pro Taste (41 eingebaute Aktionen plus eigene Tastenkürzel, von Hand in der TOML-Konfiguration angelegt), DPI-Voreinstellungen, ein SmartShift-Panel (Radmodus, Empfindlichkeit, permanente Rasterung), Profil-Overlays pro Anwendung, ein Geräte-Karussell, das live zwischen gekoppelten Geräten wechselt, und ein Einstellungsfenster mit einer in 20 Sprachen lokalisierten Oberfläche.
+- **[OpenLogi CLI](../crates/openlogi-cli)** — ein Kommandozeilenwerkzeug für headless Inventar (`list`) sowie Asset-Sync- und Geräte-Diagnose-Unterbefehle.
 
-Alles bleibt lokal: Belegungen liegen in einer schlichten TOML-Datei, Tastendrücke werden über den OS-Event-Tap neu belegt, und DPI-/SmartShift-Änderungen werden direkt über HID++ auf das Gerät geschrieben.
+Alles bleibt lokal: Belegungen liegen in einer einfachen TOML-Datei, Tastendrücke werden über den OS-Event-Hook umgeleitet, und DPI-/SmartShift-Änderungen werden per HID++ direkt aufs Gerät geschrieben.
 
-macOS wird heute unterstützt; Linux und Windows folgen bald —— siehe [Roadmap](#roadmap).
+macOS und Linux werden unterstützt. Windows ist eine frühe, ungetestete Vorschau — signierte Builds liegen jedem Release bei; siehe [Roadmap](#roadmap).
+
+## Mehr als Options+
+
+Was OpenLogi kann und Options+ nicht:
+
+- **Auf Linux laufen.** Options+ gibt es nur für macOS und Windows. OpenLogi behandelt Linux als vollwertige Plattform: evdev/uinput-Hook, udev-Regeln, eine systemd-User-Unit und `.deb`-/`.rpm`-Pakete.
+- **Die Gestentaste verschieben.** Wähle, welche physische Taste die Gestenrolle übernimmt — Daumenfläche, Mitteltaste, Zurück oder Vor — mit Wischbelegungen pro Richtung, oder schalte Gesten ganz ab. Options+ nagelt die Gestenrolle auf die dedizierte Daumenfläche fest.
+- **Konfiguration im Klartext.** Alles steckt in einer TOML-Datei, die du lesen, diffen, versionieren und zwischen Rechnern kopieren kannst.
+- **Skriptbar.** Eine echte CLI: Geräteinventar, Asset-Prefetch und HID++-Diagnosen am Gerät (Feature-Dump, DPI-/SmartShift-Roundtrips).
+- **Leichtgewichtig bleiben.** Native Rust-+-GPUI-Binaries — keine Electron-Suite, keine residenten Updater, kein Konto, keine Telemetrie.
 
 ## Roadmap
 
-| Funktion | Status |
+| Fähigkeit | Status |
 |---|---|
-| Bolt-Empfänger erkennen + gekoppelte Geräte auflisten (CLI + GUI) | ✅ |
-| Geräte per Bluetooth-Direktverbindung / Kabel (ohne Empfänger) | ✅ |
+| Bolt-Empfänger finden + gekoppelte Geräte auflisten (CLI + GUI) | ✅ |
+| Unifying-Empfänger (älteres Protokoll, von Bolt abgelöst) | ✅ |
+| Bluetooth-Direkt- / Kabelgeräte (ohne Empfänger) | ✅ |
 | Akkustand / Ladezustand | ✅ (Geräte online) |
-| Interaktive GUI: Karussell, Maus-Diagramm, Aktions-Auswahl | ✅ macOS |
-| Tastenneubelegung über den OS-Event-Tap (derzeit Seitentasten Back / Forward) | ✅ macOS |
-| Katalog mit 39 Aktionen + aufgezeichnete eigene Tastenkürzel | ✅ macOS¹ |
-| DPI-Steuerung + Presets + Aktionen „Durchschalten“ / „Preset setzen“ (HID++ `0x2201`) | ✅ macOS |
-| SmartShift-Umschaltung des Radmodus (HID++ `0x2111`) | ✅ macOS |
-| Anwendungsspezifische Profil-Overlays (automatischer Wechsel bei App-Fokus) | ✅ macOS |
-| Einstellungsfenster: Start bei Anmeldung, Update-Prüfung, Menüleiste, Berechtigungen, Sprache | ✅ macOS |
-| Oberflächen-Lokalisierung (6 Sprachen: en, ja, ru, zh-CN, zh-HK, zh-TW) | ✅ macOS |
-| Richtungsbelegungen der Gestentaste | 🟡 konfigurierbar; Hardware-Erfassung ausstehend |
-| Erfassung von Mittel- / Modus-Umschalt- / Daumenrad-Taste | 🟡 konfigurierbar; Hook belegt nur die Seitentasten |
-| Linux-/Windows-Event-Hook | ❌ Stub (`Unsupported`) |
-| Unifying-Empfänger | ❌ (noch nicht unterstützt) |
+| Interaktive GUI: Karussell, Mausdiagramm, Aktions-Picker | ✅ macOS + Linux |
+| Tastenumbelegung über OS-Event-Hook / evdev | ✅ macOS + Linux |
+| Katalog mit 41 Aktionen + eigene Tastenkürzel (TOML-handgepflegt) | ✅ macOS + Linux¹ |
+| DPI-Steuerung + Voreinstellungen + Cycle-/Set-Preset-Aktionen (HID++ `0x2201`) | ✅ |
+| SmartShift-Rad: Modus + Empfindlichkeit + permanente Rasterung (HID++ `0x2111`) | ✅ |
+| Profil-Overlays pro Anwendung (Auto-Wechsel bei App-Fokus) | ✅ macOS, 🟡 Linux (nur X11) |
+| Einstellungsfenster: Autostart, Updateprüfung, Menüleiste, Berechtigungen, Sprache | ✅ macOS + Linux |
+| Lokalisierte Oberfläche (20 Sprachen: da, de, el, en, es, fi, fr, it, ja, ko, nb, nl, pl, pt-BR, pt-PT, ru, sv, zh-CN, zh-HK, zh-TW) | ✅ |
+| Linux-Paketierung: udev-Regeln, systemd-Unit, `.deb` / `.rpm` | ✅ Linux |
+| Gestentaste: Belegungen pro Richtung | 🟡 konfigurierbar; Hardware-Erfassung in Arbeit |
+| Erfassung von Mittel-/Mode-Shift-/Daumenrad-Taste | 🟡 konfigurierbar; der Hook übernimmt bislang nur die Seitentasten |
+| Windows (Agent, GUI, Event-Hook) | 🟡 ungetestete Vorschau — signierte `.exe` / `.msi` liegen jedem Release bei |
 
-¹ Einige Aktionen (z. B. die Medientasten) protokollieren derzeit nur das beabsichtigte Ereignis, statt es tatsächlich auszulösen —— als Folgeaufgabe vermerkt.
+¹ Medientasten-Aktionen nutzen unter Linux D-Bus MPRIS; einige macOS-spezifische Aktionen (z. B. Launchpad) haben unter Linux kein Gegenstück und sind No-ops.
 
 ## Installation
 
 > [!IMPORTANT]
-> Beende zuerst **Logi Options+** —— beide Programme konkurrieren um den HID++-Zugriff, und ein Empfänger kann jeweils nur von einem belegt werden.
+> Beende zuerst **Logi Options+** — die beiden Anwendungen streiten sich um den HID++-Zugriff, und ein Empfänger kann immer nur einem gehören.
 
-Lade die signierte, notarisierte `.dmg` aus dem [neuesten Release](https://github.com/AprilNEA/OpenLogi/releases/latest) herunter und ziehe `OpenLogi.app` nach `/Applications`.
+### macOS
 
-Oder installiere via [Homebrew](https://brew.sh):
+Lade das signierte, notarisierte `.dmg` vom [neuesten Release](https://github.com/AprilNEA/OpenLogi/releases/latest) und ziehe `OpenLogi.app` nach `/Applications`.
+
+Oder per [Homebrew](https://brew.sh):
 
 ```sh
 brew install --cask openlogi
 ```
 
+Der offizielle Homebrew-Cask ist der Standardweg. Um stattdessen explizit das neueste GitHub-Release über `aprilnea/tap` zu verfolgen:
+
+```sh
+brew tap aprilnea/tap
+brew install --cask aprilnea/tap/openlogi@latest
+```
+
+`openlogi@latest` wird vom Release-Workflow von OpenLogi gepflegt und kann aktualisiert sein, bevor der Autobump des offiziellen Casks greift. Installiere entweder `openlogi` oder `openlogi@latest`, nicht beide.
+
+### Linux
+
+Lade das `.deb` oder `.rpm` vom [neuesten Release](https://github.com/AprilNEA/OpenLogi/releases/latest):
+
+```sh
+# Debian / Ubuntu
+sudo dpkg -i openlogi_*.deb
+
+# Fedora / RHEL
+sudo rpm -i openlogi-*.rpm
+```
+
+Pakete erscheinen für `x86_64`/`amd64` und `arm64`/`aarch64`.
+
+Das Paket installiert udev-Regeln, die deinem Benutzer Zugriff auf `/dev/hidraw*` und `/dev/uinput` ohne `sudo` geben. Aktiviere nach der Installation den Hintergrund-Agent für deinen Benutzer:
+
+```sh
+systemctl --user enable --now openlogi-agent.service
+```
+
+Für manuelle / Quellcode-Installationen und Distributionen ohne systemd siehe [INSTALL-linux.md](INSTALL-linux.md).
+
+### Windows (Vorschau)
+
+Jedem Release liegen signierte `.exe`- und Per-User-`.msi`-Installer (x86_64 und arm64) bei. Die Windows-Unterstützung ist eine frühe Vorschau, die auf echter Hardware noch nicht breit getestet wurde — rechne mit Ecken und Kanten und [melde Probleme](https://github.com/AprilNEA/OpenLogi/issues).
+
 Zum Bauen aus dem Quellcode siehe [DEVELOPMENT.md](DEVELOPMENT.md).
+
 
 ## Verwendung (CLI)
 
-Siehe [USAGE.md](USAGE.md).
+Siehe [USAGE.md](USAGE.md)
 
 ## Konfiguration
 
-Siehe [CONFIGURATION.md](CONFIGURATION.md).
+Siehe [CONFIGURATION.md](CONFIGURATION.md)
 
 ## Entwicklung
 
-Siehe [DEVELOPMENT.md](DEVELOPMENT.md).
+Siehe [DEVELOPMENT.md](DEVELOPMENT.md)
 
 ## Danksagungen
 
@@ -97,17 +146,15 @@ Siehe [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Lizenz
 
-Dual-lizenziert unter wahlweise
+Doppelt lizenziert, wahlweise unter
 
 - Apache License, Version 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
 - MIT-Lizenz ([LICENSE-MIT](../LICENSE-MIT))
 
-—— nach deiner Wahl.
+### Logo & Markenressourcen
 
-### Logo & Markenmaterialien
-
-Das OpenLogi-Logo und das App-Icon —— die Markenmaterialien unter [`design/`](../design/) —— sind © 2026 AprilNEA, alle Rechte vorbehalten, und werden nicht von den oben genannten MIT-/Apache-Lizenzen abgedeckt; siehe [`design/LICENSE`](../design/LICENSE). Das Forken des Codes gewährt keinerlei Rechte am Namen, Logo oder Icon von OpenLogi; bitte verwende sie ohne vorherige schriftliche Genehmigung nicht, um deine eigenen Projekte, Forks oder Distributionen zu repräsentieren.
+Das OpenLogi-Logo und das App-Icon — die Markenressourcen unter [`design/`](../design/) — sind © 2026 AprilNEA, alle Rechte vorbehalten, und fallen nicht unter die obigen MIT-/Apache-Lizenzen; siehe [`design/LICENSE`](../design/LICENSE). Ein Fork des Codes gewährt kein Recht am Namen, Logo oder Icon von OpenLogi; bitte verwende sie nicht ohne vorherige schriftliche Erlaubnis für eigene Projekte, Forks oder Distributionen.
 
 ---
 
-**Nicht mit Logitech verbunden.** „Logitech“, „MX Master“ und „Options+“ sind Marken der Logitech International S.A.
+**Nicht mit Logitech verbunden.** „Logitech", „MX Master" und „Options+" sind Marken der Logitech International S.A.

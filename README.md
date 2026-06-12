@@ -35,13 +35,31 @@ OpenLogi talks to Logitech HID++ mice over a Logi Bolt receiver — or a
 Bluetooth-direct / wired connection — without running Logi Options+. It ships
 two binaries:
 
-- **[OpenLogi GUI](crates/openlogi-gui)** — a GPUI desktop app: an interactive mouse diagram with clickable hotspots, a per-button action picker (39 built-in actions plus recorded custom shortcuts), DPI presets, a SmartShift panel (wheel mode, sensitivity, permanent ratchet), per-application profile overlays, a device carousel that switches between paired devices live, and a Settings window with a UI localized into 20 languages.
+- **[OpenLogi GUI](crates/openlogi-gui)** — a GPUI desktop app: an interactive mouse diagram with clickable hotspots, a per-button action picker (41 built-in actions plus custom keyboard shortcuts authored in the TOML config), DPI presets, a SmartShift panel (wheel mode, sensitivity, permanent ratchet), per-application profile overlays, a device carousel that switches between paired devices live, and a Settings window with a UI localized into 20 languages.
 - **[OpenLogi CLI](crates/openlogi-cli)** — a CLI for headless inventory (`list`) plus asset-sync and on-device diagnostic subcommands.
 
 Everything is local: bindings live in a plain TOML file, button presses are remapped through the OS event tap, and DPI / SmartShift changes are written straight to the device over HID++.
 
-macOS and Linux are supported. Windows support is planned — see
-[Roadmap](#roadmap).
+macOS and Linux are supported. Windows is an early, untested preview — signed
+builds ship with each release; see [Roadmap](#roadmap).
+
+## Beyond Options+
+
+Things OpenLogi does that Options+ won't:
+
+- **Run on Linux.** Options+ ships for macOS and Windows only. OpenLogi treats
+  Linux as a first-class platform: evdev/uinput hook, udev rules, a systemd
+  user unit, and `.deb` / `.rpm` packages.
+- **Move the Gesture Button.** Pick which physical button owns the gesture
+  role — thumb pad, middle, back, or forward — with per-direction swipe
+  bindings, or turn gestures off entirely. Options+ pins the gesture role to
+  the dedicated thumb pad.
+- **Keep config in plain text.** Everything is one TOML file you can read,
+  diff, version-control, and copy between machines.
+- **Script it.** A real CLI: device inventory, asset prefetch, and on-device
+  HID++ diagnostics (feature dump, DPI / SmartShift round-trips).
+- **Stay light.** Native Rust + GPUI binaries — no Electron suite, no resident
+  updaters, no account, no telemetry.
 
 ## Roadmap
 
@@ -53,7 +71,7 @@ macOS and Linux are supported. Windows support is planned — see
 | Battery percentage / charge state | ✅ (online devices) |
 | Interactive GUI: carousel, mouse diagram, action picker | ✅ macOS + Linux |
 | Button remapping via the OS event tap / evdev hook | ✅ macOS + Linux |
-| 39-action catalog + recorded custom keyboard shortcuts | ✅ macOS + Linux¹ |
+| 41-action catalog + custom keyboard shortcuts (TOML-authored) | ✅ macOS + Linux¹ |
 | DPI control + presets + Cycle / Set-preset actions (HID++ `0x2201`) | ✅ |
 | SmartShift wheel: mode toggle + sensitivity + permanent-ratchet panel (HID++ `0x2111`) | ✅ |
 | Per-application profile overlays (auto-switch on app focus) | ✅ macOS, 🟡 Linux (X11 only) |
@@ -62,7 +80,7 @@ macOS and Linux are supported. Windows support is planned — see
 | Linux packaging: udev rules, systemd unit, `.deb` / `.rpm` / `.tar.gz` | ✅ Linux |
 | Gesture-button per-direction bindings | 🟡 configurable; hardware capture pending |
 | Middle / mode-shift / thumbwheel button capture | 🟡 configurable; hook owns side buttons only |
-| Windows event hook | ❌ |
+| Windows (agent, GUI, event hook) | 🟡 untested preview — signed `.exe` / `.msi` ship per release |
 
 ¹ Media key actions use D-Bus MPRIS on Linux; a handful of macOS-specific actions (e.g. Launchpad) have no Linux equivalent and are no-ops.
 
@@ -124,6 +142,13 @@ systemctl --user enable --now openlogi-agent.service
 
 See [docs/INSTALL-linux.md](docs/INSTALL-linux.md) for source installs,
 packaging details, and distros without systemd.
+
+### Windows (preview)
+
+Signed `.exe` and per-user `.msi` installers (x86_64 and arm64) are attached to
+each release. Windows support is an early preview that hasn't been broadly
+tested on real hardware yet — expect rough edges, and please
+[report issues](https://github.com/AprilNEA/OpenLogi/issues).
 
 To build from source, see [DEVELOPMENT.md](docs/DEVELOPMENT.md).
 

@@ -162,7 +162,7 @@ jobs:
           ref_name="${ref_name//\//-}"
           cp target/release/OpenLogi.dmg "dist/OpenLogi-${ref_name}-macos-${{ matrix.arch }}.dmg"
 
-      - uses: actions/upload-artifact@v8
+      - uses: actions/upload-artifact@v7
         with:
           name: OpenLogi-macos-dmg-${{ matrix.arch }}
           path: dist/*.dmg
@@ -317,7 +317,7 @@ jobs:
           $ref = $env:GITHUB_REF_NAME -replace '/', '-'
           Copy-Item target\${{ matrix.target }}\release\openlogi-gui.exe "dist\OpenLogi-$ref-windows-${{ matrix.arch }}.exe"
 
-      - uses: actions/upload-artifact@v8
+      - uses: actions/upload-artifact@v7
         with:
           name: OpenLogi-windows-${{ matrix.arch }}
           path: dist/*.exe
@@ -528,7 +528,7 @@ jobs:
             --tag "$GITHUB_REF_NAME" \
             --output .release/RELEASE_NOTES.md
 
-      - uses: actions/upload-artifact@v8
+      - uses: actions/upload-artifact@v7
         with:
           name: OpenLogi-release-notes
           path: .release/RELEASE_NOTES.md
@@ -599,7 +599,7 @@ jobs:
             cp "$pkg" "dist/openlogi-${ref_name}-linux-${PKG_ARCH}.${ext}"
           done
 
-      - uses: actions/upload-artifact@v8
+      - uses: actions/upload-artifact@v7
         with:
           name: OpenLogi-linux-packages-${{ matrix.arch }}
           path: dist/*

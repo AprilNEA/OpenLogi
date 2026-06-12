@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.9](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.8...openlogi-core-v0.6.9) - 2026-06-12
+
+### Added
+
+- *(gui)* add a Copy Diagnostics button to the About window ([#206](https://github.com/AprilNEA/OpenLogi/pull/206))
+
 ## [0.6.8](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.7...openlogi-core-v0.6.8) - 2026-06-12
 
 ### Added

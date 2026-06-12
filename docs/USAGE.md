@@ -9,6 +9,7 @@ openlogi assets sync          # pre-fetch device renders from assets.openlogi.or
 openlogi diag features        # dump every HID++ feature the active device reports
 openlogi diag dpi             # read → write → read-back → restore DPI (smoke test)
 openlogi diag smartshift      # toggle SmartShift and restore (smoke test)
+openlogi diag lighting ff0000 # solid colour for a wired RGB keyboard (any RRGGBB hex)
 ```
 
 Running `openlogi` with no subcommand defaults to `list`. Set
