@@ -715,14 +715,15 @@ jobs:
           # newline mangled to a space — see the GitHub App key note above).
           # `tr -d` drops any wrapping whitespace before decoding.
           printf '%s' "$OPENLOGI_UPDATE_MINISIGN_SECRET_KEY" | tr -d '[:space:]' | base64 -d > "$key_file"
-          # The Windows binaries get the same minisign treatment as the DMGs:
-          # manual verification today, and the future Windows auto-updater
-          # needs the detached signatures to exist for every shipped version.
-          # nullglob: the exe/msi sets are best-effort per arch leg, so the
-          # globs may match nothing; the DMGs are guaranteed by the publish
+          # The Windows binaries and Linux packages get the same minisign
+          # treatment as the DMGs: manual verification today, and the future
+          # auto-updaters need the detached signatures to exist for every
+          # shipped version.
+          # nullglob: the exe/msi/deb/rpm sets are best-effort per arch leg, so
+          # the globs may match nothing; the DMGs are guaranteed by the publish
           # gate.
           shopt -s nullglob
-          for artifact in dist/*.dmg dist/*.exe dist/*.msi; do
+          for artifact in dist/*.dmg dist/*.exe dist/*.msi dist/*.deb dist/*.rpm; do
             minisign -S -m "$artifact" -s "$key_file" -x "$artifact.minisig" -W
             minisign -V -m "$artifact" -P "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" -x "$artifact.minisig"
           done
