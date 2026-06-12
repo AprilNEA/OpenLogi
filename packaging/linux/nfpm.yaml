@@ -3,13 +3,13 @@
 # Build with the xtask:
 #   cargo run -p xtask -- package-linux
 #
-# Or directly (requires nfpm in PATH and VERSION env var set):
-#   VERSION=0.6.0 nfpm package --packager deb --target target/release
-#   VERSION=0.6.0 nfpm package --packager rpm --target target/release
+# Or directly (requires nfpm in PATH; set VERSION and PKG_ARCH):
+#   VERSION=0.6.0 PKG_ARCH=amd64 nfpm package --packager deb --target target/release
+#   VERSION=0.6.0 PKG_ARCH=arm64 nfpm package --packager rpm --target target/release
 
 name: openlogi
 version: "${VERSION}"
-arch: amd64
+arch: "${PKG_ARCH}"
 maintainer: OpenLogi Contributors <dev@aprilnea.me>
 description: |-
   Logitech HID++ device control — remap buttons, DPI, and SmartShift.

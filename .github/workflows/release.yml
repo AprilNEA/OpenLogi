@@ -534,8 +534,18 @@ jobs:
           path: .release/RELEASE_NOTES.md
 
   linux-packages:
-    name: Linux packages (.deb / .rpm)
-    runs-on: ubuntu-latest
+    name: Linux packages (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            nfpm_sha256: "d6417f99d5fa32bba7a4e007084615d3897651498c2e443118c26b9ec3b698a8"
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            nfpm_sha256: "dc63aa7228ec70490bae67ad3146883055a055639dcf0dffc82fa965bac75a31"
     permissions:
       contents: read
     steps:
@@ -545,16 +555,31 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The nfpm `arch` and the runner's native arch must agree — the packages
+      # are built natively, not cross-compiled, so a mismatched runner would
+      # silently ship a wrongly-labelled binary.
+      - name: Verify runner architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          case "$(uname -m)" in
+            x86_64) got=amd64 ;;
+            aarch64) got=arm64 ;;
+            *) echo "unexpected machine $(uname -m)" >&2; exit 1 ;;
+          esac
+          test "$got" = "$EXPECTED_ARCH"
+
       - name: Install system dependencies and nfpm
         env:
           NFPM_VERSION: "2.46.3"
-          NFPM_SHA256: "d6417f99d5fa32bba7a4e007084615d3897651498c2e443118c26b9ec3b698a8"
+          NFPM_ARCH: ${{ matrix.arch }}
+          NFPM_SHA256: ${{ matrix.nfpm_sha256 }}
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libfontconfig1-dev libfreetype-dev libxcb1-dev libxkbcommon-dev
           curl -fsSLo /tmp/nfpm.deb \
-            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb"
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_${NFPM_ARCH}.deb"
           echo "${NFPM_SHA256}  /tmp/nfpm.deb" | sha256sum -c
           sudo dpkg -i /tmp/nfpm.deb
 
@@ -562,6 +587,8 @@ jobs:
         run: cargo run -p xtask -- package-linux
 
       - name: Collect packages
+        env:
+          PKG_ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p dist
           ref_name="${GITHUB_REF_NAME:-dev}"
@@ -569,12 +596,12 @@ jobs:
           for pkg in target/release/*.deb target/release/*.rpm; do
             [ -f "$pkg" ] || continue
             ext="${pkg##*.}"
-            cp "$pkg" "dist/openlogi-${ref_name}-linux-amd64.${ext}"
+            cp "$pkg" "dist/openlogi-${ref_name}-linux-${PKG_ARCH}.${ext}"
           done
 
       - uses: actions/upload-artifact@v8
         with:
-          name: OpenLogi-linux-packages
+          name: OpenLogi-linux-packages-${{ matrix.arch }}
           path: dist/*
 
   # Single owner of the GitHub Release. softprops/action-gh-release@v3 creates the
@@ -630,8 +657,9 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: OpenLogi-linux-packages
+          pattern: OpenLogi-linux-packages-*
           path: dist
+          merge-multiple: true
 
       - name: Generate checksums
         run: |
