@@ -34,7 +34,7 @@
            Compressed="yes">
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of OpenLogi is already installed." />
-    <MediaTemplate EmbedCab="yes" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="ProgramsFolder" Name="Programs">

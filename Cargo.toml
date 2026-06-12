@@ -94,6 +94,6 @@ missing_errors_doc = "allow"
 doc_markdown = "allow"
 
 [profile.release]
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 strip = "symbols"

@@ -253,7 +253,11 @@ pub(crate) fn dmg_macos(args: &DmgMacos) -> Result<()> {
     // Geometry is locked to the painted 760×480 background. `create-dmg` uses
     // outer window dimensions, so add the 32pt Finder title bar and keep icon
     // coordinates relative to the 760×480 content area.
+    // ULMO (LZMA) compresses ~20% smaller than the default UDZO (zlib) and
+    // mounts on macOS 10.15+, well under the bundle's 13.0 floor.
     run(ProcessCommand::new("create-dmg")
+        .arg("--format")
+        .arg("ULMO")
         .arg("--volname")
         .arg("OpenLogi")
         .arg("--background")
