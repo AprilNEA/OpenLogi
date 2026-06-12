@@ -59,7 +59,7 @@ macOS and Linux are supported. Windows support is planned — see
 | Per-application profile overlays (auto-switch on app focus) | ✅ macOS, 🟡 Linux (X11 only) |
 | Settings window: launch-at-login, update check, menu-bar, permissions, language | ✅ macOS + Linux |
 | Interface localization (20 languages: da, de, el, en, es, fi, fr, it, ja, ko, nb, nl, pl, pt-BR, pt-PT, ru, sv, zh-CN, zh-HK, zh-TW) | ✅ |
-| Linux packaging: udev rules, systemd unit, `.deb` / `.rpm` | ✅ Linux |
+| Linux packaging: udev rules, systemd unit, `.deb` / `.rpm` / `.tar.gz` | ✅ Linux |
 | Gesture-button per-direction bindings | 🟡 configurable; hardware capture pending |
 | Middle / mode-shift / thumbwheel button capture | 🟡 configurable; hook owns side buttons only |
 | Windows event hook | ❌ |
@@ -95,7 +95,8 @@ before the official cask autobump lands. Install either `openlogi` or
 
 ### Linux
 
-Download the `.deb` or `.rpm` from the [latest release](https://github.com/AprilNEA/OpenLogi/releases/latest):
+Download the Linux package for your distro from the
+[latest release](https://github.com/AprilNEA/OpenLogi/releases/latest):
 
 ```sh
 # Debian / Ubuntu
@@ -105,16 +106,24 @@ sudo dpkg -i openlogi_*.deb
 sudo rpm -i openlogi-*.rpm
 ```
 
-The package installs udev rules that grant your user access to
-`/dev/hidraw*` and `/dev/uinput` without `sudo`. After installation,
-enable the background agent for your user:
+For other Linux distributions, use the portable release tarball:
+
+```sh
+tar -xzf openlogi-*-linux-*.tar.gz
+cd openlogi-*-linux-*
+sudo packaging/linux/install.sh --prefix=/usr
+```
+
+The packages and install script install udev rules that grant your user access
+to `/dev/hidraw*` and `/dev/uinput` without `sudo`. After installation, enable
+the background agent for your user:
 
 ```sh
 systemctl --user enable --now openlogi-agent.service
 ```
 
-See [docs/INSTALL-linux.md](docs/INSTALL-linux.md) for manual / source installs
-and distros without systemd.
+See [docs/INSTALL-linux.md](docs/INSTALL-linux.md) for source installs,
+packaging details, and distros without systemd.
 
 To build from source, see [DEVELOPMENT.md](docs/DEVELOPMENT.md).
 

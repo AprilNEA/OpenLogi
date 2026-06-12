@@ -78,6 +78,8 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
             appears_transparent: false,
             traffic_light_position: None,
         }),
+        app_id: Some(crate::APP_ID.to_string()),
+        icon: crate::app_assets::app_icon(),
         ..WindowOptions::default()
     };
 

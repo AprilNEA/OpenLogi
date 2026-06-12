@@ -116,6 +116,18 @@ layout: a 760×480 background image in a 760×512 Finder window, with 128px icon
 positioned at `(212, 250)` for `OpenLogi.app` and `(548, 250)` for
 `Applications`.
 
+## Packaging Linux Releases
+
+```sh
+cargo run -p xtask -- package-linux
+```
+
+The Linux packaging task builds the three release binaries, writes a portable
+`openlogi-<version>-linux-<arch>.tar.gz`, and uses `nfpm` to create matching
+`.deb` and `.rpm` packages in `target/release/`.
+
+Use `--no-build` to package an existing `target/release` build.
+
 ## Release updater publishing
 
 Tagged releases still attach DMGs and `SHA256SUMS` to GitHub Releases for manual

@@ -175,74 +175,81 @@ pub fn open(cx: &mut App) {
 }
 
 impl Render for AboutView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
 
-        v_flex()
-            .size_full()
-            .bg(pal.bg)
-            .text_color(pal.text_primary)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
-            .items_center()
-            .justify_center()
-            .gap_3()
-            .p_8()
-            .child(img(crate::app_assets::LOGO).w(px(72.)).h(px(72.)))
-            .child(
-                div()
-                    .text_2xl()
-                    .font_weight(FontWeight::BOLD)
-                    .child("OpenLogi"),
-            )
-            .child(
-                div()
-                    .id("about-version")
-                    .text_sm()
-                    .text_color(pal.text_muted)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(pal.text_primary))
-                    .child(concat!("v", env!("CARGO_PKG_VERSION")))
-                    .on_click(|_, _, cx| cx.open_url(&release_tag_url(env!("CARGO_PKG_VERSION")))),
-            )
-            .child(
-                div()
-                    .max_w(px(280.))
-                    .text_sm()
-                    .text_center()
-                    .text_color(pal.text_muted)
-                    .child(tr!(
-                        "Open-source Logitech mouse configuration — DPI, SmartShift, button \
+        crate::window_chrome::frame(
+            "About OpenLogi",
+            v_flex()
+                .size_full()
+                .bg(pal.bg)
+                .text_color(pal.text_primary)
+                .on_action(|_: &CloseWindow, window, _| window.remove_window())
+                .on_action(|_: &Minimize, window, _| window.minimize_window())
+                .on_action(|_: &Zoom, window, _| window.zoom_window())
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .p_8()
+                .child(img(crate::app_assets::LOGO).w(px(72.)).h(px(72.)))
+                .child(
+                    div()
+                        .text_2xl()
+                        .font_weight(FontWeight::BOLD)
+                        .child("OpenLogi"),
+                )
+                .child(
+                    div()
+                        .id("about-version")
+                        .text_sm()
+                        .text_color(pal.text_muted)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(pal.text_primary))
+                        .child(concat!("v", env!("CARGO_PKG_VERSION")))
+                        .on_click(|_, _, cx| {
+                            cx.open_url(&release_tag_url(env!("CARGO_PKG_VERSION")))
+                        }),
+                )
+                .child(
+                    div()
+                        .max_w(px(280.))
+                        .text_sm()
+                        .text_center()
+                        .text_color(pal.text_muted)
+                        .child(tr!(
+                            "Open-source Logitech mouse configuration — DPI, SmartShift, button \
                          bindings, and gestures."
-                    )),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .pt_2()
-                    .child(
-                        Button::new("about-repo")
-                            .outline()
-                            .icon(IconName::Github)
-                            .label("GitHub")
-                            .on_click(|_, _, cx| cx.open_url(REPO_URL)),
-                    )
-                    .child(
-                        Button::new("about-releases")
-                            .outline()
-                            .icon(IconName::ExternalLink)
-                            .label("Releases")
-                            .on_click(|_, _, cx| cx.open_url(RELEASES_URL)),
-                    ),
-            )
-            .child(self.update_section(cx))
-            .child(self.diagnostics_button(cx))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(pal.text_muted)
-                    .child("Licensed under MIT OR Apache-2.0"),
-            )
+                        )),
+                )
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .pt_2()
+                        .child(
+                            Button::new("about-repo")
+                                .outline()
+                                .icon(IconName::Github)
+                                .label("GitHub")
+                                .on_click(|_, _, cx| cx.open_url(REPO_URL)),
+                        )
+                        .child(
+                            Button::new("about-releases")
+                                .outline()
+                                .icon(IconName::ExternalLink)
+                                .label("Releases")
+                                .on_click(|_, _, cx| cx.open_url(RELEASES_URL)),
+                        ),
+                )
+                .child(self.update_section(cx))
+                .child(self.diagnostics_button(cx))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(pal.text_muted)
+                        .child("Licensed under MIT OR Apache-2.0"),
+                ),
+            window,
+            cx,
+        )
     }
 }

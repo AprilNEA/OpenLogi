@@ -28,7 +28,7 @@ enum Command {
     DmgMacos(DmgMacos),
     /// Build the app bundle and package it into the branded macOS DMG.
     PackageMacos(DmgMacos),
-    /// Build release binaries and package them into .deb and .rpm (Linux).
+    /// Build release binaries and package them into .deb, .rpm, and .tar.gz (Linux).
     PackageLinux(PackageLinux),
 }
 

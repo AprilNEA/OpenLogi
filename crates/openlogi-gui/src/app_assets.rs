@@ -7,6 +7,7 @@
 //! would not.
 
 use std::borrow::Cow;
+use std::sync::{Arc, LazyLock};
 
 use gpui::{AssetSource, Result, SharedString};
 
@@ -14,10 +15,21 @@ use gpui::{AssetSource, Result, SharedString};
 pub const LOGO: &str = "openlogi.png";
 
 /// The 1024×1024 app icon, embedded into the binary.
-const LOGO_BYTES: &[u8] = include_bytes!(concat!(
+pub const LOGO_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../design/icon/openlogi.png"
 ));
+
+static APP_ICON: LazyLock<Option<Arc<image::RgbaImage>>> = LazyLock::new(|| {
+    image::load_from_memory(LOGO_BYTES)
+        .ok()
+        .map(|img| Arc::new(img.to_rgba8()))
+});
+
+/// The decoded app icon for native window metadata.
+pub fn app_icon() -> Option<Arc<image::RgbaImage>> {
+    APP_ICON.clone()
+}
 
 /// Vendored [lucide](https://lucide.dev) icons (ISC license) for the binding
 /// menus, embedded so they resolve identically in a packaged `.app` and a dev
