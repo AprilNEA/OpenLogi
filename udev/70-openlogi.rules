@@ -1,0 +1,28 @@
+# OpenLogi — Linux device permissions
+#
+# Grants the active local-seat user read/write access to Logitech HID++ devices
+# (and to uinput, for the evdev+uinput event hook) without root, via systemd
+# `uaccess`. This is group-free and works under both X11 and Wayland/GNOME.
+#
+# Install:
+#   sudo cp udev/70-openlogi.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   # then power-cycle the device (or replug the receiver) so the ACL is applied
+#
+# Two matchers are needed because the vendor id is exposed differently per
+# transport:
+#   - Bolt receiver / USB cable: the device sits on the USB tree, so the vendor
+#     is a USB attribute (`ATTRS{idVendor}`).
+#   - Bluetooth-direct: the device hangs off `uhid`
+#     (/devices/virtual/misc/uhid/0005:046D:XXXX.NNNN), which has no USB
+#     `idVendor` attribute — the vendor only appears in the HID id `0005:046D:*`,
+#     matched here via `KERNELS`.
+
+# Logitech over USB / Bolt receiver
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", MODE="0660", TAG+="uaccess"
+
+# Logitech over Bluetooth-direct (uhid; vendor only in the HID id, uppercase)
+KERNEL=="hidraw*", KERNELS=="0005:046D:*", MODE="0660", TAG+="uaccess"
+
+# uinput — required by the Linux evdev+uinput event hook to inject events
+KERNEL=="uinput", MODE="0660", TAG+="uaccess", OPTIONS+="static_node=uinput"

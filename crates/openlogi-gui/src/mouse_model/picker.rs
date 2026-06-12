@@ -1,41 +1,37 @@
-//! Popover content for binding mouse buttons, plus the gesture button's
-//! cascading menu.
+//! Popover content for binding mouse buttons, plus the gesture button's custom
+//! two-level menu.
 //!
 //! - [`action_picker`] — one button → one [`Action`], rendered as a custom flat
 //!   list inside a gpui-component [`Popover`](gpui_component::popover::Popover).
 //!   Generic over the entity that should be notified after a binding changes so
 //!   the trigger re-renders with the new label.
-//! - [`build_gesture_menu`] — the gesture button's two-level
-//!   [`PopupMenu`](gpui_component::menu::PopupMenu): one submenu per
-//!   [`GestureDirection`], each listing the full action catalog with the
-//!   current binding checked. Picking an action commits straight to
-//!   [`AppState`], whose global observers re-render the model, so the menu
-//!   needs no observer.
+//! - [`gesture_overview`] — the gesture button's custom multi-level menu: a
+//!   plus-shaped navigator card (level 1) listing all five [`GestureDirection`]s
+//!   with their bound actions, and — once a direction is activated — a separate
+//!   action-list card (level 2) that flies out beside it. The two are distinct
+//!   floating cards (own surface + height), so this reads like a cascading menu
+//!   while staying fully custom-styled. The active direction is scratch state on
+//!   the [`MouseModelView`].
 //!
-//! The [`Popover`] wraps the [`action_picker`] content in a styled surface
-//! (background, border, shadow, `p_3` padding), so the layout here stays flat:
-//! no extra card background, no extra outer padding. Rows are transparent until
-//! hovered; the active binding is marked with accent text plus a check glyph
-//! rather than a filled box. The [`PopupMenu`] draws its own surface and check
-//! marks, so the gesture menu defers entirely to the framework's styling.
+//! The [`action_picker`] [`Popover`] uses the framework's styled surface; the
+//! gesture menu uses `appearance(false)` and draws its own card surfaces, since
+//! its two levels need independent panels. Rows are transparent until hovered;
+//! the active binding is marked with accent text plus a check glyph.
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, BorrowAppContext as _, Context, Entity, FontWeight, InteractiveElement,
     IntoElement, ParentElement, StatefulInteractiveElement as _, Styled, Window, div, hsla,
-    prelude::FluentBuilder as _, px, rgb,
+    prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::{
-    h_flex,
-    menu::{PopupMenu, PopupMenuItem},
-    popover::PopoverState,
-    v_flex,
-};
+use gpui_component::{Icon, IconName, h_flex, popover::PopoverState, v_flex};
 
 use crate::data::mouse_buttons::{
     Action, ButtonId, Category, GestureDirection, default_gesture_binding,
 };
+use crate::mouse_model::view::MouseModelView;
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette};
 
@@ -74,7 +70,7 @@ pub fn action_picker<T: 'static>(
 
     let pal = theme::palette(cx);
     let button = rust_i18n::t!(btn.label());
-    v_flex()
+    menu_card(pal)
         .min_w(px(POPOVER_W))
         .child(title(tr!("Bind %{name}", name => button), pal))
         .child(divider(pal))
@@ -85,58 +81,191 @@ pub fn action_picker<T: 'static>(
         .into_any_element()
 }
 
-/// Build the gesture button's two-level [`PopupMenu`]: one submenu per
-/// [`GestureDirection`], each opening the full action catalog with the current
-/// binding checked. Picking an action commits it to [`AppState`] and dismisses
-/// the whole menu.
-pub fn build_gesture_menu(
-    mut menu: PopupMenu,
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
-    for dir in GestureDirection::ALL {
-        // Glyph prefix gives the directional cue the old list had; the bound
-        // action shows up as the checked row inside each submenu.
-        let label = format!("{}  {}", dir.glyph(), tr!(dir.label()));
-        menu = menu.submenu(label, window, cx, move |submenu, _window, cx| {
-            gesture_action_submenu(dir, submenu, cx)
-        });
-    }
-    menu
+/// Floor width of a single direction cell in the plus navigator. Three sit side
+/// by side in the middle row, so the plus is roughly `3×` this plus gaps.
+const GESTURE_CELL_W: f32 = 104.;
+
+/// Build the gesture button's custom two-level menu: the plus navigator card
+/// (level 1) plus, once a direction is activated, its action-list card (level 2)
+/// flown out beside it. The two are separate floating cards — own surface and
+/// height — so it reads like a cascading menu without sharing one box. The
+/// active direction is scratch UI state on the [`MouseModelView`] (`None` until
+/// a cell is clicked → only the plus shows), reset on popover close. Mutating it
+/// re-renders the view, which re-renders this open popover's content.
+pub fn gesture_overview(
+    view: &Entity<MouseModelView>,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
+    let pal = theme::palette(cx);
+    let active = view.read(cx).gesture_selected_dir();
+    h_flex()
+        .items_start()
+        .gap_2()
+        .child(plus_card(view, active, pal, cx))
+        // The flyout card only appears once a direction is activated.
+        .when_some(active, |row, dir| row.child(flyout_card(dir, view, pal, cx)))
+        .into_any_element()
 }
 
-/// Populate one direction's action submenu: the category-grouped catalog with
-/// the current binding checked and a commit-on-click handler per row. The
-/// submenu scrolls (the catalog is taller than the window) — it has no further
-/// submenus of its own, so scrolling is allowed.
-fn gesture_action_submenu(
-    direction: GestureDirection,
-    submenu: PopupMenu,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
+/// The shared floating-card surface for every binding menu — the button picker,
+/// the gesture plus navigator, and its action flyout — so they read as one
+/// consistent, app-branded panel instead of two different surfaces.
+///
+/// Radius scale (shape lock): interactive rows/cells use `rounded_md` (6px); the
+/// card uses `rounded_lg` (8px). The shadow is gpui's soft `shadow_md`, not a
+/// hard drop. Not stateful (no interaction → no element id, so two sibling cards
+/// can't collide on one).
+fn menu_card(pal: Palette) -> gpui::Div {
+    v_flex()
+        .bg(pal.surface)
+        .border_1()
+        .border_color(pal.border)
+        .rounded_lg()
+        .shadow_md()
+        .p_1p5()
+}
+
+/// Level 1: the plus navigator. `Up` on top, `Left`/`Click`/`Right` across the
+/// middle, `Down` on the bottom. Each cell shows its glyph + label and bound
+/// action; the `active` cell (if any) is accented. Clicking a cell activates
+/// that direction (flying out the level-2 card) without committing.
+fn plus_card(
+    view: &Entity<MouseModelView>,
+    active: Option<GestureDirection>,
+    pal: Palette,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
+    let actions: BTreeMap<GestureDirection, Action> = GestureDirection::ALL
+        .into_iter()
+        .map(|d| {
+            let action = cx
+                .try_global::<AppState>()
+                .and_then(|s| s.gesture_bindings.get(&d).cloned())
+                .unwrap_or_else(|| default_gesture_binding(d));
+            (d, action)
+        })
+        .collect();
+
+    let cell =
+        |dir: GestureDirection| direction_cell(dir, &actions[&dir], active == Some(dir), view, pal);
+
+    menu_card(pal)
+        .gap_1p5()
+        .child(
+            h_flex()
+                .w_full()
+                .justify_center()
+                .child(cell(GestureDirection::Up)),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .justify_center()
+                .gap_1p5()
+                .child(cell(GestureDirection::Left))
+                .child(cell(GestureDirection::Click))
+                .child(cell(GestureDirection::Right)),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .justify_center()
+                .child(cell(GestureDirection::Down)),
+        )
+        .into_any_element()
+}
+
+/// One direction's cell in the plus: a fixed-width clickable card with the
+/// direction glyph + label above its bound-action label. The `active` cell is
+/// accented (border + faint fill); a default binding's action is muted.
+fn direction_cell(
+    dir: GestureDirection,
+    current: &Action,
+    active: bool,
+    view: &Entity<MouseModelView>,
+    pal: Palette,
+) -> AnyElement {
+    let idx = match dir {
+        GestureDirection::Up => 0usize,
+        GestureDirection::Down => 1,
+        GestureDirection::Left => 2,
+        GestureDirection::Right => 3,
+        GestureDirection::Click => 4,
+    };
+    let header = format!("{}  {}", dir.glyph(), tr!(dir.label()));
+    let action_label = tr!(current.label());
+    let is_default = *current == default_gesture_binding(dir);
+    let view = view.clone();
+    v_flex()
+        .id(("gesture-cell", idx))
+        .w(px(GESTURE_CELL_W))
+        .gap(px(2.))
+        .px_2()
+        .py_1p5()
+        .rounded_md()
+        .border_1()
+        .border_color(if active {
+            rgb(ACCENT_BLUE).into()
+        } else {
+            pal.border
+        })
+        .when(active, |s| s.bg(hsla(0.6, 0.9, 0.6, 0.10)))
+        .hover(move |s| s.bg(pal.surface_hover))
+        .child(div().text_xs().text_color(pal.text_muted).child(header))
+        .child(
+            div()
+                .text_sm()
+                .text_color(if is_default {
+                    pal.text_muted
+                } else {
+                    pal.text_primary
+                })
+                .child(action_label),
+        )
+        // Click opens this direction's flyout; clicking the active cell again
+        // closes it. (Hover-to-open was too easy to mis-trigger while moving the
+        // cursor across the plus.)
+        .on_click(move |_event, _window, cx| {
+            view.update(cx, |v, vcx| {
+                let next = (v.gesture_selected_dir() != Some(dir)).then_some(dir);
+                v.set_gesture_selected_dir(next);
+                vcx.notify();
+            });
+        })
+        .into_any_element()
+}
+
+/// Level 2: the `dir` direction's action picker, flown out as its own card —
+/// the category-grouped catalog with the current binding checked. Picking
+/// commits and stays open, so the level-1 cell + checkmark update in place and
+/// the user can keep editing other directions.
+fn flyout_card(
+    dir: GestureDirection,
+    view: &Entity<MouseModelView>,
+    pal: Palette,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
     let current = cx
         .try_global::<AppState>()
-        .and_then(|s| s.gesture_bindings.get(&direction).cloned())
-        .unwrap_or_else(|| default_gesture_binding(direction));
+        .and_then(|s| s.gesture_bindings.get(&dir).cloned())
+        .unwrap_or_else(|| default_gesture_binding(dir));
 
-    let mut submenu = submenu.scrollable(true).max_h(px(POPOVER_LIST_MAX_H));
-    for (category, actions) in grouped_catalog() {
-        submenu = submenu.label(tr!(category.label()));
-        for action in actions {
-            let checked = action == current;
-            let label = tr!(action.label());
-            let commit = action;
-            submenu = submenu.item(PopupMenuItem::new(label).checked(checked).on_click(
-                move |_event, _window, cx| {
-                    let action = commit.clone();
-                    cx.update_global::<AppState, _>(move |state, _| {
-                        state.commit_gesture_binding(direction, action);
-                    });
-                },
-            ));
-        }
-    }
-    submenu
+    let view_pick = view.clone();
+    let on_pick: PickFn = Rc::new(move |action, _window, cx| {
+        cx.update_global::<AppState, _>(|state, _| state.commit_gesture_binding(dir, action));
+        // Stay open; re-render so the level-1 cell + checkmark update.
+        view_pick.update(cx, |_, vcx| vcx.notify());
+    });
+
+    menu_card(pal)
+        .min_w(px(POPOVER_W))
+        .child(title(format!("{}  {}", dir.glyph(), tr!(dir.label())), pal))
+        .child(divider(pal))
+        .child(scroll_list(
+            "gesture-dir-scroll",
+            action_rows("gesture-action", Some(&current), &on_pick, pal),
+        ))
+        .into_any_element()
 }
 
 // ── Shared building blocks ──────────────────────────────────────────────────
@@ -161,9 +290,68 @@ fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
     sections
 }
 
-/// Build the category-grouped action rows. `current` is marked with accent
-/// text + a check glyph; clicking any row invokes `on_pick`. `id_prefix`
-/// disambiguates element IDs between pickers that share this builder.
+/// Icon for the gesture button's label card — lucide `move` (a 4-way arrow
+/// cross), standing in for its five swipe directions since it has no single
+/// bound action.
+pub(crate) const GESTURE_BUTTON_ICON: &str = "action-icons/move.svg";
+
+/// Asset path (served by [`crate::app_assets`]) of the vendored lucide glyph for
+/// an action — the leading icon in each action row and in the leader-line label
+/// card. Exhaustive on purpose: a new [`Action`] variant must pick an icon here
+/// (no catch-all fallback).
+pub(crate) fn action_icon_path(action: &Action) -> &'static str {
+    match action {
+        Action::None => "action-icons/ban.svg",
+        Action::LeftClick | Action::RightClick => "action-icons/mouse-pointer-click.svg",
+        Action::MiddleClick => "action-icons/mouse.svg",
+        // Circled arrows: visually "back/forward as a button", distinct from
+        // BrowserBack/BrowserForward's bare arrows in the Navigation section.
+        Action::MouseBack => "action-icons/circle-arrow-left.svg",
+        Action::MouseForward => "action-icons/circle-arrow-right.svg",
+        Action::Copy => "action-icons/copy.svg",
+        Action::Paste => "action-icons/clipboard-paste.svg",
+        Action::Cut => "action-icons/scissors.svg",
+        Action::Undo => "action-icons/undo-2.svg",
+        Action::Redo => "action-icons/redo-2.svg",
+        Action::SelectAll => "action-icons/list-checks.svg",
+        Action::Find => "action-icons/search.svg",
+        Action::Save => "action-icons/save.svg",
+        Action::BrowserBack => "action-icons/arrow-left.svg",
+        Action::BrowserForward => "action-icons/arrow-right.svg",
+        Action::NewTab => "action-icons/square-plus.svg",
+        Action::CloseTab => "action-icons/square-x.svg",
+        Action::ReopenTab => "action-icons/rotate-ccw.svg",
+        Action::NextTab => "action-icons/chevron-right.svg",
+        Action::PrevTab => "action-icons/chevron-left.svg",
+        Action::ReloadPage => "action-icons/rotate-cw.svg",
+        Action::MissionControl => "action-icons/layout-grid.svg",
+        Action::AppExpose => "action-icons/layers.svg",
+        Action::PreviousDesktop => "action-icons/square-arrow-left.svg",
+        Action::NextDesktop => "action-icons/square-arrow-right.svg",
+        Action::ShowDesktop => "action-icons/monitor.svg",
+        Action::LaunchpadShow => "action-icons/grid-3x3.svg",
+        Action::LockScreen => "action-icons/lock.svg",
+        Action::Screenshot => "action-icons/camera.svg",
+        Action::PlayPause => "action-icons/play.svg",
+        Action::NextTrack => "action-icons/skip-forward.svg",
+        Action::PrevTrack => "action-icons/skip-back.svg",
+        Action::VolumeUp => "action-icons/volume-2.svg",
+        Action::VolumeDown => "action-icons/volume-1.svg",
+        Action::MuteVolume => "action-icons/volume-x.svg",
+        Action::CycleDpiPresets | Action::SetDpiPreset(_) => "action-icons/gauge.svg",
+        Action::ToggleSmartShift => "action-icons/refresh-cw.svg",
+        Action::ScrollUp => "action-icons/chevrons-up.svg",
+        Action::ScrollDown => "action-icons/chevrons-down.svg",
+        Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
+        Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
+        Action::CustomShortcut(_) => "action-icons/keyboard.svg",
+    }
+}
+
+/// Build the category-grouped action rows. Each row leads with the action's
+/// icon, then its label; `current` adds a trailing accent check. Clicking any
+/// row invokes `on_pick`. `id_prefix` disambiguates element IDs between pickers
+/// that share this builder.
 fn action_rows(
     id_prefix: &'static str,
     current: Option<&Action>,
@@ -178,20 +366,31 @@ fn action_rows(
         for action in actions {
             let selected = current == Some(&action);
             let label = tr!(action.label());
+            let icon_path = action_icon_path(&action);
             let on_pick = on_pick.clone();
             let row_id = idx;
             idx += 1;
             children.push(
-                menu_row((id_prefix, row_id), pal)
-                    .text_color(if selected {
-                        rgb(ACCENT_BLUE).into()
-                    } else {
-                        pal.text_primary
-                    })
-                    .when(selected, |s| s.bg(hsla(0.6, 0.9, 0.6, 0.14)))
-                    .child(div().child(label))
+                menu_row((id_prefix, row_id), pal, selected)
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                svg()
+                                    .path(icon_path)
+                                    .size_4()
+                                    .flex_none()
+                                    .text_color(pal.text_muted),
+                            )
+                            .child(div().child(label)),
+                    )
                     .when(selected, |s| {
-                        s.child(div().text_color(rgb(ACCENT_BLUE)).child("✓"))
+                        s.child(
+                            Icon::new(IconName::Check)
+                                .size_3()
+                                .text_color(rgb(ACCENT_BLUE)),
+                        )
                     })
                     .on_click(move |_event, window, cx| (on_pick)(action.clone(), window, cx))
                     .into_any_element(),
@@ -201,10 +400,21 @@ fn action_rows(
     children
 }
 
-/// A clickable, full-width menu row: transparent at rest, hover-filled,
-/// `text-sm`, with its children spread left/right. Children are added by the
-/// caller.
-fn menu_row(id: impl Into<gpui::ElementId>, pal: Palette) -> gpui::Stateful<gpui::Div> {
+/// A clickable, full-width menu row: `text-sm`, children spread left/right.
+/// The label stays in `text_primary` in both states for readability; selection
+/// is shown by a subtle accent fill (plus the caller's trailing check), and the
+/// fill deepens on hover. Unselected rows are transparent at rest, neutral on
+/// hover. One accent, one signal per state — no blue label text (which fails AA
+/// contrast on the near-white surface).
+fn menu_row(
+    id: impl Into<gpui::ElementId>,
+    pal: Palette,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
+    // Accent fill derived from ACCENT_BLUE (≈ hue 0.6 / sat 0.9 / light 0.6),
+    // kept low-alpha so the row reads as tinted, not painted.
+    let tint = hsla(0.6, 0.9, 0.6, 0.12);
+    let tint_hover = hsla(0.6, 0.9, 0.6, 0.18);
     h_flex()
         .id(id)
         .w_full()
@@ -215,7 +425,15 @@ fn menu_row(id: impl Into<gpui::ElementId>, pal: Palette) -> gpui::Stateful<gpui
         .py_1p5()
         .rounded_md()
         .text_sm()
-        .hover(move |s| s.bg(pal.surface_hover))
+        .text_color(pal.text_primary)
+        .when(selected, |s| s.bg(tint))
+        .hover(move |s| {
+            s.bg(if selected {
+                tint_hover
+            } else {
+                pal.surface_hover
+            })
+        })
 }
 
 /// Small uppercase muted group header.

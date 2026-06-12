@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  Windows Installer authoring for the OpenLogi MSI (built with the WiX
+  toolset v6 by release.yml's `windows-msi` job).
+
+  - Per-user scope: installs to %LocalAppData%\Programs\OpenLogi without
+    elevation; raw HID access and the input hook need no admin rights.
+  - The packaged exe is the already-Authenticode-signed build from the
+    `windows` job; the MSI itself is signed on top by the same job.
+  - Build-time defines (passed via `wix build -d`):
+      Version  numeric x.y.z ProductVersion (0.0.0 on non-tag dispatches)
+      ExeFile  path to the signed openlogi-gui exe to package
+-->
+
+<!--
+  One UpgradeCode per architecture, fixed forever: Windows Installer treats
+  x64 and arm64 packages both as "64-bit", so a shared UpgradeCode would let
+  FindRelatedProducts cross-grade one architecture over the other.
+-->
+<?if $(sys.BUILDARCH) = arm64 ?>
+  <?define UpgradeCode = "2A989A66-36FE-4999-ACE2-3E79AE02D12A" ?>
+<?else?>
+  <?define UpgradeCode = "981D0C70-179E-4EE8-8F1E-0EB6877EAE94" ?>
+<?endif?>
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="OpenLogi"
+           Manufacturer="AprilNEA"
+           Version="$(var.Version)"
+           UpgradeCode="$(var.UpgradeCode)"
+           Language="1033"
+           Scope="perUser"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of OpenLogi is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="OpenLogi" />
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="App" Directory="INSTALLFOLDER">
+      <Component Id="MainExecutable">
+        <!-- Installed as plain OpenLogi.exe: inside the install dir the file
+             name is the product name. -->
+        <File Id="OpenLogiExe" Name="OpenLogi.exe" Source="$(var.ExeFile)" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <!-- Shortcuts cannot be a component KeyPath; the HKCU marker stands in,
+           which also fits the per-user scope. -->
+      <Component Id="StartMenuShortcut">
+        <Shortcut Id="OpenLogiShortcut"
+                  Name="OpenLogi"
+                  Target="[INSTALLFOLDER]OpenLogi.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\OpenLogi"
+                       Name="Installed"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="Main">
+      <ComponentGroupRef Id="App" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+    <Property Id="ARPURLINFOABOUT" Value="https://openlogi.org" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/AprilNEA/OpenLogi" />
+  </Package>
+</Wix>

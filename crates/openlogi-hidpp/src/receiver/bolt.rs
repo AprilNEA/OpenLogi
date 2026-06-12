@@ -158,14 +158,12 @@ impl Receiver {
                             }
                             // Device name
                             1 => {
-                                let Ok(name) =
-                                    str::from_utf8(&payload[4..(4 + payload[3] as usize)])
-                                else {
+                                let Some((counter, name)) = parse_discovery_name(&payload) else {
                                     return;
                                 };
 
                                 emitter.emit(Event::DeviceDiscoveryDeviceName {
-                                    counter: payload[0] as u16 + payload[1] as u16 * 256,
+                                    counter,
                                     name: name.to_string(),
                                 });
                             }
@@ -413,9 +411,8 @@ impl Receiver {
             )
             .await?;
 
-        let end_idx = 3 + response[2] as usize;
-        Ok(str::from_utf8(&response[3..end_idx])
-            .map_err(|_| Hidpp10Error::UnsupportedResponse)?
+        Ok(parse_codename(&response)
+            .ok_or(Hidpp10Error::UnsupportedResponse)?
             .to_string())
     }
 
@@ -494,6 +491,31 @@ impl Receiver {
 
         Ok(())
     }
+}
+
+/// Parse a device-discovery name notification (sub-id `0x4f`, kind `1`).
+///
+/// `payload[3]` is the device-reported name length. The byte comes straight
+/// off the radio, so it must never index past the report: a length that does
+/// not fit the packet (or non-UTF-8 bytes) drops the event instead of
+/// panicking the listener.
+fn parse_discovery_name(payload: &[u8; 17]) -> Option<(u16, &str)> {
+    let len = usize::from(payload[3]);
+    let end = 4usize.checked_add(len)?;
+    let name = str::from_utf8(payload.get(4..end)?).ok()?;
+    Some((payload[0] as u16 + payload[1] as u16 * 256, name))
+}
+
+/// Extract the codename chunk from a `DeviceCodename` register read.
+///
+/// `response[2]` is the device-reported name length. A name longer than the
+/// 13 bytes one response carries is clamped to the chunk present (fetching
+/// the rest takes further reads with different parameters); a length byte
+/// pointing past the response must not panic. `None` for non-UTF-8 bytes.
+fn parse_codename(response: &[u8; 16]) -> Option<&str> {
+    let end = 3usize.saturating_add(usize::from(response[2]));
+    let raw = response.get(3..end.min(response.len()))?;
+    str::from_utf8(raw).ok()
 }
 
 impl Drop for Receiver {
@@ -700,4 +722,65 @@ pub enum PairingPasskeyPressType {
     Initialization = 0x00,
     Keypress = 0x01,
     Submit = 0x04,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovery_name_with_oversized_length_is_dropped() {
+        let mut payload = [0u8; 17];
+        payload[3] = 200;
+
+        assert_eq!(parse_discovery_name(&payload), None);
+    }
+
+    #[test]
+    fn discovery_name_within_bounds_parses() {
+        let mut payload = [0u8; 17];
+        payload[0] = 7;
+        payload[3] = 4;
+        payload[4..8].copy_from_slice(b"Casa");
+
+        assert_eq!(parse_discovery_name(&payload), Some((7, "Casa")));
+    }
+
+    #[test]
+    fn discovery_name_rejects_invalid_utf8() {
+        let mut payload = [0u8; 17];
+        payload[3] = 2;
+        payload[4] = 0xff;
+        payload[5] = 0xfe;
+
+        assert_eq!(parse_discovery_name(&payload), None);
+    }
+
+    #[test]
+    fn codename_with_oversized_length_clamps_to_available_chunk() {
+        let mut response = [0u8; 16];
+        response[2] = 200;
+        response[3..16].copy_from_slice(b"MX Anywhere 3");
+
+        assert_eq!(parse_codename(&response), Some("MX Anywhere 3"));
+    }
+
+    #[test]
+    fn codename_within_bounds_parses() {
+        let mut response = [0u8; 16];
+        response[2] = 5;
+        response[3..8].copy_from_slice(b"Casa!");
+
+        assert_eq!(parse_codename(&response), Some("Casa!"));
+    }
+
+    #[test]
+    fn codename_rejects_invalid_utf8() {
+        let mut response = [0u8; 16];
+        response[2] = 2;
+        response[3] = 0xff;
+        response[4] = 0xfe;
+
+        assert_eq!(parse_codename(&response), None);
+    }
 }

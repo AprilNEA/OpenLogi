@@ -82,7 +82,7 @@ pub fn run(args: SyncArgs) -> Result<()> {
     depots.sort();
     for depot in depots {
         let entry = &index.devices[depot];
-        let dir = out.join(depot);
+        let dir = http::safe_component_path(&out, depot, "asset depot")?;
         fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
 
         // Per-depot baseline (metadata + manifest + hero render, either

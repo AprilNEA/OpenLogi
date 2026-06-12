@@ -7,6 +7,152 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.7](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.6...openlogi-core-v0.6.7) - 2026-06-12
+
+### Fixed
+
+- *(core)* post macOS volume and media keys as NX system-defined events ([#184](https://github.com/AprilNEA/OpenLogi/pull/184))
+
+### Other
+
+- *(ipc)* pin the wire format with golden bytes and mark wire types
+
+## [0.6.6](https://github.com/AprilNEA/OpenLogi/compare/openlogi-hidpp-v0.6.5...openlogi-hidpp-v0.6.6) - 2026-06-10
+
+### Fixed
+
+- *(hidpp)* bound device-controlled name lengths in Bolt parsing ([#200](https://github.com/AprilNEA/OpenLogi/pull/200))
+
+## [0.6.5](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.4...openlogi-core-v0.6.5) - 2026-06-10
+
+### Other
+
+- collapse nested ifs flagged by current stable clippy ([#197](https://github.com/AprilNEA/OpenLogi/pull/197))
+
+## [0.6.4](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.3...openlogi-core-v0.6.4) - 2026-06-10
+
+### Added
+
+- *(core)* complete the macOS->Windows CustomShortcut keycode map
+- *(windows)* native input + HID++ leaf support
+- *(openlogi-gui)* expand UI to 19 fully-translated locales ([#24](https://github.com/AprilNEA/OpenLogi/pull/24))
+- *(gui)* glow keyboard card in lighting colour ([#185](https://github.com/AprilNEA/OpenLogi/pull/185))
+
+## [0.6.3](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.2...openlogi-core-v0.6.3) - 2026-06-09
+
+### Added
+
+- *(core)* unify button + gesture bindings into one Binding map
+
+### Fixed
+
+- *(core)* harden gesture Binding defaults, migration, and projection
+
+## [0.6.2](https://github.com/AprilNEA/OpenLogi/compare/v0.6.1...v0.6.2) - 2026-06-08
+
+### Added
+
+- *(i18n)* integrate Crowdin localization workflow ([#174](https://github.com/AprilNEA/OpenLogi/pull/174))
+
+### Other
+
+- switch release notes generation to Codex ([#177](https://github.com/AprilNEA/OpenLogi/pull/177))
+- add code of conduct
+
+## [0.6.1](https://github.com/AprilNEA/OpenLogi/compare/openlogi-cli-v0.6.0...openlogi-cli-v0.6.1) - 2026-06-08
+
+### Fixed
+
+- *(cli)* diag selects a device that exposes the feature under test ([#150](https://github.com/AprilNEA/OpenLogi/pull/150))
+
+## [0.6.0](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.5.3...openlogi-core-v0.6.0) - 2026-06-07
+
+### Added
+
+- *(agent)* tarpc IPC server backed by the orchestrator + device I/O
+- *(agent)* define tarpc IPC service contract + serde-derive wire types
+
+### Fixed
+
+- *(agent)* give the agent its own single-instance lock
+
+### Other
+
+- Merge origin/master into feat/agent-daemon-split
+
+## [0.5.3](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.5.2...openlogi-core-v0.5.3) - 2026-06-06
+
+### Fixed
+
+- *(gui)* prefer asset-registry kind + harden device-kind classification
+
+### Other
+
+- gate config panels on HID++ capabilities, not device kind
+
+## [0.5.2](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.5.1...openlogi-core-v0.5.2) - 2026-06-05
+
+### Added
+
+- *(core)* LockScreen and media actions via D-Bus on Linux
+- *(core)* expose action_device_path for evtest attachment
+- *(core)* implement Action::execute on Linux via uinput
+- enable Thumb Wheel Up/Down mapping, "Do Nothing" action, and native scroll sensitivity ([#125](https://github.com/AprilNEA/OpenLogi/pull/125))
+
+### Fixed
+
+- *(core)* fmt + clarify mpris fallback log on the Linux D-Bus code
+- *(core)* address PR #124 review comments
+- *(core)* drop unused REL_X/REL_Y from the action uinput device
+- *(core)* cover Action::None in execute_linux
+- *(core)* address PR review comments
+- *(core)* use enumerate_dev_nodes_blocking for correct event path
+- *(core)* address code review findings
+
+### Other
+
+- run clippy on Windows instead of bare cargo check ([#146](https://github.com/AprilNEA/OpenLogi/pull/146))
+- *(core)* simplify D-Bus helpers and add -v flag to inject_action
+- *(core)* simplify inject_action parsing, guard --delay
+- *(core)* extract KEY_CAPABILITIES const, drop too_many_lines allow
+- *(core)* note LockScreen Linux limitation and D-Bus follow-up
+- *(core)* note Ctrl+Shift+Z vs Ctrl+Y redo shortcut choice on Linux
+- *(core)* clarify scroll unit difference between post_horizontal_scroll and HorizontalScroll* actions
+- *(core)* simplify Linux execute helpers and doc fixes
+- *(core)* add vk_mapping tests and inject_action example
+
+## [0.5.1](https://github.com/AprilNEA/OpenLogi/compare/openlogi-assets-v0.5.0...openlogi-assets-v0.5.1) - 2026-06-05
+
+### Fixed
+
+- *(assets)* match devices against every model id a depot lists
+
+### Other
+
+- *(assets)* lock the index.json modelIds schema contract
+
+## [0.5.0](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.4.1...openlogi-core-v0.5.0) - 2026-06-05
+
+### Added
+
+- add wired G-series keyboard RGB control ([#29](https://github.com/AprilNEA/OpenLogi/pull/29))
+
+## [0.4.1](https://github.com/AprilNEA/OpenLogi/compare/openlogi-v0.4.0...openlogi-v0.4.1) - 2026-06-03
+
+### Added
+
+- *(gui)* refine device gallery worktree changes
+- *(nix)* wire passthru.updateScript for nix-update / autobump
+- *(nix)* add nixpkgs package + flake; commit the prebuilt app icon
+
+### Other
+
+- route issue-chooser questions to GitHub Discussions
+- update Telegram invite link to the new channel
+- *(release)* disable homebrew-tap dispatch (openlogi moved to homebrew-cask) ([#105](https://github.com/AprilNEA/OpenLogi/pull/105))
+- add GitHub issue form templates ([#102](https://github.com/AprilNEA/OpenLogi/pull/102))
+- configure release-plz branch prefix
+
 ## [0.4.0](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.3.4...openlogi-core-v0.4.0) - 2026-06-02
 
 ### Added

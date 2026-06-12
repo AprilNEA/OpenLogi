@@ -6,22 +6,41 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "OS-level mouse-event hook for OpenLogi. macOS via CGEventTap; Linux/Windows are stubs."
+description = "OS-level mouse-event hook for OpenLogi. macOS via CGEventTap; Linux via evdev+uinput; Windows via WH_MOUSE_LL."
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", version = "0.4.0" }
+openlogi-core = { path = "../openlogi-core", version = "0.6.7" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"
+libc = "0.2"
+x11rb = "0.13"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+ctrlc = "3"
+
+# CGEventTap stays on core-graphics/core-foundation (the freeze-hazard run-loop
+# machinery). The frontmost-app read uses objc2 (NSWorkspace) so no raw `objc`.
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { workspace = true }
 core-foundation = { workspace = true }
-cocoa = "0.26"
-objc = "0.2"
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", features = ["NSString"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "NSRunningApplication"] }
+
+# WH_MOUSE_LL low-level mouse hook + foreground-process path (GetForegroundWindow
+# / QueryFullProcessImageNameW).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [lints.rust]
 unsafe_code = "allow"
-unexpected_cfgs = { level = "allow", check-cfg = [] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

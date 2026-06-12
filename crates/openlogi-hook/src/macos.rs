@@ -62,54 +62,27 @@ pub(crate) fn prompt_accessibility() {
     let _trusted = unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef().cast()) };
 }
 
-/// Read the frontmost application's bundle identifier via NSWorkspace.
-/// Pure FFI — returns `None` when no app is frontmost or the identifier
-/// is missing / non-UTF8.
+/// Read the frontmost application's bundle identifier via `NSWorkspace`.
+/// Returns `None` when no app is frontmost or the identifier is missing.
 ///
-/// Wrapped in a per-call `NSAutoreleasePool`. Without it, every call on
-/// a non-main thread (the watcher loop) leaks the workspace, app, and
-/// bundle-id objects — at one call per second that's hundreds of MB
-/// after a full workday.
+/// `NSWorkspace` is `AnyThread`, so this is sound on the watcher thread. The
+/// reads return owned `Retained` values (no leak by construction), but the
+/// framework still autoreleases internal temporaries and `to_str` borrows its
+/// UTF-8 view from the pool — so an explicit `autoreleasepool` is required off
+/// the main thread, where no run loop drains one. (Without it the old raw path
+/// leaked the workspace/app/bundle-id objects: hundreds of MB across a workday.)
 pub(crate) fn frontmost_bundle_id() -> Option<String> {
-    use cocoa::base::{id, nil};
-    use cocoa::foundation::{NSAutoreleasePool, NSString};
-    use objc::{class, msg_send, sel, sel_impl};
+    use objc2::rc::autoreleasepool;
+    use objc2_app_kit::NSWorkspace;
 
-    // SAFETY: NSWorkspace is part of AppKit, available on every supported
-    // macOS (≥13.0). Each `msg_send!` returns either `nil` (handled below)
-    // or an autoreleased Objective-C object. The surrounding
-    // `NSAutoreleasePool` drains those temporaries when this function
-    // returns; the Rust `String` we hand back is a copy that outlives
-    // the pool.
-    unsafe {
-        let pool = NSAutoreleasePool::new(nil);
-        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
-        if workspace == nil {
-            let _: () = msg_send![pool, drain];
-            return None;
-        }
-        let app: id = msg_send![workspace, frontmostApplication];
-        if app == nil {
-            let _: () = msg_send![pool, drain];
-            return None;
-        }
-        let bundle_id: id = msg_send![app, bundleIdentifier];
-        if bundle_id == nil {
-            let _: () = msg_send![pool, drain];
-            return None;
-        }
-        let ptr: *const std::os::raw::c_char = NSString::UTF8String(bundle_id);
-        let result = if ptr.is_null() {
-            None
-        } else {
-            std::ffi::CStr::from_ptr(ptr)
-                .to_str()
-                .ok()
-                .map(str::to_owned)
-        };
-        let _: () = msg_send![pool, drain];
-        result
-    }
+    autoreleasepool(|pool| {
+        let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+        let bundle_id = app.bundleIdentifier()?;
+        // SAFETY: `to_str` yields a UTF-8 view valid for `pool`'s lifetime; we
+        // copy it into an owned `String` before the pool (and `bundle_id`) drop,
+        // so the borrow never escapes.
+        Some(unsafe { bundle_id.to_str(pool) }.to_owned())
+    })
 }
 
 /// Translate a raw OS button number to a [`ButtonId`].
@@ -130,13 +103,24 @@ fn button_number_to_id(n: i64) -> Option<ButtonId> {
 /// Convert a `CGEvent` to our [`MouseEvent`] vocabulary. Returns `None`
 /// for event types we don't translate (e.g. move events, unknown buttons).
 fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
-    // Skip events OpenLogi synthesized itself (e.g. a MouseBack/MouseForward
-    // action posting button4/5). They carry our sentinel in the source
-    // user-data field; without this a button bound to its own native action
-    // would re-enter the tap and loop forever. `None` → the tap keeps the event
-    // so it still reaches the OS.
-    if event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
-        == openlogi_core::binding::SYNTHETIC_EVENT_USER_DATA
+    // Skip events OpenLogi itself synthesised ([`Action::execute`] stamps them),
+    // so a remapped click we posted doesn't re-enter the hook as real input and,
+    // for a gesture button, get misread as a fresh hold. Only button events are
+    // ever synthesised (`Action::execute` posts buttons, never moves/scroll), so
+    // gate the field read on button types — keeping the FFI call off the
+    // high-rate pointer-move stream.
+    let is_button = matches!(
+        etype,
+        CGEventType::LeftMouseDown
+            | CGEventType::LeftMouseUp
+            | CGEventType::RightMouseDown
+            | CGEventType::RightMouseUp
+            | CGEventType::OtherMouseDown
+            | CGEventType::OtherMouseUp
+    );
+    if is_button
+        && event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
+            == openlogi_core::binding::SYNTHETIC_EVENT_USER_DATA
     {
         return None;
     }
@@ -178,12 +162,33 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
                 delta_y: dy as f32,
             })
         }
+        // Pointer movement feeds gesture-button swipe detection. While a button
+        // is physically held the OS reports *Dragged rather than MouseMoved, so
+        // a gesture button's hold-and-swipe arrives here as OtherMouseDragged.
+        CGEventType::MouseMoved
+        | CGEventType::LeftMouseDragged
+        | CGEventType::RightMouseDragged
+        | CGEventType::OtherMouseDragged => {
+            let dx = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X);
+            let dy = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y);
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "per-event pointer deltas are small integers, far within i32"
+            )]
+            Some(MouseEvent::Moved {
+                delta_x: dx as i32,
+                delta_y: dy as i32,
+            })
+        }
         CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
-            error!(
-                "CGEventTap disabled by OS (type={etype:?}); \
-                 hook will stop receiving events until re-enabled"
-            );
-            None
+            // The run-loop slice re-enables the tap (see `thread_main`); surface
+            // the interruption so the runtime cancels any in-progress hold — a
+            // button-up dropped during the gap must not later fire a phantom
+            // swipe off ordinary cursor motion. Logged at debug, not warn:
+            // TapDisabledByUserInput fires during ordinary heavy input bursts and
+            // self-heals next slice, so it isn't worth a warning each time.
+            debug!("CGEventTap disabled by OS (type={etype:?}); re-enabling, cancelling any hold");
+            Some(MouseEvent::CaptureInterrupted)
         }
         _ => None,
     }
@@ -238,6 +243,14 @@ fn thread_main(
         CGEventType::OtherMouseDown,
         CGEventType::OtherMouseUp,
         CGEventType::ScrollWheel,
+        // Pointer movement, for gesture-button hold+swipe. A held button makes
+        // the OS emit *Dragged rather than MouseMoved, so all four are needed.
+        // The callback stays lock-light (see `hook_runtime`) so this high-rate
+        // stream can't stall the tap.
+        CGEventType::MouseMoved,
+        CGEventType::LeftMouseDragged,
+        CGEventType::RightMouseDragged,
+        CGEventType::OtherMouseDragged,
     ];
 
     let tap_result = CGEventTap::new(
@@ -307,6 +320,11 @@ fn thread_main(
             );
             break;
         }
+        // Recover from an OS-initiated disable (TapDisabledByTimeout/UserInput):
+        // re-enabling is idempotent while the tap is already live, so this brings
+        // a disabled tap back within one slice instead of the hook going
+        // permanently deaf. Only reached while Accessibility is still granted.
+        tap.enable();
     }
 
     // Detach the tap from the event stream synchronously before unwinding,

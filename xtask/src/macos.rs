@@ -43,11 +43,11 @@ pub(crate) fn package_macos(args: &DmgMacos) -> Result<()> {
 
 pub(crate) fn generate_macos_icns() -> Result<()> {
     let root = repo_root()?;
-    let svg = root.join("design/icon/openlogi.svg");
+    let master = root.join("design/icon/openlogi.png");
     let output_dir = root.join("crates/openlogi-gui/icon");
     let output = output_dir.join("AppIcon.icns");
 
-    ensure_file(&svg)?;
+    ensure_file(&master)?;
     fs::create_dir_all(&output_dir).with_context(|| {
         format!(
             "could not create icon output directory {}",
@@ -60,53 +60,19 @@ pub(crate) fn generate_macos_icns() -> Result<()> {
     fs::create_dir_all(&iconset)
         .with_context(|| format!("could not create iconset directory {}", iconset.display()))?;
 
-    if command_exists("rsvg-convert") {
-        render_iconset(&iconset, |size, output| {
-            run(ProcessCommand::new("rsvg-convert")
-                .arg("-w")
-                .arg(size.to_string())
-                .arg("-h")
-                .arg(size.to_string())
-                .arg(&svg)
-                .arg("-o")
-                .arg(output))
-        })?;
-    } else if command_exists("resvg") {
-        render_iconset(&iconset, |size, output| {
-            run(ProcessCommand::new("resvg")
-                .arg("--width")
-                .arg(size.to_string())
-                .arg("--height")
-                .arg(size.to_string())
-                .arg(&svg)
-                .arg(output))
-        })?;
-    } else {
-        println!("note: no rsvg-convert/resvg — using qlmanage + sips (built-in)");
-        let _ = ProcessCommand::new("qlmanage")
-            .arg("-t")
-            .arg("-s")
-            .arg("1024")
-            .arg("-o")
-            .arg(work.path())
-            .arg(&svg)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let master = work.path().join("openlogi.svg.png");
-        ensure_file(&master)
-            .with_context(|| format!("qlmanage could not render {}", svg.display()))?;
-        render_iconset(&iconset, |size, output| {
-            run(ProcessCommand::new("sips")
-                .arg("-z")
-                .arg(size.to_string())
-                .arg(size.to_string())
-                .arg(&master)
-                .arg("--out")
-                .arg(output)
-                .stdout(Stdio::null()))
-        })?;
-    }
+    // The squircle and opaque fill are baked into the 1024² master PNG, so each
+    // iconset slot is just a sips downscale. sips and iconutil are macOS
+    // built-ins — no SVG renderer (rsvg/resvg) needed.
+    render_iconset(&iconset, |size, output| {
+        run(ProcessCommand::new("sips")
+            .arg("-z")
+            .arg(size.to_string())
+            .arg(size.to_string())
+            .arg(&master)
+            .arg("--out")
+            .arg(output)
+            .stdout(Stdio::null()))
+    })?;
 
     run(ProcessCommand::new("iconutil")
         .arg("-c")
@@ -184,8 +150,56 @@ pub(crate) fn bundle_macos() -> Result<()> {
 
     let app = root.join("target/release/bundle/osx/OpenLogi.app");
     ensure_dir(&app)?;
+    embed_agent_helper(&root, &app, &xcode_env)?;
     println!();
     println!("Bundle ready: {}", app.display());
+    Ok(())
+}
+
+/// Build the headless agent and embed it as a nested login-item helper at
+/// `OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app`. The agent is
+/// the always-on process (hook + device I/O + menu bar); shipping it inside the
+/// GUI bundle keeps one notarized artifact, lets `open -b` foreground the GUI
+/// from the agent's menu, and gives the agent a stable signed identity so its
+/// Accessibility (TCC) grant survives app updates.
+fn embed_agent_helper(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<()> {
+    println!("==> agent helper (build)");
+    run(with_env(
+        ProcessCommand::new("cargo")
+            .arg("build")
+            .arg("-p")
+            .arg("openlogi-agent")
+            .arg("--release")
+            .current_dir(root),
+        xcode_env,
+    ))?;
+    let agent_bin = root.join("target/release/openlogi-agent");
+    ensure_file(&agent_bin)?;
+
+    let helper = app.join("Contents/Library/LoginItems/OpenLogiAgent.app");
+    let helper_macos = helper.join("Contents/MacOS");
+    fs::create_dir_all(&helper_macos)
+        .with_context(|| format!("could not create {}", helper_macos.display()))?;
+    fs::copy(&agent_bin, helper_macos.join("openlogi-agent"))
+        .with_context(|| "could not copy the agent binary into the helper bundle".to_string())?;
+    let info_src = root.join("crates/openlogi-agent/macos/Info.plist");
+    ensure_file(&info_src)?;
+    let info_dst = helper.join("Contents/Info.plist");
+    fs::copy(&info_src, &info_dst)
+        .with_context(|| "could not write the helper Info.plist".to_string())?;
+    // The template ships the 0.0.0 dev version (the hand-bundled dev flow
+    // copies it verbatim); stamp the workspace version (= xtask's own,
+    // inherited) over it so Finder and update scanners see the real one.
+    for key in ["CFBundleShortVersionString", "CFBundleVersion"] {
+        run(ProcessCommand::new("/usr/bin/plutil")
+            .arg("-replace")
+            .arg(key)
+            .arg("-string")
+            .arg(env!("CARGO_PKG_VERSION"))
+            .arg(&info_dst))?;
+    }
+
+    println!("    embedded {}", helper.display());
     Ok(())
 }
 
@@ -275,21 +289,40 @@ pub(crate) fn dmg_macos(args: &DmgMacos) -> Result<()> {
 
 fn sign_app(identity: &str) -> Result<()> {
     let app = repo_root()?.join("target/release/bundle/osx/OpenLogi.app");
+    let helper = app.join("Contents/Library/LoginItems/OpenLogiAgent.app");
     println!("==> codesign ({identity})");
+    // Inside-out signing: seal the nested helper with its own signature first,
+    // then the outer app (which seals the already-signed helper). `--deep` is
+    // deprecated and can't give the helper an independent signature — but a
+    // stable, separately-signed helper identity is exactly what lets the agent's
+    // Accessibility (TCC) grant persist across updates. So sign each explicitly.
+    if helper.exists() {
+        codesign_runtime(identity, &helper)?;
+    }
+    codesign_runtime(identity, &app)?;
+    run(ProcessCommand::new("codesign")
+        .arg("--verify")
+        .arg("--strict")
+        .arg(&app))?;
+    if helper.exists() {
+        run(ProcessCommand::new("codesign")
+            .arg("--verify")
+            .arg("--strict")
+            .arg(&helper))?;
+    }
+    Ok(())
+}
+
+/// Sign one bundle with the hardened runtime + a secure timestamp.
+fn codesign_runtime(identity: &str, target: &Path) -> Result<()> {
     run(ProcessCommand::new("codesign")
         .arg("--force")
-        .arg("--deep")
         .arg("--options")
         .arg("runtime")
         .arg("--timestamp")
         .arg("--sign")
         .arg(identity)
-        .arg(&app))?;
-    run(ProcessCommand::new("codesign")
-        .arg("--verify")
-        .arg("--deep")
-        .arg("--strict")
-        .arg(&app))
+        .arg(target))
 }
 
 fn sign_dmg(identity: &str, dmg: &Path) -> Result<()> {

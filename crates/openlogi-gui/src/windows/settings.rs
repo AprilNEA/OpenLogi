@@ -1,26 +1,27 @@
-//! The Settings window — a standalone OS window (⌘, / menu / footer link)
-//! exposing the app-wide preferences in [`openlogi_core::config::AppSettings`].
+//! The Settings window — a standalone OS window (⌘, / menu bar / the right
+//! panel's Configuration card) exposing the app-wide preferences in
+//! [`openlogi_core::config::AppSettings`].
 //!
-//! Two toggles for now, so the layout is a hand-rolled form rather than
-//! gpui-component's [`Settings`](gpui_component::setting::Settings) widget
-//! (whose 250px page sidebar would dwarf two switches). When the preference
-//! set grows enough to warrant pages, this can migrate to that widget.
+//! Uses gpui-component's Settings widget so page navigation, search, and the
+//! left sidebar share the same behaviour as the rest of that component set.
 
 use gpui::{
-    App, AppContext as _, BorrowAppContext as _, Context, Entity, FontWeight, InteractiveElement,
+    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
     IntoElement, ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, px, rgb,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
-    Icon, IconName, IndexPath, Sizable,
-    group_box::GroupBox,
-    h_flex,
-    scroll::ScrollableElement,
+    IconName, IndexPath, Sizable, h_flex,
     select::{Select, SelectEvent, SelectItem, SelectState},
-    switch::Switch,
+    setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
+    slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
+use openlogi_core::config::{
+    DEFAULT_THUMBWHEEL_SENSITIVITY, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
+};
 
+use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::platform::permissions::{self, Permission, PermissionStatus};
 use crate::state::AppState;
 use crate::theme::{self, Palette};
@@ -31,9 +32,14 @@ pub struct SettingsView {
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
     language_select: Entity<SelectState<Vec<LanguageOption>>>,
+    sensitivity_slider: Entity<SliderState>,
 }
 
 impl SettingsView {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "sensitivity bounds are tiny 1..=100 integers — exact in f32"
+    )]
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let current = cx
             .try_global::<AppState>()
@@ -44,10 +50,51 @@ impl SettingsView {
         cx.subscribe_in(&language_select, window, Self::on_language_select)
             .detach();
 
+        let sensitivity = cx
+            .try_global::<AppState>()
+            .map_or(DEFAULT_THUMBWHEEL_SENSITIVITY, |s| {
+                s.app_settings().thumbwheel_sensitivity
+            });
+        let sensitivity_slider = cx.new(|_| {
+            SliderState::new()
+                .min(MIN_THUMBWHEEL_SENSITIVITY as f32)
+                .max(MAX_THUMBWHEEL_SENSITIVITY as f32)
+                .default_value(sensitivity as f32)
+        });
+        cx.subscribe_in(&sensitivity_slider, window, Self::on_sensitivity_slider)
+            .detach();
+
         Self {
             appearance_obs: None,
             language_select,
+            sensitivity_slider,
         }
+    }
+
+    /// Commit the thumb-wheel sensitivity slider. The label tracks the live
+    /// slider value on every `Change`; persistence (and the one shared-atomic
+    /// write the watcher reads) happens once on `Release`.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "slider value is a stepped 1..=100 figure"
+    )]
+    #[allow(
+        clippy::unused_self,
+        reason = "gpui subscription handlers must take &mut self"
+    )]
+    fn on_sensitivity_slider(
+        &mut self,
+        _: &Entity<SliderState>,
+        event: &SliderEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let SliderEvent::Release(value) = event {
+            let sensitivity = value.start().round() as i32;
+            cx.update_global::<AppState, _>(|s, _| s.set_thumbwheel_sensitivity(sensitivity));
+        }
+        cx.notify();
     }
 
     fn on_language_select(
@@ -66,16 +113,7 @@ impl SettingsView {
             .filter(|code| !code.is_empty())
             .map(ToOwned::to_owned);
 
-        cx.update_global::<AppState, _>(|s, _| s.set_language(language));
-        // `t!` reads the locale at render time, so a repaint is what actually
-        // applies the switch; the app menu and status item aren't in any
-        // window's view tree, so re-title them too. The status item's device
-        // line lives on the spawn loop, so ask it to re-localize the whole menu
-        // rather than writing from here.
-        cx.refresh_windows();
-        crate::app_menu::rebuild(cx);
-        #[cfg(target_os = "macos")]
-        crate::platform::tray::request_refresh();
+        cx.update_global::<AppState, _>(|s, cx| s.set_language(language, cx));
     }
 }
 
@@ -90,7 +128,7 @@ pub fn open(cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.settings,
         "Settings",
-        Size::new(px(520.), px(360.)),
+        Size::new(px(820.), px(520.)),
         SettingsView::new,
         cx,
     );
@@ -99,93 +137,180 @@ pub fn open(cx: &mut App) {
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let (launch, updates) = cx.try_global::<AppState>().map_or((false, false), |s| {
-            let a = s.app_settings();
-            (a.launch_at_login, a.check_for_updates)
-        });
 
-        let general = GroupBox::new()
-            .title(group_title(IconName::Settings, tr!("General")))
-            .child(setting_row(
-                Switch::new("launch-at-login")
-                    .checked(launch)
-                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
-                        let enabled = *checked;
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_launch_at_login(enabled);
-                        });
-                        cx.notify();
-                    })),
-                tr!("Launch at login"),
-                tr!("Automatically start OpenLogi when you log in to macOS."),
-                pal,
-            ))
-            .child(setting_row(
-                Switch::new("check-for-updates")
-                    .checked(updates)
-                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
-                        let enabled = *checked;
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_check_for_updates(enabled);
-                        });
-                        cx.notify();
-                    })),
-                tr!("Check for updates"),
-                tr!(
-                    "Check once per launch for a new version (query only — no automatic download)."
-                ),
-                pal,
-            ));
-
-        // The menu-bar (status item) is macOS-only, so its toggle is too.
-        #[cfg(target_os = "macos")]
-        let general = {
-            let in_menu_bar = cx
-                .try_global::<AppState>()
-                .is_some_and(|s| s.app_settings().show_in_menu_bar);
-            general.child(setting_row(
-                Switch::new("show-in-menu-bar")
-                    .checked(in_menu_bar)
-                    .on_click(cx.listener(|_, checked: &bool, _, cx| {
-                        let enabled = *checked;
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_show_in_menu_bar(enabled);
-                        });
-                        cx.notify();
-                    })),
-                tr!("Show in menu bar"),
-                tr!(
-                    "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead."
-                ),
-                pal,
-            ))
-        };
-
-        v_flex()
+        div()
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &Minimize, window, _| window.minimize_window())
+            .on_action(|_: &Zoom, window, _| window.zoom_window())
             .child(
-                v_flex()
-                    .w_full()
-                    .p_6()
-                    .gap_6()
-                    .overflow_y_scrollbar()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(tr!("Settings")),
-                    )
-                    .child(general)
-                    .child(permissions_group(pal, cx))
-                    .child(
-                        GroupBox::new()
-                            .title(group_title(IconName::Globe, tr!("Language")))
-                            .child(language_row(&self.language_select, pal)),
-                    ),
+                Settings::new("settings")
+                    .sidebar_width(px(210.))
+                    .page(general_page(self.sensitivity_slider.clone()))
+                    .page(permissions_page(pal))
+                    .page(language_page(self.language_select.clone())),
             )
     }
+}
+
+fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPage {
+    let group = SettingGroup::new()
+        .item(
+            SettingItem::new(
+                tr!("Thumb Wheel Sensitivity"),
+                SettingField::render(move |_, _, cx| {
+                    sensitivity_field(&sensitivity_slider, cx)
+                }),
+            )
+            .description(tr!(
+                "Scales the thumb wheel's horizontal scroll speed and how readily custom wheel actions trigger."
+            )),
+        )
+        .item(
+            SettingItem::new(
+                tr!("Launch at login"),
+                SettingField::switch(
+                    |cx| {
+                        cx.try_global::<AppState>()
+                            .is_some_and(|s| s.app_settings().launch_at_login)
+                    },
+                    |enabled, cx| {
+                        cx.update_global::<AppState, _>(move |s, _| {
+                            s.set_launch_at_login(enabled);
+                        });
+                        cx.refresh_windows();
+                    },
+                ),
+            )
+            .description(tr!(
+                "Automatically start OpenLogi when you log in to macOS."
+            )),
+        )
+        .item(
+            SettingItem::new(
+                tr!("Check for updates"),
+                SettingField::switch(
+                    |cx| {
+                        cx.try_global::<AppState>()
+                            .is_some_and(|s| s.app_settings().check_for_updates)
+                    },
+                    |enabled, cx| {
+                        cx.update_global::<AppState, _>(move |s, _| {
+                            s.set_check_for_updates(enabled);
+                        });
+                        cx.refresh_windows();
+                    },
+                ),
+            )
+            .description(tr!(
+                "Check once per launch for a new version (query only — no automatic download)."
+            )),
+        );
+
+    #[cfg(target_os = "macos")]
+    let group = group.item(
+        SettingItem::new(
+            tr!("Show in menu bar"),
+            SettingField::switch(
+                |cx| {
+                    cx.try_global::<AppState>()
+                        .is_some_and(|s| s.app_settings().show_in_menu_bar)
+                },
+                |enabled, cx| {
+                    cx.update_global::<AppState, _>(move |s, _| {
+                        s.set_show_in_menu_bar(enabled);
+                    });
+                    cx.refresh_windows();
+                },
+            ),
+        )
+        .description(tr!(
+            "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead."
+        )),
+    );
+
+    SettingPage::new(tr!("General"))
+        .icon(IconName::Settings)
+        .resettable(false)
+        .group(group)
+}
+
+fn permissions_page(pal: Palette) -> SettingPage {
+    SettingPage::new(tr!("Permissions"))
+        .icon(IconName::Info)
+        .resettable(false)
+        .group(
+            SettingGroup::new()
+                .item(permission_item(
+                    "perm-accessibility",
+                    tr!("Accessibility"),
+                    tr!("Needed for gesture and button remapping (event tap)."),
+                    Permission::Accessibility,
+                    |cx| {
+                        // The agent owns the hook, so this is *its* grant,
+                        // reported over IPC; while not connected the state is
+                        // genuinely unknown, not denied.
+                        match cx.try_global::<AppState>().and_then(AppState::agent_status) {
+                            Some(status) if status.accessibility_granted => {
+                                PermissionStatus::Granted
+                            }
+                            Some(_) => PermissionStatus::Denied,
+                            None => PermissionStatus::Unknown,
+                        }
+                    },
+                    pal,
+                ))
+                .item(permission_item(
+                    "perm-input-monitoring",
+                    tr!("Input Monitoring"),
+                    tr!("Needed to read HID++ data, including Bluetooth-direct mice."),
+                    Permission::InputMonitoring,
+                    |_| permissions::input_monitoring(),
+                    pal,
+                ))
+                .item(permission_item(
+                    "perm-bluetooth",
+                    tr!("Bluetooth"),
+                    tr!("Allows OpenLogi to use CoreBluetooth (not required for HID access)."),
+                    Permission::Bluetooth,
+                    |_| permissions::bluetooth(),
+                    pal,
+                )),
+        )
+}
+
+fn permission_item(
+    id: &'static str,
+    title: SharedString,
+    description: SharedString,
+    permission: Permission,
+    status: impl Fn(&App) -> PermissionStatus + 'static,
+    pal: Palette,
+) -> SettingItem {
+    SettingItem::new(
+        title,
+        SettingField::render(move |_, _, cx| permission_field(id, status(cx), permission, pal)),
+    )
+    .description(description)
+}
+
+fn language_page(language_select: Entity<SelectState<Vec<LanguageOption>>>) -> SettingPage {
+    SettingPage::new(tr!("Language"))
+        .icon(IconName::Globe)
+        .resettable(false)
+        .group(
+            SettingGroup::new().item(
+                SettingItem::new(
+                    tr!("Language"),
+                    SettingField::render(move |_, _, _| {
+                        language_select_field(language_select.clone())
+                    }),
+                )
+                .description(tr!("Choose the interface language.")),
+            ),
+        )
 }
 
 #[derive(Clone)]
@@ -238,88 +363,6 @@ fn selected_language_index(current: Option<&str>, options: &[LanguageOption]) ->
     IndexPath::default().row(row)
 }
 
-/// A GroupBox title with a small leading icon. `GroupBox::title` styles the
-/// text itself, so this only lays the icon and label out inline.
-fn group_title(icon: IconName, label: SharedString) -> impl IntoElement {
-    h_flex()
-        .gap_1p5()
-        .items_center()
-        .child(Icon::new(icon))
-        .child(label)
-}
-
-/// One row: title + muted description on the left, the control on the right.
-fn setting_row(
-    control: Switch,
-    title: impl Into<SharedString>,
-    description: impl Into<SharedString>,
-    pal: Palette,
-) -> impl IntoElement {
-    h_flex()
-        .w_full()
-        .items_center()
-        .justify_between()
-        .gap_4()
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w(px(0.))
-                .gap_1()
-                .child(div().text_sm().child(title.into()))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(pal.text_muted)
-                        .child(description.into()),
-                ),
-        )
-        .child(control)
-}
-
-/// The Permissions group: live macOS permission statuses. Accessibility is
-/// watcher-backed (read from [`AppState`]); Input Monitoring and Bluetooth are
-/// queried live on each render (both are cheap, no-prompt queries).
-fn permissions_group(pal: Palette, cx: &mut Context<SettingsView>) -> impl IntoElement {
-    let accessibility = if cx
-        .try_global::<AppState>()
-        .is_some_and(|s| s.accessibility_granted)
-    {
-        PermissionStatus::Granted
-    } else {
-        PermissionStatus::Denied
-    };
-
-    GroupBox::new()
-        .title(group_title(IconName::Info, tr!("Permissions")))
-        .child(permission_row(
-            "perm-accessibility",
-            tr!("Accessibility"),
-            tr!("Needed for gesture and button remapping (event tap)."),
-            accessibility,
-            Permission::Accessibility,
-            pal,
-            cx,
-        ))
-        .child(permission_row(
-            "perm-input-monitoring",
-            tr!("Input Monitoring"),
-            tr!("Needed to read HID++ data, including Bluetooth-direct mice."),
-            permissions::input_monitoring(),
-            Permission::InputMonitoring,
-            pal,
-            cx,
-        ))
-        .child(permission_row(
-            "perm-bluetooth",
-            tr!("Bluetooth"),
-            tr!("Allows OpenLogi to use CoreBluetooth (not required for HID access)."),
-            permissions::bluetooth(),
-            Permission::Bluetooth,
-            pal,
-            cx,
-        ))
-}
-
 /// A coloured status word for a permission row.
 fn status_badge(status: PermissionStatus) -> impl IntoElement {
     let (label, color) = match status {
@@ -330,90 +373,101 @@ fn status_badge(status: PermissionStatus) -> impl IntoElement {
     div().text_xs().text_color(rgb(color)).child(label)
 }
 
-/// One permission row: title + muted description on the left; the live status
-/// word and an "Open" button (deep-links to the System Settings pane) on the
-/// right.
-fn permission_row(
+/// The right-side field for one permission row: live status plus an "Open"
+/// button that deep-links to the System Settings pane.
+fn permission_field(
     id: &'static str,
-    title: SharedString,
-    description: SharedString,
     status: PermissionStatus,
     permission: Permission,
     pal: Palette,
-    cx: &mut Context<SettingsView>,
 ) -> impl IntoElement {
     h_flex()
-        .w_full()
+        .flex_shrink_0()
         .items_center()
-        .justify_between()
-        .gap_4()
+        .gap_3()
+        .child(status_badge(status))
         .child(
-            v_flex()
-                .flex_1()
-                .min_w(px(0.))
-                .gap_1()
-                .child(div().text_sm().child(title))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(pal.text_muted)
-                        .child(description),
-                ),
-        )
-        .child(
-            h_flex()
-                .gap_3()
-                .items_center()
-                .child(status_badge(status))
-                .child(
-                    div()
-                        .id(id)
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(pal.border)
-                        .text_xs()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(pal.surface_hover))
-                        .child(tr!("Open"))
-                        .on_click(
-                            cx.listener(move |_, _, _, _| permissions::open_pane(permission)),
-                        ),
-                ),
+            div()
+                .id(id)
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(pal.border)
+                .text_xs()
+                .cursor_pointer()
+                .hover(move |s| s.bg(pal.surface_hover))
+                .child(tr!("Open"))
+                .on_click(move |_, _, cx| {
+                    // Accessibility must be prompted in the agent (it owns the
+                    // hook); prompting in the GUI would authorize the wrong
+                    // binary. Other panes just deep-link to System Settings.
+                    if matches!(permission, Permission::Accessibility)
+                        && let Some(state) = cx.try_global::<crate::state::AppState>()
+                    {
+                        state.request_accessibility_prompt();
+                    }
+                    permissions::open_pane(permission);
+                }),
         )
 }
 
-/// The language picker. "Follow system" clears the stored preference (`None`);
-/// the explicit locale entries come from [`crate::i18n::SUPPORTED`]. Selecting
-/// one switches the locale live, then repaints every window and the menu bar so
-/// the whole UI re-renders without a restart.
-fn language_row(
-    language_select: &Entity<SelectState<Vec<LanguageOption>>>,
-    pal: Palette,
+/// The language picker field. "Follow system" clears the stored preference
+/// (`None`); explicit locale entries come from [`crate::i18n::SUPPORTED`].
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "built inside an `Fn` render closure, so a `&Entity` parameter would make \
+              the returned element borrow a captured variable; `Entity` is a cheap handle"
+)]
+fn language_select_field(
+    language_select: Entity<SelectState<Vec<LanguageOption>>>,
 ) -> impl IntoElement {
-    h_flex()
-        .w_full()
-        .items_center()
-        .justify_between()
-        .gap_4()
+    // The Select's root is `size_full`, so pin it to a fixed-size box instead
+    // of letting it consume the whole Settings item row.
+    div().flex_shrink_0().w(px(220.)).h_6().child(
+        Select::new(&language_select)
+            .small()
+            .w(px(220.))
+            .menu_width(px(220.)),
+    )
+}
+
+/// The thumb-wheel sensitivity field: the slider plus a live value readout that
+/// flags the 1× default. Reads the slider entity directly so the readout tracks
+/// the drag; persistence is handled by [`SettingsView::on_sensitivity_slider`].
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "slider value is a stepped 1..=100 figure"
+)]
+fn sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> AnyElement {
+    let value = slider.read(cx).value().start().round() as i32;
+    let is_default = value == DEFAULT_THUMBWHEEL_SENSITIVITY;
+    let pal = theme::palette(cx);
+    v_flex()
+        .flex_shrink_0()
+        .gap_1()
         .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .text_xs()
-                .text_color(pal.text_muted)
-                .child(tr!("Choose the interface language.")),
+            h_flex()
+                .items_center()
+                .gap_3()
+                .child(div().w(px(180.)).child(Slider::new(slider)))
+                .child(
+                    div()
+                        .w(px(72.))
+                        .text_sm()
+                        .text_color(pal.text_muted)
+                        .child(value.to_string()),
+                ),
         )
-        .child(
-            // The Select's root is `size_full`, so it would otherwise claim the
-            // whole row and starve the description into one char per line. Pin it
-            // to a fixed-size, non-shrinking box (h_6 matches the `.small()` input).
-            div().flex_shrink_0().w(px(220.)).h_6().child(
-                Select::new(language_select)
-                    .small()
-                    .w(px(220.))
-                    .menu_width(px(220.)),
-            ),
-        )
+        .when(is_default, |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(pal.text_muted)
+                    .whitespace_nowrap()
+                    .child(format!("({})", rust_i18n::t!("Default"))),
+            )
+        })
+        .into_any_element()
 }

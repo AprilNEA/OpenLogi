@@ -57,13 +57,13 @@ pub fn bluetooth() -> PermissionStatus {
 }
 
 /// Open the System Settings privacy pane for `permission`.
+///
+/// This only opens the deep link — it deliberately does **not** fire the
+/// Accessibility prompt. The agent owns the CGEventTap, so the prompt has to
+/// run in the agent process (see [`crate::state::AppState::request_accessibility_prompt`]);
+/// prompting here would authorize the GUI, the wrong binary.
 #[cfg(target_os = "macos")]
 pub fn open_pane(permission: Permission) {
-    // Accessibility is the one permission OpenLogi can request directly; firing
-    // the native prompt matches the in-app accessibility gate's button.
-    if matches!(permission, Permission::Accessibility) {
-        openlogi_hook::Hook::prompt_accessibility();
-    }
     let anchor = match permission {
         Permission::Accessibility => "Privacy_Accessibility",
         Permission::InputMonitoring => "Privacy_ListenEvent",
@@ -85,8 +85,8 @@ mod macos {
         reason = "IOKit (IOHIDCheckAccess) + CoreBluetooth privacy-permission FFI"
     )]
 
-    use objc::runtime::Class;
-    use objc::{msg_send, sel, sel_impl};
+    use objc2::msg_send;
+    use objc2::runtime::AnyClass;
 
     use super::PermissionStatus;
 
@@ -119,13 +119,14 @@ mod macos {
     pub(super) fn bluetooth() -> PermissionStatus {
         // `+[CBManager authorization]` (inherited by CBCentralManager) is a
         // class method returning `CBManagerAuthorization`: notDetermined = 0,
-        // restricted = 1, denied = 2, allowedAlways = 3. Use `Class::get` (not
-        // the `class!` macro) so a missing class degrades to `Unknown` instead
-        // of panicking.
-        let Some(cls) = Class::get("CBCentralManager") else {
+        // restricted = 1, denied = 2, allowedAlways = 3. Use `AnyClass::get`
+        // (not the `class!` macro) so a missing class degrades to `Unknown`
+        // instead of panicking.
+        let Some(cls) = AnyClass::get(c"CBCentralManager") else {
             return PermissionStatus::Unknown;
         };
-        // SAFETY: sending a documented class method that returns an NSInteger.
+        // SAFETY: sending a documented class method (`+authorization`) that
+        // returns a `CBManagerAuthorization` NSInteger.
         let authorization: isize = unsafe { msg_send![cls, authorization] };
         match authorization {
             3 => PermissionStatus::Granted,

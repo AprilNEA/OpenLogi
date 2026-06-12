@@ -29,6 +29,7 @@ use hidpp::{
     channel::{HidppChannel, HidppMessage},
     receiver::{self, Receiver},
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
@@ -97,7 +98,11 @@ pub struct PairingReceiver {
 }
 
 /// Selects which receiver a pairing operation targets.
-#[derive(Clone, Debug)]
+///
+/// Crosses the agent↔GUI IPC (`start_pairing`), so variant order is wire
+/// format — changes require a `PROTOCOL_VERSION` bump (guarded by
+/// `openlogi-agent-core/tests/wire_format.rs`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ReceiverSelector {
     /// The first supported receiver found — fine for the common single-receiver case.
     First,
@@ -135,14 +140,19 @@ impl DiscoveredDevice {
 }
 
 /// A single click in a pointer passkey sequence.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Click {
     Left,
     Right,
 }
 
 /// How the user authenticates the device during Bolt pairing.
-#[derive(Clone, Debug)]
+///
+/// Crosses the agent↔GUI IPC (inside `PairingUpdate::Passkey`, [`Click`]
+/// included), so variant and field order are wire format — changes require a
+/// `PROTOCOL_VERSION` bump (guarded by
+/// `openlogi-agent-core/tests/wire_format.rs`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PasskeyMethod {
     /// Type these digits on the new keyboard, then press Enter.
     Keyboard(String),

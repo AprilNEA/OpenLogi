@@ -8,6 +8,10 @@
 
 mod route;
 mod transport;
+// Native Win32 HID report-write fallback, used by the Windows composite channel
+// in `transport` when async-hid's async write path fails.
+#[cfg(target_os = "windows")]
+mod windows_hid;
 
 pub mod gesture;
 pub mod inventory;
@@ -18,15 +22,15 @@ pub mod thumbwheel;
 pub mod write;
 
 pub use gesture::{CaptureChannel, CapturedInput, GestureError, run_capture_session};
-pub use inventory::{InventoryError, enumerate};
+pub use inventory::{Enumerator, InventoryError, enumerate};
 pub use pairing::{
     Click, DiscoveredDevice, PairingCommand, PairingError, PairingEvent, PairingReceiver,
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
 };
 pub use route::{DIRECT_DEVICE_INDEX, DeviceRoute};
-pub use smartshift::{SmartShiftMode, SmartShiftStatus};
+pub use smartshift::{AUTO_DISENGAGE_PERMANENT, SmartShiftMode, SmartShiftStatus};
 pub use write::{
     DpiCapabilities, DpiInfo, FeatureEntry, SharedChannel, WriteError, dump_features, get_dpi,
-    get_dpi_info, get_smartshift_status, set_dpi, set_dpi_on, toggle_smartshift,
-    toggle_smartshift_on,
+    get_dpi_info, get_smartshift_status, set_dpi, set_dpi_on, set_keyboard_color, set_smartshift,
+    set_smartshift_on, set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
 };

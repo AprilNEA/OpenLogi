@@ -1,0 +1,74 @@
+name: GitHub App token from 1Password
+description: Load GitHub App credentials from 1Password, decode the base64 private key, and mint an installation token.
+
+inputs:
+  op-service-account-token:
+    description: 1Password service account token.
+    required: true
+  op-github-app-item:
+    description: 1Password item reference that contains GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY.
+    required: true
+  owner:
+    description: Optional GitHub owner for cross-repository tokens.
+    required: false
+    default: ""
+  repositories:
+    description: Optional comma- or newline-separated repository list for cross-repository tokens.
+    required: false
+    default: ""
+
+outputs:
+  token:
+    description: Minted GitHub App installation token.
+    value: ${{ steps.app-token.outputs.token || steps.scoped-app-token.outputs.token }}
+  cargo-registry-token:
+    description: Optional Cargo registry token loaded from the same 1Password item.
+    value: ${{ steps.load-secrets.outputs.CARGO_REGISTRY_TOKEN }}
+
+runs:
+  using: composite
+  steps:
+    - name: Load GitHub App credentials from 1Password
+      id: load-secrets
+      uses: 1password/load-secrets-action@v4
+      with:
+        export-env: false
+      env:
+        OP_SERVICE_ACCOUNT_TOKEN: ${{ inputs.op-service-account-token }}
+        GITHUB_APP_ID: ${{ inputs.op-github-app-item }}/GITHUB_APP_ID
+        GITHUB_APP_PRIVATE_KEY: ${{ inputs.op-github-app-item }}/GITHUB_APP_PRIVATE_KEY
+        CARGO_REGISTRY_TOKEN: ${{ inputs.op-github-app-item }}/CARGO_REGISTRY_TOKEN
+
+    # The App private key is stored base64-encoded in 1Password (a raw PEM's
+    # newlines get mangled to spaces on paste). Decode it here; base64 ignores
+    # whitespace, so it survives re-mangling.
+    - name: Decode GitHub App private key
+      id: app-key
+      shell: bash
+      env:
+        APP_KEY_B64: ${{ steps.load-secrets.outputs.GITHUB_APP_PRIVATE_KEY }}
+      run: |
+        key="$(printf '%s' "$APP_KEY_B64" | tr -d '[:space:]' | base64 -d)"
+        {
+          echo 'pem<<__PEM__'
+          printf '%s\n' "$key"
+          echo '__PEM__'
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Mint GitHub App token
+      id: app-token
+      if: inputs.owner == ''
+      uses: actions/create-github-app-token@v3
+      with:
+        client-id: ${{ steps.load-secrets.outputs.GITHUB_APP_ID }}
+        private-key: ${{ steps.app-key.outputs.pem }}
+
+    - name: Mint scoped GitHub App token
+      id: scoped-app-token
+      if: inputs.owner != ''
+      uses: actions/create-github-app-token@v3
+      with:
+        client-id: ${{ steps.load-secrets.outputs.GITHUB_APP_ID }}
+        private-key: ${{ steps.app-key.outputs.pem }}
+        owner: ${{ inputs.owner }}
+        repositories: ${{ inputs.repositories }}

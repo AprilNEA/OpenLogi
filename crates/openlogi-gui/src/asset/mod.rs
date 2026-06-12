@@ -13,19 +13,22 @@
 //! ultimately to the synthetic silhouette. The write side ([`sync::sync`])
 //! always targets the user cache — the bundle is read-only.
 
+mod glow;
 mod images;
 mod paths;
 pub mod sync;
+
+pub(crate) use self::glow::{ensure_glow_png, glow_path};
 
 use std::path::{Path, PathBuf};
 
 use openlogi_assets::{
     BUTTONS_RENDER_FILES, DeviceEntry, FRONT_RENDER_FILES, Index, METADATA_FILES, Metadata,
 };
-use openlogi_core::device::DeviceModelInfo;
+use openlogi_core::device::{DeviceKind, DeviceModelInfo};
 use tracing::{debug, warn};
 
-use self::images::{buttons_image_for, read_png_dimensions, variant_image_for};
+use self::images::{buttons_image_for, load_manifest, read_png_dimensions, variant_image_for};
 use self::paths::{bundle_assets_root, load_index, user_cache_root};
 
 #[derive(Debug, Clone)]
@@ -36,7 +39,18 @@ pub struct ResolvedAsset {
     )]
     pub depot: String,
     pub display_name: String,
+    /// The registry's curated device type for this model, normalized from the
+    /// asset index `type` string. Per-model and human-maintained, so it's the
+    /// most authoritative kind signal we have — the UI prefers it over the
+    /// runtime HID++ classification when a device matched a known depot.
+    /// [`DeviceKind::Unknown`] when the registry type was missing/unmodelled.
+    pub kind: DeviceKind,
     pub image_path: PathBuf,
+    /// The front/hero render (`device_image`, typically `front_*.png`) used for
+    /// the device gallery cards — distinct from [`Self::image_path`], which is
+    /// the side/buttons view the mouse model aligns hotspots against. `None`
+    /// when the depot ships no front render.
+    pub hero_image_path: Option<PathBuf>,
     pub metadata: Metadata,
     /// Actual pixel dimensions of `image_path`. Logi's
     /// `core_metadata.json` `origin` field tracks the *bbox of the mouse
@@ -124,9 +138,33 @@ impl AssetResolver {
             // `side_*.png`), so we prefer that resource for the
             // mouse-model render — otherwise hotspot percentages drift
             // off every button. `front_*.png` is left for the carousel.
-            let buttons_name = buttons_image_for(&dir, &entry.model_id, model.extended_model_id);
-            let variant_front_name =
-                variant_image_for(&dir, &entry.model_id, model.extended_model_id);
+            //
+            // The depot's manifest keys variants on one of its model ids,
+            // which isn't always the index primary — the MX Master 3S
+            // manifest is keyed on `2b034` while the index lists `2b043`
+            // first. Try each listed id as the variant base so the right
+            // colour render resolves regardless of which pid Logi keyed on.
+            // Parse the manifest once and consult it for every candidate.
+            let manifest = load_manifest(&dir);
+            let buttons_name = manifest.as_ref().and_then(|m| {
+                entry
+                    .model_id_candidates()
+                    .find_map(|base| buttons_image_for(m, base, model.extended_model_id))
+            });
+            let variant_front_name = manifest.as_ref().and_then(|m| {
+                entry
+                    .model_id_candidates()
+                    .find_map(|base| variant_image_for(m, base, model.extended_model_id))
+            });
+            // Front/hero render for the gallery: the colour variant's
+            // `device_image`, falling back to the generic front renders. Resolved
+            // against this same root so it sits beside the buttons image.
+            let hero_image_path = variant_front_name
+                .clone()
+                .into_iter()
+                .chain(FRONT_RENDER_FILES.map(str::to_string))
+                .map(|n| dir.join(n))
+                .find(|p| p.exists());
             let image_name = buttons_name
                 .clone()
                 .or_else(|| variant_front_name.clone())
@@ -148,8 +186,8 @@ impl AssetResolver {
             let metadata = match Metadata::load_from(&meta_path) {
                 Ok(m) => m,
                 Err(e) => {
-                    warn!(depot, root = %root.display(), file = meta_name, error = ?e, "failed to parse device metadata");
-                    continue;
+                    warn!(depot, root = %root.display(), file = meta_name, error = ?e, "device metadata unparseable — rendering image without hotspots");
+                    Metadata::default()
                 }
             };
             let (png_width, png_height) = match read_png_dimensions(&image_path) {
@@ -179,7 +217,9 @@ impl AssetResolver {
             return Some(ResolvedAsset {
                 depot: depot.to_string(),
                 display_name: entry.display_name.clone(),
+                kind: DeviceKind::from_registry_type(&entry.kind),
                 image_path,
+                hero_image_path,
                 metadata,
                 png_width,
                 png_height,
@@ -274,26 +314,45 @@ mod tests {
     use openlogi_core::device::DeviceTransports;
     use std::collections::HashMap;
 
-    fn mx_master_3s_index() -> Index {
+    fn mx_master_3s_entry(model_ids: Vec<String>) -> DeviceEntry {
+        DeviceEntry {
+            model_id: "2b043".to_string(),
+            model_ids,
+            display_name: "MX Master 3S".to_string(),
+            kind: "mouse".to_string(),
+            asset_path: "assets/mx_master_3s/".to_string(),
+            files: Vec::new(),
+        }
+    }
+
+    fn index_of(depot: &str, entry: DeviceEntry) -> Index {
         let mut devices = HashMap::new();
-        devices.insert(
-            "mx_master_3s".to_string(),
-            DeviceEntry {
-                model_id: "2b043".to_string(),
-                display_name: "MX Master 3S".to_string(),
-                kind: "mouse".to_string(),
-                asset_path: "assets/mx_master_3s/".to_string(),
-                files: Vec::new(),
-            },
-        );
+        devices.insert(depot.to_string(), entry);
         Index {
             schema_version: 1,
             devices,
         }
     }
 
-    /// An MX Master 3S connected over BTLE reports model id `b034` / ext 1 —
-    /// absent from the registry, which keys the 3S under `2b043`.
+    /// The current registry: the 3S depot lists both bolt pids Logi ships for
+    /// it (`b043` via a Bolt receiver, `b034` over BTLE).
+    fn mx_master_3s_index() -> Index {
+        index_of(
+            "mx_master_3s",
+            mx_master_3s_entry(vec!["2b043".into(), "2b034".into()]),
+        )
+    }
+
+    /// A legacy index generated before `modelIds` existed: only the primary
+    /// pid `2b043` is listed, so the BTLE pid `b034` matches nothing.
+    fn legacy_mx_master_3s_index() -> Index {
+        index_of("mx_master_3s", mx_master_3s_entry(Vec::new()))
+    }
+
+    /// An MX Master 3S connected over BTLE reports bolt pid `b034` / ext 1.
+    /// The strict `{ext}{pid}` key (`1b034`) matches no registry entry — the
+    /// depot lists `2b034`/`2b043` (ext 2) — so the suffix `b034` is what
+    /// bridges it.
     fn btle_3s_model() -> DeviceModelInfo {
         DeviceModelInfo {
             entity_count: 0,
@@ -309,17 +368,27 @@ mod tests {
     }
 
     #[test]
-    fn pid_matching_alone_misses_btle_3s() {
-        // The bug: no model id the device reports (`b034`) appears in the
-        // registry, so strict + suffix PID matching both fail.
+    fn secondary_pid_resolves_btle_3s_without_codename() {
+        // The fix: the depot lists `2b034` alongside `2b043`, so the suffix
+        // match on `b034` resolves the BTLE 3S by pid — no codename needed.
         let index = mx_master_3s_index();
+        let hit = resolve_in_index(&index, &btle_3s_model(), None);
+        assert_eq!(hit.map(|(depot, _)| depot), Some("mx_master_3s"));
+    }
+
+    #[test]
+    fn legacy_index_misses_btle_3s_by_pid() {
+        // Before `modelIds`: only `2b043` is listed, so neither strict nor
+        // suffix pid matching finds the BTLE 3S (`b034`).
+        let index = legacy_mx_master_3s_index();
         assert!(resolve_in_index(&index, &btle_3s_model(), None).is_none());
     }
 
     #[test]
-    fn codename_bridges_btle_3s_to_its_depot() {
-        // The fix: the firmware codename matches the registry displayName.
-        let index = mx_master_3s_index();
+    fn codename_bridges_btle_3s_on_legacy_index() {
+        // Back-compat: on a legacy index the firmware codename still bridges
+        // to the depot via displayName.
+        let index = legacy_mx_master_3s_index();
         let hit = resolve_in_index(&index, &btle_3s_model(), Some("MX Master 3S"));
         assert_eq!(hit.map(|(depot, _)| depot), Some("mx_master_3s"));
     }
@@ -375,6 +444,7 @@ mod tests {
         };
         let entry = DeviceEntry {
             model_id: "eb020".to_string(),
+            model_ids: Vec::new(),
             display_name: "MX Vertical".to_string(),
             kind: "MOUSE".to_string(),
             asset_path: format!("v1/devices/{depot}/"),

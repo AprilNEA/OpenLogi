@@ -73,6 +73,28 @@ pub fn data_dir() -> Result<PathBuf, PathsError> {
     xdg_base(std::env::var_os("XDG_DATA_HOME"), &[".local", "share"])
 }
 
+/// Resolve the runtime directory holding the agent's IPC socket. Honours an
+/// absolute `$XDG_RUNTIME_DIR` (Linux); otherwise falls back to [`config_dir`]
+/// — macOS has no `$XDG_RUNTIME_DIR`, and the config dir is already
+/// user-private. Split from the env read so the branch is unit-testable.
+fn runtime_base(env_value: Option<OsString>) -> Result<PathBuf, PathsError> {
+    match env_value {
+        Some(v) if Path::new(&v).is_absolute() => Ok(PathBuf::from(v).join(APP_DIR)),
+        _ => config_dir(),
+    }
+}
+
+/// Directory for runtime sockets — the background agent's IPC endpoint.
+pub fn runtime_dir() -> Result<PathBuf, PathsError> {
+    runtime_base(std::env::var_os("XDG_RUNTIME_DIR"))
+}
+
+/// Path to the background agent's Unix-domain IPC socket: the GUI connects here
+/// to reach the agent that owns device I/O.
+pub fn agent_socket_path() -> Result<PathBuf, PathsError> {
+    Ok(runtime_dir()?.join("agent.sock"))
+}
+
 #[cfg(all(test, unix))]
 #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
@@ -90,6 +112,21 @@ mod tests {
         // A relative $XDG_*_HOME is invalid, so this must fall back to
         // $HOME/.config/openlogi rather than honour the relative value.
         let dir = xdg_base(Some("relative/dir".into()), &[".config"]).expect("home dir resolves");
+        assert!(dir.ends_with("openlogi"));
+        assert!(!dir.to_string_lossy().contains("relative"));
+    }
+
+    #[test]
+    fn absolute_runtime_dir_is_used_verbatim() {
+        let dir = runtime_base(Some("/run/user/501".into())).expect("absolute override");
+        assert_eq!(dir, PathBuf::from("/run/user/501/openlogi"));
+    }
+
+    #[test]
+    fn relative_runtime_dir_falls_back_to_config() {
+        // A relative $XDG_RUNTIME_DIR is invalid, so this falls back to the
+        // config dir (also ending in openlogi) rather than honouring it.
+        let dir = runtime_base(Some("relative/run".into())).expect("config dir resolves");
         assert!(dir.ends_with("openlogi"));
         assert!(!dir.to_string_lossy().contains("relative"));
     }

@@ -14,9 +14,9 @@
 name = "openlogi-hidpp"
 version.workspace = true
 edition.workspace = true
-# Upstream HEAD uses std APIs stabilized in 1.87, so this fork's real MSRV is
-# higher than the workspace's 1.85. Declared explicitly (not inherited) — note
-# this makes the workspace effectively need 1.87 via openlogi-hid.
+# Upstream HEAD uses std APIs stabilized in 1.87. Keep this explicit instead
+# of inheriting the workspace MSRV so future syncs can see the fork's own lower
+# bound.
 rust-version = "1.87"
 license = "0BSD"
 repository.workspace = true
@@ -33,7 +33,6 @@ hidreport = "0.5.0"
 futures = "0.3.31"
 async-trait = "0.1.88"
 rand = "0.9.0"
-lazy_static = "1.5.0"
 num_enum = "0.7.3"
 async-channel = "2.3.1"
 serde = { version = "1.0", features = ["derive"], optional = true }

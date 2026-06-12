@@ -7,25 +7,38 @@
 //! (once per slider release) — unless a [`SharedChannel`] from the capture
 //! session is reused.
 
+use std::num::NonZeroU8;
 use std::sync::Arc;
 
+use async_hid::AsyncHidWrite;
 use hidpp::{
     channel::HidppChannel,
     device::Device,
     feature::CreatableFeature,
     feature::adjustable_dpi::AdjustableDpiFeature,
+    feature::smartshift::{SmartShiftFeature, WheelMode},
     protocol::v20::{ErrorType, Hidpp20Error},
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::debug;
 
 use crate::route::{DeviceRoute, open_route_channel};
 use crate::smartshift::{SmartShiftFeatureV0, SmartShiftMode, SmartShiftStatus};
 
-#[derive(Debug, Error)]
+// Serializable + Clone so it can cross the agent↔GUI IPC unchanged: the GUI
+// classifies a device read/write error as permanent (FeatureUnsupported /
+// EmptyDpiList) vs transient, so the discriminating variant must survive the
+// wire — stringifying it would collapse every case to "transient" and a device
+// that genuinely lacks a feature would be re-probed forever. Variant order is
+// therefore wire format: changes require a `PROTOCOL_VERSION` bump (guarded
+// by `openlogi-agent-core/tests/wire_format.rs`).
+#[derive(Debug, Clone, Error, Serialize, Deserialize)]
 pub enum WriteError {
-    #[error("HID transport error")]
-    Hid(#[from] async_hid::HidError),
+    // `async_hid::HidError` isn't `Serialize`, so carry its message as text; the
+    // typed error is never matched on (only constructed + displayed).
+    #[error("HID transport error: {0}")]
+    Hid(String),
     #[error("no connected device matched the route")]
     DeviceNotFound,
     #[error("device at index {index:#04x} did not respond to HID++")]
@@ -38,8 +51,14 @@ pub enum WriteError {
     Hidpp(String),
 }
 
+impl From<async_hid::HidError> for WriteError {
+    fn from(e: async_hid::HidError) -> Self {
+        Self::Hid(e.to_string())
+    }
+}
+
 /// Supported DPI values reported by a device's HID++ AdjustableDpi feature.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DpiCapabilities {
     values: Vec<u16>,
 }
@@ -133,7 +152,11 @@ impl DpiCapabilities {
 }
 
 /// Current DPI plus the supported values reported by the device.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Crosses the agent↔GUI IPC (`read_dpi`, [`DpiCapabilities`] included), so
+/// field order is wire format — changes require a `PROTOCOL_VERSION` bump
+/// (guarded by `openlogi-agent-core/tests/wire_format.rs`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DpiInfo {
     /// DPI currently configured on sensor 0.
     pub current: u16,
@@ -210,6 +233,132 @@ async fn open_feature<F: CreatableFeature + 'static>(
         .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?
         .ok_or(WriteError::FeatureUnsupported { feature_hex: F::ID })?;
     Ok(device.add_feature::<F>(info.index))
+}
+
+/// Whether a failure to open the `0x2111` Enhanced SmartShift feature should
+/// trigger the `0x2110` legacy fallback. Only a missing-`0x2111` feature
+/// qualifies; transport and protocol errors propagate unchanged so a real
+/// failure is never masked by a second open attempt.
+fn is_missing_enhanced(err: &WriteError) -> bool {
+    matches!(
+        err,
+        WriteError::FeatureUnsupported { feature_hex } if *feature_hex == 0x2111
+    )
+}
+
+/// Map the fork's `0x2110` [`WheelMode`] onto OpenLogi's [`SmartShiftMode`].
+/// A future `#[non_exhaustive]` variant maps to [`SmartShiftMode::Ratchet`],
+/// the "safe" clicky default OpenLogi uses elsewhere. (Reserved wire bytes
+/// never reach here — the fork's `get_ratchet_control_mode` rejects them.)
+fn wheel_mode_to_smartshift(wheel: WheelMode) -> SmartShiftMode {
+    if matches!(wheel, WheelMode::Freespin) {
+        SmartShiftMode::Free
+    } else {
+        SmartShiftMode::Ratchet
+    }
+}
+
+/// Map OpenLogi's [`SmartShiftMode`] onto the fork's `0x2110` [`WheelMode`] —
+/// the inverse of [`wheel_mode_to_smartshift`], used when writing the legacy
+/// ratchet-control mode.
+fn smartshift_to_wheel(mode: SmartShiftMode) -> WheelMode {
+    match mode {
+        SmartShiftMode::Free => WheelMode::Freespin,
+        SmartShiftMode::Ratchet => WheelMode::Ratchet,
+    }
+}
+
+/// Whichever SmartShift feature a device exposes, normalised onto
+/// [`SmartShiftMode`]. Devices ship one or the other: MX Master 3 / 3S use the
+/// `0x2111` Enhanced variant, the MX Master 2S uses the original `0x2110`.
+enum SmartShift {
+    /// `0x2111 SmartShiftWheelEnhanced`.
+    Enhanced(Arc<SmartShiftFeatureV0>),
+    /// `0x2110 SmartShiftWheel`.
+    Legacy(Arc<SmartShiftFeature>),
+}
+
+impl SmartShift {
+    /// Open whichever SmartShift feature the device exposes. Tries `0x2111`
+    /// first; on a missing-`0x2111` error (and only that), retries with
+    /// `0x2110`. Any other error from the first attempt propagates unchanged.
+    async fn open(device: &mut Device) -> Result<Self, WriteError> {
+        match open_feature::<SmartShiftFeatureV0>(device).await {
+            Ok(feature) => Ok(Self::Enhanced(feature)),
+            Err(err) if is_missing_enhanced(&err) => {
+                let feature = open_feature::<SmartShiftFeature>(device).await?;
+                Ok(Self::Legacy(feature))
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Read the current mode + auto-disengage threshold. Enhanced (`0x2111`)
+    /// also reports tunable torque; Legacy (`0x2110`) has no such concept, so
+    /// `tunable_torque` is reported as `0` per [`SmartShiftStatus`]'s contract.
+    async fn status(&self) -> Result<SmartShiftStatus, WriteError> {
+        match self {
+            Self::Enhanced(feature) => feature
+                .get_status()
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}"))),
+            Self::Legacy(feature) => {
+                let rcm = feature
+                    .get_ratchet_control_mode()
+                    .await
+                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+                Ok(SmartShiftStatus {
+                    mode: wheel_mode_to_smartshift(rcm.wheel_mode),
+                    auto_disengage: rcm.auto_disengage,
+                    // 0x2110 has no tunable-torque function; report 0 like
+                    // `SmartShiftStatus::tunable_torque` documents for devices
+                    // that don't support it.
+                    tunable_torque: 0,
+                })
+            }
+        }
+    }
+
+    /// Write a full desired status. Enhanced (`0x2111`) takes mode +
+    /// auto-disengage + tunable torque directly. Legacy (`0x2110`) has no
+    /// tunable-torque function, so that field is ignored; the wheel mode and
+    /// auto-disengage threshold are written explicitly — never relying on the
+    /// device treating a `None`/`0` field as "keep current".
+    async fn set_status(&self, status: SmartShiftStatus) -> Result<(), WriteError> {
+        let SmartShiftStatus {
+            mode,
+            auto_disengage,
+            tunable_torque,
+        } = status;
+        match self {
+            Self::Enhanced(feature) => feature
+                .set_status(mode, auto_disengage, tunable_torque)
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}"))),
+            Self::Legacy(feature) => feature
+                .set_ratchet_control_mode(
+                    Some(smartshift_to_wheel(mode)),
+                    Some(auto_disengage),
+                    None,
+                )
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}"))),
+        }
+    }
+
+    /// Write a new auto-disengage `sensitivity`, preserving the current mode
+    /// (and, on Enhanced, the tunable torque). Reads the current status first
+    /// so every preserved field is written back explicitly. The [`NonZeroU8`]
+    /// rules out `0`, which the device would treat as "no change" — a silent
+    /// non-write rather than a real sensitivity update.
+    async fn set_sensitivity(&self, value: NonZeroU8) -> Result<(), WriteError> {
+        let current = self.status().await?;
+        self.set_status(SmartShiftStatus {
+            auto_disengage: value.get(),
+            ..current
+        })
+        .await
+    }
 }
 
 /// Read the device's current DPI on sensor 0 — companion to [`set_dpi`].
@@ -290,11 +439,35 @@ pub async fn get_smartshift_status(route: &DeviceRoute) -> Result<SmartShiftStat
         let mut device = Device::new(Arc::clone(&channel), index)
             .await
             .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        let feature = open_feature::<SmartShiftFeatureV0>(&mut device).await?;
-        feature
-            .get_status()
+        let smartshift = SmartShift::open(&mut device).await?;
+        smartshift.status().await
+    })
+    .await
+}
+
+/// Set the SmartShift auto-disengage sensitivity on `route`, preserving the
+/// current mode. Returns the read-back status after the write so the caller can
+/// display and verify it.
+///
+/// `value` is written verbatim: `0x01..=0xfe` is the auto-disengage threshold
+/// (smaller = releases sooner / more sensitive) and `0xff` is permanent ratchet.
+/// The [`NonZeroU8`] parameter rules out `0` at the type level — the device
+/// treats a `0` threshold as "no change", so it could never be a real write.
+///
+/// `FeatureUnsupported` when the device exposes neither HID++ `0x2111`
+/// (MX Master 3 / 3S) nor the older `0x2110` (MX Master 2S).
+pub async fn set_smartshift_sensitivity(
+    route: &DeviceRoute,
+    value: NonZeroU8,
+) -> Result<SmartShiftStatus, WriteError> {
+    let index = route.device_index();
+    with_route(route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
             .await
-            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let smartshift = SmartShift::open(&mut device).await?;
+        smartshift.set_sensitivity(value).await?;
+        smartshift.status().await
     })
     .await
 }
@@ -305,6 +478,104 @@ pub async fn set_dpi(route: &DeviceRoute, dpi: u16) -> Result<(), WriteError> {
         set_dpi_on_channel(&channel, index, dpi).await
     })
     .await
+}
+
+/// HID++ `PerKeyLighting` feature — drives the per-key RGB on wired G-series
+/// keyboards. Its feature *index* varies per device, so it's resolved at runtime.
+const PER_KEY_LIGHTING_FEATURE: u16 = 0x8080;
+
+// HID++ 2.0 report ids for the 0x8080 per-key frames: 0x12 is the 64-byte "very
+// long" report that streams a batch of (keyID, R, G, B) entries; 0x11 is the
+// 20-byte "long" report that commits the streamed frame.
+const REPORT_SET_KEYS: u8 = 0x12;
+const REPORT_FRAME_END: u8 = 0x11;
+// Function byte = `function_id << 4 | software_id`. Software id 0xa just tags our
+// requests; function 0x3 streams a key range, 0x5 ends/commits the frame.
+const SW_ID: u8 = 0x0a;
+const FN_SET_KEY_RANGE: u8 = 0x3;
+const FN_FRAME_END: u8 = 0x5;
+// Fixed bytes of the "set key range" payload: a mode flag (byte 5) and the
+// per-frame entry count (byte 7), which is also the chunk size below.
+const SET_RANGE_MODE: u8 = 0x01;
+const KEYS_PER_FRAME: u8 = 0x0e;
+
+/// Set a keyboard's per-key RGB to a solid `(r, g, b)` colour via HID++
+/// `PerKeyLighting` (`0x8080`): stream every key's colour in 64-byte `0x12`
+/// "set group keys" frames, then commit the frame.
+///
+/// The `0x8080` feature index is resolved per device (it differs across the
+/// G-series), so this isn't tied to the G513. `FeatureUnsupported` when the
+/// device exposes no `0x8080` (e.g. a non-RGB peripheral).
+pub async fn set_keyboard_color(
+    route: &DeviceRoute,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> Result<(), WriteError> {
+    // Resolve this device's runtime feature index for 0x8080 over the HID++
+    // channel; the per-key frames are then sent as raw 0x12 reports (which the
+    // typed channel can't model) on a freshly opened writer.
+    let device_index = route.device_index();
+    let feature_index = with_route(route, move |channel| async move {
+        let device = Device::new(Arc::clone(&channel), device_index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable {
+                index: device_index,
+            })?;
+        let info = device
+            .root()
+            .get_feature(PER_KEY_LIGHTING_FEATURE)
+            .await
+            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?
+            .ok_or(WriteError::FeatureUnsupported {
+                feature_hex: PER_KEY_LIGHTING_FEATURE,
+            })?;
+        Ok(info.index)
+    })
+    .await?;
+
+    let Some(mut writer) = crate::transport::open_route_writer(route).await? else {
+        return Err(WriteError::DeviceNotFound);
+    };
+    // Each 64-byte `0x12` "set group keys" packet carries up to 14
+    // `(keyID, R, G, B)` entries; keyIDs are HID usage codes. Cover the whole
+    // keyboard usage range (incl. modifiers at `0xe0..`) so every key lights,
+    // then commit the frame.
+    let key_ids: Vec<u8> = (0x00u8..=0xe8).collect();
+    for chunk in key_ids.chunks(KEYS_PER_FRAME as usize) {
+        let mut rep = vec![0u8; 64];
+        rep[0] = REPORT_SET_KEYS;
+        rep[1] = device_index;
+        rep[2] = feature_index;
+        rep[3] = (FN_SET_KEY_RANGE << 4) | SW_ID;
+        rep[5] = SET_RANGE_MODE;
+        rep[7] = KEYS_PER_FRAME;
+        for (i, &key) in chunk.iter().enumerate() {
+            let off = 8 + i * 4;
+            rep[off] = key;
+            rep[off + 1] = r;
+            rep[off + 2] = g;
+            rep[off + 3] = b;
+        }
+        writer
+            .write_output_report(&rep)
+            .await
+            .map_err(WriteError::from)?;
+    }
+    let mut commit = vec![0u8; 20];
+    commit[0] = REPORT_FRAME_END;
+    commit[1] = device_index;
+    commit[2] = feature_index;
+    commit[3] = (FN_FRAME_END << 4) | SW_ID;
+    writer
+        .write_output_report(&commit)
+        .await
+        .map_err(WriteError::from)?;
+    debug!(
+        device_index,
+        feature_index, r, g, b, "wrote keyboard colour"
+    );
+    Ok(())
 }
 
 /// The DPI write itself, on an already-open channel at HID++ `index`. Shared by
@@ -350,8 +621,9 @@ async fn set_dpi_on_channel(
 /// mode first, then writes the opposite — keeps current sensitivity.
 /// Returns the new mode written.
 ///
-/// `FeatureUnsupported` when the device doesn't expose HID++ `0x2111`
-/// (older Logi mice and most non-MX devices).
+/// `FeatureUnsupported` when the device exposes neither HID++ `0x2111`
+/// (MX Master 3 / 3S) nor the older `0x2110` (MX Master 2S) — i.e. it has no
+/// SmartShift wheel.
 pub async fn toggle_smartshift(route: &DeviceRoute) -> Result<SmartShiftMode, WriteError> {
     let index = route.device_index();
     with_route(route, move |channel| async move {
@@ -369,18 +641,68 @@ async fn toggle_smartshift_on_channel(
     let mut device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    let feature = open_feature::<SmartShiftFeatureV0>(&mut device).await?;
-    let SmartShiftStatus { mode, sensitivity } = feature
-        .get_status()
-        .await
-        .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
-    let next = mode.flipped();
-    feature
-        .set_status(next, sensitivity)
-        .await
-        .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+    let smartshift = SmartShift::open(&mut device).await?;
+    let status = smartshift.status().await?;
+    let next = status.mode.flipped();
+    smartshift
+        .set_status(SmartShiftStatus {
+            mode: next,
+            ..status
+        })
+        .await?;
     debug!(index, ?next, "wrote SmartShift mode");
     Ok(next)
+}
+
+/// Write a full SmartShift configuration — wheel mode, auto-disengage
+/// threshold, and tunable torque — to `route`. The firmware persists all three
+/// to the device's NVM. Callers that mean to change only one field should read
+/// the rest via [`get_smartshift_status`] first and pass them back unchanged.
+/// On a Legacy (`0x2110`) device the `tunable_torque` field is ignored.
+///
+/// `FeatureUnsupported` when the device exposes neither HID++ `0x2111`
+/// (MX Master 3 / 3S) nor the older `0x2110` (MX Master 2S).
+pub async fn set_smartshift(
+    route: &DeviceRoute,
+    mode: SmartShiftMode,
+    auto_disengage: u8,
+    tunable_torque: u8,
+) -> Result<(), WriteError> {
+    let index = route.device_index();
+    with_route(route, move |channel| async move {
+        set_smartshift_on_channel(&channel, index, mode, auto_disengage, tunable_torque).await
+    })
+    .await
+}
+
+/// The SmartShift write itself, on an already-open channel at HID++ `index`.
+/// Shared by [`set_smartshift`] and [`set_smartshift_on`].
+async fn set_smartshift_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    mode: SmartShiftMode,
+    auto_disengage: u8,
+    tunable_torque: u8,
+) -> Result<(), WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let smartshift = SmartShift::open(&mut device).await?;
+    smartshift
+        .set_status(SmartShiftStatus {
+            mode,
+            auto_disengage,
+            tunable_torque,
+        })
+        .await?;
+    debug!(
+        index,
+        ?mode,
+        auto_disengage,
+        tunable_torque,
+        "wrote SmartShift config"
+    );
+    Ok(())
 }
 
 /// An open HID++ channel to a device, shared so DPI / SmartShift writes can
@@ -422,6 +744,24 @@ pub async fn toggle_smartshift_on(shared: &SharedChannel) -> Result<SmartShiftMo
     toggle_smartshift_on_channel(&shared.channel, shared.route.device_index()).await
 }
 
+/// Write a full SmartShift configuration on an already-open [`SharedChannel`]
+/// — the fast path that skips enumeration and channel setup.
+pub async fn set_smartshift_on(
+    shared: &SharedChannel,
+    mode: SmartShiftMode,
+    auto_disengage: u8,
+    tunable_torque: u8,
+) -> Result<(), WriteError> {
+    set_smartshift_on_channel(
+        &shared.channel,
+        shared.route.device_index(),
+        mode,
+        auto_disengage,
+        tunable_torque,
+    )
+    .await
+}
+
 /// Boilerplate-eater: open the channel that reaches `route`, then run `f` once
 /// with it. The caller addresses features at [`DeviceRoute::device_index`].
 async fn with_route<F, Fut, T>(route: &DeviceRoute, f: F) -> Result<T, WriteError>
@@ -437,7 +777,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{DpiCapabilities, WriteError};
+    use super::*;
 
     #[test]
     fn capabilities_sort_and_deduplicate_values() -> Result<(), WriteError> {
@@ -492,5 +832,65 @@ mod tests {
         assert_eq!(caps.adjacent_test_target(1000), Some(1600));
         assert_eq!(caps.adjacent_test_target(2000), Some(1600));
         Ok(())
+    }
+
+    #[test]
+    fn smartshift_and_wheel_mode_byte_encodings_match() {
+        // The whole design relies on 0x2110 WheelMode and 0x2111
+        // SmartShiftMode sharing one wire encoding (Free/Freespin = 1,
+        // Ratchet = 2). If the fork ever renumbers WheelMode this fails loudly.
+        assert_eq!(
+            u8::from(SmartShiftMode::Free),
+            u8::from(WheelMode::Freespin)
+        );
+        assert_eq!(
+            u8::from(SmartShiftMode::Ratchet),
+            u8::from(WheelMode::Ratchet)
+        );
+    }
+
+    #[test]
+    fn wheel_mode_maps_to_smartshift_mode() {
+        assert_eq!(
+            wheel_mode_to_smartshift(WheelMode::Freespin),
+            SmartShiftMode::Free
+        );
+        assert_eq!(
+            wheel_mode_to_smartshift(WheelMode::Ratchet),
+            SmartShiftMode::Ratchet
+        );
+    }
+
+    #[test]
+    fn smartshift_to_wheel_round_trips() {
+        // smartshift_to_wheel is the inverse of wheel_mode_to_smartshift.
+        for mode in [SmartShiftMode::Free, SmartShiftMode::Ratchet] {
+            assert_eq!(wheel_mode_to_smartshift(smartshift_to_wheel(mode)), mode);
+        }
+    }
+
+    #[test]
+    fn missing_enhanced_triggers_fallback() {
+        assert!(is_missing_enhanced(&WriteError::FeatureUnsupported {
+            feature_hex: 0x2111,
+        }));
+    }
+
+    #[test]
+    fn missing_legacy_does_not_trigger_fallback() {
+        // A device missing 0x2110 must NOT loop back — it genuinely has no
+        // SmartShift.
+        assert!(!is_missing_enhanced(&WriteError::FeatureUnsupported {
+            feature_hex: 0x2110,
+        }));
+    }
+
+    #[test]
+    fn transport_errors_do_not_trigger_fallback() {
+        // Real failures must propagate, not be masked by a fallback attempt.
+        assert!(!is_missing_enhanced(&WriteError::DeviceUnreachable {
+            index: 0xff,
+        }));
+        assert!(!is_missing_enhanced(&WriteError::Hidpp("boom".into())));
     }
 }

@@ -7,8 +7,8 @@
 //! so it never reappears; "Enable" also runs one check immediately.
 
 use gpui::{
-    App, BorrowAppContext as _, Context, FontWeight, IntoElement, ParentElement as _, Render, Size,
-    Styled as _, Subscription, Window, div, px,
+    App, BorrowAppContext as _, Context, FontWeight, InteractiveElement, IntoElement,
+    ParentElement as _, Render, Size, Styled as _, Subscription, Window, div, px,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -16,6 +16,7 @@ use gpui_component::{
 };
 use gpui_updater::Updater;
 
+use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::state::AppState;
 use crate::theme;
 use crate::windows::{self, AuxWindow};
@@ -54,10 +55,8 @@ pub fn open(cx: &mut App) {
 /// Persist the user's answer, run one check if they opted in, and close.
 fn answer(enabled: bool, window: &mut Window, cx: &mut App) {
     cx.update_global::<AppState, _>(|state, _| state.record_update_consent(enabled));
-    if enabled {
-        if let Some(updater) = crate::platform::updater::shared(cx) {
-            updater.update(cx, Updater::check);
-        }
+    if enabled && let Some(updater) = crate::platform::updater::shared(cx) {
+        updater.update(cx, Updater::check);
     }
     window.remove_window();
 }
@@ -70,6 +69,9 @@ impl Render for UpdateConsentView {
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &Minimize, window, _| window.minimize_window())
+            .on_action(|_: &Zoom, window, _| window.zoom_window())
             .items_center()
             .justify_center()
             .gap_4()

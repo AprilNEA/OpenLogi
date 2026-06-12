@@ -17,7 +17,6 @@ use gpui_component::{
 use openlogi_hid::{DeviceRoute, DpiCapabilities};
 use tracing::debug;
 
-use crate::hardware::{read_dpi_info_blocking, write_dpi_in_background};
 use crate::state::{AppState, DpiStatus};
 use crate::theme::{self, ACCENT_BLUE, Palette};
 
@@ -83,29 +82,33 @@ impl DpiPanel {
         };
 
         cx.update_global::<AppState, _>(|state, _| state.mark_dpi_loading(&key));
-        // Run the blocking HID++ read on a dedicated OS thread (matching
-        // `write_dpi_in_background`) instead of `cx.background_spawn`, so a slow
-        // or asleep device can't pin a shared GPUI background-executor thread
-        // for the whole `WRITE_BUDGET`. A oneshot hands the result back.
-        let key_for_reset = key.clone();
+        // The agent owns device I/O; request the DPI read over IPC and await the
+        // reply rather than opening the device from the GUI process. The agent
+        // returns the typed `WriteError`, so a permanent `FeatureUnsupported` /
+        // `EmptyDpiList` reaches `store_dpi_info` intact and the panel stops
+        // re-probing instead of retrying a doomed read on every reselect.
+        let sender = cx.global::<AppState>().ipc_sender();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        std::thread::spawn(move || {
-            let result = read_dpi_info_blocking(&route);
-            let _ = tx.send((key, route, result));
-        });
+        if sender
+            .send(crate::ipc_client::Command::ReadDpi(route.clone(), tx))
+            .is_err()
+        {
+            cx.update_global::<AppState, _>(|state, _| state.clear_dpi_loading(&key));
+            return;
+        }
         cx.spawn(async move |_panel, cx| {
             match rx.await {
-                Ok((key, route, result)) => {
+                Ok(result) => {
                     cx.update_global::<AppState, _>(|state, cx| {
                         state.store_dpi_info(key, &route, result);
                         cx.refresh_windows();
                     });
                 }
-                // The worker vanished without sending (e.g. it panicked). Reset
-                // the `Loading` marker so the device isn't stuck on "Reading…".
+                // The client thread dropped the reply (it's gone). Reset the
+                // `Loading` marker so the device isn't stuck on "Reading…".
                 Err(_) => {
                     cx.update_global::<AppState, _>(|state, cx| {
-                        state.clear_dpi_loading(&key_for_reset);
+                        state.clear_dpi_loading(&key);
                         cx.refresh_windows();
                     });
                 }
@@ -178,11 +181,14 @@ impl DpiPanel {
                         // carousel-driven device switches route the write to the
                         // now-current device, not whichever was active when this
                         // slider entity was constructed.
-                        let target = cx
+                        let route = cx
                             .try_global::<AppState>()
                             .and_then(|s| s.current_record().and_then(|r| r.route.clone()));
+                        let sender = cx.try_global::<AppState>().map(AppState::ipc_sender);
                         cx.update_global::<AppState, _>(|state, _| state.dpi = dpi);
-                        write_dpi_in_background(None, target, dpi);
+                        if let (Some(route), Some(sender)) = (route, sender) {
+                            let _ = sender.send(crate::ipc_client::Command::SetDpi(route, dpi));
+                        }
                     }
                 },
             );
@@ -248,7 +254,7 @@ impl Render for DpiPanel {
                 h_flex()
                     .justify_between()
                     .items_baseline()
-                    .child(div().text_sm().text_color(pal.text_muted).child("DPI"))
+                    .child(div().text_sm().text_color(pal.text_muted).child(tr!("DPI")))
                     .child(
                         div()
                             .text_sm()
@@ -416,14 +422,17 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
                     // Only apply once the supported DPI list is known, so the
                     // click writes a snapped, device-valid value — and can't be
                     // clobbered by a discovery result that lands afterwards.
-                    let Some((target, dpi)) = cx.try_global::<AppState>().and_then(|s| {
+                    let Some((route, dpi, sender)) = cx.try_global::<AppState>().and_then(|s| {
                         let dpi = s.active_dpi_capabilities()?.snap(value);
-                        Some((s.current_record().and_then(|r| r.route.clone()), dpi))
+                        let route = s.current_record().and_then(|r| r.route.clone());
+                        Some((route, dpi, s.ipc_sender()))
                     }) else {
                         return;
                     };
                     cx.update_global::<AppState, _>(|state, _| state.dpi = dpi);
-                    write_dpi_in_background(None, target, dpi);
+                    if let Some(route) = route {
+                        let _ = sender.send(crate::ipc_client::Command::SetDpi(route, dpi));
+                    }
                     cx.refresh_windows();
                 }),
         )

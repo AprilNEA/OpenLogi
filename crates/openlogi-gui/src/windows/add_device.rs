@@ -1,13 +1,14 @@
 //! The "Add device" window — drives a wireless pairing session.
 //!
-//! Pairing runs on the long-lived [`crate::watchers::pairing`] thread. This
-//! window is a thin state machine over two globals:
+//! Pairing runs in the **agent** (it owns device I/O, so it opens the receiver,
+//! not the GUI). This window is a thin state machine that talks to the agent
+//! over IPC:
 //!
-//! - [`PairingControl`] — the channel the buttons push [`Control`] into
-//!   (start / pick a device / cancel).
-//! - [`PairingUi`] — the latest session state, updated from the pairing event
-//!   stream in [`crate::main`]'s loop via [`apply_event`]. The view observes it
-//!   and repaints on every change.
+//! - The buttons send [`Command::StartPairing`] / [`Command::PairDevice`] /
+//!   [`Command::CancelPairing`] through the agent IPC client.
+//! - [`PairingUi`] — the latest session state, updated from the agent's pairing
+//!   long-poll ([`crate::ipc_client::IpcClient::pairing`]) in [`crate::main`]'s
+//!   loop via [`apply_update`]. The view observes it and repaints on change.
 //!
 //! Bolt is interactive (discover → pick → enter a passkey on the device);
 //! Unifying just opens a lock and waits for the next device to link, so it
@@ -19,19 +20,16 @@ use gpui::{
     px, rgb,
 };
 use gpui_component::v_flex;
-use openlogi_hid::{Click, DiscoveredDevice, PairingEvent, PasskeyMethod, ReceiverSelector};
+use openlogi_agent_core::ipc::{FoundDevice, PairingUpdate};
+use openlogi_hid::{Click, PasskeyMethod, ReceiverSelector};
 
+use crate::app_menu::{CloseWindow, Minimize, Zoom};
+use crate::ipc_client::Command;
+use crate::state::AppState;
 use crate::theme::{self, Palette};
-use crate::watchers::pairing::Control;
 use crate::windows::{self, AuxWindow};
 
-/// Sender side of the pairing watcher, published as a global so the window's
-/// buttons can drive the session without threading a handle through the views.
-pub struct PairingControl(pub tokio::sync::mpsc::UnboundedSender<Control>);
-
-impl Global for PairingControl {}
-
-/// The pairing flow's current UI state. Mirrors the [`PairingEvent`] stream.
+/// The pairing flow's current UI state. Mirrors the [`PairingUpdate`] stream.
 #[derive(Clone, Default)]
 pub enum PairingUi {
     /// No session in flight (initial, or after Done / dismissing a failure).
@@ -40,7 +38,7 @@ pub enum PairingUi {
     /// Discovery (Bolt) or the pairing lock (Unifying) is open.
     Searching,
     /// Bolt: devices discovered so far, awaiting the user's pick.
-    Found(Vec<DiscoveredDevice>),
+    Found(Vec<FoundDevice>),
     /// A device was picked; waiting for the receiver's next step.
     Pairing,
     /// Bolt: the device asks the user to enter a passkey.
@@ -74,12 +72,13 @@ pub fn open(cx: &mut App) {
     );
 }
 
-/// Fold a pairing event into [`PairingUi`]. Called from the GPUI event loop.
-pub fn apply_event(cx: &mut App, event: PairingEvent) {
+/// Fold a pairing update into [`PairingUi`]. Called from the GPUI event loop as
+/// the agent's pairing long-poll delivers events.
+pub fn apply_update(cx: &mut App, update: PairingUpdate) {
     let current = cx.try_global::<PairingUi>().cloned().unwrap_or_default();
-    let next = match event {
-        PairingEvent::Searching => PairingUi::Searching,
-        PairingEvent::DeviceFound(device) => {
+    let next = match update {
+        PairingUpdate::Searching => PairingUi::Searching,
+        PairingUpdate::DeviceFound(device) => {
             let mut devices = match current {
                 PairingUi::Found(devices) => devices,
                 _ => Vec::new(),
@@ -89,22 +88,22 @@ pub fn apply_event(cx: &mut App, event: PairingEvent) {
             }
             PairingUi::Found(devices)
         }
-        PairingEvent::Passkey(method) => PairingUi::Passkey(method),
-        PairingEvent::Paired { slot } => PairingUi::Paired { slot },
-        PairingEvent::Failed(error) => PairingUi::Failed(error.to_string()),
+        PairingUpdate::Passkey(method) => PairingUi::Passkey(method),
+        PairingUpdate::Paired { slot } => PairingUi::Paired { slot },
+        PairingUpdate::Failed(detail) => PairingUi::Failed(detail),
     };
     cx.set_global(next);
 }
 
-fn send(cx: &App, control: Control) {
-    if let Some(ctrl) = cx.try_global::<PairingControl>() {
-        let _ = ctrl.0.send(control);
+fn send(cx: &App, command: Command) {
+    if let Some(state) = cx.try_global::<AppState>() {
+        let _ = state.ipc_sender().send(command);
     }
 }
 
 fn start_search(cx: &mut App) {
     cx.set_global(PairingUi::Searching);
-    send(cx, Control::Start(ReceiverSelector::First));
+    send(cx, Command::StartPairing(ReceiverSelector::First));
 }
 
 /// Standalone Add Device window root view.
@@ -140,6 +139,9 @@ impl Render for AddDeviceView {
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &Minimize, window, _| window.minimize_window())
+            .on_action(|_: &Zoom, window, _| window.zoom_window())
             .p_6()
             .gap_5()
             .child(
@@ -234,8 +236,8 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
 }
 
 /// A discovered-device row; clicking it pairs with that device.
-fn device_row(idx: usize, device: &DiscoveredDevice, pal: Palette) -> impl IntoElement {
-    let picked = device.clone();
+fn device_row(idx: usize, device: &FoundDevice, pal: Palette) -> impl IntoElement {
+    let address = device.address;
     div()
         .id(("found-device", idx))
         .w_full()
@@ -252,7 +254,7 @@ fn device_row(idx: usize, device: &DiscoveredDevice, pal: Palette) -> impl IntoE
                 .child(SharedString::from(device.name.clone())),
         )
         .on_click(move |_, _, cx| {
-            send(cx, Control::Pair(picked.clone()));
+            send(cx, Command::PairDevice(address));
             cx.set_global(PairingUi::Pairing);
         })
 }
@@ -341,7 +343,7 @@ fn action_button(
 
 fn cancel_button(pal: Palette) -> impl IntoElement {
     action_button("ad-cancel", tr!("Cancel"), pal, false).on_click(|_, _, cx| {
-        send(cx, Control::Cancel);
+        send(cx, Command::CancelPairing);
         cx.set_global(PairingUi::Idle);
     })
 }

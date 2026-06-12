@@ -8,9 +8,26 @@
   <key>CFBundleIdentifier</key><string>org.openlogi.openlogi.dev</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.0.1</string>
-  <key>CFBundleVersion</key><string>0.0.1</string>
+  <!-- 0.0.0 = the repo-wide "unstamped dev build" sentinel (release versions
+       come from cargo-bundle / xtask stamping). -->
+  <key>CFBundleShortVersionString</key><string>0.0.0</string>
+  <key>CFBundleVersion</key><string>0.0.0</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <!-- openlogi:// deep-link scheme. Mirror of [package.metadata.bundle]
+       osx_url_schemes in Cargo.toml (which cargo-bundle uses for the release
+       app) — keep the two in sync. CFBundleURLName matches the name
+       cargo-bundle generates (the bundle name, not the identifier) so dev and
+       release register the type identically. -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>OpenLogi</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>openlogi</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>

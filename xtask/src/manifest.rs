@@ -45,6 +45,7 @@ struct Manifest {
 struct Asset {
     name: String,
     url: String,
+    signature_url: String,
     os: &'static str,
     arch: String,
     format: &'static str,
@@ -106,9 +107,19 @@ fn collect_assets(dist: &Path, release_base: &str) -> Result<Vec<Asset>> {
         let Some(arch) = dmg_arch(name) else {
             continue;
         };
+        let signature_name = format!("{name}.minisig");
+        let signature_path = dist.join(&signature_name);
+        if !signature_path.is_file() {
+            bail!(
+                "missing minisign signature {} for updater artifact {}",
+                signature_path.display(),
+                path.display()
+            );
+        }
         assets.push(Asset {
             name: name.to_string(),
             url: format!("{release_base}/{name}"),
+            signature_url: format!("{release_base}/{signature_name}"),
             os: "macos",
             arch: arch.to_string(),
             format: "dmg",
@@ -152,4 +163,49 @@ fn published_at() -> Result<String> {
     OffsetDateTime::from(SystemTime::now())
         .format(&Rfc3339)
         .context("could not format current timestamp")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::{env, fs, process};
+
+    use super::*;
+
+    fn temp_dist(name: &str) -> PathBuf {
+        let path = env::temp_dir().join(format!("openlogi-manifest-test-{}-{name}", process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn collect_assets_requires_minisign_signature_for_each_dmg() {
+        let dist = temp_dist("missing-signature");
+        fs::write(dist.join("OpenLogi-v1.2.3-macos-arm64.dmg"), b"dmg").unwrap();
+
+        assert!(collect_assets(&dist, "https://updates.example/releases/v1.2.3").is_err());
+
+        let _ = fs::remove_dir_all(dist);
+    }
+
+    #[test]
+    fn collect_assets_publishes_signature_url() {
+        let dist = temp_dist("with-signature");
+        fs::write(dist.join("OpenLogi-v1.2.3-macos-arm64.dmg"), b"dmg").unwrap();
+        fs::write(
+            dist.join("OpenLogi-v1.2.3-macos-arm64.dmg.minisig"),
+            b"signature",
+        )
+        .unwrap();
+
+        let assets = collect_assets(&dist, "https://updates.example/releases/v1.2.3").unwrap();
+
+        assert_eq!(
+            assets[0].signature_url,
+            "https://updates.example/releases/v1.2.3/OpenLogi-v1.2.3-macos-arm64.dmg.minisig"
+        );
+
+        let _ = fs::remove_dir_all(dist);
+    }
 }

@@ -1,0 +1,111 @@
+name: Windows signing dry-run
+
+# Manual, publish-free end-to-end test of the Azure Artifact Signing path:
+# 1Password config → build → OIDC login → sign → verify. Exists because
+# release.yml only runs on v* tags, so validating a signing-config change
+# used to cost a release (v0.6.4: missing role assignment; v0.6.5: https
+# timestamp URL). Keep these steps in sync with release.yml's `windows` job.
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  sign:
+    name: Windows signing dry-run (${{ matrix.arch }})
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+    # Matches release.yml's windows job: the GUI release build dominates.
+    timeout-minutes: 60
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+    permissions:
+      id-token: write
+      contents: read
+    # Same environment as the release job so the OIDC subject matches the
+    # federated credential (repo:AprilNEA/OpenLogi:environment:release).
+    environment: release
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Load Azure signing config from 1Password
+        id: azure_config
+        uses: 1password/load-secrets-action@v4
+        with:
+          export-env: false
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          AZURE_CLIENT_ID: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_CLIENT_ID
+          AZURE_TENANT_ID: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_TENANT_ID
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_SUBSCRIPTION_ID
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_SIGNING_ENDPOINT
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_SIGNING_ACCOUNT
+          AZURE_CERT_PROFILE: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_CERT_PROFILE
+
+      - name: Validate Azure signing config
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ steps.azure_config.outputs.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ steps.azure_config.outputs.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ steps.azure_config.outputs.AZURE_SUBSCRIPTION_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERT_PROFILE: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
+        run: |
+          set -euo pipefail
+          : "${AZURE_CLIENT_ID:?Configure AZURE_CLIENT_ID in the Azure 1Password item}"
+          : "${AZURE_TENANT_ID:?Configure AZURE_TENANT_ID in the Azure 1Password item}"
+          : "${AZURE_SUBSCRIPTION_ID:?Configure AZURE_SUBSCRIPTION_ID in the Azure 1Password item}"
+          : "${AZURE_SIGNING_ENDPOINT:?Configure AZURE_SIGNING_ENDPOINT in the Azure 1Password item}"
+          : "${AZURE_SIGNING_ACCOUNT:?Configure AZURE_SIGNING_ACCOUNT in the Azure 1Password item}"
+          : "${AZURE_CERT_PROFILE:?Configure AZURE_CERT_PROFILE in the Azure 1Password item}"
+
+      - name: Build OpenLogi
+        run: cargo build --release -p openlogi-gui --target ${{ matrix.target }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ steps.azure_config.outputs.AZURE_CLIENT_ID }}
+          tenant-id: ${{ steps.azure_config.outputs.AZURE_TENANT_ID }}
+          subscription-id: ${{ steps.azure_config.outputs.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign openlogi-gui.exe with Artifact Signing
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
+          files: ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-gui.exe
+          # Must stay http — SignTool rejects an https /tr ("Invalid Timestamp
+          # URL", v0.6.5). The RFC3161 response is itself signed.
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          cache-dependencies: false
+
+      - name: Verify the binary is signed
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature target\${{ matrix.target }}\release\openlogi-gui.exe
+          $sig | Format-List
+          # NotSigned and HashMismatch are trust-store independent and always
+          # ship-blockers; NotTrusted/UnknownError depend on the runner's
+          # trust store, so they stay log-only.
+          if ($null -eq $sig.SignerCertificate -or
+              "$($sig.Status)" -in 'NotSigned', 'HashMismatch') {
+            Write-Error "openlogi-gui.exe Authenticode signature is invalid: $($sig.Status)"
+            exit 1
+          }

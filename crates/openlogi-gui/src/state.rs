@@ -14,31 +14,55 @@
     reason = "fields are read once their owning component lands in UI.md phases 2–4"
 )]
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
 
-use gpui::Global;
-use openlogi_core::config::{AppSettings, Config};
+use gpui::{App, Global};
+use openlogi_core::config::{AppSettings, Config, Lighting};
 use openlogi_core::device::DeviceInventory;
-use openlogi_hid::{DeviceRoute, DpiCapabilities, DpiInfo, WriteError};
-use openlogi_hook::Hook;
+use openlogi_hid::{
+    DeviceRoute, DpiCapabilities, DpiInfo, SmartShiftMode, SmartShiftStatus, WriteError,
+};
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-mod bindings;
 mod devices;
-mod dpi;
 
 pub use devices::DeviceRecord;
-pub use dpi::DpiCycleState;
+pub use openlogi_agent_core::DpiCycleState;
 
 use crate::asset::AssetResolver;
-use crate::data::mouse_buttons::{Action, ButtonId, GestureDirection};
-use crate::state::bindings::{bindings_for, gesture_bindings_for};
+use crate::data::mouse_buttons::{Action, Binding, ButtonId, GestureDirection};
 use crate::state::devices::{build_device_list, pick_initial_device, sort_device_list};
+use openlogi_agent_core::bindings::{bindings_for, gesture_bindings_for};
 
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
 pub const DEFAULT_DPI: u32 = 1600;
+
+/// The GUI's view of the agent connection: the latest status snapshot, or the
+/// reason there isn't one. One value instead of per-fact mirror fields
+/// (granted / scanning / …) so a future writer can't update half of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentLink {
+    /// No snapshot yet — the window just opened, or the agent is still
+    /// starting. Render a neutral connecting frame: claiming "denied" or "no
+    /// devices" before the first snapshot flashed both at every
+    /// already-set-up user (the original startup bug).
+    Connecting,
+    /// Still no snapshot well past startup: the agent is genuinely
+    /// unreachable (binary missing, repeated spawn failures). Rendered as a
+    /// static error frame; polling continues and a snapshot upgrades this
+    /// back to [`Self::Ready`].
+    Unreachable,
+    /// The agent answered the handshake with a *newer* protocol than this
+    /// process speaks — the app was updated on disk while this GUI stayed
+    /// running. Only relaunching helps; without this state the window would
+    /// keep showing a live-looking but frozen UI.
+    OutdatedGui,
+    /// Connected and current: the agent's latest status snapshot.
+    Ready(openlogi_agent_core::ipc::AgentStatus),
+}
 
 /// Inventory snapshots can briefly miss a real device while another HID++
 /// request is in flight. Keep the previous record through this many
@@ -70,6 +94,27 @@ pub enum DpiStatus {
     Unsupported(String),
 }
 
+/// Per-device SmartShift (`0x2111`) loading state. Mirrors [`DpiStatus`]:
+/// lazily loaded because the HID++ read must not block device switching or
+/// rendering. Unlike DPI presets, the resolved config is *not* persisted to
+/// `config.toml` — the device stores wheel mode / threshold / torque in its
+/// own non-volatile memory, so the GUI only ever reads and writes the device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SmartShiftLoad {
+    /// The selected device has not been queried yet.
+    Unknown,
+    /// A background HID++ read is in flight.
+    Loading,
+    /// The device reported its current SmartShift configuration.
+    Ready(SmartShiftStatus),
+    /// Transient read errors exhausted the retry budget; retryable on
+    /// re-select.
+    Failed(String),
+    /// The device genuinely does not expose SmartShift (`0x2111`); never
+    /// retried.
+    Unsupported(String),
+}
+
 pub struct AppState {
     /// Index into [`Self::device_list`] of the currently visible device. May
     /// be out of bounds briefly while inventories re-enumerate; views must
@@ -82,21 +127,21 @@ pub struct AppState {
     /// The hotspot the user most recently armed by clicking. Drives the
     /// "selected button" outline on the mouse model and the popover content.
     pub active_button: Option<ButtonId>,
-    /// Whether the process holds macOS Accessibility permission. Drives the
-    /// permission gate; flipped by the accessibility watcher when the user
-    /// grants access. Always `true` on platforms without the concept.
-    pub accessibility_granted: bool,
-    /// Whether the first device enumeration is still in flight. Startup no
-    /// longer blocks on enumeration (see `main`); this drives the "Scanning…"
-    /// vs "No devices connected" empty state and is cleared once the inventory
-    /// watcher delivers its first snapshot.
-    pub scanning: bool,
+    /// Everything the GUI knows about the agent connection — the last status
+    /// snapshot, or why there isn't one. The render path branches on this
+    /// single value, so the permission gate, the scanning state, and the
+    /// connection-problem frames can never disagree about what the agent said.
+    agent_link: AgentLink,
     /// Bindings for the *currently selected* device. Reloaded whenever the
     /// carousel selection changes.
     pub button_bindings: BTreeMap<ButtonId, Action>,
-    /// Per-direction sub-bindings for the gesture button on the currently
-    /// selected device. Edited via the gesture picker; persistence shape
-    /// lives in [`openlogi_core::config::DeviceConfig::gesture_bindings`].
+    /// Per-direction sub-bindings for the current device's gesture owner. Edited
+    /// via the gesture picker and persisted as a [`Binding::Gesture`] entry under
+    /// the owning button — the thumb pad ([`ButtonId::GestureButton`]) by default,
+    /// or a promoted Middle/Back/Forward — in the device's unified binding map
+    /// ([`DeviceConfig::bindings`]). Rebuilt by the `gesture_bindings_for_current` helper.
+    ///
+    /// [`DeviceConfig::bindings`]: openlogi_core::config::DeviceConfig::bindings
     pub gesture_bindings: BTreeMap<GestureDirection, Action>,
     pub dpi: u32,
     /// DPI capability state keyed by [`DeviceRecord::config_key`]. Loaded
@@ -111,6 +156,30 @@ pub struct AppState {
     /// times (see [`DPI_LOAD_MAX_ATTEMPTS`]) instead of sticking the device on
     /// [`DpiStatus::Unsupported`] forever.
     dpi_load_attempts: BTreeMap<String, u8>,
+    /// SmartShift (`0x2111`) configuration state keyed by
+    /// [`DeviceRecord::config_key`]. Loaded lazily on the same pattern as
+    /// [`Self::dpi_by_device`]; the device persists the values itself, so this
+    /// is a read/write cache, not a source of truth saved to disk. Private so
+    /// all access goes through the accessor methods below (`current_smartshift_*`,
+    /// `store_smartshift_status`), which enforce the stale-result and retry rules.
+    smartshift_by_device: BTreeMap<String, SmartShiftLoad>,
+    /// Consecutive failed SmartShift read attempts, keyed by
+    /// [`DeviceRecord::config_key`] — mirrors [`Self::dpi_load_attempts`].
+    smartshift_load_attempts: BTreeMap<String, u8>,
+    /// Glow-overlay cache paths we've already spawned generation for, so each
+    /// `(depot, colour)` is attempted exactly once — even when the depot ships
+    /// no mask and no file is ever written (otherwise the worker's
+    /// `refresh_windows` would re-trigger generation every frame, forever).
+    glow_attempted: HashSet<PathBuf>,
+    /// Glow-overlay cache paths whose PNG is generated and ready to render, so
+    /// `lighting_overlay` never stats the filesystem on the render thread.
+    glow_ready: HashSet<PathBuf>,
+    /// Devices whose SmartShift was just written optimistically and still need a
+    /// confirming re-read, keyed by [`DeviceRecord::config_key`]. A fire-and-
+    /// forget write can be rejected/timed-out by a sleeping device, so the panel
+    /// re-reads (without a Loading flicker) to replace the optimistic value with
+    /// the device's actual state. See [`Self::commit_smartshift`].
+    smartshift_pending_confirm: std::collections::BTreeSet<String>,
     /// All paired devices, in carousel order. Each entry caches the per-
     /// device data the views need so a switch is a pure index update.
     pub device_list: Vec<DeviceRecord>,
@@ -118,18 +187,12 @@ pub struct AppState {
     /// [`Self::set_current_device`] so restarts preserve user bindings and
     /// the last-selected device.
     config: Config,
-    /// Shared binding map consumed by the OS-level hook thread (P0.1). The
-    /// hook holds the other `Arc` clone; writes here are picked up by the next
-    /// hook callback without GPUI thread involvement.
-    pub hook_bindings: Arc<RwLock<BTreeMap<ButtonId, Action>>>,
-    /// Shared DPI-cycle state consumed by the hook thread when dispatching
-    /// [`Action::CycleDpiPresets`] / [`Action::SetDpiPreset`].
-    pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
-    /// Shared gesture-direction binding map consumed by the gesture watcher
-    /// thread. Mirrors [`Self::hook_bindings`] but keyed by direction; the
-    /// watcher holds the other `Arc` clone, so writes here reach it without
-    /// GPUI involvement.
-    pub gesture_hook_bindings: Arc<RwLock<BTreeMap<GestureDirection, Action>>>,
+    /// Sender to the IPC client thread. The agent owns the hook + all device
+    /// I/O, so binding / setting writes persist to `config.toml` and then send
+    /// [`Command::ReloadConfig`](crate::ipc_client::Command) for the agent to
+    /// rebuild, and "apply now" device changes (DPI / SmartShift / lighting)
+    /// go out as their own commands. The GUI never opens a device itself.
+    ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
 }
 
 impl AppState {
@@ -146,32 +209,7 @@ impl AppState {
         config: Config,
         inventories: &[DeviceInventory],
         cache: &AssetResolver,
-    ) -> Self {
-        let bindings_arc = Arc::new(RwLock::new(BTreeMap::new()));
-        let gesture_arc = Arc::new(RwLock::new(BTreeMap::new()));
-        let cycle_arc = Arc::new(RwLock::new(DpiCycleState::default()));
-        Self::with_runtime_shared(
-            config,
-            inventories,
-            cache,
-            bindings_arc,
-            gesture_arc,
-            cycle_arc,
-        )
-    }
-
-    /// Like [`Self::with_runtime`] but re-uses existing `Arc`s so the hook
-    /// thread and `AppState` share the same maps. Both arcs are rewritten to
-    /// match the resolved initial state so the hook sees correct values from
-    /// the very first captured event.
-    #[must_use]
-    pub fn with_runtime_shared(
-        config: Config,
-        inventories: &[DeviceInventory],
-        cache: &AssetResolver,
-        hook_bindings: Arc<RwLock<BTreeMap<ButtonId, Action>>>,
-        gesture_hook_bindings: Arc<RwLock<BTreeMap<GestureDirection, Action>>>,
-        dpi_cycle: Arc<RwLock<DpiCycleState>>,
+        ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
     ) -> Self {
         let device_list = build_device_list(inventories, cache);
         let current_device = pick_initial_device(&device_list, config.selected_device());
@@ -179,26 +217,51 @@ impl AppState {
             current_device,
             current_app_bundle: None,
             active_button: None,
-            accessibility_granted: Hook::has_accessibility(),
-            scanning: true,
+            // Updated from the agent's IPC poll; the GUI no longer runs the
+            // hook, so it can't meaningfully query Accessibility (or devices)
+            // itself.
+            agent_link: AgentLink::Connecting,
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),
             dpi: DEFAULT_DPI,
             dpi_by_device: BTreeMap::new(),
             inventory_misses: BTreeMap::new(),
             dpi_load_attempts: BTreeMap::new(),
+            smartshift_by_device: BTreeMap::new(),
+            smartshift_load_attempts: BTreeMap::new(),
+            glow_attempted: HashSet::new(),
+            glow_ready: HashSet::new(),
+            smartshift_pending_confirm: std::collections::BTreeSet::new(),
             device_list,
             config,
-            hook_bindings,
-            dpi_cycle,
-            gesture_hook_bindings,
+            ipc_commands,
         };
         state.button_bindings = state.bindings_for_current();
         state.gesture_bindings = state.gesture_bindings_for_current();
-        state.sync_hook_bindings();
-        state.sync_gesture_bindings();
-        state.sync_dpi_cycle();
         state
+    }
+
+    /// Send a device command to the agent over IPC, logging a dropped channel
+    /// (the client thread is gone) rather than surfacing it.
+    fn send_ipc(&self, command: crate::ipc_client::Command) {
+        if self.ipc_commands.send(command).is_err() {
+            warn!("IPC client thread is gone — device command dropped");
+        }
+    }
+
+    /// A clone of the IPC command sender, so views (the DPI / SmartShift panels)
+    /// can issue device reads and writes through the agent themselves.
+    #[must_use]
+    pub fn ipc_sender(&self) -> mpsc::UnboundedSender<crate::ipc_client::Command> {
+        self.ipc_commands.clone()
+    }
+
+    /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
+    /// CGEventTap, so the system dialog must name and authorize the *agent*
+    /// binary; prompting in the GUI process (as the pre-split build did) would
+    /// grant the wrong binary and the hook would never install.
+    pub fn request_accessibility_prompt(&self) {
+        self.send_ipc(crate::ipc_client::Command::RequestAccessibilityPrompt);
     }
 
     /// Build the button-binding, gesture-binding, and DPI snapshots consumed by
@@ -217,8 +280,9 @@ impl AppState {
         let device_list = build_device_list(inventories, cache);
         let current_device = pick_initial_device(&device_list, config.selected_device());
         let record = device_list.get(current_device);
-        let bindings = bindings_for(config, record, None);
-        let gesture_bindings = gesture_bindings_for(config, record);
+        let config_key = record.map(|r| r.config_key.as_str());
+        let bindings = bindings_for(config, config_key, None);
+        let gesture_bindings = gesture_bindings_for(config, config_key);
         let presets = record
             .map(|r| config.dpi_presets(&r.config_key))
             .unwrap_or_default();
@@ -248,7 +312,6 @@ impl AppState {
         debug!(?bundle, "foreground app changed");
         self.current_app_bundle = bundle;
         self.button_bindings = self.bindings_for_current();
-        self.sync_hook_bindings();
     }
 
     /// The active device, or `None` when [`Self::device_list`] is empty or
@@ -258,15 +321,51 @@ impl AppState {
         self.device_list.get(self.current_device)
     }
 
+    /// The agent connection state the render path branches on.
+    #[must_use]
+    pub fn agent_link(&self) -> &AgentLink {
+        &self.agent_link
+    }
+
+    /// The latest agent status snapshot — `None` while not connected (any
+    /// non-[`AgentLink::Ready`] state), which readers like the Settings
+    /// permission rows surface as "unknown", not "denied".
+    #[must_use]
+    pub fn agent_status(&self) -> Option<&openlogi_agent_core::ipc::AgentStatus> {
+        match &self.agent_link {
+            AgentLink::Ready(status) => Some(status),
+            _ => None,
+        }
+    }
+
+    /// Replace the link, reporting whether it actually changed — the steady
+    /// IPC poll mostly delivers identical snapshots, and the caller skips the
+    /// window refresh for those.
+    pub fn set_agent_link(&mut self, link: AgentLink) -> bool {
+        if self.agent_link == link {
+            return false;
+        }
+        self.agent_link = link;
+        true
+    }
+
     /// Replace [`Self::device_list`] from a fresh inventory snapshot,
     /// preserving the carousel selection by `config_key` when possible. If
     /// the previously-selected device disappeared, the selection falls back
-    /// to index 0.
+    /// to index 0. Returns whether anything actually changed.
     ///
-    /// No-op when the new list has the same `config_key` sequence as the
-    /// current one — avoids spurious `observe_global` notifications during
-    /// quiet polling cycles (P1.6).
-    pub fn refresh_inventories(&mut self, inventories: &[DeviceInventory], cache: &AssetResolver) {
+    /// No-op (returning `false`) when the new list has the same `config_key`
+    /// sequence as the current one — the caller skips the window refresh, and
+    /// quiet polling cycles cause no spurious re-renders (P1.6). `force`
+    /// pushes through that early-return: the records embed resolved asset
+    /// paths, so a completed asset sync needs one rebuild even though the
+    /// device *set* is unchanged.
+    pub fn refresh_inventories(
+        &mut self,
+        inventories: &[DeviceInventory],
+        cache: &AssetResolver,
+        force: bool,
+    ) -> bool {
         let new_list = build_device_list(inventories, cache);
         let merged_list = self.merge_inventory_snapshot(new_list);
         // Compare routes too, not just config_key: a device can reconnect on a
@@ -278,8 +377,8 @@ impl AppState {
                 .iter()
                 .zip(self.device_list.iter())
                 .all(|(a, b)| a.config_key == b.config_key && a.route == b.route);
-        if unchanged {
-            return;
+        if unchanged && !force {
+            return false;
         }
 
         let previous_key = self.current_record().map(|r| r.config_key.clone());
@@ -313,10 +412,16 @@ impl AppState {
         for key in &rerouted {
             self.dpi_by_device.remove(key);
             self.dpi_load_attempts.remove(key);
+            self.smartshift_by_device.remove(key);
+            self.smartshift_load_attempts.remove(key);
         }
         self.dpi_by_device
             .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
         self.dpi_load_attempts
+            .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
+        self.smartshift_by_device
+            .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
+        self.smartshift_load_attempts
             .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
         self.current_device = new_index;
         // The active device may have changed (selection fell back to index 0
@@ -325,9 +430,9 @@ impl AppState {
         self.dpi = self.dpi_for_current();
         self.button_bindings = self.bindings_for_current();
         self.gesture_bindings = self.gesture_bindings_for_current();
-        self.sync_hook_bindings();
-        self.sync_gesture_bindings();
-        self.sync_dpi_cycle();
+        // Display state only — the agent runs its own inventory watcher and
+        // rebuilds the live binding/DPI maps itself.
+        true
     }
 
     fn merge_inventory_snapshot(&mut self, new_list: Vec<DeviceRecord>) -> Vec<DeviceRecord> {
@@ -389,6 +494,13 @@ impl AppState {
                 self.dpi_by_device.remove(&key);
                 self.dpi_load_attempts.remove(&key);
             }
+            if matches!(
+                self.smartshift_by_device.get(&key),
+                Some(SmartShiftLoad::Failed(_))
+            ) {
+                self.smartshift_by_device.remove(&key);
+                self.smartshift_load_attempts.remove(&key);
+            }
         }
         // `self.dpi` is the active device's value; adopt the newly-selected
         // device's known DPI so the panel doesn't keep showing the previous
@@ -396,14 +508,13 @@ impl AppState {
         self.dpi = self.dpi_for_current();
         self.button_bindings = self.bindings_for_current();
         self.gesture_bindings = self.gesture_bindings_for_current();
-        self.sync_hook_bindings();
-        self.sync_gesture_bindings();
-        self.sync_dpi_cycle();
         let key = self.current_record().map(|r| r.config_key.clone());
         self.config.set_selected_device(key);
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist selected device");
         }
+        // The agent owns the hook + device I/O; have it switch devices too.
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 
     /// Replace the DPI preset list for the currently selected device. The
@@ -423,7 +534,7 @@ impl AppState {
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist DPI presets to config.toml");
         }
-        self.sync_dpi_cycle();
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 
     /// Read the DPI preset list for the active device, or an empty `Vec`
@@ -553,7 +664,6 @@ impl AppState {
                         "transient DPI read error — will retry"
                     );
                     self.dpi_by_device.remove(&key);
-                    self.refresh_dpi_cycle_capabilities();
                     return;
                 }
                 self.dpi_load_attempts.remove(&key);
@@ -561,10 +671,6 @@ impl AppState {
             }
         };
         self.dpi_by_device.insert(key, status);
-        // Inject the new capabilities without rebuilding the cycle: discovery
-        // completes at an arbitrary moment and must not reset the cycle index
-        // the way a device switch or preset edit deliberately does.
-        self.refresh_dpi_cycle_capabilities();
     }
 
     /// DPI capabilities for the active device, if discovery succeeded.
@@ -588,6 +694,224 @@ impl AppState {
             .map_or(dpi, |caps| caps.snap(dpi))
     }
 
+    /// SmartShift configuration status for the active device.
+    #[must_use]
+    pub fn current_smartshift_status(&self) -> SmartShiftLoad {
+        self.current_record()
+            .and_then(|record| self.smartshift_by_device.get(&record.config_key).cloned())
+            .unwrap_or(SmartShiftLoad::Unknown)
+    }
+
+    /// Whether the active device still needs a SmartShift read (no status
+    /// recorded). Cheaper than comparing a cloned [`SmartShiftLoad`] on the
+    /// per-frame render path.
+    #[must_use]
+    pub fn current_smartshift_unqueried(&self) -> bool {
+        self.current_record()
+            .is_some_and(|record| !self.smartshift_by_device.contains_key(&record.config_key))
+    }
+
+    /// The active device's resolved SmartShift config, if the read succeeded.
+    /// Callers use it to preserve fields they don't mean to change (e.g.
+    /// tunable torque) when writing back.
+    #[must_use]
+    pub fn current_smartshift_ready(&self) -> Option<SmartShiftStatus> {
+        self.current_record()
+            .and_then(|record| self.smartshift_by_device.get(&record.config_key))
+            .and_then(|status| match status {
+                SmartShiftLoad::Ready(s) => Some(*s),
+                SmartShiftLoad::Unknown
+                | SmartShiftLoad::Loading
+                | SmartShiftLoad::Failed(_)
+                | SmartShiftLoad::Unsupported(_) => None,
+            })
+    }
+
+    /// Mark SmartShift discovery as in flight for `key`.
+    pub fn mark_smartshift_loading(&mut self, key: &str) {
+        self.smartshift_by_device
+            .insert(key.to_string(), SmartShiftLoad::Loading);
+    }
+
+    /// Reset a stuck `Loading` for `key` back to `Unknown` — called when the
+    /// read worker vanished without delivering a result.
+    pub fn clear_smartshift_loading(&mut self, key: &str) {
+        if matches!(
+            self.smartshift_by_device.get(key),
+            Some(SmartShiftLoad::Loading)
+        ) {
+            self.smartshift_by_device.remove(key);
+        }
+    }
+
+    /// Drop the active device's recorded SmartShift status so the next render
+    /// re-runs discovery. Backs the "click to retry" affordance on a
+    /// [`SmartShiftLoad::Failed`] device.
+    pub fn retry_active_smartshift(&mut self) {
+        if let Some(key) = self.current_record().map(|r| r.config_key.clone()) {
+            self.smartshift_by_device.remove(&key);
+            self.smartshift_load_attempts.remove(&key);
+        }
+    }
+
+    /// Store a SmartShift read result if it still matches the known device
+    /// route, with the same transient-retry / permanent-unsupported handling
+    /// as [`Self::store_dpi_info`].
+    pub fn store_smartshift_status(
+        &mut self,
+        key: String,
+        route: &DeviceRoute,
+        result: Result<SmartShiftStatus, WriteError>,
+    ) {
+        let still_matches = self
+            .device_list
+            .iter()
+            .any(|record| record.config_key == key && record.route.as_ref() == Some(route));
+        if !still_matches {
+            debug!(key, ?route, "stale SmartShift result ignored");
+            if self.device_list.iter().any(|r| r.config_key == key) {
+                self.smartshift_by_device.remove(&key);
+            }
+            return;
+        }
+
+        let status = match result {
+            Ok(status) => {
+                self.smartshift_load_attempts.remove(&key);
+                SmartShiftLoad::Ready(status)
+            }
+            Err(error) if smartshift_error_is_permanent(&error) => {
+                self.smartshift_load_attempts.remove(&key);
+                SmartShiftLoad::Unsupported(error.to_string())
+            }
+            Err(error) => {
+                let attempts = self
+                    .smartshift_load_attempts
+                    .entry(key.clone())
+                    .or_insert(0);
+                *attempts = attempts.saturating_add(1);
+                if *attempts < DPI_LOAD_MAX_ATTEMPTS {
+                    debug!(
+                        key,
+                        attempts = *attempts,
+                        error = %error,
+                        "transient SmartShift read error — will retry"
+                    );
+                    self.smartshift_by_device.remove(&key);
+                    return;
+                }
+                self.smartshift_load_attempts.remove(&key);
+                SmartShiftLoad::Failed(error.to_string())
+            }
+        };
+        self.smartshift_by_device.insert(key, status);
+    }
+
+    /// Write a full SmartShift configuration to the active device (best-effort,
+    /// on a background thread) and optimistically cache it. The device persists
+    /// the values in its own NVM, so nothing is written to `config.toml`.
+    /// No-op when no device is selected.
+    pub fn commit_smartshift(
+        &mut self,
+        mode: SmartShiftMode,
+        auto_disengage: u8,
+        tunable_torque: u8,
+    ) {
+        let Some(record) = self.current_record() else {
+            debug!("no active device — SmartShift change ignored");
+            return;
+        };
+        let key = record.config_key.clone();
+        let route = record.route.clone();
+        if let Some(route) = route {
+            self.send_ipc(crate::ipc_client::Command::SetSmartShift(
+                route,
+                mode,
+                auto_disengage,
+                tunable_torque,
+            ));
+        }
+        // Reflect the write immediately so the panel doesn't flicker back to
+        // the previous value before a re-read lands, but queue a confirming
+        // re-read: the write is fire-and-forget, so a sleeping device that
+        // rejected or timed it out would otherwise leave this optimistic value
+        // showing as "applied" forever (Ready blocks any further read).
+        self.smartshift_by_device.insert(
+            key.clone(),
+            SmartShiftLoad::Ready(SmartShiftStatus {
+                mode,
+                auto_disengage,
+                tunable_torque,
+            }),
+        );
+        self.smartshift_pending_confirm.insert(key);
+    }
+
+    /// Take the active device's pending SmartShift confirm, if any. Returns the
+    /// `(config_key, route)` for a one-shot re-read that replaces the optimistic
+    /// value with the device's real state; consumed once so it doesn't re-fire.
+    pub fn take_active_smartshift_confirm(&mut self) -> Option<(String, DeviceRoute)> {
+        let record = self.current_record()?;
+        let key = record.config_key.clone();
+        let route = record.route.clone()?;
+        self.smartshift_pending_confirm
+            .remove(&key)
+            .then_some((key, route))
+    }
+
+    /// The lighting config for the active device, or the default when none is
+    /// stored / no device is selected.
+    #[must_use]
+    pub fn lighting(&self) -> Lighting {
+        self.current_record()
+            .and_then(|r| self.config.lighting(&r.config_key))
+            .unwrap_or_default()
+    }
+
+    /// The stored lighting config for `key`, or `None` when unset.
+    #[must_use]
+    pub fn lighting_for(&self, key: &str) -> Option<Lighting> {
+        self.config.lighting(key)
+    }
+
+    /// Claim `path` for a one-shot glow generation; `true` the first time, so the
+    /// caller spawns the worker exactly once per `(depot, colour)`.
+    pub fn mark_glow_attempted(&mut self, path: PathBuf) -> bool {
+        self.glow_attempted.insert(path)
+    }
+
+    /// Record that `path`'s overlay PNG is generated and ready to render.
+    pub fn mark_glow_ready(&mut self, path: PathBuf) {
+        self.glow_ready.insert(path);
+    }
+
+    /// Whether `path`'s overlay PNG is ready — a cheap in-memory check so the
+    /// render thread never stats the filesystem.
+    #[must_use]
+    pub fn glow_is_ready(&self, path: &Path) -> bool {
+        self.glow_ready.contains(path)
+    }
+
+    /// Persist a new lighting config for the active device and push it to the
+    /// hardware (best-effort). No-op when no device is selected.
+    pub fn commit_lighting(&mut self, lighting: Lighting) {
+        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
+            debug!("no active device key — lighting kept in memory only");
+            return;
+        };
+        let target = self.current_record().and_then(|r| r.route.clone());
+        if let Some(route) = target {
+            self.send_ipc(crate::ipc_client::Command::SetLighting(
+                route,
+                lighting.clone(),
+            ));
+        }
+        self.config.set_lighting(&key, lighting);
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist lighting to config.toml");
+        }
+    }
+
     /// App-wide settings backing the Settings window (launch-at-login,
     /// update check). Read-only view; mutate via the setters below so the
     /// change is persisted.
@@ -608,17 +932,17 @@ impl AppState {
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist launch-at-login setting");
         }
-        crate::platform::launch_agent::reconcile(enabled);
+        // The agent owns autostart now; it reconciles its LaunchAgent (which
+        // points at the agent, not the GUI) when it reloads the config.
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 
-    /// Toggle the macOS menu-bar (status item) icon, persist it, and apply it
-    /// live. Turning it off hides the item *and* pins the app to Regular
-    /// activation, so it stays an ordinary Dock app rather than being left with
-    /// neither a window, a Dock icon, nor a menu-bar icon. No-op when unchanged.
-    ///
-    /// macOS-only: the toggle that calls it exists only there, so gating avoids
-    /// an unused-method warning on other platforms.
-    #[cfg(target_os = "macos")]
+    /// Toggle the menu-bar (status item) icon preference and persist it. The
+    /// icon is hosted by the always-on agent, which reads this on startup and
+    /// installs the status item only when enabled — so the change takes effect
+    /// the next time the agent launches (a no-restart live toggle would need a
+    /// main-thread hop from the agent's IPC reload). `ReloadConfig` keeps the
+    /// agent's other config in sync meanwhile. No-op when unchanged.
     pub fn set_show_in_menu_bar(&mut self, enabled: bool) {
         if self.config.app_settings.show_in_menu_bar == enabled {
             return;
@@ -627,13 +951,7 @@ impl AppState {
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist show-in-menu-bar setting");
         }
-        #[cfg(target_os = "macos")]
-        {
-            crate::platform::tray::set_visible(enabled);
-            if !enabled {
-                crate::platform::tray::show_in_dock();
-            }
-        }
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 
     /// Toggle the opt-in update check and persist it. No immediate side
@@ -647,6 +965,24 @@ impl AppState {
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist update-check setting");
         }
+    }
+
+    /// Set the thumb-wheel sensitivity (clamped to the valid range), publish it
+    /// to the gesture watcher via the shared atomic, and persist it. No-op when
+    /// unchanged. Disk failures are logged, not propagated.
+    pub fn set_thumbwheel_sensitivity(&mut self, sensitivity: i32) {
+        let sensitivity = sensitivity.clamp(
+            openlogi_core::config::MIN_THUMBWHEEL_SENSITIVITY,
+            openlogi_core::config::MAX_THUMBWHEEL_SENSITIVITY,
+        );
+        if self.config.app_settings.thumbwheel_sensitivity == sensitivity {
+            return;
+        }
+        self.config.app_settings.thumbwheel_sensitivity = sensitivity;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist thumbwheel sensitivity");
+        }
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 
     /// Record the answer to the first-run update-check prompt: enable (or leave
@@ -669,11 +1005,10 @@ impl AppState {
         self.config.app_settings.language.as_deref()
     }
 
-    /// Set the UI language (`None` = follow system), persist it, and switch the
-    /// process-global locale live via [`crate::i18n`]. The caller must refresh
-    /// open windows and rebuild the menu so everything re-renders. No-op when
-    /// unchanged.
-    pub fn set_language(&mut self, language: Option<String>) {
+    /// Set the UI language (`None` = follow system), persist it, switch the
+    /// process-global locale live via [`crate::i18n`], and repaint open UI.
+    /// No-op when unchanged.
+    pub fn set_language(&mut self, language: Option<String>, cx: &mut App) {
         if self.config.app_settings.language == language {
             return;
         }
@@ -682,6 +1017,8 @@ impl AppState {
             warn!(error = %e, "could not persist language setting");
         }
         crate::i18n::activate(self.config.app_settings.language.as_deref());
+        cx.refresh_windows();
+        crate::app_menu::rebuild(cx);
     }
 
     /// Update a single binding in memory, on disk, and in the shared hook
@@ -693,21 +1030,6 @@ impl AppState {
     pub fn commit_binding(&mut self, button: ButtonId, action: Action) {
         self.button_bindings.insert(button, action.clone());
 
-        // Push into the hook-shared map. A poisoned lock means the hook
-        // thread panicked; log and carry on rather than propagating to the
-        // UI.
-        match self.hook_bindings.write() {
-            Ok(mut guard) => {
-                guard.insert(button, action.clone());
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "hook_bindings lock poisoned — binding change will not reach the hook"
-                );
-            }
-        }
-
         let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
             debug!(
                 ?button,
@@ -715,132 +1037,103 @@ impl AppState {
             );
             return;
         };
-        self.config.set_binding(&key, button, action);
+        self.config
+            .set_binding(&key, button, Binding::Single(action));
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist binding to config.toml");
         }
+        // The agent owns the hook; have it rebuild its live map from config.
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 
     fn bindings_for_current(&self) -> BTreeMap<ButtonId, Action> {
         bindings_for(
             &self.config,
-            self.current_record(),
+            self.current_record().map(|r| r.config_key.as_str()),
             self.current_app_bundle.as_deref(),
         )
     }
 
     fn gesture_bindings_for_current(&self) -> BTreeMap<GestureDirection, Action> {
-        gesture_bindings_for(&self.config, self.current_record())
+        let Some(key) = self.current_record().map(|r| r.config_key.as_str()) else {
+            return BTreeMap::new();
+        };
+        match self.config.gesture_owner(key) {
+            // The dedicated thumb pad seeds every direction from the defaults.
+            Some(ButtonId::GestureButton) => gesture_bindings_for(&self.config, Some(key)),
+            // A promoted OS-hook button is shown from its raw stored map (which
+            // `set_gesture_owner` seeds with full defaults), so the menu matches
+            // exactly what `oshook_gestures_for` dispatches — no seeding here.
+            Some(owner) => match self.config.bindings_for(key).get(&owner) {
+                Some(Binding::Gesture(map)) => map.clone(),
+                _ => BTreeMap::new(),
+            },
+            None => BTreeMap::new(),
+        }
+    }
+
+    /// The current device's gesture button — the [`Binding::Gesture`] owner — or
+    /// `None` when no button is in gesture mode. Drives which button's card opens
+    /// the gesture menu rather than the single-action picker.
+    #[must_use]
+    pub fn current_gesture_owner(&self) -> Option<ButtonId> {
+        let key = self.current_record()?.config_key.as_str();
+        self.config.gesture_owner(key)
+    }
+
+    /// Make `button` the current device's gesture button (or clear it with
+    /// `None`), enforcing the one-gesture-button-per-device lock. Persists, tells
+    /// the agent to rebuild, and refreshes the projected maps the UI reads.
+    pub fn commit_gesture_owner(&mut self, button: Option<ButtonId>) {
+        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
+            return;
+        };
+        match button {
+            Some(b) => {
+                self.config.set_gesture_owner(&key, b);
+            }
+            None => {
+                self.config.disable_gestures(&key);
+            }
+        }
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist gesture-button change to config.toml");
+        }
+        // The owner change shuffles bindings between the single + gesture maps.
+        self.button_bindings = self.bindings_for_current();
+        self.gesture_bindings = self.gesture_bindings_for_current();
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 
     /// Update a single gesture-button sub-binding in memory, on disk, and in the
     /// shared gesture map the watcher thread reads.
     pub fn commit_gesture_binding(&mut self, direction: GestureDirection, action: Action) {
-        self.gesture_bindings.insert(direction, action.clone());
-
-        match self.gesture_hook_bindings.write() {
-            Ok(mut guard) => {
-                guard.insert(direction, action.clone());
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "gesture_hook_bindings lock poisoned — change will not reach the watcher"
-                );
-            }
-        }
-
         let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
             debug!(
                 ?direction,
-                "no active device key — gesture binding kept in memory only"
+                "no active device key — gesture binding edit ignored"
             );
             return;
         };
-        self.config.set_gesture_binding(&key, direction, action);
+        // Edit whichever button owns gestures — not always the thumb pad. When
+        // gestures are off, a stray edit must NOT silently re-enable them on the
+        // thumb pad (the gesture editor shouldn't be reachable in that state):
+        // no-op instead.
+        let Some(owner) = self.config.gesture_owner(&key) else {
+            debug!(
+                ?direction,
+                "gestures are off — ignoring gesture binding edit"
+            );
+            return;
+        };
+        self.gesture_bindings.insert(direction, action.clone());
+        self.config
+            .set_gesture_direction(&key, owner, direction, action);
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist gesture binding to config.toml");
         }
-    }
-
-    /// Mirror [`Self::button_bindings`] into the hook-shared `Arc`. Called
-    /// after the UI-side map changes wholesale (initial build, device
-    /// switch) so the hook thread observes consistent state.
-    fn sync_hook_bindings(&self) {
-        match self.hook_bindings.write() {
-            Ok(mut guard) => {
-                *guard = self.button_bindings.clone();
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "hook_bindings lock poisoned — hook will keep stale bindings"
-                );
-            }
-        }
-    }
-
-    /// Mirror [`Self::gesture_bindings`] into the watcher-shared `Arc`. Called
-    /// alongside [`Self::sync_hook_bindings`] after the gesture map changes
-    /// wholesale (initial build, device switch).
-    fn sync_gesture_bindings(&self) {
-        match self.gesture_hook_bindings.write() {
-            Ok(mut guard) => {
-                *guard = self.gesture_bindings.clone();
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "gesture_hook_bindings lock poisoned — watcher will keep stale bindings"
-                );
-            }
-        }
-    }
-
-    /// Rebuild [`Self::dpi_cycle`] from the active device's stored presets
-    /// and DPI target. Called on initial build, device switch, and preset
-    /// commits. The cycle index resets to 0 since the list contents may
-    /// have changed.
-    fn sync_dpi_cycle(&self) {
-        let presets = self
-            .current_record()
-            .map(|r| self.config.dpi_presets(&r.config_key))
-            .unwrap_or_default();
-        let target = self.current_record().and_then(|r| r.route.clone());
-        let capabilities = self.active_dpi_capabilities().cloned();
-        match self.dpi_cycle.write() {
-            Ok(mut guard) => {
-                *guard = DpiCycleState {
-                    presets,
-                    index: 0,
-                    target,
-                    capabilities,
-                };
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "dpi_cycle lock poisoned — hook will keep stale presets"
-                );
-            }
-        }
-    }
-
-    /// Patch only the DPI capabilities into the shared cycle, preserving the
-    /// current cycle position. Called when lazy discovery completes, which can
-    /// happen long after the cycle was built — unlike [`Self::sync_dpi_cycle`],
-    /// this must not reset the index.
-    fn refresh_dpi_cycle_capabilities(&self) {
-        let capabilities = self.active_dpi_capabilities().cloned();
-        match self.dpi_cycle.write() {
-            Ok(mut guard) => guard.capabilities = capabilities,
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "dpi_cycle lock poisoned — hook will keep stale DPI capabilities"
-                );
-            }
-        }
+        // The agent owns the gesture watcher; have it rebuild from config.
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
     }
 }
 
@@ -852,6 +1145,13 @@ fn dpi_error_is_permanent(error: &WriteError) -> bool {
         error,
         WriteError::FeatureUnsupported { .. } | WriteError::EmptyDpiList
     )
+}
+
+/// Whether a SmartShift read error is permanent: a genuine "feature not
+/// supported" reply (the device lacks `0x2111`) never changes, so stop
+/// probing. Everything else (timeouts, busy device) is transient.
+fn smartshift_error_is_permanent(error: &WriteError) -> bool {
+    matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
 impl Global for AppState {}

@@ -31,7 +31,7 @@ PLIST_SRC="$ROOT/crates/openlogi-gui/dev/Info.plist"
 
 mkdir -p "$MACOS" "$RES"
 
-# App icon — gitignored, generated from the master SVG on demand. Mirror it
+# App icon — generated from the master PNG on demand. Mirror it
 # into the bundle whenever the source is newer (or the bundle copy is missing).
 if [ ! -f "$ICON_SRC" ]; then
   cargo run -p xtask --manifest-path "$ROOT/Cargo.toml" -- macos-icns
@@ -54,5 +54,45 @@ fi
 # atomically on rebuild (new inode), so relink every run; `ln -f` repoints a
 # stale link. Fall back to a copy if the bundle ever lands on another volume.
 ln -f "$bin" "$MACOS/openlogi-gui" 2>/dev/null || cp -f "$bin" "$MACOS/openlogi-gui"
+
+# Register the dev .app with LaunchServices so the `openlogi://` URL scheme
+# works during development. Gate on the *bundled* plist (freshly stamped by the
+# copy step above) vs a marker, so a rebuilt bundle re-registers even when the
+# source plist is unchanged — and only stamp the marker when lsregister actually
+# succeeds, so a failure retries next run instead of latching off. Skips the
+# (normally ~10 ms, occasionally multi-second) lsregister cost on the steady
+# incremental path.
+#
+# Both the dev build (here) and the release build register the same openlogi://
+# scheme; LaunchServices routes to the last-registered handler. If a release
+# install starts winning the scheme during development, re-run this (touch the
+# dev plist) or `lsregister -f "$APP"` to put the dev build back in front.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [ -x "$LSREGISTER" ] && [ "$PLIST" -nt "$PLIST.lsregistered" ]; then
+  if "$LSREGISTER" -R "$APP" 2>/dev/null; then
+    touch "$PLIST.lsregistered"
+  fi
+fi
+
+# Embed the headless agent so the GUI can auto-spawn it in dev. The GUI's IPC
+# client (ipc_client::agent_binary_path) looks for the agent as the embedded
+# login-item helper beside the GUI executable — exactly the production layout
+# xtask's embed_agent_helper assembles. `cargo run -p openlogi-gui` builds only
+# the GUI, so build the agent in the matching profile and mirror that layout
+# here. Cheap after the first build (an incremental no-op); set
+# OPENLOGI_DEV_AGENT=0 to run the GUI against a separately launched agent.
+if [ "${OPENLOGI_DEV_AGENT:-1}" != "0" ]; then
+  agent_dir="$(dirname "$bin")" # target/debug or target/release
+  if [ "${agent_dir##*/}" = "release" ]; then
+    cargo build -p openlogi-agent --release --manifest-path "$ROOT/Cargo.toml"
+  else
+    cargo build -p openlogi-agent --manifest-path "$ROOT/Cargo.toml"
+  fi
+  helper="$APP/Contents/Library/LoginItems/OpenLogiAgent.app"
+  mkdir -p "$helper/Contents/MacOS"
+  ln -f "$agent_dir/openlogi-agent" "$helper/Contents/MacOS/openlogi-agent" 2>/dev/null \
+    || cp -f "$agent_dir/openlogi-agent" "$helper/Contents/MacOS/openlogi-agent"
+  cp -f "$ROOT/crates/openlogi-agent/macos/Info.plist" "$helper/Contents/Info.plist"
+fi
 
 exec "$MACOS/openlogi-gui" "$@"

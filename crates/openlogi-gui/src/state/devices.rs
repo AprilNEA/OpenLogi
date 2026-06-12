@@ -1,7 +1,9 @@
 //! Device-list construction and selection helpers for [`super::AppState`].
 
-use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceKind};
+use openlogi_agent_core::device_order::DeviceStableId;
+use openlogi_core::device::{BatteryInfo, Capabilities, DeviceInventory, DeviceKind};
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use tracing::debug;
 
 use crate::asset::{AssetResolver, ResolvedAsset};
 
@@ -24,32 +26,15 @@ pub struct DeviceRecord {
     pub unit_id: [u8; 4],
     pub route: Option<DeviceRoute>,
     pub kind: DeviceKind,
+    /// Configuration capabilities from the device's HID++ feature table.
+    /// Continuity across sleep lives in the hid layer: its probe cache keeps
+    /// serving the last-known capabilities for a known-but-offline device, so
+    /// this is `None` only for a device never probed since the agent started —
+    /// and the UI then falls back to [`Capabilities::presumed_from_kind`].
+    pub capabilities: Option<Capabilities>,
     pub slot: u8,
     pub online: bool,
     pub battery: Option<BatteryInfo>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum DeviceStableId {
-    Bolt {
-        receiver_uid: String,
-        slot: u8,
-    },
-    Direct {
-        vendor_id: u16,
-        product_id: u16,
-        identity: DeviceIdentity,
-    },
-    Unknown {
-        slot: u8,
-        identity: DeviceIdentity,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum DeviceIdentity {
-    Serial(String),
-    Unit([u8; 4]),
 }
 
 pub(super) fn build_device_list(
@@ -67,8 +52,9 @@ pub(super) fn build_device_list(
             let display_name = asset
                 .as_ref()
                 .map(|a| a.display_name.clone())
-                .or_else(|| paired.codename.clone())
+                .or_else(|| paired.codename.as_deref().map(prettify_codename))
                 .unwrap_or_else(|| format!("Slot {}", paired.slot));
+            let kind = effective_kind(paired.kind, asset.as_ref().map(|a| a.kind));
             list.push(DeviceRecord {
                 config_key,
                 display_name,
@@ -76,12 +62,17 @@ pub(super) fn build_device_list(
                 serial_number: model.serial_number.clone(),
                 unit_id: model.unit_id,
                 route: device_route(inv, paired.slot),
-                kind: paired.kind,
+                kind,
+                capabilities: paired.capabilities,
                 slot: paired.slot,
                 online: paired.online,
                 battery: paired.battery.clone(),
             });
         }
+    }
+    #[cfg(debug_assertions)]
+    if std::env::var_os("OPENLOGI_DEMO_KEYBOARD").is_some() {
+        list.push(demo_keyboard());
     }
     sort_device_list(&mut list);
     list
@@ -99,41 +90,37 @@ pub(super) fn sort_device_list(list: &mut [DeviceRecord]) {
 
 fn device_order_key(record: &DeviceRecord) -> (DeviceStableId, String, String) {
     (
-        DeviceStableId::from_record(record),
+        DeviceStableId::from_parts(
+            record.route.as_ref(),
+            record.slot,
+            record.serial_number.as_deref(),
+            record.unit_id,
+        ),
         record.config_key.clone(),
         record.display_name.clone(),
     )
 }
 
-impl DeviceStableId {
-    fn from_record(record: &DeviceRecord) -> Self {
-        match &record.route {
-            Some(DeviceRoute::Bolt { receiver_uid, slot }) => Self::Bolt {
-                receiver_uid: receiver_uid.to_ascii_lowercase(),
-                slot: *slot,
-            },
-            Some(DeviceRoute::Direct {
-                vendor_id,
-                product_id,
-            }) => Self::Direct {
-                vendor_id: *vendor_id,
-                product_id: *product_id,
-                identity: DeviceIdentity::from_record(record),
-            },
-            None => Self::Unknown {
-                slot: record.slot,
-                identity: DeviceIdentity::from_record(record),
-            },
-        }
-    }
-}
-
-impl DeviceIdentity {
-    fn from_record(record: &DeviceRecord) -> Self {
-        record.serial_number.as_ref().map_or_else(
-            || Self::Unit(record.unit_id),
-            |serial| Self::Serial(serial.to_ascii_lowercase()),
-        )
+/// Dev-only synthetic keyboard so the keyboard detail panel + lighting controls
+/// render without the hardware. Gated behind the `OPENLOGI_DEMO_KEYBOARD` env
+/// var (debug builds only); `route: None` keeps every hardware write a no-op.
+#[cfg(debug_assertions)]
+fn demo_keyboard() -> DeviceRecord {
+    DeviceRecord {
+        config_key: "demo-g513".to_string(),
+        display_name: "Logitech G513".to_string(),
+        asset: None,
+        serial_number: None,
+        unit_id: [0; 4],
+        route: None,
+        kind: DeviceKind::Keyboard,
+        capabilities: Some(Capabilities {
+            lighting: true,
+            ..Capabilities::default()
+        }),
+        slot: 0,
+        online: true,
+        battery: None,
     }
 }
 
@@ -159,8 +146,92 @@ fn device_route(inv: &DeviceInventory, slot: u8) -> Option<DeviceRoute> {
     }
 }
 
+/// Last step of the device-kind precedence chain:
+///
+/// > **asset registry** > HID++ `0x0005` > Bolt pairing register
+///
+/// The two HID++ sources are already folded into `hid_kind` by
+/// `resolve_device_kind` (`crates/openlogi-hid/src/inventory.rs`); this applies
+/// the final override. Adding a kind source means slotting it into this one
+/// chain — here if it should beat the HID++ sources, in `resolve_device_kind`
+/// otherwise — and updating both docs.
+///
+/// The registry type wins because it is per-model and human-maintained, so a
+/// device that matched a known depot is classified by what that model *is* —
+/// not by a Bolt pairing register that can misreport (the failure behind #127).
+/// We fall back to `hid_kind` when there is no asset or its type is `Unknown`.
+/// A genuine disagreement is logged at debug (the list rebuilds on every
+/// snapshot, so a louder level would spam); it flags a HID++ source we
+/// shouldn't trust for that device.
+///
+/// Kind is cosmetic (icon / label) since #127: config panels gate on
+/// [`Capabilities`], never on kind, so a wrong pick can't hide functionality.
+fn effective_kind(hid_kind: DeviceKind, asset_kind: Option<DeviceKind>) -> DeviceKind {
+    let Some(asset_kind) = asset_kind.filter(|k| *k != DeviceKind::Unknown) else {
+        return hid_kind;
+    };
+    if hid_kind != DeviceKind::Unknown && hid_kind != asset_kind {
+        debug!(
+            ?hid_kind,
+            ?asset_kind,
+            "HID++ device kind disagrees with the asset registry — trusting the registry"
+        );
+    }
+    asset_kind
+}
+
 pub(super) fn pick_initial_device(list: &[DeviceRecord], saved: Option<&str>) -> usize {
     saved
         .and_then(|key| list.iter().position(|r| r.config_key == key))
         .unwrap_or(0)
+}
+
+/// Tidy a raw HID++ codename for display when no curated asset name exists.
+/// Logitech reports gaming codenames in ALL CAPS (e.g. `"G513 RGB MECHANICAL
+/// GAMING KEYBOARD"`); title-case each word so it reads like the asset names
+/// (`"MX Master 3S"`) instead of shouting, while keeping model numbers (tokens
+/// with a digit, e.g. `G513`) and short acronyms (`RGB`, `TKL`, `SE`) as-is.
+/// Codenames already in mixed case are returned unchanged.
+fn prettify_codename(raw: &str) -> String {
+    if raw.chars().any(char::is_lowercase) {
+        return raw.to_string();
+    }
+    raw.split_whitespace()
+        .map(|word| {
+            if word.len() <= 3 || word.bytes().any(|b| b.is_ascii_digit()) {
+                word.to_string()
+            } else {
+                let mut chars = word.chars();
+                chars.next().map_or_else(String::new, |first| {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                })
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeviceKind, effective_kind};
+
+    #[test]
+    fn asset_kind_overrides_a_misreporting_hid_kind() {
+        // #127: the registry knows this depot is a mouse, so a HID++ source that
+        // reported `Keyboard` loses.
+        assert_eq!(
+            effective_kind(DeviceKind::Keyboard, Some(DeviceKind::Mouse)),
+            DeviceKind::Mouse
+        );
+    }
+
+    #[test]
+    fn hid_kind_is_used_without_a_modelled_asset() {
+        // No asset, or an asset whose type we don't model → keep the HID kind.
+        assert_eq!(effective_kind(DeviceKind::Mouse, None), DeviceKind::Mouse);
+        assert_eq!(
+            effective_kind(DeviceKind::Mouse, Some(DeviceKind::Unknown)),
+            DeviceKind::Mouse
+        );
+    }
 }

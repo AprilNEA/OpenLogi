@@ -28,6 +28,13 @@ pub const STATUS_OFFLINE: u32 = 0x006b_7280;
 pub const HEADER_H: f32 = 80.;
 pub const FOOTER_H: f32 = 50.;
 
+/// Fixed footprint of a device card in the Home gallery. Equal-width cards lay
+/// out in a horizontally scrollable row (centred when they fit, scrollable when
+/// they don't); `GALLERY_PHOTO_H` is the height of the device photo above the
+/// name/battery row.
+pub const GALLERY_CARD_W: f32 = 240.;
+pub const GALLERY_PHOTO_H: f32 = 230.;
+
 /// Appearance-dependent surface + text colours for the bespoke (non
 /// gpui-component) surfaces. Resolved once per render via [`palette`] and
 /// passed down to the free helper builders.

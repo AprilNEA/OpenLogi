@@ -20,6 +20,9 @@ openlogi-core = { path = "../openlogi-core" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-assets = { path = "../openlogi-assets" }
+openlogi-agent-core = { path = "../openlogi-agent-core" }
+tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
+interprocess = { workspace = true }
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
 gpui-component = { workspace = true }
@@ -28,25 +31,27 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-fs4 = { version = "1.1.0", features = ["sync"] }
 thiserror.workspace = true
 ureq.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png"] }
 rust-i18n = "4"
 sys-locale = "0.3.2"
-gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.3", features = ["gpui"] }
+gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.4", features = ["gpui"] }
 
-# Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. Same crates the
-# openlogi-hook CGEventTap uses, so the toolchain is already proven here.
+# Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. objc2 gives typed,
+# `Retained<T>`-owned AppKit bindings so the status-item code can't leak (#99).
 [target.'cfg(target_os = "macos")'.dependencies]
-cocoa = "0.26"
-objc = "0.2"
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication"] }
+objc2-foundation = { version = "0.3.2", features = ["NSString"] }
 
-# Mirrors [workspace.lints], plus an allow for the legacy `cfg(cargo-clippy)`
-# check emitted by objc 0.2's macros (same as openlogi-hook). unsafe_code stays
-# denied; the menubar module opts in locally with #[expect(unsafe_code)].
+# unsafe_code stays denied; the status-item/tray modules opt in locally with
+# #[expect(unsafe_code)] for the few objc2 calls (init-with-action, set-target,
+# super-init) that remain unsafe.
 [lints.rust]
 unsafe_code = "deny"
-unexpected_cfgs = { level = "allow", check-cfg = [] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -58,7 +63,8 @@ doc_markdown = "allow"
 [package.metadata.bundle]
 name = "OpenLogi"
 identifier = "org.openlogi.openlogi"
-version = "0.1.0"
+# No `version` override — cargo-bundle falls back to the crate version, which
+# is workspace-unified. A literal here goes stale the moment release-plz bumps.
 category = "public.app-category.utilities"
 short_description = "Lightweight local-first companion for Logitech HID++ peripherals."
 long_description = """\
@@ -67,5 +73,13 @@ cloud account, no telemetry, no auto-update poller. Plain TOML config, \
 single binary; device renders are fetched on demand on first launch.
 """
 osx_minimum_system_version = "13.0"
+# Deep-link scheme for the release app. The dev build is hand-bundled, so its
+# dev/Info.plist declares the same scheme separately — keep the two in sync.
+osx_url_schemes = ["openlogi"]
 icon = ["icon/AppIcon.icns"]
 resources = ["assets/**/*"]
+
+[package.metadata.i18n]
+available-locales = ["en", "ja", "ru", "zh-CN", "zh-HK", "zh-TW", "it"]
+default-locale = "en"
+load-path = "locales"

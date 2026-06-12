@@ -37,56 +37,12 @@ jobs:
       # GitHub App token (not a PAT) so the release PR / tag trigger CI and the
       # DMG release workflow — the default GITHUB_TOKEN cannot trigger workflows.
       # App credentials come from the same 1Password item as release.yml.
-      - name: Load GitHub App credentials from 1Password
-        id: load_secrets
-        uses: 1password/load-secrets-action@v4
-        with:
-          export-env: false
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          GITHUB_APP_ID: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_ID
-          GITHUB_APP_PRIVATE_KEY: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_PRIVATE_KEY
-          CARGO_REGISTRY_TOKEN: ${{ secrets.OP_GITHUB_APP_ITEM }}/CARGO_REGISTRY_TOKEN
-      # App key is stored base64-encoded in 1Password (raw PEM newlines get
-      # mangled to spaces on paste); decode it (base64 ignores whitespace).
-      - name: Decode GitHub App private key
-        id: app_key
-        env:
-          APP_KEY_B64: ${{ steps.load_secrets.outputs.GITHUB_APP_PRIVATE_KEY }}
-        run: |
-          key="$(printf '%s' "$APP_KEY_B64" | tr -d '[:space:]' | base64 -d)"
-          {
-            echo 'pem<<__PEM__'
-            printf '%s\n' "$key"
-            echo '__PEM__'
-          } >> "$GITHUB_OUTPUT"
-
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: ./.github/actions/github-app-token-from-1password
         with:
-          client-id: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
-          private-key: ${{ steps.app_key.outputs.pem }}
-      # release-plz leaves its release branch behind after a release PR merges,
-      # and a leftover ref then makes the next `release-pr` fail with HTTP 422
-      # (so no PR is created). Prune any `release-plz/*` branch that no longer
-      # has an open PR — never the active release PR's branch — before running.
-      - name: Prune stale release-plz branches
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          for branch in $(gh api "repos/$REPO/branches" --paginate --jq '.[].name' \
-            | grep '^release-plz/' || true); do
-            open=$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq 'length')
-            if [ "$open" = "0" ]; then
-              echo "Pruning stale release branch: $branch"
-              gh api -X DELETE "repos/$REPO/git/refs/heads/$branch" \
-                || echo "::warning::could not delete $branch"
-            else
-              echo "Keeping $branch (open PR exists)"
-            fi
-          done
+          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
       - name: Run release-plz (release-pr)
         id: release_pr
         uses: release-plz/action@v0.5
@@ -94,54 +50,79 @@ jobs:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          CARGO_REGISTRY_TOKEN: ${{ steps.load_secrets.outputs.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.app-token.outputs.cargo-registry-token }}
       # `release-plz/action` swallows a release-pr HTTP 422 as a warning and
       # reports no PR, which silently stalls releases (it looks identical to a
       # quiet week of commits). Fail loudly when release-plz opened/updated no
       # release PR, none is already open, yet release-worthy commits exist since
       # the last tag — that combination means a swallowed failure, not a no-op.
+      # (The blanket 422-swallow is an acknowledged action hack: release-plz/action#264
+      # added it to fix that action's own CI; #427 aims to remove it. Once #427
+      # lands and we pin an action release that includes it, this guard can go.)
       - name: Guard against a silently stalled release
         if: steps.release_pr.outputs.prs_created == 'false'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          # An already-open release PR is the normal "updated, not created" path.
-          open_release_pr=$(gh pr list --repo "$REPO" --state open --json headRefName \
-            --jq '[.[] | select(.headRefName | startswith("release-plz/"))] | length')
-          if [ "$open_release_pr" != "0" ]; then
-            echo "A release PR is already open — nothing to flag."
-            exit 0
-          fi
-          last_tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
-          # The release job runs in parallel and cuts the `v{version}` tag only
-          # after publishing, so that tag is usually absent from this job's
-          # checkout — never trust the local tag list to decide "did a release
-          # just happen". Read the manifest instead: merging a release PR bumps
-          # the workspace version, so a manifest version ahead of the last tag
-          # means the release already landed (the parallel job is tagging it),
-          # not a stall. Only when the manifest still sits at the last released
-          # tag can leftover release-worthy commits mean a swallowed release-pr.
-          manifest_version=$(awk '
-            /^\[workspace\.package\]/ { in_section = 1; next }
-            /^\[/ { in_section = 0 }
-            in_section && /^version[[:space:]]*=/ {
-              gsub(/.*=[[:space:]]*"|".*/, ""); print; exit
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const { readFileSync } = require("node:fs");
+            const { owner, repo } = context.repo;
+
+            // An already-open release PR is the normal "updated, not created" path.
+            const openPulls = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: "open",
+              per_page: 100,
+            });
+            if (openPulls.some((pull) => pull.head.ref.startsWith("release-plz/"))) {
+              core.info("A release PR is already open — nothing to flag.");
+              return;
             }
-          ' Cargo.toml)
-          if [ -n "$last_tag" ] && [ -n "$manifest_version" ] \
-            && [ "v$manifest_version" != "$last_tag" ]; then
-            echo "Workspace version $manifest_version is ahead of $last_tag — a release PR already merged; the release job cuts the tag. Nothing to flag."
-            exit 0
-          fi
-          range="${last_tag:+$last_tag..}HEAD"
-          worthy=$(git log "$range" --format='%s' \
-            | grep -cE '^(feat|fix|perf)(\(.+\))?!?:|^[a-z]+(\(.+\))?!:' || true)
-          if [ "$worthy" != "0" ]; then
-            echo "::error::release-plz opened no release PR, but $worthy release-worthy commit(s) exist since ${last_tag:-repo start} and none is open — likely a swallowed release-plz failure (see the release-pr step)."
-            exit 1
-          fi
-          echo "No release PR and no release-worthy commits since ${last_tag:-repo start}; nothing to release."
+
+            const tags = await github.paginate(github.rest.repos.listTags, {
+              owner,
+              repo,
+              per_page: 100,
+            });
+            const lastTag = tags
+              .map((tag) => tag.name)
+              .filter((tag) => /^v\d+\.\d+\.\d+/.test(tag))
+              .sort((left, right) => right.localeCompare(left, undefined, { numeric: true, sensitivity: "base" }))[0] ?? "";
+
+            // The release job runs in parallel and cuts the `v{version}` tag only
+            // after publishing, so that tag is usually absent from this job's
+            // checkout — never trust the local tag list to decide "did a release
+            // just happen". Read the manifest instead: merging a release PR bumps
+            // the workspace version, so a manifest version ahead of the last tag
+            // means the release already landed (the parallel job is tagging it),
+            // not a stall. Only when the manifest still sits at the last released
+            // tag can leftover release-worthy commits mean a swallowed release-pr.
+            const manifestVersion = readFileSync("Cargo.toml", "utf8")
+              .match(/\[workspace\.package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1] ?? "";
+            if (lastTag && manifestVersion && `v${manifestVersion}` !== lastTag) {
+              core.info(`Workspace version ${manifestVersion} is ahead of ${lastTag} — a release PR already merged; the release job cuts the tag. Nothing to flag.`);
+              return;
+            }
+
+            const commits = lastTag
+              ? (await github.rest.repos.compareCommitsWithBasehead({
+                  owner,
+                  repo,
+                  basehead: `${lastTag}...${context.sha}`,
+                })).data.commits
+              : await github.paginate(github.rest.repos.listCommits, {
+                  owner,
+                  repo,
+                  sha: context.sha,
+                  per_page: 100,
+                });
+            const worthy = commits.filter(({ commit }) => /^(feat|fix|perf)(\(.+\))?!?:|^[a-z]+(\(.+\))?!:/.test(commit.message.split("\n")[0])).length;
+            if (worthy !== 0) {
+              core.setFailed(`release-plz opened no release PR, but ${worthy} release-worthy commit(s) exist since ${lastTag || "repo start"} and none is open — likely a swallowed release-plz failure (see the release-pr step).`);
+              return;
+            }
+            core.info(`No release PR and no release-worthy commits since ${lastTag || "repo start"}; nothing to release.`);
 
   # On every push to master, publishes any crate whose manifest version is not yet
   # on crates.io — i.e. a no-op until the release PR is merged, at which point it
@@ -164,40 +145,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libudev-dev pkg-config gcc g++ clang libssl-dev libzstd-dev
-      - name: Load GitHub App credentials from 1Password
-        id: load_secrets
-        uses: 1password/load-secrets-action@v4
-        with:
-          export-env: false
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          GITHUB_APP_ID: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_ID
-          GITHUB_APP_PRIVATE_KEY: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_PRIVATE_KEY
-          CARGO_REGISTRY_TOKEN: ${{ secrets.OP_GITHUB_APP_ITEM }}/CARGO_REGISTRY_TOKEN
-      # App key is stored base64-encoded in 1Password (raw PEM newlines get
-      # mangled to spaces on paste); decode it (base64 ignores whitespace).
-      - name: Decode GitHub App private key
-        id: app_key
-        env:
-          APP_KEY_B64: ${{ steps.load_secrets.outputs.GITHUB_APP_PRIVATE_KEY }}
-        run: |
-          key="$(printf '%s' "$APP_KEY_B64" | tr -d '[:space:]' | base64 -d)"
-          {
-            echo 'pem<<__PEM__'
-            printf '%s\n' "$key"
-            echo '__PEM__'
-          } >> "$GITHUB_OUTPUT"
-
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: ./.github/actions/github-app-token-from-1password
         with:
-          client-id: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
-          private-key: ${{ steps.app_key.outputs.pem }}
+          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
       - name: Run release-plz (release)
         uses: release-plz/action@v0.5
         with:
           command: release
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          CARGO_REGISTRY_TOKEN: ${{ steps.load_secrets.outputs.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.app-token.outputs.cargo-registry-token }}

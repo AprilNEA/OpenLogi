@@ -1,0 +1,10 @@
+[
+  {
+    "label": "Run OpenLogi GUI",
+    "command": "devenv tasks run openlogi:gui",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "hide": "never",
+  },
+]

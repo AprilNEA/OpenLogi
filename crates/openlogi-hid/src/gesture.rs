@@ -16,10 +16,10 @@
 //! is therefore only diverted when its click is actually bound.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::{Duration, Instant};
 
 use hidpp::{channel::HidppChannel, device::Device, protocol::v20};
-use openlogi_core::binding::{ButtonId, GestureDirection, detect_swipe};
+use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
@@ -35,7 +35,7 @@ use crate::write::SharedChannel;
 pub type CaptureChannel = Arc<RwLock<Option<SharedChannel>>>;
 
 /// One input captured from the active device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CapturedInput {
     /// A completed gesture-button swipe.
     Gesture(GestureDirection),
@@ -66,24 +66,12 @@ pub enum GestureError {
     Hidpp(String),
 }
 
-/// Minimum hold before raw-XY travel counts as a swipe. A quicker tap stays a
-/// plain click even if the cursor was moving when it fired.
-const GESTURE_HOLD_FOR_SWIPE: Duration = Duration::from_millis(160);
-
 /// Movement + button state accumulated across messages. Lives behind a `Mutex`
 /// because the channel's read thread invokes the listener by shared reference.
 #[derive(Default)]
 struct CaptureAccum {
-    /// Whether the gesture button is currently held.
-    gesture_held: bool,
-    /// When the current hold began — gates swipe vs. click by duration.
-    held_since: Option<Instant>,
-    /// Accumulated raw-XY travel since the press began.
-    dx: i32,
-    dy: i32,
-    /// Whether a directional swipe has already committed during this hold.
-    /// Gestures fire mid-swipe (like Options+) and once per press.
-    fired: bool,
+    /// Mid-swipe state for the diverted thumb-pad gesture button (raw-XY).
+    swipe: SwipeAccumulator,
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
     dpi_down: bool,
@@ -93,6 +81,12 @@ struct CaptureAccum {
 /// `capture_thumbwheel`) the thumb wheel on `route` until `shutdown` resolves,
 /// forwarding each event to `sink`.
 ///
+/// The gesture button (raw-XY) is diverted only when `divert_gesture_button` —
+/// i.e. it is the device's gesture owner. When the user moves the gesture role
+/// to an OS-hook button or turns gestures off, the thumb pad is left undiverted
+/// so it keeps its native behavior instead of being captured-and-swallowed. The
+/// DPI/ModeShift capture and the channel-reuse slot are independent of this.
+///
 /// Opens and holds one HID++ channel, diverts whichever of those controls the
 /// device exposes, and listens. Returns once `shutdown` fires (or its sender is
 /// dropped), after restoring every diverted control. Setup errors are returned;
@@ -100,6 +94,7 @@ struct CaptureAccum {
 pub async fn run_capture_session(
     route: DeviceRoute,
     capture_thumbwheel: bool,
+    divert_gesture_button: bool,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
@@ -108,7 +103,13 @@ pub async fn run_capture_session(
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
     let device_index = route.device_index();
-    let armed = arm_controls(&chan, device_index, capture_thumbwheel).await?;
+    let armed = arm_controls(
+        &chan,
+        device_index,
+        capture_thumbwheel,
+        divert_gesture_button,
+    )
+    .await?;
 
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
@@ -128,23 +129,23 @@ pub async fn run_capture_session(
                 return;
             }
             let msg = v20::Message::from(raw);
-            if let Some(idx) = reprog_index {
-                if let Some(event) = reprog_controls::decode_event(&msg, device_index, idx) {
-                    // Recover the guard even if a prior holder panicked — the
-                    // critical section is panic-free, so the data is consistent.
-                    let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
-                    handle_reprog(&mut acc, event, &dpi_set, &sink);
-                    return;
-                }
+            if let Some(idx) = reprog_index
+                && let Some(event) = reprog_controls::decode_event(&msg, device_index, idx)
+            {
+                // Recover the guard even if a prior holder panicked — the
+                // critical section is panic-free, so the data is consistent.
+                let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
+                handle_reprog(&mut acc, event, &dpi_set, &sink);
+                return;
             }
-            if let Some(idx) = thumb_index {
-                if let Some(event) = thumbwheel::decode_event(&msg, device_index, idx) {
-                    if event.single_tap {
-                        let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::Thumbwheel));
-                    }
-                    if event.rotation != 0 {
-                        let _ = sink.send(CapturedInput::Scroll(event.rotation));
-                    }
+            if let Some(idx) = thumb_index
+                && let Some(event) = thumbwheel::decode_event(&msg, device_index, idx)
+            {
+                if event.single_tap {
+                    let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::Thumbwheel));
+                }
+                if event.rotation != 0 {
+                    let _ = sink.send(CapturedInput::Scroll(event.rotation));
                 }
             }
         }
@@ -211,6 +212,7 @@ async fn arm_controls(
     chan: &Arc<HidppChannel>,
     slot: u8,
     capture_thumbwheel: bool,
+    divert_gesture_button: bool,
 ) -> Result<ArmedControls, GestureError> {
     let device = Device::new(Arc::clone(chan), slot)
         .await
@@ -228,9 +230,12 @@ async fn arm_controls(
         let rc = ReprogControlsV4::new(Arc::clone(chan), slot, info.index);
         let controls = enumerate_controls(&rc).await?;
 
-        if controls
-            .iter()
-            .any(|c| c.cid == reprog_controls::GESTURE_BUTTON_CID && c.supports_raw_xy())
+        // Only divert the gesture button when it owns the gesture role; otherwise
+        // leave it native (a non-owner thumb pad must not be captured-and-dropped).
+        if divert_gesture_button
+            && controls
+                .iter()
+                .any(|c| c.cid == reprog_controls::GESTURE_BUTTON_CID && c.supports_raw_xy())
         {
             rc.set_cid_reporting(reprog_controls::GESTURE_BUTTON_CID, true, true)
                 .await
@@ -249,32 +254,31 @@ async fn arm_controls(
     }
 
     let mut thumb: Option<(Thumbwheel, u8)> = None;
-    if capture_thumbwheel {
-        if let Some(info) = device
+    if capture_thumbwheel
+        && let Some(info) = device
             .root()
             .get_feature(thumbwheel::FEATURE_ID)
             .await
             .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
-        {
-            let tw = Thumbwheel::new(Arc::clone(chan), slot, info.index);
-            // Consume the getInfo error here, before the next await: Hidpp20Error
-            // isn't Send, so holding it across an await would make this future
-            // (spawned on tokio) non-Send.
-            let supports_single_tap = match tw.get_info().await {
-                Ok(twinfo) => twinfo.supports_single_tap,
-                Err(e) => {
-                    warn!(error = ?e, "thumb wheel getInfo failed");
-                    false
-                }
-            };
-            if supports_single_tap {
-                tw.set_reporting(true, false)
-                    .await
-                    .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-                thumb = Some((tw, info.index));
-            } else {
-                debug!("thumb wheel reports no single tap — click not capturable");
+    {
+        let tw = Thumbwheel::new(Arc::clone(chan), slot, info.index);
+        // Consume the getInfo error here, before the next await: Hidpp20Error
+        // isn't Send, so holding it across an await would make this future
+        // (spawned on tokio) non-Send.
+        let supports_single_tap = match tw.get_info().await {
+            Ok(twinfo) => twinfo.supports_single_tap,
+            Err(e) => {
+                warn!(error = ?e, "thumb wheel getInfo failed");
+                false
             }
+        };
+        if supports_single_tap {
+            tw.set_reporting(true, false)
+                .await
+                .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+            thumb = Some((tw, info.index));
+        } else {
+            debug!("thumb wheel reports no single tap — click not capturable");
         }
     }
 
@@ -329,17 +333,11 @@ fn handle_reprog(
     match event {
         RawControlEvent::DivertedButtons(cids) => {
             let gesture_held = cids.contains(&reprog_controls::GESTURE_BUTTON_CID);
-            if gesture_held && !acc.gesture_held {
-                acc.gesture_held = true;
-                acc.held_since = Some(Instant::now());
-                acc.dx = 0;
-                acc.dy = 0;
-                acc.fired = false;
-            } else if !gesture_held && acc.gesture_held {
-                acc.gesture_held = false;
-                acc.held_since = None;
+            if gesture_held && !acc.swipe.is_holding() {
+                acc.swipe.begin();
+            } else if !gesture_held && acc.swipe.is_holding() {
                 // A press that never committed a direction is a plain click.
-                if !acc.fired {
+                if acc.swipe.end() {
                     debug!("gesture click");
                     let _ = sink.send(CapturedInput::Gesture(GestureDirection::Click));
                 }
@@ -352,21 +350,12 @@ fn handle_reprog(
             acc.dpi_down = dpi_down;
         }
         RawControlEvent::RawXy { dx, dy } => {
-            // Accumulate until a clean direction commits, then fire immediately
-            // and ignore the rest of the hold (one gesture per press).
-            if acc.gesture_held && !acc.fired {
-                acc.dx = acc.dx.saturating_add(i32::from(dx));
-                acc.dy = acc.dy.saturating_add(i32::from(dy));
-                // Held long enough to be a deliberate gesture, not a tap whose
-                // cursor happened to be in motion? Only then does travel commit.
-                let held = acc
-                    .held_since
-                    .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
-                if held && let Some(direction) = detect_swipe(acc.dx, acc.dy) {
-                    debug!(?direction, dx = acc.dx, dy = acc.dy, "gesture committed");
-                    acc.fired = true;
-                    let _ = sink.send(CapturedInput::Gesture(direction));
-                }
+            // Commit the instant a clean direction emerges (mid-swipe, once per
+            // hold); the accumulator gates on hold duration internally and drops
+            // travel that arrives outside a hold.
+            if let Some(direction) = acc.swipe.accumulate(i32::from(dx), i32::from(dy)) {
+                debug!(?direction, "gesture committed");
+                let _ = sink.send(CapturedInput::Gesture(direction));
             }
         }
     }
@@ -414,7 +403,7 @@ mod tests {
 
         handle_reprog(&mut acc, press(), &[], &tx);
         // Pretend the button has been held well past the swipe gate.
-        acc.held_since = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2);
+        acc.swipe.backdate_hold_for_test();
         handle_reprog(
             &mut acc,
             RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -449,5 +438,32 @@ mod tests {
             Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle))
         );
         assert!(rx.try_recv().is_err(), "a held DPI button presses once");
+    }
+
+    #[test]
+    fn a_dpi_button_re_presses_after_a_release() {
+        // Rising-edge detection must re-arm: press → release → press is two
+        // distinct presses. The release (a frame without the CID) is what resets
+        // the edge; without it a re-press would be swallowed as "still held".
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = CaptureAccum::default();
+        let dpi = reprog_controls::DPI_MODE_SHIFT_CIDS[0];
+        let down = RawControlEvent::DivertedButtons([dpi, 0, 0, 0]);
+        let up = RawControlEvent::DivertedButtons([0, 0, 0, 0]);
+
+        handle_reprog(&mut acc, down, &[dpi], &tx);
+        handle_reprog(&mut acc, up, &[dpi], &tx);
+        handle_reprog(&mut acc, down, &[dpi], &tx);
+
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle))
+        );
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle)),
+            "a release re-arms the rising edge"
+        );
+        assert!(rx.try_recv().is_err());
     }
 }

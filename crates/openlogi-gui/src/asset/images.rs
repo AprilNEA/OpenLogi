@@ -38,11 +38,15 @@ pub(super) fn read_png_dimensions(path: &Path) -> std::io::Result<(u32, u32)> {
     Ok((width, height))
 }
 
-/// Walk the depot's `manifest.json` (if present) for the colour
-/// variant matching `ext`. Returns the `device_image` src filename or
-/// `None` when the manifest is missing / malformed / lacks the variant.
-pub(super) fn variant_image_for(dir: &Path, base_model_id: &str, ext: u8) -> Option<String> {
-    let manifest = load_manifest(dir)?;
+/// Look up the colour variant matching `ext` in an already-loaded depot
+/// manifest. Returns the `device_image` src filename or `None` when the
+/// manifest lacks that variant. Pure — the caller loads the manifest once
+/// (see [`load_manifest`]) and reuses it across candidate bases.
+pub(super) fn variant_image_for(
+    manifest: &DepotManifest,
+    base_model_id: &str,
+    ext: u8,
+) -> Option<String> {
     manifest
         .resource_for_variant(base_model_id, ext, "device_image")
         .map(str::to_string)
@@ -51,14 +55,20 @@ pub(super) fn variant_image_for(dir: &Path, base_model_id: &str, ext: u8) -> Opt
 /// Like [`variant_image_for`] but returns the `device_buttons_image`
 /// resource (typically `side_*.png`) — that's the view Logi calibrates
 /// the assignment markers against, so the mouse-model render uses it.
-pub(super) fn buttons_image_for(dir: &Path, base_model_id: &str, ext: u8) -> Option<String> {
-    let manifest = load_manifest(dir)?;
+pub(super) fn buttons_image_for(
+    manifest: &DepotManifest,
+    base_model_id: &str,
+    ext: u8,
+) -> Option<String> {
     manifest
         .resource_for_variant(base_model_id, ext, "device_buttons_image")
         .map(str::to_string)
 }
 
-fn load_manifest(dir: &Path) -> Option<DepotManifest> {
+/// Load and parse a depot's `manifest.json`, or `None` when it's missing /
+/// malformed. Read once per [`load_files`](super::AssetResolver::load_files)
+/// so the variant lookups above don't re-parse it for each candidate base.
+pub(super) fn load_manifest(dir: &Path) -> Option<DepotManifest> {
     let manifest_path = dir.join("manifest.json");
     if !manifest_path.exists() {
         return None;

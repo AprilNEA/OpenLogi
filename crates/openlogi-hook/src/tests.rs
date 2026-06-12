@@ -9,6 +9,10 @@ fn hook_error_display() {
         HookError::Unsupported,
         HookError::AccessibilityDenied,
         HookError::MacOsTap("test reason".into()),
+        #[cfg(target_os = "linux")]
+        HookError::NoDeviceFound,
+        #[cfg(target_os = "linux")]
+        HookError::Linux(std::io::Error::other("test reason")),
     ];
     for e in errors {
         assert!(!e.to_string().is_empty(), "empty display for {e:?}");
@@ -27,6 +31,10 @@ fn mouse_event_clone_and_debug() {
             delta_x: 1.0,
             delta_y: -1.5,
         },
+        MouseEvent::Moved {
+            delta_x: 3,
+            delta_y: -2,
+        },
     ];
     for e in &events {
         let cloned = e.clone();
@@ -43,12 +51,28 @@ fn event_disposition_equality() {
     assert_ne!(EventDisposition::PassThrough, EventDisposition::Suppress);
 }
 
-/// On non-macOS targets, `Hook::start` returns `Unsupported`.
-#[cfg(not(target_os = "macos"))]
+/// On unsupported targets (not macOS, not Linux), `Hook::start` returns `Unsupported`.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[test]
-fn non_macos_start_returns_unsupported() {
+fn unsupported_start_returns_unsupported() {
     let result = Hook::start(|_| EventDisposition::PassThrough);
     assert!(matches!(result, Err(HookError::Unsupported)));
+}
+
+/// On Linux, `Hook::start` never returns `Unsupported` — it either succeeds or
+/// returns a Linux-specific error (e.g. `NoDeviceFound` in a headless CI env).
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_start_does_not_return_unsupported() {
+    let result = Hook::start(|_| EventDisposition::PassThrough);
+    assert!(
+        !matches!(result, Err(HookError::Unsupported)),
+        "Hook::start returned Unsupported on Linux"
+    );
+    // Clean up if a hook was actually installed.
+    if let Ok(hook) = result {
+        hook.stop();
+    }
 }
 
 /// On non-macOS targets, `Hook::has_accessibility` is always `true`.

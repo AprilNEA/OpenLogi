@@ -5,7 +5,7 @@ build instructions, see the [README](../README.md).
 
 ## Toolchain
 
-- Stable Rust (Edition 2024, MSRV 1.85)
+- Stable Rust (Edition 2024, MSRV 1.88)
 - macOS: Xcode 16+ with the optional **Metal Toolchain** component (required by
   GPUI's `gpui_macos` build script to compile shaders)
 - `create-dmg` for packaging (`brew install create-dmg`); `cargo-bundle` is
@@ -54,6 +54,8 @@ mirror CI and packaging:
 devenv tasks run openlogi:gui      # run the desktop app
 devenv tasks run openlogi:check    # fmt + clippy + tests (run before committing)
 devenv tasks run openlogi:dmg      # build the macOS DMG
+devenv tasks run openlogi:i18n-upload    # upload English source strings to Crowdin
+devenv tasks run openlogi:i18n-download  # download translations and run i18n tests
 ```
 
 The first time you `cd` into the repo after pulling a change to `devenv.nix`,
@@ -126,13 +128,24 @@ ${OPENLOGI_UPDATE_BASE_URL}/channels/stable/latest.json
 
 The app embeds that manifest URL at build time via
 `OPENLOGI_UPDATE_MANIFEST_URL`, derived from `OPENLOGI_UPDATE_BASE_URL` in the
-release workflow.
+release workflow. Release builds also embed `OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY`
+and run with `Verification::Strict`: an update is installed only if the manifest
+asset carries a minisign signature that verifies against that key, plus a
+matching SHA-256. A build without the key embedded (local/dev) fails closed —
+the update check errors rather than installing an unverified artifact.
 
 Configure the R2/update settings in one 1Password item referenced by the GitHub
 secret `OP_R2_SECRET_ITEM`. The item must contain:
 
 - `OPENLOGI_UPDATE_BASE_URL` — public HTTPS base URL, for example
   `https://updates.openlogi.org`.
+- `OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY` — base64 minisign public key embedded in
+  the app and used to verify updater artifacts.
+- `OPENLOGI_UPDATE_MINISIGN_SECRET_KEY` — the passwordless minisign secret key
+  file, **base64-encoded** (`base64 < minisign.key`), used only in the release
+  publish job to sign DMGs before `latest.json` is generated. It is stored
+  base64 (not raw) so its two lines survive 1Password's paste handling; the
+  workflow decodes it, mirroring the GitHub App key.
 - `CLOUDFLARE_R2_ACCOUNT_ID` — Cloudflare account ID used for the S3 endpoint.
 - `CLOUDFLARE_R2_BUCKET` — bucket name.
 - `CLOUDFLARE_R2_ACCESS_KEY_ID` — R2 S3 access key.
