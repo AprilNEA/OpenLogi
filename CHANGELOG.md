@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.12](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.11...openlogi-core-v0.6.12) - 2026-06-13
+
+### Fixed
+
+- *(gui)* keep asleep devices and their panels in the device list
+- *(agent)* persist DPI/SmartShift per device and reapply volatile settings on reconnect
+
 ## [0.6.11](https://github.com/AprilNEA/OpenLogi/compare/openlogi-hid-v0.6.10...openlogi-hid-v0.6.11) - 2026-06-13
 
 ### Fixed
