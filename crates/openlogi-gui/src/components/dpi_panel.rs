@@ -6,8 +6,8 @@
 
 use gpui::{
     AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription,
-    Window, div, px, rgb,
+    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
+    Subscription, Window, div, px, rgb,
 };
 use gpui_component::{
     Icon, IconName, h_flex,
@@ -305,25 +305,29 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
             device_key: String::new(),
             dpi: crate::state::DEFAULT_DPI,
             presets: Vec::new(),
-            status: DpiStatus::Unsupported("No active device".into()),
+            status: DpiStatus::Unsupported(tr!("No active device").to_string()),
             reachable: false,
         })
 }
 
-fn dpi_range_label(status: &DpiStatus, reachable: bool) -> String {
+fn dpi_range_label(status: &DpiStatus, reachable: bool) -> SharedString {
     match status {
+        // The numeric range is digits and symbols only — nothing to translate.
         DpiStatus::Ready(info) => format!(
             "{}–{} · step {}",
             info.capabilities.min(),
             info.capabilities.max(),
             info.capabilities.step_hint()
-        ),
+        )
+        .into(),
         DpiStatus::Unknown | DpiStatus::Loading if !reachable => {
-            "Device offline — reconnect to read DPI range".to_string()
+            tr!("Device offline — reconnect to read DPI range")
         }
-        DpiStatus::Unknown | DpiStatus::Loading => "Loading device DPI range…".to_string(),
-        DpiStatus::Failed(message) => format!("DPI read failed: {message}"),
-        DpiStatus::Unsupported(message) => format!("DPI range unavailable: {message}"),
+        DpiStatus::Unknown | DpiStatus::Loading => tr!("Loading device DPI range…"),
+        DpiStatus::Failed(message) => tr!("DPI read failed: %{message}", message => message),
+        DpiStatus::Unsupported(message) => {
+            tr!("DPI range unavailable: %{message}", message => message)
+        }
     }
 }
 
@@ -336,46 +340,52 @@ fn slider_element(
     match (status, slider_state) {
         // A device with one supported DPI has nothing to drag — show the value.
         (DpiStatus::Ready(info), _) if info.capabilities.min() == info.capabilities.max() => {
-            dpi_status_line(&format!("Fixed DPI: {}", info.capabilities.min()), pal)
+            dpi_status_line(
+                tr!("Fixed DPI: %{dpi}", dpi => info.capabilities.min()),
+                pal,
+            )
         }
         (DpiStatus::Ready(_), Some(slider_state)) => {
             Slider::new(slider_state).horizontal().into_any_element()
         }
-        (DpiStatus::Ready(_), None) => dpi_status_line("Preparing DPI slider…", pal),
+        (DpiStatus::Ready(_), None) => dpi_status_line(tr!("Preparing DPI slider…"), pal),
         (DpiStatus::Unknown | DpiStatus::Loading, _) if !reachable => {
-            dpi_status_line("Device offline — DPI unavailable.", pal)
+            dpi_status_line(tr!("Device offline — DPI unavailable."), pal)
         }
         (DpiStatus::Unknown | DpiStatus::Loading, _) => {
-            dpi_status_line("Reading supported DPI values…", pal)
+            dpi_status_line(tr!("Reading supported DPI values…"), pal)
         }
         // Clickable: reselecting is a no-op for a single-device carousel, so the
         // retry must work in place.
-        (DpiStatus::Failed(_), _) => dpi_retry_line("Couldn't read DPI — click to retry.", pal),
-        (DpiStatus::Unsupported(_), _) => {
-            dpi_status_line("This device did not report Adjustable DPI support.", pal)
+        (DpiStatus::Failed(_), _) => {
+            dpi_retry_line(tr!("Couldn't read DPI — click to retry."), pal)
         }
+        (DpiStatus::Unsupported(_), _) => dpi_status_line(
+            tr!("This device did not report Adjustable DPI support."),
+            pal,
+        ),
     }
 }
 
-fn dpi_status_line(message: &str, pal: Palette) -> AnyElement {
+fn dpi_status_line(message: SharedString, pal: Palette) -> AnyElement {
     div()
         .h(px(CHIP_H))
         .text_sm()
         .text_color(pal.text_muted)
-        .child(message.to_string())
+        .child(message)
         .into_any_element()
 }
 
 /// A `Failed`-state line that re-arms DPI discovery for the active device on
 /// click. Backs the only recovery path when the carousel holds one device.
-fn dpi_retry_line(message: &str, pal: Palette) -> AnyElement {
+fn dpi_retry_line(message: SharedString, pal: Palette) -> AnyElement {
     div()
         .id("dpi-retry")
         .h(px(CHIP_H))
         .text_sm()
         .text_color(rgb(ACCENT_BLUE))
         .hover(|s| s.text_color(pal.text_primary))
-        .child(message.to_string())
+        .child(message)
         .on_click(|_event, _window, cx| {
             cx.update_global::<AppState, _>(|state, _| state.retry_active_dpi());
             cx.refresh_windows();
