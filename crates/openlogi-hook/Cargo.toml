@@ -16,7 +16,10 @@ tracing = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
 libc = "0.2"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 x11rb = "0.13"
+zbus = "5"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 ctrlc = "3"
