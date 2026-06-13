@@ -80,20 +80,22 @@ fn new_dyn<F: CreatableFeature>(
 }
 
 /// Builds [`KNOWN_FEATURES`]. Each row is `id "Name"` for a feature we only know
-/// by name, or `id "Name" => FeatureImpl` to also register a default
-/// implementation produced through [`new_dyn`].
+/// by name, or `id "Name" => Impl, ...` to also register one or more default
+/// implementations through [`new_dyn`]. Listing several impls mirrors a feature
+/// that ships multiple versions, each contributing its own
+/// [`CreatableFeature::STARTING_VERSION`] in declaration order.
 macro_rules! known_features {
-    ( $( $id:literal $name:literal $( => $feat:ty )? ),* $(,)? ) => {
+    ( $( $id:literal $name:literal $( => $($feat:ty),+ )? ),* $(,)? ) => {
         HashMap::from([ $(
-            ($id, KnownFeature { name: $name, versions: known_features!(@versions $( $feat )?) }),
+            ($id, KnownFeature { name: $name, versions: known_features!(@versions $( $($feat),+ )?) }),
         )* ])
     };
     (@versions) => { &[] };
-    (@versions $feat:ty) => {
-        &[FeatureVersion {
+    (@versions $($feat:ty),+) => {
+        &[$(FeatureVersion {
             starting_version: <$feat>::STARTING_VERSION,
             producer: new_dyn::<$feat>,
-        }]
+        }),+]
     };
 }
 
@@ -213,3 +215,26 @@ static KNOWN_FEATURES: LazyLock<HashMap<u16, KnownFeature>> = LazyLock::new(|| {
     0x8320 "HeadsetOut",
     }
 });
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{FeatureVersion, KnownFeature, new_dyn};
+    use crate::feature::{CreatableFeature, feature_set::FeatureSetFeature, root::RootFeature};
+
+    #[test]
+    fn macro_registers_one_version_per_listed_impl() {
+        // The `=> A, B` form keeps the original table's ability to register
+        // several versioned implementations under a single feature id.
+        let map: HashMap<u16, KnownFeature> = known_features! {
+            0x0000 "NameOnly",
+            0x0001 "OneImpl" => RootFeature,
+            0xffff "TwoImpls" => RootFeature, FeatureSetFeature,
+        };
+
+        assert_eq!(map[&0x0000].versions.len(), 0);
+        assert_eq!(map[&0x0001].versions.len(), 1);
+        assert_eq!(map[&0xffff].versions.len(), 2);
+    }
+}

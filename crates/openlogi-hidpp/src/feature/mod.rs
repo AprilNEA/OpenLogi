@@ -78,7 +78,15 @@ impl FeatureEndpoint {
 
     /// The request header addressing `function` on this endpoint, stamped with
     /// the channel's next software id.
+    ///
+    /// `function` is a HID++2.0 function id, which is 4-bit; only the low nibble
+    /// is sent. The assert keeps a stray out-of-range id from silently routing
+    /// to a different function in debug builds.
     fn header(&self, function: u8) -> v20::MessageHeader {
+        debug_assert!(
+            function < 16,
+            "HID++2.0 function id {function} exceeds 4 bits"
+        );
         v20::MessageHeader {
             device_index: self.device_index,
             feature_index: self.feature_index,
