@@ -350,23 +350,36 @@ fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
     // the GUI shows first rather than whatever HID node enumerated first.
     // `config_key` only breaks ties a unique `DeviceStableId` never produces.
     devices.sort_by(|a, b| {
-        DeviceStableId::from_parts(a.route.as_ref(), a.slot, a.serial.as_deref(), a.unit_id)
-            .cmp(&DeviceStableId::from_parts(
-                b.route.as_ref(),
-                b.slot,
-                b.serial.as_deref(),
-                b.unit_id,
-            ))
+        stable_id(a)
+            .cmp(&stable_id(b))
             .then_with(|| a.config_key.cmp(&b.config_key))
     });
     devices
 }
 
+/// The canonical identity of one device: what the GUI carousel orders by and
+/// what [`reapply_targets`] matches a device against across inventory ticks.
+/// Unlike `config_key` (derived from the model id), this stays unique for two
+/// physically distinct devices of the same model.
+fn stable_id(dev: &AgentDevice) -> DeviceStableId {
+    DeviceStableId::from_parts(
+        dev.route.as_ref(),
+        dev.slot,
+        dev.serial.as_deref(),
+        dev.unit_id,
+    )
+}
+
 /// Indices into `next` of devices whose volatile settings need re-applying:
-/// newly-appeared keys, route changes (a replug re-enumerating under a new
-/// node), offline→online transitions (a reconnect after device sleep), or —
-/// after a system wake — every device. Offline devices are never targeted
-/// (the write would just time out); they re-apply on their own transition.
+/// a device whose stable identity is newly present (a first sighting, or a
+/// replug that re-enumerated under a new identity — e.g. a Bolt device that
+/// moved slots), or an offline→online transition (a reconnect after device
+/// sleep); plus — after a system wake — every online device. Devices are
+/// matched across ticks by [`stable_id`], never `config_key`: two same-model
+/// devices share a `config_key`, so keying on it made the second device
+/// perpetually match the first, observe a different route, and re-apply on
+/// every tick. Offline devices are never targeted (the write would just time
+/// out); they re-apply on their own transition.
 fn reapply_targets(prev: &[AgentDevice], next: &[AgentDevice], reapply_all: bool) -> Vec<usize> {
     next.iter()
         .enumerate()
@@ -375,9 +388,13 @@ fn reapply_targets(prev: &[AgentDevice], next: &[AgentDevice], reapply_all: bool
             if reapply_all {
                 return true;
             }
-            match prev.iter().find(|p| p.config_key == dev.config_key) {
+            let id = stable_id(dev);
+            match prev.iter().find(|p| stable_id(p) == id) {
+                // A new identity (first sighting, or a replug under a new
+                // route/slot) needs a fresh apply; a known one only when it has
+                // just come back online.
                 None => true,
-                Some(p) => p.route != dev.route || !p.online,
+                Some(p) => !p.online,
             }
         })
         .map(|(idx, _)| idx)
@@ -442,6 +459,18 @@ mod tests {
         );
         // Going to sleep (online → offline) → nothing.
         assert!(reapply_targets(&[dev("a", 1, true)], &[dev("a", 1, false)], false).is_empty());
+    }
+
+    #[test]
+    fn reapply_targets_disambiguates_same_model_duplicates() {
+        // Two devices of the same model share a `config_key` but are distinct
+        // physical units at different Bolt slots, so they have distinct stable
+        // ids. A steady tick with both already online must target NEITHER —
+        // matching prev by `config_key` alone made the second device match the
+        // first, observe a different route, and re-apply on every 2s tick.
+        let prev = [dev("dup", 1, true), dev("dup", 2, true)];
+        let next = [dev("dup", 1, true), dev("dup", 2, true)];
+        assert!(reapply_targets(&prev, &next, false).is_empty());
     }
 
     #[test]
