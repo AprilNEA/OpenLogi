@@ -8,21 +8,14 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
     channel::HidppChannel,
     event::EventEmitter,
-    feature::{CreatableFeature, EmittingFeature, Feature},
-    nibble::{self, U4},
-    protocol::v20::{self, Hidpp20Error},
+    feature::{CreatableFeature, EmittingFeature, Feature, FeatureEndpoint, event_payload},
+    protocol::v20::Hidpp20Error,
 };
 
 /// Implements the `UnifiedBattery` / `0x1004` feature.
 pub struct UnifiedBatteryFeature {
-    /// The underlying HID++ channel.
-    chan: Arc<HidppChannel>,
-
-    /// The index of the device to implement the feature for.
-    device_index: u8,
-
-    /// The index of the feature in the feature table.
-    feature_index: u8,
+    /// The endpoint this feature talks to.
+    endpoint: FeatureEndpoint,
 
     /// The emitter used to emit events.
     emitter: Arc<EventEmitter<BatteryEvent>>,
@@ -44,25 +37,20 @@ impl CreatableFeature for UnifiedBatteryFeature {
             let emitter = Arc::clone(&emitter);
 
             move |raw, matched| {
-                if matched {
-                    return;
-                }
-
-                let msg = v20::Message::from(raw);
-
-                let header = msg.header();
-                if header.device_index != device_index
-                    || header.feature_index != feature_index
-                    || nibble::combine(header.software_id, header.function_id) != 0
-                {
-                    return;
-                }
-
-                let payload = msg.extend_payload();
-                let Ok(level) = BatteryLevel::try_from(payload[1]) else {
+                let Some((func, payload)) =
+                    event_payload(raw, matched, device_index, feature_index)
+                else {
                     return;
                 };
-                let Ok(status) = BatteryStatus::try_from(payload[2]) else {
+                // The battery broadcast is the only event and carries sub-id 0.
+                if func.to_lo() != 0 {
+                    return;
+                }
+
+                let (Ok(level), Ok(status)) = (
+                    BatteryLevel::try_from(payload[1]),
+                    BatteryStatus::try_from(payload[2]),
+                ) else {
                     return;
                 };
 
@@ -75,9 +63,7 @@ impl CreatableFeature for UnifiedBatteryFeature {
         });
 
         Self {
-            chan,
-            device_index,
-            feature_index,
+            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
             emitter,
             msg_listener_hdl: hdl,
         }
@@ -94,47 +80,25 @@ impl EmittingFeature<BatteryEvent> for UnifiedBatteryFeature {
 
 impl Drop for UnifiedBatteryFeature {
     fn drop(&mut self) {
-        self.chan.remove_msg_listener(self.msg_listener_hdl);
+        self.endpoint
+            .chan()
+            .remove_msg_listener(self.msg_listener_hdl);
     }
 }
 
 impl UnifiedBatteryFeature {
     /// Retrieves the capabilities of this feature and the battery in general.
     pub async fn get_battery_capabilities(&self) -> Result<BatteryCapabilities, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(0),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        let payload: [u8; 2] = response.extend_payload()[..2].try_into().unwrap();
+        let payload: [u8; 2] = self.endpoint.call(0, [0; 3]).await?.extend_payload()[..2]
+            .try_into()
+            .unwrap();
 
         Ok(BatteryCapabilities::from(payload))
     }
 
     /// Retrieves the current information about the battery status.
     pub async fn get_battery_info(&self) -> Result<BatteryInfo, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(1),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        let payload = response.extend_payload();
+        let payload = self.endpoint.call(1, [0; 3]).await?.extend_payload();
 
         // payload[3] contains some kind of information about the status of the external
         // power source (maybe 0 = disconnected and 1 = connected, I don't have enough
