@@ -8,21 +8,14 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
     channel::HidppChannel,
     event::EventEmitter,
-    feature::{CreatableFeature, EmittingFeature, Feature},
-    nibble::{self, U4},
-    protocol::v20::{self, Hidpp20Error},
+    feature::{CreatableFeature, EmittingFeature, Feature, FeatureEndpoint, event_payload},
+    protocol::v20::Hidpp20Error,
 };
 
 /// Implements the `Thumbwheel` / `0x2150` feature.
 pub struct ThumbwheelFeature {
-    /// The underlying HID++ channel.
-    chan: Arc<HidppChannel>,
-
-    /// The index of the device to implement the feature for.
-    device_index: u8,
-
-    /// The index of the feature in the feature table.
-    feature_index: u8,
+    /// The endpoint this feature talks to.
+    endpoint: FeatureEndpoint,
 
     /// The emitter used to emit events.
     emitter: Arc<EventEmitter<ThumbwheelEvent>>,
@@ -44,21 +37,16 @@ impl CreatableFeature for ThumbwheelFeature {
             let emitter = Arc::clone(&emitter);
 
             move |raw, matched| {
-                if matched {
+                let Some((func, payload)) =
+                    event_payload(raw, matched, device_index, feature_index)
+                else {
+                    return;
+                };
+                // The status update is the only event and carries sub-id 0.
+                if func.to_lo() != 0 {
                     return;
                 }
 
-                let msg = v20::Message::from(raw);
-
-                let header = msg.header();
-                if header.device_index != device_index
-                    || header.feature_index != feature_index
-                    || nibble::combine(header.software_id, header.function_id) != 0
-                {
-                    return;
-                }
-
-                let payload = msg.extend_payload();
                 let Ok(rotation_status) = ThumbwheelRotationStatus::try_from(payload[4]) else {
                     return;
                 };
@@ -75,9 +63,7 @@ impl CreatableFeature for ThumbwheelFeature {
         });
 
         Self {
-            chan,
-            device_index,
-            feature_index,
+            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
             emitter,
             msg_listener_hdl: hdl,
         }
@@ -94,27 +80,16 @@ impl EmittingFeature<ThumbwheelEvent> for ThumbwheelFeature {
 
 impl Drop for ThumbwheelFeature {
     fn drop(&mut self) {
-        self.chan.remove_msg_listener(self.msg_listener_hdl);
+        self.endpoint
+            .chan()
+            .remove_msg_listener(self.msg_listener_hdl);
     }
 }
 
 impl ThumbwheelFeature {
     /// Retrieves some information about the thumbwheel.
     pub async fn get_thumbwheel_info(&self) -> Result<ThumbwheelInfo, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(0),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        let payload = response.extend_payload();
+        let payload = self.endpoint.call(0, [0; 3]).await?.extend_payload();
 
         Ok(ThumbwheelInfo {
             native_resolution: u16::from_be_bytes(payload[0..=1].try_into().unwrap()),
@@ -128,20 +103,7 @@ impl ThumbwheelFeature {
 
     /// Retrieves the custom status of the thumbwheel.
     pub async fn get_thumbwheel_status(&self) -> Result<ThumbwheelStatus, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(1),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        let payload = response.extend_payload();
+        let payload = self.endpoint.call(1, [0; 3]).await?.extend_payload();
 
         Ok(ThumbwheelStatus {
             reporting_mode: ThumbwheelReportingMode::try_from(payload[0])
@@ -164,16 +126,8 @@ impl ThumbwheelFeature {
         mode: ThumbwheelReportingMode,
         invert_direction: bool,
     ) -> Result<(), Hidpp20Error> {
-        self.chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(2),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [mode.into(), if invert_direction { 1 } else { 0 }, 0x00],
-            ))
+        self.endpoint
+            .call(2, [mode.into(), if invert_direction { 1 } else { 0 }, 0x00])
             .await?;
 
         Ok(())

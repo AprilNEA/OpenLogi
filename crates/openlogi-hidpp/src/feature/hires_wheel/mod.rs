@@ -8,9 +8,9 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
     channel::HidppChannel,
     event::EventEmitter,
-    feature::{CreatableFeature, EmittingFeature, Feature},
+    feature::{CreatableFeature, EmittingFeature, Feature, FeatureEndpoint, event_payload},
     nibble::U4,
-    protocol::v20::{self, Hidpp20Error},
+    protocol::v20::Hidpp20Error,
 };
 
 /// Implements the `HiResWheel` / `0x2121` feature.
@@ -18,14 +18,8 @@ use crate::{
 /// The analytics part of the feature is not implemented here as its data
 /// structure lacks any documentation.
 pub struct HiResWheelFeature {
-    /// The underlying HID++ channel.
-    chan: Arc<HidppChannel>,
-
-    /// The index of the device to implement the feature for.
-    device_index: u8,
-
-    /// The index of the feature in the feature table.
-    feature_index: u8,
+    /// The endpoint this feature talks to.
+    endpoint: FeatureEndpoint,
 
     /// The emitter used to emit events.
     emitter: Arc<EventEmitter<HiResWheelEvent>>,
@@ -47,23 +41,14 @@ impl CreatableFeature for HiResWheelFeature {
             let emitter = Arc::clone(&emitter);
 
             move |raw, matched| {
-                if matched {
+                let Some((func, payload)) =
+                    event_payload(raw, matched, device_index, feature_index)
+                else {
                     return;
-                }
+                };
 
-                let msg = v20::Message::from(raw);
-
-                let header = msg.header();
-                if header.device_index != device_index
-                    || header.feature_index != feature_index
-                    || header.software_id.to_lo() != 0
-                {
-                    return;
-                }
-
-                let payload = msg.extend_payload();
-
-                let event = match header.function_id.to_lo() {
+                // HiResWheel dispatches on the sub-id: 0 = movement, 1 = ratchet switch.
+                let event = match func.to_lo() {
                     0 => {
                         let Ok(resolution) =
                             WheelResolution::try_from((payload[0] & (1 << 4)) >> 4)
@@ -92,9 +77,7 @@ impl CreatableFeature for HiResWheelFeature {
         });
 
         Self {
-            chan,
-            device_index,
-            feature_index,
+            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
             emitter,
             msg_listener_hdl: hdl,
         }
@@ -111,27 +94,16 @@ impl EmittingFeature<HiResWheelEvent> for HiResWheelFeature {
 
 impl Drop for HiResWheelFeature {
     fn drop(&mut self) {
-        self.chan.remove_msg_listener(self.msg_listener_hdl);
+        self.endpoint
+            .chan()
+            .remove_msg_listener(self.msg_listener_hdl);
     }
 }
 
 impl HiResWheelFeature {
     /// Retrieves the capabilities of the hi-res wheel and this feature.
     pub async fn get_wheel_capabilities(&self) -> Result<WheelCapabilities, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(0),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        let payload = response.extend_payload();
+        let payload = self.endpoint.call(0, [0; 3]).await?.extend_payload();
 
         Ok(WheelCapabilities {
             multiplier: payload[0],
@@ -144,20 +116,7 @@ impl HiResWheelFeature {
 
     /// Retrieves the current mode of the hi-res wheel.
     pub async fn get_wheel_mode(&self) -> Result<WheelMode, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(1),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        let payload = response.extend_payload();
+        let payload = self.endpoint.call(1, [0; 3]).await?.extend_payload();
 
         Ok(WheelMode {
             inverted: payload[0] & (1 << 2) != 0,
@@ -188,20 +147,11 @@ impl HiResWheelFeature {
         mode_byte |= u8::from(resolution) << 1;
         mode_byte |= u8::from(target);
 
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(2),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [mode_byte, 0x00, 0x00],
-            ))
-            .await?;
-
-        let payload = response.extend_payload();
+        let payload = self
+            .endpoint
+            .call(2, [mode_byte, 0x00, 0x00])
+            .await?
+            .extend_payload();
 
         Ok(WheelMode {
             inverted: payload[0] & (1 << 2) != 0,
@@ -214,20 +164,7 @@ impl HiResWheelFeature {
 
     /// Retrieves the current state of the ratchet switch.
     pub async fn get_ratchet_switch_state(&self) -> Result<WheelRatchetState, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(3),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        let payload = response.extend_payload();
+        let payload = self.endpoint.call(3, [0; 3]).await?.extend_payload();
 
         WheelRatchetState::try_from(payload[0] & 1).map_err(|_| Hidpp20Error::UnsupportedResponse)
     }

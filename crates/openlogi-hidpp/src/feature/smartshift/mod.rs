@@ -7,21 +7,14 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
     channel::HidppChannel,
-    feature::{CreatableFeature, Feature},
-    nibble::U4,
-    protocol::v20::{self, Hidpp20Error},
+    feature::{CreatableFeature, Feature, FeatureEndpoint},
+    protocol::v20::Hidpp20Error,
 };
 
 /// Implements the `SmartShift` / `0x2110` feature.
 pub struct SmartShiftFeature {
-    /// The underlying HID++ channel.
-    chan: Arc<HidppChannel>,
-
-    /// The index of the device to implement the feature for.
-    device_index: u8,
-
-    /// The index of the feature in the feature table.
-    feature_index: u8,
+    /// The endpoint this feature talks to.
+    endpoint: FeatureEndpoint,
 }
 
 impl CreatableFeature for SmartShiftFeature {
@@ -30,9 +23,7 @@ impl CreatableFeature for SmartShiftFeature {
 
     fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
         Self {
-            chan,
-            device_index,
-            feature_index,
+            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
         }
     }
 }
@@ -46,20 +37,7 @@ impl SmartShiftFeature {
     /// either by software or the wheel mode button. It will not provide
     /// information about whether the wheel is in auto-disengaged mode.
     pub async fn get_ratchet_control_mode(&self) -> Result<RatchetControlMode, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(0),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        let payload = response.extend_payload();
+        let payload = self.endpoint.call(0, [0; 3]).await?.extend_payload();
 
         Ok(RatchetControlMode {
             wheel_mode: WheelMode::try_from(payload[0])
@@ -87,20 +65,15 @@ impl SmartShiftFeature {
         auto_disengage: Option<u8>,
         auto_disengage_default: Option<u8>,
     ) -> Result<(), Hidpp20Error> {
-        self.chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(1),
-                    software_id: self.chan.get_sw_id(),
-                },
+        self.endpoint
+            .call(
+                1,
                 [
                     wheel_mode.map_or(0, u8::from),
                     auto_disengage.unwrap_or(0),
                     auto_disengage_default.unwrap_or(0),
                 ],
-            ))
+            )
             .await?;
 
         Ok(())
