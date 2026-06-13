@@ -23,6 +23,7 @@ workspace = true
 resolver = "3"
 members = [
     "crates/openlogi-core",
+    "crates/openlogi-inject",
     "crates/openlogi-hidpp",
     "crates/openlogi-hid",
     "crates/openlogi-assets",

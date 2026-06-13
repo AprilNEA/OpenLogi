@@ -311,7 +311,7 @@ fn dispatch(
             match advance(dir, &action, magnitude, sensitivity, Instant::now()) {
                 WheelOutput::Idle => {}
                 WheelOutput::Scroll(lines) => {
-                    openlogi_core::binding::post_horizontal_scroll(lines);
+                    openlogi_inject::post_horizontal_scroll(lines);
                 }
                 WheelOutput::FireAction => {
                     debug!(?button, action = %action.label(), "thumb wheel → action");

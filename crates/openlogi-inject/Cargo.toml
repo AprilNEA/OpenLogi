@@ -1,0 +1,42 @@
+[package]
+name = "openlogi-inject"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "OS input-event synthesis for OpenLogi actions (macOS CGEvent/NSEvent, Linux uinput/D-Bus, Windows SendInput)."
+keywords = ["logitech", "input", "uinput", "sendinput", "mouse"]
+categories = ["hardware-support", "os"]
+
+[dependencies]
+openlogi-core = { path = "../openlogi-core", version = "0.6.9" }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"
+zbus = "5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.25.0", features = ["highsierra"] }
+core-foundation = { workspace = true }
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = [
+  "NSEvent",
+  "NSGraphicsContext",
+  "objc2-core-graphics",
+] }
+objc2-core-graphics = { version = "0.3.2", features = ["CGEvent"] }
+objc2-foundation = "0.3.2"
+
+# SendInput-based action synthesis (execute_windows).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_UI_Input_KeyboardAndMouse"] }

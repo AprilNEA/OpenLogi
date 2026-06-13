@@ -4695,6 +4695,7 @@ dependencies = [
  "openlogi-core",
  "openlogi-hid",
  "openlogi-hook",
+ "openlogi-inject",
  "serde",
  "tarpc",
  "tokio",
@@ -4732,22 +4733,13 @@ dependencies = [
 name = "openlogi-core"
 version = "0.6.9"
 dependencies = [
- "core-foundation 0.10.0",
- "core-graphics 0.25.0",
- "evdev",
  "fs4",
- "objc2",
- "objc2-app-kit",
- "objc2-core-graphics",
- "objc2-foundation",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
- "windows-sys 0.61.2",
- "zbus",
 ]
 
 [[package]]
@@ -4829,10 +4821,30 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "openlogi-core",
+ "openlogi-inject",
  "thiserror 2.0.18",
  "tracing",
  "windows-sys 0.61.2",
  "x11rb",
+]
+
+[[package]]
+name = "openlogi-inject"
+version = "0.6.9"
+dependencies = [
+ "core-foundation 0.10.0",
+ "core-graphics 0.25.0",
+ "evdev",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-graphics",
+ "objc2-foundation",
+ "openlogi-core",
+ "serde",
+ "tracing",
+ "tracing-subscriber",
+ "windows-sys 0.61.2",
+ "zbus",
 ]
 
 [[package]]
