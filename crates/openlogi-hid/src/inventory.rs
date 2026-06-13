@@ -75,6 +75,25 @@ const PROBE_BUDGET: Duration = Duration::from_secs(5);
 /// just lacks capabilities / battery until the next tick.
 const UNIFYING_SLOT_PROBE: Duration = Duration::from_millis(3500);
 
+/// Per-slot budget for a Bolt paired device's HID++ feature walk. The whole
+/// receiver shares one [`PROBE_BUDGET`]; without a per-slot cap a single online
+/// device that stops answering its feature-walk reads (seen on a recent macOS
+/// IOHID stack with a new MX Master 4) burns the entire budget, so `probe_one`
+/// times out and the receiver yields *nothing* — every paired device drops to
+/// "No devices" even though its pairing-register identity read fine (#218).
+/// Capping each slot lets a hung device fall back to its cached / identity-only
+/// data while the rest of the receiver still enumerates. Bolt BTLE round-trips
+/// are fast (a healthy walk is well under a second), so 1 s is generous headroom
+/// for a waking device yet small enough that **all three** of a typical Bolt
+/// pairing's online slots can hang at once and still fit `PROBE_BUDGET` after the
+/// 1.5 s arrival drain (1.5 + 3×1 = 4.5 s) — so the receiver keeps surfacing its
+/// devices instead of `probe_one` timing out wholesale and dropping every device
+/// to "No devices". Sized from the #218 rig: the per-slot fallback there caught
+/// individual hung slots and kept the list populated, but a sustained
+/// *all-three-online* hang summed past the budget at 1.5 s/slot — 1 s keeps that
+/// case inside it too.
+const BOLT_SLOT_PROBE: Duration = Duration::from_secs(1);
+
 #[derive(Debug, Error)]
 pub enum InventoryError {
     #[error("HID transport error")]
@@ -678,7 +697,24 @@ async fn probe_bolt_slot(
     let cached = id.as_ref().and_then(|i| cache.get(i));
     let register_kind = map_kind(bolt_kind);
 
-    let (probe, outcome) = probe_or_reuse(channel, slot, id, cached, online, tick).await;
+    // Cap the feature walk per slot so one device that stops answering can't
+    // burn the whole receiver's `PROBE_BUDGET` and time out `probe_one` — which
+    // would drop *every* device on the receiver. A timed-out slot falls back to
+    // its cached probe (its pairing-register identity above already read fine),
+    // mirroring the Unifying path (#218).
+    let probe_result = timeout(
+        BOLT_SLOT_PROBE,
+        probe_or_reuse(channel, slot, id.clone(), cached, online, tick),
+    )
+    .await;
+    let (probe, outcome) = if let Ok(r) = probe_result {
+        r
+    } else {
+        debug!(slot, budget = ?BOLT_SLOT_PROBE,
+            "Bolt slot probe timed out; using cached data if available");
+        let probe = cached.map_or_else(ProbedFeatures::default, |c| c.probe.clone());
+        (probe, seen(id))
+    };
     if matches!(outcome, CacheOutcome::Fresh(..))
         && let Some(probed) = probe.kind
         && probed != DeviceKind::Unknown
