@@ -50,6 +50,7 @@ _version: 1
 "Using Logi Options+? Quit it first — both apps compete for HID++ access.": "Usi Logi Options+? Esci prima da lì — entrambe le app competono per l'accesso HID++."
 "Accessibility permission required": "Permesso di Accessibilità richiesto"
 "OpenLogi captures mouse buttons (Back / Forward / gesture button) through the system Accessibility permission and runs the actions you bind. Features that talk to the device directly — DPI, SmartShift — are unaffected.": "OpenLogi cattura i pulsanti del mouse (Indietro / Avanti / pulsante gesture) tramite i permessi di Accessibilità del sistema ed esegue le azioni associate. Le funzionalità che comunicano direttamente con il dispositivo — DPI, SmartShift — non sono influenzate."
+"Enable “OpenLogi Agent” in the Accessibility list — the background agent owns the mouse hook, not the OpenLogi app. If it already shows as enabled, remove the stale entry with the − button and add it back.": "Abilita “OpenLogi Agent” nell'elenco Accessibilità — l'hook del mouse appartiene all'agente in background, non all'app OpenLogi. Se risulta già abilitato, rimuovi la voce obsoleta con il pulsante − e aggiungila di nuovo."
 "Open System Settings to grant access": "Apri Impostazioni di Sistema per concedere l'accesso"
 "Takes effect automatically once granted — no restart needed.": "Diventa effettivo automaticamente una volta concesso — nessun riavvio necessario."
 "Not now (use DPI and other features only)": "Non ora (usa solo DPI e altre funzionalità)"

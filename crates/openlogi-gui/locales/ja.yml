@@ -50,6 +50,7 @@ _version: 1
 "Using Logi Options+? Quit it first — both apps compete for HID++ access.": "Logi Options+ をお使いですか?まず終了してください — 両方のアプリが HID++ アクセスを奪い合います。"
 "Accessibility permission required": "アクセシビリティ権限が必要です"
 "OpenLogi captures mouse buttons (Back / Forward / gesture button) through the system Accessibility permission and runs the actions you bind. Features that talk to the device directly — DPI, SmartShift — are unaffected.": "OpenLogi はシステムの「アクセシビリティ」権限を通じてマウスボタン(戻る / 進む / ジェスチャーボタン)を捕捉し、割り当てた操作を実行します。DPI、SmartShift などデバイスと直接通信する機能には影響しません。"
+"Enable “OpenLogi Agent” in the Accessibility list — the background agent owns the mouse hook, not the OpenLogi app. If it already shows as enabled, remove the stale entry with the − button and add it back.": "アクセシビリティのリストで“OpenLogi Agent”を有効にしてください — マウスフックを所有するのは OpenLogi アプリではなく、バックグラウンドのエージェントです。すでに有効と表示されている場合は、−ボタンで古い項目を削除してから追加し直してください。"
 "Open System Settings to grant access": "システム設定を開いて許可する"
 "Takes effect automatically once granted — no restart needed.": "許可すると自動的に反映されます — 再起動は不要です。"
 "Not now (use DPI and other features only)": "後で(DPI などの機能のみ使用)"

@@ -50,6 +50,7 @@ _version: 1
 "Using Logi Options+? Quit it first — both apps compete for HID++ access.": "Logi Options+를 사용 중이신가요? 먼저 종료하세요 — 두 앱이 HID++ 접근 권한을 두고 경쟁합니다."
 "Accessibility permission required": "손쉬운 사용 권한이 필요합니다"
 "OpenLogi captures mouse buttons (Back / Forward / gesture button) through the system Accessibility permission and runs the actions you bind. Features that talk to the device directly — DPI, SmartShift — are unaffected.": "OpenLogi는 시스템의 손쉬운 사용 권한을 통해 마우스 버튼(뒤로 / 앞으로 / 제스처 버튼)을 가로채어 사용자가 지정한 동작을 실행합니다. DPI, SmartShift처럼 기기와 직접 통신하는 기능에는 영향을 주지 않습니다."
+"Enable “OpenLogi Agent” in the Accessibility list — the background agent owns the mouse hook, not the OpenLogi app. If it already shows as enabled, remove the stale entry with the − button and add it back.": "손쉬운 사용 목록에서 “OpenLogi Agent”를 활성화하세요 — 마우스 후크는 OpenLogi 앱이 아니라 백그라운드 에이전트가 소유합니다. 이미 활성화된 것으로 표시되면 − 버튼으로 오래된 항목을 제거한 뒤 다시 추가하세요."
 "Open System Settings to grant access": "시스템 설정을 열어 권한 부여"
 "Takes effect automatically once granted — no restart needed.": "권한을 부여하면 자동으로 적용됩니다 — 재시작이 필요 없습니다."
 "Not now (use DPI and other features only)": "나중에 (DPI 등 일부 기능만 사용)"

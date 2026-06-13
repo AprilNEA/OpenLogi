@@ -50,6 +50,7 @@ _version: 1
 "Using Logi Options+? Quit it first — both apps compete for HID++ access.": "正在使用 Logi Options+？請先結束，兩個應用程式會爭用 HID++ 存取權限。"
 "Accessibility permission required": "需要「輔助使用」權限"
 "OpenLogi captures mouse buttons (Back / Forward / gesture button) through the system Accessibility permission and runs the actions you bind. Features that talk to the device directly — DPI, SmartShift — are unaffected.": "OpenLogi 會透過系統的「輔助使用」權限擷取滑鼠按鍵（後退 / 前進 / 手勢按鈕），並執行指派的操作。DPI、SmartShift 等直接與裝置通訊的功能不受影響。"
+"Enable “OpenLogi Agent” in the Accessibility list — the background agent owns the mouse hook, not the OpenLogi app. If it already shows as enabled, remove the stale entry with the − button and add it back.": "請在「輔助使用」清單中啟用「OpenLogi Agent」——滑鼠掛鉤屬於背景代理程式，而非 OpenLogi 應用程式。如果它已顯示為啟用，請用 − 按鈕移除過時項目後重新加入。"
 "Open System Settings to grant access": "開啟系統設定以授權"
 "Takes effect automatically once granted — no restart needed.": "授權後會自動生效，無需重新啟動。"
 "Not now (use DPI and other features only)": "稍後再說（僅使用 DPI 等功能）"

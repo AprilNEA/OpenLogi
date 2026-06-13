@@ -50,6 +50,7 @@ _version: 1
 "Using Logi Options+? Quit it first — both apps compete for HID++ access.": "Используете Logi Options+? Сначала закройте его — оба приложения конкурируют за доступ к HID++."
 "Accessibility permission required": "Требуется разрешение Универсального доступа"
 "OpenLogi captures mouse buttons (Back / Forward / gesture button) through the system Accessibility permission and runs the actions you bind. Features that talk to the device directly — DPI, SmartShift — are unaffected.": "OpenLogi перехватывает кнопки мыши (Назад / Вперёд / кнопку жестов) через системное разрешение Универсального доступа и выполняет назначенные вами действия. Функции, которые обращаются к устройству напрямую — DPI, SmartShift — не затрагиваются."
+"Enable “OpenLogi Agent” in the Accessibility list — the background agent owns the mouse hook, not the OpenLogi app. If it already shows as enabled, remove the stale entry with the − button and add it back.": "Включите “OpenLogi Agent” в списке «Универсальный доступ» — хук мыши принадлежит фоновому агенту, а не приложению OpenLogi. Если он уже отображается как включённый, удалите устаревшую запись кнопкой − и добавьте её заново."
 "Open System Settings to grant access": "Открыть системные настройки для выдачи доступа"
 "Takes effect automatically once granted — no restart needed.": "Вступит в силу автоматически после выдачи разрешения — перезапуск не нужен."
 "Not now (use DPI and other features only)": "Не сейчас (использовать только DPI и другие функции)"
