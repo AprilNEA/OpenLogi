@@ -110,19 +110,10 @@ impl AssetClient {
         self.get_bytes(&url)
     }
 
-    /// Fetch a per-depot file into `dir`, returning the number of bytes
-    /// written. `name` comes from remote metadata, so it is validated down
-    /// to a single path component before any path is built.
-    fn fetch_file_to_dir(&self, asset_path: &str, dir: &Path, name: &str) -> Result<usize> {
-        let dst = safe_component_path(dir, name, "asset file name")?;
-        let bytes = self.fetch_file(asset_path, name)?;
-        write_replace(&dst, &bytes)?;
-        Ok(bytes.len())
-    }
-
     /// Fetch `file` into `dir` unless a file already there matches its
-    /// `sha256`; a fresh download is verified against the same hash and
-    /// removed on mismatch, so nothing unverified survives on disk. The
+    /// `sha256`. The download is verified against the expected hash *in
+    /// memory, before it is written*, so only correct bytes ever reach the
+    /// cache directory and a mismatch leaves any existing file untouched. The
     /// cache-skip primitive shared by the CLI bundle sync and the GUI
     /// runtime sync — callers branch on [`FetchOutcome`] to do their own
     /// progress reporting.
@@ -132,16 +123,23 @@ impl AssetClient {
         dir: &Path,
         file: &FileEntry,
     ) -> Result<FetchOutcome> {
+        // `name` comes from remote metadata; validate it down to a single
+        // path component before any path is built.
         let dst = safe_component_path(dir, &file.name, "asset file name")?;
         if cached_matches(&dst, &file.sha256) {
             return Ok(FetchOutcome::CacheHit);
         }
-        let bytes = self.fetch_file_to_dir(asset_path, dir, &file.name)?;
-        if !cached_matches(&dst, &file.sha256) {
-            let _ = fs::remove_file(&dst);
-            bail!("downloaded asset checksum mismatch: {}", dst.display());
+        let bytes = self.fetch_file(asset_path, &file.name)?;
+        let actual = sha256_hex(&bytes);
+        if !actual.eq_ignore_ascii_case(&file.sha256) {
+            bail!(
+                "downloaded asset checksum mismatch for {}: expected {}, got {actual}",
+                file.name,
+                file.sha256
+            );
         }
-        Ok(FetchOutcome::Fetched { bytes })
+        write_replace(&dst, &bytes)?;
+        Ok(FetchOutcome::Fetched { bytes: bytes.len() })
     }
 
     /// GET `url` on the shared agent and read the whole body into memory,
