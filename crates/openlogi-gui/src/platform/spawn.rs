@@ -32,10 +32,15 @@ use libc::{c_char, c_int, pid_t, posix_spawnattr_t};
 
 unsafe extern "C" {
     /// Private libSystem call: with `disclaim` non-zero, a child spawned under
-    /// `attrs` does not inherit the caller's TCC responsibility and is judged
-    /// against its own code signature. Takes the attribute handle by value (it
-    /// is itself a pointer) and only sets a flag, leaving ownership with us.
-    fn responsibility_spawnattrs_setdisclaim(attrs: posix_spawnattr_t, disclaim: c_int) -> c_int;
+    /// `*attrs` does not inherit the caller's TCC responsibility and is judged
+    /// against its own code signature. The Apple `spawn_private.h` signature
+    /// takes the attribute **by pointer** (`posix_spawnattr_t *`); passing it by
+    /// value returns `EINVAL` on current macOS, i.e. the disclaim silently never
+    /// happens.
+    fn responsibility_spawnattrs_setdisclaim(
+        attrs: *mut posix_spawnattr_t,
+        disclaim: c_int,
+    ) -> c_int;
 }
 
 /// Launch `program` (no arguments, inheriting the current environment) as a
@@ -73,9 +78,9 @@ fn spawn_inner(program: &Path) -> io::Result<pid_t> {
         return Err(io::Error::from_raw_os_error(rc));
     }
 
-    // SAFETY: `attr` was just initialized and is passed by value; the call only
-    // flips the disclaim flag and does not take ownership.
-    let disclaim_rc = unsafe { responsibility_spawnattrs_setdisclaim(attr, 1) };
+    // SAFETY: `attr` was just initialized; `&raw mut attr` is the
+    // `posix_spawnattr_t *` the call expects; it only flips the disclaim flag.
+    let disclaim_rc = unsafe { responsibility_spawnattrs_setdisclaim(&raw mut attr, 1) };
     if disclaim_rc != 0 {
         // Non-fatal: a running agent under the wrong TCC identity still beats no
         // agent at all. Surface it so a dropped symbol shows up in the logs.
