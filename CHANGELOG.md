@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.11](https://github.com/AprilNEA/OpenLogi/compare/openlogi-hid-v0.6.10...openlogi-hid-v0.6.11) - 2026-06-13
+
+### Fixed
+
+- *(hid)* replay a node's last inventory through transient probe failures ([#222](https://github.com/AprilNEA/OpenLogi/pull/222))
+
 ## [0.6.10](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.9...openlogi-core-v0.6.10) - 2026-06-13
 
 ### Added
