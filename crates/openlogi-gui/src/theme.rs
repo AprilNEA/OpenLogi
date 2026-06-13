@@ -166,4 +166,19 @@ mod tests {
         assert!((a.s - t.s).abs() < 0.05, "sat {} vs {}", a.s, t.s);
         assert!((a.l - t.l).abs() < 0.05, "light {} vs {}", a.l, t.l);
     }
+
+    /// `accent_tint_hover` is also a hand-written `hsla`; pin that it stays
+    /// derived from `ACCENT_BLUE` and sits deeper than the resting `accent_tint`.
+    #[test]
+    fn accent_tint_hover_matches_accent() {
+        let a = accent();
+        let th = accent_tint_hover();
+        assert!((a.h - th.h).abs() < 0.02, "hue {} vs {}", a.h, th.h);
+        assert!((a.s - th.s).abs() < 0.05, "sat {} vs {}", a.s, th.s);
+        assert!((a.l - th.l).abs() < 0.05, "light {} vs {}", a.l, th.l);
+        assert!(
+            th.a > accent_tint().a,
+            "hover tint should sit deeper than the resting tint"
+        );
+    }
 }
