@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.10](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.9...openlogi-core-v0.6.10) - 2026-06-13
+
+### Added
+
+- *(config)* add auto_download_assets app setting
+
+### Fixed
+
+- *(gui)* keep the diagnostics report truthful across agent restarts ([#230](https://github.com/AprilNEA/OpenLogi/pull/230))
+
 ## [0.6.9](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.8...openlogi-core-v0.6.9) - 2026-06-12
 
 ### Added
