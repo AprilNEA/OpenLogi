@@ -16,7 +16,7 @@
 //! unreachable or answers with a newer protocol, that is pushed to the GUI as
 //! a [`GuiUpdate`] so the window can say so instead of spinning forever.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use openlogi_agent_core::ipc::{
@@ -502,26 +502,14 @@ fn spawn_agent() {
         );
         return;
     };
-    match spawn_detached(&path) {
-        Ok(()) => info!(path = %path.display(), "agent not running — launched it"),
+    // Spawn the agent under its *own* macOS TCC identity, not the GUI's:
+    // otherwise it inherits the GUI's responsibility and the Accessibility /
+    // Input-Monitoring grants the user gave the agent look missing (issue #214).
+    // `disclaim` is a no-op pass-through to `std::process::Command` off macOS.
+    match disclaim::Command::new(&path).spawn() {
+        Ok(_) => info!(path = %path.display(), "agent not running — launched it"),
         Err(e) => warn!(error = %e, path = %path.display(), "could not launch the agent"),
     }
-}
-
-/// Spawn the agent disclaiming TCC responsibility so macOS judges it by its own
-/// `org.openlogi.agent` identity — otherwise the GUI-spawned agent inherits the
-/// GUI's, and the Accessibility / Input-Monitoring grants the user gave the
-/// agent look missing (issue #214). See [`crate::platform::spawn`].
-#[cfg(target_os = "macos")]
-fn spawn_detached(path: &Path) -> std::io::Result<()> {
-    crate::platform::spawn::spawn_disclaiming_responsibility(path)
-}
-
-/// Elsewhere a plain child is correct — Windows and Linux have no TCC
-/// responsibility to inherit.
-#[cfg(not(target_os = "macos"))]
-fn spawn_detached(path: &Path) -> std::io::Result<()> {
-    std::process::Command::new(path).spawn().map(|_| ())
 }
 
 /// Resolve the agent executable relative to the running GUI: a sibling in the
