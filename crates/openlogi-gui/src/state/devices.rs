@@ -111,20 +111,37 @@ pub(super) fn build_device_list(
 }
 
 /// Append an offline placeholder for every known device not already present in
-/// `list` (matched by `config_key`). Split out from [`build_device_list`] so
-/// the union rule is unit-testable without an [`AssetResolver`].
+/// `list`. Split out from [`build_device_list`] so the union rule is
+/// unit-testable without an [`AssetResolver`].
+///
+/// A device is "already present" when its `config_key` matches **or** a record
+/// with the same (display name, kind) is already in the list. The second match
+/// is what stops a one-physical-device-two-cards phantom: a device with more
+/// than one model id resolves to a *different* `config_key` per transport (the
+/// MX Master 3S is pid `b034` over BTLE but `b043` via a Bolt receiver — #137),
+/// so a stale identity persisted under the other pid would otherwise show as a
+/// second card. The resolved display name is per-model, so it collapses those
+/// pid variants — both against a live record and among the placeholders
+/// themselves (a device persisted under both pids must still surface once).
 fn append_offline_known<'a>(
     list: &mut Vec<DeviceRecord>,
     known: impl Iterator<Item = (&'a str, &'a DeviceIdentity)>,
 ) {
-    let present: HashSet<&str> = list.iter().map(|r| r.config_key.as_str()).collect();
-    // Collect before extending: `present` borrows `list`, so the phantoms must
-    // be materialized before we can mutate it.
+    let present_keys: HashSet<&str> = list.iter().map(|r| r.config_key.as_str()).collect();
+    let mut seen: HashSet<(String, DeviceKind)> = list
+        .iter()
+        .map(|r| (r.display_name.clone(), r.kind))
+        .collect();
+    // Collect before extending: `present_keys` borrows `list`, so the phantoms
+    // must be materialized before we can mutate it.
     let phantoms: Vec<DeviceRecord> = known
-        .filter(|(key, _)| !present.contains(key))
+        .filter(|(key, identity)| {
+            !present_keys.contains(key)
+                && seen.insert((identity.display_name.clone(), identity.kind))
+        })
         .map(|(key, identity)| offline_record(key, identity))
         .collect();
-    drop(present);
+    drop(present_keys);
     list.extend(phantoms);
 }
 
@@ -388,6 +405,51 @@ mod tests {
         assert!(
             list.iter().any(|r| r.config_key == "B" && !r.online),
             "B is added back as a persisted offline placeholder"
+        );
+    }
+
+    #[test]
+    fn one_model_under_two_pids_is_not_duplicated() {
+        // The MX Master 3S resolves to a different `config_key` per transport
+        // (b034 BTLE / b043 Bolt, #137). A live record under one pid plus a
+        // stale persisted identity under the other must show ONE card, not two.
+        let mut list = vec![online_record("0b043")];
+        list[0].display_name = "MX Master 3S".into();
+        let stale = mouse_identity("MX Master 3S"); // persisted under the other pid
+        let other = mouse_identity("MX Mechanical Mini"); // a genuinely different device
+        append_offline_known(
+            &mut list,
+            [("0b034", &stale), ("0b367", &other)].into_iter(),
+        );
+
+        assert_eq!(
+            list.iter()
+                .filter(|r| r.display_name == "MX Master 3S")
+                .count(),
+            1,
+            "the same model under two pids must surface once"
+        );
+        assert!(
+            list.iter()
+                .any(|r| r.display_name == "MX Mechanical Mini" && !r.online),
+            "a genuinely different known device is still added"
+        );
+    }
+
+    #[test]
+    fn one_offline_model_persisted_under_two_pids_collapses_to_one_card() {
+        // Both pids persisted, neither live (device on another host): the
+        // dedupe must collapse the placeholders among themselves too, not only
+        // against a live record.
+        let mut list: Vec<DeviceRecord> = vec![];
+        let a = mouse_identity("MX Master 3S");
+        let b = mouse_identity("MX Master 3S");
+        append_offline_known(&mut list, [("0b034", &a), ("0b043", &b)].into_iter());
+
+        assert_eq!(
+            list.len(),
+            1,
+            "two persisted pids of one model collapse to one"
         );
     }
 
