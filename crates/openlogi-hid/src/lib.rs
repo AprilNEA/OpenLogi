@@ -32,7 +32,8 @@ pub use pairing::{
 pub use route::{BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, UNIFYING_PIDS};
 pub use smartshift::{AUTO_DISENGAGE_PERMANENT, SmartShiftMode, SmartShiftStatus};
 pub use write::{
-    DpiCapabilities, DpiInfo, FeatureEntry, SharedChannel, WriteError, dump_features, get_dpi,
-    get_dpi_info, get_smartshift_status, set_dpi, set_dpi_on, set_keyboard_color, set_smartshift,
-    set_smartshift_on, set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
+    DpiCapabilities, DpiInfo, FeatureEntry, LightingMethod, SharedChannel, WriteError,
+    dump_features, get_dpi, get_dpi_info, get_smartshift_status, set_dpi, set_dpi_on,
+    set_keyboard_color, set_keyboard_color_with, set_smartshift, set_smartshift_on,
+    set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
 };

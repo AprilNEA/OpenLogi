@@ -73,10 +73,10 @@ pub struct Capabilities {
     pub buttons: bool,
     /// Adjustable pointer resolution — HID++ `0x2201` / `0x2202` (AdjustableDpi).
     pub pointer: bool,
-    /// Per-key RGB the lighting panel can actually drive — HID++ `PerKeyLighting`
-    /// (`0x8080`), the feature `set_keyboard_color` writes. Legacy/zone/backlight
-    /// lighting families aren't driven by the panel, so they don't flip this and
-    /// don't earn an inert Lighting tab.
+    /// Solid-colour RGB the lighting panel can actually drive — HID++
+    /// `ColorLedEffects` (`0x8070`) or `PerKeyLighting` (`0x8080`), the features
+    /// `set_keyboard_color` writes. Backlight-only families aren't driven by the
+    /// panel, so they don't flip this and don't earn an inert Lighting tab.
     pub lighting: bool,
 }
 
@@ -87,10 +87,11 @@ impl Capabilities {
     pub fn from_feature_ids(ids: &[u16]) -> Self {
         const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
-        // Only PerKeyLighting (0x8080) — the feature the lighting panel drives via
-        // `set_keyboard_color`. Advertising a non-per-key family (legacy 0x8070,
-        // backlight 0x198x) would otherwise earn a tab the panel can't drive.
-        const LIGHTING: [u16; 1] = [0x8080];
+        // PerKeyLighting (0x8080) and ColorLedEffects (0x8070) — both now driven
+        // by `set_keyboard_color` (it prefers 0x8070's fixed effect to override a
+        // running onboard profile, falling back to 0x8080 per-key). Other families
+        // (backlight 0x198x) stay out so they don't earn a tab the panel can't drive.
+        const LIGHTING: [u16; 2] = [0x8080, 0x8070];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
             buttons: has(&BUTTONS),
