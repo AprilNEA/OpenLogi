@@ -255,8 +255,38 @@ struct CachedChannel {
 /// We merge the two so an MX Master that's been asleep still shows up with
 /// its codename and kind even before you click it.
 pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
-    Enumerator::default().enumerate().await
+    // The polling [`Enumerator`] keeps a per-node ledger across ticks, so a
+    // transient probe miss replays the node's last good inventory. A one-shot
+    // caller (CLI `list` / `diag`) builds a fresh `Enumerator` whose ledger is
+    // empty, so a miss has nothing to replay and would surface as an empty or
+    // partial list — the two isolated runs in #218 read 3 devices and 0. Retry a
+    // few times instead, reusing the same enumerator so its ledger accumulates a
+    // snapshot a later attempt can replay and the opened channel stays warm.
+    // #226's 5 s request timeout inside `HidppChannel::send` makes a dead probe
+    // fail fast, so a short bounded retry is cheap.
+    let mut enumerator = Enumerator::default();
+    let mut attempt = 1u8;
+    loop {
+        let (inventories, all_healthy) = enumerator.enumerate_reporting_health().await?;
+        if all_healthy || attempt >= ONESHOT_ATTEMPTS {
+            return Ok(inventories);
+        }
+        debug!(
+            attempt,
+            "one-shot enumerate saw an unhealthy node — retrying"
+        );
+        tokio::time::sleep(ONESHOT_RETRY_DELAY).await;
+        attempt += 1;
+    }
 }
+
+/// Attempts a one-shot [`enumerate`] makes before returning whatever it last
+/// read, when a node keeps coming back unhealthy.
+const ONESHOT_ATTEMPTS: u8 = 4;
+
+/// Delay between one-shot [`enumerate`] retries. A first probe usually wakes an
+/// asleep device, so a short pause lets the next attempt read it cleanly.
+const ONESHOT_RETRY_DELAY: Duration = Duration::from_millis(300);
 
 impl Enumerator {
     /// One enumeration pass, reusing the cache from prior passes. Probes every
@@ -270,6 +300,19 @@ impl Enumerator {
     /// channel is reopened, so a transient HID++ glitch can't masquerade as
     /// "no devices" (#218) — see [`crate::node_ledger`].
     pub async fn enumerate(&mut self) -> Result<Vec<DeviceInventory>, InventoryError> {
+        self.enumerate_reporting_health().await.map(|(inv, _)| inv)
+    }
+
+    /// [`Self::enumerate`] plus whether every probed node answered cleanly this
+    /// pass — `false` if any probe timed out, failed to open, or read short of a
+    /// receiver's pairing count. The polling watcher ignores the flag (the ledger
+    /// already replays a node through a transient miss), but the one-shot
+    /// [`enumerate`] free fn uses it to retry: a fresh `Enumerator` has no ledger
+    /// history to replay, so a transient miss would otherwise surface as an
+    /// empty/partial list (#218).
+    async fn enumerate_reporting_health(
+        &mut self,
+    ) -> Result<(Vec<DeviceInventory>, bool), InventoryError> {
         self.tick = self.tick.wrapping_add(1);
         let tick = self.tick;
         let candidates = enumerate_hidpp_devices().await?;
@@ -336,6 +379,9 @@ impl Enumerator {
 
         let mut inventories = Vec::new();
         let mut outcomes = Vec::new();
+        // Whether every node answered cleanly this pass. Drives the one-shot
+        // `enumerate` retry; the ledger's own per-node replay is unaffected.
+        let mut all_healthy = true;
         for (node, result) in results {
             let probe = if let Ok(probe) = result {
                 probe
@@ -347,6 +393,7 @@ impl Enumerator {
                 warn!(budget = ?PROBE_BUDGET, "device probe timed out — treating as a failed probe");
                 NodeProbe::failed()
             };
+            all_healthy &= probe.healthy;
             outcomes.extend(probe.outcomes);
             let settled = self.ledger.settle(&node, probe.healthy, probe.inventory);
             if settled.evict_channel && self.channels.remove(&node).is_some() {
@@ -357,6 +404,7 @@ impl Enumerator {
         // Nodes that wouldn't open this tick still replay their last snapshot
         // (they have no cached channel to evict).
         for node in open_failures {
+            all_healthy = false;
             let settled = self.ledger.settle(&node, false, None);
             inventories.extend(settled.inventory);
         }
@@ -376,7 +424,7 @@ impl Enumerator {
             }
         }
         self.evict_unseen(&seen_keys);
-        Ok(inventories)
+        Ok((inventories, all_healthy))
     }
 
     /// Drop cache entries for devices not seen this tick, after a short grace so
