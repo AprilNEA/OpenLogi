@@ -70,49 +70,188 @@ pub enum AgentLink {
 /// disappear mid-interaction.
 const INVENTORY_MISS_GRACE: u8 = 2;
 
-/// How many times to retry DPI capability discovery after a transient HID++
-/// error (read timeout, busy device) before marking the device unsupported. A
-/// genuine "feature not supported" reply is permanent and never retried.
-const DPI_LOAD_MAX_ATTEMPTS: u8 = 3;
+/// How many times to retry a device read (DPI capability discovery or a
+/// SmartShift read) after a transient HID++ error (read timeout, busy device)
+/// before giving up. A genuine "feature not supported" reply is permanent and
+/// never retried.
+const LOAD_MAX_ATTEMPTS: u8 = 3;
 
-/// Per-device DPI capability loading state.
+/// Lazy per-device load state for a background HID++ read: unqueried, in flight,
+/// resolved, transiently failed (retryable on re-select), or permanently
+/// unsupported. Shared by DPI capability discovery and SmartShift reads through
+/// [`LazyDeviceData`]; the two differ only in payload type `T` and in which
+/// errors count as permanent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DpiStatus {
+pub enum Load<T> {
     /// The selected device has not been queried yet.
     Unknown,
     /// A background HID++ read is in flight.
     Loading,
-    /// The device reported its current DPI and supported values.
-    Ready(DpiInfo),
-    /// Transient discovery errors (read timeouts, busy device) exhausted the
-    /// retry budget. Distinct from [`Self::Unsupported`] because the device may
-    /// well support DPI — re-selecting it (see [`AppState::set_current_device`])
+    /// The device reported its value.
+    Ready(T),
+    /// Transient errors (read timeouts, busy device) exhausted the retry budget.
+    /// Distinct from [`Self::Unsupported`] because the device may well support
+    /// the feature — re-selecting it (see [`AppState::set_current_device`])
     /// grants a fresh attempt.
     Failed(String),
-    /// The device genuinely does not support the AdjustableDpi feature; never
-    /// retried.
+    /// The device genuinely does not support the feature; never retried.
     Unsupported(String),
 }
 
-/// Per-device SmartShift (`0x2111`) loading state. Mirrors [`DpiStatus`]:
-/// lazily loaded because the HID++ read must not block device switching or
-/// rendering. Unlike DPI presets, the resolved config is *not* persisted to
-/// `config.toml` — the device stores wheel mode / threshold / torque in its
-/// own non-volatile memory, so the GUI only ever reads and writes the device.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SmartShiftLoad {
-    /// The selected device has not been queried yet.
-    Unknown,
-    /// A background HID++ read is in flight.
-    Loading,
-    /// The device reported its current SmartShift configuration.
-    Ready(SmartShiftStatus),
-    /// Transient read errors exhausted the retry budget; retryable on
-    /// re-select.
-    Failed(String),
-    /// The device genuinely does not expose SmartShift (`0x2111`); never
-    /// retried.
-    Unsupported(String),
+/// Per-device DPI capability load state. See [`Load`].
+pub type DpiStatus = Load<DpiInfo>;
+
+/// Per-device SmartShift (`0x2111`) config load state. See [`Load`]. Unlike DPI
+/// presets, the resolved config is *not* persisted to `config.toml` — the device
+/// stores wheel mode / threshold / torque in its own non-volatile memory, so the
+/// GUI only ever reads and writes the device.
+pub type SmartShiftLoad = Load<SmartShiftStatus>;
+
+/// Per-device lazy-load cache for a background HID++ read, keyed by
+/// [`DeviceRecord::config_key`]. Holds each device's [`Load`] state plus its
+/// transient-retry counter, and carries the stale-route guard + retry-budget
+/// policy once, for both DPI and SmartShift.
+struct LazyDeviceData<T> {
+    by_device: BTreeMap<String, Load<T>>,
+    /// Consecutive transient read failures per device, capped by
+    /// [`LOAD_MAX_ATTEMPTS`] before the device settles on [`Load::Failed`].
+    attempts: BTreeMap<String, u8>,
+}
+
+// Manual `Default` (not derived): a derive would demand `T: Default`, but the
+// empty maps need nothing of `T`.
+impl<T> Default for LazyDeviceData<T> {
+    fn default() -> Self {
+        Self {
+            by_device: BTreeMap::new(),
+            attempts: BTreeMap::new(),
+        }
+    }
+}
+
+impl<T: Clone> LazyDeviceData<T> {
+    /// The recorded state for `key`, or [`Load::Unknown`] if never queried.
+    fn status(&self, key: &str) -> Load<T> {
+        self.by_device.get(key).cloned().unwrap_or(Load::Unknown)
+    }
+
+    /// The raw recorded entry for `key`, for callers that match on `Ready`
+    /// without cloning the payload.
+    fn get(&self, key: &str) -> Option<&Load<T>> {
+        self.by_device.get(key)
+    }
+
+    /// Whether `key` still needs a read (nothing recorded yet). Cheaper than
+    /// cloning [`status`](Self::status) on the per-frame render path.
+    fn unqueried(&self, key: &str) -> bool {
+        !self.by_device.contains_key(key)
+    }
+
+    /// Mark a read as in flight for `key`.
+    fn mark_loading(&mut self, key: &str) {
+        self.by_device.insert(key.to_string(), Load::Loading);
+    }
+
+    /// Reset a stuck `Loading` for `key` back to unqueried — the read worker
+    /// vanished (e.g. panicked) without delivering a result, so the next render
+    /// re-issues instead of wedging the device on "Reading…".
+    fn clear_loading(&mut self, key: &str) {
+        if matches!(self.by_device.get(key), Some(Load::Loading)) {
+            self.by_device.remove(key);
+        }
+    }
+
+    /// Drop `key`'s recorded state and retry budget so the next render re-reads.
+    /// Backs the "click to retry" affordance and the re-select-grants-a-retry
+    /// rule for a [`Load::Failed`] device.
+    fn retry(&mut self, key: &str) {
+        self.by_device.remove(key);
+        self.attempts.remove(key);
+    }
+
+    /// Forget `key` entirely — the device disappeared, or reconnected on a new
+    /// route, so its cached state (keyed to the dead route) is stale.
+    fn remove(&mut self, key: &str) {
+        self.by_device.remove(key);
+        self.attempts.remove(key);
+    }
+
+    /// Forget every device the `present` predicate rejects (not in the live set).
+    fn retain_present(&mut self, present: impl Fn(&str) -> bool) {
+        self.by_device.retain(|key, _| present(key.as_str()));
+        self.attempts.retain(|key, _| present(key.as_str()));
+    }
+
+    /// Optimistically record a resolved value with no read involved — e.g. a
+    /// just-written SmartShift config, shown until a confirming re-read replaces
+    /// it. Leaves the retry budget untouched.
+    fn set_ready(&mut self, key: String, value: T) {
+        self.by_device.insert(key, Load::Ready(value));
+    }
+
+    /// Store a read result under the stale-route guard and the transient-retry /
+    /// permanent-unsupported policy. `matches_route` is whether a live device
+    /// still holds `key` *on the route the read targeted*; `still_present` is
+    /// whether `key` exists at all. Returns the resolved value when the result
+    /// settled to [`Load::Ready`], so the caller can run a side effect (the DPI
+    /// panel seeds the shared current value). `label` tags the debug logs.
+    fn store(
+        &mut self,
+        key: String,
+        result: Result<T, WriteError>,
+        is_permanent: impl Fn(&WriteError) -> bool,
+        matches_route: bool,
+        still_present: bool,
+        label: &'static str,
+    ) -> Option<T> {
+        if !matches_route {
+            debug!(key, label, "stale device read result ignored");
+            // The device reconnected on a different route mid-read: drop the
+            // orphaned `Loading` marker so the next render re-reads against the
+            // live route instead of spinning on "Reading…" forever.
+            if still_present {
+                self.by_device.remove(&key);
+            }
+            return None;
+        }
+
+        let status = match result {
+            Ok(value) => {
+                self.attempts.remove(&key);
+                Load::Ready(value)
+            }
+            // A genuine "feature not supported" reply never changes — record it
+            // and stop probing.
+            Err(error) if is_permanent(&error) => {
+                self.attempts.remove(&key);
+                Load::Unsupported(error.to_string())
+            }
+            // Transient failures get a few more tries: clear the status so the
+            // next render re-reads, until the budget runs out, then settle on
+            // `Failed` (retryable on re-select) rather than `Unsupported`.
+            Err(error) => {
+                let attempts = self.attempts.entry(key.clone()).or_insert(0);
+                *attempts = attempts.saturating_add(1);
+                if *attempts < LOAD_MAX_ATTEMPTS {
+                    debug!(key, attempts = *attempts, error = %error, label, "transient device read error — will retry");
+                    self.by_device.remove(&key);
+                    return None;
+                }
+                self.attempts.remove(&key);
+                Load::Failed(error.to_string())
+            }
+        };
+
+        // Clone out the resolved value (cheap; once per completed read) before
+        // the status moves into the map, so the caller can seed derived state
+        // without re-borrowing `self`.
+        let resolved = match &status {
+            Load::Ready(value) => Some(value.clone()),
+            _ => None,
+        };
+        self.by_device.insert(key, status);
+        resolved
+    }
 }
 
 pub struct AppState {
@@ -144,28 +283,18 @@ pub struct AppState {
     /// [`DeviceConfig::bindings`]: openlogi_core::config::DeviceConfig::bindings
     pub gesture_bindings: BTreeMap<GestureDirection, Action>,
     pub dpi: u32,
-    /// DPI capability state keyed by [`DeviceRecord::config_key`]. Loaded
+    /// DPI capability load state keyed by [`DeviceRecord::config_key`]. Loaded
     /// lazily because HID++ reads must not block device switching or rendering.
-    pub dpi_by_device: BTreeMap<String, DpiStatus>,
+    dpi_data: LazyDeviceData<DpiInfo>,
     /// Consecutive inventory snapshots that omitted a previously-known device,
     /// keyed by [`DeviceRecord::config_key`]. Used to debounce transient HID++
     /// probe misses without hiding a real disconnect forever.
     inventory_misses: BTreeMap<String, u8>,
-    /// Consecutive failed DPI discovery attempts, keyed by
-    /// [`DeviceRecord::config_key`]. Lets a transient read error retry a few
-    /// times (see [`DPI_LOAD_MAX_ATTEMPTS`]) instead of sticking the device on
-    /// [`DpiStatus::Unsupported`] forever.
-    dpi_load_attempts: BTreeMap<String, u8>,
-    /// SmartShift (`0x2111`) configuration state keyed by
+    /// SmartShift (`0x2111`) config load state keyed by
     /// [`DeviceRecord::config_key`]. Loaded lazily on the same pattern as
-    /// [`Self::dpi_by_device`]; the device persists the values itself, so this
-    /// is a read/write cache, not a source of truth saved to disk. Private so
-    /// all access goes through the accessor methods below (`current_smartshift_*`,
-    /// `store_smartshift_status`), which enforce the stale-result and retry rules.
-    smartshift_by_device: BTreeMap<String, SmartShiftLoad>,
-    /// Consecutive failed SmartShift read attempts, keyed by
-    /// [`DeviceRecord::config_key`] — mirrors [`Self::dpi_load_attempts`].
-    smartshift_load_attempts: BTreeMap<String, u8>,
+    /// [`Self::dpi_data`]; the device persists the values itself, so this is a
+    /// read/write cache, not a source of truth saved to disk.
+    smartshift_data: LazyDeviceData<SmartShiftStatus>,
     /// Glow-overlay cache paths we've already spawned generation for, so each
     /// `(depot, colour)` is attempted exactly once — even when the depot ships
     /// no mask and no file is ever written (otherwise the worker's
@@ -230,11 +359,9 @@ impl AppState {
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),
             dpi: DEFAULT_DPI,
-            dpi_by_device: BTreeMap::new(),
+            dpi_data: LazyDeviceData::default(),
             inventory_misses: BTreeMap::new(),
-            dpi_load_attempts: BTreeMap::new(),
-            smartshift_by_device: BTreeMap::new(),
-            smartshift_load_attempts: BTreeMap::new(),
+            smartshift_data: LazyDeviceData::default(),
             glow_attempted: HashSet::new(),
             glow_ready: HashSet::new(),
             smartshift_pending_confirm: std::collections::BTreeSet::new(),
@@ -285,7 +412,7 @@ impl AppState {
     /// The cached DPI-discovery status for `key`, for the diagnostics report.
     #[must_use]
     pub fn dpi_status_for(&self, key: &str) -> Option<DpiStatus> {
-        self.dpi_by_device.get(key).cloned()
+        self.dpi_data.get(key).cloned()
     }
 
     /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
@@ -442,19 +569,16 @@ impl AppState {
 
         self.device_list = merged_list;
         for key in &rerouted {
-            self.dpi_by_device.remove(key);
-            self.dpi_load_attempts.remove(key);
-            self.smartshift_by_device.remove(key);
-            self.smartshift_load_attempts.remove(key);
+            self.dpi_data.remove(key);
+            self.smartshift_data.remove(key);
         }
-        self.dpi_by_device
-            .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
-        self.dpi_load_attempts
-            .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
-        self.smartshift_by_device
-            .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
-        self.smartshift_load_attempts
-            .retain(|key, _| self.device_list.iter().any(|r| r.config_key == *key));
+        let present = |key: &str| {
+            self.device_list
+                .iter()
+                .any(|r| r.config_key.as_str() == key)
+        };
+        self.dpi_data.retain_present(present);
+        self.smartshift_data.retain_present(present);
         self.current_device = new_index;
         // The active device may have changed (selection fell back to index 0
         // when the previous one vanished); re-seed the displayed DPI so it
@@ -522,16 +646,11 @@ impl AppState {
         // A device left in `Failed` (transient read errors exhausted its retry
         // budget) gets one fresh attempt each time it is re-selected.
         if let Some(key) = self.current_record().map(|r| r.config_key.clone()) {
-            if matches!(self.dpi_by_device.get(&key), Some(DpiStatus::Failed(_))) {
-                self.dpi_by_device.remove(&key);
-                self.dpi_load_attempts.remove(&key);
+            if matches!(self.dpi_data.get(&key), Some(Load::Failed(_))) {
+                self.dpi_data.retry(&key);
             }
-            if matches!(
-                self.smartshift_by_device.get(&key),
-                Some(SmartShiftLoad::Failed(_))
-            ) {
-                self.smartshift_by_device.remove(&key);
-                self.smartshift_load_attempts.remove(&key);
+            if matches!(self.smartshift_data.get(&key), Some(Load::Failed(_))) {
+                self.smartshift_data.retry(&key);
             }
         }
         // `self.dpi` is the active device's value; adopt the newly-selected
@@ -581,9 +700,9 @@ impl AppState {
     /// DPI capability status for the active device.
     #[must_use]
     pub fn current_dpi_status(&self) -> DpiStatus {
-        self.current_record()
-            .and_then(|record| self.dpi_by_device.get(&record.config_key).cloned())
-            .unwrap_or(DpiStatus::Unknown)
+        self.current_record().map_or(DpiStatus::Unknown, |record| {
+            self.dpi_data.status(&record.config_key)
+        })
     }
 
     /// Whether the active device still needs a DPI read (no status recorded —
@@ -592,7 +711,7 @@ impl AppState {
     #[must_use]
     pub fn current_dpi_unqueried(&self) -> bool {
         self.current_record()
-            .is_some_and(|record| !self.dpi_by_device.contains_key(&record.config_key))
+            .is_some_and(|record| self.dpi_data.unqueried(&record.config_key))
     }
 
     /// The active device's known DPI, falling back to [`DEFAULT_DPI`] until its
@@ -600,7 +719,7 @@ impl AppState {
     #[must_use]
     fn dpi_for_current(&self) -> u32 {
         self.current_record()
-            .and_then(|record| self.dpi_by_device.get(&record.config_key))
+            .and_then(|record| self.dpi_data.get(&record.config_key))
             .and_then(|status| match status {
                 DpiStatus::Ready(info) => Some(u32::from(info.current)),
                 _ => None,
@@ -610,17 +729,14 @@ impl AppState {
 
     /// Mark DPI capability discovery as in flight for `key`.
     pub fn mark_dpi_loading(&mut self, key: &str) {
-        self.dpi_by_device
-            .insert(key.to_string(), DpiStatus::Loading);
+        self.dpi_data.mark_loading(key);
     }
 
     /// Reset a stuck `Loading` for `key` back to `Unknown`. Called when the
     /// discovery worker vanished without delivering a result (e.g. it panicked),
     /// so the device isn't wedged on "Reading…" with no path to retry.
     pub fn clear_dpi_loading(&mut self, key: &str) {
-        if matches!(self.dpi_by_device.get(key), Some(DpiStatus::Loading)) {
-            self.dpi_by_device.remove(key);
-        }
+        self.dpi_data.clear_loading(key);
     }
 
     /// Drop the active device's recorded DPI status so the next render
@@ -629,8 +745,7 @@ impl AppState {
     /// carousel has a single device (re-selecting it is a no-op).
     pub fn retry_active_dpi(&mut self) {
         if let Some(key) = self.current_record().map(|r| r.config_key.clone()) {
-            self.dpi_by_device.remove(&key);
-            self.dpi_load_attempts.remove(&key);
+            self.dpi_data.retry(&key);
         }
     }
 
@@ -643,73 +758,36 @@ impl AppState {
         route: &DeviceRoute,
         result: Result<DpiInfo, WriteError>,
     ) {
-        let still_matches = self
+        let is_active = self.current_record().map(|r| r.config_key.as_str()) == Some(key.as_str());
+        let matches_route = self
             .device_list
             .iter()
             .any(|record| record.config_key == key && record.route.as_ref() == Some(route));
-        if !still_matches {
-            debug!(key, ?route, "stale DPI capability result ignored");
-            // If the device is still present but on a different route (it
-            // reconnected mid-read), drop the orphaned `Loading` marker so the
-            // next render re-discovers against the live route instead of
-            // spinning on "Reading…" forever.
-            if self
-                .device_list
-                .iter()
-                .any(|record| record.config_key == key)
-            {
-                self.dpi_by_device.remove(&key);
-            }
-            return;
+        let still_present = self
+            .device_list
+            .iter()
+            .any(|record| record.config_key == key);
+        // Only the active device owns the shared `self.dpi`; a result landing for
+        // a background device after a carousel switch must not clobber the
+        // visible value.
+        if let Some(info) = self.dpi_data.store(
+            key,
+            result,
+            dpi_error_is_permanent,
+            matches_route,
+            still_present,
+            "DPI",
+        ) && is_active
+        {
+            self.dpi = u32::from(info.current);
         }
-
-        let is_active = self.current_record().map(|r| r.config_key.as_str()) == Some(key.as_str());
-        let status = match result {
-            Ok(info) => {
-                // Only the active device owns the shared `self.dpi`; a result
-                // landing for a background device after a carousel switch must
-                // not clobber the visible value.
-                if is_active {
-                    self.dpi = u32::from(info.current);
-                }
-                self.dpi_load_attempts.remove(&key);
-                DpiStatus::Ready(info)
-            }
-            // A genuine "feature not supported" reply will never change — record
-            // it and stop probing.
-            Err(error) if dpi_error_is_permanent(&error) => {
-                self.dpi_load_attempts.remove(&key);
-                DpiStatus::Unsupported(error.to_string())
-            }
-            // Timeouts and other transient failures get a few more tries: clear
-            // the status back to `Unknown` so the next render re-triggers the
-            // read, until the attempt budget runs out, then settle on `Failed`
-            // (retryable on re-select) rather than the permanent `Unsupported`.
-            Err(error) => {
-                let attempts = self.dpi_load_attempts.entry(key.clone()).or_insert(0);
-                *attempts = attempts.saturating_add(1);
-                if *attempts < DPI_LOAD_MAX_ATTEMPTS {
-                    debug!(
-                        key,
-                        attempts = *attempts,
-                        error = %error,
-                        "transient DPI read error — will retry"
-                    );
-                    self.dpi_by_device.remove(&key);
-                    return;
-                }
-                self.dpi_load_attempts.remove(&key);
-                DpiStatus::Failed(error.to_string())
-            }
-        };
-        self.dpi_by_device.insert(key, status);
     }
 
     /// DPI capabilities for the active device, if discovery succeeded.
     #[must_use]
     pub fn active_dpi_capabilities(&self) -> Option<&DpiCapabilities> {
         self.current_record()
-            .and_then(|record| self.dpi_by_device.get(&record.config_key))
+            .and_then(|record| self.dpi_data.get(&record.config_key))
             .and_then(|status| match status {
                 DpiStatus::Ready(info) => Some(&info.capabilities),
                 DpiStatus::Unknown
@@ -730,8 +808,9 @@ impl AppState {
     #[must_use]
     pub fn current_smartshift_status(&self) -> SmartShiftLoad {
         self.current_record()
-            .and_then(|record| self.smartshift_by_device.get(&record.config_key).cloned())
-            .unwrap_or(SmartShiftLoad::Unknown)
+            .map_or(SmartShiftLoad::Unknown, |record| {
+                self.smartshift_data.status(&record.config_key)
+            })
     }
 
     /// Whether the active device still needs a SmartShift read (no status
@@ -740,7 +819,7 @@ impl AppState {
     #[must_use]
     pub fn current_smartshift_unqueried(&self) -> bool {
         self.current_record()
-            .is_some_and(|record| !self.smartshift_by_device.contains_key(&record.config_key))
+            .is_some_and(|record| self.smartshift_data.unqueried(&record.config_key))
     }
 
     /// The active device's resolved SmartShift config, if the read succeeded.
@@ -749,7 +828,7 @@ impl AppState {
     #[must_use]
     pub fn current_smartshift_ready(&self) -> Option<SmartShiftStatus> {
         self.current_record()
-            .and_then(|record| self.smartshift_by_device.get(&record.config_key))
+            .and_then(|record| self.smartshift_data.get(&record.config_key))
             .and_then(|status| match status {
                 SmartShiftLoad::Ready(s) => Some(*s),
                 SmartShiftLoad::Unknown
@@ -761,19 +840,13 @@ impl AppState {
 
     /// Mark SmartShift discovery as in flight for `key`.
     pub fn mark_smartshift_loading(&mut self, key: &str) {
-        self.smartshift_by_device
-            .insert(key.to_string(), SmartShiftLoad::Loading);
+        self.smartshift_data.mark_loading(key);
     }
 
     /// Reset a stuck `Loading` for `key` back to `Unknown` — called when the
     /// read worker vanished without delivering a result.
     pub fn clear_smartshift_loading(&mut self, key: &str) {
-        if matches!(
-            self.smartshift_by_device.get(key),
-            Some(SmartShiftLoad::Loading)
-        ) {
-            self.smartshift_by_device.remove(key);
-        }
+        self.smartshift_data.clear_loading(key);
     }
 
     /// Drop the active device's recorded SmartShift status so the next render
@@ -781,8 +854,7 @@ impl AppState {
     /// [`SmartShiftLoad::Failed`] device.
     pub fn retry_active_smartshift(&mut self) {
         if let Some(key) = self.current_record().map(|r| r.config_key.clone()) {
-            self.smartshift_by_device.remove(&key);
-            self.smartshift_load_attempts.remove(&key);
+            self.smartshift_data.retry(&key);
         }
     }
 
@@ -795,48 +867,22 @@ impl AppState {
         route: &DeviceRoute,
         result: Result<SmartShiftStatus, WriteError>,
     ) {
-        let still_matches = self
+        let matches_route = self
             .device_list
             .iter()
             .any(|record| record.config_key == key && record.route.as_ref() == Some(route));
-        if !still_matches {
-            debug!(key, ?route, "stale SmartShift result ignored");
-            if self.device_list.iter().any(|r| r.config_key == key) {
-                self.smartshift_by_device.remove(&key);
-            }
-            return;
-        }
-
-        let status = match result {
-            Ok(status) => {
-                self.smartshift_load_attempts.remove(&key);
-                SmartShiftLoad::Ready(status)
-            }
-            Err(error) if smartshift_error_is_permanent(&error) => {
-                self.smartshift_load_attempts.remove(&key);
-                SmartShiftLoad::Unsupported(error.to_string())
-            }
-            Err(error) => {
-                let attempts = self
-                    .smartshift_load_attempts
-                    .entry(key.clone())
-                    .or_insert(0);
-                *attempts = attempts.saturating_add(1);
-                if *attempts < DPI_LOAD_MAX_ATTEMPTS {
-                    debug!(
-                        key,
-                        attempts = *attempts,
-                        error = %error,
-                        "transient SmartShift read error — will retry"
-                    );
-                    self.smartshift_by_device.remove(&key);
-                    return;
-                }
-                self.smartshift_load_attempts.remove(&key);
-                SmartShiftLoad::Failed(error.to_string())
-            }
-        };
-        self.smartshift_by_device.insert(key, status);
+        let still_present = self
+            .device_list
+            .iter()
+            .any(|record| record.config_key == key);
+        self.smartshift_data.store(
+            key,
+            result,
+            smartshift_error_is_permanent,
+            matches_route,
+            still_present,
+            "SmartShift",
+        );
     }
 
     /// Write a full SmartShift configuration to the active device (best-effort,
@@ -868,13 +914,13 @@ impl AppState {
         // re-read: the write is fire-and-forget, so a sleeping device that
         // rejected or timed it out would otherwise leave this optimistic value
         // showing as "applied" forever (Ready blocks any further read).
-        self.smartshift_by_device.insert(
+        self.smartshift_data.set_ready(
             key.clone(),
-            SmartShiftLoad::Ready(SmartShiftStatus {
+            SmartShiftStatus {
                 mode,
                 auto_disengage,
                 tunable_torque,
-            }),
+            },
         );
         self.smartshift_pending_confirm.insert(key);
     }

@@ -12,7 +12,7 @@
 //!   own widgets — which is what keeps a popover from rendering white under
 //!   an otherwise dark UI (see `main.rs`'s appearance wiring).
 
-use gpui::{App, Hsla, rgb};
+use gpui::{App, Hsla, Styled, hsla, rgb};
 use gpui_component::ActiveTheme as _;
 
 /// Primary action / selection blue. Brand colour, identical in both modes —
@@ -97,5 +97,73 @@ pub fn palette(cx: &App) -> Palette {
         Palette::dark()
     } else {
         Palette::light()
+    }
+}
+
+/// [`ACCENT_BLUE`] as an [`Hsla`] — the selection accent for borders and fills
+/// on selectable controls, so callers stop re-`rgb()`-ing the brand constant.
+#[must_use]
+pub fn accent() -> Hsla {
+    rgb(ACCENT_BLUE).into()
+}
+
+/// Faint accent fill marking a *selected* row / chip — tinted, not painted, so
+/// it reads on both palettes while the label stays in `text_primary` (a blue
+/// label fails AA contrast on the light surface). Hand-matched to [`accent`]
+/// (hue 0.6 / sat 0.9 / light 0.6); [`tests::accent_tint_matches_accent`] pins
+/// that it stays derived from the brand colour.
+#[must_use]
+pub fn accent_tint() -> Hsla {
+    hsla(0.6, 0.9, 0.6, 0.12)
+}
+
+/// [`accent_tint`] deepened for hover on an already-selected row.
+#[must_use]
+pub fn accent_tint_hover() -> Hsla {
+    hsla(0.6, 0.9, 0.6, 0.18)
+}
+
+/// Chaining helpers expressing the single "selected" decision — accent border
+/// plus a faint accent fill — instead of every pill / chip / row hand-rolling
+/// the `if selected { accent } else { border }` ternary (which had drifted into
+/// three inconsistent dialects, one of them blue-on-white). Blanket-implemented
+/// for every [`Styled`] element, the way gpui-component extends styling.
+pub trait SelectableStyle: Styled + Sized {
+    /// A 1px accent border when `selected`, the neutral hairline otherwise.
+    #[must_use]
+    fn selected_border(self, selected: bool, pal: Palette) -> Self {
+        self.border_1()
+            .border_color(if selected { accent() } else { pal.border })
+    }
+
+    /// A faint accent fill when `selected`; leaves the background untouched
+    /// otherwise so the caller's resting fill shows through.
+    #[must_use]
+    fn selected_fill(self, selected: bool) -> Self {
+        if selected {
+            self.bg(accent_tint())
+        } else {
+            self
+        }
+    }
+}
+
+impl<E: Styled> SelectableStyle for E {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `accent_tint` is hand-written `hsla` (gpui's `rgb→hsla` isn't `const`),
+    /// so pin that it stays derived from `ACCENT_BLUE` rather than drifting into
+    /// an arbitrary blue — selected chips must match the accent borders and text
+    /// they sit beside.
+    #[test]
+    fn accent_tint_matches_accent() {
+        let a = accent();
+        let t = accent_tint();
+        assert!((a.h - t.h).abs() < 0.02, "hue {} vs {}", a.h, t.h);
+        assert!((a.s - t.s).abs() < 0.05, "sat {} vs {}", a.s, t.s);
+        assert!((a.l - t.l).abs() < 0.05, "light {} vs {}", a.l, t.l);
     }
 }

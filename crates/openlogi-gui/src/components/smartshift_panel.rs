@@ -23,8 +23,10 @@ use gpui_component::{
 };
 use openlogi_hid::{AUTO_DISENGAGE_PERMANENT, DeviceRoute, SmartShiftMode, SmartShiftStatus};
 
+use crate::components::device_read::issue_device_read;
+use crate::components::status::{retry_line, status_line};
 use crate::state::{AppState, SmartShiftLoad};
-use crate::theme::{self, ACCENT_BLUE, Palette};
+use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
 
 /// Friendly slider range for the `autoDisengage` threshold. The wire field is
 /// `0x01`–`0xFE` (0.25 turn/s steps), but realistic scroll speeds sit well
@@ -122,33 +124,14 @@ impl SmartShiftPanel {
     /// so a permanent `FeatureUnsupported` reaches `store_smartshift_status`
     /// intact and the panel stops re-probing instead of retrying every reselect.
     fn issue_smartshift_read(key: String, route: DeviceRoute, cx: &mut Context<Self>) {
-        let sender = cx.global::<AppState>().ipc_sender();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if sender
-            .send(crate::ipc_client::Command::ReadSmartShift(
-                route.clone(),
-                tx,
-            ))
-            .is_err()
-        {
-            cx.update_global::<AppState, _>(|state, _| state.clear_smartshift_loading(&key));
-            return;
-        }
-        cx.spawn(async move |_panel, cx| match rx.await {
-            Ok(result) => {
-                cx.update_global::<AppState, _>(|state, cx| {
-                    state.store_smartshift_status(key, &route, result);
-                    cx.refresh_windows();
-                });
-            }
-            Err(_) => {
-                cx.update_global::<AppState, _>(|state, cx| {
-                    state.clear_smartshift_loading(&key);
-                    cx.refresh_windows();
-                });
-            }
-        })
-        .detach();
+        issue_device_read(
+            cx,
+            key,
+            route,
+            crate::ipc_client::Command::ReadSmartShift,
+            AppState::store_smartshift_status,
+            AppState::clear_smartshift_loading,
+        );
     }
 
     /// The interactive body shown once the device's SmartShift config resolves.
@@ -296,9 +279,15 @@ impl Render for SmartShiftPanel {
             SmartShiftLoad::Loading | SmartShiftLoad::Unknown => {
                 status_line(tr!("Reading SmartShift settings…"), pal)
             }
-            SmartShiftLoad::Failed(_) => {
-                retry_line(tr!("Couldn't read SmartShift — click to retry."), pal)
-            }
+            SmartShiftLoad::Failed(_) => retry_line(
+                "smartshift-retry",
+                tr!("Couldn't read SmartShift — click to retry."),
+                pal,
+                |cx| {
+                    cx.update_global::<AppState, _>(|state, _| state.retry_active_smartshift());
+                    cx.refresh_windows();
+                },
+            ),
             SmartShiftLoad::Unsupported(_) => {
                 status_line(tr!("This device does not support SmartShift."), pal)
             }
@@ -346,23 +335,11 @@ fn mode_pill(
         .px_3()
         .py_1()
         .rounded_md()
-        .border_1()
-        .border_color(if selected {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.border
-        })
-        .bg(if selected {
-            pal.surface_hover
-        } else {
-            pal.surface
-        })
+        .selected_border(selected, pal)
+        .bg(pal.surface)
+        .selected_fill(selected)
         .text_sm()
-        .text_color(if selected {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.text_primary
-        })
+        .text_color(pal.text_primary)
         .cursor_pointer()
         .hover(|s| s.bg(pal.surface_hover))
         .child(label)
@@ -402,18 +379,10 @@ fn permanent_toggle(
         .px_2()
         .py_1()
         .rounded_md()
-        .border_1()
-        .border_color(if on {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.border
-        })
+        .selected_border(on, pal)
+        .selected_fill(on)
         .text_xs()
-        .text_color(if on {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.text_muted
-        })
+        .text_color(if on { pal.text_primary } else { pal.text_muted })
         .cursor_pointer()
         .child(label)
         .on_click(move |_event, _window, cx| {
@@ -437,30 +406,6 @@ fn disabled_track(pal: Palette) -> AnyElement {
         .h(px(6.))
         .rounded_full()
         .bg(pal.border)
-        .into_any_element()
-}
-
-fn status_line(text: SharedString, pal: Palette) -> AnyElement {
-    div()
-        .text_sm()
-        .text_color(pal.text_muted)
-        .child(text)
-        .into_any_element()
-}
-
-/// A `Failed`-state line that re-arms the SmartShift read on click — the only
-/// recovery path when the carousel holds a single device.
-fn retry_line(text: SharedString, pal: Palette) -> AnyElement {
-    div()
-        .id("smartshift-retry")
-        .text_sm()
-        .text_color(rgb(ACCENT_BLUE))
-        .hover(|s| s.text_color(pal.text_primary))
-        .child(text)
-        .on_click(|_event, _window, cx| {
-            cx.update_global::<AppState, _>(|state, _| state.retry_active_smartshift());
-            cx.refresh_windows();
-        })
         .into_any_element()
 }
 
