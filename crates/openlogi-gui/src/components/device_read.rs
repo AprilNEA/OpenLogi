@@ -36,7 +36,14 @@ pub fn issue_device_read<P, T>(
     let sender = cx.global::<AppState>().ipc_sender();
     let (tx, rx) = oneshot::channel();
     if sender.send(make_command(route.clone(), tx)).is_err() {
-        cx.update_global::<AppState, _>(|state, _| clear(state, &key));
+        // Repaint here too: the async branches below refresh after clearing the
+        // marker, so a channel that's already broken when the read is issued
+        // must not leave the panel stuck on "Reading…" until an unrelated event
+        // redraws it. (Both original panels missed this on the send-error path.)
+        cx.update_global::<AppState, _>(|state, cx| {
+            clear(state, &key);
+            cx.refresh_windows();
+        });
         return;
     }
     cx.spawn(async move |_panel, cx| {
