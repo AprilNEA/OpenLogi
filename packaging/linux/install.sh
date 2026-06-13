@@ -54,14 +54,19 @@ BINDIR="${PREFIX}/bin"
 # ── locate build output ────────────────────────────────────────────────────────
 
 # Prefer a release build next to the script (typical: run from the repo root
-# after `cargo build --release`).
+# after `cargo build --release`). Release tarballs place the same binaries under
+# ./bin so the archive can be installed without a Cargo checkout.
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="${REPO_ROOT}/target/release"
+if [ ! -x "${BUILD_DIR}/openlogi" ] && [ -x "${REPO_ROOT}/bin/openlogi" ]; then
+    BUILD_DIR="${REPO_ROOT}/bin"
+fi
 
 for bin in openlogi openlogi-gui openlogi-agent; do
     if [ ! -x "${BUILD_DIR}/${bin}" ]; then
         echo "Error: ${BUILD_DIR}/${bin} not found." >&2
-        echo "Build first: cargo build --release" >&2
+        echo "Build first with: cargo build --release" >&2
+        echo "Or install from an OpenLogi Linux release tarball." >&2
         exit 1
     fi
 done

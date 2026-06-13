@@ -14,15 +14,7 @@ pub async fn run(_args: ListArgs) -> Result<()> {
         println!("No Logitech HID++ devices found.");
         println!();
         println!("Notes:");
-        println!("  - On macOS, quit Logi Options+ first — both apps fight over HID++ access.");
-        println!(
-            "  - A Bluetooth-direct mouse (e.g. Lift, Signature) needs Input Monitoring \
-             permission: System Settings → Privacy & Security → Input Monitoring."
-        );
-        println!(
-            "  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548); other \
-             receivers (Unifying) aren't surfaced yet."
-        );
+        print_no_devices_notes();
         std::process::exit(2);
     }
 
@@ -34,6 +26,32 @@ pub async fn run(_args: ListArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn print_no_devices_notes() {
+    println!(
+        "  - Plug in a Logi Bolt or Unifying receiver, or pair/connect a Bluetooth Logitech device."
+    );
+    println!(
+        "  - Install the Linux udev rules from packaging/linux/udev/70-openlogi.rules \
+         so your user can access /dev/hidraw* and /dev/uinput."
+    );
+    println!("  - Quit Solaar or any other Logitech manager before starting OpenLogi.");
+}
+
+#[cfg(target_os = "macos")]
+fn print_no_devices_notes() {
+    println!("  - Quit Logi Options+ first — both apps fight over HID++ access.");
+    println!(
+        "  - A Bluetooth-direct mouse (e.g. Lift, Signature) needs Input Monitoring \
+         permission: System Settings → Privacy & Security → Input Monitoring."
+    );
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn print_no_devices_notes() {
+    println!("  - Connect a supported Logitech HID++ receiver or direct device.");
 }
 
 fn print_inventory(inv: &DeviceInventory) {

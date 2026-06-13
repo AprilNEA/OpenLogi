@@ -142,23 +142,28 @@ pub fn open(cx: &mut App) {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
 
-        div()
-            .size_full()
-            .bg(pal.bg)
-            .text_color(pal.text_primary)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
-            .child(
-                Settings::new("settings")
-                    .sidebar_width(px(210.))
-                    .page(general_page(self.sensitivity_slider.clone()))
-                    .page(permissions_page(pal))
-                    .page(language_page(self.language_select.clone())),
-            )
+        crate::window_chrome::frame(
+            "Settings",
+            div()
+                .size_full()
+                .bg(pal.bg)
+                .text_color(pal.text_primary)
+                .on_action(|_: &CloseWindow, window, _| window.remove_window())
+                .on_action(|_: &Minimize, window, _| window.minimize_window())
+                .on_action(|_: &Zoom, window, _| window.zoom_window())
+                .child(
+                    Settings::new("settings")
+                        .sidebar_width(px(210.))
+                        .page(general_page(self.sensitivity_slider.clone()))
+                        .page(permissions_page(pal))
+                        .page(language_page(self.language_select.clone())),
+                ),
+            window,
+            cx,
+        )
     }
 }
 
@@ -302,10 +307,10 @@ fn permissions_page(pal: Palette) -> SettingPage {
                 let field = gpui_component::v_flex().gap_1().child(status_badge(status));
                 let hint = match status {
                     PermissionStatus::Denied => Some(tr!(
-                        "OpenLogi needs write access to /dev/uinput (for button \
-                         remapping) and read/write access to /dev/hidraw* (for HID++ \
-                         communication). Install the OpenLogi udev rules to grant \
-                         access — see the Linux install guide."
+                        "OpenLogi needs write access to /dev/uinput, read/write \
+                         access to /dev/hidraw*, and read access to Logitech \
+                         /dev/input/event* mouse nodes. Install the OpenLogi udev \
+                         rules to grant access — see the Linux install guide."
                     )),
                     PermissionStatus::Unknown => Some(tr!(
                         "No Logitech device detected. Connect your device or verify \

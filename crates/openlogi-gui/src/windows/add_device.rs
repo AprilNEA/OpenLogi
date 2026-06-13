@@ -131,26 +131,31 @@ impl AuxWindow for AddDeviceView {
 }
 
 impl Render for AddDeviceView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
         let state = cx.try_global::<PairingUi>().cloned().unwrap_or_default();
 
-        v_flex()
-            .size_full()
-            .bg(pal.bg)
-            .text_color(pal.text_primary)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
-            .p_6()
-            .gap_5()
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(tr!("Add Device")),
-            )
-            .child(body(&state, pal))
+        crate::window_chrome::frame(
+            "Add Device",
+            v_flex()
+                .size_full()
+                .bg(pal.bg)
+                .text_color(pal.text_primary)
+                .on_action(|_: &CloseWindow, window, _| window.remove_window())
+                .on_action(|_: &Minimize, window, _| window.minimize_window())
+                .on_action(|_: &Zoom, window, _| window.zoom_window())
+                .p_6()
+                .gap_5()
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(tr!("Add Device")),
+                )
+                .child(body(&state, pal)),
+            window,
+            cx,
+        )
     }
 }
 

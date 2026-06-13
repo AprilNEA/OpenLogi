@@ -13,12 +13,52 @@
   distros).
 - `systemd` + `udev` (standard on Ubuntu, Fedora, Arch, Debian, openSUSE, …).
 
+## Install from a release
+
+Pre-built `.deb`, `.rpm`, and portable `.tar.gz` packages are available on the
+[releases page](https://github.com/AprilNEA/OpenLogi/releases/latest).
+
+Use the native package when your distro supports it:
+
+```sh
+# Debian / Ubuntu
+sudo dpkg -i openlogi_*.deb
+
+# Fedora / RHEL / openSUSE
+sudo rpm -i openlogi-*.rpm
+```
+
+For other distributions, use the portable tarball. It contains the three
+prebuilt binaries plus the same installer metadata used by the distro packages:
+
+```sh
+tar -xzf openlogi-*-linux-*.tar.gz
+cd openlogi-*-linux-*
+sudo packaging/linux/install.sh --prefix=/usr
+```
+
+The install script copies the binaries, udev rules, systemd user unit, desktop
+entry, and icon into system paths. To remove a tarball install:
+
+```sh
+sudo packaging/linux/uninstall.sh --prefix=/usr
+```
+
+After installing by any release package format, enable the background agent:
+
+```sh
+systemctl --user enable --now openlogi-agent.service
+```
+
+Then launch **OpenLogi** from your desktop launcher, or run:
+
+```sh
+openlogi-gui
+```
+
 ## Build from source
 
-Pre-built `.deb` and `.rpm` packages are available on the
-[releases page](https://github.com/AprilNEA/OpenLogi/releases/latest) — see
-the main [README](../README.md#linux) for the package-based install. To build
-from source instead, use the stable Rust toolchain:
+To build from source, use the stable Rust toolchain:
 
 ```sh
 git clone https://github.com/AprilNEA/OpenLogi
@@ -42,6 +82,8 @@ OpenLogi needs:
   button remapping.
 - **Read/write access to `/dev/hidraw*`** — to send HID++ commands to the Bolt
   receiver.
+- **Read access to Logitech `/dev/input/event*` mouse nodes** — to capture
+  remappable button events through evdev.
 
 Install the bundled udev rules to grant access to the active-seat user without
 requiring `sudo` or group membership (requires `systemd-logind`):
@@ -61,6 +103,9 @@ openlogi-agent --check-uinput 2>/dev/null || \
 
 # Check a hidraw node
 ls -la /dev/hidraw*
+
+# Check Logitech mouse event ACLs
+getfacl /dev/input/event* | grep -A5 "$USER" || true
 ```
 
 The GUI Settings → Permissions page shows a live `Granted` / `Not granted`
@@ -69,8 +114,8 @@ indicator; check it after installing the rules (no restart needed).
 > **Device already connected?** `udevadm trigger` re-evaluates rules but does
 > not re-grant `uaccess` ACLs on nodes that were already open when the rules
 > were installed. If access is still denied, unplug and replug your receiver or
-> mouse (or power-cycle for wireless devices) to let udev apply the new rules on
-> reconnect.
+> mouse, or disconnect and reconnect the Bluetooth device, to let udev apply the
+> new rules on reconnect.
 
 ### Non-systemd systems (SysV init, OpenRC)
 
@@ -82,7 +127,7 @@ sudo usermod -aG input "$USER"
 # Re-login for the group change to take effect.
 ```
 
-## Install with the script
+## Install a source build with the script
 
 The `packaging/linux/install.sh` script copies the binaries, udev rules,
 systemd unit, desktop entry, and icon to system paths, then reloads `udevadm`.
@@ -98,6 +143,24 @@ To remove:
 
 ```sh
 packaging/linux/uninstall.sh
+```
+
+## Build Linux release packages
+
+Maintainers can build all Linux release artifacts from the repo root:
+
+```sh
+cargo run -p xtask -- package-linux
+```
+
+The command builds release binaries, creates a portable
+`openlogi-<version>-linux-<arch>.tar.gz`, and then uses `nfpm` to create `.deb`
+and `.rpm` packages in `target/release/`.
+
+For local testing without rebuilding binaries:
+
+```sh
+cargo run -p xtask -- package-linux --no-build
 ```
 
 ## Autostart (launch at login)
