@@ -63,7 +63,7 @@ fn spawn_inner(program: &Path) -> io::Result<pid_t> {
     let argv = [path.as_ptr().cast_mut(), ptr::null_mut::<c_char>()];
     // SAFETY: `_NSGetEnviron` returns a valid, non-null pointer to the live
     // `environ` for the whole process lifetime; we only read it here.
-    let envp = unsafe { *libc::_NSGetEnviron() }.cast::<*mut c_char>();
+    let envp: *const *mut c_char = unsafe { *libc::_NSGetEnviron() };
 
     let mut attr: posix_spawnattr_t = ptr::null_mut();
     // SAFETY: `&raw mut attr` is a valid out-pointer; `posix_spawnattr_init`
@@ -100,8 +100,11 @@ fn spawn_inner(program: &Path) -> io::Result<pid_t> {
         )
     };
 
-    // SAFETY: `attr` was initialized by `posix_spawnattr_init` and is destroyed
-    // exactly once here, on every path out of this function.
+    // SAFETY: `attr` was initialized by `posix_spawnattr_init` above (the
+    // init-failure path returned early, before this), so destroying it here is
+    // valid and happens exactly once — on both the spawn-success and -failure
+    // paths. POSIX forbids destroying an attr whose init failed, which is why
+    // the early return must *not* reach this.
     unsafe { libc::posix_spawnattr_destroy(&raw mut attr) };
 
     if spawn_rc == 0 {
