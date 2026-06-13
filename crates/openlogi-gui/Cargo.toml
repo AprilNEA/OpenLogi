@@ -46,6 +46,9 @@ gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.4
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication"] }
 objc2-foundation = { version = "0.3.2", features = ["NSString", "NSProcessInfo"] }
+# posix_spawn + the private responsibility_spawnattrs_setdisclaim FFI used to
+# launch the agent under its own TCC identity (see platform/spawn.rs).
+libc = "0.2"
 
 # unsafe_code stays denied; the status-item/tray modules opt in locally with
 # #[expect(unsafe_code)] for the few objc2 calls (init-with-action, set-target,

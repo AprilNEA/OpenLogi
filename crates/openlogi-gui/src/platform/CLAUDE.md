@@ -10,6 +10,11 @@ FFI is exactly these files — keep them in sync:
 - `permissions.rs` — `CBCentralManager.authorization` (`objc2` class lookup) + `IOHIDCheckAccess` (C FFI).
 - `crates/openlogi-hook/src/macos.rs` — CGEventTap (on `core-graphics`, see below) + the `NSWorkspace` frontmost-app read (`objc2`).
 
+`spawn.rs` is **not** ObjC: it's plain `libc` POSIX FFI (`posix_spawn`) plus one
+private libSystem symbol (`responsibility_spawnattrs_setdisclaim`), used to
+launch the agent under its own TCC identity rather than the GUI's (issue #214).
+Its `unsafe` blocks follow the same one-op-per-block + `SAFETY` rule below.
+
 `single_instance.rs` (fs4 lock), `launch_agent.rs` (plist via `std::fs`), `updater.rs`
 (gpui_updater) contain **no** ObjC FFI — don't add any.
 

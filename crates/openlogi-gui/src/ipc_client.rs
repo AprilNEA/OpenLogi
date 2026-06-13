@@ -16,7 +16,7 @@
 //! unreachable or answers with a newer protocol, that is pushed to the GUI as
 //! a [`GuiUpdate`] so the window can say so instead of spinning forever.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use openlogi_agent_core::ipc::{
@@ -490,7 +490,7 @@ async fn poll_pairing_once(
     }
 }
 
-/// Launch the agent once when the socket is unreachable. Detached `spawn` so it
+/// Launch the agent once when the socket is unreachable. Detached so it
 /// outlives the GUI (the agent is the always-on process); logs and moves on if
 /// the binary can't be found / started — the user may start it via launchd or by
 /// hand, and the poll loop keeps retrying the connection regardless.
@@ -502,10 +502,26 @@ fn spawn_agent() {
         );
         return;
     };
-    match std::process::Command::new(&path).spawn() {
-        Ok(_) => info!(path = %path.display(), "agent not running — launched it"),
+    match spawn_detached(&path) {
+        Ok(()) => info!(path = %path.display(), "agent not running — launched it"),
         Err(e) => warn!(error = %e, path = %path.display(), "could not launch the agent"),
     }
+}
+
+/// Spawn the agent disclaiming TCC responsibility so macOS judges it by its own
+/// `org.openlogi.agent` identity — otherwise the GUI-spawned agent inherits the
+/// GUI's, and the Accessibility / Input-Monitoring grants the user gave the
+/// agent look missing (issue #214). See [`crate::platform::spawn`].
+#[cfg(target_os = "macos")]
+fn spawn_detached(path: &Path) -> std::io::Result<()> {
+    crate::platform::spawn::spawn_disclaiming_responsibility(path)
+}
+
+/// Elsewhere a plain child is correct — Windows and Linux have no TCC
+/// responsibility to inherit.
+#[cfg(not(target_os = "macos"))]
+fn spawn_detached(path: &Path) -> std::io::Result<()> {
+    std::process::Command::new(path).spawn().map(|_| ())
 }
 
 /// Resolve the agent executable relative to the running GUI: a sibling in the

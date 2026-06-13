@@ -4762,6 +4762,7 @@ dependencies = [
  "gpui_platform",
  "image",
  "interprocess",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
