@@ -256,6 +256,22 @@ impl AppState {
         }
     }
 
+    /// Persist the in-memory config and — only if the write actually landed —
+    /// have the agent reload it. `what` names the setting for the failure log.
+    ///
+    /// The order matters: on a failed write the on-disk file still holds the
+    /// *previous* config, so a reload would hand the agent stale values and
+    /// (for volatile settings) silently re-apply the old DPI/SmartShift on the
+    /// next reconnect or wake. Skipping the reload keeps the agent on whatever
+    /// it already runs; the GUI keeps the new value in memory either way.
+    fn persist_and_reload(&self, what: &str) {
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, what, "could not persist to config.toml — agent reload skipped");
+            return;
+        }
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+    }
+
     /// A clone of the IPC command sender, so views (the DPI / SmartShift panels)
     /// can issue device reads and writes through the agent themselves.
     #[must_use]
@@ -542,11 +558,8 @@ impl AppState {
         self.gesture_bindings = self.gesture_bindings_for_current();
         let key = self.current_record().map(|r| r.config_key.clone());
         self.config.set_selected_device(key);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist selected device");
-        }
         // The agent owns the hook + device I/O; have it switch devices too.
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("selected device");
     }
 
     /// Replace the DPI preset list for the currently selected device. The
@@ -563,10 +576,7 @@ impl AppState {
             return;
         };
         self.config.set_dpi_presets(&key, presets);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist DPI presets to config.toml");
-        }
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("DPI presets");
     }
 
     /// Read the DPI preset list for the active device, or an empty `Vec`
@@ -872,10 +882,7 @@ impl AppState {
                 tunable_torque,
             },
         );
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist SmartShift to config.toml");
-        }
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("SmartShift");
         // Reflect the write immediately so the panel doesn't flicker back to
         // the previous value before a re-read lands, but queue a confirming
         // re-read: the write is fire-and-forget, so a sleeping device that
@@ -952,13 +959,10 @@ impl AppState {
             ));
         }
         self.config.set_lighting(&key, lighting);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist lighting to config.toml");
-        }
         // Keep the agent's config copy fresh: it re-applies the saved colour
         // when the keyboard reconnects, and without the reload it would
         // replay whatever was saved the last time something *else* reloaded.
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("lighting");
     }
 
     /// Apply `dpi` to the active device (best-effort, via the agent) and
@@ -977,10 +981,7 @@ impl AppState {
             self.send_ipc(crate::ipc_client::Command::SetDpi(route, dpi));
         }
         self.config.set_dpi(&key, dpi);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist DPI to config.toml");
-        }
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("DPI");
     }
 
     /// App-wide settings backing the Settings window (launch-at-login,
@@ -1000,12 +1001,9 @@ impl AppState {
             return;
         }
         self.config.app_settings.launch_at_login = enabled;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist launch-at-login setting");
-        }
         // The agent owns autostart now; it reconciles its LaunchAgent (which
         // points at the agent, not the GUI) when it reloads the config.
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("launch-at-login setting");
     }
 
     /// Toggle the menu-bar (status item) icon preference and persist it. The
@@ -1019,10 +1017,7 @@ impl AppState {
             return;
         }
         self.config.app_settings.show_in_menu_bar = enabled;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist show-in-menu-bar setting");
-        }
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("show-in-menu-bar setting");
     }
 
     /// Toggle the opt-in update check and persist it. No immediate side
@@ -1050,10 +1045,7 @@ impl AppState {
             return;
         }
         self.config.app_settings.thumbwheel_sensitivity = sensitivity;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist thumbwheel sensitivity");
-        }
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("thumbwheel sensitivity");
     }
 
     pub fn set_auto_download_assets(&mut self, enabled: bool) {
@@ -1120,11 +1112,8 @@ impl AppState {
         };
         self.config
             .set_binding(&key, button, Binding::Single(action));
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist binding to config.toml");
-        }
         // The agent owns the hook; have it rebuild its live map from config.
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("binding");
     }
 
     fn bindings_for_current(&self) -> BTreeMap<ButtonId, Action> {
@@ -1177,13 +1166,10 @@ impl AppState {
                 self.config.disable_gestures(&key);
             }
         }
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist gesture-button change to config.toml");
-        }
         // The owner change shuffles bindings between the single + gesture maps.
         self.button_bindings = self.bindings_for_current();
         self.gesture_bindings = self.gesture_bindings_for_current();
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("gesture-button change");
     }
 
     /// Update a single gesture-button sub-binding in memory, on disk, and in the
@@ -1210,11 +1196,8 @@ impl AppState {
         self.gesture_bindings.insert(direction, action.clone());
         self.config
             .set_gesture_direction(&key, owner, direction, action);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist gesture binding to config.toml");
-        }
         // The agent owns the gesture watcher; have it rebuild from config.
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("gesture binding");
     }
 }
 
