@@ -185,7 +185,10 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         return call_next(code, wparam, lparam);
     }
 
-    let Some(data) = hook_data(lparam) else {
+    // SAFETY: `mouse_proc` is only installed as a WH_MOUSE_LL hook and this is
+    // the `code == HC_ACTION` arm, so `lparam` is the live `MSLLHOOKSTRUCT`
+    // pointer `hook_data` requires.
+    let Some(data) = (unsafe { hook_data(lparam) }) else {
         return call_next(code, wparam, lparam);
     };
     let Some(event) = translate_event(wparam, data) else {
@@ -203,14 +206,20 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     }
 }
 
-fn hook_data(lparam: LPARAM) -> Option<MSLLHOOKSTRUCT> {
+/// Copy the `MSLLHOOKSTRUCT` the OS passed in `lparam`, or `None` if `lparam`
+/// is null.
+///
+/// # Safety
+/// `lparam` must be the `lParam` the OS passes to a `WH_MOUSE_LL` hook
+/// procedure for an `HC_ACTION` event — i.e. it points to a live
+/// `MSLLHOOKSTRUCT` (or is 0). Any other non-zero value is undefined behavior.
+unsafe fn hook_data(lparam: LPARAM) -> Option<MSLLHOOKSTRUCT> {
     if lparam == 0 {
         return None;
     }
-    // SAFETY: reached only with `code == HC_ACTION` (checked by the sole caller,
-    // `mouse_proc`) and `lparam != 0`, so per the WH_MOUSE_LL contract Windows
-    // guarantees `lparam` points to a live `MSLLHOOKSTRUCT`. We copy it out by
-    // value (it is plain-old-data) and never retain the pointer.
+    // SAFETY: by this function's contract `lparam` is the WH_MOUSE_LL HC_ACTION
+    // lParam and is non-zero here, so it points to a live `MSLLHOOKSTRUCT`. We
+    // copy it out by value (plain-old-data) and never retain the pointer.
     Some(unsafe { *(lparam as *const MSLLHOOKSTRUCT) })
 }
 
