@@ -1,0 +1,36 @@
+name: Nix CI
+
+# Build the Nix package (flake `.#openlogi`) so it can't silently rot. The main
+# risk is `cargoHash` going stale: it changes whenever Cargo.lock does (a dep
+# bump, a release version bump, or a gpui pin bump) and a stale hash fails the
+# build. Gated to the files that actually affect the Nix build so it doesn't run
+# on every Rust change (Rust CI covers those).
+on:
+  push:
+    branches: [master]
+    paths:
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - "nix/**"
+      - "crates/openlogi-gui/icon/AppIcon.icns"
+      - ".github/workflows/nix.yml"
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - "nix/**"
+      - "crates/openlogi-gui/icon/AppIcon.icns"
+      - ".github/workflows/nix.yml"
+
+jobs:
+  build:
+    name: nix build (macOS)
+    # darwin-only package (gpui_platform/runtime_shaders + cargo-bundle .app).
+    # arm64 is enough to catch cargoHash drift, which is platform-independent.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - run: nix build .#openlogi -L

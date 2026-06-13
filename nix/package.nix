@@ -16,7 +16,7 @@
 
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "openlogi";
-  version = "0.4.0";
+  version = "0.4.1";
 
   # Build from the working tree (target/.git/etc. filtered out). cargo-bundle
   # uses the committed crates/openlogi-gui/icon/AppIcon.icns.
@@ -41,8 +41,12 @@ rustPlatform.buildRustPackage (finalAttrs: {
   #   };
 
   # One FOD vendors every dependency, including the zed / wgpu / font-kit git
-  # forks gpui pulls in. Same approach as nixpkgs' zed-editor.
-  cargoHash = "sha256-bY/yKDjdjFAF7A6Q8Yc/r5H0K0ATbP9Jq9zAN72CYi4=";
+  # forks gpui pulls in. Same approach as nixpkgs' zed-editor. Use the value the
+  # `nix.yml` CI build reports — it fails closed on a stale hash and prints
+  # `To correct the hash mismatch ... use "sha256-..."`. NB: the fetchCargoVendor
+  # hash is not reproducible across environments here, so a locally-built value
+  # can differ from CI's; trust CI's.
+  cargoHash = "sha256-LXM+EP46KlS67n0klchrwBpTrobxYCsjVKW6oZ9Sygc=";
 
   postPatch = ''
     # .cargo/config.toml forces `linker = /usr/bin/cc` + a /Applications/Xcode
@@ -60,6 +64,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   nativeBuildInputs = [
     cargo-bundle # assembles OpenLogi.app from [package.metadata.bundle]
+    rustPlatform.bindgenHook # `media` (a gpui dep) runs bindgen — needs libclang
   ];
 
   # The GUI plus the headless agent (embedded below as a login-item helper). The
@@ -106,9 +111,9 @@ rustPlatform.buildRustPackage (finalAttrs: {
     runHook postInstall
   '';
 
-  # `nix-update openlogi` (and nixpkgs' autobump) bump the version and refetch
-  # src.hash + cargoHash automatically — effective once `src` is the
-  # fetchFromGitHub form above (a local `src` has no remote version to track).
+  # `updateScript` is for the nixpkgs fetchFromGitHub form (autobump bumps
+  # version + cargoHash). This local-`src` flake refreshes cargoHash from the
+  # nix.yml CI log instead (see the cargoHash note above).
   passthru.updateScript = nix-update-script { };
 
   meta = {
