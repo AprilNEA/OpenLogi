@@ -314,7 +314,10 @@ fn slider_element(
     match (status, slider_state) {
         // A device with one supported DPI has nothing to drag — show the value.
         (DpiStatus::Ready(info), _) if info.capabilities.min() == info.capabilities.max() => {
-            status_line(tr!("Fixed DPI: %{dpi}", dpi => info.capabilities.min()), pal)
+            status_line(
+                tr!("Fixed DPI: %{dpi}", dpi => info.capabilities.min()),
+                pal,
+            )
         }
         (DpiStatus::Ready(_), Some(slider_state)) => {
             Slider::new(slider_state).horizontal().into_any_element()
@@ -337,9 +340,10 @@ fn slider_element(
                 cx.refresh_windows();
             },
         ),
-        (DpiStatus::Unsupported(_), _) => {
-            status_line(tr!("This device did not report Adjustable DPI support."), pal)
-        }
+        (DpiStatus::Unsupported(_), _) => status_line(
+            tr!("This device did not report Adjustable DPI support."),
+            pal,
+        ),
     }
 }
 
