@@ -576,8 +576,17 @@ jobs:
           NFPM_SHA256: ${{ matrix.nfpm_sha256 }}
         run: |
           sudo apt-get update
+          # package-linux builds openlogi-gui, which links GPUI's full
+          # wayland / x11 stack — keep this in sync with ci.yml's Linux deps
+          # (the proven set). The previous short list was missing
+          # libxkbcommon-x11-dev / libwayland-dev / libx11-xcb-dev, so every
+          # tagged Linux build failed to link (`-lxkbcommon-x11`) and took the
+          # whole GitHub Release down with it.
           sudo apt-get install -y \
-            libfontconfig1-dev libfreetype-dev libxcb1-dev libxkbcommon-dev
+            libudev-dev \
+            gcc g++ clang libfontconfig-dev libwayland-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev \
+            libssl-dev libzstd-dev pkg-config
           curl -fsSLo /tmp/nfpm.deb \
             "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_${NFPM_ARCH}.deb"
           echo "${NFPM_SHA256}  /tmp/nfpm.deb" | sha256sum -c
@@ -674,21 +683,21 @@ jobs:
           sha256sum *.dmg *.exe *.msi *.deb *.rpm > SHA256SUMS
 
       # softprops' `files` can't list a glob that matches nothing without
-      # tripping fail_on_unmatched_files, and the exe/msi sets vary per arch
-      # leg — record what actually arrived.
-      - name: Detect shipped Windows binaries
-        id: windows_exes
+      # tripping fail_on_unmatched_files. The Windows exe/msi (per arch leg)
+      # and the Linux deb/rpm are all best-effort — only the DMGs, SHA256SUMS
+      # and the .minisig set are guaranteed by the publish gate — so record
+      # what actually arrived. This is what lets a failing Windows or Linux
+      # leg degrade to a smaller release instead of blocking the macOS one.
+      - name: Detect best-effort artifacts
+        id: artifacts
         run: |
-          if compgen -G 'dist/*.exe' > /dev/null; then
-            echo "exe=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exe=false" >> "$GITHUB_OUTPUT"
-          fi
-          if compgen -G 'dist/*.msi' > /dev/null; then
-            echo "msi=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "msi=false" >> "$GITHUB_OUTPUT"
-          fi
+          for ext in exe msi deb rpm; do
+            if compgen -G "dist/*.$ext" > /dev/null; then
+              echo "$ext=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$ext=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
 
       - name: Load static updater publishing config from 1Password
         id: r2_config
@@ -814,12 +823,12 @@ jobs:
           body_path: .release/RELEASE_NOTES.md
           files: |
             dist/*.dmg
-            dist/*.deb
-            dist/*.rpm
             dist/*.minisig
             dist/SHA256SUMS
-            ${{ steps.windows_exes.outputs.exe == 'true' && 'dist/*.exe' || '' }}
-            ${{ steps.windows_exes.outputs.msi == 'true' && 'dist/*.msi' || '' }}
+            ${{ steps.artifacts.outputs.exe == 'true' && 'dist/*.exe' || '' }}
+            ${{ steps.artifacts.outputs.msi == 'true' && 'dist/*.msi' || '' }}
+            ${{ steps.artifacts.outputs.deb == 'true' && 'dist/*.deb' || '' }}
+            ${{ steps.artifacts.outputs.rpm == 'true' && 'dist/*.rpm' || '' }}
           fail_on_unmatched_files: true
 
   homebrew-tap:
