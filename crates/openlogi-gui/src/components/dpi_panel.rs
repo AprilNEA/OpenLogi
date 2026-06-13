@@ -6,8 +6,8 @@
 
 use gpui::{
     AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription,
-    Window, div, px, rgb,
+    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
+    Subscription, Window, div, px, rgb,
 };
 use gpui_component::{
     Icon, IconName, h_flex,
@@ -17,8 +17,10 @@ use gpui_component::{
 use openlogi_hid::{DeviceRoute, DpiCapabilities};
 use tracing::debug;
 
+use crate::components::device_read::issue_device_read;
+use crate::components::status::{retry_line, status_line};
 use crate::state::{AppState, DpiStatus};
-use crate::theme::{self, ACCENT_BLUE, Palette};
+use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
 
 /// Slider column width. Matches the right-column layout in `app.rs`.
 const PANEL_W: f32 = 300.;
@@ -80,41 +82,19 @@ impl DpiPanel {
         let Some((key, route)) = dpi_load_target(cx) else {
             return;
         };
-
         cx.update_global::<AppState, _>(|state, _| state.mark_dpi_loading(&key));
-        // The agent owns device I/O; request the DPI read over IPC and await the
-        // reply rather than opening the device from the GUI process. The agent
-        // returns the typed `WriteError`, so a permanent `FeatureUnsupported` /
-        // `EmptyDpiList` reaches `store_dpi_info` intact and the panel stops
-        // re-probing instead of retrying a doomed read on every reselect.
-        let sender = cx.global::<AppState>().ipc_sender();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if sender
-            .send(crate::ipc_client::Command::ReadDpi(route.clone(), tx))
-            .is_err()
-        {
-            cx.update_global::<AppState, _>(|state, _| state.clear_dpi_loading(&key));
-            return;
-        }
-        cx.spawn(async move |_panel, cx| {
-            match rx.await {
-                Ok(result) => {
-                    cx.update_global::<AppState, _>(|state, cx| {
-                        state.store_dpi_info(key, &route, result);
-                        cx.refresh_windows();
-                    });
-                }
-                // The client thread dropped the reply (it's gone). Reset the
-                // `Loading` marker so the device isn't stuck on "Reading…".
-                Err(_) => {
-                    cx.update_global::<AppState, _>(|state, cx| {
-                        state.clear_dpi_loading(&key);
-                        cx.refresh_windows();
-                    });
-                }
-            }
-        })
-        .detach();
+        // The agent owns device I/O: request the DPI read over IPC and store the
+        // typed reply off the render thread. The typed `WriteError` reaches
+        // `store_dpi_info` intact, so a permanent `FeatureUnsupported` /
+        // `EmptyDpiList` stops the panel re-probing on every reselect.
+        issue_device_read(
+            cx,
+            key,
+            route,
+            crate::ipc_client::Command::ReadDpi,
+            AppState::store_dpi_info,
+            AppState::clear_dpi_loading,
+        );
     }
 
     fn ensure_slider(
@@ -305,25 +285,28 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
             device_key: String::new(),
             dpi: crate::state::DEFAULT_DPI,
             presets: Vec::new(),
-            status: DpiStatus::Unsupported("No active device".into()),
+            status: DpiStatus::Unsupported(tr!("No active device").to_string()),
             reachable: false,
         })
 }
 
-fn dpi_range_label(status: &DpiStatus, reachable: bool) -> String {
+fn dpi_range_label(status: &DpiStatus, reachable: bool) -> SharedString {
     match status {
         DpiStatus::Ready(info) => format!(
             "{}–{} · step {}",
             info.capabilities.min(),
             info.capabilities.max(),
             info.capabilities.step_hint()
-        ),
+        )
+        .into(),
         DpiStatus::Unknown | DpiStatus::Loading if !reachable => {
-            "Device offline — reconnect to read DPI range".to_string()
+            tr!("Device offline — reconnect to read DPI range")
         }
-        DpiStatus::Unknown | DpiStatus::Loading => "Loading device DPI range…".to_string(),
-        DpiStatus::Failed(message) => format!("DPI read failed: {message}"),
-        DpiStatus::Unsupported(message) => format!("DPI range unavailable: {message}"),
+        DpiStatus::Unknown | DpiStatus::Loading => tr!("Loading device DPI range…"),
+        DpiStatus::Failed(message) => tr!("DPI read failed: %{message}", message => message),
+        DpiStatus::Unsupported(message) => {
+            tr!("DPI range unavailable: %{message}", message => message)
+        }
     }
 }
 
@@ -336,51 +319,37 @@ fn slider_element(
     match (status, slider_state) {
         // A device with one supported DPI has nothing to drag — show the value.
         (DpiStatus::Ready(info), _) if info.capabilities.min() == info.capabilities.max() => {
-            dpi_status_line(&format!("Fixed DPI: {}", info.capabilities.min()), pal)
+            status_line(
+                tr!("Fixed DPI: %{dpi}", dpi => info.capabilities.min()),
+                pal,
+            )
         }
         (DpiStatus::Ready(_), Some(slider_state)) => {
             Slider::new(slider_state).horizontal().into_any_element()
         }
-        (DpiStatus::Ready(_), None) => dpi_status_line("Preparing DPI slider…", pal),
+        (DpiStatus::Ready(_), None) => status_line(tr!("Preparing DPI slider…"), pal),
         (DpiStatus::Unknown | DpiStatus::Loading, _) if !reachable => {
-            dpi_status_line("Device offline — DPI unavailable.", pal)
+            status_line(tr!("Device offline — DPI unavailable."), pal)
         }
         (DpiStatus::Unknown | DpiStatus::Loading, _) => {
-            dpi_status_line("Reading supported DPI values…", pal)
+            status_line(tr!("Reading supported DPI values…"), pal)
         }
         // Clickable: reselecting is a no-op for a single-device carousel, so the
         // retry must work in place.
-        (DpiStatus::Failed(_), _) => dpi_retry_line("Couldn't read DPI — click to retry.", pal),
-        (DpiStatus::Unsupported(_), _) => {
-            dpi_status_line("This device did not report Adjustable DPI support.", pal)
-        }
+        (DpiStatus::Failed(_), _) => retry_line(
+            "dpi-retry",
+            tr!("Couldn't read DPI — click to retry."),
+            pal,
+            |cx| {
+                cx.update_global::<AppState, _>(|state, _| state.retry_active_dpi());
+                cx.refresh_windows();
+            },
+        ),
+        (DpiStatus::Unsupported(_), _) => status_line(
+            tr!("This device did not report Adjustable DPI support."),
+            pal,
+        ),
     }
-}
-
-fn dpi_status_line(message: &str, pal: Palette) -> AnyElement {
-    div()
-        .h(px(CHIP_H))
-        .text_sm()
-        .text_color(pal.text_muted)
-        .child(message.to_string())
-        .into_any_element()
-}
-
-/// A `Failed`-state line that re-arms DPI discovery for the active device on
-/// click. Backs the only recovery path when the carousel holds one device.
-fn dpi_retry_line(message: &str, pal: Palette) -> AnyElement {
-    div()
-        .id("dpi-retry")
-        .h(px(CHIP_H))
-        .text_sm()
-        .text_color(rgb(ACCENT_BLUE))
-        .hover(|s| s.text_color(pal.text_primary))
-        .child(message.to_string())
-        .on_click(|_event, _window, cx| {
-            cx.update_global::<AppState, _>(|state, _| state.retry_active_dpi());
-            cx.refresh_windows();
-        })
-        .into_any_element()
 }
 
 const CHIP_H: f32 = 28.;
@@ -396,27 +365,15 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
         .gap_2()
         .items_center()
         .rounded_md()
-        .border_1()
-        .border_color(if active {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.border
-        })
-        .bg(if active {
-            pal.surface_hover
-        } else {
-            pal.surface
-        })
+        .selected_border(active, pal)
+        .bg(pal.surface)
+        .selected_fill(active)
         .hover(|s| s.bg(pal.surface_hover))
         .child(
             div()
                 .id(("dpi-preset-apply", idx))
                 .text_sm()
-                .text_color(if active {
-                    rgb(ACCENT_BLUE).into()
-                } else {
-                    pal.text_primary
-                })
+                .text_color(pal.text_primary)
                 .child(format!("{value}"))
                 .on_click(move |_event, _window, cx| {
                     // Only apply once the supported DPI list is known, so the
