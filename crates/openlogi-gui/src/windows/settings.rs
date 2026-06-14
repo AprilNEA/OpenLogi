@@ -26,6 +26,12 @@ use openlogi_core::config::{
     DEFAULT_THUMBWHEEL_SENSITIVITY, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
 };
 
+const DEFAULT_WHEEL_STRENGTH: u8 = 1;
+const MIN_WHEEL_STRENGTH: u8 = 1;
+const MAX_WHEEL_STRENGTH: u8 = 10;
+const DEFAULT_WHEEL_TACTILITY: u8 = 0;
+const MAX_WHEEL_TACTILITY: u8 = 10;
+
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 #[cfg(target_os = "macos")]
 use crate::platform::permissions::Permission;
@@ -42,6 +48,8 @@ pub struct SettingsView {
     appearance_obs: Option<Subscription>,
     language_select: Entity<SelectState<Vec<LanguageOption>>>,
     sensitivity_slider: Entity<SliderState>,
+    wheel_strength_slider: Entity<SliderState>,
+    wheel_tactility_slider: Entity<SliderState>,
     /// Asset-cache size blurb, computed once when the window opens rather than
     /// re-walking the cache on every render. A snapshot — reopen to refresh
     /// after a Clear.
@@ -77,10 +85,48 @@ impl SettingsView {
         cx.subscribe_in(&sensitivity_slider, window, Self::on_sensitivity_slider)
             .detach();
 
+        let wheel_strength = cx
+            .try_global::<AppState>()
+            .map_or(DEFAULT_WHEEL_STRENGTH, |s| {
+                s.app_settings().wheel_strength.max(1)
+            });
+        let wheel_strength_slider = cx.new(|_| {
+            SliderState::new()
+                .min(f32::from(MIN_WHEEL_STRENGTH))
+                .max(f32::from(MAX_WHEEL_STRENGTH))
+                .default_value(f32::from(wheel_strength))
+        });
+        cx.subscribe_in(
+            &wheel_strength_slider,
+            window,
+            Self::on_wheel_strength_slider,
+        )
+        .detach();
+
+        let wheel_tactility = cx
+            .try_global::<AppState>()
+            .map_or(DEFAULT_WHEEL_TACTILITY, |s| {
+                s.app_settings().wheel_tactility
+            });
+        let wheel_tactility_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(f32::from(MAX_WHEEL_TACTILITY))
+                .default_value(f32::from(wheel_tactility))
+        });
+        cx.subscribe_in(
+            &wheel_tactility_slider,
+            window,
+            Self::on_wheel_tactility_slider,
+        )
+        .detach();
+
         Self {
             appearance_obs: None,
             language_select,
             sensitivity_slider,
+            wheel_strength_slider,
+            wheel_tactility_slider,
             asset_cache_desc: cache_size_description(),
         }
     }
@@ -107,6 +153,52 @@ impl SettingsView {
         if let SliderEvent::Release(value) = event {
             let sensitivity = value.start().round() as i32;
             cx.update_global::<AppState, _>(|s, _| s.set_thumbwheel_sensitivity(sensitivity));
+        }
+        cx.notify();
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "slider values are small stepped integer ranges"
+    )]
+    #[allow(
+        clippy::unused_self,
+        reason = "gpui subscription handlers must take &mut self"
+    )]
+    fn on_wheel_strength_slider(
+        &mut self,
+        _: &Entity<SliderState>,
+        event: &SliderEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let SliderEvent::Release(value) = event {
+            let strength = value.start().round() as u8;
+            cx.update_global::<AppState, _>(|s, _| s.set_wheel_strength(strength));
+        }
+        cx.notify();
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "slider values are small stepped integer ranges"
+    )]
+    #[allow(
+        clippy::unused_self,
+        reason = "gpui subscription handlers must take &mut self"
+    )]
+    fn on_wheel_tactility_slider(
+        &mut self,
+        _: &Entity<SliderState>,
+        event: &SliderEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let SliderEvent::Release(value) = event {
+            let tactility = value.start().round() as u8;
+            cx.update_global::<AppState, _>(|s, _| s.set_wheel_tactility(tactility));
         }
         cx.notify();
     }
@@ -162,7 +254,11 @@ impl Render for SettingsView {
             .child(
                 Settings::new("settings")
                     .sidebar_width(px(210.))
-                    .page(general_page(self.sensitivity_slider.clone()))
+                    .page(general_page(
+                        self.sensitivity_slider.clone(),
+                        self.wheel_strength_slider.clone(),
+                        self.wheel_tactility_slider.clone(),
+                    ))
                     .page(permissions_page(pal))
                     .page(assets_page(pal, self.asset_cache_desc.clone()))
                     .page(language_page(self.language_select.clone())),
@@ -170,7 +266,11 @@ impl Render for SettingsView {
     }
 }
 
-fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPage {
+fn general_page(
+    sensitivity_slider: Entity<SliderState>,
+    wheel_strength_slider: Entity<SliderState>,
+    wheel_tactility_slider: Entity<SliderState>,
+) -> SettingPage {
     let group = SettingGroup::new()
         .item(
             SettingItem::new(
@@ -182,6 +282,44 @@ fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPage {
             .description(tr!(
                 "Scales the thumb wheel's horizontal scroll speed and how readily custom wheel actions trigger."
             )),
+        )
+        .item(
+            SettingItem::new(
+                tr!("Invert wheel direction"),
+                SettingField::switch(
+                    |cx| {
+                        cx.try_global::<AppState>()
+                            .is_some_and(|s| s.app_settings().wheel_inverted)
+                    },
+                    |enabled, cx| {
+                        cx.update_global::<AppState, _>(move |s, _| {
+                            s.set_wheel_inverted(enabled);
+                        });
+                        cx.refresh_windows();
+                    },
+                ),
+            )
+            .description(tr!(
+                "Reverse captured vertical and horizontal wheel scrolling."
+            )),
+        )
+        .item(
+            SettingItem::new(
+                tr!("Wheel strength"),
+                SettingField::render(move |_, _, cx| {
+                    wheel_slider_field(&wheel_strength_slider, DEFAULT_WHEEL_STRENGTH, cx)
+                }),
+            )
+            .description(tr!("Multiplies captured wheel deltas before re-emitting them.")),
+        )
+        .item(
+            SettingItem::new(
+                tr!("Wheel tactility"),
+                SettingField::render(move |_, _, cx| {
+                    wheel_slider_field(&wheel_tactility_slider, DEFAULT_WHEEL_TACTILITY, cx)
+                }),
+            )
+            .description(tr!("Quantizes captured wheel deltas into chunkier steps. 0 keeps smooth scrolling.")),
         )
         .item(
             SettingItem::new(
@@ -612,9 +750,23 @@ fn language_select_field(
     clippy::cast_sign_loss,
     reason = "slider value is a stepped 1..=100 figure"
 )]
+fn wheel_slider_field(slider: &Entity<SliderState>, default_value: u8, cx: &mut App) -> AnyElement {
+    let value = slider.read(cx).value().start().round() as u8;
+    slider_value_field(slider, value.to_string(), value == default_value, cx)
+}
+
 fn sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> AnyElement {
     let value = slider.read(cx).value().start().round() as i32;
     let is_default = value == DEFAULT_THUMBWHEEL_SENSITIVITY;
+    slider_value_field(slider, value.to_string(), is_default, cx)
+}
+
+fn slider_value_field(
+    slider: &Entity<SliderState>,
+    label: String,
+    is_default: bool,
+    cx: &mut App,
+) -> AnyElement {
     let pal = theme::palette(cx);
     v_flex()
         .flex_shrink_0()
@@ -629,7 +781,7 @@ fn sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> AnyElement {
                         .w(px(72.))
                         .text_sm()
                         .text_color(pal.text_muted)
-                        .child(value.to_string()),
+                        .child(label),
                 ),
         )
         .when(is_default, |this| {

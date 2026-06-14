@@ -22,7 +22,7 @@ use tracing::warn;
 use crate::DpiCycleState;
 use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
 use crate::device_order::DeviceStableId;
-use crate::hook_runtime::{HookMaps, SharedHookMaps};
+use crate::hook_runtime::{HookMaps, ScrollSettings, SharedHookMaps, SharedScrollSettings};
 use crate::ipc::InventoryHealth;
 use crate::watchers::gesture::GestureBindings;
 
@@ -54,6 +54,7 @@ pub struct SharedRuntime {
     pub gesture_bindings: GestureBindings,
     pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
     pub thumbwheel_sensitivity: Arc<AtomicI32>,
+    pub scroll_settings: SharedScrollSettings,
     pub capture_channel: CaptureChannel,
     /// Set while a pairing session runs: the gesture watcher then releases its
     /// capture session so `run_pairing` can own the receiver's HID node (one
@@ -109,6 +110,9 @@ impl Orchestrator {
             thumbwheel_sensitivity: Arc::new(AtomicI32::new(
                 config.app_settings.thumbwheel_sensitivity,
             )),
+            scroll_settings: Arc::new(RwLock::new(ScrollSettings::from_app_settings(
+                &config.app_settings,
+            ))),
             capture_channel: Arc::new(RwLock::new(None)),
             pairing_active: Arc::new(AtomicBool::new(false)),
             capture_idle: Arc::new(AtomicBool::new(true)),
@@ -181,6 +185,11 @@ impl Orchestrator {
         self.shared.thumbwheel_sensitivity.store(
             self.config.app_settings.thumbwheel_sensitivity,
             Ordering::Relaxed,
+        );
+        write_value(
+            &self.shared.scroll_settings,
+            ScrollSettings::from_app_settings(&self.config.app_settings),
+            "scroll_settings",
         );
     }
 
