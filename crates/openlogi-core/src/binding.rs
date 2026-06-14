@@ -1445,13 +1445,13 @@ mod macos {
         ev.post(CGEventTapLocation::HID);
     }
 
-    /// Post a scroll event with explicit vertical / horizontal deltas.
+    /// Post a scroll event with explicit vertical / horizontal line deltas.
     pub(super) fn post_scroll_delta(v: i32, h: i32) {
         let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
             tracing::warn!("CGEventSource::new failed for scroll");
             return;
         };
-        let Ok(ev) = CGEvent::new_scroll_event(src, ScrollEventUnit::PIXEL, 2, v, h, 0) else {
+        let Ok(ev) = CGEvent::new_scroll_event(src, ScrollEventUnit::LINE, 2, v, h, 0) else {
             tracing::warn!("CGEvent::new_scroll_event failed");
             return;
         };
