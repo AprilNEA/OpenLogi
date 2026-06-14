@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::binding::{
-    Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
+    Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding, post_scroll_delta,
 };
+use openlogi_core::config::AppSettings;
 use openlogi_hid::CaptureChannel;
 use openlogi_hook::{EventDisposition, Hook, MouseEvent};
 use tracing::{info, warn};
@@ -37,6 +38,38 @@ pub struct HookMaps {
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
 /// (orchestrator), the OS-hook callback, and the gesture watcher.
 pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
+
+/// App-wide scroll-wheel preferences mirrored from config into the hook callback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollSettings {
+    pub inverted: bool,
+    pub strength: u8,
+    pub tactility: u8,
+}
+
+impl Default for ScrollSettings {
+    fn default() -> Self {
+        Self {
+            inverted: false,
+            strength: 1,
+            tactility: 0,
+        }
+    }
+}
+
+impl ScrollSettings {
+    #[must_use]
+    pub fn from_app_settings(settings: &AppSettings) -> Self {
+        Self {
+            inverted: settings.wheel_inverted,
+            strength: settings.wheel_strength.max(1),
+            tactility: settings.wheel_tactility,
+        }
+    }
+}
+
+/// Shared scroll-wheel preferences read by the OS-hook callback.
+pub type SharedScrollSettings = Arc<RwLock<ScrollSettings>>;
 
 /// Tracks which OS-hook button (Middle/Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
@@ -101,6 +134,7 @@ pub fn start(
     hooks: SharedHookMaps,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture: CaptureChannel,
+    scroll_settings: SharedScrollSettings,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -210,7 +244,22 @@ pub fn start(
             HOLD.with_borrow_mut(HoldState::cancel);
             EventDisposition::PassThrough
         }
-        MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
+        MouseEvent::Scroll { delta_x, delta_y } => {
+            let settings = scroll_settings
+                .read()
+                .map(|guard| *guard)
+                .unwrap_or_default();
+            if settings == ScrollSettings::default() {
+                return EventDisposition::PassThrough;
+            }
+
+            let (v, h) = transform_scroll(delta_x, delta_y, settings);
+            if v == 0 && h == 0 {
+                return EventDisposition::PassThrough;
+            }
+            post_scroll_delta(v, h);
+            EventDisposition::Suppress
+        }
     });
 
     match result {
@@ -246,6 +295,35 @@ fn resolve_gesture_click(
 /// the hook should pass the event through to the OS rather than suppress and
 /// re-synthesise it. For Back/Forward this keeps the genuine hardware button
 /// 4/5 intact instead of round-tripping it through synthesis.
+fn transform_scroll(delta_x: f32, delta_y: f32, settings: ScrollSettings) -> (i32, i32) {
+    let strength = f32::from(settings.strength.max(1));
+    let tactility = i32::from(settings.tactility.min(10));
+
+    let mut h = delta_x * strength;
+    let mut v = delta_y * strength;
+    if settings.inverted {
+        h = -h;
+        v = -v;
+    }
+
+    (quantize_scroll(v, tactility), quantize_scroll(h, tactility))
+}
+
+fn quantize_scroll(value: f32, tactility: i32) -> i32 {
+    let v = value.round() as i32;
+    if tactility <= 1 {
+        return v;
+    }
+
+    let step = tactility;
+    let abs = v.abs();
+    let snapped = ((abs + step / 2) / step) * step;
+    if snapped == 0 && v != 0 {
+        return v.signum() * step;
+    }
+    if v < 0 { -snapped } else { snapped }
+}
+
 fn is_native_click(id: ButtonId, action: &Action) -> bool {
     matches!(
         (id, action),
@@ -310,6 +388,45 @@ pub fn dispatch_action(
 mod tests {
     use super::*;
     use openlogi_core::binding::GESTURE_SWIPE_THRESHOLD;
+
+    #[test]
+    fn transform_scroll_preserves_axis_order() {
+        let settings = ScrollSettings {
+            inverted: false,
+            strength: 2,
+            tactility: 0,
+        };
+
+        assert_eq!(transform_scroll(3.0, -4.0, settings), (-8, 6));
+    }
+
+    #[test]
+    fn transform_scroll_inverts_both_axes() {
+        let settings = ScrollSettings {
+            inverted: true,
+            strength: 1,
+            tactility: 0,
+        };
+
+        assert_eq!(transform_scroll(2.0, -3.0, settings), (3, -2));
+    }
+
+    #[test]
+    fn quantize_scroll_keeps_small_non_zero_motion() {
+        assert_eq!(quantize_scroll(1.0, 4), 4);
+        assert_eq!(quantize_scroll(-1.0, 4), -4);
+    }
+
+    #[test]
+    fn transform_scroll_rounds_micro_motion_to_zero_for_native_passthrough() {
+        let settings = ScrollSettings {
+            inverted: true,
+            strength: 1,
+            tactility: 0,
+        };
+
+        assert_eq!(transform_scroll(0.2, -0.3, settings), (0, 0));
+    }
 
     // The mid-swipe gate itself is unit-tested on `SwipeAccumulator` in
     // `openlogi-core`; these cover only what `HoldState` adds on top — tagging a

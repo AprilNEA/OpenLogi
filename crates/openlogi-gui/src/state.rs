@@ -1050,6 +1050,32 @@ impl AppState {
     /// Set the thumb-wheel sensitivity (clamped to the valid range), publish it
     /// to the gesture watcher via the shared atomic, and persist it. No-op when
     /// unchanged. Disk failures are logged, not propagated.
+    pub fn set_wheel_inverted(&mut self, inverted: bool) {
+        if self.config.app_settings.wheel_inverted == inverted {
+            return;
+        }
+        self.config.app_settings.wheel_inverted = inverted;
+        self.persist_and_reload("wheel inversion");
+    }
+
+    pub fn set_wheel_strength(&mut self, strength: u8) {
+        let strength = strength.clamp(1, 10);
+        if self.config.app_settings.wheel_strength == strength {
+            return;
+        }
+        self.config.app_settings.wheel_strength = strength;
+        self.persist_and_reload("wheel strength");
+    }
+
+    pub fn set_wheel_tactility(&mut self, tactility: u8) {
+        let tactility = tactility.min(10);
+        if self.config.app_settings.wheel_tactility == tactility {
+            return;
+        }
+        self.config.app_settings.wheel_tactility = tactility;
+        self.persist_and_reload("wheel tactility");
+    }
+
     pub fn set_thumbwheel_sensitivity(&mut self, sensitivity: i32) {
         let sensitivity = sensitivity.clamp(
             openlogi_core::config::MIN_THUMBWHEEL_SENSITIVITY,
