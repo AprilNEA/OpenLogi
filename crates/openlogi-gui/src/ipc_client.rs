@@ -490,7 +490,7 @@ async fn poll_pairing_once(
     }
 }
 
-/// Launch the agent once when the socket is unreachable. Detached `spawn` so it
+/// Launch the agent once when the socket is unreachable. Detached so it
 /// outlives the GUI (the agent is the always-on process); logs and moves on if
 /// the binary can't be found / started — the user may start it via launchd or by
 /// hand, and the poll loop keeps retrying the connection regardless.
@@ -502,7 +502,11 @@ fn spawn_agent() {
         );
         return;
     };
-    match std::process::Command::new(&path).spawn() {
+    // Spawn the agent under its *own* macOS TCC identity, not the GUI's:
+    // otherwise it inherits the GUI's responsibility and the Accessibility /
+    // Input-Monitoring grants the user gave the agent look missing (issue #214).
+    // `disclaim` is a no-op pass-through to `std::process::Command` off macOS.
+    match disclaim::Command::new(&path).spawn() {
         Ok(_) => info!(path = %path.display(), "agent not running — launched it"),
         Err(e) => warn!(error = %e, path = %path.display(), "could not launch the agent"),
     }

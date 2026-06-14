@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::binding::{Action, Binding, ButtonId, GestureDirection, default_binding_for};
+use crate::device::{Capabilities, DeviceKind};
 use crate::paths::{self, PathsError};
 
 /// The schema version the current build produces. Bumped on breaking layout
@@ -93,6 +94,13 @@ pub struct AppSettings {
     /// item. macOS-only; ignored on other platforms.
     #[serde(default = "default_true")]
     pub show_in_menu_bar: bool,
+    /// Whether the GUI automatically downloads device images from
+    /// `assets.openlogi.org` when a device appears. `true` (default) keeps
+    /// the current behavior; `false` makes no asset network requests at all
+    /// (the app falls back to bundled art and the synthetic silhouette). A
+    /// manual "Refresh assets" in Settings still fetches on demand regardless.
+    #[serde(default = "default_true")]
+    pub auto_download_assets: bool,
     /// UI language as a BCP-47-ish locale code matching the GUI's bundled
     /// locales (e.g. `"en"`, `"de"`, `"pt-BR"`, `"zh-CN"`, `"zh-TW"`; see the
     /// GUI's `i18n::SUPPORTED`). `None` means "follow the system locale", which
@@ -135,6 +143,7 @@ impl Default for AppSettings {
             check_for_updates: false,
             update_prompt_seen: false,
             show_in_menu_bar: true,
+            auto_download_assets: true,
             language: None,
             thumbwheel_sensitivity: DEFAULT_THUMBWHEEL_SENSITIVITY,
         }
@@ -206,6 +215,33 @@ where
     Ok(u8::deserialize(deserializer)?.min(100))
 }
 
+/// Scroll-wheel mode for [`SmartShift`]: free-spin or ratchet (clicky).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WheelMode {
+    Free,
+    Ratchet,
+}
+
+/// Per-device SmartShift wheel configuration, persisted so the agent can
+/// re-apply it when the device reconnects: the values are written to device
+/// RAM and do not survive a power cycle (#189), despite earlier assumptions
+/// that the device kept them in NVM.
+///
+/// Config-file only — never crosses the IPC (the agent reads it from
+/// `config.toml` on reload), so it is free to evolve without a
+/// `PROTOCOL_VERSION` bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmartShift {
+    pub mode: WheelMode,
+    /// SmartShift auto-disengage threshold (`0x01`–`0xFE`, in 0.25 turn/s
+    /// steps), or `0xFF` for a permanently engaged ratchet.
+    pub auto_disengage: u8,
+    /// Tunable-torque force percentage (`1`–`100`), `0` when the device
+    /// doesn't support tunable torque.
+    pub tunable_torque: u8,
+}
+
 /// Which control owns a device's single gesture role.
 ///
 /// Stored explicitly — rather than inferred from which button happens to carry a
@@ -255,6 +291,31 @@ where
     Ok(button.map(GestureOwner::Button))
 }
 
+/// Last-known identity of a device, captured while it was online so the UI can
+/// render its card and the *correct* config panels before any live HID++ probe
+/// completes — or while the device is asleep and can't be probed at all.
+///
+/// Every field is a **static property of the model**, not of the current
+/// connection: an MX Master 3S has adjustable DPI whether or not it is awake.
+/// That is what makes this safe to persist — it never goes stale. It is also
+/// free of any per-unit identifier (no serial number, no unit id), so caching
+/// it adds no privacy surface beyond the `config_key` already used as the map
+/// key. Persisting identity is what stops a sleeping/just-booted mouse from
+/// vanishing from the device list (and losing its Pointer/Buttons panels)
+/// until a cold probe happens to win its race — see issue #159.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceIdentity {
+    /// The name shown in the carousel, as resolved from the asset registry the
+    /// last time the device was online.
+    pub display_name: String,
+    /// The device's resolved [`DeviceKind`] (asset registry preferred, HID++
+    /// classification as fallback).
+    pub kind: DeviceKind,
+    /// Configuration capabilities measured from the device's HID++ feature
+    /// table. This is the field that keeps a sleeping mouse's panels visible.
+    pub capabilities: Capabilities,
+}
+
 /// Settings scoped to a single physical device (keyed by HID++ model+ext).
 ///
 /// Deserialization goes through [`RawDeviceConfig`] (`#[serde(from)]`) so
@@ -271,6 +332,12 @@ pub struct DeviceConfig {
     /// as a scalar ahead of the `bindings` sub-table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gesture_owner: Option<GestureOwner>,
+    /// Last-known identity (name / kind / capabilities), captured while the
+    /// device was online. Lets the UI render this device — with the right
+    /// config panels — on a cold start before any probe, or while it sleeps.
+    /// `None` for configs written before this field existed or by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<DeviceIdentity>,
     /// Every rebindable button's binding: a single [`Action`], or — for the
     /// gesture button (and, later, any raw-XY-capable button) — a
     /// [`Binding::Gesture`] per-direction map.
@@ -290,10 +357,20 @@ pub struct DeviceConfig {
     /// the cycle action becomes a no-op until the user adds at least one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dpi_presets: Vec<u32>,
+    /// The sensor DPI the user committed for this device. Persisted because
+    /// the value lives in device RAM and resets on a power cycle (#189); the
+    /// agent re-applies it when the device reconnects. `None` until the user
+    /// first changes DPI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dpi: Option<u32>,
     /// Per-device RGB lighting (static color + brightness + on/off). `None`
     /// until the user changes it, so it stays out of `config.toml` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lighting: Option<Lighting>,
+    /// Per-device SmartShift wheel configuration, re-applied on reconnect for
+    /// the same reason as [`Self::dpi`]. `None` until the user changes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smartshift: Option<SmartShift>,
 }
 
 /// Deserialize-only shim that folds the pre-v2 `button_bindings` +
@@ -308,6 +385,8 @@ struct RawDeviceConfig {
     /// [`deserialize_gesture_owner`].
     #[serde(default, deserialize_with = "deserialize_gesture_owner")]
     gesture_owner: Option<GestureOwner>,
+    #[serde(default)]
+    identity: Option<DeviceIdentity>,
     /// v2 shape — present on already-migrated files; wins on any key collision.
     #[serde(default)]
     bindings: BTreeMap<ButtonId, Binding>,
@@ -322,7 +401,11 @@ struct RawDeviceConfig {
     #[serde(default)]
     dpi_presets: Vec<u32>,
     #[serde(default)]
+    dpi: Option<u32>,
+    #[serde(default)]
     lighting: Option<Lighting>,
+    #[serde(default)]
+    smartshift: Option<SmartShift>,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -358,10 +441,13 @@ impl From<RawDeviceConfig> for DeviceConfig {
 
         DeviceConfig {
             gesture_owner: raw.gesture_owner,
+            identity: raw.identity,
             bindings,
             per_app_bindings: raw.per_app_bindings,
             dpi_presets: raw.dpi_presets,
+            dpi: raw.dpi,
             lighting: raw.lighting,
+            smartshift: raw.smartshift,
         }
     }
 }
@@ -703,6 +789,34 @@ impl Config {
             .dpi_presets = presets;
     }
 
+    /// The last-known [`DeviceIdentity`] for `device_key`, or `None` if the
+    /// device has never been seen online (or was configured before identities
+    /// were recorded).
+    #[must_use]
+    pub fn device_identity(&self, device_key: &str) -> Option<&DeviceIdentity> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.identity.as_ref())
+    }
+
+    /// Record (or refresh) the identity captured for `device_key` while it was
+    /// online, creating the device entry if needed.
+    pub fn set_device_identity(&mut self, device_key: &str, identity: DeviceIdentity) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .identity = Some(identity);
+    }
+
+    /// Iterate every device we've recorded an identity for, as
+    /// `(config_key, identity)`. Used to seed offline placeholder cards so a
+    /// known device stays visible (with its panels) before any live probe.
+    pub fn known_identities(&self) -> impl Iterator<Item = (&str, &DeviceIdentity)> {
+        self.devices
+            .iter()
+            .filter_map(|(k, d)| d.identity.as_ref().map(|i| (k.as_str(), i)))
+    }
+
     /// The lighting config for `device_key`, or `None` if unset.
     #[must_use]
     pub fn lighting(&self, device_key: &str) -> Option<Lighting> {
@@ -717,6 +831,33 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .lighting = Some(lighting);
+    }
+
+    /// The committed sensor DPI for `device_key`, or `None` if never set.
+    #[must_use]
+    pub fn dpi(&self, device_key: &str) -> Option<u32> {
+        self.devices.get(device_key).and_then(|d| d.dpi)
+    }
+
+    /// Record the committed sensor DPI for `device_key`, so the agent can
+    /// re-apply it when the device reconnects (#189).
+    pub fn set_dpi(&mut self, device_key: &str, dpi: u32) {
+        self.devices.entry(device_key.to_string()).or_default().dpi = Some(dpi);
+    }
+
+    /// The SmartShift wheel config for `device_key`, or `None` if never set.
+    #[must_use]
+    pub fn smartshift(&self, device_key: &str) -> Option<SmartShift> {
+        self.devices.get(device_key).and_then(|d| d.smartshift)
+    }
+
+    /// Record the SmartShift wheel config for `device_key`, so the agent can
+    /// re-apply it when the device reconnects (#189).
+    pub fn set_smartshift(&mut self, device_key: &str, smartshift: SmartShift) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .smartshift = Some(smartshift);
     }
 }
 
@@ -792,6 +933,38 @@ mod tests {
             })
         );
         assert_eq!(restored.lighting("absent"), None);
+    }
+
+    #[test]
+    fn dpi_roundtrips_per_device() {
+        let mut cfg = Config::default();
+        cfg.set_dpi("2b042", 1600);
+        let restored = write_and_read(&cfg);
+        assert_eq!(restored.dpi("2b042"), Some(1600));
+        assert_eq!(restored.dpi("absent"), None);
+    }
+
+    #[test]
+    fn smartshift_roundtrips_per_device() {
+        let mut cfg = Config::default();
+        cfg.set_smartshift(
+            "2b042",
+            SmartShift {
+                mode: WheelMode::Ratchet,
+                auto_disengage: 16,
+                tunable_torque: 30,
+            },
+        );
+        let restored = write_and_read(&cfg);
+        assert_eq!(
+            restored.smartshift("2b042"),
+            Some(SmartShift {
+                mode: WheelMode::Ratchet,
+                auto_disengage: 16,
+                tunable_torque: 30,
+            })
+        );
+        assert_eq!(restored.smartshift("absent"), None);
     }
 
     #[test]
@@ -881,6 +1054,42 @@ mod tests {
         assert!(
             !body.contains("dpi_presets"),
             "empty dpi_presets should be omitted: {body}"
+        );
+    }
+
+    #[test]
+    fn device_identity_roundtrips_and_is_iterable() {
+        use crate::device::{Capabilities, DeviceKind};
+
+        let mut cfg = Config::default();
+        let mouse = DeviceIdentity {
+            display_name: "MX Master 3S".to_string(),
+            kind: DeviceKind::Mouse,
+            capabilities: Capabilities {
+                buttons: true,
+                pointer: true,
+                lighting: false,
+            },
+        };
+        cfg.set_device_identity("2b034", mouse.clone());
+        // Recording an identity must not disturb unrelated per-device state.
+        cfg.set_binding(
+            "2b034",
+            ButtonId::Back,
+            Binding::Single(Action::BrowserBack),
+        );
+
+        let parsed = write_and_read(&cfg);
+        assert_eq!(parsed.device_identity("2b034"), Some(&mouse));
+        assert_eq!(parsed.device_identity("absent"), None);
+        assert_eq!(
+            parsed.bindings_for("2b034").get(&ButtonId::Back),
+            Some(&Binding::Single(Action::BrowserBack)),
+            "identity must coexist with bindings on the same device block"
+        );
+        assert_eq!(
+            parsed.known_identities().collect::<Vec<_>>(),
+            vec![("2b034", &mouse)]
         );
     }
 

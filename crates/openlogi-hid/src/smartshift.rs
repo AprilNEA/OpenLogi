@@ -57,6 +57,28 @@ impl SmartShiftMode {
     }
 }
 
+// The config file persists the wheel mode in its own representation
+// (`openlogi_core::config::WheelMode`, kept IPC-free); these conversions are
+// the single mapping between the persisted and the wire/firmware form, used by
+// the GUI when committing and by the agent when re-applying after a reconnect.
+impl From<openlogi_core::config::WheelMode> for SmartShiftMode {
+    fn from(mode: openlogi_core::config::WheelMode) -> Self {
+        match mode {
+            openlogi_core::config::WheelMode::Free => Self::Free,
+            openlogi_core::config::WheelMode::Ratchet => Self::Ratchet,
+        }
+    }
+}
+
+impl From<SmartShiftMode> for openlogi_core::config::WheelMode {
+    fn from(mode: SmartShiftMode) -> Self {
+        match mode {
+            SmartShiftMode::Free => Self::Free,
+            SmartShiftMode::Ratchet => Self::Ratchet,
+        }
+    }
+}
+
 /// `autoDisengage` value that keeps the ratchet engaged permanently — the
 /// wheel never auto-releases into free-spin, regardless of speed. Any other
 /// value (`0x01`–`0xFE`) is a SmartShift speed threshold.

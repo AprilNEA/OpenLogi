@@ -177,18 +177,11 @@ impl DpiPanel {
                     }
                     SliderEvent::Release(value) => {
                         let dpi = normalized_slider_dpi(value.start(), cx);
-                        // Resolve the target from AppState at fire-time so
+                        // `commit_dpi` resolves the target at fire-time, so
                         // carousel-driven device switches route the write to the
                         // now-current device, not whichever was active when this
                         // slider entity was constructed.
-                        let route = cx
-                            .try_global::<AppState>()
-                            .and_then(|s| s.current_record().and_then(|r| r.route.clone()));
-                        let sender = cx.try_global::<AppState>().map(AppState::ipc_sender);
-                        cx.update_global::<AppState, _>(|state, _| state.dpi = dpi);
-                        if let (Some(route), Some(sender)) = (route, sender) {
-                            let _ = sender.send(crate::ipc_client::Command::SetDpi(route, dpi));
-                        }
+                        cx.update_global::<AppState, _>(|state, _| state.commit_dpi(dpi));
                     }
                 },
             );
@@ -422,17 +415,13 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
                     // Only apply once the supported DPI list is known, so the
                     // click writes a snapped, device-valid value — and can't be
                     // clobbered by a discovery result that lands afterwards.
-                    let Some((route, dpi, sender)) = cx.try_global::<AppState>().and_then(|s| {
-                        let dpi = s.active_dpi_capabilities()?.snap(value);
-                        let route = s.current_record().and_then(|r| r.route.clone());
-                        Some((route, dpi, s.ipc_sender()))
-                    }) else {
+                    let Some(dpi) = cx
+                        .try_global::<AppState>()
+                        .and_then(|s| Some(s.active_dpi_capabilities()?.snap(value)))
+                    else {
                         return;
                     };
-                    cx.update_global::<AppState, _>(|state, _| state.dpi = dpi);
-                    if let Some(route) = route {
-                        let _ = sender.send(crate::ipc_client::Command::SetDpi(route, dpi));
-                    }
+                    cx.update_global::<AppState, _>(|state, _| state.commit_dpi(dpi));
                     cx.refresh_windows();
                 }),
         )

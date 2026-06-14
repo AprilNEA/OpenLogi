@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui::{App, Global};
-use openlogi_core::config::{AppSettings, Config, Lighting};
+use openlogi_core::config::{AppSettings, Config, DeviceIdentity, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     DeviceRoute, DpiCapabilities, DpiInfo, SmartShiftMode, SmartShiftStatus, WriteError,
@@ -35,7 +35,6 @@ use crate::asset::AssetResolver;
 use crate::data::mouse_buttons::{Action, Binding, ButtonId, GestureDirection};
 use crate::state::devices::{build_device_list, pick_initial_device, sort_device_list};
 use openlogi_agent_core::bindings::{bindings_for, gesture_bindings_for};
-use openlogi_agent_core::ipc::AgentStatus;
 
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
@@ -194,9 +193,11 @@ pub struct AppState {
     /// rebuild, and "apply now" device changes (DPI / SmartShift / lighting)
     /// go out as their own commands. The GUI never opens a device itself.
     ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
-    /// Latest agent status snapshot from the IPC poll, kept for the diagnostics report.
-    last_status: Option<AgentStatus>,
-    /// Latest raw inventory snapshot from the IPC poll, kept for diagnostics transports and receivers.
+    /// Raw inventory from the last *completed* enumeration, kept for the
+    /// diagnostics report (receivers + transports). The poll path only stores
+    /// [`InventoryHealth::Ready`](openlogi_agent_core::ipc::InventoryHealth)
+    /// snapshots, so an agent restart's empty pre-enumeration list never
+    /// blanks a report copied during the reconnect window.
     last_inventory: Vec<DeviceInventory>,
 }
 
@@ -211,12 +212,14 @@ impl AppState {
     /// builds the `Arc` first and uses [`Self::with_runtime_shared`] instead.
     #[must_use]
     pub fn with_runtime(
-        config: Config,
+        mut config: Config,
         inventories: &[DeviceInventory],
         cache: &AssetResolver,
         ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
     ) -> Self {
-        let device_list = build_device_list(inventories, cache);
+        let device_list = build_device_list(inventories, cache, &config);
+        // Record any device probed at launch so it survives the next cold start.
+        persist_identities(&mut config, &device_list);
         let current_device = pick_initial_device(&device_list, config.selected_device());
         let mut state = Self {
             current_device,
@@ -240,7 +243,6 @@ impl AppState {
             device_list,
             config,
             ipc_commands,
-            last_status: None,
             last_inventory: Vec::new(),
         };
         state.button_bindings = state.bindings_for_current();
@@ -256,6 +258,22 @@ impl AppState {
         }
     }
 
+    /// Persist the in-memory config and — only if the write actually landed —
+    /// have the agent reload it. `what` names the setting for the failure log.
+    ///
+    /// The order matters: on a failed write the on-disk file still holds the
+    /// *previous* config, so a reload would hand the agent stale values and
+    /// (for volatile settings) silently re-apply the old DPI/SmartShift on the
+    /// next reconnect or wake. Skipping the reload keeps the agent on whatever
+    /// it already runs; the GUI keeps the new value in memory either way.
+    fn persist_and_reload(&self, what: &str) {
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, what, "could not persist to config.toml — agent reload skipped");
+            return;
+        }
+        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+    }
+
     /// A clone of the IPC command sender, so views (the DPI / SmartShift panels)
     /// can issue device reads and writes through the agent themselves.
     #[must_use]
@@ -263,19 +281,14 @@ impl AppState {
         self.ipc_commands.clone()
     }
 
-    /// Cache the latest IPC poll snapshot (raw inventory + agent status) for the diagnostics report.
-    pub fn store_agent_snapshot(&mut self, inventory: &[DeviceInventory], status: &AgentStatus) {
+    /// Cache a *completed* inventory snapshot for the diagnostics report.
+    /// Callers gate on [`InventoryHealth::Ready`](openlogi_agent_core::ipc::InventoryHealth) —
+    /// see [`Self::last_inventory`].
+    pub fn store_inventory_snapshot(&mut self, inventory: &[DeviceInventory]) {
         self.last_inventory = inventory.to_vec();
-        self.last_status = Some(status.clone());
     }
 
-    /// The latest agent status snapshot, or `None` before the first poll lands.
-    #[must_use]
-    pub fn last_status(&self) -> Option<&AgentStatus> {
-        self.last_status.as_ref()
-    }
-
-    /// The latest raw inventory snapshot, used by diagnostics for transports and receivers.
+    /// The last completed inventory snapshot, used by diagnostics for transports and receivers.
     #[must_use]
     pub fn last_inventory(&self) -> &[DeviceInventory] {
         &self.last_inventory
@@ -314,7 +327,7 @@ impl AppState {
         BTreeMap<GestureDirection, Action>,
         DpiCycleState,
     ) {
-        let device_list = build_device_list(inventories, cache);
+        let device_list = build_device_list(inventories, cache, config);
         let current_device = pick_initial_device(&device_list, config.selected_device());
         let record = device_list.get(current_device);
         let config_key = record.map(|r| r.config_key.as_str());
@@ -403,17 +416,29 @@ impl AppState {
         cache: &AssetResolver,
         force: bool,
     ) -> bool {
-        let new_list = build_device_list(inventories, cache);
+        let new_list = build_device_list(inventories, cache, &self.config);
         let merged_list = self.merge_inventory_snapshot(new_list);
-        // Compare routes too, not just config_key: a device can reconnect on a
-        // new HID++ index while keeping its model-derived config_key, and the
-        // fresh route must replace the stale one so reads/writes don't target a
-        // dead index.
+        // Capture any newly-probed identity before the unchanged-check can early
+        // out: a device whose capabilities just resolved keeps the same
+        // config_key + route, so that guard would otherwise skip the write.
+        persist_identities(&mut self.config, &merged_list);
+        // Compare more than config_key: a device can reconnect on a new HID++
+        // index while keeping its model-derived config_key, and the fresh route
+        // must replace the stale one so reads/writes don't target a dead index.
+        // `online` and `capabilities` are compared too, so a device waking up or
+        // a probe that resolves its feature table on a stable route still
+        // refreshes the carousel (and its config panels) instead of being
+        // swallowed by this guard.
         let unchanged = merged_list.len() == self.device_list.len()
             && merged_list
                 .iter()
                 .zip(self.device_list.iter())
-                .all(|(a, b)| a.config_key == b.config_key && a.route == b.route);
+                .all(|(a, b)| {
+                    a.config_key == b.config_key
+                        && a.route == b.route
+                        && a.online == b.online
+                        && a.capabilities == b.capabilities
+                });
         if unchanged && !force {
             return false;
         }
@@ -547,11 +572,8 @@ impl AppState {
         self.gesture_bindings = self.gesture_bindings_for_current();
         let key = self.current_record().map(|r| r.config_key.clone());
         self.config.set_selected_device(key);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist selected device");
-        }
         // The agent owns the hook + device I/O; have it switch devices too.
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("selected device");
     }
 
     /// Replace the DPI preset list for the currently selected device. The
@@ -568,10 +590,7 @@ impl AppState {
             return;
         };
         self.config.set_dpi_presets(&key, presets);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist DPI presets to config.toml");
-        }
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("DPI presets");
     }
 
     /// Read the DPI preset list for the active device, or an empty `Vec`
@@ -845,8 +864,9 @@ impl AppState {
     }
 
     /// Write a full SmartShift configuration to the active device (best-effort,
-    /// on a background thread) and optimistically cache it. The device persists
-    /// the values in its own NVM, so nothing is written to `config.toml`.
+    /// on a background thread), optimistically cache it, and persist it to
+    /// `config.toml` — the values live in device RAM and reset on a power
+    /// cycle (#189), so the agent re-applies them when the device reconnects.
     /// No-op when no device is selected.
     pub fn commit_smartshift(
         &mut self,
@@ -868,6 +888,15 @@ impl AppState {
                 tunable_torque,
             ));
         }
+        self.config.set_smartshift(
+            &key,
+            openlogi_core::config::SmartShift {
+                mode: mode.into(),
+                auto_disengage,
+                tunable_torque,
+            },
+        );
+        self.persist_and_reload("SmartShift");
         // Reflect the write immediately so the panel doesn't flicker back to
         // the previous value before a re-read lands, but queue a confirming
         // re-read: the write is fire-and-forget, so a sleeping device that
@@ -944,9 +973,29 @@ impl AppState {
             ));
         }
         self.config.set_lighting(&key, lighting);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist lighting to config.toml");
+        // Keep the agent's config copy fresh: it re-applies the saved colour
+        // when the keyboard reconnects, and without the reload it would
+        // replay whatever was saved the last time something *else* reloaded.
+        self.persist_and_reload("lighting");
+    }
+
+    /// Apply `dpi` to the active device (best-effort, via the agent) and
+    /// persist it per device — the sensor value lives in device RAM and resets
+    /// on a power cycle (#189), so the agent re-applies it on reconnect.
+    /// Updates the displayed value even with no device selected.
+    pub fn commit_dpi(&mut self, dpi: u32) {
+        self.dpi = dpi;
+        let Some(record) = self.current_record() else {
+            debug!("no active device — DPI change kept in memory only");
+            return;
+        };
+        let key = record.config_key.clone();
+        let route = record.route.clone();
+        if let Some(route) = route {
+            self.send_ipc(crate::ipc_client::Command::SetDpi(route, dpi));
         }
+        self.config.set_dpi(&key, dpi);
+        self.persist_and_reload("DPI");
     }
 
     /// App-wide settings backing the Settings window (launch-at-login,
@@ -966,12 +1015,9 @@ impl AppState {
             return;
         }
         self.config.app_settings.launch_at_login = enabled;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist launch-at-login setting");
-        }
         // The agent owns autostart now; it reconciles its LaunchAgent (which
         // points at the agent, not the GUI) when it reloads the config.
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("launch-at-login setting");
     }
 
     /// Toggle the menu-bar (status item) icon preference and persist it. The
@@ -985,10 +1031,7 @@ impl AppState {
             return;
         }
         self.config.app_settings.show_in_menu_bar = enabled;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist show-in-menu-bar setting");
-        }
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("show-in-menu-bar setting");
     }
 
     /// Toggle the opt-in update check and persist it. No immediate side
@@ -1016,10 +1059,17 @@ impl AppState {
             return;
         }
         self.config.app_settings.thumbwheel_sensitivity = sensitivity;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist thumbwheel sensitivity");
+        self.persist_and_reload("thumbwheel sensitivity");
+    }
+
+    pub fn set_auto_download_assets(&mut self, enabled: bool) {
+        if self.config.app_settings.auto_download_assets == enabled {
+            return;
         }
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.config.app_settings.auto_download_assets = enabled;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist auto-download-assets setting");
+        }
     }
 
     /// Record the answer to the first-run update-check prompt: enable (or leave
@@ -1076,11 +1126,8 @@ impl AppState {
         };
         self.config
             .set_binding(&key, button, Binding::Single(action));
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist binding to config.toml");
-        }
         // The agent owns the hook; have it rebuild its live map from config.
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("binding");
     }
 
     fn bindings_for_current(&self) -> BTreeMap<ButtonId, Action> {
@@ -1133,13 +1180,10 @@ impl AppState {
                 self.config.disable_gestures(&key);
             }
         }
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist gesture-button change to config.toml");
-        }
         // The owner change shuffles bindings between the single + gesture maps.
         self.button_bindings = self.bindings_for_current();
         self.gesture_bindings = self.gesture_bindings_for_current();
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("gesture-button change");
     }
 
     /// Update a single gesture-button sub-binding in memory, on disk, and in the
@@ -1166,11 +1210,42 @@ impl AppState {
         self.gesture_bindings.insert(direction, action.clone());
         self.config
             .set_gesture_direction(&key, owner, direction, action);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist gesture binding to config.toml");
-        }
         // The agent owns the gesture watcher; have it rebuild from config.
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        self.persist_and_reload("gesture binding");
+    }
+}
+
+/// Record the identity (name / kind / capabilities) of every currently online,
+/// fully-probed device into `config`, persisting to disk only when something
+/// actually changed.
+///
+/// This is the write half of the identity-driven device list: it is what lets
+/// [`build_device_list`] resurrect a sleeping device on the next launch. Only
+/// online devices with *measured* capabilities are recorded — never a presumed
+/// or carried-forward `None` — so a placeholder never persists empty panels.
+/// The change-guard keeps quiet inventory ticks off the disk; the agent does
+/// not consume identities, so no `ReloadConfig` is sent.
+fn persist_identities(config: &mut Config, list: &[DeviceRecord]) {
+    let mut changed = false;
+    for record in list {
+        if !record.online {
+            continue;
+        }
+        let Some(capabilities) = record.capabilities else {
+            continue;
+        };
+        let identity = DeviceIdentity {
+            display_name: record.display_name.clone(),
+            kind: record.kind,
+            capabilities,
+        };
+        if config.device_identity(&record.config_key) != Some(&identity) {
+            config.set_device_identity(&record.config_key, identity);
+            changed = true;
+        }
+    }
+    if changed && let Err(e) = config.save_atomic() {
+        warn!(error = %e, "could not persist device identities to config.toml");
     }
 }
 

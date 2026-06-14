@@ -10,6 +10,12 @@ FFI is exactly these files — keep them in sync:
 - `permissions.rs` — `CBCentralManager.authorization` (`objc2` class lookup) + `IOHIDCheckAccess` (C FFI).
 - `crates/openlogi-hook/src/macos.rs` — CGEventTap (on `core-graphics`, see below) + the `NSWorkspace` frontmost-app read (`objc2`).
 
+Spawning the agent under its own macOS TCC identity (so its Accessibility /
+Input-Monitoring grants aren't attributed to the GUI, issue #214) lives in the
+external [`disclaim`](https://crates.io/crates/disclaim) crate — `posix_spawn` +
+the private `responsibility_spawnattrs_setdisclaim`, not ObjC. `ipc_client`'s
+`spawn_agent` uses it; there is no in-tree FFI for it.
+
 `single_instance.rs` (fs4 lock), `launch_agent.rs` (plist via `std::fs`), `updater.rs`
 (gpui_updater) contain **no** ObjC FFI — don't add any.
 

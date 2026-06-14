@@ -12,11 +12,11 @@
 //! latency budget in PLAN.md.
 
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use openlogi_core::device::DeviceInventory;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Consecutive *initial* enumerate failures before the watcher declares
 /// enumeration [`InventoryEvent::Unavailable`]. Only counts before the first
@@ -24,6 +24,13 @@ use tracing::{debug, warn};
 /// the error arm below), and a later success upgrades `Unavailable` back to a
 /// live inventory.
 const INITIAL_FAILURE_LIMIT: u8 = 3;
+
+/// Wall-clock slack past `period` before a late tick is read as a sleep/wake
+/// gap. Generously above the worst honest iteration (period + a fully
+/// timed-out probe pass), so only a genuine suspend trips it; a rare false
+/// positive (e.g. a large NTP step) merely re-applies settings the devices
+/// already have.
+const WAKE_GAP: Duration = Duration::from_secs(60);
 
 /// What the watcher tells the agent.
 pub enum InventoryEvent {
@@ -33,6 +40,12 @@ pub enum InventoryEvent {
     /// starting" any longer; without this the GUI would show its scanning
     /// state forever on a broken HID backend.
     Unavailable,
+    /// The wall clock jumped far past the polling period — the system almost
+    /// certainly slept and woke. Devices may have power-cycled while their
+    /// set/route/online state looks unchanged across the gap, so the agent
+    /// re-applies volatile settings on the next snapshot (#189). Detected by
+    /// wall clock because the monotonic clock pauses during sleep on macOS.
+    SystemWake,
 }
 
 /// Spawn the watcher and return a receiver of inventory events. The
@@ -65,7 +78,21 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<InventoryEvent> {
             let mut enumerator = openlogi_hid::Enumerator::default();
             let mut succeeded = false;
             let mut initial_failures: u8 = 0;
+            let mut last_tick = SystemTime::now();
             loop {
+                // A tick arriving far past its period means the system slept;
+                // `duration_since` errs when the clock stepped backwards, in
+                // which case there is nothing to conclude — just re-anchor.
+                let now = SystemTime::now();
+                if let Ok(elapsed) = now.duration_since(last_tick)
+                    && elapsed > period + WAKE_GAP
+                {
+                    info!(?elapsed, "wall-clock gap — assuming a system wake");
+                    if worker_tx.send(InventoryEvent::SystemWake).is_err() {
+                        return;
+                    }
+                }
+                last_tick = now;
                 match rt.block_on(enumerator.enumerate()) {
                     Ok(inv) => {
                         succeeded = true;

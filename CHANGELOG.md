@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.12](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.11...openlogi-core-v0.6.12) - 2026-06-13
+
+### Fixed
+
+- *(gui)* keep asleep devices and their panels in the device list
+- *(agent)* persist DPI/SmartShift per device and reapply volatile settings on reconnect
+
+## [0.6.11](https://github.com/AprilNEA/OpenLogi/compare/openlogi-hid-v0.6.10...openlogi-hid-v0.6.11) - 2026-06-13
+
+### Fixed
+
+- *(hid)* replay a node's last inventory through transient probe failures ([#222](https://github.com/AprilNEA/OpenLogi/pull/222))
+
+## [0.6.10](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.9...openlogi-core-v0.6.10) - 2026-06-13
+
+### Added
+
+- *(config)* add auto_download_assets app setting
+
+### Fixed
+
+- *(gui)* keep the diagnostics report truthful across agent restarts ([#230](https://github.com/AprilNEA/OpenLogi/pull/230))
+
 ## [0.6.9](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.8...openlogi-core-v0.6.9) - 2026-06-12
 
 ### Added

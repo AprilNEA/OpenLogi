@@ -156,6 +156,14 @@ fn main() -> Result<()> {
         pairing: mut ipc_pairing,
     } = ipc_client::spawn(std::time::Duration::from_secs(2));
 
+    // Manual asset actions (Settings → Assets): Refresh / Clear cache. The
+    // sender is published as a global so the Settings window can drive the
+    // sync that lives on the main loop below; the loop keeps a second sender
+    // (`asset_ctrl_self_tx`) to re-issue a command it had to defer while a
+    // sync was in flight.
+    let (asset_ctrl_tx, mut asset_ctrl_rx) = tokio::sync::mpsc::unbounded_channel::<AssetCommand>();
+    let asset_ctrl_self_tx = asset_ctrl_tx.clone();
+
     // `with_assets` registers the embedded app logo ([`app_assets`]) plus the
     // lucide SVGs that back `gpui_component::IconName`; without it `img()` /
     // `Icon` would fail to load.
@@ -189,6 +197,10 @@ fn main() -> Result<()> {
         // through the agent over IPC; the agent's pairing long-poll feeds events
         // back into this global via the select loop below.
         cx.set_global(windows::add_device::PairingUi::Idle);
+
+        // The Settings → Assets buttons drive the asset sync (which lives on
+        // the select loop below) through this global.
+        cx.set_global(AssetControl(asset_ctrl_tx));
 
         // Publish the shared updater and, if the user opted in, run one
         // check on launch. Done before `initial_config` is moved into the
@@ -255,6 +267,15 @@ fn main() -> Result<()> {
             let mut index_refreshed = false;
             let mut synced_keys: HashSet<String> = HashSet::new();
             let mut assets_dirty = false;
+            // Most recent completed enumeration, kept so a manual Refresh /
+            // Clear (the AssetControl arm below) can sync the current devices
+            // without waiting for the next snapshot.
+            let mut latest_inv: Vec<DeviceInventory> = Vec::new();
+            // A manual Refresh / Clear that arrived while a sync was in
+            // flight: stashed here and run by the sync-outcome arm the moment
+            // that sync finishes, so a Clear's cache wipe never races the
+            // in-flight fetch's writes and the manual fetch is never dropped.
+            let mut deferred_manual: Option<AssetCommand> = None;
             // Cleared when the IPC update channel closes (the client thread
             // died), so the select stops polling a closed receiver.
             let mut ipc_open = true;
@@ -264,14 +285,22 @@ fn main() -> Result<()> {
                         Some(ipc_client::GuiUpdate::Snapshot(update)) => {
                         // Kick off (or re-arm) the background asset sync. The
                         // index prefetch needs no devices; depot fetches fire
-                        // only for models not already synced this session.
+                        // only for models not already synced this session. The
+                        // whole automatic path is skipped when the user turned
+                        // auto-download off — a manual Refresh still works via
+                        // the AssetControl arm below.
+                        let auto_download = cx.update(|cx| {
+                            cx.try_global::<AppState>()
+                                .is_none_or(|s| s.app_settings().auto_download_assets)
+                        });
                         let backoff_passed = last_sync_at
                             .is_none_or(|t| t.elapsed() >= sync_retry_delay(sync_attempts));
                         let pending: Vec<_> = collect_models(&update.inventory)
                             .into_iter()
                             .filter(|m| !synced_keys.contains(&model_key(m)))
                             .collect();
-                        if sync_enabled
+                        if auto_download
+                            && sync_enabled
                             && !sync_running
                             && backoff_passed
                             && (!index_refreshed || !pending.is_empty())
@@ -286,6 +315,14 @@ fn main() -> Result<()> {
                                 let _ = tx.send(SyncOutcome { ok, keys });
                             });
                         }
+                        // Keep the latest completed enumeration for the manual
+                        // Refresh / Clear arm — a not-yet-ready agent's empty
+                        // pre-enumeration list must not shrink it.
+                        let inventory_ready = update.status.inventory
+                            == openlogi_agent_core::ipc::InventoryHealth::Ready;
+                        if inventory_ready {
+                            latest_inv.clone_from(&update.inventory);
+                        }
                         // A completed sync may have put real photos where
                         // silhouettes were resolved: the resolver was rebuilt
                         // when its outcome landed; force this merge through
@@ -299,11 +336,15 @@ fn main() -> Result<()> {
                                 // counting those as misses would wipe the device list (and
                                 // pop an open detail page) on every agent restart: at the
                                 // 250 ms reconnect cadence the miss grace burns in ~750 ms
-                                // while a fresh enumeration takes 1.5–5 s.
-                                let merged = update.status.inventory
-                                    == openlogi_agent_core::ipc::InventoryHealth::Ready
+                                // while a fresh enumeration takes 1.5–5 s. The diagnostics
+                                // snapshot shares the gate so a report copied during that
+                                // window keeps the receivers the UI is still showing; the
+                                // manual-sync arm reuses `inventory_ready` above.
+                                let merged = inventory_ready
                                     && state.refresh_inventories(&update.inventory, &cache, force_refresh);
-                                state.store_agent_snapshot(&update.inventory, &update.status);
+                                if inventory_ready {
+                                    state.store_inventory_snapshot(&update.inventory);
+                                }
                                 // Bitwise `|`: the link must be set even when the
                                 // merge already reported a change.
                                 merged | state.set_agent_link(state::AgentLink::Ready(update.status))
@@ -330,6 +371,62 @@ fn main() -> Result<()> {
                             cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
                         }
                     },
+                    Some(cmd) = asset_ctrl_rx.recv() => {
+                        // Manual Refresh / Clear from Settings → Assets. Both
+                        // force a fresh fetch for the current devices —
+                        // bypassing the auto-download setting and the
+                        // release-bundle `sync_enabled` gate — and Clear wipes
+                        // the per-user cache first, resetting the retry backoff
+                        // so the next automatic attempt isn't delayed.
+                        if sync_running {
+                            // A sync is writing the cache right now. Stash the
+                            // command; the outcome arm re-issues it the moment
+                            // that sync finishes, so a Clear never wipes the
+                            // cache out from under the running fetch and a
+                            // second writer is never spawned alongside it. A
+                            // queued Clear wins over a later Refresh — Clear
+                            // re-fetches too, so collapsing to Refresh would
+                            // silently drop the wipe.
+                            if matches!(cmd, AssetCommand::ClearCache)
+                                || !matches!(deferred_manual, Some(AssetCommand::ClearCache))
+                            {
+                                deferred_manual = Some(cmd);
+                            }
+                        } else {
+                            if matches!(cmd, AssetCommand::ClearCache) {
+                                if let Err(e) = asset::clear_cache() {
+                                    warn!(error = %e, "could not clear asset cache");
+                                }
+                                // The on-disk cache is gone: drop the bookkeeping
+                                // that says otherwise (so the automatic sync can
+                                // re-fetch a device that reconnects later), rebuild
+                                // the resolver, and repaint so cleared art falls
+                                // back to the silhouette (or bundled art)
+                                // immediately.
+                                synced_keys.clear();
+                                index_refreshed = false;
+                                cache = asset::AssetResolver::new();
+                                cx.update(|cx| {
+                                    let changed = cx.update_global::<AppState, _>(|state, _| {
+                                        state.refresh_inventories(&latest_inv, &cache, true)
+                                    });
+                                    if changed {
+                                        cx.refresh_windows();
+                                    }
+                                });
+                            }
+                            sync_running = true;
+                            sync_attempts = 0;
+                            last_sync_at = None;
+                            let models = collect_models(&latest_inv);
+                            let tx = sync_tx.clone();
+                            std::thread::spawn(move || {
+                                let keys = models.iter().map(model_key).collect();
+                                let ok = run_asset_sync(&models);
+                                let _ = tx.send(SyncOutcome { ok, keys });
+                            });
+                        }
+                    }
                     // Guarded so this branch is *disabled* while no sync is in
                     // flight — we hold a live `sync_tx`, so an unguarded recv
                     // would pend forever and keep the `else => break` exit
@@ -346,6 +443,14 @@ fn main() -> Result<()> {
                             synced_keys.extend(outcome.keys);
                             cache = asset::AssetResolver::new();
                             assets_dirty = true;
+                        }
+                        // A manual Refresh / Clear that landed mid-sync waited
+                        // for this moment: re-issue it now that the cache is no
+                        // longer being written. The arm above runs it (sync is
+                        // idle again) — or re-defers if a new sync already
+                        // started in the meantime.
+                        if let Some(cmd) = deferred_manual.take() {
+                            let _ = asset_ctrl_self_tx.send(cmd);
                         }
                     }
                     Some(update) = ipc_pairing.recv() => {
@@ -390,6 +495,22 @@ fn model_key((model, codename): &(DeviceModelInfo, Option<String>)) -> String {
     )
 }
 
+/// A manual asset action requested from the Settings → Assets tab, pushed to
+/// the main event loop via [`AssetControl`].
+pub enum AssetCommand {
+    /// Force-fetch assets for the connected devices now, bypassing the
+    /// automatic download policy.
+    Refresh,
+    /// Delete the per-user cache, then re-fetch.
+    ClearCache,
+}
+
+/// Global handle the Settings window uses to push [`AssetCommand`]s into the
+/// main loop, mirroring how the Add Device window drives pairing.
+pub struct AssetControl(pub tokio::sync::mpsc::UnboundedSender<AssetCommand>);
+
+impl gpui::Global for AssetControl {}
+
 /// Minimum gap before re-attempting a failed sync, doubling with each
 /// consecutive attempt and capped at a minute. The first attempt is
 /// immediate (`last_sync_at` is `None`); after that a permanently-down host
@@ -406,7 +527,10 @@ fn sync_retry_delay(attempts: u32) -> Duration {
 /// `models`. Returns `true` when the sync completed and `false` when it
 /// failed and should be retried. Runs on a dedicated background thread —
 /// the HTTP layer's blocking retries are fine here. (Whether sync runs at
-/// all is the caller's `should_run` gate, checked once at startup.)
+/// all is the caller's gate: the automatic path checks `should_run` once at
+/// startup plus the auto-download setting; the Settings → Assets manual
+/// actions always fetch, even in a release build that would otherwise serve
+/// only bundled art.)
 fn run_asset_sync(models: &[(DeviceModelInfo, Option<String>)]) -> bool {
     let server =
         std::env::var("OPENLOGI_ASSETS").unwrap_or_else(|_| asset::sync::DEFAULT_BASE.to_string());
