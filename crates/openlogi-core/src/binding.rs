@@ -1165,16 +1165,6 @@ impl Action {
     }
 }
 
-/// Synthesise a horizontal scroll of `delta` wheel lines at the current focus.
-///
-/// Used by the gesture/thumbwheel capture watcher to re-inject the MX thumb
-/// wheel's scrolling after the wheel has been diverted over HID++ to capture its
-/// click. `delta` is the device's raw rotation; its sign follows the wheel's
-/// rotation convention and its magnitude (one line per rotation increment) may
-/// need tuning per device, since the diverted resolution differs from native.
-///
-/// No-op (logs nothing) on platforms without a supported injection mechanism.
-
 /// Re-inject a captured scroll-wheel event after applying user preferences.
 ///
 /// `v` is vertical axis 1, `h` is horizontal axis 2. On macOS this posts at the
@@ -1204,6 +1194,16 @@ pub fn post_scroll_delta(v: i32, h: i32) {
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let _ = (v, h);
 }
+
+/// Synthesise a horizontal scroll of `delta` wheel lines at the current focus.
+///
+/// Used by the gesture/thumbwheel capture watcher to re-inject the MX thumb
+/// wheel's scrolling after the wheel has been diverted over HID++ to capture its
+/// click. `delta` is the device's raw rotation; its sign follows the wheel's
+/// rotation convention and its magnitude (one line per rotation increment) may
+/// need tuning per device, since the diverted resolution differs from native.
+///
+/// No-op (logs nothing) on platforms without a supported injection mechanism.
 
 pub fn post_horizontal_scroll(delta: i32) {
     #[cfg(target_os = "macos")]

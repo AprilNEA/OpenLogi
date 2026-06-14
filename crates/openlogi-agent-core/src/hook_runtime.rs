@@ -290,11 +290,8 @@ fn resolve_gesture_click(
         .unwrap_or_else(|| default_binding(id))
 }
 
-/// Whether `action` is just `id`'s own native event — i.e. the button is mapped
-/// to the very click (or extra-button press) it already produces. In that case
-/// the hook should pass the event through to the OS rather than suppress and
-/// re-synthesise it. For Back/Forward this keeps the genuine hardware button
-/// 4/5 intact instead of round-tripping it through synthesis.
+/// Apply the app-wide scroll preferences to a captured wheel event, returning
+/// vertical (axis 1) and horizontal (axis 2) line deltas to re-inject.
 fn transform_scroll(delta_x: f32, delta_y: f32, settings: ScrollSettings) -> (i32, i32) {
     let strength = f32::from(settings.strength.max(1));
     let tactility = i32::from(settings.tactility.min(10));
@@ -324,6 +321,11 @@ fn quantize_scroll(value: f32, tactility: i32) -> i32 {
     if v < 0 { -snapped } else { snapped }
 }
 
+/// Whether `action` is just `id`'s own native event — i.e. the button is mapped
+/// to the very click (or extra-button press) it already produces. In that case
+/// the hook should pass the event through to the OS rather than suppress and
+/// re-synthesise it. For Back/Forward this keeps the genuine hardware button
+/// 4/5 intact instead of round-tripping it through synthesis.
 fn is_native_click(id: ButtonId, action: &Action) -> bool {
     matches!(
         (id, action),
