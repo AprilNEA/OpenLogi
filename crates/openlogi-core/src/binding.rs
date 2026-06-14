@@ -1174,6 +1174,37 @@ impl Action {
 /// need tuning per device, since the diverted resolution differs from native.
 ///
 /// No-op (logs nothing) on platforms without a supported injection mechanism.
+
+/// Re-inject a captured scroll-wheel event after applying user preferences.
+///
+/// `v` is vertical axis 1, `h` is horizontal axis 2. On macOS this posts at the
+/// session tap rather than the HID tap so OpenLogi's own HID event tap does not
+/// capture and transform the synthetic event again.
+pub fn post_scroll_delta(v: i32, h: i32) {
+    if v == 0 && h == 0 {
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    macos::post_scroll_delta(v, h);
+
+    #[cfg(target_os = "linux")]
+    {
+        if v != 0 {
+            linux::scroll(evdev::RelativeAxisCode::REL_WHEEL, v);
+        }
+        if h != 0 {
+            linux::scroll(evdev::RelativeAxisCode::REL_HWHEEL, h);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    windows::post_scroll_delta(v, h);
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let _ = (v, h);
+}
+
 pub fn post_horizontal_scroll(delta: i32) {
     #[cfg(target_os = "macos")]
     macos::post_horizontal_scroll(delta);
@@ -1412,6 +1443,19 @@ mod macos {
             return;
         };
         ev.post(CGEventTapLocation::HID);
+    }
+
+    /// Post a scroll event with explicit vertical / horizontal deltas.
+    pub(super) fn post_scroll_delta(v: i32, h: i32) {
+        let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+            tracing::warn!("CGEventSource::new failed for scroll");
+            return;
+        };
+        let Ok(ev) = CGEvent::new_scroll_event(src, ScrollEventUnit::PIXEL, 2, v, h, 0) else {
+            tracing::warn!("CGEvent::new_scroll_event failed");
+            return;
+        };
+        ev.post(CGEventTapLocation::Session);
     }
 
     /// Post a horizontal scroll of `delta` lines (wheel2 axis). Line units suit
@@ -2336,6 +2380,23 @@ mod windows {
             _ => return,
         };
         send_inputs(&[mouse_input(flags, data)]);
+    }
+
+    pub(super) fn post_scroll_delta(v: i32, h: i32) {
+        let mut inputs = Vec::new();
+        if v != 0 {
+            inputs.push(mouse_input(
+                MOUSEEVENTF_WHEEL,
+                v.saturating_mul(WHEEL_DELTA),
+            ));
+        }
+        if h != 0 {
+            inputs.push(mouse_input(
+                MOUSEEVENTF_HWHEEL,
+                h.saturating_mul(WHEEL_DELTA),
+            ));
+        }
+        send_inputs(&inputs);
     }
 
     pub(super) fn post_horizontal_scroll(delta: i32) {

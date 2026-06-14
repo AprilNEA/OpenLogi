@@ -88,6 +88,17 @@ pub struct AppSettings {
     /// user opt in on first launch.
     #[serde(default)]
     pub update_prompt_seen: bool,
+    /// Reverse the direction of captured scroll-wheel gestures.
+    #[serde(default)]
+    pub wheel_inverted: bool,
+    /// Scroll strength multiplier. `1` keeps the physical wheel's native feel;
+    /// larger values make each wheel tick travel farther.
+    #[serde(default = "default_scroll_strength")]
+    pub wheel_strength: u8,
+    /// Scroll tactility / chunk size. `0` or `1` keeps motion smooth; larger
+    /// values quantize emitted scroll into chunkier, more tactile steps.
+    #[serde(default)]
+    pub wheel_tactility: u8,
     /// Whether OpenLogi shows a macOS menu-bar (status item) icon. `true`
     /// (default) → it lives in the menu bar, dropping the Dock icon while no
     /// window is open; `false` → it stays an ordinary Dock app with no status
@@ -142,6 +153,9 @@ impl Default for AppSettings {
             launch_at_login: false,
             check_for_updates: false,
             update_prompt_seen: false,
+            wheel_inverted: false,
+            wheel_strength: default_scroll_strength(),
+            wheel_tactility: 0,
             show_in_menu_bar: true,
             auto_download_assets: true,
             language: None,
@@ -154,6 +168,11 @@ impl Default for AppSettings {
 /// icon is on out of the box and configs predating the field keep that behavior.
 fn default_true() -> bool {
     true
+}
+
+/// serde default for [`AppSettings::wheel_strength`]: keep native feel.
+const fn default_scroll_strength() -> u8 {
+    1
 }
 
 /// serde default for [`AppSettings::thumbwheel_sensitivity`]: keeps configs
