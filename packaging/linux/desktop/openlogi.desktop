@@ -5,6 +5,10 @@ Comment=Logitech HID++ device control — remap buttons, DPI, SmartShift
 Exec=openlogi-gui
 Icon=openlogi
 Terminal=false
+# Ties the running window (Wayland xdg-toplevel app_id / X11 WM_CLASS, set in
+# main_window_options) back to this launcher so GNOME groups it under the
+# OpenLogi icon instead of a generic one.
+StartupWMClass=org.openlogi.openlogi
 Categories=Settings;HardwareSettings;
 Keywords=logitech;mouse;hid;remap;dpi;
 StartupNotify=true
