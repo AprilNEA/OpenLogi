@@ -19,7 +19,9 @@ use core_graphics::event::{
 use foreign_types_shared::ForeignType as _;
 use tracing::{debug, error, warn};
 
-use crate::{ButtonId, EventDevice, EventDisposition, HookError, MouseEvent};
+use crate::{
+    ButtonId, EventDevice, EventDisposition, EventTapInfo, HookError, MouseEvent, TapLocation,
+};
 
 /// Everything `Hook` needs to control the background thread.
 pub(crate) struct HookInner {
@@ -587,6 +589,111 @@ fn disable_tap(tap: &CGEventTap) {
     // the call; `CGEventTapEnable(.., false)` is idempotent and merely
     // detaches the tap from the system event stream.
     unsafe { CGEventTapEnable(tap.mach_port().as_concrete_TypeRef(), false) };
+}
+
+/// Mirror of CoreGraphics' `CGEventTapInformation`. `#[repr(C)]` reproduces the
+/// header layout (including the padding before `events_of_interest` and
+/// `min_usec_latency`) so `CGGetEventTapList` writes into the right offsets.
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(
+    dead_code,
+    reason = "events_of_interest and the latency floats are unread but must \
+              exist so the struct keeps CoreGraphics' exact 48-byte stride; \
+              CGGetEventTapList writes whole records into the buffer"
+)]
+struct CGEventTapInformation {
+    event_tap_id: u32,
+    tap_point: u32,
+    options: u32,
+    events_of_interest: u64,
+    tapping_process: i32,
+    process_being_tapped: i32,
+    enabled: bool,
+    min_usec_latency: f32,
+    avg_usec_latency: f32,
+    max_usec_latency: f32,
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    // `core-graphics` doesn't bind the enumeration side (it ships the tap
+    // *create/enable* path only), so we declare it ourselves. Passing a null
+    // list with count 0 returns the number of taps via `event_tap_count`.
+    fn CGGetEventTapList(
+        max_number_of_taps: u32,
+        tap_list: *mut CGEventTapInformation,
+        event_tap_count: *mut u32,
+    ) -> i32;
+}
+
+#[link(name = "System", kind = "dylib")]
+unsafe extern "C" {
+    // libproc; resolves a PID to its executable path. Returns the byte length
+    // written, or <= 0 on failure (e.g. the process exited, or it's out of the
+    // caller's permission scope).
+    fn proc_pidpath(pid: i32, buffer: *mut std::ffi::c_void, buffersize: u32) -> i32;
+}
+
+/// See [`super::Hook::list_event_taps`].
+pub(crate) fn list_event_taps() -> Vec<EventTapInfo> {
+    let mut count: u32 = 0;
+    // SAFETY: a null `tap_list` with `max == 0` is the documented count-probe
+    // form; it only writes `count`.
+    let err = unsafe { CGGetEventTapList(0, std::ptr::null_mut(), &raw mut count) };
+    if err != 0 || count == 0 {
+        return Vec::new();
+    }
+
+    // SAFETY: `CGEventTapInformation` is a plain `repr(C)` POD; an all-zero bit
+    // pattern is a valid instance (`enabled = false`, all numeric fields 0).
+    // `CGGetEventTapList` overwrites each slot it fills.
+    let mut taps: Vec<CGEventTapInformation> = vec![unsafe { std::mem::zeroed() }; count as usize];
+    let err = unsafe { CGGetEventTapList(count, taps.as_mut_ptr(), &raw mut count) };
+    if err != 0 {
+        return Vec::new();
+    }
+    // The second call may report fewer taps than the probe; never read past it.
+    taps.truncate(count as usize);
+
+    taps.into_iter()
+        .map(|t| EventTapInfo {
+            tap_id: t.event_tap_id,
+            location: match t.tap_point {
+                0 => TapLocation::Hid,
+                1 => TapLocation::Session,
+                2 => TapLocation::AnnotatedSession,
+                other => TapLocation::Other(other),
+            },
+            // kCGEventTapOptionDefault == 0 (active); kCGEventTapOptionListenOnly == 1.
+            active: t.options == 0,
+            enabled: t.enabled,
+            owner_pid: t.tapping_process,
+            owner_name: process_name(t.tapping_process),
+            target_pid: (t.process_being_tapped != 0).then_some(t.process_being_tapped),
+        })
+        .collect()
+}
+
+/// Best-effort PID → executable file name via libproc.
+fn process_name(pid: i32) -> Option<String> {
+    // PROC_PIDPATHINFO_MAXSIZE is 4 * MAXPATHLEN (4 * 1024).
+    const BUF_LEN: u32 = 4096;
+    if pid <= 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; BUF_LEN as usize];
+    // SAFETY: `buf` is a live, writable buffer of `BUF_LEN` bytes; the C side
+    // writes at most that many and returns the length actually written.
+    let len = unsafe { proc_pidpath(pid, buf.as_mut_ptr().cast(), BUF_LEN) };
+    if len <= 0 {
+        return None;
+    }
+    // `len > 0` here, so `unsigned_abs` is the value itself; widening to usize
+    // is lossless and sidesteps the sign-loss cast lint.
+    buf.truncate(len.unsigned_abs() as usize);
+    let path = String::from_utf8_lossy(&buf);
+    Some(path.rsplit('/').next().unwrap_or(&path).to_string())
 }
 
 /// Signal the run loop to stop and join the background thread.

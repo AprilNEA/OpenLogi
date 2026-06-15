@@ -101,6 +101,51 @@ pub enum EventDisposition {
     Suppress,
 }
 
+/// Where in the event stream a tap is inserted (macOS `CGEventTapLocation`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TapLocation {
+    /// `kCGHIDEventTap` — the lowest level, ahead of the window server. An
+    /// *active* tap here gates raw device input for the whole system, so a slow
+    /// or wedged owner adds latency to every event. This is where OpenLogi (and
+    /// Logi Options+) install.
+    Hid,
+    /// `kCGSessionEventTap` — scoped to the current login session.
+    Session,
+    /// `kCGAnnotatedSessionEventTap` — session tap that also sees annotations.
+    AnnotatedSession,
+    /// A location value newer than this enum knows about.
+    Other(u32),
+}
+
+/// A live event tap installed somewhere in the system, as reported by
+/// [`Hook::list_event_taps`]. Read-only diagnostic snapshot — enumerating taps
+/// needs no Accessibility grant and any process in the session sees them all.
+///
+/// The per-tap latency figures `CGEventTapInformation` carries are deliberately
+/// omitted: empirically they hold uninitialised sentinel values that change
+/// between samples, so they are not a trustworthy lag signal.
+#[derive(Clone, Debug)]
+pub struct EventTapInfo {
+    /// The system-assigned tap identifier.
+    pub tap_id: u32,
+    /// Where the tap sits in the event stream.
+    pub location: TapLocation,
+    /// `true` for an *active* tap (`kCGEventTapOptionDefault`) that can modify
+    /// or suppress events; `false` for a passive *listen-only* tap, which
+    /// physically cannot stall input.
+    pub active: bool,
+    /// Whether the tap is currently enabled (servicing events).
+    pub enabled: bool,
+    /// PID of the process that installed the tap.
+    pub owner_pid: i32,
+    /// Best-effort executable file name of the owner, or `None` if the process
+    /// has exited or its path is unreadable.
+    pub owner_name: Option<String>,
+    /// PID of the single process whose events this tap intercepts, or `None`
+    /// for a global tap (one that sees every process's events).
+    pub target_pid: Option<i32>,
+}
+
 /// Errors that [`Hook::start`] and related functions can produce.
 #[derive(Debug, thiserror::Error)]
 pub enum HookError {
@@ -258,6 +303,24 @@ impl Hook {
         cfg_select! {
             target_os = "macos" => { macos::prompt_accessibility(); }
             _ => {}
+        }
+    }
+
+    /// Enumerate every event tap currently installed in this login session.
+    ///
+    /// A read-only diagnostic snapshot for spotting input contention — e.g. a
+    /// competing app holding an *active* [`TapLocation::Hid`] tap (the classic
+    /// "another driver is also intercepting the mouse" cause of pointer lag),
+    /// or OpenLogi's own tap being unexpectedly disabled. Needs no Accessibility
+    /// grant; the call sees every process's taps regardless of who asks.
+    ///
+    /// Returns an empty vector on non-macOS targets, which have no equivalent
+    /// global tap registry.
+    #[must_use]
+    pub fn list_event_taps() -> Vec<EventTapInfo> {
+        cfg_select! {
+            target_os = "macos" => { macos::list_event_taps() }
+            _ => { Vec::new() }
         }
     }
 }
