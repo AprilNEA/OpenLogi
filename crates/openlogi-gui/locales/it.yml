@@ -235,3 +235,8 @@ _version: 1
 "Reading supported DPI values…": "Reading supported DPI values…"
 "Couldn't read DPI — click to retry.": "Couldn't read DPI — click to retry."
 "This device did not report Adjustable DPI support.": "This device did not report Adjustable DPI support."
+"Diagnostics": "Diagnostica"
+"Input interception": "Intercettazione input"
+"Detects other apps tapping the mouse event stream — a common cause of pointer lag.": "Rileva altre app che intercettano il flusso di eventi del mouse, una causa comune di lentezza del puntatore."
+"No other app is intercepting mouse input.": "Nessun'altra app sta intercettando l'input del mouse."
+"Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}": "Un'altra app sta intercettando l'input del mouse, il che può causare lentezza del puntatore o azioni dei pulsanti duplicate: %{apps}"

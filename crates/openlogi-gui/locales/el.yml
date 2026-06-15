@@ -235,3 +235,8 @@ _version: 1
 "Reading supported DPI values…": "Reading supported DPI values…"
 "Couldn't read DPI — click to retry.": "Couldn't read DPI — click to retry."
 "This device did not report Adjustable DPI support.": "This device did not report Adjustable DPI support."
+"Diagnostics": "Διαγνωστικά"
+"Input interception": "Υποκλοπή εισόδου"
+"Detects other apps tapping the mouse event stream — a common cause of pointer lag.": "Εντοπίζει άλλες εφαρμογές που υποκλέπτουν τη ροή συμβάντων του ποντικιού — μια συνηθισμένη αιτία καθυστέρησης του δείκτη."
+"No other app is intercepting mouse input.": "Καμία άλλη εφαρμογή δεν υποκλέπτει την είσοδο του ποντικιού."
+"Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}": "Μια άλλη εφαρμογή υποκλέπτει την είσοδο του ποντικιού, κάτι που μπορεί να προκαλέσει καθυστέρηση του δείκτη ή διπλές ενέργειες κουμπιών: %{apps}"

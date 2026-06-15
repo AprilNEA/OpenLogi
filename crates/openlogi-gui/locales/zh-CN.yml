@@ -235,3 +235,8 @@ _version: 1
 "Reading supported DPI values…": "Reading supported DPI values…"
 "Couldn't read DPI — click to retry.": "Couldn't read DPI — click to retry."
 "This device did not report Adjustable DPI support.": "This device did not report Adjustable DPI support."
+"Diagnostics": "诊断"
+"Input interception": "输入拦截"
+"Detects other apps tapping the mouse event stream — a common cause of pointer lag.": "检测其它正在监听鼠标事件流的应用——这是指针卡顿的常见原因。"
+"No other app is intercepting mouse input.": "没有其它应用在拦截鼠标输入。"
+"Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}": "另一个应用正在拦截鼠标输入，可能导致指针卡顿或按键重复触发：%{apps}"

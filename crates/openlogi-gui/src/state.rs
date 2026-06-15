@@ -328,6 +328,11 @@ pub struct AppState {
     /// snapshots, so an agent restart's empty pre-enumeration list never
     /// blanks a report copied during the reconnect window.
     last_inventory: Vec<DeviceInventory>,
+    /// Recent events streamed from the agent's hook for the debug live monitor
+    /// on the Diagnostics page. Bounded; only filled while the Settings window's
+    /// poll loop runs (debug macOS builds only).
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    monitor_events: std::collections::VecDeque<openlogi_agent_core::ipc::MonitorEvent>,
 }
 
 impl AppState {
@@ -371,6 +376,8 @@ impl AppState {
             config,
             ipc_commands,
             last_inventory: Vec::new(),
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            monitor_events: std::collections::VecDeque::new(),
         };
         state.button_bindings = state.bindings_for_current();
         state.gesture_bindings = state.gesture_bindings_for_current();
@@ -419,6 +426,25 @@ impl AppState {
     #[must_use]
     pub fn last_inventory(&self) -> &[DeviceInventory] {
         &self.last_inventory
+    }
+
+    /// Append a batch of live-monitor events, capping the retained history so the
+    /// buffer can't grow without bound while the monitor is open.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    pub fn push_monitor_events(&mut self, events: Vec<openlogi_agent_core::ipc::MonitorEvent>) {
+        const MAX: usize = 200;
+        self.monitor_events.extend(events);
+        let overflow = self.monitor_events.len().saturating_sub(MAX);
+        self.monitor_events.drain(..overflow);
+    }
+
+    /// Recent live-monitor events, oldest first.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[must_use]
+    pub fn monitor_events(
+        &self,
+    ) -> &std::collections::VecDeque<openlogi_agent_core::ipc::MonitorEvent> {
+        &self.monitor_events
     }
 
     /// Config schema version and the number of devices with saved configuration.

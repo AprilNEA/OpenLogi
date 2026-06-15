@@ -95,6 +95,11 @@ pub enum Command {
     StartPairing(ReceiverSelector),
     PairDevice([u8; 6]),
     CancelPairing,
+    /// Drain the agent's live event-monitor buffer for the debug Diagnostics
+    /// monitor. The first poll enables monitoring agent-side; the agent
+    /// auto-disables it once polls stop.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    PollEventMonitor(oneshot::Sender<Vec<openlogi_agent_core::ipc::MonitorEvent>>),
 }
 
 /// Handle the GUI holds to talk to the agent: a stream of poll updates, a
@@ -714,6 +719,10 @@ async fn handle(client: &mut Option<AgentClient>, cmd: Command) -> Result<(), ()
         }
         Command::PairDevice(address) => client.pair_device(ctx, address).await.map_err(|_| ())?,
         Command::CancelPairing => client.cancel_pairing(ctx).await.map_err(|_| ())?,
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        Command::PollEventMonitor(reply) => {
+            let _ = reply.send(rpc_result(client.poll_event_monitor(ctx).await)?);
+        }
     }
     Ok(())
 }
