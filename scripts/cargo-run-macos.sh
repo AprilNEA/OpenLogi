@@ -89,10 +89,14 @@ if [ "${OPENLOGI_DEV_AGENT:-1}" != "0" ]; then
     cargo build -p openlogi-agent --manifest-path "$ROOT/Cargo.toml"
   fi
   helper="$APP/Contents/Library/LoginItems/OpenLogiAgent.app"
-  mkdir -p "$helper/Contents/MacOS"
+  mkdir -p "$helper/Contents/MacOS" "$helper/Contents/Resources"
   ln -f "$agent_dir/openlogi-agent" "$helper/Contents/MacOS/openlogi-agent" 2>/dev/null \
     || cp -f "$agent_dir/openlogi-agent" "$helper/Contents/MacOS/openlogi-agent"
   cp -f "$ROOT/crates/openlogi-agent/macos/Info.plist" "$helper/Contents/Info.plist"
+  # Share the GUI's "e" icon (Info.plist CFBundleIconFile = AppIcon) so the
+  # agent isn't a blank entry in the Accessibility list. ICON_SRC was generated
+  # / verified above.
+  cp -f "$ICON_SRC" "$helper/Contents/Resources/AppIcon.icns"
 fi
 
 exec "$MACOS/openlogi-gui" "$@"

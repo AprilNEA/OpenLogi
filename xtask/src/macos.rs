@@ -187,6 +187,18 @@ fn embed_agent_helper(root: &Path, app: &Path, xcode_env: &[(String, String)]) -
     let info_dst = helper.join("Contents/Info.plist");
     fs::copy(&info_src, &info_dst)
         .with_context(|| "could not write the helper Info.plist".to_string())?;
+    // Share the GUI's app icon so the agent shows the OpenLogi mark (not a
+    // generic blank) in System Settings → Accessibility, where the grant now
+    // lives under "OpenLogi Agent". `bundle_macos` runs `generate_macos_icns`
+    // first, so the icns is already on disk. Matches the Info.plist
+    // CFBundleIconFile = "AppIcon".
+    let icon_src = root.join("crates/openlogi-gui/icon/AppIcon.icns");
+    ensure_file(&icon_src)?;
+    let resources = helper.join("Contents/Resources");
+    fs::create_dir_all(&resources)
+        .with_context(|| format!("could not create {}", resources.display()))?;
+    fs::copy(&icon_src, resources.join("AppIcon.icns"))
+        .with_context(|| "could not copy the app icon into the helper bundle".to_string())?;
     // The template ships the 0.0.0 dev version (the hand-bundled dev flow
     // copies it verbatim); stamp the workspace version (= xtask's own,
     // inherited) over it so Finder and update scanners see the real one.
