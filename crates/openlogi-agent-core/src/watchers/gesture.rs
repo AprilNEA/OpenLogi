@@ -43,6 +43,7 @@ pub type ThumbwheelSensitivity = Arc<AtomicI32>;
 
 /// How often to re-read the active device target + thumb-wheel arming so a
 /// carousel switch or a binding/sensitivity edit re-points / re-arms capture.
+/// It also paces the respawn of a session that ended on its own (see `manage`).
 const TARGET_POLL: Duration = Duration::from_secs(1);
 
 /// Idle gap after which a partly-accumulated *custom* wheel action is forgotten,
@@ -129,6 +130,18 @@ fn thumbwheel_armed(hook_maps: &SharedHookMaps, sensitivity: i32) -> bool {
     })
 }
 
+/// Whether a finished capture session should make the manager re-arm.
+///
+/// `done_epoch` identifies the session that signalled completion; `live_epoch`
+/// is the session the manager currently believes is running; `has_target` is
+/// whether a device is currently targeted. A session ending only warrants a
+/// respawn when it is the *current* one (not a stale session already superseded
+/// by a deliberate restart, whose epoch no longer matches) and a target is still
+/// set (not a deliberate stop-to-idle, e.g. while pairing owns the receiver).
+fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -> bool {
+    done_epoch == live_epoch && has_target
+}
+
 /// Keep one capture session alive for the active device, restarting it when the
 /// device or the thumb-wheel arming changes, and dispatch incoming inputs. Runs
 /// for the lifetime of the process.
@@ -147,6 +160,16 @@ async fn manage(
     let mut stop: Option<oneshot::Sender<()>> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut accumulators = WheelAccumulators::default();
+    // Capture sessions run as detached tasks, so an unexpected exit (a transient
+    // HID++ read error, a sleep-wake glitch, brief radio loss) would otherwise go
+    // unnoticed: the tick below only restarts on a *changed* target, so a session
+    // that dies with the target unchanged leaves the gesture button and thumb
+    // wheel dead until the next carousel switch, config reload, or agent restart.
+    // Each session reports its completion here, tagged with the epoch it started
+    // under, so a dead *current* session can be re-armed while stale completions
+    // (from an already-superseded session) are ignored.
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<u64>();
+    let mut epoch: u64 = 0;
 
     loop {
         tokio::select! {
@@ -199,6 +222,9 @@ async fn manage(
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
                     let slot = Arc::clone(&capture_channel);
+                    epoch = epoch.wrapping_add(1);
+                    let session_epoch = epoch;
+                    let done = done_tx.clone();
                     tokio::spawn(async move {
                         if let Err(e) = run_capture_session(
                             route,
@@ -212,8 +238,33 @@ async fn manage(
                         {
                             debug!(error = %e, "capture session ended");
                         }
+                        // Report completion so the manager can re-arm if this exit
+                        // was unexpected rather than a deliberate stop.
+                        let _ = done.send(session_epoch);
                     });
                     stop = Some(stop_tx);
+                }
+            }
+            Some(done_epoch) = done_rx.recv() => {
+                // A capture session ended on its own. Re-arm only when it is the
+                // session we currently believe is live for an active target;
+                // clearing `current` lets the next tick start a fresh session.
+                // The tick fires at most once per `TARGET_POLL`, which paces the
+                // respawn so a permanently failing device can't hot-loop. A stale
+                // epoch or a deliberate stop-to-idle is a no-op (see `should_rearm`).
+                if should_rearm(done_epoch, epoch, current.is_some()) {
+                    warn!("capture session for the active device ended unexpectedly, re-arming");
+                    current = None;
+                    // Keep the `stop`/`current` invariant: the session already
+                    // exited, so its stop receiver is gone and dropping the sender
+                    // here is a no-op, but it stops the next tick from signalling a
+                    // session that no longer exists.
+                    stop = None;
+                    // No session owns the receiver now, so mark capture idle: the
+                    // tick's `want == current` short-circuit (None == None while
+                    // pairing wants None) would otherwise skip this update and a
+                    // pairing session waiting on `capture_idle` could stall.
+                    capture_idle.store(true, Ordering::Relaxed);
                 }
             }
         }
@@ -523,5 +574,25 @@ mod tests {
             ),
             WheelOutput::Idle
         );
+    }
+
+    #[test]
+    fn rearms_when_the_current_session_dies_with_a_target() {
+        // The live session ended on its own while a device is still targeted.
+        assert!(should_rearm(7, 7, true));
+    }
+
+    #[test]
+    fn ignores_a_stale_session_superseded_by_a_restart() {
+        // An older session reports completion after a deliberate restart already
+        // bumped the epoch; re-arming would needlessly cycle the live session.
+        assert!(!should_rearm(6, 7, true));
+    }
+
+    #[test]
+    fn ignores_a_deliberate_stop_to_idle() {
+        // The session was stopped on purpose (pairing took the receiver, or no
+        // device is targeted): no target means there is nothing to re-arm.
+        assert!(!should_rearm(7, 7, false));
     }
 }
