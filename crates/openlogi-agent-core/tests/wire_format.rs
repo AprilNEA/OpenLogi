@@ -23,8 +23,8 @@ use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_agent_core::ipc::{
-    AgentRequest, AgentSnapshot, AgentStatus, FoundDevice, InventoryHealth, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingUpdate,
+    AgentRequest, AgentSnapshot, AgentStatus, FoundDevice, InventoryHealth, MonitorEvent,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate,
 };
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{
@@ -61,7 +61,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 8);
+    assert_eq!(PROTOCOL_VERSION, 9);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -82,6 +82,26 @@ fn request_variant_order() {
     );
     assert_wire(&AgentRequest::NextPairing {}, "0d");
     assert_wire(&AgentRequest::Snapshot {}, "0e");
+    assert_wire(&AgentRequest::PollEventMonitor {}, "0f");
+}
+
+#[test]
+fn monitor_events() {
+    assert_wire(
+        &MonitorEvent::Button {
+            button: "Back".into(),
+            pressed: true,
+        },
+        "00044261636b01",
+    );
+    assert_wire(
+        &MonitorEvent::Scroll {
+            delta_x: 0.0,
+            delta_y: 1.0,
+        },
+        "01000000000000803f",
+    );
+    assert_wire(&MonitorEvent::CaptureInterrupted, "02");
 }
 
 #[test]

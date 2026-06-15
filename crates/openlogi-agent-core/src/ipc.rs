@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 /// v6: `Capabilities::scroll_inversion` added.
 /// v7: pairing commands return typed acceptance errors.
 /// v8: [`WriteError`] carries typed HID++ operation failures.
-pub const PROTOCOL_VERSION: u32 = 8;
+/// v9: `poll_event_monitor` appended + [`MonitorEvent`] (live event monitor).
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep
@@ -189,6 +190,23 @@ pub enum PairingUpdate {
     Failed(PairingFailure),
 }
 
+/// One input event the agent's mouse hook observed, streamed to the GUI's live
+/// event monitor via [`Agent::poll_event_monitor`]. Pointer-move events are
+/// deliberately excluded — they would flood the buffer — so this is the
+/// button/scroll/interrupt view of what OpenLogi's hook actually receives.
+///
+/// bincode encodes the variant *index*, so variants are append-only.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum MonitorEvent {
+    /// A mouse button changed state. `button` is the display label (e.g. `Back`).
+    Button { button: String, pressed: bool },
+    /// A scroll-wheel tick; positive `delta_x` = right, positive `delta_y` = down.
+    Scroll { delta_x: f32, delta_y: f32 },
+    /// The OS interrupted capture (the tap was disabled by a timeout or by
+    /// competing user input). Surfaced because it explains a momentary gap.
+    CaptureInterrupted,
+}
+
 #[tarpc::service]
 pub trait Agent {
     /// Wire-protocol version, for the connect handshake.
@@ -250,4 +268,10 @@ pub trait Agent {
     /// Appended for protocol v4. Keep future methods append-only; method order
     /// is wire-sensitive (see [`Self::protocol_version`]).
     async fn snapshot() -> AgentSnapshot;
+    /// Drain the events the hook has observed since the last poll, for the GUI's
+    /// live event monitor. The first poll enables monitoring; the agent
+    /// auto-disables it once polls stop (the GUI closed the panel or died), so
+    /// there is no explicit stop. Appended last — see the method-order note on
+    /// [`Agent::protocol_version`].
+    async fn poll_event_monitor() -> Vec<MonitorEvent>;
 }
