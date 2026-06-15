@@ -10,10 +10,12 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::binding::{
-    Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding, post_scroll_delta,
+    Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
 use openlogi_core::config::AppSettings;
 use openlogi_hid::CaptureChannel;
+#[cfg(target_os = "macos")]
+use openlogi_hook::ScrollTransform;
 use openlogi_hook::{EventDisposition, Hook, MouseEvent};
 use tracing::{info, warn};
 
@@ -244,21 +246,38 @@ pub fn start(
             HOLD.with_borrow_mut(HoldState::cancel);
             EventDisposition::PassThrough
         }
-        MouseEvent::Scroll { delta_x, delta_y } => {
+        MouseEvent::Scroll {
+            delta_x,
+            delta_y,
+            is_continuous,
+        } => {
             let settings = scroll_settings
                 .read()
                 .map(|guard| *guard)
                 .unwrap_or_default();
-            if settings == ScrollSettings::default() {
+            if settings == ScrollSettings::default() || is_continuous {
                 return EventDisposition::PassThrough;
             }
 
-            let (v, h) = transform_scroll(delta_x, delta_y, settings);
-            if v == 0 && h == 0 {
-                return EventDisposition::PassThrough;
+            #[cfg(target_os = "macos")]
+            {
+                let _ = (delta_x, delta_y);
+                EventDisposition::TransformScroll(ScrollTransform {
+                    inverted: settings.inverted,
+                    strength: settings.strength,
+                    tactility: settings.tactility,
+                })
             }
-            post_scroll_delta(v, h);
-            EventDisposition::Suppress
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                let (v, h) = transform_scroll(delta_x, delta_y, settings);
+                if v == 0 && h == 0 {
+                    return EventDisposition::PassThrough;
+                }
+                openlogi_core::binding::post_scroll_delta(v, h);
+                EventDisposition::Suppress
+            }
         }
     });
 

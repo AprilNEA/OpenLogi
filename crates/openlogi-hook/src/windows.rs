@@ -213,10 +213,12 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
         WM_MOUSEWHEEL => Some(MouseEvent::Scroll {
             delta_x: 0.0,
             delta_y: f32::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
+            is_continuous: false,
         }),
         WM_MOUSEHWHEEL => Some(MouseEvent::Scroll {
             delta_x: f32::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
             delta_y: 0.0,
+            is_continuous: false,
         }),
         _ => None,
     }
@@ -294,8 +296,9 @@ mod tests {
             mouseData: 120u32 << 16,
             ..MSLLHOOKSTRUCT::default()
         };
-        let Some(MouseEvent::Scroll { delta_x, delta_y }) =
-            translate_event(WM_MOUSEWHEEL as WPARAM, forward)
+        let Some(MouseEvent::Scroll {
+            delta_x, delta_y, ..
+        }) = translate_event(WM_MOUSEWHEEL as WPARAM, forward)
         else {
             panic!("expected a scroll event");
         };

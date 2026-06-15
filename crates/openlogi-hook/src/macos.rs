@@ -12,7 +12,7 @@ use core_graphics::event::{
 };
 use tracing::{debug, error, warn};
 
-use crate::{ButtonId, EventDisposition, HookError, MouseEvent};
+use crate::{ButtonId, EventDisposition, HookError, MouseEvent, ScrollTransform};
 
 /// Everything `Hook` needs to control the background thread.
 pub(crate) struct HookInner {
@@ -100,6 +100,92 @@ fn button_number_to_id(n: i64) -> Option<ButtonId> {
     }
 }
 
+fn transform_scroll_event(event: &CGEvent, transform: ScrollTransform) {
+    let factor = if transform.inverted { -1.0 } else { 1.0 } * f64::from(transform.strength.max(1));
+    let tactility = i64::from(transform.tactility.min(10));
+
+    transform_double_scroll_field(
+        event,
+        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
+        factor,
+        tactility,
+    );
+    transform_double_scroll_field(
+        event,
+        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2,
+        factor,
+        tactility,
+    );
+    transform_integer_scroll_field(
+        event,
+        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1,
+        factor,
+        0,
+    );
+    transform_integer_scroll_field(
+        event,
+        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2,
+        factor,
+        0,
+    );
+    transform_integer_scroll_field(
+        event,
+        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
+        factor,
+        0,
+    );
+    transform_integer_scroll_field(
+        event,
+        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
+        factor,
+        0,
+    );
+}
+
+fn transform_double_scroll_field(
+    event: &CGEvent,
+    field: core_graphics::event::CGEventField,
+    factor: f64,
+    tactility: i64,
+) {
+    let value = event.get_double_value_field(field) * factor;
+    let value = if tactility <= 1 {
+        value
+    } else {
+        quantize_scroll(value, tactility) as f64
+    };
+    event.set_double_value_field(field, value);
+}
+
+fn transform_integer_scroll_field(
+    event: &CGEvent,
+    field: core_graphics::event::CGEventField,
+    factor: f64,
+    tactility: i64,
+) {
+    let value = (event.get_integer_value_field(field) as f64 * factor).round() as i64;
+    let value = if tactility <= 1 {
+        value
+    } else {
+        quantize_scroll(value as f64, tactility)
+    };
+    event.set_integer_value_field(field, value);
+}
+
+fn quantize_scroll(value: f64, tactility: i64) -> i64 {
+    let v = value.round() as i64;
+    if tactility <= 1 {
+        return v;
+    }
+
+    let abs = v.abs();
+    let snapped = ((abs + tactility / 2) / tactility) * tactility;
+    if snapped == 0 && v != 0 {
+        return v.signum() * tactility;
+    }
+    if v < 0 { -snapped } else { snapped }
+}
+
 /// Convert a `CGEvent` to our [`MouseEvent`] vocabulary. Returns `None`
 /// for event types we don't translate (e.g. move events, unknown buttons).
 fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
@@ -153,6 +239,8 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             // axis 1 = vertical scroll; axis 2 = horizontal scroll.
             let dy = event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1);
             let dx = event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2);
+            let is_continuous =
+                event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS) != 0;
             #[allow(
                 clippy::cast_possible_truncation,
                 reason = "scroll deltas are small fractional values that fit comfortably in f32"
@@ -160,6 +248,7 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             Some(MouseEvent::Scroll {
                 delta_x: dx as f32,
                 delta_y: dy as f32,
+                is_continuous,
             })
         }
         // Pointer movement feeds gesture-button swipe detection. While a button
@@ -265,6 +354,10 @@ fn thread_main(
             match cb(mouse_event) {
                 EventDisposition::PassThrough => CallbackResult::Keep,
                 EventDisposition::Suppress => CallbackResult::Drop,
+                EventDisposition::TransformScroll(transform) => {
+                    transform_scroll_event(event, transform);
+                    CallbackResult::Keep
+                }
             }
         },
     );

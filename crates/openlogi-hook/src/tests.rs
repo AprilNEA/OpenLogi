@@ -30,6 +30,7 @@ fn mouse_event_clone_and_debug() {
         MouseEvent::Scroll {
             delta_x: 1.0,
             delta_y: -1.5,
+            is_continuous: false,
         },
         MouseEvent::Moved {
             delta_x: 3,

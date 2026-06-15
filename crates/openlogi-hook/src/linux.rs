@@ -211,7 +211,11 @@ fn wait_readable(device_fd: i32, stop_fd: i32) -> bool {
 }
 
 fn scroll(delta_x: f32, delta_y: f32) -> MouseEvent {
-    MouseEvent::Scroll { delta_x, delta_y }
+    MouseEvent::Scroll {
+        delta_x,
+        delta_y,
+        is_continuous: false,
+    }
 }
 
 fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent> {
@@ -366,7 +370,7 @@ fn device_thread(
                     }
                     None => EventDisposition::PassThrough,
                 };
-                if matches!(disposition, EventDisposition::PassThrough) {
+                if !matches!(disposition, EventDisposition::Suppress) {
                     pending.push(event);
                 }
             }
@@ -575,7 +579,7 @@ mod tests {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_WHEEL.0, 3);
         let result = translate(&event, false);
         assert!(
-            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y })
+            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y, .. })
                 if delta_x.abs() < f32::EPSILON && (delta_y - 3.0).abs() < f32::EPSILON),
             "expected Scroll {{ delta_x: 0.0, delta_y: 3.0 }}, got {result:?}"
         );
@@ -586,7 +590,7 @@ mod tests {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL.0, -2);
         let result = translate(&event, false);
         assert!(
-            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y })
+            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y, .. })
                 if (delta_x - -2.0).abs() < f32::EPSILON && delta_y.abs() < f32::EPSILON),
             "expected Scroll {{ delta_x: -2.0, delta_y: 0.0 }}, got {result:?}"
         );
@@ -604,7 +608,7 @@ mod tests {
         );
         let result = translate(&event, true);
         assert!(
-            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y })
+            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y, .. })
                 if delta_x.abs() < f32::EPSILON && (delta_y - 0.5).abs() < f32::EPSILON),
             "expected Scroll {{ delta_x: 0.0, delta_y: 0.5 }}, got {result:?}"
         );
@@ -619,7 +623,7 @@ mod tests {
         );
         let result = translate(&event, true);
         assert!(
-            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y })
+            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y, .. })
                 if (delta_x - -1.0).abs() < f32::EPSILON && delta_y.abs() < f32::EPSILON),
             "expected Scroll {{ delta_x: -1.0, delta_y: 0.0 }}, got {result:?}"
         );

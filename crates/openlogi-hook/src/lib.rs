@@ -43,6 +43,11 @@ pub enum MouseEvent {
         delta_x: f32,
         /// Positive = down, negative = up.
         delta_y: f32,
+        /// `true` for continuous/pixel scroll devices such as trackpads.
+        ///
+        /// macOS uses this to keep mouse-wheel transforms from touching the
+        /// built-in trackpad's natural scrolling stream.
+        is_continuous: bool,
     },
     /// Pointer movement, in device units. Emitted so a held gesture button can
     /// accumulate a swipe; the callback passes these through (the cursor keeps
@@ -68,6 +73,24 @@ pub enum EventDisposition {
     PassThrough,
     /// Drop the event; the target application never sees it.
     Suppress,
+    /// Mutate a captured scroll event in place and let it continue.
+    ///
+    /// Only macOS can rewrite the original `CGEvent` in the tap callback. Other
+    /// platform hooks treat this as pass-through, and callers should only return
+    /// it when handling a `MouseEvent::Scroll` they know can be transformed.
+    TransformScroll(ScrollTransform),
+}
+
+/// In-place scroll-wheel transform requested by the hook runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollTransform {
+    /// Negate scroll axes.
+    pub inverted: bool,
+    /// Multiplier applied to line, pixel, and fixed-point scroll fields.
+    pub strength: u8,
+    /// Optional line-delta chunking strength. Pixel/fixed fields keep their
+    /// native precision and are only scaled/inverted.
+    pub tactility: u8,
 }
 
 /// Errors that [`Hook::start`] and related functions can produce.
