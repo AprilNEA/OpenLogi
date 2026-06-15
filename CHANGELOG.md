@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.13](https://github.com/AprilNEA/OpenLogi/compare/openlogi-hidpp-v0.6.12...openlogi-hidpp-v0.6.13) - 2026-06-15
+
+### Other
+
+- *(hidpp)* address review — multi-impl macro arm + 4-bit function guard
+- *(hidpp)* fold per-feature request framing into FeatureEndpoint
+- *(hidpp)* express the feature registry as a data macro
+
 ## [0.6.12](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.11...openlogi-core-v0.6.12) - 2026-06-13
 
 ### Fixed
