@@ -914,6 +914,7 @@ jobs:
       - name: Compute release checksums
         id: checksums
         run: |
+          set -o pipefail
           version="${GITHUB_REF_NAME#v}"
           base="https://github.com/AprilNEA/OpenLogi/releases/download/${GITHUB_REF_NAME}"
           sha_amd64=$(curl -fsSL "${base}/openlogi-${GITHUB_REF_NAME}-linux-amd64.pkg.tar.zst" | sha256sum | awk '{print $1}')
