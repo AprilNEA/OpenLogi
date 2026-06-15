@@ -17,7 +17,7 @@ use gpui_component::{
 use openlogi_core::config::Lighting;
 
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette};
+use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
 
 const SWATCH: f32 = 28.;
 
@@ -145,7 +145,7 @@ fn swatch(idx: usize, hex: &'static str, current: &Lighting, pal: Palette) -> An
         .rounded_md()
         .border_2()
         .border_color(if selected {
-            rgb(ACCENT_BLUE).into()
+            theme::accent()
         } else {
             pal.border
         })
@@ -171,18 +171,10 @@ fn toggle(current: &Lighting, pal: Palette) -> AnyElement {
         .px_2()
         .py_1()
         .rounded_md()
-        .border_1()
-        .border_color(if on {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.border
-        })
+        .selected_border(on, pal)
+        .selected_fill(on)
         .text_xs()
-        .text_color(if on {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.text_muted
-        })
+        .text_color(if on { pal.text_primary } else { pal.text_muted })
         .cursor_pointer()
         .child(if on { tr!("On") } else { tr!("Off") })
         .on_click(|_event, _window, cx| {

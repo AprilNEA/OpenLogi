@@ -5,22 +5,15 @@ use std::sync::Arc;
 
 use crate::{
     channel::HidppChannel,
-    feature::{CreatableFeature, Feature},
-    nibble::U4,
-    protocol::v20::{self, Hidpp20Error},
+    feature::{CreatableFeature, Feature, FeatureEndpoint},
+    protocol::v20::Hidpp20Error,
 };
 
 /// Implements the `AdjustableDpi` / `0x2201` feature.
 #[derive(Clone)]
 pub struct AdjustableDpiFeature {
-    /// The underlying HID++ channel.
-    chan: Arc<HidppChannel>,
-
-    /// The index of the device to implement the feature for.
-    device_index: u8,
-
-    /// The index of the feature in the feature table.
-    feature_index: u8,
+    /// The endpoint this feature talks to.
+    endpoint: FeatureEndpoint,
 }
 
 impl CreatableFeature for AdjustableDpiFeature {
@@ -29,9 +22,7 @@ impl CreatableFeature for AdjustableDpiFeature {
 
     fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
         Self {
-            chan,
-            device_index,
-            feature_index,
+            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
         }
     }
 }
@@ -41,20 +32,7 @@ impl Feature for AdjustableDpiFeature {}
 impl AdjustableDpiFeature {
     /// Retrieves the number of sensors the device exposes.
     pub async fn get_sensor_count(&self) -> Result<u8, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(0),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        Ok(response.extend_payload()[0])
+        Ok(self.endpoint.call(0, [0; 3]).await?.extend_payload()[0])
     }
 
     /// Retrieves the supported DPI values for `sensor_index`.
@@ -67,39 +45,22 @@ impl AdjustableDpiFeature {
     /// start is the previous value and whose end is the next value. The returned
     /// list is sorted and deduplicated.
     pub async fn get_sensor_dpi_list(&self, sensor_index: u8) -> Result<Vec<u16>, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(1),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [sensor_index, 0x00, 0x00],
-            ))
-            .await?;
-
         // Skip the echoed sensor index in byte 0; the DPI values follow.
-        let payload = response.extend_payload();
+        let payload = self
+            .endpoint
+            .call(1, [sensor_index, 0x00, 0x00])
+            .await?
+            .extend_payload();
         parse_dpi_list_payload(&payload[1..])
     }
 
     /// Retrieves the currently configured DPI for `sensor_index`.
     pub async fn get_sensor_dpi(&self, sensor_index: u8) -> Result<u16, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(2),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [sensor_index, 0x00, 0x00],
-            ))
-            .await?;
-        let payload = response.extend_payload();
+        let payload = self
+            .endpoint
+            .call(2, [sensor_index, 0x00, 0x00])
+            .await?
+            .extend_payload();
 
         Ok(u16::from_be_bytes([payload[1], payload[2]]))
     }
@@ -107,17 +68,8 @@ impl AdjustableDpiFeature {
     /// Sets the DPI for `sensor_index`.
     pub async fn set_sensor_dpi(&self, sensor_index: u8, dpi: u16) -> Result<(), Hidpp20Error> {
         let [dpi_hi, dpi_lo] = dpi.to_be_bytes();
-        let _ = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(3),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [sensor_index, dpi_hi, dpi_lo],
-            ))
+        self.endpoint
+            .call(3, [sensor_index, dpi_hi, dpi_lo])
             .await?;
 
         Ok(())

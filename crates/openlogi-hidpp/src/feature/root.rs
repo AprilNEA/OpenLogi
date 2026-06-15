@@ -3,12 +3,8 @@
 
 use std::sync::Arc;
 
-use super::{CreatableFeature, Feature, FeatureType};
-use crate::{
-    channel::HidppChannel,
-    nibble::U4,
-    protocol::v20::{self, Hidpp20Error},
-};
+use super::{CreatableFeature, Feature, FeatureEndpoint, FeatureType};
+use crate::{channel::HidppChannel, protocol::v20::Hidpp20Error};
 
 /// Implements the `Root` / `0x0000` feature that every HID++2.0 device
 /// supports by default.
@@ -17,11 +13,9 @@ use crate::{
 /// created using [`crate::device::Device::new`].
 #[derive(Clone)]
 pub struct RootFeature {
-    /// The underlying HID++ channel.
-    chan: Arc<HidppChannel>,
-
-    /// The index of the device to implement the feature for.
-    device_index: u8,
+    /// The endpoint this feature talks to. The root feature always lives at
+    /// feature index 0.
+    endpoint: FeatureEndpoint,
 }
 
 impl CreatableFeature for RootFeature {
@@ -29,7 +23,9 @@ impl CreatableFeature for RootFeature {
     const STARTING_VERSION: u8 = 0;
 
     fn new(chan: Arc<HidppChannel>, device_index: u8, _: u8) -> Self {
-        Self { chan, device_index }
+        Self {
+            endpoint: FeatureEndpoint::new(chan, device_index, 0),
+        }
     }
 }
 
@@ -44,20 +40,11 @@ impl RootFeature {
     /// If the device only supports the root feature version 1, the
     /// [`FeatureInformation::version`] field will be `0` for all features.
     pub async fn get_feature(&self, id: u16) -> Result<Option<FeatureInformation>, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: 0,
-                    function_id: U4::from_lo(0),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [(id >> 8) as u8, id as u8, 0x00],
-            ))
-            .await?;
-
-        let payload = response.extend_payload();
+        let payload = self
+            .endpoint
+            .call(0, [(id >> 8) as u8, id as u8, 0x00])
+            .await?
+            .extend_payload();
         if payload[0] == 0 {
             return Ok(None);
         }
@@ -78,20 +65,11 @@ impl RootFeature {
     /// [`crate::protocol::determine_version`] function does so in a more
     /// general manner.
     pub async fn ping(&self, data: u8) -> Result<u8, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: 0,
-                    function_id: U4::from_lo(1),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, data],
-            ))
-            .await?;
-
-        let payload = response.extend_payload();
+        let payload = self
+            .endpoint
+            .call(1, [0x00, 0x00, data])
+            .await?
+            .extend_payload();
         Ok(payload[2])
     }
 }

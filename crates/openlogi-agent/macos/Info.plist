@@ -23,6 +23,8 @@
   <string>OpenLogi Agent</string>
   <key>CFBundleExecutable</key>
   <string>openlogi-agent</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
   <string>org.openlogi.agent</string>
   <key>CFBundlePackageType</key>
