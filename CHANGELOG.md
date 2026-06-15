@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.14](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.13...openlogi-core-v0.6.14) - 2026-06-15
+
+### Fixed
+
+- *(hid)* solid keyboard colour via 0x8070 effect ([#205](https://github.com/AprilNEA/OpenLogi/pull/205))
+
+### Other
+
+- *(core)* extract the OS input-injection layer into openlogi-inject ([#240](https://github.com/AprilNEA/OpenLogi/pull/240))
+
 ## [0.6.13](https://github.com/AprilNEA/OpenLogi/compare/openlogi-hidpp-v0.6.12...openlogi-hidpp-v0.6.13) - 2026-06-15
 
 ### Other
