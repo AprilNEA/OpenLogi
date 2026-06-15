@@ -286,3 +286,8 @@ _version: 1
 "No themes match “%{query}”.": "No themes match “%{query}”."
 "Color theme": "Color theme"
 "Interface language": "Interface language"
+"Diagnostics": "Diagnostiek"
+"Input interception": "Invoeronderschepping"
+"Detects other apps tapping the mouse event stream — a common cause of pointer lag.": "Detecteert andere apps die de muisgebeurtenissenstroom onderscheppen — een veelvoorkomende oorzaak van vertraging van de aanwijzer."
+"No other app is intercepting mouse input.": "Geen andere app onderschept muisinvoer."
+"Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}": "Een andere app onderschept muisinvoer, wat kan leiden tot vertraging van de aanwijzer of dubbele knopacties: %{apps}"

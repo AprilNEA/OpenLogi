@@ -286,3 +286,8 @@ _version: 1
 "No themes match “%{query}”.": "No themes match “%{query}”."
 "Color theme": "Color theme"
 "Interface language": "Interface language"
+"Diagnostics": "Диагностика"
+"Input interception": "Перехват ввода"
+"Detects other apps tapping the mouse event stream — a common cause of pointer lag.": "Обнаруживает другие приложения, перехватывающие поток событий мыши, — частая причина задержки указателя."
+"No other app is intercepting mouse input.": "Никакое другое приложение не перехватывает ввод мыши."
+"Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}": "Другое приложение перехватывает ввод мыши, что может вызывать задержку указателя или дублирование действий кнопок: %{apps}"

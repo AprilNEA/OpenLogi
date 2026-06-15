@@ -52,6 +52,10 @@ use crate::windows::{self, AuxWindow};
 mod about;
 mod appearance;
 mod assets;
+// Event-tap enumeration is a macOS (`CGEventTap`) concept; the Diagnostics page
+// that surfaces it is macOS-only.
+#[cfg(target_os = "macos")]
+mod diagnostics;
 mod general;
 mod language;
 mod permissions;
@@ -119,6 +123,11 @@ pub struct SettingsView {
     /// re-walking the cache on every render. A snapshot — reopen to refresh
     /// after a Clear.
     asset_cache_desc: SharedString,
+    /// Drives the debug live event monitor: polls the agent on a timer while the
+    /// Settings window is open. Dropping it with the view stops polling, which
+    /// lets the agent's idle janitor turn monitoring back off.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    _monitor_task: gpui::Task<()>,
 }
 
 impl SettingsView {
@@ -167,6 +176,31 @@ impl SettingsView {
         cx.subscribe_in(&sensitivity_slider, window, Self::on_sensitivity_slider)
             .detach();
 
+        // Poll the agent's live event monitor while this window is open. The task
+        // is held in the view, so closing Settings drops it, polling stops, and
+        // the agent disables monitoring on its own.
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        let monitor_task = cx.spawn(async move |_view, cx| {
+            loop {
+                let sender = cx.update_global::<AppState, _>(|s, _| s.ipc_sender());
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                if sender
+                    .send(crate::ipc_client::Command::PollEventMonitor(tx))
+                    .is_ok()
+                    && let Ok(events) = rx.await
+                    && !events.is_empty()
+                {
+                    cx.update_global::<AppState, _>(|state, cx| {
+                        state.push_monitor_events(events);
+                        cx.refresh_windows();
+                    });
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(300))
+                    .await;
+            }
+        });
+
         Self {
             focus_handle,
             appearance_obs: None,
@@ -180,6 +214,8 @@ impl SettingsView {
             copied: false,
             copied_gen: 0,
             asset_cache_desc: assets::cache_size_description(),
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            _monitor_task: monitor_task,
         }
     }
 
@@ -259,6 +295,34 @@ impl Render for SettingsView {
         let pal = theme::palette(cx);
         let view = cx.entity();
 
+        // Outline group boxes give every page bordered cards (depth /
+        // definition that the flat Fill variant lacked); the hero /
+        // source / config blocks are custom rows inside them.
+        let settings = Settings::new("settings")
+            .with_group_variant(GroupBoxVariant::Outline)
+            .sidebar_width(px(210.))
+            .default_selected_index(SelectIndex {
+                page_ix: self.initial_page.index(),
+                group_ix: None,
+            })
+            .page(general::general_page(self.sensitivity_slider.clone()))
+            .page(updates::updates_page(self.updater.clone(), pal))
+            .page(permissions::permissions_page(pal))
+            .page(appearance::appearance_page(
+                view.clone(),
+                self.theme_filter,
+                self.theme_search.clone(),
+                self.language_select.clone(),
+                pal,
+            ))
+            .page(assets::assets_page(pal, self.asset_cache_desc.clone()))
+            .page(about::about_page(view, self.copied, pal));
+        // Surfaces competing macOS event taps (a pointer-lag cause) and, in debug
+        // builds, the full tap list and a live event monitor. Appended after
+        // About so [`SettingsPage::index`] stays platform-independent.
+        #[cfg(target_os = "macos")]
+        let settings = settings.page(diagnostics::diagnostics_page(pal));
+
         div()
             .size_full()
             .bg(pal.bg)
@@ -267,29 +331,6 @@ impl Render for SettingsView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            .child(
-                // Outline group boxes give every page bordered cards (depth /
-                // definition that the flat Fill variant lacked); the hero /
-                // source / config blocks are custom rows inside them.
-                Settings::new("settings")
-                    .with_group_variant(GroupBoxVariant::Outline)
-                    .sidebar_width(px(210.))
-                    .default_selected_index(SelectIndex {
-                        page_ix: self.initial_page.index(),
-                        group_ix: None,
-                    })
-                    .page(general::general_page(self.sensitivity_slider.clone()))
-                    .page(updates::updates_page(self.updater.clone(), pal))
-                    .page(permissions::permissions_page(pal))
-                    .page(appearance::appearance_page(
-                        view.clone(),
-                        self.theme_filter,
-                        self.theme_search.clone(),
-                        self.language_select.clone(),
-                        pal,
-                    ))
-                    .page(assets::assets_page(pal, self.asset_cache_desc.clone()))
-                    .page(about::about_page(view, self.copied, pal)),
-            )
+            .child(settings)
     }
 }

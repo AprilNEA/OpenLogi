@@ -286,3 +286,8 @@ _version: 1
 "No themes match “%{query}”.": "No themes match “%{query}”."
 "Color theme": "Color theme"
 "Interface language": "Interface language"
+"Diagnostics": "Diagnostik"
+"Input interception": "Avlyssning av indata"
+"Detects other apps tapping the mouse event stream — a common cause of pointer lag.": "Upptäcker andra appar som fångar upp musens händelseström – en vanlig orsak till pekarfördröjning."
+"No other app is intercepting mouse input.": "Ingen annan app fångar upp musinmatning."
+"Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}": "En annan app fångar upp musinmatning, vilket kan orsaka pekarfördröjning eller dubblerade knappåtgärder: %{apps}"

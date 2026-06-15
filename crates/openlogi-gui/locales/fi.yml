@@ -286,3 +286,8 @@ _version: 1
 "No themes match “%{query}”.": "No themes match “%{query}”."
 "Color theme": "Color theme"
 "Interface language": "Interface language"
+"Diagnostics": "Diagnostiikka"
+"Input interception": "Syötteen sieppaus"
+"Detects other apps tapping the mouse event stream — a common cause of pointer lag.": "Tunnistaa muut sovellukset, jotka sieppaavat hiiren tapahtumavirtaa – yleinen osoittimen viiveen syy."
+"No other app is intercepting mouse input.": "Mikään muu sovellus ei sieppaa hiiren syötettä."
+"Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}": "Toinen sovellus sieppaa hiiren syötettä, mikä voi aiheuttaa osoittimen viivettä tai painikkeiden kaksoistoimintoja: %{apps}"

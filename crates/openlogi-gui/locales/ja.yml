@@ -286,3 +286,8 @@ _version: 1
 "No themes match “%{query}”.": "No themes match “%{query}”."
 "Color theme": "Color theme"
 "Interface language": "Interface language"
+"Diagnostics": "診断"
+"Input interception": "入力の横取り"
+"Detects other apps tapping the mouse event stream — a common cause of pointer lag.": "マウスイベントストリームを監視している他のアプリを検出します。ポインタ遅延のよくある原因です。"
+"No other app is intercepting mouse input.": "マウス入力を横取りしている他のアプリはありません。"
+"Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}": "別のアプリがマウス入力を横取りしています。ポインタの遅延やボタンの二重動作の原因になることがあります：%{apps}"

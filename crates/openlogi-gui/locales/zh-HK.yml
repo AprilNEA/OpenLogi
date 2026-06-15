@@ -286,3 +286,8 @@ _version: 1
 "No themes match “%{query}”.": "沒有符合「%{query}」的主題。"
 "Color theme": "配色主題"
 "Interface language": "介面語言"
+"Diagnostics": "診斷"
+"Input interception": "輸入攔截"
+"Detects other apps tapping the mouse event stream — a common cause of pointer lag.": "偵測其他正在監聽滑鼠事件流的應用程式——這是指標延遲的常見原因。"
+"No other app is intercepting mouse input.": "沒有其他應用程式正在攔截滑鼠輸入。"
+"Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}": "另一個應用程式正在攔截滑鼠輸入，可能導致指標延遲或按鍵重複觸發：%{apps}"

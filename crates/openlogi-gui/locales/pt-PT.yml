@@ -286,3 +286,8 @@ _version: 1
 "No themes match “%{query}”.": "No themes match “%{query}”."
 "Color theme": "Color theme"
 "Interface language": "Interface language"
+"Diagnostics": "Diagnóstico"
+"Input interception": "Interceção de entrada"
+"Detects other apps tapping the mouse event stream — a common cause of pointer lag.": "Deteta outras apps que intercetam o fluxo de eventos do rato — uma causa comum de lentidão do ponteiro."
+"No other app is intercepting mouse input.": "Nenhuma outra app está a intercetar a entrada do rato."
+"Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}": "Outra app está a intercetar a entrada do rato, o que pode causar lentidão do ponteiro ou ações de botão duplicadas: %{apps}"
