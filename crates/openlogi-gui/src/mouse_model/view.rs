@@ -21,7 +21,7 @@ use crate::mouse_model::picker::{
     GESTURE_BUTTON_ICON, action_icon_path, action_picker, gesture_overview,
 };
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette};
+use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
 
 const SIDE_W: f32 = 180.;
 const SIDE_GAP: f32 = 24.;
@@ -291,23 +291,20 @@ fn owner_chip(
         None => tr!("Off"),
     };
     let id_part = btn.map_or(0usize, |b| b as usize + 1);
-    let tint = hsla(0.6, 0.9, 0.6, 0.12);
-    let tint_border = hsla(0.6, 0.9, 0.6, 0.5);
     let view = view.clone();
     div()
         .id(("gesture-owner", id_part))
         .px_2()
         .py_1()
         .rounded_md()
-        .border_1()
-        .border_color(if selected { tint_border } else { pal.border })
+        .selected_border(selected, pal)
+        .selected_fill(selected)
         .text_xs()
         .text_color(if selected {
             pal.text_primary
         } else {
             pal.text_muted
         })
-        .when(selected, |s| s.bg(tint))
         .when(!selected, |s| s.hover(|s| s.bg(pal.surface_hover)))
         .cursor_pointer()
         .child(text)
