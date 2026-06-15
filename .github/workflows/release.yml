@@ -871,11 +871,29 @@ jobs:
           client-payload: |
             {"version": "${{ github.ref_name }}"}
 
+  aur-check:
+    name: Check AUR publishing prerequisites
+    runs-on: ubuntu-latest
+    needs: publish
+    if: ${{ github.ref_type == 'tag' }}
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          if [ -n "$AUR_SSH_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
   aur-publish:
     name: Publish openlogi-bin to AUR
     runs-on: ubuntu-latest
-    needs: publish
-    if: ${{ github.ref_type == 'tag' && secrets.AUR_SSH_KEY != '' }}
+    needs: [publish, aur-check]
+    if: ${{ needs.aur-check.outputs.enabled == 'true' }}
     container:
       image: archlinux:base-devel
     steps:
