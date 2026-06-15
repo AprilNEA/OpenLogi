@@ -8,22 +8,15 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
     bcd,
     channel::HidppChannel,
-    feature::{CreatableFeature, Feature},
-    nibble::U4,
-    protocol::v20::{self, Hidpp20Error},
+    feature::{CreatableFeature, Feature, FeatureEndpoint},
+    protocol::v20::Hidpp20Error,
 };
 
 /// Implements the `DeviceInformation` / `0x0003` feature.
 #[derive(Clone)]
 pub struct DeviceInformationFeature {
-    /// The underlying HID++ channel.
-    chan: Arc<HidppChannel>,
-
-    /// The index of the device to implement the feature for.
-    device_index: u8,
-
-    /// The index of the feature in the feature table.
-    feature_index: u8,
+    /// The endpoint this feature talks to.
+    endpoint: FeatureEndpoint,
 }
 
 impl CreatableFeature for DeviceInformationFeature {
@@ -32,9 +25,7 @@ impl CreatableFeature for DeviceInformationFeature {
 
     fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
         Self {
-            chan,
-            device_index,
-            feature_index,
+            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
         }
     }
 }
@@ -44,20 +35,7 @@ impl Feature for DeviceInformationFeature {}
 impl DeviceInformationFeature {
     /// Retrieves general information about the device and its capabilities.
     pub async fn get_device_info(&self) -> Result<DeviceInformation, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(0),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        let payload = response.extend_payload();
+        let payload = self.endpoint.call(0, [0; 3]).await?.extend_payload();
 
         Ok(DeviceInformation {
             entity_count: payload[0],
@@ -80,20 +58,11 @@ impl DeviceInformationFeature {
         &self,
         entity_index: u8,
     ) -> Result<DeviceEntityFirmwareInfo, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(1),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [entity_index, 0x00, 0x00],
-            ))
-            .await?;
-
-        let payload = response.extend_payload();
+        let payload = self
+            .endpoint
+            .call(1, [entity_index, 0x00, 0x00])
+            .await?
+            .extend_payload();
 
         Ok(DeviceEntityFirmwareInfo {
             entity_type: DeviceEntityType::try_from(payload[0])
@@ -115,24 +84,12 @@ impl DeviceInformationFeature {
     /// Retrieves the serial number of the device.
     ///
     /// This function was added in feature version 4 and will likely result in
-    /// an [`v20::ErrorType::InvalidFunctionId`] error for older versions,
-    /// so [`DeviceInformationCapabilities::serial_number`] should be
-    /// verified before calling.
+    /// an [`v20::ErrorType::InvalidFunctionId`](crate::protocol::v20::ErrorType::InvalidFunctionId)
+    /// error for older versions, so
+    /// [`DeviceInformationCapabilities::serial_number`] should be verified
+    /// before calling.
     pub async fn get_serial_number(&self) -> Result<String, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(2),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        let payload = response.extend_payload();
+        let payload = self.endpoint.call(2, [0; 3]).await?.extend_payload();
 
         String::from_utf8(payload[..12].to_vec()).map_err(|_| Hidpp20Error::UnsupportedResponse)
     }

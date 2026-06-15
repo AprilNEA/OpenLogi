@@ -127,6 +127,10 @@ fn padded_report(report: &[u8], len: usize) -> Vec<u8> {
 
 fn write_file(handle: HANDLE, report: &[u8]) -> Result<(), io::Error> {
     let mut written = 0;
+    // SAFETY: `handle` is a live HID handle from `HidHandle::open`; `report` is a
+    // valid initialized slice, so its pointer + length describe readable bytes;
+    // `written` is a valid out-pointer; a null OVERLAPPED requests a synchronous
+    // write.
     let ok = unsafe {
         WriteFile(
             handle,
@@ -149,6 +153,8 @@ fn write_file(handle: HANDLE, report: &[u8]) -> Result<(), io::Error> {
 }
 
 fn set_output_report(handle: HANDLE, report: &[u8]) -> Result<(), io::Error> {
+    // SAFETY: `handle` is a live HID handle; `report` is a valid initialized
+    // slice, so its pointer + length describe readable bytes for the call.
     bool_result(unsafe {
         HidD_SetOutputReport(
             handle,
@@ -159,6 +165,8 @@ fn set_output_report(handle: HANDLE, report: &[u8]) -> Result<(), io::Error> {
 }
 
 fn set_feature(handle: HANDLE, report: &[u8]) -> Result<(), io::Error> {
+    // SAFETY: `handle` is a live HID handle; `report` is a valid initialized
+    // slice, so its pointer + length describe readable bytes for the call.
     bool_result(unsafe {
         HidD_SetFeature(
             handle,
@@ -180,6 +188,10 @@ struct HidHandle(HANDLE);
 
 impl HidHandle {
     fn open(path: &[u16], desired_access: u32) -> Result<Self, io::Error> {
+        // SAFETY: `path` is a NUL-terminated UTF-16 string (the terminator is
+        // pushed in `NativeHidWriter::new`); the other arguments are valid
+        // share/disposition constants and null security/template pointers.
+        // Returns INVALID_HANDLE_VALUE on failure, checked below.
         let handle = unsafe {
             CreateFileW(
                 path.as_ptr(),
@@ -209,6 +221,8 @@ impl HidHandle {
             ProductID: 0,
             VersionNumber: 0,
         };
+        // SAFETY: `self.0` is a live HID handle; `attributes` is a valid,
+        // Size-initialized HIDD_ATTRIBUTES the call fills in.
         if !unsafe { HidD_GetAttributes(self.0, &raw mut attributes) } {
             return Err(NativeWriteError::LastOsError(
                 "HidD_GetAttributes",
@@ -217,6 +231,9 @@ impl HidHandle {
         }
 
         let mut preparsed: PHIDP_PREPARSED_DATA = 0;
+        // SAFETY: `self.0` is a live HID handle; `preparsed` is a valid
+        // out-pointer. On success the OS allocates a blob that must be released
+        // via HidD_FreePreparsedData — owned by the `PreparsedData` guard below.
         if !unsafe { HidD_GetPreparsedData(self.0, &raw mut preparsed) } {
             return Err(NativeWriteError::LastOsError(
                 "HidD_GetPreparsedData",
@@ -226,6 +243,8 @@ impl HidHandle {
 
         let _preparsed = PreparsedData(preparsed);
         let mut caps = HIDP_CAPS::default();
+        // SAFETY: `preparsed` is the non-null blob just returned, kept alive by
+        // `_preparsed`; `caps` is a valid out-parameter the call fills in.
         let status = unsafe { HidP_GetCaps(preparsed, &raw mut caps) };
         if status != HIDP_STATUS_SUCCESS {
             return Err(NativeWriteError::HidpStatus("HidP_GetCaps", status));
@@ -238,6 +257,8 @@ impl HidHandle {
 impl Drop for HidHandle {
     fn drop(&mut self) {
         if self.0 != INVALID_HANDLE_VALUE {
+            // SAFETY: `self.0` is a live handle from CreateFileW that we own,
+            // closed exactly once here at drop.
             let _ = unsafe { CloseHandle(self.0) };
         }
     }
@@ -248,6 +269,8 @@ struct PreparsedData(PHIDP_PREPARSED_DATA);
 impl Drop for PreparsedData {
     fn drop(&mut self) {
         if self.0 != 0 {
+            // SAFETY: `self.0` is the non-null preparsed-data blob from
+            // HidD_GetPreparsedData that we own, freed exactly once here at drop.
             let _ = unsafe { HidD_FreePreparsedData(self.0) };
         }
     }
