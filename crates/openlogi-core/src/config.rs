@@ -26,7 +26,7 @@ use crate::paths::{self, PathsError};
 ///
 /// v2 merged the per-device `button_bindings` + `gesture_bindings` maps into a
 /// single `bindings: BTreeMap<ButtonId, Binding>`. A v1 file still loads (the
-/// [`RawDeviceConfig`] shim folds the legacy fields) and self-heals to v2 on the
+/// `RawDeviceConfig` shim folds the legacy fields) and self-heals to v2 on the
 /// next save; [`Config::load_from_path`] rejects only versions *newer* than this
 /// so a forward file fails loudly instead of silently losing bindings.
 pub const SCHEMA_VERSION: u32 = 2;
@@ -337,7 +337,7 @@ pub struct DeviceIdentity {
 
 /// Settings scoped to a single physical device (keyed by HID++ model+ext).
 ///
-/// Deserialization goes through [`RawDeviceConfig`] (`#[serde(from)]`) so
+/// Deserialization goes through `RawDeviceConfig` (`#[serde(from)]`) so
 /// pre-v2 files — which split bindings across `button_bindings` +
 /// `gesture_bindings` — fold into the unified [`Self::bindings`] map. Only
 /// `bindings` is ever serialized, so a migrated file self-heals to the v2 shape
@@ -649,7 +649,7 @@ impl Config {
     /// gestures are turned off.
     ///
     /// Resolved from the explicit [`DeviceConfig::gesture_owner`] when present;
-    /// otherwise inferred (see [`Self::infer_gesture_owner`]) for configs
+    /// otherwise inferred (see `Self::infer_gesture_owner`) for configs
     /// predating the field and freshly-migrated pre-v2 files. The dedicated thumb
     /// pad ([`ButtonId::GestureButton`]) owns the role by default. At most one
     /// button gestures per device.
@@ -698,7 +698,8 @@ impl Config {
     /// simply not dispatched while it isn't the owner. `button` is given a full
     /// [`Binding::Gesture`] map: a prior [`Binding::Single`] is kept as the
     /// [`GestureDirection::Click`] action, any existing swipe arms are preserved,
-    /// and unbound directions are seeded from [`default_gesture_binding`] so every
+    /// and unbound directions are seeded from
+    /// [`default_gesture_binding`](crate::binding::default_gesture_binding) so every
     /// gesture button exposes the same full five-direction set.
     pub fn set_gesture_owner(&mut self, device_key: &str, button: ButtonId) {
         self.devices

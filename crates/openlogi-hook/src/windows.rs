@@ -61,12 +61,15 @@ pub(crate) fn start(
 }
 
 pub(crate) fn stop(mut inner: HookInner) {
+    // SAFETY: PostThreadMessageW takes the target thread id and the message by
+    // value (no pointers); `thread_id` was returned by the hook thread's own
+    // GetCurrentThreadId, so it names a real thread with a message queue.
     let posted = unsafe { PostThreadMessageW(inner.thread_id, WM_QUIT, 0, 0) };
     if posted == 0 {
-        tracing::warn!(
-            error = unsafe { GetLastError() },
-            "could not post WM_QUIT to Windows hook thread"
-        );
+        // SAFETY: GetLastError reads the calling thread's last-error code and
+        // has no preconditions.
+        let err = unsafe { GetLastError() };
+        tracing::warn!(error = err, "could not post WM_QUIT to Windows hook thread");
     }
     if let Some(join) = inner.join.take()
         && let Err(e) = join.join()
@@ -94,8 +97,13 @@ fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError
         }
     }
 
+    // SAFETY: GetCurrentThreadId returns the calling thread's id; no preconditions.
     let thread_id = unsafe { GetCurrentThreadId() };
     let mut bootstrap_msg = MSG::default();
+    // SAFETY: `bootstrap_msg` is a live, owned MSG and a null window handle is
+    // valid (peek this thread's own queue); PM_NOREMOVE only inspects. The call
+    // forces the OS to create this thread's message queue up front, so a
+    // PostThreadMessageW from `stop` can't race queue creation and be lost.
     unsafe {
         PeekMessageW(
             &mut bootstrap_msg,
@@ -106,6 +114,10 @@ fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError
         );
     }
 
+    // SAFETY: `mouse_proc` is a valid HOOKPROC with the matching `extern "system"`
+    // signature; a null module handle plus thread id 0 install a global
+    // low-level mouse hook, the documented usage for WH_MOUSE_LL. Returns null
+    // on failure, checked below.
     let hook = unsafe {
         SetWindowsHookExW(
             WH_MOUSE_LL,
@@ -123,6 +135,8 @@ fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError
     let _ = ready.send(Ok(thread_id));
     message_loop();
 
+    // SAFETY: `hook` is the live handle just returned by SetWindowsHookExW,
+    // unhooked exactly once here as the thread exits.
     unsafe {
         UnhookWindowsHookEx(hook);
     }
@@ -132,14 +146,16 @@ fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError
 fn message_loop() {
     let mut msg = MSG::default();
     loop {
+        // SAFETY: `msg` is a live, owned MSG; a null window handle retrieves
+        // messages for the calling thread. Returns <= 0 on WM_QUIT or error.
         let result = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
         if result <= 0 {
             break;
         }
-        unsafe {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
+        // SAFETY: `msg` was just populated by GetMessageW and outlives the call.
+        unsafe { TranslateMessage(&msg) };
+        // SAFETY: as above — `msg` is a live, initialized MSG.
+        unsafe { DispatchMessageW(&msg) };
     }
 }
 
@@ -149,16 +165,34 @@ fn clear_callback() {
     }
 }
 
+/// Forward the event to the next hook in the chain — the default disposition
+/// for any event we don't suppress.
+fn call_next(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // SAFETY: a null `hhk` is the documented way to invoke the next hook in the
+    // chain; `code`/`wparam`/`lparam` are forwarded verbatim from the
+    // OS-supplied callback arguments, valid for the duration of this call.
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+}
+
+/// Low-level mouse-hook procedure the OS invokes for every mouse event.
+///
+/// # Safety
+/// Must only be installed as a `WH_MOUSE_LL` hook via `SetWindowsHookExW`. When
+/// `code == HC_ACTION`, Windows guarantees `lparam` points to a live
+/// `MSLLHOOKSTRUCT`; [`hook_data`] relies on that contract to dereference it.
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code != HC_ACTION as i32 {
-        return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+        return call_next(code, wparam, lparam);
     }
 
-    let Some(data) = hook_data(lparam) else {
-        return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+    // SAFETY: `mouse_proc` is only installed as a WH_MOUSE_LL hook and this is
+    // the `code == HC_ACTION` arm, so `lparam` is the live `MSLLHOOKSTRUCT`
+    // pointer `hook_data` requires.
+    let Some(data) = (unsafe { hook_data(lparam) }) else {
+        return call_next(code, wparam, lparam);
     };
     let Some(event) = translate_event(wparam, data) else {
-        return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+        return call_next(code, wparam, lparam);
     };
 
     let callback = CALLBACK.lock().ok().and_then(|slot| slot.clone());
@@ -168,14 +202,24 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     if disposition == EventDisposition::Suppress {
         1
     } else {
-        unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+        call_next(code, wparam, lparam)
     }
 }
 
-fn hook_data(lparam: LPARAM) -> Option<MSLLHOOKSTRUCT> {
+/// Copy the `MSLLHOOKSTRUCT` the OS passed in `lparam`, or `None` if `lparam`
+/// is null.
+///
+/// # Safety
+/// `lparam` must be the `lParam` the OS passes to a `WH_MOUSE_LL` hook
+/// procedure for an `HC_ACTION` event — i.e. it points to a live
+/// `MSLLHOOKSTRUCT` (or is 0). Any other non-zero value is undefined behavior.
+unsafe fn hook_data(lparam: LPARAM) -> Option<MSLLHOOKSTRUCT> {
     if lparam == 0 {
         return None;
     }
+    // SAFETY: by this function's contract `lparam` is the WH_MOUSE_LL HC_ACTION
+    // lParam and is non-zero here, so it points to a live `MSLLHOOKSTRUCT`. We
+    // copy it out by value (plain-old-data) and never retain the pointer.
     Some(unsafe { *(lparam as *const MSLLHOOKSTRUCT) })
 }
 
@@ -233,12 +277,16 @@ fn signed_high_word(value: u32) -> i16 {
 }
 
 pub(crate) fn frontmost_process_path() -> Option<String> {
+    // SAFETY: GetForegroundWindow takes no arguments and returns a window handle
+    // or null; no preconditions.
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.is_null() {
         return None;
     }
 
     let mut pid = 0;
+    // SAFETY: `hwnd` is the non-null handle just returned; `&mut pid` is a valid
+    // out-pointer the call writes the owning process id into.
     unsafe {
         GetWindowThreadProcessId(hwnd, &mut pid);
     }
@@ -246,6 +294,8 @@ pub(crate) fn frontmost_process_path() -> Option<String> {
         return None;
     }
 
+    // SAFETY: OpenProcess takes the access mask and pid by value and returns a
+    // handle or null (checked); on success we own the handle and close it below.
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
         return None;
@@ -253,7 +303,12 @@ pub(crate) fn frontmost_process_path() -> Option<String> {
 
     let mut buf = vec![0u16; 32_768];
     let mut len = buf.len() as u32;
+    // SAFETY: `process` is the valid handle from OpenProcess; `buf` is a live
+    // 32768-u16 buffer and `len` holds its length, so the call writes at most
+    // `len` code units and updates `len` with the count written.
     let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &mut len) };
+    // SAFETY: `process` is the handle from OpenProcess, owned here and closed
+    // exactly once now that the query has returned.
     unsafe {
         CloseHandle(process);
     }
@@ -265,9 +320,9 @@ pub(crate) fn frontmost_process_path() -> Option<String> {
 }
 
 fn last_error(context: &str) -> HookError {
-    HookError::WindowsHook(format!("{context} failed with GetLastError={}", unsafe {
-        GetLastError()
-    }))
+    // SAFETY: GetLastError reads the calling thread's last-error code; no preconditions.
+    let code = unsafe { GetLastError() };
+    HookError::WindowsHook(format!("{context} failed with GetLastError={code}"))
 }
 
 #[cfg(test)]

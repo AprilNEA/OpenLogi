@@ -44,6 +44,13 @@ name = "openlogi-core"
 version_group = "openlogi"
 changelog_path = "CHANGELOG.md"
 
+# OS input-event synthesis split out of openlogi-core (depends on it). Published
+# with the workspace under unified versioning.
+[[package]]
+name = "openlogi-inject"
+version_group = "openlogi"
+changelog_path = "CHANGELOG.md"
+
 [[package]]
 name = "openlogi-hid"
 version_group = "openlogi"

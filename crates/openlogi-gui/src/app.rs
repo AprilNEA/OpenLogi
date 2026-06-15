@@ -295,6 +295,18 @@ impl AppView {
             )
             .child(
                 div()
+                    .max_w(px(440.))
+                    .text_sm()
+                    .text_color(pal.text_muted)
+                    .child(tr!(
+                        "Enable “OpenLogi Agent” in the Accessibility list — the \
+                         background agent owns the mouse hook, not the OpenLogi app. \
+                         If it already shows as enabled, remove the stale entry with \
+                         the − button and add it back."
+                    )),
+            )
+            .child(
+                div()
                     .id("open-accessibility")
                     .px_4()
                     .py_2()

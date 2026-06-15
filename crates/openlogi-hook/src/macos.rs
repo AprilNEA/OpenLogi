@@ -206,7 +206,7 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
     );
     if is_button
         && event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
-            == openlogi_core::binding::SYNTHETIC_EVENT_USER_DATA
+            == openlogi_inject::SYNTHETIC_EVENT_USER_DATA
     {
         return None;
     }

@@ -7,22 +7,15 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
     channel::HidppChannel,
-    feature::{CreatableFeature, Feature},
-    nibble::U4,
+    feature::{CreatableFeature, Feature, FeatureEndpoint},
     protocol::v20::{self, Hidpp20Error},
 };
 
 /// Implements the `DeviceTypeAndName` / `0x0005` feature.
 #[derive(Clone)]
 pub struct DeviceTypeAndNameFeature {
-    /// The underlying HID++ channel.
-    chan: Arc<HidppChannel>,
-
-    /// The index of the device to implement the feature for.
-    device_index: u8,
-
-    /// The index of the feature in the feature table.
-    feature_index: u8,
+    /// The endpoint this feature talks to.
+    endpoint: FeatureEndpoint,
 }
 
 impl CreatableFeature for DeviceTypeAndNameFeature {
@@ -31,9 +24,7 @@ impl CreatableFeature for DeviceTypeAndNameFeature {
 
     fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
         Self {
-            chan,
-            device_index,
-            feature_index,
+            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
         }
     }
 }
@@ -43,20 +34,7 @@ impl Feature for DeviceTypeAndNameFeature {}
 impl DeviceTypeAndNameFeature {
     /// Retrieves the amount of characters in the marketing name of the device.
     pub async fn get_device_name_count(&self) -> Result<u8, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(0),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        Ok(response.extend_payload()[0])
+        Ok(self.endpoint.call(0, [0; 3]).await?.extend_payload()[0])
     }
 
     /// Retrieves a chunk of characters of the marketing name of the device,
@@ -70,18 +48,7 @@ impl DeviceTypeAndNameFeature {
     /// A convenience wrapper implementing this functionality is provided as
     /// [`Self::get_whole_device_name`].
     pub async fn get_device_name(&self, index: u8) -> Result<Vec<u8>, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(1),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [index, 0x00, 0x00],
-            ))
-            .await?;
+        let response = self.endpoint.call(1, [index, 0x00, 0x00]).await?;
 
         match response {
             v20::Message::Long(_, payload) => Ok(payload.to_vec()),
@@ -108,20 +75,7 @@ impl DeviceTypeAndNameFeature {
 
     /// Retrieves the marketing type of the device.
     pub async fn get_device_type(&self) -> Result<DeviceType, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(2),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        DeviceType::try_from(response.extend_payload()[0])
+        DeviceType::try_from(self.endpoint.call(2, [0; 3]).await?.extend_payload()[0])
             .map_err(|_| Hidpp20Error::UnsupportedResponse)
     }
 }

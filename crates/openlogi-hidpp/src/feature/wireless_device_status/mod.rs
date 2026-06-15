@@ -8,9 +8,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
     channel::HidppChannel,
     event::EventEmitter,
-    feature::{CreatableFeature, EmittingFeature, Feature},
-    nibble,
-    protocol::v20,
+    feature::{CreatableFeature, EmittingFeature, Feature, event_payload},
 };
 
 /// Implements the `WirelessDeviceStatus` / `0x1d4b` feature.
@@ -38,28 +36,21 @@ impl CreatableFeature for WirelessDeviceStatusFeature {
             let emitter = Arc::clone(&emitter);
 
             move |raw, matched| {
-                if matched {
+                let Some((func, payload)) =
+                    event_payload(raw, matched, device_index, feature_index)
+                else {
+                    return;
+                };
+                // The reconnection broadcast is the only event and carries sub-id 0.
+                if func.to_lo() != 0 {
                     return;
                 }
 
-                let msg = v20::Message::from(raw);
-
-                let header = msg.header();
-                if header.device_index != device_index
-                    || header.feature_index != feature_index
-                    || nibble::combine(header.software_id, header.function_id) != 0
-                {
-                    return;
-                }
-
-                let payload = msg.extend_payload();
-                let Ok(status) = WirelessDeviceStatus::try_from(payload[0]) else {
-                    return;
-                };
-                let Ok(request) = WirelessDeviceStatusRequest::try_from(payload[1]) else {
-                    return;
-                };
-                let Ok(reason) = WirelessDeviceStatusReason::try_from(payload[2]) else {
+                let (Ok(status), Ok(request), Ok(reason)) = (
+                    WirelessDeviceStatus::try_from(payload[0]),
+                    WirelessDeviceStatusRequest::try_from(payload[1]),
+                    WirelessDeviceStatusReason::try_from(payload[2]),
+                ) else {
                     return;
                 };
 

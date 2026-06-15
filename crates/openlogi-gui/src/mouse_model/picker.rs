@@ -23,7 +23,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, BorrowAppContext as _, Context, Entity, FontWeight, InteractiveElement,
-    IntoElement, ParentElement, StatefulInteractiveElement as _, Styled, Window, div, hsla,
+    IntoElement, ParentElement, StatefulInteractiveElement as _, Styled, Window, div,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Icon, IconName, h_flex, popover::PopoverState, v_flex};
@@ -33,7 +33,7 @@ use crate::data::mouse_buttons::{
 };
 use crate::mouse_model::view::MouseModelView;
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette};
+use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
 
 /// Floor width for the [`action_picker`] popover. The action labels drive the
 /// actual width; this only stops the list from collapsing too narrow. Matches
@@ -203,13 +203,8 @@ fn direction_cell(
         .px_2()
         .py_1p5()
         .rounded_md()
-        .border_1()
-        .border_color(if active {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.border
-        })
-        .when(active, |s| s.bg(hsla(0.6, 0.9, 0.6, 0.10)))
+        .selected_border(active, pal)
+        .selected_fill(active)
         .hover(move |s| s.bg(pal.surface_hover))
         .child(div().text_xs().text_color(pal.text_muted).child(header))
         .child(
@@ -411,10 +406,6 @@ fn menu_row(
     pal: Palette,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    // Accent fill derived from ACCENT_BLUE (≈ hue 0.6 / sat 0.9 / light 0.6),
-    // kept low-alpha so the row reads as tinted, not painted.
-    let tint = hsla(0.6, 0.9, 0.6, 0.12);
-    let tint_hover = hsla(0.6, 0.9, 0.6, 0.18);
     h_flex()
         .id(id)
         .w_full()
@@ -426,10 +417,10 @@ fn menu_row(
         .rounded_md()
         .text_sm()
         .text_color(pal.text_primary)
-        .when(selected, |s| s.bg(tint))
+        .selected_fill(selected)
         .hover(move |s| {
             s.bg(if selected {
-                tint_hover
+                theme::accent_tint_hover()
             } else {
                 pal.surface_hover
             })

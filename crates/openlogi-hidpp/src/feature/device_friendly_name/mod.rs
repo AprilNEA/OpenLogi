@@ -5,22 +5,15 @@ use std::sync::Arc;
 
 use crate::{
     channel::HidppChannel,
-    feature::{CreatableFeature, Feature},
-    nibble::U4,
-    protocol::v20::{self, Hidpp20Error},
+    feature::{CreatableFeature, Feature, FeatureEndpoint},
+    protocol::v20::Hidpp20Error,
 };
 
 /// Implements the `DeviceFriendlyName` / `0x0007` feature.
 #[derive(Clone)]
 pub struct DeviceFriendlyNameFeature {
-    /// The underlying HID++ channel.
-    chan: Arc<HidppChannel>,
-
-    /// The index of the device to implement the feature for.
-    device_index: u8,
-
-    /// The index of the feature in the feature table.
-    feature_index: u8,
+    /// The endpoint this feature talks to.
+    endpoint: FeatureEndpoint,
 }
 
 impl CreatableFeature for DeviceFriendlyNameFeature {
@@ -29,9 +22,7 @@ impl CreatableFeature for DeviceFriendlyNameFeature {
 
     fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
         Self {
-            chan,
-            device_index,
-            feature_index,
+            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
         }
     }
 }
@@ -41,20 +32,7 @@ impl Feature for DeviceFriendlyNameFeature {}
 impl DeviceFriendlyNameFeature {
     /// Retrieves the length data of the friendly device name feature.
     pub async fn get_friendly_name_length(&self) -> Result<DeviceFriendlyNameLength, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(0),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        let payload = response.extend_payload();
+        let payload = self.endpoint.call(0, [0; 3]).await?.extend_payload();
 
         Ok(DeviceFriendlyNameLength {
             name_length: payload[0],
@@ -74,20 +52,13 @@ impl DeviceFriendlyNameFeature {
     /// A convenience wrapper implementing this functionality is provided as
     /// [`Self::get_whole_friendly_name`].
     pub async fn get_friendly_name(&self, index: u8) -> Result<[u8; 15], Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(1),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [index, 0x00, 0x00],
-            ))
-            .await?;
+        let payload = self
+            .endpoint
+            .call(1, [index, 0x00, 0x00])
+            .await?
+            .extend_payload();
 
-        Ok(response.extend_payload()[1..].try_into().unwrap())
+        Ok(payload[1..].try_into().unwrap())
     }
 
     /// Retrieves the whole friendly name of the device by first calling
@@ -118,20 +89,13 @@ impl DeviceFriendlyNameFeature {
     /// A convenience wrapper implementing this functionality is provided as
     /// [`Self::get_whole_default_friendly_name`].
     pub async fn get_default_friendly_name(&self, index: u8) -> Result<[u8; 15], Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(2),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [index, 0x00, 0x00],
-            ))
-            .await?;
+        let payload = self
+            .endpoint
+            .call(2, [index, 0x00, 0x00])
+            .await?
+            .extend_payload();
 
-        Ok(response.extend_payload()[1..].try_into().unwrap())
+        Ok(payload[1..].try_into().unwrap())
     }
 
     /// Retrieves the whole default friendly name of the device by first calling
@@ -167,20 +131,9 @@ impl DeviceFriendlyNameFeature {
         data[0] = index;
         data[1..].copy_from_slice(&chunk);
 
-        let response = self
-            .chan
-            .send_v20(v20::Message::Long(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(3),
-                    software_id: self.chan.get_sw_id(),
-                },
-                data,
-            ))
-            .await?;
+        let payload = self.endpoint.call_long(3, data).await?.extend_payload();
 
-        Ok(response.extend_payload()[0])
+        Ok(payload[0])
     }
 
     /// Sets the whole friendly device name, truncating the value to a maximum
@@ -218,20 +171,7 @@ impl DeviceFriendlyNameFeature {
     ///
     /// Returns the total length of the name after resetting it,
     pub async fn reset_friendly_name(&self) -> Result<u8, Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Short(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(4),
-                    software_id: self.chan.get_sw_id(),
-                },
-                [0x00, 0x00, 0x00],
-            ))
-            .await?;
-
-        Ok(response.extend_payload()[0])
+        Ok(self.endpoint.call(4, [0; 3]).await?.extend_payload()[0])
     }
 }
 
