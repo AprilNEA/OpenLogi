@@ -146,6 +146,46 @@ pub struct EventTapInfo {
     pub target_pid: Option<i32>,
 }
 
+impl EventTapInfo {
+    /// `true` when this tap sits *active* at the [`TapLocation::Hid`] level and
+    /// is enabled — the one configuration that inserts the owner into the path
+    /// of every event and can therefore add latency system-wide. Listen-only,
+    /// disabled, or session-level taps cannot stall input this way.
+    #[must_use]
+    pub fn gates_input(&self) -> bool {
+        self.active && self.enabled && self.location == TapLocation::Hid
+    }
+
+    /// If this tap's owner is a known third-party input driver that competes
+    /// with OpenLogi for the mouse stream, return its product name — used to
+    /// warn the user about a likely pointer-lag cause.
+    ///
+    /// Matches on the owner executable name only; callers should combine it with
+    /// [`Self::gates_input`] so a competitor's *inactive* helper isn't flagged.
+    #[must_use]
+    pub fn known_input_conflict(&self) -> Option<&'static str> {
+        // (lower-cased executable-name substring, product display name). Brand
+        // names are not localised; only the surrounding warning copy is.
+        const KNOWN: &[(&str, &str)] = &[
+            ("logioptionsplus", "Logi Options+"),
+            ("logioptions", "Logitech Options"),
+            ("logimgr", "Logitech Options"),
+            ("lccdaemon", "Logitech Control Center"),
+            ("steermouse", "SteerMouse"),
+            ("bettermouse", "BetterMouse"),
+            ("usboverdrive", "USB Overdrive"),
+            ("mac mouse fix", "Mac Mouse Fix"),
+            ("linearmouse", "LinearMouse"),
+            ("smoothscroll", "SmoothScroll"),
+        ];
+        let name = self.owner_name.as_deref()?.to_ascii_lowercase();
+        KNOWN
+            .iter()
+            .find(|(needle, _)| name.contains(needle))
+            .map(|&(_, label)| label)
+    }
+}
+
 /// Errors that [`Hook::start`] and related functions can produce.
 #[derive(Debug, thiserror::Error)]
 pub enum HookError {
