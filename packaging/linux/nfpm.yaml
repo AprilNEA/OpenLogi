@@ -1,4 +1,4 @@
-# nfpm package descriptor for OpenLogi Linux packages (.deb / .rpm).
+# nfpm package descriptor for OpenLogi Linux packages (.deb / .rpm / .pkg.tar.zst).
 #
 # Build with the xtask:
 #   cargo run -p xtask -- package-linux
@@ -6,6 +6,7 @@
 # Or directly (requires nfpm in PATH; set VERSION and PKG_ARCH):
 #   VERSION=0.6.0 PKG_ARCH=amd64 nfpm package --packager deb --target target/release
 #   VERSION=0.6.0 PKG_ARCH=arm64 nfpm package --packager rpm --target target/release
+#   VERSION=0.6.0 PKG_ARCH=amd64 nfpm package --packager archlinux --target target/release
 
 name: openlogi
 version: "${VERSION}"
@@ -58,6 +59,9 @@ contents:
     dst: /usr/share/icons/hicolor/512x512/apps/openlogi.png
     file_info:
       mode: 0644
+
+archlinux:
+  packager: "OpenLogi Contributors <dev@aprilnea.me>"
 
 scripts:
   postinstall: packaging/linux/nfpm-scripts/postinstall.sh

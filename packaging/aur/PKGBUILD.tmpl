@@ -1,0 +1,33 @@
+# Maintainer: OpenLogi Contributors <dev@aprilnea.me>
+pkgname=openlogi-bin
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc="Logitech HID++ device control — remap buttons, DPI, and SmartShift. An open-source, local-first alternative to Logi Options+."
+arch=('x86_64' 'aarch64')
+url="https://github.com/AprilNEA/OpenLogi"
+license=('Apache-2.0 OR MIT')
+depends=('dbus' 'systemd-libs')
+optdepends=('libusb: USB HID device access')
+provides=('openlogi')
+conflicts=('openlogi')
+install=openlogi.install
+
+_base="https://github.com/AprilNEA/OpenLogi/releases/download/v${pkgver}"
+source_x86_64=("openlogi-v${pkgver}-linux-amd64.pkg.tar.zst::${_base}/openlogi-v${pkgver}-linux-amd64.pkg.tar.zst")
+sha256sums_x86_64=('@SHA256_AMD64@')
+source_aarch64=("openlogi-v${pkgver}-linux-arm64.pkg.tar.zst::${_base}/openlogi-v${pkgver}-linux-arm64.pkg.tar.zst")
+sha256sums_aarch64=('@SHA256_AARCH64@')
+
+package() {
+  case "$CARCH" in
+    x86_64)  _src="openlogi-v${pkgver}-linux-amd64.pkg.tar.zst" ;;
+    aarch64) _src="openlogi-v${pkgver}-linux-arm64.pkg.tar.zst" ;;
+  esac
+  # Extract the nfpm-built pacman package, skipping its metadata files.
+  bsdtar -xf "${srcdir}/${_src}" \
+    --exclude='.PKGINFO' \
+    --exclude='.INSTALL' \
+    --exclude='.CHANGELOG' \
+    --exclude='.BUILDINFO' \
+    -C "${pkgdir}"
+}
