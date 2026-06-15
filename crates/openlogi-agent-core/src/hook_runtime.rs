@@ -291,7 +291,7 @@ pub fn dispatch_action(
             return;
         }
         other => {
-            other.execute();
+            openlogi_inject::execute(other);
             None
         }
     };

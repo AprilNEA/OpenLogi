@@ -1,4 +1,4 @@
-//! Manual smoke-test for `Action::execute`.
+//! Manual smoke-test for `openlogi_inject::execute`.
 //!
 //! Parses action names from arguments, waits for the configured delay, then
 //! fires each one in order. The delay lets you focus the target window before
@@ -7,7 +7,7 @@
 //! # Usage
 //!
 //! ```text
-//! cargo build --example inject_action -p openlogi-core
+//! cargo build --example inject_action -p openlogi-inject
 //! sudo ./target/debug/examples/inject_action [--delay <secs>] <Action> [<Action> ...]
 //! ```
 //!
@@ -40,9 +40,9 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde::de::IntoDeserializer;
 
-#[cfg(target_os = "linux")]
-use openlogi_core::binding::action_device_path;
 use openlogi_core::binding::{Action, KeyCombo};
+#[cfg(target_os = "linux")]
+use openlogi_inject::action_device_path;
 
 fn parse_action(s: &str) -> Result<Action, String> {
     // `CustomShortcut` has its own CLI syntax (serde expects a table for the
@@ -181,7 +181,7 @@ fn main() {
     let between = Duration::from_millis(between_ms);
     for (i, action) in actions.iter().enumerate() {
         println!("  → {}", action.label());
-        action.execute();
+        openlogi_inject::execute(action);
         if i + 1 < actions.len() {
             std::thread::sleep(between);
         }

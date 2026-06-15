@@ -12,6 +12,7 @@ publish = false
 
 [dependencies]
 openlogi-core = { path = "../openlogi-core" }
+openlogi-inject = { path = "../openlogi-inject" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 serde = { workspace = true }
