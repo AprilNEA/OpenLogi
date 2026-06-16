@@ -272,6 +272,18 @@ jobs:
           tenant-id: ${{ steps.azure_config.outputs.AZURE_TENANT_ID }}
           subscription-id: ${{ steps.azure_config.outputs.AZURE_SUBSCRIPTION_ID }}
 
+      # artifact-signing-action installs its ArtifactSigning module from PSGallery,
+      # which is intermittently missing on hosted windows runners (the action then
+      # dies with "Unable to find repository 'PSGallery'" — actions/runner-images#13758).
+      # That flake silently dropped the arm64 exe + msi from v0.6.14. Re-register the
+      # default PSGallery so a mis-provisioned runner can't lose an artifact again.
+      - name: Ensure PSGallery is registered
+        shell: pwsh
+        run: |
+          if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+            Register-PSRepository -Default
+          }
+
       # Authenticode-signs via Artifact Signing (ex-Trusted Signing). The action only
       # runs on Windows runners. azure/login leaves an az CLI session that the action's
       # default AzureCliCredential picks up, so no azure-* secret inputs are needed.
@@ -430,6 +442,14 @@ jobs:
           client-id: ${{ steps.azure_config.outputs.AZURE_CLIENT_ID }}
           tenant-id: ${{ steps.azure_config.outputs.AZURE_TENANT_ID }}
           subscription-id: ${{ steps.azure_config.outputs.AZURE_SUBSCRIPTION_ID }}
+
+      # Same PSGallery flake guard as the exe job — see that step's comment.
+      - name: Ensure PSGallery is registered
+        shell: pwsh
+        run: |
+          if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+            Register-PSRepository -Default
+          }
 
       - name: Sign OpenLogi.msi with Artifact Signing
         uses: azure/artifact-signing-action@v2
