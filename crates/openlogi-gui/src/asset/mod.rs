@@ -179,7 +179,15 @@ impl AssetResolver {
     ) -> Option<ResolvedAsset> {
         let index = self.index.as_ref()?;
         let (depot, entry) = resolve_in_index(index, model, codename)?;
-        self.load_files(depot, entry, model)
+        let mut resolved = self.load_files(depot, entry, model)?;
+        // A curated alias lends a sibling depot's render but not its identity:
+        // keep the device's own name so a G502 HERO isn't relabelled "G502".
+        if let Some(name) = codename
+            && aliased_depot(model, codename) == Some(depot)
+        {
+            resolved.display_name = name.to_string();
+        }
+        Some(resolved)
     }
 
     fn load_files(
@@ -342,15 +350,58 @@ pub(crate) fn resolve_in_index<'a>(
         return Some(hit);
     }
 
-    // Last resort: bridge by firmware codename ↔ registry displayName.
-    let name = codename?;
-    let hit = index.find_by_display_name(name)?;
-    debug!(
-        depot = hit.0,
-        codename = name,
-        "asset matched via codename↔displayName fallback"
-    );
-    Some(hit)
+    // Bridge by firmware codename ↔ registry displayName.
+    if let Some(name) = codename
+        && let Some(hit) = index.find_by_display_name(name)
+    {
+        debug!(
+            depot = hit.0,
+            codename = name,
+            "asset matched via codename↔displayName fallback"
+        );
+        return Some(hit);
+    }
+
+    // Last resort: a curated alias for devices absent from the upstream registry
+    // that reuse a sibling's chassis render — e.g. the G502 HERO ships no depot
+    // of its own but is the classic G502 body, so it borrows `g502_core`'s image.
+    if let Some(depot) = aliased_depot(model, codename)
+        && let Some(hit) = index
+            .devices
+            .iter()
+            .find(|(d, _)| d.as_str() == depot)
+            .map(|(d, e)| (d.as_str(), e))
+    {
+        debug!(depot = hit.0, "asset matched via curated family alias");
+        return Some(hit);
+    }
+    None
+}
+
+/// Depot to borrow a render from for a device the upstream registry
+/// (`assets.openlogi.org`) doesn't list but which is cosmetically identical to
+/// a depot it does. Matched by registry PID first (stable when the feature walk
+/// read one), then by a codename substring as a fallback for a walk that left
+/// no PID. Empty for everything else — the common path never reaches here.
+fn aliased_depot(model: &DeviceModelInfo, codename: Option<&str>) -> Option<&'static str> {
+    /// `(pid, depot)` — the G502 HERO (USB pid `c08b`) shares the classic G502
+    /// body, which the registry keys as `g502_core` (pid `c07d`).
+    const PID_ALIASES: &[(u16, &str)] = &[(0xc08b, "g502_core")];
+    /// `(codename-substring, depot)` — used when the walk yielded no PID; the
+    /// substring is matched case-insensitively.
+    const NAME_ALIASES: &[(&str, &str)] = &[("g502 hero", "g502_core")];
+
+    if let Some(&(_, depot)) = PID_ALIASES
+        .iter()
+        .find(|(pid, _)| model.model_ids.contains(pid))
+    {
+        return Some(depot);
+    }
+    let name = codename?.to_ascii_lowercase();
+    NAME_ALIASES
+        .iter()
+        .find(|(needle, _)| name.contains(needle))
+        .map(|&(_, depot)| depot)
 }
 
 fn strict_candidates(model: &DeviceModelInfo) -> Vec<String> {
@@ -456,6 +507,78 @@ mod tests {
         let index = legacy_mx_master_3s_index();
         let hit = resolve_in_index(&index, &btle_3s_model(), Some("MX Master 3S"));
         assert_eq!(hit.map(|(depot, _)| depot), Some("mx_master_3s"));
+    }
+
+    fn g502_entry(model_id: &str, display_name: &str, depot: &str) -> DeviceEntry {
+        DeviceEntry {
+            model_id: model_id.to_string(),
+            model_ids: vec![model_id.to_string()],
+            display_name: display_name.to_string(),
+            kind: "mouse".to_string(),
+            asset_path: format!("assets/{depot}/"),
+            files: Vec::new(),
+        }
+    }
+
+    /// The G502 HERO (wired, USB pid `c08b`) reports a pid the registry doesn't
+    /// list — only the classic `g502_core` ("G502", pid `c07d`) and
+    /// `g502_wireless` are present — so it resolves via the curated alias.
+    fn g502_index() -> Index {
+        let mut devices = HashMap::new();
+        devices.insert(
+            "g502_core".to_string(),
+            g502_entry("c07d", "G502", "g502_core"),
+        );
+        devices.insert(
+            "g502_wireless".to_string(),
+            g502_entry("407f", "G502 Lightspeed", "g502_wireless"),
+        );
+        Index {
+            schema_version: 1,
+            devices,
+        }
+    }
+
+    fn g502_hero_model(model_ids: [u16; 3]) -> DeviceModelInfo {
+        DeviceModelInfo {
+            entity_count: 0,
+            serial_number: None,
+            unit_id: [0; 4],
+            transports: DeviceTransports {
+                usb: true,
+                ..Default::default()
+            },
+            model_ids,
+            extended_model_id: 0,
+        }
+    }
+
+    #[test]
+    fn g502_hero_aliases_to_g502_core_by_pid() {
+        let index = g502_index();
+        let hit = resolve_in_index(&index, &g502_hero_model([0xc08b, 0, 0]), None);
+        assert_eq!(hit.map(|(depot, _)| depot), Some("g502_core"));
+    }
+
+    #[test]
+    fn g502_hero_aliases_to_g502_core_by_codename_without_pid() {
+        // A walk that left no registry pid still resolves via the codename.
+        let index = g502_index();
+        let hit = resolve_in_index(
+            &index,
+            &g502_hero_model([0, 0, 0]),
+            Some("G502 HERO Gaming Mouse"),
+        );
+        assert_eq!(hit.map(|(depot, _)| depot), Some("g502_core"));
+    }
+
+    #[test]
+    fn unaliased_unknown_device_still_misses() {
+        // The alias must not become a catch-all: an unrelated unknown device
+        // with no pid/name match resolves to nothing.
+        let index = g502_index();
+        let hit = resolve_in_index(&index, &g502_hero_model([0xabcd, 0, 0]), Some("Some Mouse"));
+        assert!(hit.is_none());
     }
 
     fn bare_model() -> DeviceModelInfo {
