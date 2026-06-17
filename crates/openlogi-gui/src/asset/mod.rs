@@ -578,8 +578,9 @@ mod tests {
         cleanup_glow_pngs_in(&root);
 
         let kept = depot.join("front.png").exists() && depot.join("metadata.json").exists();
-        let swept = !depot.join("glow-ff9500.png").exists()
-            && !depot.join("glow-af52de.png.tmp").exists();
+        let swept =
+            !depot.join("glow-ff9500.png").exists() && !depot.join("glow-af52de.png.tmp").exists();
+        // Clean up before asserting so a failing assert doesn't leave the temp dir behind.
         std::fs::remove_dir_all(&root).ok();
 
         assert!(swept, "legacy glow files must be deleted");
