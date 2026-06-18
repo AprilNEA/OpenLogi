@@ -384,7 +384,9 @@ async fn walk_bolt_slot(
 
     let device = PairedDevice {
         slot,
-        codename: identity.codename.clone(),
+        // Fall back to the device's own `0x0005` marketing name when the Bolt
+        // receiver has no stored codename for this slot.
+        codename: identity.codename.clone().or_else(|| probe.name.clone()),
         wpid,
         // Prefer the device's own `0x0005` type; the register kind is the
         // offline fallback.
@@ -594,7 +596,9 @@ async fn probe_unifying_slot(
 
     let device = PairedDevice {
         slot,
-        codename,
+        // Fall back to the device's own `0x0005` marketing name when the
+        // receiver has no stored codename for this slot.
+        codename: codename.or_else(|| probe.name.clone()),
         wpid: Some(event.wpid),
         kind: resolve_device_kind(probe.kind, register_kind),
         // Reachable on this receiver iff the feature walk got through this tick.
