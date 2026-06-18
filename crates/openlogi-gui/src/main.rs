@@ -250,6 +250,10 @@ fn main() -> Result<()> {
             // assets (below). Rebuilding per snapshot was pure waste: the
             // unchanged-list early-return discarded the fresh records anyway.
             let mut cache = asset::AssetResolver::new();
+            // One-time sweep of the legacy pre-rendered glow PNGs the old overlay
+            // baked into the user cache; the glow is painted live now, so they're
+            // dead bytes. Off-thread so it never delays the first paint.
+            std::thread::spawn(asset::cleanup_legacy_glow_pngs);
             // Asset sync runs in the background, in two stages: the first
             // agent snapshot — even a deviceless one — triggers an index
             // prefetch so the registry is on disk before any device needs

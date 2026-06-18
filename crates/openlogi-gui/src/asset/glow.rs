@@ -1,4 +1,4 @@
-//! Inter-key "hole glow" overlay for a light-up keyboard.
+//! Inter-key "hole glow" for a light-up keyboard, painted live from a baked mask.
 //!
 //! A floating-key keyboard render (e.g. the G513) has many small *enclosed*
 //! transparent gaps between its keys. Painting only those holes in the device's
@@ -8,24 +8,22 @@
 //!
 //! Finding the holes is expensive (a full-image flood-fill), so the assets repo
 //! precomputes them once (`scripts/precompute_glow.py`) into each depot's
-//! `metadata.json` as a run-length-encoded mask. At runtime we only recolour
-//! that tiny mask per lighting colour — no flood-fill, no full-image decode.
-//! A depot without a precomputed mask simply gets no overlay.
+//! `metadata.json` as a run-length-encoded mask. At runtime we decode that mask
+//! into normalized horizontal segments ([`GlowGeometry`]) once per resolve and
+//! paint them as scaled, tinted quads on the fly — no pre-rendered PNG and no
+//! per-colour texture, so a depot's whole lighting footprint is the segment list.
 
-use std::path::PathBuf;
+use std::path::Path;
 
-use image::{Rgba, RgbaImage};
 use serde::Deserialize;
-use tracing::{debug, warn};
-
-use crate::components::lighting_panel::parse_hex;
+use tracing::warn;
 
 /// Metadata files to read the precomputed mask from, newest schema first.
 const META_FILES: [&str; 2] = ["core_metadata.json", "metadata.json"];
 
 /// Sanity bound on a baked mask's stored dimensions. The masks are ~1k px wide;
 /// anything far larger is a corrupt or hostile `metadata.json`. The cap also
-/// keeps `width * height` well inside `u32`, so the run accumulator can't wrap.
+/// keeps `width * height` well inside `u64`, so the run accumulator can't wrap.
 const MAX_MASK_DIM: u32 = 8192;
 
 /// Precomputed inter-key hole mask embedded in a depot's `metadata.json`:
@@ -44,98 +42,85 @@ struct MetaGlow {
     glow: Option<GlowMask>,
 }
 
-/// Generate (once, then cache) a `glow-<hex>.png` overlay for a keyboard: the
-/// precomputed inter-key holes painted `hex`, transparent elsewhere. `None`
-/// unless the depot ships a precomputed mask (the feature gate) or the cache
-/// can't be written. Cached under the writable user dir keyed by `depot`, so it
-/// survives a read-only `.app` bundle.
-pub(crate) fn ensure_glow_png(depot: &str, hex: &str) -> Option<PathBuf> {
-    let dir = depot_dir(depot)?;
-    let out = dir.join(format!("glow-{hex}.png"));
-    if out.exists() {
-        return Some(out);
-    }
-    let [_, r, g, b] = parse_hex(hex).to_be_bytes();
-    let color = Rgba([r, g, b, 255]);
-    let overlay = render_mask(&read_baked_mask(depot)?, color)?;
-
-    std::fs::create_dir_all(&dir).ok()?;
-    // Write atomically (temp + rename) so a concurrent render never loads a
-    // half-written PNG; gpui caches an image-load *failure* permanently. For the
-    // same reason we keep every colour variant on disk (bounded by the small
-    // swatch palette) — deleting one would strand the GUI's in-memory "ready"
-    // set pointing at a file that no longer exists, blanking the card.
-    let tmp = dir.join(format!("glow-{hex}.png.tmp"));
-    overlay
-        .save_with_format(&tmp, image::ImageFormat::Png)
-        .map_err(|e| warn!(path = %tmp.display(), error = %e, "glow: save failed"))
-        .ok()?;
-    std::fs::rename(&tmp, &out).ok()?;
-    debug!(depot, hex, "glow: cached");
-    Some(out)
+/// One horizontal run of inter-key holes, normalized to the mask's `[0, 1]`
+/// extent so it scales to whatever size the device image renders at.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GlowSeg {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
-/// Cache path for a depot's glow overlay at colour `hex` (stat-only — no
-/// writes). `None` when the depot name isn't a safe single path component,
-/// so read-side lookups stay inside the cache root just like the writers.
-pub(crate) fn glow_path(depot: &str, hex: &str) -> Option<PathBuf> {
-    Some(depot_dir(depot)?.join(format!("glow-{hex}.png")))
+/// The baked inter-key holes as normalized segments plus the mask's aspect
+/// ratio, ready to paint over the device image at any size. Decoded once per
+/// asset resolve; the segment list is the entire runtime footprint — there is
+/// no recoloured texture, so a session that cycles colours costs nothing extra.
+#[derive(Debug, Clone)]
+pub(crate) struct GlowGeometry {
+    pub aspect: f32,
+    pub segments: Vec<GlowSeg>,
 }
 
-/// Validated `<user_cache_root>/<depot>` — `None` (with a warn) when the
-/// index-supplied depot name isn't a single safe path component, so glow
-/// IO can never leave the cache root.
-fn depot_dir(depot: &str) -> Option<PathBuf> {
-    openlogi_assets::http::safe_component_path(
-        &super::paths::user_cache_root(),
-        depot,
-        "asset depot",
-    )
-    .map_err(|e| warn!(depot, error = %e, "glow: refusing depot dir"))
-    .ok()
-}
-
-/// Read the precomputed `glow` mask from the depot's metadata, ignoring every
-/// other field (so the keyboard-schema hotspot data is irrelevant here).
-fn read_baked_mask(depot: &str) -> Option<GlowMask> {
-    let dir = depot_dir(depot)?;
-    META_FILES.iter().find_map(|name| {
+/// Load and decode the precomputed glow mask from a depot directory's metadata.
+/// `None` when the depot ships no mask (the feature gate) or it's malformed.
+pub(crate) fn load_glow_geometry(dir: &Path) -> Option<GlowGeometry> {
+    let mask = META_FILES.iter().find_map(|name| {
         let text = std::fs::read_to_string(dir.join(name)).ok()?;
         serde_json::from_str::<MetaGlow>(&text).ok()?.glow
-    })
+    })?;
+    GlowGeometry::from_mask(&mask)
 }
 
-/// Paint the RLE mask in `color`, then soften.
-fn render_mask(mask: &GlowMask, color: Rgba<u8>) -> Option<RgbaImage> {
-    Some(image::imageops::blur(&paint_mask(mask, color)?, 1.5))
-}
-
-/// Reconstruct the RLE mask into a transparent image with the on-runs painted
-/// `color`. `None` if the runs don't cover exactly `width * height`.
-fn paint_mask(mask: &GlowMask, color: Rgba<u8>) -> Option<RgbaImage> {
-    let (w, h) = (mask.width, mask.height);
-    if w == 0 || h == 0 || w > MAX_MASK_DIM || h > MAX_MASK_DIM {
-        warn!(w, h, "glow: precomputed mask dimensions out of range");
-        return None;
-    }
-    let total = u64::from(w) * u64::from(h);
-    if mask.runs.iter().map(|&r| u64::from(r)).sum::<u64>() != total {
-        warn!(w, h, "glow: precomputed mask runs don't cover width*height");
-        return None;
-    }
-    let mut img = RgbaImage::new(w, h);
-    let mut idx: u32 = 0;
-    let mut on = false;
-    for &run in &mask.runs {
-        if on {
-            for p in idx..idx + run {
-                img.put_pixel(p % w, p / w, color);
-            }
+impl GlowGeometry {
+    /// Decode the RLE mask into normalized per-row hole segments. A run that
+    /// crosses a row boundary is split so every segment stays on one row.
+    /// `None` if the stored dimensions are out of range or the runs don't cover
+    /// exactly `width * height`.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "mask coords are < 8192 px — well within f32 mantissa"
+    )]
+    fn from_mask(mask: &GlowMask) -> Option<Self> {
+        let (w, h) = (mask.width, mask.height);
+        if w == 0 || h == 0 || w > MAX_MASK_DIM || h > MAX_MASK_DIM {
+            warn!(w, h, "glow: precomputed mask dimensions out of range");
+            return None;
         }
-        idx += run;
-        on = !on;
+        let total = u64::from(w) * u64::from(h);
+        if mask.runs.iter().map(|&r| u64::from(r)).sum::<u64>() != total {
+            warn!(w, h, "glow: precomputed mask runs don't cover width*height");
+            return None;
+        }
+        let (wf, hf) = (w as f32, h as f32);
+        let mut segments = Vec::new();
+        let mut idx: u64 = 0;
+        let mut on = false;
+        for &run in &mask.runs {
+            if on && run > 0 {
+                let mut start = idx;
+                let end = idx + u64::from(run);
+                while start < end {
+                    let row = start / u64::from(w);
+                    let col = start % u64::from(w);
+                    let seg_end = end.min((row + 1) * u64::from(w));
+                    segments.push(GlowSeg {
+                        x: col as f32 / wf,
+                        y: row as f32 / hf,
+                        w: (seg_end - start) as f32 / wf,
+                        h: 1.0 / hf,
+                    });
+                    start = seg_end;
+                }
+            }
+            idx += u64::from(run);
+            on = !on;
+        }
+        Some(Self {
+            aspect: wf / hf,
+            segments,
+        })
     }
-    Some(img)
 }
 
 #[cfg(test)]
@@ -144,27 +129,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn paint_mask_paints_only_on_runs() {
-        // 3x2 mask, runs alternate off/on starting off: off2, on1, off2, on1.
-        // Row-major pixels idx 2 and idx 5 are ON.
+    fn from_mask_extracts_on_runs_as_normalized_segments() {
+        // 4x2 mask, runs alternate off/on starting off: off2, on2, off3, on1.
+        // Row-major idx 2..4 ON (row 0, cols 2-3); idx 7 ON (row 1, col 3).
         let mask = GlowMask {
-            width: 3,
+            width: 4,
             height: 2,
-            runs: vec![2, 1, 2, 1],
+            runs: vec![2, 2, 3, 1],
         };
-        let img = paint_mask(&mask, Rgba([10, 20, 30, 255])).expect("mask paints");
-        assert_eq!(img.get_pixel(2, 0).0, [10, 20, 30, 255]); // idx 2, on
-        assert_eq!(img.get_pixel(2, 1).0, [10, 20, 30, 255]); // idx 5, on
-        assert_eq!(img.get_pixel(0, 0).0[3], 0); // idx 0, off → transparent
+        let geom = GlowGeometry::from_mask(&mask).expect("valid mask");
+        assert!((geom.aspect - 2.0).abs() < 1e-6);
+        assert_eq!(geom.segments.len(), 2);
+        let first = geom.segments[0];
+        assert!((first.x - 0.5).abs() < 1e-6); // col 2 / 4
+        assert!((first.y - 0.0).abs() < 1e-6); // row 0
+        assert!((first.w - 0.5).abs() < 1e-6); // len 2 / 4
+        let second = geom.segments[1];
+        assert!((second.x - 0.75).abs() < 1e-6); // col 3 / 4
+        assert!((second.y - 0.5).abs() < 1e-6); // row 1 / 2
     }
 
     #[test]
-    fn paint_mask_rejects_bad_run_total() {
+    fn from_mask_splits_a_run_across_rows() {
+        // 2x2, runs off1 on3: idx 1 (row 0 col 1) + idx 2..4 (row 1) → 2 segments.
+        let mask = GlowMask {
+            width: 2,
+            height: 2,
+            runs: vec![1, 3],
+        };
+        let geom = GlowGeometry::from_mask(&mask).expect("valid mask");
+        assert_eq!(geom.segments.len(), 2);
+    }
+
+    #[test]
+    fn from_mask_rejects_bad_run_total() {
         let mask = GlowMask {
             width: 4,
             height: 4,
             runs: vec![3, 2], // sums to 5, not 16
         };
-        assert!(paint_mask(&mask, Rgba([0, 0, 0, 255])).is_none());
+        assert!(GlowGeometry::from_mask(&mask).is_none());
     }
 }
