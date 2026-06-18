@@ -81,3 +81,49 @@ fn linux_start_does_not_return_unsupported() {
 fn non_macos_has_accessibility_is_true() {
     assert!(Hook::has_accessibility());
 }
+
+/// Build an `EventTapInfo` with the given owner name and tap properties,
+/// defaulting the fields the conflict logic doesn't read.
+fn tap(owner: Option<&str>, location: TapLocation, active: bool, enabled: bool) -> EventTapInfo {
+    EventTapInfo {
+        tap_id: 1,
+        location,
+        active,
+        enabled,
+        owner_pid: 100,
+        owner_name: owner.map(str::to_owned),
+        target_pid: None,
+    }
+}
+
+/// `gates_input` is true only for an enabled, active, HID-level tap.
+#[test]
+fn gates_input_requires_active_enabled_hid() {
+    assert!(tap(None, TapLocation::Hid, true, true).gates_input());
+    // listen-only, disabled, or session-level cannot stall the HID stream.
+    assert!(!tap(None, TapLocation::Hid, false, true).gates_input());
+    assert!(!tap(None, TapLocation::Hid, true, false).gates_input());
+    assert!(!tap(None, TapLocation::Session, true, true).gates_input());
+}
+
+/// Known third-party input drivers are matched case-insensitively by owner
+/// executable name; unrelated owners and missing names return `None`.
+#[test]
+fn known_input_conflict_matches_curated_list() {
+    let hid = |owner| tap(Some(owner), TapLocation::Hid, true, true);
+    assert_eq!(
+        hid("logioptionsplus_agent").known_input_conflict(),
+        Some("Logi Options+")
+    );
+    // Case-insensitive, and substring of a longer path component.
+    assert_eq!(
+        hid("BetterMouse").known_input_conflict(),
+        Some("BetterMouse")
+    );
+    assert_eq!(hid("SteerMouse").known_input_conflict(), Some("SteerMouse"));
+    assert_eq!(hid("Raycast").known_input_conflict(), None);
+    assert_eq!(
+        tap(None, TapLocation::Hid, true, true).known_input_conflict(),
+        None
+    );
+}

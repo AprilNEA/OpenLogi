@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::orchestrator::Orchestrator;
 use openlogi_agent_core::{hook_runtime, watchers};
 use openlogi_core::config::Config;
@@ -124,6 +125,12 @@ async fn run(config: Config) {
     let shared = orchestrator.lock().await.shared();
     let hook_installed = Arc::new(AtomicBool::new(false));
 
+    // Live event monitor: shared between the hook callback (which mirrors events
+    // into it) and the IPC server (which the GUI polls). The janitor turns it
+    // back off once the GUI stops polling.
+    let event_monitor = Arc::new(EventMonitor::default());
+    tokio::spawn(Arc::clone(&event_monitor).run_idle_janitor());
+
     // Pairing runs in the agent (it owns device I/O); the GUI drives it over IPC.
     let pairing = Arc::new(pairing::PairingManager::new(shared.clone()));
 
@@ -153,6 +160,7 @@ async fn run(config: Config) {
         shared: shared.clone(),
         hook_installed: Arc::clone(&hook_installed),
         pairing: Arc::clone(&pairing),
+        event_monitor: Arc::clone(&event_monitor),
     };
     tokio::spawn(server::run(server));
 
@@ -201,6 +209,7 @@ async fn run(config: Config) {
                         shared.hook_maps.clone(),
                         shared.dpi_cycle.clone(),
                         shared.capture_channel.clone(),
+                        Arc::clone(&event_monitor),
                     );
                     hook_installed.store(hook.is_some(), Ordering::Relaxed);
                 }

@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt as _;
-use openlogi_agent_core::ipc::{Agent, AgentStatus, PROTOCOL_VERSION, PairingUpdate};
+use openlogi_agent_core::event_monitor::SharedEventMonitor;
+use openlogi_agent_core::ipc::{Agent, AgentStatus, MonitorEvent, PROTOCOL_VERSION, PairingUpdate};
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::{hardware, transport};
 use openlogi_core::config::{Config, Lighting};
@@ -35,6 +36,7 @@ pub struct AgentServer {
     pub shared: SharedRuntime,
     pub hook_installed: Arc<AtomicBool>,
     pub pairing: Arc<PairingManager>,
+    pub event_monitor: SharedEventMonitor,
 }
 
 impl Agent for AgentServer {
@@ -135,6 +137,10 @@ impl Agent for AgentServer {
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {
         self.pairing.next_update().await
+    }
+
+    async fn poll_event_monitor(self, _: Context) -> Vec<MonitorEvent> {
+        self.event_monitor.poll()
     }
 }
 

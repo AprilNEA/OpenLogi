@@ -11,9 +11,9 @@ use gpui::StatefulInteractiveElement as _;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use gpui::rgb;
 use gpui::{
-    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ParentElement as _, Render, SharedString, Size, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Axis, BorrowAppContext as _, Context, Entity,
+    InteractiveElement, IntoElement, ParentElement as _, Render, SharedString, Size, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     IconName, IndexPath, Sizable, h_flex,
@@ -25,6 +25,10 @@ use gpui_component::{
 use openlogi_core::config::{
     DEFAULT_THUMBWHEEL_SENSITIVITY, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
 };
+// Event-tap enumeration is a macOS (`CGEventTap`) concept; the Diagnostics page
+// that surfaces it is macOS-only.
+#[cfg(target_os = "macos")]
+use openlogi_hook::Hook;
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 #[cfg(target_os = "macos")]
@@ -46,6 +50,11 @@ pub struct SettingsView {
     /// re-walking the cache on every render. A snapshot — reopen to refresh
     /// after a Clear.
     asset_cache_desc: SharedString,
+    /// Drives the debug live event monitor: polls the agent on a timer while the
+    /// Settings window is open. Dropping it with the view stops polling, which
+    /// lets the agent's idle janitor turn monitoring back off.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    _monitor_task: gpui::Task<()>,
 }
 
 impl SettingsView {
@@ -77,11 +86,38 @@ impl SettingsView {
         cx.subscribe_in(&sensitivity_slider, window, Self::on_sensitivity_slider)
             .detach();
 
+        // Poll the agent's live event monitor while this window is open. The task
+        // is held in the view, so closing Settings drops it, polling stops, and
+        // the agent disables monitoring on its own.
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        let monitor_task = cx.spawn(async move |_view, cx| {
+            loop {
+                let sender = cx.update_global::<AppState, _>(|s, _| s.ipc_sender());
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                if sender
+                    .send(crate::ipc_client::Command::PollEventMonitor(tx))
+                    .is_ok()
+                    && let Ok(events) = rx.await
+                    && !events.is_empty()
+                {
+                    cx.update_global::<AppState, _>(|state, cx| {
+                        state.push_monitor_events(events);
+                        cx.refresh_windows();
+                    });
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(300))
+                    .await;
+            }
+        });
+
         Self {
             appearance_obs: None,
             language_select,
             sensitivity_slider,
             asset_cache_desc: cache_size_description(),
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            _monitor_task: monitor_task,
         }
     }
 
@@ -152,6 +188,17 @@ impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
 
+        let settings = Settings::new("settings")
+            .sidebar_width(px(210.))
+            .page(general_page(self.sensitivity_slider.clone()))
+            .page(permissions_page(pal))
+            .page(assets_page(pal, self.asset_cache_desc.clone()))
+            .page(language_page(self.language_select.clone()));
+        // Surfaces competing macOS event taps (a pointer-lag cause) and, in debug
+        // builds, the full tap list and a live event monitor.
+        #[cfg(target_os = "macos")]
+        let settings = settings.page(diagnostics_page(pal));
+
         div()
             .size_full()
             .bg(pal.bg)
@@ -159,14 +206,7 @@ impl Render for SettingsView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            .child(
-                Settings::new("settings")
-                    .sidebar_width(px(210.))
-                    .page(general_page(self.sensitivity_slider.clone()))
-                    .page(permissions_page(pal))
-                    .page(assets_page(pal, self.asset_cache_desc.clone()))
-                    .page(language_page(self.language_select.clone())),
-            )
+            .child(settings)
     }
 }
 
@@ -250,6 +290,162 @@ fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPage {
         .icon(IconName::Settings)
         .resettable(false)
         .group(group)
+}
+
+/// The Diagnostics page (macOS): flags other apps intercepting the mouse event
+/// stream — a common pointer-lag cause — and, in debug builds, dumps the full
+/// event-tap list. The live event monitor is added in [`SettingsView`].
+#[cfg(target_os = "macos")]
+fn diagnostics_page(pal: Palette) -> SettingPage {
+    SettingPage::new(tr!("Diagnostics"))
+        .icon(IconName::Info)
+        .resettable(false)
+        .group(
+            SettingGroup::new().item(
+                SettingItem::new(
+                    tr!("Input interception"),
+                    SettingField::render(move |_, _, cx| input_conflict_field(pal, cx)),
+                )
+                .description(tr!(
+                    "Detects other apps tapping the mouse event stream — a common cause of pointer lag."
+                ))
+                // Vertical: the status + tap list are wide, multi-line content,
+                // not a compact right-side control — stacking them full-width
+                // below the title lets the lines wrap instead of overflowing.
+                .layout(Axis::Vertical),
+            ),
+        )
+}
+
+/// Live status: the curated known-conflict check over the current event taps,
+/// plus (debug) the full tap list. Recomputed on each render, so it reflects the
+/// live tap set whenever the window repaints.
+#[cfg(target_os = "macos")]
+fn input_conflict_field(pal: Palette, cx: &mut App) -> AnyElement {
+    let taps = Hook::list_event_taps();
+
+    // Dedup the product names of input-gating taps owned by known conflicts.
+    let mut conflicts: Vec<&'static str> = Vec::new();
+    for tap in &taps {
+        if tap.gates_input()
+            && let Some(name) = tap.known_input_conflict()
+            && !conflicts.contains(&name)
+        {
+            conflicts.push(name);
+        }
+    }
+
+    let mut col = v_flex().w_full().gap_1();
+    if conflicts.is_empty() {
+        col = col.child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme::STATUS_CONNECTED))
+                .child(tr!("No other app is intercepting mouse input.")),
+        );
+    } else {
+        col = col.child(
+            div()
+                .text_sm()
+                .text_color(rgb(theme::STATUS_CONNECTING))
+                .child(tr!(
+                    "Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}",
+                    apps => conflicts.join(", ")
+                )),
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        col = col.child(debug_tap_list(&taps, pal));
+        col = col.child(monitor_list(pal, cx));
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (pal, cx);
+    }
+
+    col.into_any_element()
+}
+
+/// Debug-only live event monitor: the events the agent's hook has observed,
+/// newest first. Polled into [`AppState`] by [`SettingsView`]'s task.
+#[cfg(all(target_os = "macos", debug_assertions))]
+fn monitor_list(pal: Palette, cx: &mut App) -> impl IntoElement {
+    let lines: Vec<String> = cx
+        .try_global::<AppState>()
+        .map(|s| {
+            s.monitor_events()
+                .iter()
+                .rev()
+                .take(20)
+                .map(format_monitor_event)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut col = v_flex().w_full().mt_2().gap_1().child(
+        div()
+            .text_xs()
+            .text_color(pal.text_muted)
+            .child("Live events (newest first)"),
+    );
+    if lines.is_empty() {
+        col = col.child(
+            div()
+                .text_xs()
+                .text_color(pal.text_muted)
+                .child("(click or scroll to see what the hook receives)"),
+        );
+    } else {
+        for line in lines {
+            col = col.child(div().text_xs().text_color(pal.text_primary).child(line));
+        }
+    }
+    col
+}
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+fn format_monitor_event(event: &openlogi_agent_core::ipc::MonitorEvent) -> String {
+    use openlogi_agent_core::ipc::MonitorEvent;
+    match event {
+        MonitorEvent::Button { button, pressed } => {
+            format!("button {button} {}", if *pressed { "down" } else { "up" })
+        }
+        MonitorEvent::Scroll { delta_x, delta_y } => {
+            format!("scroll dx={delta_x:.1} dy={delta_y:.1}")
+        }
+        MonitorEvent::CaptureInterrupted => "capture interrupted".to_string(),
+    }
+}
+
+/// Debug-only raw dump of every event tap: owner, location, mode, enabled. Taps
+/// that gate the HID stream are highlighted, since those are the lag-relevant
+/// ones. English-only by design — a developer aid, not a shipped string.
+#[cfg(all(target_os = "macos", debug_assertions))]
+fn debug_tap_list(taps: &[openlogi_hook::EventTapInfo], pal: Palette) -> impl IntoElement {
+    let mut col = v_flex().w_full().mt_2().gap_1().child(
+        div()
+            .text_xs()
+            .text_color(pal.text_muted)
+            .child(format!("{} event tap(s)", taps.len())),
+    );
+    for tap in taps {
+        let owner = tap.owner_name.as_deref().unwrap_or("(unknown)");
+        let mode = if tap.active { "active" } else { "listen" };
+        let line = format!(
+            "{owner} (pid {}) — {:?} {mode} enabled={}",
+            tap.owner_pid, tap.location, tap.enabled
+        );
+        let row = div().text_xs().child(line);
+        let row = if tap.gates_input() {
+            row.text_color(rgb(theme::STATUS_CONNECTING))
+        } else {
+            row.text_color(pal.text_muted)
+        };
+        col = col.child(row);
+    }
+    col
 }
 
 #[cfg_attr(

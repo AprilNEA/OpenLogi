@@ -9,6 +9,7 @@
 pub mod bindings;
 pub mod device_order;
 mod dpi;
+pub mod event_monitor;
 pub mod hardware;
 pub mod hook_runtime;
 pub mod ipc;

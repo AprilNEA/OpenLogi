@@ -249,3 +249,8 @@ _version: 1
 "Reading supported DPI values…": "Reading supported DPI values…"
 "Couldn't read DPI — click to retry.": "Couldn't read DPI — click to retry."
 "This device did not report Adjustable DPI support.": "This device did not report Adjustable DPI support."
+"Diagnostics": "Diagnostiikka"
+"Input interception": "Syötteen sieppaus"
+"Detects other apps tapping the mouse event stream — a common cause of pointer lag.": "Tunnistaa muut sovellukset, jotka sieppaavat hiiren tapahtumavirtaa – yleinen osoittimen viiveen syy."
+"No other app is intercepting mouse input.": "Mikään muu sovellus ei sieppaa hiiren syötettä."
+"Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}": "Toinen sovellus sieppaa hiiren syötettä, mikä voi aiheuttaa osoittimen viivettä tai painikkeiden kaksoistoimintoja: %{apps}"
