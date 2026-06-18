@@ -82,6 +82,7 @@ pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Optio
 pub(super) async fn probe_features(
     channel: &Arc<HidppChannel>,
     slot: u8,
+    want_name: bool,
 ) -> (ProbedFeatures, Option<u8>) {
     let mut device = match Device::new(Arc::clone(channel), slot).await {
         Ok(d) => d,
@@ -169,16 +170,23 @@ pub(super) async fn probe_features(
                 }
             };
             // The device's own marketing name, used as the display fallback
-            // when the receiver has no stored codename for this slot.
-            let name = match feature.get_whole_device_name().await {
-                Ok(n) => {
-                    let trimmed = n.trim();
-                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+            // when the receiver has no stored codename for this slot. Skipped
+            // on the direct path (`want_name = false`), where the HID node name
+            // is already the codename — fetching it would be several HID++
+            // round-trips whose result is discarded.
+            let name = if want_name {
+                match feature.get_whole_device_name().await {
+                    Ok(n) => {
+                        let trimmed = n.trim();
+                        (!trimmed.is_empty()).then(|| trimmed.to_string())
+                    }
+                    Err(e) => {
+                        debug!(slot, error = ?e, "device name (0x0005) read failed");
+                        None
+                    }
                 }
-                Err(e) => {
-                    debug!(slot, error = ?e, "device name (0x0005) read failed");
-                    None
-                }
+            } else {
+                None
             };
             (kind, name)
         }
