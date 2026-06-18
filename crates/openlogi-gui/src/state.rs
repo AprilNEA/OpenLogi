@@ -14,8 +14,7 @@
     reason = "fields are read once their owning component lands in UI.md phases 2–4"
 )]
 
-use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
 
 use gpui::{App, Global};
 use openlogi_core::config::{AppSettings, Config, DeviceIdentity, Lighting};
@@ -295,14 +294,6 @@ pub struct AppState {
     /// [`Self::dpi_data`]; the device persists the values itself, so this is a
     /// read/write cache, not a source of truth saved to disk.
     smartshift_data: LazyDeviceData<SmartShiftStatus>,
-    /// Glow-overlay cache paths we've already spawned generation for, so each
-    /// `(depot, colour)` is attempted exactly once — even when the depot ships
-    /// no mask and no file is ever written (otherwise the worker's
-    /// `refresh_windows` would re-trigger generation every frame, forever).
-    glow_attempted: HashSet<PathBuf>,
-    /// Glow-overlay cache paths whose PNG is generated and ready to render, so
-    /// `lighting_overlay` never stats the filesystem on the render thread.
-    glow_ready: HashSet<PathBuf>,
     /// Devices whose SmartShift was just written optimistically and still need a
     /// confirming re-read, keyed by [`DeviceRecord::config_key`]. A fire-and-
     /// forget write can be rejected/timed-out by a sleeping device, so the panel
@@ -364,8 +355,6 @@ impl AppState {
             dpi_data: LazyDeviceData::default(),
             inventory_misses: BTreeMap::new(),
             smartshift_data: LazyDeviceData::default(),
-            glow_attempted: HashSet::new(),
-            glow_ready: HashSet::new(),
             smartshift_pending_confirm: std::collections::BTreeSet::new(),
             device_list,
             config,
@@ -984,24 +973,6 @@ impl AppState {
     #[must_use]
     pub fn lighting_for(&self, key: &str) -> Option<Lighting> {
         self.config.lighting(key)
-    }
-
-    /// Claim `path` for a one-shot glow generation; `true` the first time, so the
-    /// caller spawns the worker exactly once per `(depot, colour)`.
-    pub fn mark_glow_attempted(&mut self, path: PathBuf) -> bool {
-        self.glow_attempted.insert(path)
-    }
-
-    /// Record that `path`'s overlay PNG is generated and ready to render.
-    pub fn mark_glow_ready(&mut self, path: PathBuf) {
-        self.glow_ready.insert(path);
-    }
-
-    /// Whether `path`'s overlay PNG is ready — a cheap in-memory check so the
-    /// render thread never stats the filesystem.
-    #[must_use]
-    pub fn glow_is_ready(&self, path: &Path) -> bool {
-        self.glow_ready.contains(path)
     }
 
     /// Persist a new lighting config for the active device and push it to the

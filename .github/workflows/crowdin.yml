@@ -1,0 +1,53 @@
+name: Crowdin
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+  push:
+    branches:
+      - master
+    paths:
+      - crowdin.yml
+      - crates/openlogi-gui/locales/en.yml
+      - .github/workflows/crowdin.yml
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: crowdin-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  synchronize:
+    name: Synchronize translations
+    runs-on: ubuntu-latest
+    if: github.repository == 'AprilNEA/OpenLogi'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Synchronize with Crowdin
+        uses: crowdin/github-action@v2
+        with:
+          config: crowdin.yml
+          upload_sources: true
+          upload_translations: false
+          download_translations: true
+          localization_branch_name: crowdin/i18n
+          commit_message: "chore(i18n): sync Crowdin translations [skip ci]"
+          create_pull_request: true
+          pull_request_title: "chore(i18n): sync Crowdin translations"
+          pull_request_body: |
+            Automated translation sync from Crowdin.
+
+            This workflow is intentionally limited by `export_languages` in `crowdin.yml` so unfinished Crowdin target languages are not exported into the app.
+          github_user_name: Crowdin Bot
+          github_user_email: support+bot@crowdin.com
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
+          CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}
