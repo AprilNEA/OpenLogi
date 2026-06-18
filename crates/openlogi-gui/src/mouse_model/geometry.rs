@@ -16,22 +16,40 @@ const ASSET_HOTSPOT: f32 = 56.;
 /// separately-clickable dots.
 const THUMBWHEEL_ROTATION_OFFSET: f32 = 18.;
 
-/// Scale the device image to fit a target height while preserving the
-/// **actual PNG's** aspect ratio. The metadata's `origin` reports the
-/// silhouette bbox inside the PNG, which is typically narrower than the
-/// full image (Logi pads transparent strips on both sides); sizing by
-/// origin causes `ObjectFit::Contain` to letterbox vertically and pulls
-/// every hotspot off the rendered button.
+/// Scale the device image to *fit inside* a `max_w` × `target_h` box while
+/// preserving the **actual PNG's** aspect ratio. A tall device (a mouse) is
+/// bound by the height; a wide one (a keyboard) is bound by the width — which
+/// is what stops a wide keyboard render from overflowing the panel (#272).
+///
+/// The metadata's `origin` reports the silhouette bbox inside the PNG, which
+/// is typically narrower than the full image (Logi pads transparent strips on
+/// both sides); sizing by origin causes `ObjectFit::Contain` to letterbox
+/// vertically and pulls every hotspot off the rendered button.
 #[allow(
     clippy::cast_precision_loss,
     reason = "device images are < 4096 px on either axis — well within f32 mantissa"
 )]
-pub fn asset_dimensions_for_png(asset: &ResolvedAsset, target_h: f32) -> (f32, f32) {
+pub fn asset_dimensions_for_png(asset: &ResolvedAsset, target_h: f32, max_w: f32) -> (f32, f32) {
     if asset.png_height == 0 {
         return MOUSE_MODEL_SIZE;
     }
-    let w = target_h * (asset.png_width as f32) / (asset.png_height as f32);
-    (w, target_h)
+    let aspect = (asset.png_width as f32) / (asset.png_height as f32);
+    let w = target_h * aspect;
+    if w > max_w {
+        (max_w, max_w / aspect)
+    } else {
+        (w, target_h)
+    }
+}
+
+/// Whether the asset exposes any remappable button markers. Mice do (so the
+/// model reserves a side gutter for their leader-line labels); keyboards and
+/// other label-less devices don't, so the model can hand them the full width.
+pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
+    asset
+        .metadata
+        .assignments()
+        .any(|a| map_slot_name(&a.slot_name).is_some())
 }
 
 /// Convert Logitech's percent-based markers into mouse-local pixel rects,

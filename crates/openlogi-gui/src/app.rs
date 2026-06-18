@@ -1,9 +1,9 @@
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, BorrowAppContext as _, BoxShadow, Context, Div, Entity,
-    FontWeight, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, div, img, point,
+    AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, BoxShadow, Context, Div,
+    Entity, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, fill, img, point,
     prelude::FluentBuilder as _, px, relative, rgb,
 };
 use gpui_component::{
@@ -25,7 +25,7 @@ use tracing::info;
 use openlogi_agent_core::ipc::InventoryHealth;
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
-use crate::asset::AssetResolver;
+use crate::asset::{AssetResolver, GlowGeometry};
 use crate::components::carousel::Carousel;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::lighting_panel::LightingPanel;
@@ -147,44 +147,6 @@ pub struct AppView {
 }
 
 impl AppView {
-    /// Generate any missing keyboard glow overlays off the render thread, once
-    /// each. The gallery only reads the cached PNG ([`lighting_overlay`]); when a
-    /// worker finishes it refreshes the windows and the next render shows it.
-    fn ensure_glow(cx: &mut Context<Self>) {
-        let jobs: Vec<GlowJob> = {
-            let Some(state) = cx.try_global::<AppState>() else {
-                return;
-            };
-            state
-                .device_list
-                .iter()
-                .filter_map(|record| glow_job(state, record))
-                .collect()
-        };
-        for job in jobs {
-            let first = cx.update_global::<AppState, _>(|state, _| {
-                state.mark_glow_attempted(job.cache.clone())
-            });
-            if !first {
-                continue;
-            }
-            let GlowJob { cache, depot, hex } = job;
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            std::thread::spawn(move || {
-                let _ = tx.send(crate::asset::ensure_glow_png(&depot, &hex).is_some());
-            });
-            cx.spawn(async move |_view, cx| {
-                if matches!(rx.await, Ok(true)) {
-                    cx.update_global::<AppState, _>(|state, cx| {
-                        state.mark_glow_ready(cache);
-                        cx.refresh_windows();
-                    });
-                }
-            })
-            .detach();
-        }
-    }
-
     /// Construct the root view and its child entities.
     pub fn new(_inventories: &[DeviceInventory], cx: &mut Context<Self>) -> Self {
         let cache = AssetResolver::new();
@@ -404,7 +366,6 @@ impl Render for AppView {
                 .child(Self::accessibility_gate(pal, cx))
                 .into_any_element();
         }
-        Self::ensure_glow(cx);
 
         let has_device = cx
             .try_global::<AppState>()
@@ -627,7 +588,9 @@ fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                     return div().into_any_element();
                 };
                 let key = record.config_key.clone();
-                let glow = lighting_overlay(&record, cx);
+                let glow = cx
+                    .try_global::<AppState>()
+                    .and_then(|s| keyboard_glow(s, &record));
                 let view = view.clone();
                 device_card(&record, focused, glow, pal)
                     .id(("device-card", idx))
@@ -645,48 +608,70 @@ fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
     )
 }
 
-/// Path to the cached inter-key colour overlay for a light-up keyboard, if it
-/// has been generated. Generation runs off the render thread in
-/// [`AppView::ensure_glow`]; this lookup only stats the cache. `None` unless the
-/// device is a keyboard with lighting enabled and the overlay exists yet.
-fn lighting_overlay(record: &DeviceRecord, cx: &App) -> Option<PathBuf> {
-    if record.kind != DeviceKind::Keyboard {
-        return None;
-    }
-    let state = cx.try_global::<AppState>()?;
-    let lighting = state
-        .lighting_for(&record.config_key)
-        .filter(|l| l.enabled)?;
-    let asset = record.asset.as_ref()?;
-    asset.hero_image_path.as_ref()?;
-    let path = crate::asset::glow_path(&asset.depot, &lighting.color)?;
-    state.glow_is_ready(&path).then_some(path)
-}
+/// Opacity the lighting colour is painted at over the device image, in both the
+/// home gallery and the device-detail model.
+const GLOW_OPACITY: f32 = 0.6;
 
-/// A pending off-thread glow generation: the cache path to fill plus the inputs
-/// [`crate::asset::ensure_glow_png`] needs.
-struct GlowJob {
-    cache: PathBuf,
-    depot: String,
-    hex: String,
-}
-
-/// The glow job for `record` when it's a keyboard with lighting enabled and a
-/// resolved photo; `None` otherwise.
-fn glow_job(state: &AppState, record: &DeviceRecord) -> Option<GlowJob> {
+/// The inter-key glow geometry and tinted colour for `record`, or `None` unless
+/// it's a keyboard with lighting enabled and a depot that ships a baked mask.
+/// The geometry is painted live by [`glow_canvas`] — no pre-rendered PNG, so a
+/// colour change costs no new texture.
+pub(crate) fn keyboard_glow(
+    state: &AppState,
+    record: &DeviceRecord,
+) -> Option<(Arc<GlowGeometry>, Hsla)> {
     if record.kind != DeviceKind::Keyboard {
         return None;
     }
     let lighting = state
         .lighting_for(&record.config_key)
         .filter(|l| l.enabled)?;
-    let asset = record.asset.as_ref()?;
-    asset.hero_image_path.as_ref()?;
-    Some(GlowJob {
-        cache: crate::asset::glow_path(&asset.depot, &lighting.color)?,
-        depot: asset.depot.clone(),
-        hex: lighting.color,
-    })
+    let geom = record.asset.as_ref()?.glow.clone()?;
+    let [_, r, g, b] = crate::components::lighting_panel::parse_hex(&lighting.color).to_be_bytes();
+    let color = gpui::Rgba {
+        r: f32::from(r) / 255.,
+        g: f32::from(g) / 255.,
+        b: f32::from(b) / 255.,
+        a: GLOW_OPACITY,
+    };
+    Some((geom, color.into()))
+}
+
+/// Paint a keyboard's baked inter-key holes in its lighting colour, scaled with
+/// a contain-fit so the holes register with the keys at any render size. A
+/// `canvas` of tinted quads — no pre-rendered PNG and no per-colour texture, so
+/// the runtime footprint is just the depot's small segment list (#272).
+pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElement {
+    canvas(
+        move |_, _, _| (geom, color),
+        move |bounds, (geom, color), window, _| {
+            let bw = f32::from(bounds.size.width);
+            let bh = f32::from(bounds.size.height);
+            if bw <= 0. || bh <= 0. {
+                return;
+            }
+            // Contain-fit a `geom.aspect` box inside the bounds, matching the
+            // device image's object-fit so the holes line up with the keys.
+            let (rw, rh) = if bw / bh > geom.aspect {
+                (bh * geom.aspect, bh)
+            } else {
+                (bw, bw / geom.aspect)
+            };
+            let ox = f32::from(bounds.origin.x) + (bw - rw) / 2.;
+            let oy = f32::from(bounds.origin.y) + (bh - rh) / 2.;
+            for s in &geom.segments {
+                let quad = Bounds {
+                    origin: point(px(ox + s.x * rw), px(oy + s.y * rh)),
+                    size: gpui::size(px((s.w * rw).max(1.)), px((s.h * rh).max(1.))),
+                };
+                window.paint_quad(fill(quad, color));
+            }
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// A device card in the Home gallery: the device photo floating on the window
@@ -695,7 +680,12 @@ fn glow_job(state: &AppState, record: &DeviceRecord) -> Option<GlowJob> {
 /// faint accent ring; inactive cards reserve the same 1px border in a
 /// transparent colour so selection never nudges the layout. Returns a bare
 /// [`Div`] so the gallery can wire the click handler.
-fn device_card(record: &DeviceRecord, active: bool, glow: Option<PathBuf>, pal: Palette) -> Div {
+fn device_card(
+    record: &DeviceRecord,
+    active: bool,
+    glow: Option<(Arc<GlowGeometry>, Hsla)>,
+    pal: Palette,
+) -> Div {
     let ring = if active {
         rgb(theme::ACCENT_BLUE).into()
     } else {
@@ -718,17 +708,10 @@ fn device_card(record: &DeviceRecord, active: bool, glow: Option<PathBuf>, pal: 
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(device_image(record, pal))
-                .when_some(glow, |this, path| {
-                    this.child(
-                        img(path)
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full()
-                            .opacity(0.6),
-                    )
-                }),
+                .when_some(glow, |this, (geom, color)| {
+                    this.child(glow_canvas(geom, color))
+                })
+                .child(device_image(record, pal)),
         )
         .child(
             v_flex()

@@ -18,9 +18,10 @@ mod images;
 mod paths;
 pub mod sync;
 
-pub(crate) use self::glow::{ensure_glow_png, glow_path};
+pub(crate) use self::glow::GlowGeometry;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use openlogi_assets::{
     BUTTONS_RENDER_FILES, DeviceEntry, FRONT_RENDER_FILES, Index, METADATA_FILES, Metadata,
@@ -59,6 +60,36 @@ pub fn clear_cache() -> std::io::Result<()> {
     match std::fs::remove_dir_all(user_cache_root()) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         other => other,
+    }
+}
+
+/// Remove the legacy pre-rendered keyboard glow overlays (`glow-<hex>.png`, plus
+/// any `.tmp` left by an interrupted write) the old overlay path baked into each
+/// depot's user-cache dir. The glow is painted live from the depot's run-mask
+/// now, so these are dead bytes; sweep them once at startup. Best-effort — an
+/// unreadable dir or undeletable file is skipped silently.
+pub fn cleanup_legacy_glow_pngs() {
+    cleanup_glow_pngs_in(&user_cache_root());
+}
+
+fn cleanup_glow_pngs_in(root: &Path) {
+    let Ok(depots) = std::fs::read_dir(root) else {
+        return;
+    };
+    for depot in depots.flatten() {
+        if !depot.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(depot.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let name = file.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("glow-") && (name.ends_with(".png") || name.ends_with(".png.tmp")) {
+                let _ = std::fs::remove_file(file.path());
+            }
+        }
     }
 }
 
@@ -106,6 +137,10 @@ pub struct ResolvedAsset {
     /// the side/buttons view the mouse model aligns hotspots against. `None`
     /// when the depot ships no front render.
     pub hero_image_path: Option<PathBuf>,
+    /// Precomputed inter-key lighting holes for a light-up keyboard, decoded
+    /// from the depot's baked RLE mask and painted live over the device image
+    /// (see [`crate::app::glow_canvas`]). `None` for depots without a mask.
+    pub glow: Option<Arc<GlowGeometry>>,
     pub metadata: Metadata,
     /// Actual pixel dimensions of `image_path`. Logi's
     /// `core_metadata.json` `origin` field tracks the *bbox of the mouse
@@ -285,6 +320,7 @@ impl AssetResolver {
                 kind: DeviceKind::from_registry_type(&entry.kind),
                 image_path,
                 hero_image_path,
+                glow: self::glow::load_glow_geometry(&dir).map(Arc::new),
                 metadata,
                 png_width,
                 png_height,
@@ -526,5 +562,28 @@ mod tests {
         );
         assert_eq!((asset.png_width, asset.png_height), (100, 200));
         assert_eq!(asset.metadata.assignments().count(), 1);
+    }
+
+    #[test]
+    fn cleanup_removes_only_legacy_glow_pngs() {
+        let root =
+            std::env::temp_dir().join(format!("openlogi-glow-cleanup-{}", std::process::id()));
+        let depot = root.join("g513");
+        std::fs::create_dir_all(&depot).expect("create depot dir");
+        std::fs::write(depot.join("glow-ff9500.png"), b"x").expect("write glow png");
+        std::fs::write(depot.join("glow-af52de.png.tmp"), b"x").expect("write glow tmp");
+        std::fs::write(depot.join("front.png"), b"x").expect("write front render");
+        std::fs::write(depot.join("metadata.json"), b"{}").expect("write metadata");
+
+        cleanup_glow_pngs_in(&root);
+
+        let kept = depot.join("front.png").exists() && depot.join("metadata.json").exists();
+        let swept =
+            !depot.join("glow-ff9500.png").exists() && !depot.join("glow-af52de.png.tmp").exists();
+        // Clean up before asserting so a failing assert doesn't leave the temp dir behind.
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(swept, "legacy glow files must be deleted");
+        assert!(kept, "real assets must be left untouched");
     }
 }
