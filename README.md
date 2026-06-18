@@ -84,6 +84,19 @@ Things OpenLogi does that Options+ won't:
 
 ¹ Media key actions use D-Bus MPRIS on Linux; a handful of macOS-specific actions (e.g. Launchpad) have no Linux equivalent and are no-ops.
 
+## Tested devices
+
+OpenLogi speaks generic HID++ 2.0, so most modern Logitech mice work without a
+per-model entry — if a device appears under `openlogi list`, button / DPI /
+SmartShift control will generally work. Confirmed on real hardware:
+
+| Device | Connection | Verified |
+|---|---|---|
+| **MX Master** (1st gen — reports `Wireless Mouse MX Master`, `wpid 4060`) | Unifying receiver | macOS 26 — enumeration, DPI (`0x2201`), SmartShift (`0x2110`), and Back / Forward / mode-shift button remapping. Thumb gesture button (`0x00c3`) is not yet captured on this model. |
+
+Don't see your device? Please [open an issue](https://github.com/AprilNEA/OpenLogi/issues)
+with your `openlogi list` output so it can be added here.
+
 ## Install
 
 > [!IMPORTANT]

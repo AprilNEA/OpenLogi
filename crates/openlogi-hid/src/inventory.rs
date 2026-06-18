@@ -695,7 +695,9 @@ async fn probe_bolt_slot(
 
     let device = PairedDevice {
         slot,
-        codename,
+        // Fall back to the device's own `0x0005` marketing name when the Bolt
+        // receiver has no stored codename for this slot.
+        codename: codename.or_else(|| probe.name.clone()),
         wpid,
         // Prefer the device's own `0x0005` type; the register kind is the
         // offline fallback.
@@ -889,7 +891,10 @@ async fn probe_unifying_slot(
 
     let device = PairedDevice {
         slot,
-        codename,
+        // The Unifying receiver doesn't store a codename for the slot, so fall
+        // back to the device's own `0x0005` marketing name rather than show it
+        // as "Unknown device".
+        codename: codename.or_else(|| probe.name.clone()),
         wpid: Some(event.wpid),
         kind: resolve_device_kind(probe.kind, register_kind),
         online: event.online,
@@ -928,6 +933,11 @@ struct ProbedFeatures {
     model_info: Option<DeviceModelInfo>,
     /// Marketing type from HID++ `0x0005` — an identity hint only.
     kind: Option<DeviceKind>,
+    /// Marketing name from HID++ `0x0005` (e.g. `"MX Master"`). Used as the
+    /// display-name fallback when the receiver has no stored codename for the
+    /// slot (Unifying never stores one; some Bolt pairings don't either), so an
+    /// otherwise-recognised device isn't shown as "Unknown device".
+    name: Option<String>,
     /// Configuration capabilities derived from the device's feature table.
     capabilities: Option<Capabilities>,
 }
@@ -1045,15 +1055,30 @@ async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> (ProbedFeature
     // the authoritative kind signal. On the direct path it's the only one; on
     // the Bolt path it corrects a pairing register that reported the wrong (or
     // `Unknown`) kind.
-    let kind = match device.get_feature::<DeviceTypeAndNameFeature>() {
-        Some(feature) => match feature.get_device_type().await {
-            Ok(ty) => Some(map_device_type(ty)),
-            Err(e) => {
-                debug!(slot, error = ?e, "DeviceType read failed");
-                None
-            }
-        },
-        None => None,
+    let (kind, name) = match device.get_feature::<DeviceTypeAndNameFeature>() {
+        Some(feature) => {
+            let kind = match feature.get_device_type().await {
+                Ok(ty) => Some(map_device_type(ty)),
+                Err(e) => {
+                    debug!(slot, error = ?e, "DeviceType read failed");
+                    None
+                }
+            };
+            // The device's own marketing name, used as the display fallback
+            // when the receiver has no stored codename for this slot.
+            let name = match feature.get_whole_device_name().await {
+                Ok(n) => {
+                    let trimmed = n.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                }
+                Err(e) => {
+                    debug!(slot, error = ?e, "device name (0x0005) read failed");
+                    None
+                }
+            };
+            (kind, name)
+        }
+        None => (None, None),
     };
 
     (
@@ -1061,6 +1086,7 @@ async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> (ProbedFeature
             battery,
             model_info,
             kind,
+            name,
             capabilities,
         },
         battery_index,
