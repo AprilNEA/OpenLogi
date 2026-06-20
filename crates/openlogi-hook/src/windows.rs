@@ -7,12 +7,16 @@
     reason = "Win32 FFI uses raw pointer parameters and fixed-width message values"
 )]
 
+use std::mem::size_of;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
@@ -199,18 +203,16 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let disposition = callback
         .as_ref()
         .map_or(EventDisposition::PassThrough, |cb| cb(event));
-    let suppress = match disposition {
-        EventDisposition::Suppress => true,
-        // Scroll inversion (#126) is not wired on Windows yet: re-injecting a
-        // wheel event via SendInput would re-enter this WH_MOUSE_LL hook, which
-        // needs an injected-event guard (LLMHF_INJECTED) this port doesn't carry
-        // yet. Until then a ReplaceScroll is delivered unchanged.
-        EventDisposition::ReplaceScroll { .. } | EventDisposition::PassThrough => false,
-    };
-    if suppress {
-        1
-    } else {
-        call_next(code, wparam, lparam)
+    match disposition {
+        EventDisposition::PassThrough => call_next(code, wparam, lparam),
+        EventDisposition::Suppress => 1,
+        // Invert the wheel (#126): drop the original and re-inject the transformed
+        // tick. `SendInput` stamps it `LLMHF_INJECTED`, which `translate_event`
+        // skips, so it reaches the foreground app without looping back here.
+        EventDisposition::ReplaceScroll { delta_x, delta_y } => {
+            inject_scroll(delta_x, delta_y);
+            1
+        }
     }
 }
 
@@ -276,6 +278,63 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
             is_continuous: false,
         }),
         _ => None,
+    }
+}
+
+/// Re-inject a scroll carrying `(delta_x, delta_y)` via `SendInput`, used to
+/// deliver an inverted wheel (#126). The synthetic events are flagged
+/// `LLMHF_INJECTED`, which [`translate_event`] skips, so they reach the
+/// foreground app without looping back through this hook. A `SendInput`
+/// `mouseData` carries the wheel delta directly (a multiple of `WHEEL_DELTA`),
+/// unlike the high-word packing the hook reads off an incoming `MSLLHOOKSTRUCT`.
+fn inject_scroll(delta_x: f32, delta_y: f32) {
+    let mut inputs: Vec<INPUT> = Vec::with_capacity(2);
+    if delta_y != 0.0 {
+        inputs.push(wheel_input(MOUSEEVENTF_WHEEL, delta_y));
+    }
+    if delta_x != 0.0 {
+        inputs.push(wheel_input(MOUSEEVENTF_HWHEEL, delta_x));
+    }
+    let (Ok(count), Ok(size)) = (
+        u32::try_from(inputs.len()),
+        i32::try_from(size_of::<INPUT>()),
+    ) else {
+        tracing::warn!("SendInput contract violated for re-injected scroll");
+        return;
+    };
+    if count == 0 {
+        return;
+    }
+    // SAFETY: `inputs` is a live, initialized slice of `count` `INPUT`s; SendInput
+    // copies it and returns how many it injected.
+    let sent = unsafe { SendInput(count, inputs.as_ptr(), size) };
+    if sent != count {
+        tracing::warn!(
+            requested = count,
+            sent,
+            "SendInput dropped re-injected scroll"
+        );
+    }
+}
+
+/// Build one wheel `INPUT`. `delta` is in the hook's wheel-tick units (the same
+/// [`MouseEvent::Scroll`] units), converted back to the Win32 `mouseData`
+/// multiple of `WHEEL_DELTA`. Pure negation is exact, so an inverted tick
+/// round-trips cleanly.
+fn wheel_input(flags: u32, delta: f32) -> INPUT {
+    let data = (delta * WHEEL_DELTA).round() as i32;
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: u32::from_ne_bytes(data.to_ne_bytes()),
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
     }
 }
 
@@ -373,5 +432,24 @@ mod tests {
             delta_y > 0.0,
             "wheel-forward should scroll up, got {delta_y}"
         );
+    }
+
+    /// The re-injected wheel `mouseData` carries the delta directly (a multiple
+    /// of `WHEEL_DELTA`), and inversion is an exact negation — so an inverted
+    /// tick is the original's sign flipped, no rounding drift.
+    #[test]
+    fn wheel_input_reconstructs_exact_signed_delta() {
+        let up = wheel_input(MOUSEEVENTF_WHEEL, 1.0);
+        let down = wheel_input(MOUSEEVENTF_WHEEL, -1.0);
+        // SAFETY: both were just built as INPUT_MOUSE, so the `mi` arm is active.
+        let (up_data, down_data) = unsafe {
+            (
+                i32::from_ne_bytes(up.Anonymous.mi.mouseData.to_ne_bytes()),
+                i32::from_ne_bytes(down.Anonymous.mi.mouseData.to_ne_bytes()),
+            )
+        };
+        assert_eq!(up_data, 120);
+        assert_eq!(down_data, -120);
+        assert_eq!(up_data, -down_data, "inversion is an exact negation");
     }
 }
