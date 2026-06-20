@@ -30,6 +30,7 @@ fn mouse_event_clone_and_debug() {
         MouseEvent::Scroll {
             delta_x: 1.0,
             delta_y: -1.5,
+            is_continuous: false,
         },
         MouseEvent::Moved {
             delta_x: 3,
@@ -49,6 +50,27 @@ fn event_disposition_equality() {
     assert_eq!(EventDisposition::PassThrough, EventDisposition::PassThrough);
     assert_eq!(EventDisposition::Suppress, EventDisposition::Suppress);
     assert_ne!(EventDisposition::PassThrough, EventDisposition::Suppress);
+    // The scroll-transform variant compares by its deltas.
+    assert_eq!(
+        EventDisposition::ReplaceScroll {
+            delta_x: 0.0,
+            delta_y: 3.0,
+        },
+        EventDisposition::ReplaceScroll {
+            delta_x: 0.0,
+            delta_y: 3.0,
+        },
+    );
+    assert_ne!(
+        EventDisposition::ReplaceScroll {
+            delta_x: 0.0,
+            delta_y: 3.0,
+        },
+        EventDisposition::ReplaceScroll {
+            delta_x: 0.0,
+            delta_y: -3.0,
+        },
+    );
 }
 
 /// On unsupported targets (not macOS, not Linux), `Hook::start` returns `Unsupported`.

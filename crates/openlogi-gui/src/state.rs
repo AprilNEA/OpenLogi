@@ -948,6 +948,27 @@ impl AppState {
         self.smartshift_pending_confirm.insert(key);
     }
 
+    /// Whether the active device's scroll wheel is inverted (issue #126).
+    /// `false` when no device is selected or the device hasn't opted in.
+    #[must_use]
+    pub fn current_invert_scroll(&self) -> bool {
+        self.current_record()
+            .is_some_and(|r| self.config.invert_scroll(&r.config_key))
+    }
+
+    /// Set the active device's scroll-wheel inversion, persist it, and reload
+    /// the agent so the OS hook applies it on the next scroll. No-op when no
+    /// device is selected. Pure config — there is no hardware write, so (unlike
+    /// DPI / SmartShift) no optimistic cache or confirming re-read is needed.
+    pub fn commit_invert_scroll(&mut self, invert: bool) {
+        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
+            debug!("no active device — invert-scroll change ignored");
+            return;
+        };
+        self.config.set_invert_scroll(&key, invert);
+        self.persist_and_reload("invert scroll");
+    }
+
     /// Take the active device's pending SmartShift confirm, if any. Returns the
     /// `(config_key, route)` for a one-shot re-read that replaces the optimistic
     /// value with the device's real state; consumed once so it doesn't re-fire.

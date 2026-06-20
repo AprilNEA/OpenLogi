@@ -43,6 +43,13 @@ pub enum MouseEvent {
         delta_x: f32,
         /// Positive = down, negative = up.
         delta_y: f32,
+        /// `true` for a smooth, momentum-carrying scroll — a trackpad or Magic
+        /// Mouse gesture (macOS `kCGScrollWheelEventIsContinuous`); `false` for a
+        /// discrete mouse-wheel detent. Lets a consumer transform the wheel while
+        /// leaving native trackpad scrolling alone (issue #126). Always `false`
+        /// on Linux/Windows, where the wheel and trackpad arrive as distinct
+        /// event types rather than one flagged stream.
+        is_continuous: bool,
     },
     /// Pointer movement, in device units. Emitted so a held gesture button can
     /// accumulate a swipe; the callback passes these through (the cursor keeps
@@ -62,12 +69,25 @@ pub enum MouseEvent {
 }
 
 /// What the hook callback wants the OS to do with the captured event.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EventDisposition {
     /// Let the event reach its original target unchanged.
     PassThrough,
     /// Drop the event; the target application never sees it.
     Suppress,
+    /// Deliver a [`MouseEvent::Scroll`] carrying these deltas in place of the
+    /// captured one — the hook rewrites the live event's axes (and scales its
+    /// smooth-scroll companion fields to match) rather than re-synthesising it,
+    /// so momentum/phase survive. Only meaningful in response to a `Scroll`
+    /// event; the value is the same `(delta_x, delta_y)` units the callback was
+    /// handed. Used to invert the wheel (issue #126): pure negation is exact in
+    /// these units, so no precision is lost.
+    ReplaceScroll {
+        /// Positive = right, negative = left.
+        delta_x: f32,
+        /// Positive = down, negative = up.
+        delta_y: f32,
+    },
 }
 
 /// Errors that [`Hook::start`] and related functions can produce.

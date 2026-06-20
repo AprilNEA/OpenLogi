@@ -54,6 +54,12 @@ pub struct SharedRuntime {
     pub gesture_bindings: GestureBindings,
     pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
     pub thumbwheel_sensitivity: Arc<AtomicI32>,
+    /// Whether the active device's scroll wheel is inverted (issue #126). The
+    /// OS-hook callback reads it on every discrete scroll. The tap sees the
+    /// merged HID stream with no device-of-origin, so — like
+    /// [`Self::thumbwheel_sensitivity`] — this tracks the *selected* device's
+    /// setting rather than applying per-device simultaneously.
+    pub invert_scroll: Arc<AtomicBool>,
     pub capture_channel: CaptureChannel,
     /// Set while a pairing session runs: the gesture watcher then releases its
     /// capture session so `run_pairing` can own the receiver's HID node (one
@@ -109,6 +115,9 @@ impl Orchestrator {
             thumbwheel_sensitivity: Arc::new(AtomicI32::new(
                 config.app_settings.thumbwheel_sensitivity,
             )),
+            // Seeded false; `rebuild` (called below) fills in the selected
+            // device's real setting once devices are known.
+            invert_scroll: Arc::new(AtomicBool::new(false)),
             capture_channel: Arc::new(RwLock::new(None)),
             pairing_active: Arc::new(AtomicBool::new(false)),
             capture_idle: Arc::new(AtomicBool::new(true)),
@@ -180,6 +189,10 @@ impl Orchestrator {
         );
         self.shared.thumbwheel_sensitivity.store(
             self.config.app_settings.thumbwheel_sensitivity,
+            Ordering::Relaxed,
+        );
+        self.shared.invert_scroll.store(
+            key.is_some_and(|k| self.config.invert_scroll(k)),
             Ordering::Relaxed,
         );
     }

@@ -199,7 +199,15 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let disposition = callback
         .as_ref()
         .map_or(EventDisposition::PassThrough, |cb| cb(event));
-    if disposition == EventDisposition::Suppress {
+    let suppress = match disposition {
+        EventDisposition::Suppress => true,
+        // Scroll inversion (#126) is not wired on Windows yet: re-injecting a
+        // wheel event via SendInput would re-enter this WH_MOUSE_LL hook, which
+        // needs an injected-event guard (LLMHF_INJECTED) this port doesn't carry
+        // yet. Until then a ReplaceScroll is delivered unchanged.
+        EventDisposition::ReplaceScroll { .. } | EventDisposition::PassThrough => false,
+    };
+    if suppress {
         1
     } else {
         call_next(code, wparam, lparam)
@@ -254,13 +262,18 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
         // every platform — matching macOS (`SCROLL_WHEEL_EVENT_DELTA_AXIS_1`) and
         // Linux (`REL_WHEEL`), whose deltas feed the same direction-sensitive
         // bindings. Negating here flipped scroll-up/-down only on Windows.
+        // `is_continuous` is always false on Windows: the wheel arrives as
+        // WM_MOUSEWHEEL and precision-touchpad scrolling as separate input, so
+        // there is no single flagged stream to disambiguate (unlike macOS).
         WM_MOUSEWHEEL => Some(MouseEvent::Scroll {
             delta_x: 0.0,
             delta_y: f32::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
+            is_continuous: false,
         }),
         WM_MOUSEHWHEEL => Some(MouseEvent::Scroll {
             delta_x: f32::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
             delta_y: 0.0,
+            is_continuous: false,
         }),
         _ => None,
     }
@@ -349,8 +362,9 @@ mod tests {
             mouseData: 120u32 << 16,
             ..MSLLHOOKSTRUCT::default()
         };
-        let Some(MouseEvent::Scroll { delta_x, delta_y }) =
-            translate_event(WM_MOUSEWHEEL as WPARAM, forward)
+        let Some(MouseEvent::Scroll {
+            delta_x, delta_y, ..
+        }) = translate_event(WM_MOUSEWHEEL as WPARAM, forward)
         else {
             panic!("expected a scroll event");
         };
