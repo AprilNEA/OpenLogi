@@ -434,6 +434,11 @@ pub enum Action {
     LockScreen,
     /// Capture a screenshot.
     Screenshot,
+    /// Capture a selected screen region to the clipboard.
+    ///
+    /// macOS uses Cmd+Shift+Ctrl+4; Windows uses Win+Shift+S. Linux delegates
+    /// to the desktop environment's screenshot handler via Print Screen.
+    CaptureRegion,
 
     // ── Media ────────────────────────────────────────────────────────────────
     /// Toggle media play/pause.
@@ -703,6 +708,7 @@ impl Action {
             Action::LaunchpadShow => "Launchpad".into(),
             Action::LockScreen => "Lock Screen".into(),
             Action::Screenshot => "Screenshot".into(),
+            Action::CaptureRegion => "Capture Region".into(),
             Action::PlayPause => "Play / Pause".into(),
             Action::NextTrack => "Next Track".into(),
             Action::PrevTrack => "Previous Track".into(),
@@ -754,7 +760,9 @@ impl Action {
             | Action::NextDesktop
             | Action::ShowDesktop
             | Action::LaunchpadShow => Category::Navigation,
-            Action::None | Action::LockScreen | Action::Screenshot => Category::System,
+            Action::None | Action::LockScreen | Action::Screenshot | Action::CaptureRegion => {
+                Category::System
+            }
             Action::PlayPause
             | Action::NextTrack
             | Action::PrevTrack
@@ -813,6 +821,7 @@ impl Action {
             Action::None,
             Action::LockScreen,
             Action::Screenshot,
+            Action::CaptureRegion,
             // Media
             Action::PlayPause,
             Action::NextTrack,
@@ -1034,6 +1043,25 @@ mod tests {
             parsed.bindings[&ButtonId::DpiToggle],
             Binding::Single(Action::SetDpiPreset(2))
         );
+    }
+
+    #[test]
+    fn binding_capture_region_roundtrips_as_single_string() {
+        let toml = "bindings.Back = \"CaptureRegion\"";
+        let parsed = toml::from_str::<BindingWrapper>(toml).expect("deserialize");
+        assert_eq!(
+            parsed.bindings[&ButtonId::Back],
+            Binding::Single(Action::CaptureRegion)
+        );
+
+        let back = binding_roundtrip(parsed.bindings);
+        assert_eq!(
+            back[&ButtonId::Back],
+            Binding::Single(Action::CaptureRegion)
+        );
+        assert_eq!(Action::CaptureRegion.label(), "Capture Region");
+        assert_eq!(Action::CaptureRegion.category(), Category::System);
+        assert!(Action::catalog().contains(&Action::CaptureRegion));
     }
 
     // ── Gesture classification ────────────────────────────────────────────────

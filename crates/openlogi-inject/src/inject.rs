@@ -113,6 +113,9 @@ fn execute_linux(action: &Action) {
         // logind LockSessions() via the system bus; falls back to Super+L.
         Action::LockScreen => linux::lock_screen(),
         Action::Screenshot => linux::press_key(&[], KeyCode::KEY_SYSRQ),
+        // Region vs full-screen capture depends on the desktop environment's
+        // screenshot handler for Print Screen.
+        Action::CaptureRegion => linux::press_key(&[], KeyCode::KEY_SYSRQ),
         // ── Media ─────────────────────────────────────────────────────────
         // MPRIS targets the running media player; XF86 volume keys go to the
         // system mixer (PulseAudio/PipeWire) which is what users expect.
@@ -221,6 +224,8 @@ fn execute_macos(action: &Action) {
         Action::LockScreen => macos::post_key(0x0C, cmd | ctrl),
         // Screenshot = Cmd+Shift+3 (kVK_ANSI_3 = 0x14)
         Action::Screenshot => macos::post_key(0x14, cmd | shift),
+        // Capture region to clipboard = Cmd+Shift+Ctrl+4 (kVK_ANSI_4 = 0x15)
+        Action::CaptureRegion => macos::post_key(0x15, cmd | shift | ctrl),
         // ── Media ─────────────────────────────────────────────────────────
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
@@ -318,6 +323,9 @@ fn execute_windows(action: &Action) {
         Action::LaunchpadShow => windows::post_key(windows::VK_LWIN, &[]),
         Action::LockScreen => windows::post_key(windows::VK_L, &[windows::VK_LWIN]),
         Action::Screenshot => {
+            windows::post_key(windows::VK_S, &[windows::VK_LWIN, windows::VK_SHIFT]);
+        }
+        Action::CaptureRegion => {
             windows::post_key(windows::VK_S, &[windows::VK_LWIN, windows::VK_SHIFT]);
         }
         Action::PlayPause => windows::post_key(windows::VK_MEDIA_PLAY_PAUSE, &[]),
