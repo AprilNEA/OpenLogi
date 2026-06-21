@@ -19,7 +19,7 @@
 //! way regardless.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -32,6 +32,7 @@ use tracing::{debug, warn};
 
 use crate::DpiCycleState;
 use crate::hook_runtime::{self, SharedHookMaps};
+use crate::receiver_access::ReceiverAccess;
 
 /// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
 /// direction). The watcher reads it to map a captured swipe to a bound action.
@@ -79,8 +80,7 @@ pub fn spawn(
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
-    pairing_active: Arc<AtomicBool>,
-    capture_idle: Arc<AtomicBool>,
+    receiver_access: ReceiverAccess,
 ) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -99,8 +99,7 @@ pub fn spawn(
             dpi_cycle,
             capture_channel,
             thumbwheel_sensitivity,
-            pairing_active,
-            capture_idle,
+            receiver_access,
         ));
     });
 }
@@ -151,8 +150,7 @@ async fn manage(
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
-    pairing_active: Arc<AtomicBool>,
-    capture_idle: Arc<AtomicBool>,
+    receiver_access: ReceiverAccess,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
     // (route, capture_thumbwheel, divert_gesture_button)
@@ -185,10 +183,10 @@ async fn manage(
                 );
             }
             _ = ticker.tick() => {
-                // While pairing, release the capture session so run_pairing can
-                // own the receiver's HID node (one process can't read it through
-                // two channels). The pairing manager waits on `capture_idle`.
-                let want = if pairing_active.load(Ordering::Relaxed) {
+                // While pairing is waiting or active, release the capture
+                // session so run_pairing can own the receiver's HID node (one
+                // process can't read it through two channels).
+                let want = if receiver_access.pairing_requested() {
                     None
                 } else {
                     let target = dpi_cycle.read().ok().and_then(|guard| guard.target.clone());
@@ -216,9 +214,16 @@ async fn manage(
                 if let Some(stop) = stop.take() {
                     let _ = stop.send(());
                 }
-                current.clone_from(&want);
-                capture_idle.store(want.is_none(), Ordering::Relaxed);
+                if current.is_some() {
+                    current = None;
+                    continue;
+                }
                 if let Some((route, capture_thumbwheel, divert_gesture_button)) = want {
+                    let Some(receiver_lease) = receiver_access.try_acquire_for_capture() else {
+                        current = None;
+                        continue;
+                    };
+                    current = Some((route.clone(), capture_thumbwheel, divert_gesture_button));
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
                     let slot = Arc::clone(&capture_channel);
@@ -226,6 +231,7 @@ async fn manage(
                     let session_epoch = epoch;
                     let done = done_tx.clone();
                     tokio::spawn(async move {
+                        let _receiver_lease = receiver_lease;
                         if let Err(e) = run_capture_session(
                             route,
                             capture_thumbwheel,
@@ -243,6 +249,8 @@ async fn manage(
                         let _ = done.send(session_epoch);
                     });
                     stop = Some(stop_tx);
+                } else {
+                    current = None;
                 }
             }
             Some(done_epoch) = done_rx.recv() => {
@@ -260,11 +268,6 @@ async fn manage(
                     // here is a no-op, but it stops the next tick from signalling a
                     // session that no longer exists.
                     stop = None;
-                    // No session owns the receiver now, so mark capture idle: the
-                    // tick's `want == current` short-circuit (None == None while
-                    // pairing wants None) would otherwise skip this update and a
-                    // pairing session waiting on `capture_idle` could stall.
-                    capture_idle.store(true, Ordering::Relaxed);
                 }
             }
         }

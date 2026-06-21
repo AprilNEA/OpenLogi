@@ -24,6 +24,7 @@ use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
 use crate::device_order::DeviceStableId;
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::ipc::InventoryHealth;
+use crate::receiver_access::ReceiverAccess;
 use crate::watchers::gesture::GestureBindings;
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -61,14 +62,9 @@ pub struct SharedRuntime {
     /// setting rather than applying per-device simultaneously.
     pub invert_scroll: Arc<AtomicBool>,
     pub capture_channel: CaptureChannel,
-    /// Set while a pairing session runs: the gesture watcher then releases its
-    /// capture session so `run_pairing` can own the receiver's HID node (one
-    /// process still can't read the same node through two channels).
-    pub pairing_active: Arc<AtomicBool>,
-    /// Published by the gesture watcher: `true` when it holds no capture
-    /// session, so the pairing manager can wait for capture to actually release
-    /// before opening the receiver.
-    pub capture_idle: Arc<AtomicBool>,
+    /// Exclusive receiver access shared by HID++ capture and pairing. Capture
+    /// and pairing must never open the same receiver HID node concurrently.
+    pub receiver_access: ReceiverAccess,
 }
 
 /// Owns the config + device selection and keeps [`SharedRuntime`] in sync.
@@ -119,8 +115,7 @@ impl Orchestrator {
             // device's real setting once devices are known.
             invert_scroll: Arc::new(AtomicBool::new(false)),
             capture_channel: Arc::new(RwLock::new(None)),
-            pairing_active: Arc::new(AtomicBool::new(false)),
-            capture_idle: Arc::new(AtomicBool::new(true)),
+            receiver_access: ReceiverAccess::default(),
         };
         let orch = Self {
             config,

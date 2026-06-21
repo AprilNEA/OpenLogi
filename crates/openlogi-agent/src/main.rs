@@ -137,8 +137,7 @@ async fn run(config: Config) {
         shared.dpi_cycle.clone(),
         shared.capture_channel.clone(),
         shared.thumbwheel_sensitivity.clone(),
-        shared.pairing_active.clone(),
-        shared.capture_idle.clone(),
+        shared.receiver_access.clone(),
     );
 
     let mut inventory_rx = watchers::inventory::spawn(Duration::from_secs(2));

@@ -7,19 +7,20 @@
 //! (`start_pairing` / `pair_device` / `cancel_pairing` + a `next_pairing`
 //! long-poll for the event stream).
 //!
-//! While a session runs, the agent pauses its own capture via
-//! [`SharedRuntime::pairing_active`] and waits for [`SharedRuntime::capture_idle`]
-//! so `run_pairing` can own the receiver's HID node, then resumes capture when
-//! the session ends (every end — including cancel — emits a terminal event).
+//! While a session runs, the agent holds an exclusive receiver lease through
+//! [`SharedRuntime::receiver_access`], so `run_pairing` can own the receiver's
+//! HID node. Dropping that lease lets HID++ capture resume when the session ends
+//! (every end — including cancel — emits a terminal event).
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use openlogi_agent_core::ipc::{FoundDevice, PairingUpdate};
 use openlogi_agent_core::orchestrator::SharedRuntime;
+use openlogi_agent_core::receiver_access::PairingReceiverLease;
 use openlogi_agent_core::watchers::pairing::{self, Control};
 use openlogi_hid::{DiscoveredDevice, PairingEvent, ReceiverSelector};
 use tokio::sync::{Mutex, mpsc};
@@ -29,6 +30,9 @@ use tracing::warn;
 /// Comfortably under the client's request deadline so the agent answers first.
 const HOLD: Duration = Duration::from_secs(20);
 
+/// How long pairing waits for HID++ capture to release the receiver lease.
+const RECEIVER_LEASE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Address-keyed cache of the full discovered devices, so the GUI can pair by
 /// address without round-tripping the non-serializable `DiscoveredDevice`.
 type DeviceCache = Arc<StdMutex<HashMap<[u8; 6], DiscoveredDevice>>>;
@@ -36,14 +40,15 @@ type DeviceCache = Arc<StdMutex<HashMap<[u8; 6], DiscoveredDevice>>>;
 /// Owns the pairing watcher and translates its event stream for the IPC layer.
 pub struct PairingManager {
     ctrl: mpsc::UnboundedSender<Control>,
+    update_tx: mpsc::UnboundedSender<PairingUpdate>,
     updates: Mutex<mpsc::UnboundedReceiver<PairingUpdate>>,
     devices: DeviceCache,
     /// Count of outstanding pairing sessions. The watcher is single-session,
-    /// so `start` atomically transitions this 0 → 1 (and sets
-    /// `pairing_active`); the translator decrements it on each terminal event
-    /// and lifts the capture pause when it returns to zero. Balanced: one
-    /// accepted `start` ⇒ exactly one terminal.
+    /// so `start` atomically transitions this 0 → 1. The translator decrements
+    /// it on each terminal event and releases the receiver lease when it returns
+    /// to zero. Balanced: one accepted `start` ⇒ exactly one terminal.
     sessions: Arc<AtomicUsize>,
+    receiver_lease: Arc<StdMutex<Option<PairingReceiverLease>>>,
     shared: SharedRuntime,
 }
 
@@ -56,18 +61,21 @@ impl PairingManager {
         let (upd_tx, upd_rx) = mpsc::unbounded_channel();
         let devices: DeviceCache = Arc::new(StdMutex::new(HashMap::new()));
         let sessions = Arc::new(AtomicUsize::new(0));
+        let receiver_lease = Arc::new(StdMutex::new(None));
         tokio::spawn(translate(
             raw_events,
-            upd_tx,
+            upd_tx.clone(),
             Arc::clone(&devices),
             Arc::clone(&sessions),
-            Arc::clone(&shared.pairing_active),
+            Arc::clone(&receiver_lease),
         ));
         Self {
             ctrl,
+            update_tx: upd_tx,
             updates: Mutex::new(upd_rx),
             devices,
             sessions,
+            receiver_lease,
             shared,
         }
     }
@@ -82,17 +90,41 @@ impl PairingManager {
             warn!("pairing start requested while a session is already active");
             return;
         }
+        let admission = SessionAdmission::new(Arc::clone(&self.sessions));
 
         if let Ok(mut devices) = self.devices.lock() {
             devices.clear();
         }
-        self.shared.pairing_active.store(true, Ordering::Relaxed);
-        self.wait_capture_idle().await;
-        if let Err(e) = self.ctrl.send(Control::Start(selector)) {
-            self.sessions.store(0, Ordering::Release);
-            self.shared.pairing_active.store(false, Ordering::Relaxed);
-            warn!(error = %e, "could not start pairing session; pairing watcher is unavailable");
+        let Ok(receiver_lease) = tokio::time::timeout(
+            RECEIVER_LEASE_TIMEOUT,
+            self.shared.receiver_access.acquire_for_pairing(),
+        )
+        .await
+        else {
+            let _ = self.update_tx.send(PairingUpdate::Failed(
+                "Timed out waiting for receiver capture to stop.".to_string(),
+            ));
+            warn!("timed out waiting for receiver capture to stop; pairing not started");
+            return;
+        };
+        if let Ok(mut slot) = self.receiver_lease.lock() {
+            *slot = Some(receiver_lease);
+        } else {
+            let _ = self.update_tx.send(PairingUpdate::Failed(
+                "Pairing is unavailable because receiver access could not be recorded.".to_string(),
+            ));
+            warn!("pairing receiver lease lock poisoned; aborting start");
+            return;
         }
+        if let Err(e) = self.ctrl.send(Control::Start(selector)) {
+            self.release_receiver_lease();
+            let _ = self.update_tx.send(PairingUpdate::Failed(
+                "Pairing is unavailable because the pairing watcher is not running.".to_string(),
+            ));
+            warn!(error = %e, "could not start pairing session; pairing watcher is unavailable");
+            return;
+        }
+        admission.commit();
     }
 
     /// Pair with a previously discovered device by address.
@@ -110,7 +142,7 @@ impl PairingManager {
     }
 
     /// Cancel the in-progress session. The resulting `Failed(Cancelled)` event
-    /// resumes capture via the translator — don't clear `pairing_active` here, or
+    /// releases the receiver lease via the translator — don't release it here, or
     /// capture could re-acquire the receiver while `run_pairing` still holds it.
     pub fn cancel(&self) {
         let _ = self.ctrl.send(Control::Cancel);
@@ -122,16 +154,36 @@ impl PairingManager {
         tokio::time::timeout(HOLD, rx.recv()).await.ok().flatten()
     }
 
-    /// Wait (bounded, ~3s at the watcher's ~1s re-evaluation cadence) for the
-    /// capture watcher to drop its session before opening the receiver.
-    async fn wait_capture_idle(&self) {
-        for _ in 0..30 {
-            if self.shared.capture_idle.load(Ordering::Relaxed) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+    fn release_receiver_lease(&self) {
+        if let Ok(mut slot) = self.receiver_lease.lock() {
+            *slot = None;
         }
-        warn!("capture did not release before pairing — proceeding anyway");
+    }
+}
+
+struct SessionAdmission {
+    sessions: Arc<AtomicUsize>,
+    committed: bool,
+}
+
+impl SessionAdmission {
+    fn new(sessions: Arc<AtomicUsize>) -> Self {
+        Self {
+            sessions,
+            committed: false,
+        }
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for SessionAdmission {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.sessions.store(0, Ordering::Release);
+        }
     }
 }
 
@@ -143,7 +195,7 @@ async fn translate(
     upd_tx: mpsc::UnboundedSender<PairingUpdate>,
     devices: DeviceCache,
     sessions: Arc<AtomicUsize>,
-    pairing_active: Arc<AtomicBool>,
+    receiver_lease: Arc<StdMutex<Option<PairingReceiverLease>>>,
 ) {
     while let Some(event) = raw.recv().await {
         let update = match event {
@@ -169,8 +221,10 @@ async fn translate(
             // Lift the capture pause when the accepted single session ends.
             // Balanced: `start()` admits one active session, and that session
             // emits exactly one terminal event.
-            if sessions.fetch_sub(1, Ordering::Relaxed) == 1 {
-                pairing_active.store(false, Ordering::Relaxed);
+            if sessions.fetch_sub(1, Ordering::Relaxed) == 1
+                && let Ok(mut lease) = receiver_lease.lock()
+            {
+                *lease = None;
             }
         }
         if upd_tx.send(update).is_err() {
@@ -179,11 +233,13 @@ async fn translate(
     }
     // The watcher channel closed — its thread exited, most likely because
     // run_pairing panicked and unwound the watcher thread, dropping evt_tx before
-    // any terminal event. Don't leave capture permanently paused: reset the pause
-    // so gesture / DPI-cycle / thumbwheel remapping keeps working (only pairing
+    // any terminal event. Don't leave the receiver lease held: release it so
+    // gesture / DPI-cycle / thumbwheel remapping keeps working (only pairing
     // itself is then unavailable until the agent restarts).
     sessions.store(0, Ordering::Relaxed);
-    pairing_active.store(false, Ordering::Relaxed);
+    if let Ok(mut lease) = receiver_lease.lock() {
+        *lease = None;
+    }
 }
 
 #[cfg(test)]
@@ -192,9 +248,11 @@ mod tests {
 
     use std::collections::BTreeMap;
     use std::sync::RwLock;
+    use std::sync::atomic::AtomicBool;
 
     use openlogi_agent_core::DpiCycleState;
     use openlogi_agent_core::hook_runtime::HookMaps;
+    use openlogi_agent_core::receiver_access::ReceiverAccess;
 
     fn shared_runtime() -> SharedRuntime {
         SharedRuntime {
@@ -204,18 +262,19 @@ mod tests {
             thumbwheel_sensitivity: Arc::new(0.into()),
             invert_scroll: Arc::new(AtomicBool::new(false)),
             capture_channel: Arc::new(RwLock::new(None)),
-            pairing_active: Arc::new(AtomicBool::new(false)),
-            capture_idle: Arc::new(AtomicBool::new(true)),
+            receiver_access: ReceiverAccess::default(),
         }
     }
 
     fn manager_with_ctrl(ctrl: mpsc::UnboundedSender<Control>) -> PairingManager {
-        let (_upd_tx, upd_rx) = mpsc::unbounded_channel();
+        let (upd_tx, upd_rx) = mpsc::unbounded_channel();
         PairingManager {
             ctrl,
+            update_tx: upd_tx,
             updates: Mutex::new(upd_rx),
             devices: Arc::new(StdMutex::new(HashMap::new())),
             sessions: Arc::new(AtomicUsize::new(0)),
+            receiver_lease: Arc::new(StdMutex::new(None)),
             shared: shared_runtime(),
         }
     }
@@ -229,7 +288,18 @@ mod tests {
         manager.start(ReceiverSelector::First).await;
 
         assert_eq!(manager.sessions.load(Ordering::Acquire), 0);
-        assert!(!manager.shared.pairing_active.load(Ordering::Relaxed));
+        assert!(!manager.shared.receiver_access.pairing_requested());
+        assert!(
+            manager
+                .shared
+                .receiver_access
+                .try_acquire_for_capture()
+                .is_some()
+        );
+        assert!(matches!(
+            manager.next_update().await,
+            Some(PairingUpdate::Failed(_))
+        ));
     }
 
     #[tokio::test]
@@ -237,7 +307,6 @@ mod tests {
         let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel();
         let manager = manager_with_ctrl(ctrl_tx);
         manager.sessions.store(1, Ordering::Release);
-        manager.shared.pairing_active.store(true, Ordering::Relaxed);
         {
             let Ok(mut devices) = manager.devices.lock() else {
                 panic!("test device cache lock should not be poisoned");
@@ -256,7 +325,6 @@ mod tests {
         manager.start(ReceiverSelector::First).await;
 
         assert_eq!(manager.sessions.load(Ordering::Acquire), 1);
-        assert!(manager.shared.pairing_active.load(Ordering::Relaxed));
         let Ok(devices) = manager.devices.lock() else {
             panic!("test device cache lock should not be poisoned");
         };
