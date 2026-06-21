@@ -761,15 +761,14 @@ fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
     reason = "the two read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
 )]
 fn reply_disconnected(pairing_tx: &mpsc::UnboundedSender<PairingUpdate>, cmd: Command) {
-    // Transient (Hidpp), not a permanent feature error: the agent is just
-    // restarting, so the panel should keep retrying, not latch "unsupported".
-    let unreachable = || WriteError::Hidpp("background agent not running".to_string());
+    // Transient, not a permanent feature error: the agent is just restarting,
+    // so the panel should keep retrying, not latch "unsupported".
     match cmd {
         Command::ReadDpi(_, reply) => {
-            let _ = reply.send(Err(unreachable()));
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::ReadSmartShift(_, reply) => {
-            let _ = reply.send(Err(unreachable()));
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::StartPairing(_) | Command::PairDevice(_) => {
             let _ = pairing_tx.send(PairingUpdate::Failed(PairingFailure::AgentRestarted));

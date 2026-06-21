@@ -50,11 +50,97 @@ pub enum WriteError {
     EmptyDpiList,
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+    #[error("HID++ feature error during {operation:?} for feature {feature_hex:#06x}: {kind:?}")]
+    HidppFeature {
+        operation: HidppOperation,
+        feature_hex: u16,
+        kind: HidppFeatureErrorKind,
+    },
+    #[error("HID++ unsupported response during {operation:?} for feature {feature_hex:#06x}")]
+    UnsupportedResponse {
+        operation: HidppOperation,
+        feature_hex: u16,
+    },
+    #[error("HID++ request timed out during {operation:?}")]
+    RequestTimedOut { operation: HidppOperation },
+    #[error("tokio runtime init failed: {message}")]
+    RuntimeInit { message: String },
+    #[error("background agent is unavailable")]
+    AgentUnavailable,
+}
+
+/// HID++ operation being performed when a device write/read failed.
+///
+/// Variant order is wire format because this travels inside [`WriteError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HidppOperation {
+    ResolveFeature,
+    DumpFeatures,
+    ReadDpi,
+    ReadDpiCapabilities,
+    WriteDpi,
+    ReadSmartShift,
+    WriteSmartShift,
+    Lighting,
+}
+
+/// HID++ feature error kind in a serializable wire-safe form.
+///
+/// Variant order is wire format because this travels inside [`WriteError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HidppFeatureErrorKind {
+    NoError,
+    Unknown,
+    InvalidArgument,
+    OutOfRange,
+    HwError,
+    LogitechInternal,
+    InvalidFeatureIndex,
+    InvalidFunctionId,
+    Busy,
+    Unsupported,
+    Unrecognized,
 }
 
 impl From<async_hid::HidError> for WriteError {
     fn from(e: async_hid::HidError) -> Self {
         Self::Hid(e.to_string())
+    }
+}
+
+fn hidpp_feature_error_kind(kind: ErrorType) -> HidppFeatureErrorKind {
+    match kind {
+        ErrorType::NoError => HidppFeatureErrorKind::NoError,
+        ErrorType::Unknown => HidppFeatureErrorKind::Unknown,
+        ErrorType::InvalidArgument => HidppFeatureErrorKind::InvalidArgument,
+        ErrorType::OutOfRange => HidppFeatureErrorKind::OutOfRange,
+        ErrorType::HwError => HidppFeatureErrorKind::HwError,
+        ErrorType::LogitechInternal => HidppFeatureErrorKind::LogitechInternal,
+        ErrorType::InvalidFeatureIndex => HidppFeatureErrorKind::InvalidFeatureIndex,
+        ErrorType::InvalidFunctionId => HidppFeatureErrorKind::InvalidFunctionId,
+        ErrorType::Busy => HidppFeatureErrorKind::Busy,
+        ErrorType::Unsupported => HidppFeatureErrorKind::Unsupported,
+        _ => HidppFeatureErrorKind::Unrecognized,
+    }
+}
+
+fn classify_hidpp_error(
+    error: Hidpp20Error,
+    operation: HidppOperation,
+    feature_hex: u16,
+) -> WriteError {
+    match error {
+        Hidpp20Error::Feature(kind) => WriteError::HidppFeature {
+            operation,
+            feature_hex,
+            kind: hidpp_feature_error_kind(kind),
+        },
+        Hidpp20Error::UnsupportedResponse => WriteError::UnsupportedResponse {
+            operation,
+            feature_hex,
+        },
+        Hidpp20Error::Channel(error) => WriteError::Hidpp(format!("{error:?}")),
+        _ => WriteError::Hidpp(format!("{error:?}")),
     }
 }
 
@@ -191,21 +277,21 @@ pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, Wri
             .root()
             .get_feature(FeatureSetFeature::ID)
             .await
-            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?
+            .map_err(|e| {
+                classify_hidpp_error(e, HidppOperation::DumpFeatures, FeatureSetFeature::ID)
+            })?
             .ok_or(WriteError::FeatureUnsupported {
                 feature_hex: FeatureSetFeature::ID,
             })?;
         let feature_set = device.add_feature::<FeatureSetFeature>(feature_set_info.index);
-        let count = feature_set
-            .count()
-            .await
-            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+        let count = feature_set.count().await.map_err(|e| {
+            classify_hidpp_error(e, HidppOperation::DumpFeatures, FeatureSetFeature::ID)
+        })?;
         let mut entries = Vec::with_capacity(usize::from(count));
         for i in 0..=count {
-            let info = feature_set
-                .get_feature(i)
-                .await
-                .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            let info = feature_set.get_feature(i).await.map_err(|e| {
+                classify_hidpp_error(e, HidppOperation::DumpFeatures, FeatureSetFeature::ID)
+            })?;
             entries.push(FeatureEntry {
                 id: info.id,
                 version: info.version,
@@ -231,7 +317,7 @@ async fn open_feature<F: CreatableFeature + 'static>(
         .root()
         .get_feature(F::ID)
         .await
-        .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?
+        .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, F::ID))?
         .ok_or(WriteError::FeatureUnsupported { feature_hex: F::ID })?;
     Ok(device.add_feature::<F>(info.index))
 }
@@ -299,15 +385,13 @@ impl SmartShift {
     /// `tunable_torque` is reported as `0` per [`SmartShiftStatus`]'s contract.
     async fn status(&self) -> Result<SmartShiftStatus, WriteError> {
         match self {
-            Self::Enhanced(feature) => feature
-                .get_status()
-                .await
-                .map_err(|e| WriteError::Hidpp(format!("{e:?}"))),
+            Self::Enhanced(feature) => feature.get_status().await.map_err(|e| {
+                classify_hidpp_error(e, HidppOperation::ReadSmartShift, SmartShiftFeatureV0::ID)
+            }),
             Self::Legacy(feature) => {
-                let rcm = feature
-                    .get_ratchet_control_mode()
-                    .await
-                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+                let rcm = feature.get_ratchet_control_mode().await.map_err(|e| {
+                    classify_hidpp_error(e, HidppOperation::ReadSmartShift, SmartShiftFeature::ID)
+                })?;
                 Ok(SmartShiftStatus {
                     mode: wheel_mode_to_smartshift(rcm.wheel_mode),
                     auto_disengage: rcm.auto_disengage,
@@ -335,7 +419,13 @@ impl SmartShift {
             Self::Enhanced(feature) => feature
                 .set_status(mode, auto_disengage, tunable_torque)
                 .await
-                .map_err(|e| WriteError::Hidpp(format!("{e:?}"))),
+                .map_err(|e| {
+                    classify_hidpp_error(
+                        e,
+                        HidppOperation::WriteSmartShift,
+                        SmartShiftFeatureV0::ID,
+                    )
+                }),
             Self::Legacy(feature) => feature
                 .set_ratchet_control_mode(
                     Some(smartshift_to_wheel(mode)),
@@ -343,7 +433,9 @@ impl SmartShift {
                     None,
                 )
                 .await
-                .map_err(|e| WriteError::Hidpp(format!("{e:?}"))),
+                .map_err(|e| {
+                    classify_hidpp_error(e, HidppOperation::WriteSmartShift, SmartShiftFeature::ID)
+                }),
         }
     }
 
@@ -375,7 +467,7 @@ pub async fn get_dpi(route: &DeviceRoute) -> Result<u16, WriteError> {
         feature
             .get_sensor_dpi(0)
             .await
-            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))
+            .map_err(|e| classify_hidpp_error(e, HidppOperation::ReadDpi, AdjustableDpiFeature::ID))
     })
     .await
 }
@@ -384,15 +476,19 @@ pub async fn get_dpi(route: &DeviceRoute) -> Result<u16, WriteError> {
 /// announces `0x2201` but rejects a function (`Unsupported` /
 /// `InvalidFunctionId`) or returns a structurally invalid DPI list
 /// (`UnsupportedResponse`) will keep doing so, so these map to the permanent
-/// [`WriteError::FeatureUnsupported`]; channel/timeout errors stay transient
-/// [`WriteError::Hidpp`] so callers may retry.
+/// [`WriteError::FeatureUnsupported`]; channel/timeout and other errors are
+/// forwarded through [`classify_hidpp_error`] as transient so callers may retry.
 fn classify_dpi_error(error: Hidpp20Error) -> WriteError {
     match error {
         Hidpp20Error::Feature(ErrorType::Unsupported | ErrorType::InvalidFunctionId)
         | Hidpp20Error::UnsupportedResponse => WriteError::FeatureUnsupported {
             feature_hex: AdjustableDpiFeature::ID,
         },
-        other => WriteError::Hidpp(format!("{other:?}")),
+        other => classify_hidpp_error(
+            other,
+            HidppOperation::ReadDpiCapabilities,
+            AdjustableDpiFeature::ID,
+        ),
     }
 }
 
@@ -591,7 +687,7 @@ async fn resolve_feature_index(
             .root()
             .get_feature(feature_id)
             .await
-            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, feature_id))?;
         Ok(info.map(|i| i.index))
     })
     .await
@@ -706,7 +802,7 @@ async fn set_dpi_on_channel(
     feature
         .set_sensor_dpi(0, dpi)
         .await
-        .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+        .map_err(|e| classify_hidpp_error(e, HidppOperation::WriteDpi, AdjustableDpiFeature::ID))?;
     // Read back to confirm the firmware accepted the value. A mismatch is a
     // silent failure mode that's otherwise invisible — devices in low-power
     // states or with unsupported DPI ranges can ACK the write yet keep the old

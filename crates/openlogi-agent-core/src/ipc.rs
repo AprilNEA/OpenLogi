@@ -24,7 +24,8 @@ use serde::{Deserialize, Serialize};
 /// v4: [`Agent::snapshot`] added for atomic status + inventory polling.
 /// v5: [`PairingUpdate::Failed`] carries a typed [`PairingFailure`].
 /// v6: pairing commands return typed acceptance errors.
-pub const PROTOCOL_VERSION: u32 = 6;
+/// v7: [`WriteError`] carries typed HID++ operation failures.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep

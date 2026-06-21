@@ -32,8 +32,8 @@ use openlogi_core::device::{
     DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
 };
 use openlogi_hid::{
-    Click, DeviceRoute, DpiCapabilities, DpiInfo, PasskeyMethod, ReceiverSelector, SmartShiftMode,
-    SmartShiftStatus, WriteError,
+    Click, DeviceRoute, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
+    PasskeyMethod, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
 };
 
 /// Serialize exactly as the transport does (`tokio_serde::formats::Bincode`
@@ -61,7 +61,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 6);
+    assert_eq!(PROTOCOL_VERSION, 7);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -214,6 +214,35 @@ fn device_settings_payloads() {
         feature_hex: 0x2201,
     });
     assert_wire(&unsupported, "0103fb0122");
+
+    assert_wire(
+        &WriteError::RequestTimedOut {
+            operation: HidppOperation::WriteDpi,
+        },
+        "0804",
+    );
+    assert_wire(
+        &WriteError::HidppFeature {
+            operation: HidppOperation::WriteDpi,
+            feature_hex: 0x2201,
+            kind: HidppFeatureErrorKind::OutOfRange,
+        },
+        "0604fb012203",
+    );
+    assert_wire(
+        &WriteError::UnsupportedResponse {
+            operation: HidppOperation::Lighting,
+            feature_hex: 0x8070,
+        },
+        "0707fb7080",
+    );
+    assert_wire(
+        &WriteError::RuntimeInit {
+            message: "boom".into(),
+        },
+        "0904626f6f6d",
+    );
+    assert_wire(&WriteError::AgentUnavailable, "0a");
 
     // serde encodes SmartShiftMode's variant *index* (Free=0, Ratchet=1), not
     // the `#[repr(u8)]` firmware discriminants (1/2) — pinned here because it
