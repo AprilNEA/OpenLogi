@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::binding::{
@@ -101,6 +102,7 @@ pub fn start(
     hooks: SharedHookMaps,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture: CaptureChannel,
+    invert_scroll: Arc<AtomicBool>,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -210,7 +212,26 @@ pub fn start(
             HOLD.with_borrow_mut(HoldState::cancel);
             EventDisposition::PassThrough
         }
-        MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
+        MouseEvent::Scroll {
+            delta_x,
+            delta_y,
+            is_continuous,
+        } => {
+            // Invert only a discrete mouse-wheel tick, and only when the active
+            // device opted in (#126). A continuous trackpad / Magic Mouse gesture
+            // passes through so its native (e.g. natural) scrolling is left alone.
+            // The tap reads the merged HID stream and can't attribute a scroll to
+            // a physical device, so `invert_scroll` reflects the *selected*
+            // device — the same active-device compromise as `thumbwheel_sensitivity`.
+            if !is_continuous && delta_y != 0.0 && invert_scroll.load(Ordering::Relaxed) {
+                EventDisposition::ReplaceScroll {
+                    delta_x,
+                    delta_y: -delta_y,
+                }
+            } else {
+                EventDisposition::PassThrough
+            }
+        }
     });
 
     match result {

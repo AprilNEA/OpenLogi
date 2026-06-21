@@ -7,7 +7,7 @@ use core_foundation::runloop::{
     CFRunLoop, CFRunLoopRunResult, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
 };
 use core_graphics::event::{
-    CGEvent, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    CGEvent, CGEventField, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
     CGEventTapProxy, CGEventType, CallbackResult, EventField,
 };
 use tracing::{debug, error, warn};
@@ -153,6 +153,11 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             // axis 1 = vertical scroll; axis 2 = horizontal scroll.
             let dy = event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1);
             let dx = event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2);
+            // Continuous events come from a trackpad / Magic Mouse gesture; a
+            // notched mouse wheel is discrete. The consumer uses this to invert
+            // the wheel without disturbing native trackpad scrolling (#126).
+            let is_continuous =
+                event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS) != 0;
             #[allow(
                 clippy::cast_possible_truncation,
                 reason = "scroll deltas are small fractional values that fit comfortably in f32"
@@ -160,6 +165,7 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             Some(MouseEvent::Scroll {
                 delta_x: dx as f32,
                 delta_y: dy as f32,
+                is_continuous,
             })
         }
         // Pointer movement feeds gesture-button swipe detection. While a button
@@ -191,6 +197,54 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             Some(MouseEvent::CaptureInterrupted)
         }
         _ => None,
+    }
+}
+
+/// Rewrite a live `ScrollWheel` event so its deltas become `(new_dx, new_dy)`
+/// in the line units the tap reports. macOS hands modern apps a pixel-precise
+/// delta and a fixed-point delta *alongside* the integer line delta, and an app
+/// with smooth scrolling reads those, not the line field — so flipping only the
+/// line delta would leave such apps scrolling the original way. Each axis scales
+/// all three companion fields by the same factor (`-1` for the inversion in
+/// #126, which is exact), keeping the smooth-scroll path consistent with the
+/// notched one.
+fn rewrite_scroll(event: &CGEvent, horizontal: f64, vertical: f64) {
+    // Vertical = axis 1, horizontal = axis 2 (mirrors `translate`).
+    rewrite_scroll_axis(
+        event,
+        vertical,
+        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
+        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
+        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1,
+    );
+    rewrite_scroll_axis(
+        event,
+        horizontal,
+        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2,
+        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
+        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2,
+    );
+}
+
+/// Rewrite one scroll axis: set its line delta to `new_line` and scale the
+/// fixed-point + pixel companions by `new_line / old_line` so they agree. A
+/// zero original delta means no scroll on this axis, so the companions are left
+/// untouched (and the division avoided).
+fn rewrite_scroll_axis(
+    event: &CGEvent,
+    new_line: f64,
+    line_field: CGEventField,
+    fixed_field: CGEventField,
+    point_field: CGEventField,
+) {
+    let old_line = event.get_double_value_field(line_field);
+    event.set_double_value_field(line_field, new_line);
+    if old_line != 0.0 {
+        let scale = new_line / old_line;
+        let fixed = event.get_double_value_field(fixed_field);
+        event.set_double_value_field(fixed_field, fixed * scale);
+        let point = event.get_double_value_field(point_field);
+        event.set_double_value_field(point_field, point * scale);
     }
 }
 
@@ -265,6 +319,10 @@ fn thread_main(
             match cb(mouse_event) {
                 EventDisposition::PassThrough => CallbackResult::Keep,
                 EventDisposition::Suppress => CallbackResult::Drop,
+                EventDisposition::ReplaceScroll { delta_x, delta_y } => {
+                    rewrite_scroll(event, f64::from(delta_x), f64::from(delta_y));
+                    CallbackResult::Keep
+                }
             }
         },
     );

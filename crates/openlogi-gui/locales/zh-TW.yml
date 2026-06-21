@@ -249,3 +249,6 @@ _version: 1
 "Reading supported DPI values…": "Reading supported DPI values…"
 "Couldn't read DPI — click to retry.": "Couldn't read DPI — click to retry."
 "This device did not report Adjustable DPI support.": "This device did not report Adjustable DPI support."
+"Scrolling": "捲動"
+"Invert scroll direction": "反轉捲動方向"
+"Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "反轉此滑鼠的滾輪方向。觸控板會維持系統的捲動方向。"

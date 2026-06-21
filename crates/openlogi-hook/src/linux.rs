@@ -21,7 +21,7 @@ use std::sync::{
 use std::thread;
 
 use evdev::uinput::VirtualDevice;
-use evdev::{Device, EventSummary, KeyCode, RelativeAxisCode};
+use evdev::{Device, EventSummary, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use tracing::{debug, error, warn};
 use x11rb::connection::Connection as _;
 use x11rb::properties::WmClass;
@@ -211,7 +211,39 @@ fn wait_readable(device_fd: i32, stop_fd: i32) -> bool {
 }
 
 fn scroll(delta_x: f32, delta_y: f32) -> MouseEvent {
-    MouseEvent::Scroll { delta_x, delta_y }
+    // evdev delivers the wheel and the trackpad as distinct devices/axes rather
+    // than one flagged stream, so there is no continuous-scroll flag to carry.
+    MouseEvent::Scroll {
+        delta_x,
+        delta_y,
+        is_continuous: false,
+    }
+}
+
+/// Re-encode a transformed scroll back into one evdev axis event for re-injection
+/// (an [`EventDisposition::ReplaceScroll`]). The captured `event` is a single
+/// wheel axis; `horizontal`/`vertical` are the replacement deltas in the same
+/// units [`translate`] produced, so the relevant axis is mapped back through the
+/// inverse of `translate` (×[`HIRES_UNITS_PER_TICK`] for the hi-res axes). A
+/// non-wheel event is returned unchanged — it is never the target of a
+/// `ReplaceScroll`.
+fn reinject_scroll(event: &InputEvent, horizontal: f32, vertical: f32) -> InputEvent {
+    let EventSummary::RelativeAxis(_, axis, _) = event.destructure() else {
+        return *event;
+    };
+    let units = match axis {
+        RelativeAxisCode::REL_WHEEL => vertical,
+        RelativeAxisCode::REL_WHEEL_HI_RES => vertical * HIRES_UNITS_PER_TICK,
+        RelativeAxisCode::REL_HWHEEL => horizontal,
+        RelativeAxisCode::REL_HWHEEL_HI_RES => horizontal * HIRES_UNITS_PER_TICK,
+        _ => return *event,
+    };
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "re-injected wheel ticks are small integer counts; negation is exact"
+    )]
+    let raw = units.round() as i32;
+    InputEvent::new(EventType::RELATIVE.0, axis.0, raw)
 }
 
 fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent> {
@@ -366,8 +398,16 @@ fn device_thread(
                     }
                     None => EventDisposition::PassThrough,
                 };
-                if matches!(disposition, EventDisposition::PassThrough) {
-                    pending.push(event);
+                match disposition {
+                    EventDisposition::PassThrough => pending.push(event),
+                    // Re-inject the wheel tick with transformed deltas (e.g. an
+                    // inverted wheel, #126). uinput events go to the desktop, not
+                    // back into this grabbed device's reader, so there is no
+                    // re-capture loop to guard against.
+                    EventDisposition::ReplaceScroll { delta_x, delta_y } => {
+                        pending.push(reinject_scroll(&event, delta_x, delta_y));
+                    }
+                    EventDisposition::Suppress => {}
                 }
             }
         }
@@ -575,7 +615,7 @@ mod tests {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_WHEEL.0, 3);
         let result = translate(&event, false);
         assert!(
-            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y })
+            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y, .. })
                 if delta_x.abs() < f32::EPSILON && (delta_y - 3.0).abs() < f32::EPSILON),
             "expected Scroll {{ delta_x: 0.0, delta_y: 3.0 }}, got {result:?}"
         );
@@ -586,7 +626,7 @@ mod tests {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL.0, -2);
         let result = translate(&event, false);
         assert!(
-            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y })
+            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y, .. })
                 if (delta_x - -2.0).abs() < f32::EPSILON && delta_y.abs() < f32::EPSILON),
             "expected Scroll {{ delta_x: -2.0, delta_y: 0.0 }}, got {result:?}"
         );
@@ -604,7 +644,7 @@ mod tests {
         );
         let result = translate(&event, true);
         assert!(
-            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y })
+            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y, .. })
                 if delta_x.abs() < f32::EPSILON && (delta_y - 0.5).abs() < f32::EPSILON),
             "expected Scroll {{ delta_x: 0.0, delta_y: 0.5 }}, got {result:?}"
         );
@@ -619,7 +659,7 @@ mod tests {
         );
         let result = translate(&event, true);
         assert!(
-            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y })
+            matches!(result, Some(MouseEvent::Scroll { delta_x, delta_y, .. })
                 if (delta_x - -1.0).abs() < f32::EPSILON && delta_y.abs() < f32::EPSILON),
             "expected Scroll {{ delta_x: -1.0, delta_y: 0.0 }}, got {result:?}"
         );

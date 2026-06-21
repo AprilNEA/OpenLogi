@@ -371,6 +371,24 @@ pub struct DeviceConfig {
     /// the same reason as [`Self::dpi`]. `None` until the user changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smartshift: Option<SmartShift>,
+    /// Invert this device's scroll-wheel direction relative to the OS setting
+    /// (issue #126): on, a wheel tick scrolls the opposite way, so a user who
+    /// keeps macOS "natural scrolling" for the trackpad can have a traditional
+    /// "reverse" wheel on the mouse. Vertical only; the agent applies it in the
+    /// OS hook and leaves continuous trackpad scrolling untouched. `false`
+    /// (default) is the native direction, and is omitted from `config.toml`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub invert_scroll: bool,
+}
+
+/// `skip_serializing_if` helper for plain `bool` fields whose default is
+/// `false`: keeps an unset toggle out of `config.toml` entirely.
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Deserialize-only shim that folds the pre-v2 `button_bindings` +
@@ -406,6 +424,8 @@ struct RawDeviceConfig {
     lighting: Option<Lighting>,
     #[serde(default)]
     smartshift: Option<SmartShift>,
+    #[serde(default)]
+    invert_scroll: bool,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -448,6 +468,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             dpi: raw.dpi,
             lighting: raw.lighting,
             smartshift: raw.smartshift,
+            invert_scroll: raw.invert_scroll,
         }
     }
 }
@@ -860,6 +881,24 @@ impl Config {
             .or_default()
             .smartshift = Some(smartshift);
     }
+
+    /// Whether `device_key`'s scroll wheel is inverted (issue #126). `false`
+    /// (the native direction) for an unconfigured or absent device.
+    #[must_use]
+    pub fn invert_scroll(&self, device_key: &str) -> bool {
+        self.devices
+            .get(device_key)
+            .is_some_and(|d| d.invert_scroll)
+    }
+
+    /// Set whether `device_key`'s scroll wheel is inverted. The agent reads this
+    /// on the next `ReloadConfig` and applies it in the OS hook.
+    pub fn set_invert_scroll(&mut self, device_key: &str, invert: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .invert_scroll = invert;
+    }
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -966,6 +1005,31 @@ mod tests {
             })
         );
         assert_eq!(restored.smartshift("absent"), None);
+    }
+
+    #[test]
+    fn invert_scroll_roundtrips_per_device() {
+        let mut cfg = Config::default();
+        // Default is the native direction for any device, present or not.
+        assert!(!cfg.invert_scroll("2b042"));
+        cfg.set_invert_scroll("2b042", true);
+        let restored = write_and_read(&cfg);
+        assert!(restored.invert_scroll("2b042"));
+        assert!(!restored.invert_scroll("absent"));
+    }
+
+    #[test]
+    fn default_invert_scroll_is_omitted_from_toml() {
+        // A device block with only the default (false) invert_scroll must not
+        // emit the field — `skip_serializing_if` keeps configs clean.
+        let mut cfg = Config::default();
+        cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Copy));
+        cfg.set_invert_scroll("2b042", false);
+        let body = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(
+            !body.contains("invert_scroll"),
+            "default invert_scroll should be omitted: {body}"
+        );
     }
 
     #[test]
