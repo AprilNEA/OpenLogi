@@ -123,6 +123,11 @@ fn pairing_failure_text(failure: PairingFailure) -> String {
         PairingFailure::ReceiverAccessUnavailable => {
             tr!("Pairing is unavailable because receiver access could not be recorded.").to_string()
         }
+        PairingFailure::AlreadyActive => tr!("A pairing session is already active.").to_string(),
+        PairingFailure::UnknownDevice => {
+            tr!("That device is no longer available. Search again and retry pairing.").to_string()
+        }
+        PairingFailure::NoActiveSession => tr!("No pairing session is active.").to_string(),
     }
 }
 

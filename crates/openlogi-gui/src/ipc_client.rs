@@ -20,7 +20,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use openlogi_agent_core::ipc::{
-    AgentClient, AgentStatus, InventoryHealth, PROTOCOL_VERSION, PairingFailure, PairingUpdate,
+    AgentClient, AgentStatus, InventoryHealth, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingUpdate,
 };
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
@@ -130,8 +131,8 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
             rt.block_on(async move {
                 // Pairing events stream on their own connection + long-poll so
                 // a held next_pairing never delays the snapshot poll.
-                tokio::spawn(pairing_poll(pairing_tx));
-                poll_loop(poll_period, &update_tx, &mut cmd_rx).await;
+                tokio::spawn(pairing_poll(pairing_tx.clone()));
+                poll_loop(poll_period, &update_tx, &pairing_tx, &mut cmd_rx).await;
             });
         });
     if let Err(e) = spawn_result {
@@ -151,6 +152,7 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
 async fn poll_loop(
     poll_period: Duration,
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
+    pairing_tx: &mpsc::UnboundedSender<PairingUpdate>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Command>,
 ) {
     let mut client: Option<AgentClient> = None;
@@ -217,7 +219,7 @@ async fn poll_loop(
             }
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break }; // GUI dropped the sender → shut down
-                if handle(&mut client, cmd).await.is_err() {
+                if handle(&mut client, pairing_tx, cmd).await.is_err() {
                     // Same as a poll-detected drop: back to the fast cadence
                     // so the reconnect (agent self-exec, crash) re-converges
                     // just as quickly as at startup.
@@ -677,10 +679,14 @@ async fn poll(
 
 /// Run one device command. `Err` signals a dropped connection so the caller
 /// reconnects; the command's own failure is reported back over its oneshot.
-async fn handle(client: &mut Option<AgentClient>, cmd: Command) -> Result<(), ()> {
+async fn handle(
+    client: &mut Option<AgentClient>,
+    pairing_tx: &mpsc::UnboundedSender<PairingUpdate>,
+    cmd: Command,
+) -> Result<(), ()> {
     // keep `client` None on connect failure; that's not a dropped live connection
     let Ok(client) = ensure(client).await else {
-        reply_disconnected(cmd);
+        reply_disconnected(pairing_tx, cmd);
         return Ok(());
     };
     let ctx = context::current();
@@ -704,12 +710,29 @@ async fn handle(client: &mut Option<AgentClient>, cmd: Command) -> Result<(), ()
             .await
             .map_err(|_| ())?,
         Command::StartPairing(selector) => {
-            client.start_pairing(ctx, selector).await.map_err(|_| ())?;
+            pairing_command_result(pairing_tx, client.start_pairing(ctx, selector).await)?;
         }
-        Command::PairDevice(address) => client.pair_device(ctx, address).await.map_err(|_| ())?,
-        Command::CancelPairing => client.cancel_pairing(ctx).await.map_err(|_| ())?,
+        Command::PairDevice(address) => {
+            pairing_command_result(pairing_tx, client.pair_device(ctx, address).await)?;
+        }
+        Command::CancelPairing => {
+            pairing_command_result(pairing_tx, client.cancel_pairing(ctx).await)?;
+        }
     }
     Ok(())
+}
+
+fn pairing_command_result(
+    tx: &mpsc::UnboundedSender<PairingUpdate>,
+    result: Result<Result<(), PairingCommandError>, tarpc::client::RpcError>,
+) -> Result<(), ()> {
+    match result.map_err(|_| ())? {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = tx.send(PairingUpdate::Failed(PairingFailure::from(error)));
+            Ok(())
+        }
+    }
 }
 
 /// A fire-and-forget "apply now": `Err(())` (transport drop) propagates so the
@@ -737,7 +760,7 @@ fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
     clippy::match_same_arms,
     reason = "the two read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
 )]
-fn reply_disconnected(cmd: Command) {
+fn reply_disconnected(pairing_tx: &mpsc::UnboundedSender<PairingUpdate>, cmd: Command) {
     // Transient (Hidpp), not a permanent feature error: the agent is just
     // restarting, so the panel should keep retrying, not latch "unsupported".
     let unreachable = || WriteError::Hidpp("background agent not running".to_string());
@@ -748,6 +771,10 @@ fn reply_disconnected(cmd: Command) {
         Command::ReadSmartShift(_, reply) => {
             let _ = reply.send(Err(unreachable()));
         }
+        Command::StartPairing(_) | Command::PairDevice(_) => {
+            let _ = pairing_tx.send(PairingUpdate::Failed(PairingFailure::AgentRestarted));
+        }
+        Command::CancelPairing => {}
         _ => {}
     }
 }

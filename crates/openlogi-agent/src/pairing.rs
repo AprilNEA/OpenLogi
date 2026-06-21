@@ -18,7 +18,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use openlogi_agent_core::ipc::{FoundDevice, PairingFailure, PairingUpdate};
+use openlogi_agent_core::ipc::{FoundDevice, PairingCommandError, PairingUpdate};
 use openlogi_agent_core::orchestrator::SharedRuntime;
 use openlogi_agent_core::receiver_access::PairingReceiverLease;
 use openlogi_agent_core::watchers::pairing::{self, Control};
@@ -40,7 +40,6 @@ type DeviceCache = Arc<StdMutex<HashMap<[u8; 6], DiscoveredDevice>>>;
 /// Owns the pairing watcher and translates its event stream for the IPC layer.
 pub struct PairingManager {
     ctrl: mpsc::UnboundedSender<Control>,
-    update_tx: mpsc::UnboundedSender<PairingUpdate>,
     updates: Mutex<mpsc::UnboundedReceiver<PairingUpdate>>,
     devices: DeviceCache,
     /// Count of outstanding pairing sessions. The watcher is single-session,
@@ -71,7 +70,6 @@ impl PairingManager {
         ));
         Self {
             ctrl,
-            update_tx: upd_tx,
             updates: Mutex::new(upd_rx),
             devices,
             sessions,
@@ -81,14 +79,14 @@ impl PairingManager {
     }
 
     /// Begin a session: forget the previous discovery, pause capture, then start.
-    pub async fn start(&self, selector: ReceiverSelector) {
+    pub async fn start(&self, selector: ReceiverSelector) -> Result<(), PairingCommandError> {
         if self
             .sessions
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
             warn!("pairing start requested while a session is already active");
-            return;
+            return Err(PairingCommandError::AlreadyActive);
         }
         let admission = SessionAdmission::new(Arc::clone(&self.sessions));
 
@@ -101,51 +99,51 @@ impl PairingManager {
         )
         .await
         else {
-            let _ = self
-                .update_tx
-                .send(PairingUpdate::Failed(PairingFailure::ReceiverBusy));
             warn!("timed out waiting for receiver capture to stop; pairing not started");
-            return;
+            return Err(PairingCommandError::ReceiverBusy);
         };
         if let Ok(mut slot) = self.receiver_lease.lock() {
             *slot = Some(receiver_lease);
         } else {
-            let _ = self.update_tx.send(PairingUpdate::Failed(
-                PairingFailure::ReceiverAccessUnavailable,
-            ));
             warn!("pairing receiver lease lock poisoned; aborting start");
-            return;
+            return Err(PairingCommandError::ReceiverAccessUnavailable);
         }
         if let Err(e) = self.ctrl.send(Control::Start(selector)) {
             self.release_receiver_lease();
-            let _ = self
-                .update_tx
-                .send(PairingUpdate::Failed(PairingFailure::WatcherUnavailable));
             warn!(error = %e, "could not start pairing session; pairing watcher is unavailable");
-            return;
+            return Err(PairingCommandError::WatcherUnavailable);
         }
         admission.commit();
+        Ok(())
     }
 
     /// Pair with a previously discovered device by address.
-    pub fn pair(&self, address: [u8; 6]) {
+    pub fn pair(&self, address: [u8; 6]) -> Result<(), PairingCommandError> {
         let device = self
             .devices
             .lock()
             .ok()
             .and_then(|devices| devices.get(&address).cloned());
         if let Some(device) = device {
-            let _ = self.ctrl.send(Control::Pair(device));
+            self.ctrl
+                .send(Control::Pair(device))
+                .map_err(|_| PairingCommandError::WatcherUnavailable)
         } else {
             warn!(?address, "pair requested for an unknown device");
+            Err(PairingCommandError::UnknownDevice)
         }
     }
 
     /// Cancel the in-progress session. The resulting `Failed(Cancelled)` event
     /// releases the receiver lease via the translator — don't release it here, or
     /// capture could re-acquire the receiver while `run_pairing` still holds it.
-    pub fn cancel(&self) {
-        let _ = self.ctrl.send(Control::Cancel);
+    pub fn cancel(&self) -> Result<(), PairingCommandError> {
+        if self.sessions.load(Ordering::Acquire) == 0 {
+            return Ok(());
+        }
+        self.ctrl
+            .send(Control::Cancel)
+            .map_err(|_| PairingCommandError::WatcherUnavailable)
     }
 
     /// Long-poll the next pairing step; `None` when the hold window elapses.
@@ -267,10 +265,9 @@ mod tests {
     }
 
     fn manager_with_ctrl(ctrl: mpsc::UnboundedSender<Control>) -> PairingManager {
-        let (upd_tx, upd_rx) = mpsc::unbounded_channel();
+        let (_, upd_rx) = mpsc::unbounded_channel();
         PairingManager {
             ctrl,
-            update_tx: upd_tx,
             updates: Mutex::new(upd_rx),
             devices: Arc::new(StdMutex::new(HashMap::new())),
             sessions: Arc::new(AtomicUsize::new(0)),
@@ -285,8 +282,9 @@ mod tests {
         drop(ctrl_rx);
         let manager = manager_with_ctrl(ctrl_tx);
 
-        manager.start(ReceiverSelector::First).await;
+        let result = manager.start(ReceiverSelector::First).await;
 
+        assert_eq!(result, Err(PairingCommandError::WatcherUnavailable));
         assert_eq!(manager.sessions.load(Ordering::Acquire), 0);
         assert!(!manager.shared.receiver_access.pairing_requested());
         assert!(
@@ -296,10 +294,17 @@ mod tests {
                 .try_acquire_for_capture()
                 .is_some()
         );
-        assert!(matches!(
-            manager.next_update().await,
-            Some(PairingUpdate::Failed(_))
-        ));
+    }
+
+    #[tokio::test]
+    async fn cancel_without_active_session_is_a_noop_success() {
+        let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel();
+        let manager = manager_with_ctrl(ctrl_tx);
+
+        let result = manager.cancel();
+
+        assert_eq!(result, Ok(()));
+        assert!(ctrl_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -322,8 +327,9 @@ mod tests {
             );
         }
 
-        manager.start(ReceiverSelector::First).await;
+        let result = manager.start(ReceiverSelector::First).await;
 
+        assert_eq!(result, Err(PairingCommandError::AlreadyActive));
         assert_eq!(manager.sessions.load(Ordering::Acquire), 1);
         let Ok(devices) = manager.devices.lock() else {
             panic!("test device cache lock should not be poisoned");
