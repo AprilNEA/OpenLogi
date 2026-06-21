@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use openlogi_agent_core::ipc::{
-    AgentClient, AgentStatus, InventoryHealth, PROTOCOL_VERSION, PairingUpdate,
+    AgentClient, AgentStatus, InventoryHealth, PROTOCOL_VERSION, PairingFailure, PairingUpdate,
 };
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
@@ -452,9 +452,7 @@ async fn pairing_poll(tx: mpsc::UnboundedSender<PairingUpdate>) {
                 client = None; // connection dropped (agent restart) — reconnect
                 if session_active {
                     session_active = false;
-                    let _ = tx.send(PairingUpdate::Failed(
-                        tr!("The background service restarted — try pairing again.").to_string(),
-                    ));
+                    let _ = tx.send(PairingUpdate::Failed(PairingFailure::AgentRestarted));
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
