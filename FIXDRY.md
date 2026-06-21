@@ -11,8 +11,8 @@ This file tracks places where OpenLogi carries general-purpose infrastructure co
 
 ## Worth doing next
 
-- [ ] Replace `openlogi-assets::http::write_replace` with `atomic-write-file` or `tempfile::NamedTempFile`, preserving atomic replacement and symlink safety.
-- [ ] Replace recursive asset-cache directory walking with `walkdir`.
+- [x] Replace `openlogi-assets::http::write_replace` with `atomic-write-file`, preserving atomic replacement and symlink safety.
+- [x] Replace recursive asset-cache directory walking with `walkdir`.
 - [ ] Consider `xshell` / `duct` for `xtask` command orchestration (`run`, `command_stdout`, display/quoting).
 
 ## Needs behavior tests before replacing
