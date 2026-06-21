@@ -2,8 +2,8 @@
 //!
 //! The agent owns all device I/O, so the GUI never opens a device — it connects
 //! to the agent's Unix socket and (a) polls status + inventory snapshots on a
-//! timer to drive the device list and the Accessibility gate, and (b) forwards "apply
-//! now" / "read" device commands. Both run on one dedicated OS thread with a
+//! timer to drive the device list and the Accessibility gate, and (b) forwards
+//! "apply now" / "read" device commands. Both run on one dedicated OS thread with a
 //! tokio runtime (the GPUI thread owns no async runtime), mirroring the old
 //! watcher pattern: results cross back over `mpsc` to the GPUI loop.
 //!
