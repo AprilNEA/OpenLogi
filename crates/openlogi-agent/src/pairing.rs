@@ -166,10 +166,9 @@ async fn translate(
             update,
             PairingUpdate::Paired { .. } | PairingUpdate::Failed(_)
         ) {
-            // Lift the capture pause only when the last outstanding session ends;
-            // fetch_sub composes with start()'s fetch_add, so a session started
-            // during this one's teardown keeps the pause held. (Balanced: every
-            // session emits exactly one terminal, so the count never underflows.)
+            // Lift the capture pause when the accepted single session ends.
+            // Balanced: `start()` admits one active session, and that session
+            // emits exactly one terminal event.
             if sessions.fetch_sub(1, Ordering::Relaxed) == 1 {
                 pairing_active.store(false, Ordering::Relaxed);
             }
