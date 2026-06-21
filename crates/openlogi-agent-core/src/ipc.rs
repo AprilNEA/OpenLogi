@@ -9,8 +9,8 @@
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, DpiInfo, PasskeyMethod, ReceiverSelector, SmartShiftMode, SmartShiftStatus,
-    WriteError,
+    DeviceRoute, DpiInfo, PairingError, PasskeyMethod, ReceiverSelector, SmartShiftMode,
+    SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 /// v2: `AgentStatus::inventory_ready` added.
 /// v3: `inventory_ready` widened to [`InventoryHealth`] (adds `Unavailable`).
 /// v4: [`Agent::snapshot`] added for atomic status + inventory polling.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// v5: [`PairingUpdate::Failed`] carries a typed [`PairingFailure`].
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep
@@ -78,9 +79,54 @@ pub struct FoundDevice {
     pub name: String,
 }
 
+/// Terminal failure reason for a pairing session.
+///
+/// Kept typed across the agent↔GUI boundary so the GUI can choose recovery UI,
+/// telemetry, and localized copy without matching human-readable strings.
+///
+/// bincode encodes the variant *index*, so variants are append-only, like the
+/// [`Agent`] trait methods.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PairingFailure {
+    /// The HID transport returned an error.
+    Hid { message: String },
+    /// No connected receiver supports pairing.
+    ReceiverNotFound,
+    /// HID++ receiver register access failed.
+    Register { message: String },
+    /// The device or receiver did not complete pairing before its deadline.
+    Timeout,
+    /// The receiver reported a protocol-level pairing error code.
+    Device { code: u8 },
+    /// The user cancelled the pairing session.
+    Cancelled,
+    /// The agent could not obtain exclusive receiver ownership for pairing.
+    ReceiverBusy,
+    /// The pairing watcher is unavailable inside the agent process.
+    WatcherUnavailable,
+    /// The background agent restarted during an active pairing session.
+    AgentRestarted,
+    /// The agent could not store its exclusive receiver ownership lease.
+    ReceiverAccessUnavailable,
+}
+
+impl From<PairingError> for PairingFailure {
+    fn from(error: PairingError) -> Self {
+        match error {
+            PairingError::Hid(message) => Self::Hid { message },
+            PairingError::ReceiverNotFound => Self::ReceiverNotFound,
+            PairingError::Register(message) => Self::Register { message },
+            PairingError::Timeout => Self::Timeout,
+            PairingError::Device(code) => Self::Device { code },
+            PairingError::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 /// One step of a pairing session, streamed to the GUI via [`Agent::next_pairing`].
 /// Mirrors `openlogi_hid::PairingEvent` but in a wire-safe form — the discovered
-/// device collapses to [`FoundDevice`] and the terminal error to a string.
+/// device collapses to [`FoundDevice`] and terminal failures to
+/// [`PairingFailure`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PairingUpdate {
     /// Discovery (Bolt) / the pairing lock (Unifying) is open.
@@ -91,8 +137,8 @@ pub enum PairingUpdate {
     Passkey(PasskeyMethod),
     /// A device paired into `slot`.
     Paired { slot: u8 },
-    /// The flow ended without pairing a device (carries a human-readable detail).
-    Failed(String),
+    /// The flow ended without pairing a device.
+    Failed(PairingFailure),
 }
 
 #[tarpc::service]

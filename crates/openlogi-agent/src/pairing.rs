@@ -18,7 +18,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use openlogi_agent_core::ipc::{FoundDevice, PairingUpdate};
+use openlogi_agent_core::ipc::{FoundDevice, PairingFailure, PairingUpdate};
 use openlogi_agent_core::orchestrator::SharedRuntime;
 use openlogi_agent_core::receiver_access::PairingReceiverLease;
 use openlogi_agent_core::watchers::pairing::{self, Control};
@@ -101,9 +101,9 @@ impl PairingManager {
         )
         .await
         else {
-            let _ = self.update_tx.send(PairingUpdate::Failed(
-                "Timed out waiting for receiver capture to stop.".to_string(),
-            ));
+            let _ = self
+                .update_tx
+                .send(PairingUpdate::Failed(PairingFailure::ReceiverBusy));
             warn!("timed out waiting for receiver capture to stop; pairing not started");
             return;
         };
@@ -111,16 +111,16 @@ impl PairingManager {
             *slot = Some(receiver_lease);
         } else {
             let _ = self.update_tx.send(PairingUpdate::Failed(
-                "Pairing is unavailable because receiver access could not be recorded.".to_string(),
+                PairingFailure::ReceiverAccessUnavailable,
             ));
             warn!("pairing receiver lease lock poisoned; aborting start");
             return;
         }
         if let Err(e) = self.ctrl.send(Control::Start(selector)) {
             self.release_receiver_lease();
-            let _ = self.update_tx.send(PairingUpdate::Failed(
-                "Pairing is unavailable because the pairing watcher is not running.".to_string(),
-            ));
+            let _ = self
+                .update_tx
+                .send(PairingUpdate::Failed(PairingFailure::WatcherUnavailable));
             warn!(error = %e, "could not start pairing session; pairing watcher is unavailable");
             return;
         }
@@ -212,7 +212,7 @@ async fn translate(
             }
             PairingEvent::Passkey(method) => PairingUpdate::Passkey(method),
             PairingEvent::Paired { slot } => PairingUpdate::Paired { slot },
-            PairingEvent::Failed(error) => PairingUpdate::Failed(error.to_string()),
+            PairingEvent::Failed(error) => PairingUpdate::Failed(error.into()),
         };
         if matches!(
             update,
