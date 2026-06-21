@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, VecDeque},
     error::Error,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
@@ -223,7 +223,28 @@ impl HidppMessage {
     }
 }
 
-type MessageListener = Box<dyn Fn(HidppMessage, bool) + Send>;
+type MessageListener = Arc<dyn Fn(HidppMessage, bool) + Send + Sync + 'static>;
+
+/// Removes a HID++ message listener when dropped.
+pub struct MessageListenerGuard {
+    message_listeners: Weak<Mutex<HashMap<u32, MessageListener>>>,
+    hdl: u32,
+}
+
+impl MessageListenerGuard {
+    /// Returns the raw listener handle managed by this guard.
+    pub fn handle(&self) -> u32 {
+        self.hdl
+    }
+}
+
+impl Drop for MessageListenerGuard {
+    fn drop(&mut self) {
+        if let Some(message_listeners) = self.message_listeners.upgrade() {
+            message_listeners.lock().unwrap().remove(&self.hdl);
+        }
+    }
+}
 
 /// Represents a HID communication channel supporting HID++.
 pub struct HidppChannel {
@@ -339,17 +360,25 @@ impl HidppChannel {
                             continue;
                         };
 
-                        let mut msgs = pending_messages.lock().unwrap();
                         let mut matched = false;
-                        if let Some(pos) =
-                            msgs.iter().position(|elem| (elem.response_predicate)(&msg))
                         {
-                            let waiting = msgs.remove(pos).unwrap();
-                            let _ = waiting.sender.send(msg);
-                            matched = true;
+                            let mut msgs = pending_messages.lock().unwrap();
+                            if let Some(pos) =
+                                msgs.iter().position(|elem| (elem.response_predicate)(&msg))
+                            {
+                                let waiting = msgs.remove(pos).unwrap();
+                                let _ = waiting.sender.send(msg);
+                                matched = true;
+                            }
                         }
 
-                        for listener in message_listeners.lock().unwrap().values() {
+                        let listeners: Vec<_> = message_listeners
+                            .lock()
+                            .unwrap()
+                            .values()
+                            .cloned()
+                            .collect();
+                        for listener in listeners {
                             listener(msg, matched);
                         }
                     }
@@ -561,7 +590,10 @@ impl HidppChannel {
     ///
     /// Returns a handle that can be used to remove the listener using a call to
     /// [`Self::remove_msg_listener`].
-    pub fn add_msg_listener(&self, listener: impl Fn(HidppMessage, bool) + Send + 'static) -> u32 {
+    pub fn add_msg_listener(
+        &self,
+        listener: impl Fn(HidppMessage, bool) + Send + Sync + 'static,
+    ) -> u32 {
         let mut listeners = self.message_listeners.lock().unwrap();
 
         let mut rng = rand::rng();
@@ -570,8 +602,21 @@ impl HidppChannel {
             hdl = rng.random::<u32>();
         }
 
-        listeners.insert(hdl, Box::new(listener));
+        listeners.insert(hdl, Arc::new(listener));
         hdl
+    }
+
+    /// Registers a listener that is automatically removed when the returned
+    /// guard is dropped.
+    pub fn add_msg_listener_guarded(
+        &self,
+        listener: impl Fn(HidppMessage, bool) + Send + Sync + 'static,
+    ) -> MessageListenerGuard {
+        let hdl = self.add_msg_listener(listener);
+        MessageListenerGuard {
+            message_listeners: Arc::downgrade(&self.message_listeners),
+            hdl,
+        }
     }
 
     /// Removes a previously registered message listener.
@@ -636,7 +681,10 @@ mod tests {
     use super::*;
     use std::{
         io,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::{Duration, Instant},
     };
 
@@ -796,6 +844,37 @@ mod tests {
         });
     }
 
+    #[test]
+    fn listener_can_remove_another_listener_during_dispatch() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(HidppChannel::from_raw_channel(raw).await.unwrap());
+            let removed_listener_calls = Arc::new(AtomicUsize::new(0));
+            let removing_listener_calls = Arc::new(AtomicUsize::new(0));
+
+            let removed_listener_calls_for_listener = Arc::clone(&removed_listener_calls);
+            let removed_hdl = channel.add_msg_listener(move |_, _| {
+                removed_listener_calls_for_listener.fetch_add(1, Ordering::SeqCst);
+            });
+
+            let channel_for_listener = Arc::clone(&channel);
+            let removing_listener_calls_for_listener = Arc::clone(&removing_listener_calls);
+            channel.add_msg_listener(move |_, _| {
+                removing_listener_calls_for_listener.fetch_add(1, Ordering::SeqCst);
+                channel_for_listener.remove_msg_listener(removed_hdl);
+            });
+
+            handle.send_incoming(short_msg(0x20)).await;
+            wait_for_atomic_count(&removing_listener_calls, 1).await;
+            wait_for_atomic_count(&removed_listener_calls, 1).await;
+
+            handle.send_incoming(short_msg(0x21)).await;
+            wait_for_atomic_count(&removing_listener_calls, 2).await;
+
+            assert_eq!(removed_listener_calls.load(Ordering::SeqCst), 1);
+        });
+    }
+
     #[derive(Clone)]
     struct MockRawHidHandle {
         incoming_tx: async_channel::Sender<Vec<u8>>,
@@ -914,6 +993,18 @@ mod tests {
         }
 
         panic!("timed out waiting for {count} listener events");
+    }
+
+    async fn wait_for_atomic_count(count: &AtomicUsize, expected: usize) {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(1) {
+            if count.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            futures_timer::Delay::new(Duration::from_millis(10)).await;
+        }
+
+        panic!("timed out waiting for atomic count {expected}");
     }
 
     fn mock_error() -> Box<dyn Error + Sync + Send> {

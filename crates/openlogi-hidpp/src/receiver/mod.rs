@@ -18,23 +18,6 @@ use thiserror::Error;
 
 use crate::{channel::HidppChannel, protocol::v10::Hidpp10Error};
 
-/// Removes a HID++ message listener when the last receiver clone is dropped.
-///
-/// Storing this inside an `Arc` on the receiver struct prevents the
-/// `#[derive(Clone)]` copy from sharing the raw `u32` handle: cloning a
-/// receiver increments the Arc refcount, and `remove_msg_listener` is called
-/// exactly once — when the last clone's Arc refcount reaches zero.
-pub(super) struct ListenerDropGuard {
-    pub(super) chan: Arc<HidppChannel>,
-    pub(super) hdl: u32,
-}
-
-impl Drop for ListenerDropGuard {
-    fn drop(&mut self) {
-        self.chan.remove_msg_listener(self.hdl);
-    }
-}
-
 pub mod bolt;
 pub mod unifying;
 

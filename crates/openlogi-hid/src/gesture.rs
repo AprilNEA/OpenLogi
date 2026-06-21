@@ -121,7 +121,7 @@ pub async fn run_capture_session(
     let reprog_index = armed.reprog.as_ref().map(|(_, idx)| *idx);
     let thumb_index = armed.thumb.as_ref().map(|(_, idx)| *idx);
     let dpi_set = armed.dpi_cids.clone();
-    let hdl = chan.add_msg_listener({
+    let listener = chan.add_msg_listener_guarded({
         let accum = Arc::clone(&accum);
         let sink = sink.clone();
         move |raw, matched| {
@@ -160,7 +160,7 @@ pub async fn run_capture_session(
     );
     let _ = shutdown.await;
 
-    chan.remove_msg_listener(hdl);
+    drop(listener);
     if let Ok(mut slot) = channel_slot.write() {
         *slot = None;
     }
