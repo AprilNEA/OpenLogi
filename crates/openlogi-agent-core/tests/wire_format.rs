@@ -24,7 +24,7 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_agent_core::ipc::{
     AgentRequest, AgentSnapshot, AgentStatus, FoundDevice, InventoryHealth, PROTOCOL_VERSION,
-    PairingFailure, PairingUpdate,
+    PairingCommandError, PairingFailure, PairingUpdate,
 };
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{
@@ -61,7 +61,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 6);
+    assert_eq!(PROTOCOL_VERSION, 7);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -193,6 +193,12 @@ fn pairing_updates() {
         &PairingUpdate::Failed(PairingFailure::Device { code: 0x1f }),
         "04041f",
     );
+    assert_wire(
+        &PairingUpdate::Failed(PairingFailure::UnknownDevice),
+        "040b",
+    );
+    assert_wire(&PairingCommandError::AlreadyActive, "00");
+    assert_wire(&PairingCommandError::UnknownDevice, "03");
 }
 
 #[test]

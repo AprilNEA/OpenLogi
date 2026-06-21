@@ -24,7 +24,8 @@ use serde::{Deserialize, Serialize};
 /// v4: [`Agent::snapshot`] added for atomic status + inventory polling.
 /// v5: [`PairingUpdate::Failed`] carries a typed [`PairingFailure`].
 /// v6: `Capabilities::scroll_inversion` added.
-pub const PROTOCOL_VERSION: u32 = 6;
+/// v7: pairing commands return typed acceptance errors.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep
@@ -109,6 +110,46 @@ pub enum PairingFailure {
     AgentRestarted,
     /// The agent could not store its exclusive receiver ownership lease.
     ReceiverAccessUnavailable,
+    /// A pairing session is already active.
+    AlreadyActive,
+    /// The GUI asked to pair an address that is not in the current discovery cache.
+    UnknownDevice,
+    /// There is no pairing session to receive this command.
+    NoActiveSession,
+}
+
+/// Immediate command-acceptance failure for pairing RPCs.
+///
+/// Progress after a command is accepted still arrives through
+/// [`PairingUpdate`]. This type only covers failures that prevent the agent from
+/// accepting the command in the first place.
+///
+/// bincode encodes the variant *index*, so variants are append-only, like the
+/// [`Agent`] trait methods.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PairingCommandError {
+    /// A pairing session is already active.
+    AlreadyActive,
+    /// The agent could not obtain exclusive receiver ownership for pairing.
+    ReceiverBusy,
+    /// The pairing watcher is unavailable inside the agent process.
+    WatcherUnavailable,
+    /// The GUI asked to pair an address that is not in the current discovery cache.
+    UnknownDevice,
+    /// There is no pairing session to receive this command.
+    NoActiveSession,
+}
+
+impl From<PairingCommandError> for PairingFailure {
+    fn from(error: PairingCommandError) -> Self {
+        match error {
+            PairingCommandError::AlreadyActive => Self::AlreadyActive,
+            PairingCommandError::ReceiverBusy => Self::ReceiverBusy,
+            PairingCommandError::WatcherUnavailable => Self::WatcherUnavailable,
+            PairingCommandError::UnknownDevice => Self::UnknownDevice,
+            PairingCommandError::NoActiveSession => Self::NoActiveSession,
+        }
+    }
 }
 
 impl From<PairingError> for PairingFailure {
@@ -188,12 +229,12 @@ pub trait Agent {
     /// I/O, so pairing (which opens the receiver) runs here, not in the GUI —
     /// the GUI opening a receiver channel would clash with the agent's live
     /// capture session on the same Bolt receiver.
-    async fn start_pairing(selector: ReceiverSelector);
+    async fn start_pairing(selector: ReceiverSelector) -> Result<(), PairingCommandError>;
     /// Bolt: pair with a discovered device by its address (from a prior
     /// [`PairingUpdate::DeviceFound`]).
-    async fn pair_device(address: [u8; 6]);
+    async fn pair_device(address: [u8; 6]) -> Result<(), PairingCommandError>;
     /// Abort the in-progress pairing session.
-    async fn cancel_pairing();
+    async fn cancel_pairing() -> Result<(), PairingCommandError>;
     /// Long-poll the next pairing step. Returns `None` when the agent's hold
     /// window elapses with no event (the GUI simply re-polls); the GUI drives
     /// this in a loop while the Add Device window is open.
