@@ -231,13 +231,6 @@ pub struct MessageListenerGuard {
     hdl: u32,
 }
 
-impl MessageListenerGuard {
-    /// Returns the raw listener handle managed by this guard.
-    pub fn handle(&self) -> u32 {
-        self.hdl
-    }
-}
-
 impl Drop for MessageListenerGuard {
     fn drop(&mut self) {
         if let Some(message_listeners) = self.message_listeners.upgrade() {
