@@ -2,9 +2,9 @@
 //!
 //! tarpc generates the `AgentClient` and the `serve` glue from this trait. tarpc
 //! is strict request/response — no server push — so the streaming needs become
-//! polling: the GUI polls [`Agent::inventory`]/[`Agent::status`] on a timer, and
-//! the Add Device flow long-polls [`Agent::next_pairing`], which the agent holds
-//! open until a pairing event arrives or the request deadline elapses.
+//! polling: the GUI polls [`Agent::snapshot`] on a timer, and the Add Device
+//! flow long-polls [`Agent::next_pairing`], which the agent holds open until a
+//! pairing event arrives or the request deadline elapses.
 
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
@@ -21,13 +21,14 @@ use serde::{Deserialize, Serialize};
 ///
 /// v2: `AgentStatus::inventory_ready` added.
 /// v3: `inventory_ready` widened to [`InventoryHealth`] (adds `Unavailable`).
-pub const PROTOCOL_VERSION: u32 = 3;
+/// v4: [`Agent::snapshot`] added for atomic status + inventory polling.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Where the agent's device enumeration stands. The distinction matters
-/// because an empty [`Agent::inventory`] is ambiguous on its own: the GUI must
-/// keep its scanning state while the answer simply isn't in yet, show the
-/// empty state only for a *completed* scan that found nothing, and surface an
-/// error — rather than scan forever — when enumeration itself is broken.
+/// because an empty inventory list is ambiguous on its own: the GUI must keep
+/// its scanning state while the answer simply isn't in yet, show the empty
+/// state only for a *completed* scan that found nothing, and surface an error —
+/// rather than scan forever — when enumeration itself is broken.
 ///
 /// bincode encodes the variant *index*, so variants are append-only, like the
 /// [`Agent`] trait methods.
@@ -35,7 +36,7 @@ pub const PROTOCOL_VERSION: u32 = 3;
 pub enum InventoryHealth {
     /// The first enumeration hasn't completed yet — the device set is unknown.
     Scanning,
-    /// At least one enumeration has completed; [`Agent::inventory`] is
+    /// At least one enumeration has completed; the inventory list is
     /// authoritative (an empty list really means no devices).
     Ready,
     /// Enumeration has never succeeded and has stopped being retried as a
@@ -55,6 +56,15 @@ pub struct AgentStatus {
     pub inventory: InventoryHealth,
     pub protocol_version: u32,
     pub agent_version: String,
+}
+
+/// Status and inventory as one poll result. Kept together so the GUI never
+/// pairs inventory readiness from one orchestrator state with the inventory
+/// list from another.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSnapshot {
+    pub status: AgentStatus,
+    pub inventory: Vec<DeviceInventory>,
 }
 
 /// A nearby unpaired device surfaced during Bolt discovery, in the minimal form
@@ -141,4 +151,9 @@ pub trait Agent {
     /// window elapses with no event (the GUI simply re-polls); the GUI drives
     /// this in a loop while the Add Device window is open.
     async fn next_pairing() -> Option<PairingUpdate>;
+    /// Atomically fetch status and the latest inventory for the GUI poll loop.
+    ///
+    /// Appended for protocol v4. Keep future methods append-only; method order
+    /// is wire-sensitive (see [`Self::protocol_version`]).
+    async fn snapshot() -> AgentSnapshot;
 }

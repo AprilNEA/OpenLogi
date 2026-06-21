@@ -23,7 +23,8 @@ use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_agent_core::ipc::{
-    AgentRequest, AgentStatus, FoundDevice, InventoryHealth, PROTOCOL_VERSION, PairingUpdate,
+    AgentRequest, AgentSnapshot, AgentStatus, FoundDevice, InventoryHealth, PROTOCOL_VERSION,
+    PairingUpdate,
 };
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{
@@ -60,7 +61,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 3);
+    assert_eq!(PROTOCOL_VERSION, 4);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -80,6 +81,7 @@ fn request_variant_order() {
         "040008463030444341464501fb4006",
     );
     assert_wire(&AgentRequest::NextPairing {}, "0d");
+    assert_wire(&AgentRequest::Snapshot {}, "0e");
 }
 
 #[test]
@@ -99,6 +101,22 @@ fn agent_status() {
     assert_wire(&InventoryHealth::Scanning, "00");
     assert_wire(&InventoryHealth::Ready, "01");
     assert_wire(&InventoryHealth::Unavailable, "02");
+}
+
+#[test]
+fn agent_snapshot() {
+    let snapshot = AgentSnapshot {
+        status: AgentStatus {
+            accessibility_granted: true,
+            hook_installed: false,
+            launch_at_login: true,
+            inventory: InventoryHealth::Ready,
+            protocol_version: 7,
+            agent_version: "0.6.6".into(),
+        },
+        inventory: Vec::new(),
+    };
+    assert_wire(&snapshot, "010001010705302e362e3600");
 }
 
 #[test]
