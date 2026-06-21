@@ -38,11 +38,11 @@ pub struct PairingManager {
     ctrl: mpsc::UnboundedSender<Control>,
     updates: Mutex<mpsc::UnboundedReceiver<PairingUpdate>>,
     devices: DeviceCache,
-    /// Count of outstanding pairing sessions. `start` increments it (and sets
+    /// Count of outstanding pairing sessions. The watcher is single-session,
+    /// so `start` atomically transitions this 0 → 1 (and sets
     /// `pairing_active`); the translator decrements it on each terminal event
-    /// and lifts the capture pause only when it reaches zero — so a stale
-    /// terminal from a just-cancelled session can't clear the pause a rapidly
-    /// restarted session set. Balanced: one `start` ⇒ exactly one terminal.
+    /// and lifts the capture pause when it returns to zero. Balanced: one
+    /// accepted `start` ⇒ exactly one terminal.
     sessions: Arc<AtomicUsize>,
     shared: SharedRuntime,
 }
@@ -74,16 +74,25 @@ impl PairingManager {
 
     /// Begin a session: forget the previous discovery, pause capture, then start.
     pub async fn start(&self, selector: ReceiverSelector) {
+        if self
+            .sessions
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            warn!("pairing start requested while a session is already active");
+            return;
+        }
+
         if let Ok(mut devices) = self.devices.lock() {
             devices.clear();
         }
-        // Count this session before pausing, so a terminal event still in flight
-        // from a just-cancelled session can't lift the pause out from under it
-        // (the translator only clears when the count returns to zero).
-        self.sessions.fetch_add(1, Ordering::Relaxed);
         self.shared.pairing_active.store(true, Ordering::Relaxed);
         self.wait_capture_idle().await;
-        let _ = self.ctrl.send(Control::Start(selector));
+        if let Err(e) = self.ctrl.send(Control::Start(selector)) {
+            self.sessions.store(0, Ordering::Release);
+            self.shared.pairing_active.store(false, Ordering::Relaxed);
+            warn!(error = %e, "could not start pairing session; pairing watcher is unavailable");
+        }
     }
 
     /// Pair with a previously discovered device by address.
@@ -176,4 +185,83 @@ async fn translate(
     // itself is then unavailable until the agent restarts).
     sessions.store(0, Ordering::Relaxed);
     pairing_active.store(false, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::BTreeMap;
+    use std::sync::RwLock;
+
+    use openlogi_agent_core::DpiCycleState;
+    use openlogi_agent_core::hook_runtime::HookMaps;
+
+    fn shared_runtime() -> SharedRuntime {
+        SharedRuntime {
+            hook_maps: Arc::new(RwLock::new(HookMaps::default())),
+            gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
+            dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
+            thumbwheel_sensitivity: Arc::new(0.into()),
+            invert_scroll: Arc::new(AtomicBool::new(false)),
+            capture_channel: Arc::new(RwLock::new(None)),
+            pairing_active: Arc::new(AtomicBool::new(false)),
+            capture_idle: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    fn manager_with_ctrl(ctrl: mpsc::UnboundedSender<Control>) -> PairingManager {
+        let (_upd_tx, upd_rx) = mpsc::unbounded_channel();
+        PairingManager {
+            ctrl,
+            updates: Mutex::new(upd_rx),
+            devices: Arc::new(StdMutex::new(HashMap::new())),
+            sessions: Arc::new(AtomicUsize::new(0)),
+            shared: shared_runtime(),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_rolls_back_pause_when_watcher_send_fails() {
+        let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
+        drop(ctrl_rx);
+        let manager = manager_with_ctrl(ctrl_tx);
+
+        manager.start(ReceiverSelector::First).await;
+
+        assert_eq!(manager.sessions.load(Ordering::Acquire), 0);
+        assert!(!manager.shared.pairing_active.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn start_ignores_overlapping_session_without_clearing_or_sending() {
+        let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel();
+        let manager = manager_with_ctrl(ctrl_tx);
+        manager.sessions.store(1, Ordering::Release);
+        manager.shared.pairing_active.store(true, Ordering::Relaxed);
+        {
+            let Ok(mut devices) = manager.devices.lock() else {
+                panic!("test device cache lock should not be poisoned");
+            };
+            devices.insert(
+                [1, 2, 3, 4, 5, 6],
+                DiscoveredDevice {
+                    address: [1, 2, 3, 4, 5, 6],
+                    authentication: 0,
+                    kind: openlogi_hid::pairing::BoltDeviceKind::Unknown,
+                    name: "existing".to_string(),
+                },
+            );
+        }
+
+        manager.start(ReceiverSelector::First).await;
+
+        assert_eq!(manager.sessions.load(Ordering::Acquire), 1);
+        assert!(manager.shared.pairing_active.load(Ordering::Relaxed));
+        let Ok(devices) = manager.devices.lock() else {
+            panic!("test device cache lock should not be poisoned");
+        };
+        assert_eq!(devices.len(), 1);
+        assert!(ctrl_rx.try_recv().is_err());
+    }
 }

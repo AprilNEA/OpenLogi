@@ -408,7 +408,13 @@ pub async fn run_pairing(
     mut commands: mpsc::UnboundedReceiver<PairingCommand>,
     events: mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
-    let (channel, family) = open_receiver(&target).await?;
+    let (channel, family) = match open_receiver(&target).await {
+        Ok(receiver) => receiver,
+        Err(e) => {
+            let _ = events.send(PairingEvent::Failed(e.clone()));
+            return Err(e);
+        }
+    };
     let (listener, mut notifications) = subscribe(&channel);
 
     let result = drive(&channel, family, &mut commands, &mut notifications, &events).await;
