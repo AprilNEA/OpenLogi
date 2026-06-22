@@ -31,6 +31,8 @@ mod widgets;
 // gallery card, so it reaches these through the crate-stable `crate::app::…`
 // path rather than the internal `app::home` submodule.
 pub(crate) use home::{glow_canvas, keyboard_glow};
+// Tray menu and other crate-level callers need the cold-start charging quirk.
+pub(crate) use widgets::battery_charging_no_reading;
 
 /// Which screen the root view is showing.
 ///
@@ -469,9 +471,34 @@ impl Render for AppView {
 #[cfg(test)]
 mod tests {
     use super::home::connection_icon_path;
-    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
-    use openlogi_core::device::DeviceTransports;
+    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord, battery_charging_no_reading};
+    use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports};
     use openlogi_hid::DeviceRoute;
+
+    /// "Charging" replaces the bogus percentage only when charging *and* the
+    /// reading is still 0% (cold start, no cached pre-charge value). A non-zero
+    /// charge or a real 0% while discharging keeps the number.
+    #[test]
+    fn charging_without_reading_suppresses_percentage() {
+        let b = |percentage, status| BatteryInfo {
+            percentage,
+            level: BatteryLevel::Good,
+            status,
+        };
+        assert!(battery_charging_no_reading(&b(0, BatteryStatus::Charging)));
+        assert!(battery_charging_no_reading(&b(
+            0,
+            BatteryStatus::ChargingSlow
+        )));
+        assert!(!battery_charging_no_reading(&b(
+            40,
+            BatteryStatus::Charging
+        )));
+        assert!(!battery_charging_no_reading(&b(
+            0,
+            BatteryStatus::Discharging
+        )));
+    }
 
     #[test]
     fn connection_icon_matches_route() {
