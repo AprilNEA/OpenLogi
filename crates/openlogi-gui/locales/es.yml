@@ -249,3 +249,6 @@ _version: 1
 "Reading supported DPI values…": "Reading supported DPI values…"
 "Couldn't read DPI — click to retry.": "Couldn't read DPI — click to retry."
 "This device did not report Adjustable DPI support.": "This device did not report Adjustable DPI support."
+"Scrolling": "Desplazamiento"
+"Invert scroll direction": "Invertir dirección de desplazamiento"
+"Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "Invierte la rueda de desplazamiento de este ratón. Tu trackpad conserva la dirección de desplazamiento del sistema."

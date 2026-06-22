@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyList-1.0.dtd">
+<!--
+  Dev Info.plist for the nested login-item helper assembled by
+  scripts/cargo-run-macos.sh into
+  OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app.
+
+  The display name and bundle identifier intentionally differ from release so
+  macOS Privacy & Security shows "OpenLogi Agent Dev" instead of merging the
+  dev helper with the installed production helper.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>OpenLogi Agent Dev</string>
+  <key>CFBundleDisplayName</key>
+  <string>OpenLogi Agent Dev</string>
+  <key>CFBundleExecutable</key>
+  <string>openlogi-agent</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundleIdentifier</key>
+  <string>org.openlogi.agent.dev</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.0.0</string>
+  <key>CFBundleVersion</key>
+  <string>0.0.0</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>

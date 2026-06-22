@@ -114,7 +114,7 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
         .device_list
         .iter()
         .map(|record| {
-            let paired = find_paired(&record.config_key, inventories);
+            let paired = find_paired(&record.model_key, inventories);
             let model = paired.and_then(|p| p.model_info.as_ref());
             DeviceDiag {
                 display_name: record.display_name.clone(),
@@ -141,13 +141,13 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
 }
 
 fn find_paired<'a>(
-    config_key: &str,
+    model_key: &str,
     inventories: &'a [DeviceInventory],
 ) -> Option<&'a PairedDevice> {
     inventories.iter().flat_map(|inv| &inv.paired).find(|p| {
         p.model_info
             .as_ref()
-            .is_some_and(|m| m.config_key() == config_key)
+            .is_some_and(|m| m.config_key() == model_key)
     })
 }
 

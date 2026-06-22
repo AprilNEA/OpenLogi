@@ -54,6 +54,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use backon::{BackoffBuilder, ExponentialBuilder};
 use gpui::{
     AppContext, BorrowAppContext as _, Bounds, SharedString, Size, Styled, TitlebarOptions,
     WindowBounds, WindowOptions, px,
@@ -521,10 +522,11 @@ impl gpui::Global for AssetControl {}
 /// is polled ever more slowly (1s, 2s, 4s … 60s) instead of on every tick,
 /// while a recovered host still self-heals on the next attempt.
 fn sync_retry_delay(attempts: u32) -> Duration {
-    const CAP: Duration = Duration::from_secs(60);
-    // Cap the shift so `1 << exp` can't overflow, then clamp the result.
-    let exp = attempts.saturating_sub(1).min(6);
-    Duration::from_secs(1u64 << exp).min(CAP)
+    ExponentialBuilder::default()
+        .without_max_times()
+        .build()
+        .nth(attempts.saturating_sub(1).min(6) as usize)
+        .unwrap_or(Duration::from_secs(60))
 }
 
 /// Refresh the asset cache: the shared index always, plus the depots for

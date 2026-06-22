@@ -80,6 +80,40 @@ impl DeviceStableId {
             },
         }
     }
+
+    /// Stable key for persisted per-physical-device configuration.
+    ///
+    /// This intentionally keys receiver-connected devices by receiver UID +
+    /// pairing slot rather than model id, so two identical mice paired to the
+    /// same receiver can carry different settings.
+    #[must_use]
+    pub fn config_key(&self) -> String {
+        match self {
+            Self::Bolt { receiver_uid, slot } => format!("receiver:{receiver_uid}:slot:{slot}"),
+            Self::Direct {
+                vendor_id,
+                product_id,
+                identity,
+            } => format!("direct:{vendor_id:04x}:{product_id:04x}:{}", identity.key()),
+            Self::Unknown { slot, identity } => format!("unknown:slot:{slot}:{}", identity.key()),
+        }
+    }
+}
+
+impl DeviceIdentity {
+    fn key(&self) -> String {
+        match self {
+            Self::Serial(serial) => format!("serial:{serial}"),
+            Self::Unit(unit) => format!("unit:{}", hex_unit(*unit)),
+        }
+    }
+}
+
+fn hex_unit(unit: [u8; 4]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        unit[0], unit[1], unit[2], unit[3]
+    )
 }
 
 #[cfg(test)]
@@ -117,6 +151,19 @@ mod tests {
         assert_eq!(
             DeviceStableId::from_parts(Some(&bolt), 1, None, [0; 4]),
             DeviceStableId::from_parts(Some(&unifying), 1, None, [0; 4]),
+        );
+    }
+
+    #[test]
+    fn config_key_is_physical_not_model_scoped() {
+        let route = DeviceRoute::Bolt {
+            receiver_uid: "AABB".into(),
+            slot: 2,
+        };
+
+        assert_eq!(
+            DeviceStableId::from_parts(Some(&route), 2, Some("SERIAL"), [1, 2, 3, 4]).config_key(),
+            "receiver:aabb:slot:2"
         );
     }
 }

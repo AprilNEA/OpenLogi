@@ -224,7 +224,7 @@ pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, Wri
 /// keeps route-based write/read paths independent from full feature-table
 /// enumeration and also works for feature wrappers that are not in the central
 /// registry yet.
-async fn open_feature<F: CreatableFeature + 'static>(
+pub(crate) async fn open_feature<F: CreatableFeature + 'static>(
     device: &mut Device,
 ) -> Result<Arc<F>, WriteError> {
     let info = device
@@ -844,6 +844,14 @@ impl SharedChannel {
     pub fn matches(&self, route: &DeviceRoute) -> bool {
         self.route == *route
     }
+
+    pub(crate) fn channel(&self) -> &Arc<HidppChannel> {
+        &self.channel
+    }
+
+    pub(crate) fn device_index(&self) -> u8 {
+        self.route.device_index()
+    }
 }
 
 /// Write DPI on an already-open [`SharedChannel`] — the fast path that skips
@@ -877,7 +885,7 @@ pub async fn set_smartshift_on(
 
 /// Boilerplate-eater: open the channel that reaches `route`, then run `f` once
 /// with it. The caller addresses features at [`DeviceRoute::device_index`].
-async fn with_route<F, Fut, T>(route: &DeviceRoute, f: F) -> Result<T, WriteError>
+pub(crate) async fn with_route<F, Fut, T>(route: &DeviceRoute, f: F) -> Result<T, WriteError>
 where
     F: FnOnce(Arc<HidppChannel>) -> Fut,
     Fut: std::future::Future<Output = Result<T, WriteError>>,

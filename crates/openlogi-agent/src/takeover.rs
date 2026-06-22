@@ -62,6 +62,8 @@ pub fn try_replace_stale() -> Option<InstanceGuard> {
 #[cfg(unix)]
 fn replace_stale() -> Option<InstanceGuard> {
     use openlogi_agent_core::ipc::{AgentClient, PROTOCOL_VERSION};
+    use std::ffi::OsStr;
+    use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
     use tarpc::{client, context};
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -93,32 +95,34 @@ fn replace_stale() -> Option<InstanceGuard> {
         "lock holder speaks an older protocol — taking over"
     );
 
-    let pids = agent_pids();
-    if pids.is_empty() {
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    let own_pid = Pid::from_u32(std::process::id());
+    let stale_agents = system
+        .processes_by_exact_name(OsStr::new("openlogi-agent"))
+        .filter(|process| process.pid() != own_pid);
+
+    let mut found = false;
+    let mut signalled = false;
+    for process in stale_agents {
+        found = true;
+        let pid = process.pid().as_u32();
+        if process.kill_with(Signal::Term) == Some(true) {
+            info!(pid, "sent SIGTERM to the stale agent");
+            signalled = true;
+        } else {
+            warn!(pid, "could not signal the stale agent");
+        }
+    }
+
+    if !found {
         // The holder answered the handshake a moment ago but no process is
-        // findable now: it exited on its own (or pgrep is missing). Nothing
-        // to signal either way — let the lock retry below decide whether the
-        // lock is actually free, instead of exiting as a duplicate.
+        // findable now: it exited on its own. Nothing to signal either way —
+        // let the lock retry below decide whether the lock is actually free,
+        // instead of exiting as a duplicate.
         info!("stale agent already gone — trying for its lock");
-    } else {
-        let mut signalled = false;
-        for pid in pids {
-            // `kill(1)` over raw libc: no unsafe, and the pid came from pgrep
-            // moments ago — at worst the signal misses a just-exited process.
-            let done = std::process::Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .status()
-                .is_ok_and(|s| s.success());
-            if done {
-                info!(pid, "sent SIGTERM to the stale agent");
-                signalled = true;
-            } else {
-                warn!(pid, "could not signal the stale agent");
-            }
-        }
-        if !signalled {
-            return None;
-        }
+    } else if !signalled {
+        return None;
     }
 
     let (attempts, delay) = LOCK_RETRY;
@@ -134,31 +138,6 @@ fn replace_stale() -> Option<InstanceGuard> {
     }
     warn!("stale agent did not release the lock — giving up the takeover");
     None
-}
-
-/// Pids of every other `openlogi-agent` process owned by this user. The
-/// binary is named `openlogi-agent` in every install layout (cargo target
-/// dir, the `OpenLogiAgent.app` login-item helper), and `pgrep -x` matches
-/// the process name exactly; our own pid is excluded — `pkill` would signal
-/// us too.
-#[cfg(unix)]
-fn agent_pids() -> Vec<u32> {
-    let output = match std::process::Command::new("pgrep")
-        .args(["-x", "openlogi-agent"])
-        .output()
-    {
-        Ok(out) => out,
-        Err(e) => {
-            warn!(error = %e, "pgrep unavailable — cannot locate the stale agent");
-            return Vec::new();
-        }
-    };
-    let own = std::process::id();
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .filter(|pid| *pid != own)
-        .collect()
 }
 
 /// No Windows release has ever shipped (or auto-started) the agent, so there

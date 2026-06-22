@@ -12,7 +12,13 @@
 # `Info.plist` / `Resources` — a bare `target/debug/openlogi-gui` has neither,
 # so macOS falls back to the executable name and a generic icon.
 #
+# The dev bundles are codesigned after assembly so LaunchServices/TCC see a
+# coherent bundle identity. By default this uses the first Apple Development
+# identity in the keychain, falling back to ad-hoc signing; set
+# OPENLOGI_DEV_CODESIGN_IDENTITY to choose a specific identity.
+#
 # Set OPENLOGI_DEV_BUNDLE=0 to skip the wrapper and run the raw binary.
+# Set OPENLOGI_DEV_CODESIGN=0 to skip dev codesigning.
 set -euo pipefail
 
 bin="$1"
@@ -27,7 +33,9 @@ APP="$ROOT/target/dev/OpenLogi.app"
 MACOS="$APP/Contents/MacOS"
 RES="$APP/Contents/Resources"
 ICON_SRC="$ROOT/crates/openlogi-gui/icon/AppIcon.icns"
-PLIST_SRC="$ROOT/crates/openlogi-gui/dev/Info.plist"
+PLIST_SRC="$ROOT/crates/openlogi-gui/bundle/gui-dev/Info.plist"
+AGENT_PLIST_SRC="$ROOT/crates/openlogi-gui/bundle/agent-dev/Info.plist"
+CODESIGN_ENABLED="${OPENLOGI_DEV_CODESIGN:-1}"
 
 mkdir -p "$MACOS" "$RES"
 
@@ -47,30 +55,40 @@ if [ "$PLIST_SRC" -nt "$PLIST" ]; then
   cp -f "$PLIST_SRC" "$PLIST"
 fi
 
-# Hardlink the freshly built binary into the bundle — instant, no 95 MB copy.
+# Link/copy the freshly built binary into the bundle. The default unsigned path
+# uses a hardlink — instant, no 95 MB copy. The codesigned path must copy:
+# codesign mutates the Mach-O signature in place, and a hardlink would rewrite
+# Cargo's target/debug artifact behind Cargo's back.
 # A hardlink (not a symlink) is required: both NSBundle.mainBundle and Rust's
 # current_exe() realpath() the executable, which would resolve a symlink back
 # to target/debug/ and break the bundle association. cargo rewrites the binary
 # atomically on rebuild (new inode), so relink every run; `ln -f` repoints a
 # stale link. Fall back to a copy if the bundle ever lands on another volume.
-ln -f "$bin" "$MACOS/openlogi-gui" 2>/dev/null || cp -f "$bin" "$MACOS/openlogi-gui"
+if [ "$CODESIGN_ENABLED" != "0" ]; then
+  cp -f "$bin" "$MACOS/openlogi-gui"
+else
+  ln -f "$bin" "$MACOS/openlogi-gui" 2>/dev/null || cp -f "$bin" "$MACOS/openlogi-gui"
+fi
 
 # Register the dev .app with LaunchServices so the `openlogi://` URL scheme
 # works during development. Gate on the *bundled* plist (freshly stamped by the
 # copy step above) vs a marker, so a rebuilt bundle re-registers even when the
 # source plist is unchanged — and only stamp the marker when lsregister actually
-# succeeds, so a failure retries next run instead of latching off. Skips the
-# (normally ~10 ms, occasionally multi-second) lsregister cost on the steady
-# incremental path.
+# succeeds, so a failure retries next run instead of latching off. Keep the
+# marker outside the .app bundle: codesign treats stray files under Contents as
+# bundle resources/subcomponents and refuses to sign an `Info.plist.*` marker.
+# Skips the (normally ~10 ms, occasionally multi-second) lsregister cost on the
+# steady incremental path.
 #
 # Both the dev build (here) and the release build register the same openlogi://
 # scheme; LaunchServices routes to the last-registered handler. If a release
 # install starts winning the scheme during development, re-run this (touch the
 # dev plist) or `lsregister -f "$APP"` to put the dev build back in front.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-if [ -x "$LSREGISTER" ] && [ "$PLIST" -nt "$PLIST.lsregistered" ]; then
+LSREGISTER_MARKER="$ROOT/target/dev/OpenLogi.app.lsregistered"
+if [ -x "$LSREGISTER" ] && [ "$PLIST" -nt "$LSREGISTER_MARKER" ]; then
   if "$LSREGISTER" -R "$APP" 2>/dev/null; then
-    touch "$PLIST.lsregistered"
+    touch "$LSREGISTER_MARKER"
   fi
 fi
 
@@ -88,15 +106,47 @@ if [ "${OPENLOGI_DEV_AGENT:-1}" != "0" ]; then
   else
     cargo build -p openlogi-agent --manifest-path "$ROOT/Cargo.toml"
   fi
-  helper="$APP/Contents/Library/LoginItems/OpenLogiAgent.app"
+  helper="$APP/Contents/Library/LoginItems/OpenLogi Agent.app"
+  rm -rf \
+    "$APP/Contents/Library/LoginItems/OpenLogiAgent.app" \
+    "$APP/Contents/Library/LoginItems/OpenLogi Agent Dev.app"
   mkdir -p "$helper/Contents/MacOS" "$helper/Contents/Resources"
-  ln -f "$agent_dir/openlogi-agent" "$helper/Contents/MacOS/openlogi-agent" 2>/dev/null \
-    || cp -f "$agent_dir/openlogi-agent" "$helper/Contents/MacOS/openlogi-agent"
-  cp -f "$ROOT/crates/openlogi-agent/macos/Info.plist" "$helper/Contents/Info.plist"
+  if [ "$CODESIGN_ENABLED" != "0" ]; then
+    cp -f "$agent_dir/openlogi-agent" "$helper/Contents/MacOS/openlogi-agent"
+  else
+    ln -f "$agent_dir/openlogi-agent" "$helper/Contents/MacOS/openlogi-agent" 2>/dev/null \
+      || cp -f "$agent_dir/openlogi-agent" "$helper/Contents/MacOS/openlogi-agent"
+  fi
+  cp -f "$AGENT_PLIST_SRC" "$helper/Contents/Info.plist"
   # Share the GUI's "e" icon (Info.plist CFBundleIconFile = AppIcon) so the
   # agent isn't a blank entry in the Accessibility list. ICON_SRC was generated
   # / verified above.
   cp -f "$ICON_SRC" "$helper/Contents/Resources/AppIcon.icns"
+fi
+
+# Sign after all resources and nested helpers are in place; otherwise macOS can
+# cache a stale/invalid bundle identity and TCC may show duplicate-looking rows.
+if [ "$CODESIGN_ENABLED" != "0" ]; then
+  identity="${OPENLOGI_DEV_CODESIGN_IDENTITY:-}"
+  if [ -z "$identity" ]; then
+    identity="$(security find-identity -v -p codesigning 2>/dev/null \
+      | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' \
+      | head -n 1)"
+  fi
+  identity="${identity:--}"
+  if [ -d "$APP/Contents/Library/LoginItems/OpenLogi Agent.app" ]; then
+    codesign --force --sign "$identity" --timestamp=none \
+      "$APP/Contents/Library/LoginItems/OpenLogi Agent.app"
+  fi
+  codesign --force --sign "$identity" --timestamp=none "$APP"
+fi
+
+# Register again after the helper is embedded and the bundle is signed, so the
+# Accessibility list uses the stamped dev helper name instead of a stale cache.
+if [ -x "$LSREGISTER" ]; then
+  if "$LSREGISTER" -R "$APP" 2>/dev/null; then
+    touch "$LSREGISTER_MARKER"
+  fi
 fi
 
 exec "$MACOS/openlogi-gui" "$@"

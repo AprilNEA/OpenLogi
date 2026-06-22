@@ -15,6 +15,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
+use atomic_write_file::AtomicWriteFile;
 use backon::{BlockingRetryable, ExponentialBuilder};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
@@ -228,35 +229,18 @@ pub fn safe_component_path(base: &Path, component: &str, label: &str) -> Result<
 
 /// Write `bytes` beside `dst` and atomically rename into place.
 ///
-/// `create_new` refuses to open through anything pre-planted at the temp
-/// path (`O_EXCL` never follows symlinks), and `rename` *replaces* a symlink
-/// sitting at `dst` instead of writing through it — together they close the
-/// check-to-write race a symlink check followed by a plain `fs::write` would
-/// leave open. The rename also means a concurrent reader sees the old file
-/// or the new one, never a half-written one.
+/// The temporary file is created in the destination directory and committed via
+/// rename, so a concurrent reader sees the old file or the new one, never a
+/// half-written one. A planted symlink at `dst` is replaced, not followed.
 fn write_replace(dst: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
 
-    let mut tmp_name = dst.as_os_str().to_owned();
-    tmp_name.push(".part");
-    let tmp = PathBuf::from(tmp_name);
-    // A stale `.part` from a crashed sync would fail `create_new`; it never
-    // holds verified data, so clear it.
-    let _ = fs::remove_file(&tmp);
-    let mut file = fs::File::options()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-        .with_context(|| format!("create {}", tmp.display()))?;
-    let written = file
-        .write_all(bytes)
-        .with_context(|| format!("write {}", tmp.display()));
-    drop(file);
-    if let Err(e) = written {
-        let _ = fs::remove_file(&tmp);
-        return Err(e);
-    }
-    fs::rename(&tmp, dst).with_context(|| format!("replace {}", dst.display()))
+    let mut file =
+        AtomicWriteFile::open(dst).with_context(|| format!("create {}", dst.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("write {}", dst.display()))?;
+    file.commit()
+        .with_context(|| format!("replace {}", dst.display()))
 }
 
 /// Hex SHA-256 of an in-memory blob.

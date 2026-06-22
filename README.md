@@ -23,6 +23,11 @@
     <img alt="Hits" src="https://hits.aprilnea.com/hits?url=https://github.com/aprilnea/openlogi">
 </div>
 
+<p align="center">
+    <a href="https://trendshift.io/repositories/42303" target="_blank">
+    <img src="https://trendshift.io/api/badge/trendshift/repositories/42303/daily?language=Rust" alt="AprilNEA%2FOpenLogi | Trendshift" width="250" height="55"/></a>
+</p>
+
 > **Options+ ? Try OpenLogi.**
 
 Remap buttons, drive DPI and SmartShift, and switch profiles per app — without a Logitech account, telemetry, or the official Options+ install. No cloud, plain TOML config; the only network calls are device-image fetches and an opt-in, off-by-default update check.
@@ -184,3 +189,7 @@ your own projects, forks, or distributions without prior written permission.
 ---
 
 **Not affiliated with Logitech.** "Logitech", "MX Master", and "Options+" are trademarks of Logitech International S.A.
+
+## Repo activity
+
+![Repobeats analytics image](https://repobeats.axiom.co/api/embed/4a0b576a03e9d528ad31ccf4797a1286c045d021.svg "Repobeats analytics image")

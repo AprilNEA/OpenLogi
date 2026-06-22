@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.15](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.14...openlogi-core-v0.6.15) - 2026-06-21
+
+### Added
+
+- *(scroll)* per-device inverted scrolling ([#126](https://github.com/AprilNEA/OpenLogi/pull/126))
+
 ## [0.6.14](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.13...openlogi-core-v0.6.14) - 2026-06-15
 
 ### Fixed

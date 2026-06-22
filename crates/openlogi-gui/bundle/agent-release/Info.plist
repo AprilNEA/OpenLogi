@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyList-1.0.dtd">
 <!--
-  Info.plist for the nested login-item helper, assembled by `xtask` into
+  Release Info.plist for the nested login-item helper, assembled by `xtask` into
   OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app.
 
   LSUIElement=true makes the agent an Accessory app: a menu-bar status item with
@@ -11,9 +11,7 @@
   across app updates — the agent, not the GUI, is the hook-trusted process.
 
   The 0.0.0 version is a sentinel, not a release number: `xtask bundle-macos`
-  stamps the workspace version over it when embedding the helper, while the
-  hand-bundled dev flow (scripts/cargo-run-macos.sh) copies it as-is, so a
-  0.0.0 helper is by definition a dev build.
+  stamps the workspace version over it when embedding the helper.
 -->
 <plist version="1.0">
 <dict>

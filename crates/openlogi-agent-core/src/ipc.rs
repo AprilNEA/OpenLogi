@@ -2,15 +2,15 @@
 //!
 //! tarpc generates the `AgentClient` and the `serve` glue from this trait. tarpc
 //! is strict request/response — no server push — so the streaming needs become
-//! polling: the GUI polls [`Agent::inventory`]/[`Agent::status`] on a timer, and
-//! the Add Device flow long-polls [`Agent::next_pairing`], which the agent holds
-//! open until a pairing event arrives or the request deadline elapses.
+//! polling: the GUI polls [`Agent::snapshot`] on a timer, and the Add Device
+//! flow long-polls [`Agent::next_pairing`], which the agent holds open until a
+//! pairing event arrives or the request deadline elapses.
 
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, DpiInfo, PasskeyMethod, ReceiverSelector, SmartShiftMode, SmartShiftStatus,
-    WriteError,
+    DeviceRoute, DpiInfo, PairingError, PasskeyMethod, ReceiverSelector, SmartShiftMode,
+    SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,13 +21,16 @@ use serde::{Deserialize, Serialize};
 ///
 /// v2: `AgentStatus::inventory_ready` added.
 /// v3: `inventory_ready` widened to [`InventoryHealth`] (adds `Unavailable`).
-pub const PROTOCOL_VERSION: u32 = 3;
+/// v4: [`Agent::snapshot`] added for atomic status + inventory polling.
+/// v5: [`PairingUpdate::Failed`] carries a typed [`PairingFailure`].
+/// v6: `Capabilities::scroll_inversion` added.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Where the agent's device enumeration stands. The distinction matters
-/// because an empty [`Agent::inventory`] is ambiguous on its own: the GUI must
-/// keep its scanning state while the answer simply isn't in yet, show the
-/// empty state only for a *completed* scan that found nothing, and surface an
-/// error — rather than scan forever — when enumeration itself is broken.
+/// because an empty inventory list is ambiguous on its own: the GUI must keep
+/// its scanning state while the answer simply isn't in yet, show the empty
+/// state only for a *completed* scan that found nothing, and surface an error —
+/// rather than scan forever — when enumeration itself is broken.
 ///
 /// bincode encodes the variant *index*, so variants are append-only, like the
 /// [`Agent`] trait methods.
@@ -35,7 +38,7 @@ pub const PROTOCOL_VERSION: u32 = 3;
 pub enum InventoryHealth {
     /// The first enumeration hasn't completed yet — the device set is unknown.
     Scanning,
-    /// At least one enumeration has completed; [`Agent::inventory`] is
+    /// At least one enumeration has completed; the inventory list is
     /// authoritative (an empty list really means no devices).
     Ready,
     /// Enumeration has never succeeded and has stopped being retried as a
@@ -57,6 +60,15 @@ pub struct AgentStatus {
     pub agent_version: String,
 }
 
+/// Status and inventory as one poll result. Kept together so the GUI never
+/// pairs inventory readiness from one orchestrator state with the inventory
+/// list from another.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSnapshot {
+    pub status: AgentStatus,
+    pub inventory: Vec<DeviceInventory>,
+}
+
 /// A nearby unpaired device surfaced during Bolt discovery, in the minimal form
 /// the GUI needs: a name to show and the address to pair by. The agent keeps the
 /// full [`openlogi_hid::DiscoveredDevice`] (kind, auth bits) internally, keyed by
@@ -68,9 +80,54 @@ pub struct FoundDevice {
     pub name: String,
 }
 
+/// Terminal failure reason for a pairing session.
+///
+/// Kept typed across the agent↔GUI boundary so the GUI can choose recovery UI,
+/// telemetry, and localized copy without matching human-readable strings.
+///
+/// bincode encodes the variant *index*, so variants are append-only, like the
+/// [`Agent`] trait methods.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PairingFailure {
+    /// The HID transport returned an error.
+    Hid { message: String },
+    /// No connected receiver supports pairing.
+    ReceiverNotFound,
+    /// HID++ receiver register access failed.
+    Register { message: String },
+    /// The device or receiver did not complete pairing before its deadline.
+    Timeout,
+    /// The receiver reported a protocol-level pairing error code.
+    Device { code: u8 },
+    /// The user cancelled the pairing session.
+    Cancelled,
+    /// The agent could not obtain exclusive receiver ownership for pairing.
+    ReceiverBusy,
+    /// The pairing watcher is unavailable inside the agent process.
+    WatcherUnavailable,
+    /// The background agent restarted during an active pairing session.
+    AgentRestarted,
+    /// The agent could not store its exclusive receiver ownership lease.
+    ReceiverAccessUnavailable,
+}
+
+impl From<PairingError> for PairingFailure {
+    fn from(error: PairingError) -> Self {
+        match error {
+            PairingError::Hid(message) => Self::Hid { message },
+            PairingError::ReceiverNotFound => Self::ReceiverNotFound,
+            PairingError::Register(message) => Self::Register { message },
+            PairingError::Timeout => Self::Timeout,
+            PairingError::Device(code) => Self::Device { code },
+            PairingError::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 /// One step of a pairing session, streamed to the GUI via [`Agent::next_pairing`].
 /// Mirrors `openlogi_hid::PairingEvent` but in a wire-safe form — the discovered
-/// device collapses to [`FoundDevice`] and the terminal error to a string.
+/// device collapses to [`FoundDevice`] and terminal failures to
+/// [`PairingFailure`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PairingUpdate {
     /// Discovery (Bolt) / the pairing lock (Unifying) is open.
@@ -81,8 +138,8 @@ pub enum PairingUpdate {
     Passkey(PasskeyMethod),
     /// A device paired into `slot`.
     Paired { slot: u8 },
-    /// The flow ended without pairing a device (carries a human-readable detail).
-    Failed(String),
+    /// The flow ended without pairing a device.
+    Failed(PairingFailure),
 }
 
 #[tarpc::service]
@@ -141,4 +198,9 @@ pub trait Agent {
     /// window elapses with no event (the GUI simply re-polls); the GUI drives
     /// this in a loop while the Add Device window is open.
     async fn next_pairing() -> Option<PairingUpdate>;
+    /// Atomically fetch status and the latest inventory for the GUI poll loop.
+    ///
+    /// Appended for protocol v4. Keep future methods append-only; method order
+    /// is wire-sensitive (see [`Self::protocol_version`]).
+    async fn snapshot() -> AgentSnapshot;
 }

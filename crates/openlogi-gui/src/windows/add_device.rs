@@ -20,7 +20,7 @@ use gpui::{
     px, rgb,
 };
 use gpui_component::v_flex;
-use openlogi_agent_core::ipc::{FoundDevice, PairingUpdate};
+use openlogi_agent_core::ipc::{FoundDevice, PairingFailure, PairingUpdate};
 use openlogi_hid::{Click, PasskeyMethod, ReceiverSelector};
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
@@ -45,7 +45,7 @@ pub enum PairingUi {
     Passkey(PasskeyMethod),
     /// A device paired into `slot`.
     Paired { slot: u8 },
-    /// The session ended without pairing; carries a human-readable detail.
+    /// The session ended without pairing; carries localized display copy.
     Failed(String),
 }
 
@@ -90,9 +90,40 @@ pub fn apply_update(cx: &mut App, update: PairingUpdate) {
         }
         PairingUpdate::Passkey(method) => PairingUi::Passkey(method),
         PairingUpdate::Paired { slot } => PairingUi::Paired { slot },
-        PairingUpdate::Failed(detail) => PairingUi::Failed(detail),
+        PairingUpdate::Failed(failure) => PairingUi::Failed(pairing_failure_text(failure)),
     };
     cx.set_global(next);
+}
+
+fn pairing_failure_text(failure: PairingFailure) -> String {
+    match failure {
+        PairingFailure::Hid { message } => {
+            tr!("HID transport error: %{message}", message => message).to_string()
+        }
+        PairingFailure::ReceiverNotFound => {
+            tr!("No supported pairing-capable receiver was found.").to_string()
+        }
+        PairingFailure::Register { message } => {
+            tr!("Receiver register access failed: %{message}", message => message).to_string()
+        }
+        PairingFailure::Timeout => tr!("Pairing timed out.").to_string(),
+        PairingFailure::Device { code } => tr!(
+            "The receiver reported pairing error %{code}.",
+            code => format!("0x{code:02x}"),
+        )
+        .to_string(),
+        PairingFailure::Cancelled => tr!("Pairing was cancelled.").to_string(),
+        PairingFailure::ReceiverBusy => tr!("The receiver is busy. Try pairing again.").to_string(),
+        PairingFailure::WatcherUnavailable => {
+            tr!("Pairing is unavailable because the background service is not ready.").to_string()
+        }
+        PairingFailure::AgentRestarted => {
+            tr!("The background service restarted — try pairing again.").to_string()
+        }
+        PairingFailure::ReceiverAccessUnavailable => {
+            tr!("Pairing is unavailable because receiver access could not be recorded.").to_string()
+        }
+    }
 }
 
 fn send(cx: &App, command: Command) {

@@ -132,6 +132,10 @@ thread_local! {
 
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not
 /// granted or on an unsupported platform — the app continues without crashing.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the hook callback keeps the cross-platform event policy in one place so the shared-state locking stays coherent"
+)]
 pub fn start(
     hooks: SharedHookMaps,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
@@ -249,13 +253,14 @@ pub fn start(
         MouseEvent::Scroll {
             delta_x,
             delta_y,
-            is_continuous,
+            from_trackpad,
+            device: _,
         } => {
             let settings = scroll_settings
                 .read()
                 .map(|guard| *guard)
                 .unwrap_or_default();
-            if settings == ScrollSettings::default() || is_continuous {
+            if settings == ScrollSettings::default() || from_trackpad {
                 return EventDisposition::PassThrough;
             }
 
@@ -311,6 +316,7 @@ fn resolve_gesture_click(
 
 /// Apply the app-wide scroll preferences to a captured wheel event, returning
 /// vertical (axis 1) and horizontal (axis 2) line deltas to re-inject.
+#[cfg(any(test, not(target_os = "macos")))]
 fn transform_scroll(delta_x: f32, delta_y: f32, settings: ScrollSettings) -> (i32, i32) {
     let strength = f32::from(settings.strength.max(1));
     let tactility = i32::from(settings.tactility.min(10));
@@ -325,7 +331,12 @@ fn transform_scroll(delta_x: f32, delta_y: f32, settings: ScrollSettings) -> (i3
     (quantize_scroll(v, tactility), quantize_scroll(h, tactility))
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn quantize_scroll(value: f32, tactility: i32) -> i32 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "quantization intentionally rounds the event-local floating delta to an integer wheel step"
+    )]
     let v = value.round() as i32;
     if tactility <= 1 {
         return v;

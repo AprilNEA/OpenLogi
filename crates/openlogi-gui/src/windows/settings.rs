@@ -266,6 +266,10 @@ impl Render for SettingsView {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the settings page is intentionally assembled inline so related controls stay together with their localized descriptions"
+)]
 fn general_page(
     sensitivity_slider: Entity<SliderState>,
     wheel_strength_slider: Entity<SliderState>,
@@ -756,6 +760,10 @@ fn wheel_slider_field(slider: &Entity<SliderState>, default_value: u8, cx: &mut 
 }
 
 fn sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> AnyElement {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the slider is integer-stepped and bounded to the app's thumbwheel sensitivity range"
+    )]
     let value = slider.read(cx).value().start().round() as i32;
     let is_default = value == DEFAULT_THUMBWHEEL_SENSITIVITY;
     slider_value_field(slider, value.to_string(), is_default, cx)

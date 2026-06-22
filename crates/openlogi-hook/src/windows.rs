@@ -199,10 +199,9 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let disposition = callback
         .as_ref()
         .map_or(EventDisposition::PassThrough, |cb| cb(event));
-    if disposition == EventDisposition::Suppress {
-        1
-    } else {
-        call_next(code, wparam, lparam)
+    match disposition {
+        EventDisposition::PassThrough => call_next(code, wparam, lparam),
+        EventDisposition::Suppress => 1,
     }
 }
 
@@ -254,15 +253,20 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
         // every platform — matching macOS (`SCROLL_WHEEL_EVENT_DELTA_AXIS_1`) and
         // Linux (`REL_WHEEL`), whose deltas feed the same direction-sensitive
         // bindings. Negating here flipped scroll-up/-down only on Windows.
+        // `from_trackpad` is always false on Windows: the wheel arrives as
+        // WM_MOUSEWHEEL and precision-touchpad scrolling as separate input, so
+        // a wheel event is unambiguously a mouse wheel (unlike macOS).
         WM_MOUSEWHEEL => Some(MouseEvent::Scroll {
             delta_x: 0.0,
             delta_y: f32::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
-            is_continuous: false,
+            from_trackpad: false,
+            device: None,
         }),
         WM_MOUSEHWHEEL => Some(MouseEvent::Scroll {
             delta_x: f32::from(signed_high_word(data.mouseData)) / WHEEL_DELTA,
             delta_y: 0.0,
-            is_continuous: false,
+            from_trackpad: false,
+            device: None,
         }),
         _ => None,
     }

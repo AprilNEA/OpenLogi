@@ -587,6 +587,7 @@ mod macos {
             tracing::warn!("CGEvent::new_scroll_event failed");
             return;
         };
+        tag_synthetic(&ev);
         ev.post(CGEventTapLocation::HID);
     }
 
@@ -601,6 +602,7 @@ mod macos {
             tracing::warn!("CGEvent::new_scroll_event failed for thumbwheel");
             return;
         };
+        tag_synthetic(&ev);
         ev.post(CGEventTapLocation::HID);
     }
 

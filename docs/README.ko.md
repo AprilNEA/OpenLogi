@@ -23,6 +23,11 @@
     <img alt="Hits" src="https://hits.aprilnea.com/hits?url=https://github.com/aprilnea/openlogi">
 </div>
 
+<p align="center">
+    <a href="https://trendshift.io/repositories/42303" target="_blank">
+    <img src="https://trendshift.io/api/badge/trendshift/repositories/42303/daily?language=Rust" alt="AprilNEA%2FOpenLogi | Trendshift" width="250" height="55"/></a>
+</p>
+
 > **Options+가 지긋지긋하다면? OpenLogi를 써 보세요.**
 
 Logitech 계정도, 텔레메트리도, 공식 Options+ 설치도 없이 버튼을 리매핑하고 DPI와 SmartShift를 제어하며 앱별 프로필을 전환할 수 있습니다. 클라우드 없이 순수 TOML 설정 파일만 사용합니다. 네트워크 요청은 기기 이미지 다운로드와 기본 비활성화된 옵트인 업데이트 확인뿐입니다.
@@ -158,3 +163,7 @@ OpenLogi 로고와 앱 아이콘 — [`design/`](../design/) 아래의 브랜드
 ---
 
 **Logitech과 무관합니다.** "Logitech", "MX Master", "Options+"는 Logitech International S.A.의 상표입니다.
+
+## 저장소 활동
+
+![Repobeats analytics image](https://repobeats.axiom.co/api/embed/4a0b576a03e9d528ad31ccf4797a1286c045d021.svg "Repobeats analytics image")

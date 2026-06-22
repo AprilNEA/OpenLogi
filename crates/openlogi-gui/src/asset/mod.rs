@@ -28,6 +28,7 @@ use openlogi_assets::{
 };
 use openlogi_core::device::{DeviceKind, DeviceModelInfo};
 use tracing::{debug, warn};
+use walkdir::WalkDir;
 
 use self::images::{buttons_image_for, load_manifest, read_png_dimensions, variant_image_for};
 use self::paths::{bundle_assets_root, load_index, user_cache_root};
@@ -37,20 +38,12 @@ use self::paths::{bundle_assets_root, load_index, user_cache_root};
 /// separate tier and isn't counted.
 #[must_use]
 pub fn cache_size_bytes() -> u64 {
-    fn dir_size(dir: &Path) -> u64 {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return 0;
-        };
-        entries
-            .flatten()
-            .map(|entry| match entry.file_type() {
-                Ok(ft) if ft.is_dir() => dir_size(&entry.path()),
-                Ok(_) => entry.metadata().map_or(0, |m| m.len()),
-                Err(_) => 0,
-            })
-            .sum()
-    }
-    dir_size(&user_cache_root())
+    WalkDir::new(user_cache_root())
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.metadata().map_or(0, |m| m.len()))
+        .sum()
 }
 
 /// Delete the per-user asset cache. The next sync re-fetches what the
@@ -73,22 +66,16 @@ pub fn cleanup_legacy_glow_pngs() {
 }
 
 fn cleanup_glow_pngs_in(root: &Path) {
-    let Ok(depots) = std::fs::read_dir(root) else {
-        return;
-    };
-    for depot in depots.flatten() {
-        if !depot.file_type().is_ok_and(|t| t.is_dir()) {
-            continue;
-        }
-        let Ok(files) = std::fs::read_dir(depot.path()) else {
-            continue;
-        };
-        for file in files.flatten() {
-            let name = file.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with("glow-") && (name.ends_with(".png") || name.ends_with(".png.tmp")) {
-                let _ = std::fs::remove_file(file.path());
-            }
+    for file in WalkDir::new(root)
+        .min_depth(2)
+        .max_depth(2)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let name = file.file_name().to_string_lossy();
+        if name.starts_with("glow-") && (name.ends_with(".png") || name.ends_with(".png.tmp")) {
+            let _ = std::fs::remove_file(file.path());
         }
     }
 }
@@ -109,7 +96,7 @@ pub fn reveal_cache_in_file_manager() {
 /// above isn't the function's last statement on non-macOS — `needless_return`.)
 #[cfg(target_os = "macos")]
 fn open_in_file_manager(path: &Path) {
-    if let Err(e) = std::process::Command::new("open").arg(path).spawn() {
+    if let Err(e) = opener::open(path) {
         warn!(error = %e, "could not open cache dir in Finder");
     }
 }

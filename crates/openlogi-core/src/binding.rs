@@ -1204,7 +1204,6 @@ pub fn post_scroll_delta(v: i32, h: i32) {
 /// need tuning per device, since the diverted resolution differs from native.
 ///
 /// No-op (logs nothing) on platforms without a supported injection mechanism.
-
 pub fn post_horizontal_scroll(delta: i32) {
     #[cfg(target_os = "macos")]
     macos::post_horizontal_scroll(delta);
@@ -2945,14 +2944,14 @@ mod tests {
     }
 
     #[test]
-    fn default_gesture_horizontal_swipes_switch_desktops() {
+    fn default_gesture_horizontal_swipes_switch_tabs() {
         assert_eq!(
             default_gesture_binding(GestureDirection::Left),
-            Action::PreviousDesktop
+            Action::PrevTab
         );
         assert_eq!(
             default_gesture_binding(GestureDirection::Right),
-            Action::NextDesktop
+            Action::NextTab
         );
     }
 

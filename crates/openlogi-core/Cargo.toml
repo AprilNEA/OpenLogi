@@ -16,6 +16,15 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 fs4 = { version = "1.1.0", features = ["sync"] }
+etcetera = "0.11.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.25.0", default-features = false, features = ["link", "highsierra"] }
+core-foundation = { workspace = true }
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = ["NSEvent"] }
+objc2-core-graphics = { version = "0.3.2", features = ["CGEvent"] }
+objc2-foundation = "0.3.2"
 
 [dev-dependencies]
 tempfile = "3"

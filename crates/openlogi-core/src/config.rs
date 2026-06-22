@@ -2,9 +2,8 @@
 //! path.
 //!
 //! Per-device state (button bindings, …) lives under the
-//! [`Config::devices`] map, keyed by the HID++ identifier returned by
-//! [`DeviceModelInfo::config_key`](crate::device::DeviceModelInfo::config_key)
-//! — e.g. `"2b042"` for an MX Master 4. Schema migrations branch on
+//! [`Config::devices`] map, keyed by a stable physical-device identifier such
+//! as `"receiver:abc123:slot:2"`. Schema migrations branch on
 //! [`Config::schema_version`].
 
 use std::{
@@ -17,19 +16,23 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::binding::{Action, Binding, ButtonId, GestureDirection, default_binding_for};
-use crate::device::{Capabilities, DeviceKind};
+use crate::device::{Capabilities, DeviceKind, DeviceModelInfo};
 use crate::paths::{self, PathsError};
 
 /// The schema version the current build produces. Bumped on breaking layout
 /// changes; readers branch on the parsed value before consuming the rest of
 /// the file.
 ///
+/// v3 changes the device map from model keys to physical-device keys. No v2
+/// device entries are migrated because model-scoped settings cannot be assigned
+/// safely when two identical devices exist.
+///
 /// v2 merged the per-device `button_bindings` + `gesture_bindings` maps into a
 /// single `bindings: BTreeMap<ButtonId, Binding>`. A v1 file still loads (the
 /// `RawDeviceConfig` shim folds the legacy fields) and self-heals to v2 on the
 /// next save; [`Config::load_from_path`] rejects only versions *newer* than this
 /// so a forward file fails loudly instead of silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,7 +41,7 @@ pub struct Config {
     /// Non-device-scoped preferences (autostart, tray, language, …).
     #[serde(default, skip_serializing_if = "AppSettings::is_default")]
     pub app_settings: AppSettings,
-    /// HID++ `config_key` of the carousel-selected device, persisted so a
+    /// Physical config key of the carousel-selected device, persisted so a
     /// restart restores the last view rather than always landing on the
     /// first paired device. `None` means "fall back to the first device".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -327,6 +330,14 @@ pub struct DeviceIdentity {
     /// The name shown in the carousel, as resolved from the asset registry the
     /// last time the device was online.
     pub display_name: String,
+    /// HID++ model identity from feature 0x0003, when available. Persisted so
+    /// the GUI can resolve the same curated asset while the device is asleep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_info: Option<DeviceModelInfo>,
+    /// Firmware codename, when available. Used as an asset-resolution hint and
+    /// as a readable fallback for devices without curated model metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codename: Option<String>,
     /// The device's resolved [`DeviceKind`] (asset registry preferred, HID++
     /// classification as fallback).
     pub kind: DeviceKind,
@@ -335,7 +346,7 @@ pub struct DeviceIdentity {
     pub capabilities: Capabilities,
 }
 
-/// Settings scoped to a single physical device (keyed by HID++ model+ext).
+/// Settings scoped to a single physical device.
 ///
 /// Deserialization goes through `RawDeviceConfig` (`#[serde(from)]`) so
 /// pre-v2 files — which split bindings across `button_bindings` +
@@ -390,6 +401,24 @@ pub struct DeviceConfig {
     /// the same reason as [`Self::dpi`]. `None` until the user changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smartshift: Option<SmartShift>,
+    /// Invert this device's scroll-wheel direction relative to the OS setting
+    /// (issue #126): on, a wheel tick scrolls the opposite way, so a user who
+    /// keeps macOS "natural scrolling" for the trackpad can have a traditional
+    /// "reverse" wheel on the mouse. Vertical only; the agent applies it through
+    /// the device's HID++ native wheel-inversion mode when supported. `false`
+    /// (default) is the native direction, and is omitted from `config.toml`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub invert_scroll: bool,
+}
+
+/// `skip_serializing_if` helper for plain `bool` fields whose default is
+/// `false`: keeps an unset toggle out of `config.toml` entirely.
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Deserialize-only shim that folds the pre-v2 `button_bindings` +
@@ -425,6 +454,8 @@ struct RawDeviceConfig {
     lighting: Option<Lighting>,
     #[serde(default)]
     smartshift: Option<SmartShift>,
+    #[serde(default)]
+    invert_scroll: bool,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -467,6 +498,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             dpi: raw.dpi,
             lighting: raw.lighting,
             smartshift: raw.smartshift,
+            invert_scroll: raw.invert_scroll,
         }
     }
 }
@@ -879,6 +911,24 @@ impl Config {
             .or_default()
             .smartshift = Some(smartshift);
     }
+
+    /// Whether `device_key`'s scroll wheel is inverted (issue #126). `false`
+    /// (the native direction) for an unconfigured or absent device.
+    #[must_use]
+    pub fn invert_scroll(&self, device_key: &str) -> bool {
+        self.devices
+            .get(device_key)
+            .is_some_and(|d| d.invert_scroll)
+    }
+
+    /// Set whether `device_key`'s scroll wheel is inverted. The agent reads this
+    /// on the next `ReloadConfig` and applies it in the OS hook.
+    pub fn set_invert_scroll(&mut self, device_key: &str, invert: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .invert_scroll = invert;
+    }
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -988,6 +1038,31 @@ mod tests {
     }
 
     #[test]
+    fn invert_scroll_roundtrips_per_device() {
+        let mut cfg = Config::default();
+        // Default is the native direction for any device, present or not.
+        assert!(!cfg.invert_scroll("2b042"));
+        cfg.set_invert_scroll("2b042", true);
+        let restored = write_and_read(&cfg);
+        assert!(restored.invert_scroll("2b042"));
+        assert!(!restored.invert_scroll("absent"));
+    }
+
+    #[test]
+    fn default_invert_scroll_is_omitted_from_toml() {
+        // A device block with only the default (false) invert_scroll must not
+        // emit the field — `skip_serializing_if` keeps configs clean.
+        let mut cfg = Config::default();
+        cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Copy));
+        cfg.set_invert_scroll("2b042", false);
+        let body = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(
+            !body.contains("invert_scroll"),
+            "default invert_scroll should be omitted: {body}"
+        );
+    }
+
+    #[test]
     fn bindings_roundtrip_per_device() {
         let mut cfg = Config::default();
         cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Copy));
@@ -1039,10 +1114,10 @@ mod tests {
         );
         let body = toml::to_string_pretty(&cfg).expect("serialize");
 
-        // The model id only contains [A-Za-z0-9_], so TOML emits it as a
-        // bare-word table key (no surrounding quotes). The test asserts the
-        // observable structure rather than locking in a specific quoting.
-        assert!(body.contains("schema_version = 2"), "got: {body}");
+        // The key only contains [A-Za-z0-9_], so TOML emits it as a bare-word
+        // table key (no surrounding quotes). The test asserts the observable
+        // structure rather than locking in a specific quoting.
+        assert!(body.contains("schema_version = 3"), "got: {body}");
         assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
         // A `Single` binding serializes byte-identically to the pre-v2 bare
         // `Action`, so the leaf line is unchanged.
@@ -1084,11 +1159,14 @@ mod tests {
         let mut cfg = Config::default();
         let mouse = DeviceIdentity {
             display_name: "MX Master 3S".to_string(),
+            model_info: None,
+            codename: None,
             kind: DeviceKind::Mouse,
             capabilities: Capabilities {
                 buttons: true,
                 pointer: true,
                 lighting: false,
+                scroll_inversion: false,
             },
         };
         cfg.set_device_identity("2b034", mouse.clone());
@@ -1268,10 +1346,10 @@ Click = \"Paste\"
             Some(&Binding::Gesture(gesture))
         );
 
-        // Saving self-heals to the v2 shape: stamped version + merged table,
+        // Saving self-heals to the current shape: stamped version + merged table,
         // legacy field names gone.
         let body = toml::to_string_pretty(&cfg).expect("serialize");
-        assert!(body.contains("schema_version = 2"), "got: {body}");
+        assert!(body.contains("schema_version = 3"), "got: {body}");
         assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
         assert!(!body.contains("button_bindings"), "got: {body}");
         assert!(!body.contains("gesture_bindings"), "got: {body}");

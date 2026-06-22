@@ -112,7 +112,7 @@ pub fn open_pane(permission: Permission) {
         Permission::Bluetooth => "Privacy_Bluetooth",
     };
     let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
-    if let Err(e) = std::process::Command::new("open").arg(&url).spawn() {
+    if let Err(e) = opener::open(&url) {
         tracing::warn!(error = %e, url, "could not open System Settings");
     }
 }

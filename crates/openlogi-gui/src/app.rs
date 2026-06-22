@@ -21,6 +21,7 @@ use openlogi_core::device::{
 };
 use openlogi_hid::DeviceRoute;
 use tracing::info;
+use url::Url;
 
 use openlogi_agent_core::ipc::InventoryHealth;
 
@@ -32,7 +33,7 @@ use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AgentLink, AppState, DeviceRecord};
-use crate::theme::{self, FOOTER_H, HEADER_H, Palette};
+use crate::theme::{self, FOOTER_H, HEADER_H, Palette, SelectableStyle as _};
 
 /// Which screen the root view is showing.
 ///
@@ -887,7 +888,7 @@ fn detail_content(
 ) -> impl IntoElement {
     match active {
         DetailTab::Buttons => buttons_tab(mouse_model).into_any_element(),
-        DetailTab::Pointer => pointer_tab(dpi_panel, smartshift_panel, pal).into_any_element(),
+        DetailTab::Pointer => pointer_tab(dpi_panel, smartshift_panel, pal, cx).into_any_element(),
         DetailTab::Lighting => lighting_tab(lighting_panel, pal).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
     }
@@ -934,12 +935,13 @@ fn buttons_tab(mouse_model: &Entity<MouseModelView>) -> impl IntoElement {
         .child(div().w_full().max_w(px(760.)).child(mouse_model.clone()))
 }
 
-/// Pointer tab: the DPI panel and the SmartShift wheel controls, each in a
-/// titled card, stacked.
+/// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
+/// scroll-wheel preferences, each in a titled card, stacked.
 fn pointer_tab(
     dpi_panel: &Entity<DpiPanel>,
     smartshift_panel: &Entity<SmartShiftPanel>,
     pal: Palette,
+    cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     v_flex()
         .flex_1()
@@ -961,6 +963,91 @@ fn pointer_tab(
             pal,
             smartshift_panel.clone().into_any_element(),
         )))
+        .child(
+            div()
+                .w_full()
+                .max_w(px(560.))
+                .child(scrolling_card(pal, cx)),
+        )
+}
+
+/// Scrolling card: a per-device "invert scroll direction" toggle (#126). Pure
+/// config — no hardware read — so it is a plain switch row rather than an
+/// `Entity` panel like DPI / SmartShift.
+fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let (inverted, supported) = cx.try_global::<AppState>().map_or((false, false), |state| {
+        (
+            state.current_invert_scroll(),
+            state.current_scroll_inversion_supported(),
+        )
+    });
+    let description = if supported {
+        tr!("Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.")
+    } else {
+        tr!("This device does not report native HID++ scroll inversion support.")
+    };
+    let row = h_flex()
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(
+            v_flex()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(pal.text_primary)
+                        .child(tr!("Invert scroll direction")),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(pal.text_muted)
+                        .child(description),
+                ),
+        )
+        .child(invert_scroll_toggle(inverted, supported, pal));
+    panel_card(
+        tr!("Scrolling"),
+        IconName::Settings,
+        pal,
+        row.into_any_element(),
+    )
+}
+
+/// On/Off pill that flips the active device's scroll-wheel inversion, mirroring
+/// the SmartShift permanent-ratchet toggle.
+fn invert_scroll_toggle(on: bool, enabled: bool, pal: Palette) -> AnyElement {
+    let label = if on { tr!("On") } else { tr!("Off") };
+    if !enabled {
+        return div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(pal.border)
+            .text_xs()
+            .text_color(pal.text_muted)
+            .child(tr!("Unavailable"))
+            .into_any_element();
+    }
+    div()
+        .id("invert-scroll-toggle")
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .selected_border(on, pal)
+        .selected_fill(on)
+        .text_xs()
+        .text_color(if on { pal.text_primary } else { pal.text_muted })
+        .cursor_pointer()
+        .child(label)
+        .on_click(move |_event, _window, cx| {
+            cx.update_global::<AppState, _>(|state, _| {
+                state.commit_invert_scroll(!on);
+            });
+            cx.refresh_windows();
+        })
+        .into_any_element()
 }
 
 /// Lighting tab: the RGB controls (swatches, on/off, brightness) in a titled
@@ -1082,8 +1169,10 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                     tr!("Config folder"),
                     pal,
                     |_event, _window, cx| {
-                        if let Ok(path) = openlogi_core::paths::config_dir() {
-                            cx.open_url(&file_url(&path));
+                        if let Ok(path) = openlogi_core::paths::config_dir()
+                            && let Some(url) = file_url(&path)
+                        {
+                            cx.open_url(&url);
                         }
                     },
                 )),
@@ -1291,8 +1380,8 @@ fn relative_percent(value: u8) -> gpui::DefiniteLength {
     relative(f32::from(value.clamp(1, 100)) / 100.)
 }
 
-fn file_url(path: &std::path::Path) -> String {
-    format!("file://{}", path.to_string_lossy().replace(' ', "%20"))
+fn file_url(path: &std::path::Path) -> Option<String> {
+    Url::from_file_path(path).ok().map(Into::into)
 }
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"
@@ -1570,8 +1659,11 @@ mod tests {
     fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord {
         DeviceRecord {
             config_key: "test".to_string(),
+            model_key: "test".to_string(),
             display_name: "Test".to_string(),
             asset: None,
+            model_info: None,
+            codename: None,
             serial_number: None,
             unit_id: [0; 4],
             route: None,
@@ -1592,6 +1684,7 @@ mod tests {
             buttons: true,
             pointer: true,
             lighting: false,
+            scroll_inversion: false,
         });
         // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -1609,6 +1702,7 @@ mod tests {
             buttons: true,
             pointer: false,
             lighting: true,
+            scroll_inversion: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(

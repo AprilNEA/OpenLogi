@@ -10,6 +10,7 @@ use futures_concurrency::future::Join as _;
 use hidpp::{
     channel::HidppChannel,
     device::Device,
+    feature::hires_wheel::HiResWheelFeature,
     feature::{
         CreatableFeature, device_information::DeviceInformationFeature,
         device_type_and_name::DeviceTypeAndNameFeature, unified_battery::UnifiedBatteryFeature,
@@ -987,7 +988,7 @@ async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> (ProbedFeature
     // The enumeration response IS the device's feature-ID table — capture it
     // for capability derivation instead of discarding it.
     let mut battery_index = None;
-    let capabilities = match device.enumerate_features().await {
+    let mut capabilities = match device.enumerate_features().await {
         Ok(Some(features)) => {
             let ids: Vec<u16> = features.iter().map(|f| f.id).collect();
             battery_index = battery_feature_index(ids.iter().copied());
@@ -999,6 +1000,14 @@ async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> (ProbedFeature
             return (ProbedFeatures::default(), None);
         }
     };
+    if let Some(caps) = capabilities.as_mut()
+        && let Some(feature) = device.get_feature::<HiResWheelFeature>()
+    {
+        caps.scroll_inversion = feature
+            .get_wheel_capabilities()
+            .await
+            .is_ok_and(|wheel| wheel.has_invert);
+    }
 
     let battery = match battery_index {
         Some(feature_index) => read_battery(channel, slot, feature_index).await,

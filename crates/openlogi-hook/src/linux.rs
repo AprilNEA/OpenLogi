@@ -21,7 +21,7 @@ use std::sync::{
 use std::thread;
 
 use evdev::uinput::VirtualDevice;
-use evdev::{Device, EventSummary, KeyCode, RelativeAxisCode};
+use evdev::{Device, EventSummary, InputEvent, KeyCode, RelativeAxisCode};
 use tracing::{debug, error, warn};
 use x11rb::connection::Connection as _;
 use x11rb::properties::WmClass;
@@ -211,10 +211,13 @@ fn wait_readable(device_fd: i32, stop_fd: i32) -> bool {
 }
 
 fn scroll(delta_x: f32, delta_y: f32) -> MouseEvent {
+    // evdev delivers the wheel and the trackpad as distinct devices, so a wheel
+    // event is always a mouse wheel — never a trackpad gesture.
     MouseEvent::Scroll {
         delta_x,
         delta_y,
-        is_continuous: false,
+        from_trackpad: false,
+        device: None,
     }
 }
 
@@ -370,8 +373,11 @@ fn device_thread(
                     }
                     None => EventDisposition::PassThrough,
                 };
-                if !matches!(disposition, EventDisposition::Suppress) {
-                    pending.push(event);
+                match disposition {
+                    EventDisposition::PassThrough | EventDisposition::TransformScroll(_) => {
+                        pending.push(event)
+                    }
+                    EventDisposition::Suppress => {}
                 }
             }
         }

@@ -1,10 +1,10 @@
 use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
 
 use anyhow::Result;
 use clap::Parser;
+use xshell::{Shell, cmd};
 
-use crate::util::{absolutize, ensure_command, ensure_file, repo_root, run};
+use crate::util::{absolutize, ensure_command, ensure_file, repo_root};
 
 #[derive(Parser)]
 pub(crate) struct PackageLinux {
@@ -18,21 +18,16 @@ pub(crate) struct PackageLinux {
 
 pub(crate) fn package_linux(args: &PackageLinux) -> Result<()> {
     let root = repo_root()?;
+    let sh = Shell::new()?;
+    let _repo = sh.push_dir(&root);
 
     if !args.no_build {
         println!("==> build release binaries");
-        run(ProcessCommand::new("cargo")
-            .args([
-                "build",
-                "--release",
-                "-p",
-                "openlogi",
-                "-p",
-                "openlogi-gui",
-                "-p",
-                "openlogi-agent",
-            ])
-            .current_dir(&root))?;
+        cmd!(
+            sh,
+            "cargo build --release -p openlogi -p openlogi-gui -p openlogi-agent"
+        )
+        .run()?;
     }
 
     for bin in ["openlogi", "openlogi-gui", "openlogi-agent"] {
@@ -55,14 +50,13 @@ pub(crate) fn package_linux(args: &PackageLinux) -> Result<()> {
 
     for packager in ["deb", "rpm"] {
         println!("==> nfpm {packager} ({pkg_arch})");
-        run(ProcessCommand::new("nfpm")
-            .args(["package", "--packager", packager, "--config"])
-            .arg(&config)
-            .arg("--target")
-            .arg(&output)
-            .env("VERSION", env!("CARGO_PKG_VERSION"))
-            .env("PKG_ARCH", pkg_arch)
-            .current_dir(&root))?;
+        cmd!(
+            sh,
+            "nfpm package --packager {packager} --config {config} --target {output}"
+        )
+        .env("VERSION", env!("CARGO_PKG_VERSION"))
+        .env("PKG_ARCH", pkg_arch)
+        .run()?;
     }
 
     println!();

@@ -86,7 +86,9 @@ pub fn reconcile(enabled: bool) {
 fn reconcile_macos(enabled: bool) -> io::Result<()> {
     let path = plist_path(LABEL)?;
     let exe = std::env::current_exe()?;
-    let desired = enabled.then(|| render_plist(&exe.to_string_lossy()));
+    let desired = enabled
+        .then(|| render_plist(&exe.to_string_lossy()))
+        .transpose()?;
 
     let current = std::fs::read_to_string(&path).ok();
     match (desired.as_deref(), current.as_deref()) {
@@ -137,44 +139,22 @@ fn plist_path(label: &str) -> io::Result<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn render_plist(exe: &str) -> String {
-    let exe = xml_escape(exe);
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-        <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
-        \"http://www.apple.com/DTD/PropertyList-1.0.dtd\">\n\
-        <plist version=\"1.0\">\n\
-        <dict>\n  \
-        <key>Label</key>\n  \
-        <string>{LABEL}</string>\n  \
-        <key>ProgramArguments</key>\n  \
-        <array>\n    \
-        <string>{exe}</string>\n  \
-        </array>\n  \
-        <key>RunAtLoad</key>\n  \
-        <true/>\n  \
-        <key>KeepAlive</key>\n  \
-        <dict>\n    \
-        <key>SuccessfulExit</key>\n    \
-        <false/>\n  \
-        </dict>\n\
-        </dict>\n\
-        </plist>\n",
-    )
-}
+fn render_plist(exe: &str) -> io::Result<String> {
+    let mut keep_alive = plist::Dictionary::new();
+    keep_alive.insert("SuccessfulExit".into(), plist::Value::Boolean(false));
 
-/// Escape a string for inclusion in plist XML element text. A path can legally
-/// contain `&`, `<`, `>` (all valid APFS filename characters); left raw they
-/// produce a malformed plist that `std::fs::write` stores happily but launchd
-/// silently rejects at the next login, so the agent would never auto-start.
-/// `&` is replaced first so it doesn't double-escape the entities below.
-#[cfg(target_os = "macos")]
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+    let mut root = plist::Dictionary::new();
+    root.insert("Label".into(), plist::Value::String(LABEL.into()));
+    root.insert(
+        "ProgramArguments".into(),
+        plist::Value::Array(vec![plist::Value::String(exe.into())]),
+    );
+    root.insert("RunAtLoad".into(), plist::Value::Boolean(true));
+    root.insert("KeepAlive".into(), plist::Value::Dictionary(keep_alive));
+
+    let mut bytes = Vec::new();
+    plist::to_writer_xml(&mut bytes, &plist::Value::Dictionary(root)).map_err(io::Error::other)?;
+    String::from_utf8(bytes).map_err(io::Error::other)
 }
 
 /// HKCU autostart subkey + value name for the agent.
@@ -330,6 +310,7 @@ fn run_systemctl(args: &[&str]) {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(all(test, target_os = "macos"))]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 
@@ -337,26 +318,41 @@ mod tests {
     fn rendered_plist_targets_the_agent_and_keeps_alive() {
         let body = render_plist(
             "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
-        );
+        )
+        .expect("render plist");
         assert!(body.contains(LABEL));
         assert!(body.contains("openlogi-agent"));
         assert!(body.contains("RunAtLoad"));
         // KeepAlive uses SuccessfulExit:false so a crash respawns but the tray's
         // Quit (a clean exit(0)) is NOT relaunched; no --minimized (always headless).
-        assert!(body.contains(
-            "<key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>"
-        ));
+        let parsed = plist::Value::from_reader_xml(body.as_bytes()).expect("parse plist");
+        let keep_alive = parsed
+            .as_dictionary()
+            .and_then(|root| root.get("KeepAlive"))
+            .and_then(plist::Value::as_dictionary)
+            .expect("KeepAlive dictionary");
+        assert_eq!(
+            keep_alive
+                .get("SuccessfulExit")
+                .and_then(plist::Value::as_boolean),
+            Some(false)
+        );
         assert!(!body.contains("--minimized"));
     }
 
     #[test]
-    fn render_plist_escapes_xml_metacharacters_in_the_path() {
+    fn render_plist_serializes_xml_metacharacters_in_the_path() {
         // A home/app path with XML metacharacters (all legal APFS filename chars)
         // must not produce a malformed plist launchd would reject.
-        let body = render_plist("/Users/R&D/Apps/<OpenLogi>/openlogi-agent");
-        assert!(body.contains("/Users/R&amp;D/Apps/&lt;OpenLogi&gt;/openlogi-agent"));
-        // The raw, unescaped ampersand must not survive into the plist.
-        assert!(!body.contains("R&D"));
+        let path = "/Users/R&D/Apps/<OpenLogi>/openlogi-agent";
+        let body = render_plist(path).expect("render plist");
+        let parsed = plist::Value::from_reader_xml(body.as_bytes()).expect("parse plist");
+        let args = parsed
+            .as_dictionary()
+            .and_then(|root| root.get("ProgramArguments"))
+            .and_then(plist::Value::as_array)
+            .expect("ProgramArguments array");
+        assert_eq!(args.first().and_then(plist::Value::as_string), Some(path));
     }
 }
 
