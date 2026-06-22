@@ -1,18 +1,25 @@
 //! macOS `CGEventTap` implementation of the OS-level mouse hook.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
 use std::thread;
 
+use core_foundation::base::{CFTypeRef, TCFType as _};
+use core_foundation::number::CFNumber;
 use core_foundation::runloop::{
     CFRunLoop, CFRunLoopRunResult, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
 };
+use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::event::{
     CGEvent, CGEventField, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
-    CGEventTapProxy, CGEventType, CallbackResult, EventField,
+    CGEventTapProxy, CGEventType, CallbackResult, EventField, ScrollEventUnit,
 };
+use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+use foreign_types_shared::ForeignType as _;
 use tracing::{debug, error, warn};
 
-use crate::{ButtonId, EventDisposition, HookError, MouseEvent};
+use crate::{ButtonId, EventDevice, EventDisposition, HookError, MouseEvent};
 
 /// Everything `Hook` needs to control the background thread.
 pub(crate) struct HookInner {
@@ -33,6 +40,152 @@ unsafe impl Send for HookInner {}
 unsafe extern "C" {
     fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
     static kAXTrustedCheckOptionPrompt: core_foundation::string::CFStringRef;
+}
+
+/// Opaque `IOHIDEventRef` — the HID event backing a `CGEvent`.
+type IOHIDEventRef = *mut std::ffi::c_void;
+
+// Device-of-origin lookup. `CGEventCopyIOHIDEvent` (CoreGraphics) returns the
+// HID event behind a CGEvent; `IOHIDEventGetSenderID` (IOKit) yields the
+// registry id of the producing service. These are undocumented but long-stable
+// symbols (Mac Mouse Fix / Karabiner use them) — the only reliable way to tell a
+// hi-res mouse wheel from a trackpad, which carry identical CGEvent phase flags.
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGEventCopyIOHIDEvent(event: *const std::ffi::c_void) -> IOHIDEventRef;
+}
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOHIDEventGetSenderID(event: IOHIDEventRef) -> u64;
+}
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(cf: *const std::ffi::c_void);
+}
+
+/// The registry id of the device that produced `event`, via its backing
+/// IOHIDEvent. `None` for events with no HID backing (e.g. synthetic ones).
+fn event_sender_id(event: &CGEvent) -> Option<u64> {
+    // SAFETY: `event.as_ptr()` is the live CGEventRef; `CGEventCopyIOHIDEvent`
+    // returns a +1-retained IOHIDEvent (or null) which we release below.
+    let hid = unsafe { CGEventCopyIOHIDEvent(event.as_ptr().cast()) };
+    if hid.is_null() {
+        return None;
+    }
+    // SAFETY: `hid` is a live IOHIDEvent for the duration of the call.
+    let sender = unsafe { IOHIDEventGetSenderID(hid) };
+    // SAFETY: balance the +1 retain from `CGEventCopyIOHIDEvent`.
+    unsafe { CFRelease(hid) };
+    Some(sender)
+}
+
+/// IOKit registry walk to read a device's HID usage page. `IORegistryEntryIDMatching`
+/// builds a matching dict for the service id; `IOServiceGetMatchingService` resolves
+/// it (and releases the dict); `IORegistryEntrySearchCFProperty` reads a property,
+/// searching parents so the usage page on the owning `IOHIDDevice` is found.
+type IoObjectT = u32;
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IORegistryEntryIDMatching(entry_id: u64) -> *mut std::ffi::c_void;
+    fn IOServiceGetMatchingService(main_port: u32, matching: *const std::ffi::c_void) -> IoObjectT;
+    fn IORegistryEntrySearchCFProperty(
+        entry: IoObjectT,
+        plane: *const std::ffi::c_char,
+        key: CFStringRef,
+        allocator: CFTypeRef,
+        options: u32,
+    ) -> CFTypeRef;
+    fn IOObjectRelease(object: IoObjectT) -> i32;
+}
+
+const IO_REGISTRY_ITERATE_RECURSIVELY: u32 = 1;
+const IO_REGISTRY_ITERATE_PARENTS: u32 = 2;
+
+/// Resolve `sender_id` to its IO service, or `None`. Caller must
+/// `IOObjectRelease` the result.
+fn open_service(sender_id: u64) -> Option<IoObjectT> {
+    // SAFETY: returns a +1 matching dict; `IOServiceGetMatchingService` consumes it.
+    let matching = unsafe { IORegistryEntryIDMatching(sender_id) };
+    if matching.is_null() {
+        return None;
+    }
+    // SAFETY: `matching` is a valid +1 dict (consumed here); 0 = default main port.
+    let service = unsafe { IOServiceGetMatchingService(0, matching) };
+    (service != 0).then_some(service)
+}
+
+/// Read property `key` off `service` (searching parents), as a `+1` CFTypeRef the
+/// caller owns. `None` if absent.
+fn service_property(service: IoObjectT, key: &str) -> Option<CFTypeRef> {
+    let cf_key = CFString::new(key);
+    let plane = c"IOService";
+    // SAFETY: `service` is live; `cf_key` is a valid CFStringRef; null allocator is
+    // the documented default; returns a +1 CF value (or null).
+    let prop = unsafe {
+        IORegistryEntrySearchCFProperty(
+            service,
+            plane.as_ptr(),
+            cf_key.as_concrete_TypeRef(),
+            std::ptr::null(),
+            IO_REGISTRY_ITERATE_RECURSIVELY | IO_REGISTRY_ITERATE_PARENTS,
+        )
+    };
+    (!prop.is_null()).then_some(prop)
+}
+
+/// Cached device facts derived from the IOKit sender id behind a scroll event.
+#[derive(Clone, Default)]
+struct SenderDeviceInfo {
+    event_device: EventDevice,
+    is_trackpad: bool,
+}
+
+/// Device facts for the registry id `sender_id`. A trackpad presents a *mouse*
+/// HID interface for scrolling, so usage can't separate it from a real wheel;
+/// product identity stays stable across wheel modes, unlike CGEvent phase.
+/// Cached per id because the registry walk is slow and identity never changes.
+fn sender_device_info(sender_id: u64) -> SenderDeviceInfo {
+    thread_local! {
+        static CACHE: RefCell<HashMap<u64, SenderDeviceInfo>> = RefCell::new(HashMap::new());
+    }
+    CACHE.with_borrow_mut(|cache| {
+        cache
+            .entry(sender_id)
+            .or_insert_with(|| {
+                let Some(service) = open_service(sender_id) else {
+                    return SenderDeviceInfo::default();
+                };
+                let string_prop = |k| {
+                    // SAFETY: a String property is a +1 CFString; wrap takes ownership.
+                    service_property(service, k)
+                        .map(|p| unsafe { CFString::wrap_under_create_rule(p.cast()) }.to_string())
+                };
+                let num_prop = |k| {
+                    // SAFETY: a numeric property is a +1 CFNumber; wrap takes ownership.
+                    service_property(service, k)
+                        .and_then(|p| {
+                            unsafe { CFNumber::wrap_under_create_rule(p.cast()) }.to_i64()
+                        })
+                        .and_then(|n| u32::try_from(n).ok())
+                };
+                // SAFETY: a String property is a +1 CFString; wrap takes ownership.
+                let product_name = string_prop("Product");
+                let info = SenderDeviceInfo {
+                    is_trackpad: product_name
+                        .as_deref()
+                        .is_some_and(|p| p.to_lowercase().contains("trackpad")),
+                    event_device: EventDevice {
+                        vendor_id: num_prop("VendorID").or_else(|| num_prop("idVendor")),
+                        product_id: num_prop("ProductID").or_else(|| num_prop("idProduct")),
+                        product_name,
+                    },
+                };
+                // SAFETY: `service` is a live io_object_t we own.
+                unsafe { IOObjectRelease(service) };
+                info
+            })
+            .clone()
+    })
 }
 
 /// Check whether this process has been granted Accessibility access.
@@ -103,13 +256,11 @@ fn button_number_to_id(n: i64) -> Option<ButtonId> {
 /// Convert a `CGEvent` to our [`MouseEvent`] vocabulary. Returns `None`
 /// for event types we don't translate (e.g. move events, unknown buttons).
 fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
-    // Skip events OpenLogi itself synthesised ([`Action::execute`] stamps them),
-    // so a remapped click we posted doesn't re-enter the hook as real input and,
-    // for a gesture button, get misread as a fresh hold. Only button events are
-    // ever synthesised (`Action::execute` posts buttons, never moves/scroll), so
-    // gate the field read on button types — keeping the FFI call off the
-    // high-rate pointer-move stream.
-    let is_button = matches!(
+    // Skip events OpenLogi itself synthesised, so a remapped click or inverted
+    // scroll we posted doesn't re-enter the hook as real input. Gate the field
+    // read to events we synthesize — keeping the FFI call off the high-rate
+    // pointer-move stream.
+    let can_be_synthetic = matches!(
         etype,
         CGEventType::LeftMouseDown
             | CGEventType::LeftMouseUp
@@ -117,8 +268,9 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             | CGEventType::RightMouseUp
             | CGEventType::OtherMouseDown
             | CGEventType::OtherMouseUp
+            | CGEventType::ScrollWheel
     );
-    if is_button
+    if can_be_synthetic
         && event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
             == openlogi_inject::SYNTHETIC_EVENT_USER_DATA
     {
@@ -150,14 +302,22 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             button_number_to_id(n).map(|id| MouseEvent::Button { id, pressed: false })
         }
         CGEventType::ScrollWheel => {
-            // axis 1 = vertical scroll; axis 2 = horizontal scroll.
-            let dy = event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1);
-            let dx = event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2);
-            // Continuous events come from a trackpad / Magic Mouse gesture; a
-            // notched mouse wheel is discrete. The consumer uses this to invert
-            // the wheel without disturbing native trackpad scrolling (#126).
-            let is_continuous =
-                event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS) != 0;
+            // axis 1 = vertical scroll; axis 2 = horizontal scroll. Read the
+            // pixel-precise delta in preference to the coarse line delta (a hi-res
+            // wheel reports its motion in the pixel field with the line field at 0,
+            // so reading only the line field would look like "no scroll").
+            let dy = usable_scroll_delta(event, VERTICAL);
+            let dx = usable_scroll_delta(event, HORIZONTAL);
+            // Device identity is the reliable signal: a free-spinning Logitech
+            // wheel sets the CGEvent phase, so phase alone misclassifies it as a
+            // trackpad. Fall back to the phase heuristic only for a sender-less
+            // (synthetic) event, which has no device to identify.
+            let phase = event.get_integer_value_field(SCROLL_PHASE) != 0
+                || event.get_integer_value_field(MOMENTUM_PHASE) != 0
+                || event.get_integer_value_field(SCROLL_COUNT) != 0;
+            let sender = event_sender_id(event);
+            let device_info = sender.map(sender_device_info);
+            let from_trackpad = device_info.as_ref().map_or(phase, |info| info.is_trackpad);
             #[allow(
                 clippy::cast_possible_truncation,
                 reason = "scroll deltas are small fractional values that fit comfortably in f32"
@@ -165,7 +325,8 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             Some(MouseEvent::Scroll {
                 delta_x: dx as f32,
                 delta_y: dy as f32,
-                is_continuous,
+                from_trackpad,
+                device: device_info.map(|info| info.event_device),
             })
         }
         // Pointer movement feeds gesture-button swipe detection. While a button
@@ -200,52 +361,134 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
     }
 }
 
-/// Rewrite a live `ScrollWheel` event so its deltas become `(new_dx, new_dy)`
-/// in the line units the tap reports. macOS hands modern apps a pixel-precise
-/// delta and a fixed-point delta *alongside* the integer line delta, and an app
-/// with smooth scrolling reads those, not the line field — so flipping only the
-/// line delta would leave such apps scrolling the original way. Each axis scales
-/// all three companion fields by the same factor (`-1` for the inversion in
-/// #126, which is exact), keeping the smooth-scroll path consistent with the
-/// notched one.
-fn rewrite_scroll(event: &CGEvent, horizontal: f64, vertical: f64) {
-    // Vertical = axis 1, horizontal = axis 2 (mirrors `translate`).
-    rewrite_scroll_axis(
-        event,
-        vertical,
-        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
-        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
-        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1,
-    );
-    rewrite_scroll_axis(
-        event,
-        horizontal,
-        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2,
-        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
-        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2,
-    );
+/// The three delta encodings macOS attaches to one scroll axis: the coarse
+/// integer line delta, the fixed-point delta, and the pixel-precise point
+/// delta. An app reads whichever it prefers, so any transform must touch all
+/// three.
+#[derive(Clone, Copy)]
+struct ScrollAxisFields {
+    line: CGEventField,
+    fixed: CGEventField,
+    point: CGEventField,
 }
 
-/// Rewrite one scroll axis: set its line delta to `new_line` and scale the
-/// fixed-point + pixel companions by `new_line / old_line` so they agree. A
-/// zero original delta means no scroll on this axis, so the companions are left
-/// untouched (and the division avoided).
-fn rewrite_scroll_axis(
-    event: &CGEvent,
-    new_line: f64,
-    line_field: CGEventField,
-    fixed_field: CGEventField,
-    point_field: CGEventField,
-) {
-    let old_line = event.get_double_value_field(line_field);
-    event.set_double_value_field(line_field, new_line);
-    if old_line != 0.0 {
-        let scale = new_line / old_line;
-        let fixed = event.get_double_value_field(fixed_field);
-        event.set_double_value_field(fixed_field, fixed * scale);
-        let point = event.get_double_value_field(point_field);
-        event.set_double_value_field(point_field, point * scale);
+const VERTICAL: ScrollAxisFields = ScrollAxisFields {
+    line: EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
+    fixed: EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
+    point: EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1,
+};
+const HORIZONTAL: ScrollAxisFields = ScrollAxisFields {
+    line: EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2,
+    fixed: EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
+    point: EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2,
+};
+
+// Phase fields aren't exposed by core-graphics 0.25; the raw ids come from
+// `CGEventTypes.h`. A trackpad sets one of these; a mouse wheel never does.
+const SCROLL_PHASE: CGEventField = 99; // kCGScrollWheelEventScrollPhase
+const SCROLL_COUNT: CGEventField = 100; // kCGScrollWheelEventScrollCount
+const MOMENTUM_PHASE: CGEventField = 123; // kCGScrollWheelEventMomentumPhase
+
+/// The scroll magnitude for `axis`, preferring the pixel-precise field, then the
+/// fixed-point, then the integer line — the order the reference tools use, so a
+/// hi-res wheel (which reports in the pixel field with the line field at 0) is
+/// not mistaken for "no scroll".
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "scroll line deltas are small integers, exact in f64"
+)]
+fn usable_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
+    let point = event.get_double_value_field(axis.point);
+    if point != 0.0 {
+        return point;
     }
+    let fixed = event.get_double_value_field(axis.fixed);
+    if fixed != 0.0 {
+        return fixed;
+    }
+    event.get_integer_value_field(axis.line) as f64
+}
+
+fn scroll_diag_enabled() -> bool {
+    std::env::var_os("OPENLOGI_SCROLL_DIAG").is_some()
+}
+
+/// The value and unit to use when re-synthesising a captured scroll axis.
+#[derive(Clone, Copy)]
+struct SyntheticScrollDelta {
+    value: i32,
+    uses_pixels: bool,
+}
+
+/// Convert one captured scroll axis into the integer delta accepted by
+/// `CGEventCreateScrollWheelEvent`. Pixel/fixed-point input stays pixel-based;
+/// ordinary wheel-line input stays line-based.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "per-event scroll deltas are small enough for CGEvent's i32 wheel fields"
+)]
+fn synthetic_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> SyntheticScrollDelta {
+    let point = event.get_double_value_field(axis.point);
+    if point != 0.0 {
+        return SyntheticScrollDelta {
+            value: point.round() as i32,
+            uses_pixels: true,
+        };
+    }
+    let fixed = event.get_double_value_field(axis.fixed);
+    if fixed != 0.0 {
+        return SyntheticScrollDelta {
+            value: fixed.round() as i32,
+            uses_pixels: true,
+        };
+    }
+    SyntheticScrollDelta {
+        value: event.get_integer_value_field(axis.line) as i32,
+        uses_pixels: false,
+    }
+}
+
+/// Post a synthetic copy of a physical scroll with the vertical axis reversed.
+/// Posting a fresh event is more reliable for hardware mouse wheels than
+/// mutating or replacing the HID-backed `CGEvent`; horizontal motion is
+/// preserved so diagonal/tilt-wheel input does not lose an axis.
+fn post_inverted_scroll(event: &CGEvent) -> bool {
+    let vertical = synthetic_scroll_delta(event, VERTICAL);
+    let horizontal = synthetic_scroll_delta(event, HORIZONTAL);
+    let unit = if vertical.uses_pixels || horizontal.uses_pixels {
+        ScrollEventUnit::PIXEL
+    } else {
+        ScrollEventUnit::LINE
+    };
+    let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        warn!("CGEventSource::new failed for inverted scroll");
+        return false;
+    };
+    let Ok(synthetic) =
+        CGEvent::new_scroll_event(source, unit, 2, -vertical.value, horizontal.value, 0)
+    else {
+        warn!("CGEvent::new_scroll_event failed for inverted scroll");
+        return false;
+    };
+    synthetic.set_integer_value_field(
+        EventField::EVENT_SOURCE_USER_DATA,
+        openlogi_inject::SYNTHETIC_EVENT_USER_DATA,
+    );
+    if scroll_diag_enabled() {
+        warn!(
+            input_vertical = vertical.value,
+            output_vertical = -vertical.value,
+            horizontal = horizontal.value,
+            unit = if matches!(unit, ScrollEventUnit::PIXEL) {
+                "pixel"
+            } else {
+                "line"
+            },
+            "posting inverted synthetic scroll and dropping original"
+        );
+    }
+    synthetic.post(CGEventTapLocation::HID);
+    true
 }
 
 /// Create the event tap and run loop on a dedicated thread.
@@ -319,9 +562,12 @@ fn thread_main(
             match cb(mouse_event) {
                 EventDisposition::PassThrough => CallbackResult::Keep,
                 EventDisposition::Suppress => CallbackResult::Drop,
-                EventDisposition::ReplaceScroll { delta_x, delta_y } => {
-                    rewrite_scroll(event, f64::from(delta_x), f64::from(delta_y));
-                    CallbackResult::Keep
+                EventDisposition::InvertScroll => {
+                    if post_inverted_scroll(event) {
+                        CallbackResult::Drop
+                    } else {
+                        CallbackResult::Keep
+                    }
                 }
             }
         },

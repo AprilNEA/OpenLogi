@@ -260,7 +260,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use openlogi_agent_core::DpiCycleState;
-    use openlogi_agent_core::hook_runtime::HookMaps;
+    use openlogi_agent_core::hook_runtime::{HookMaps, ScrollInversions};
     use openlogi_agent_core::receiver_access::ReceiverAccess;
 
     fn shared_runtime() -> SharedRuntime {
@@ -269,7 +269,7 @@ mod tests {
             gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
             dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
             thumbwheel_sensitivity: Arc::new(0.into()),
-            invert_scroll: Arc::new(AtomicBool::new(false)),
+            scroll_inversions: Arc::new(RwLock::new(ScrollInversions::default())),
             capture_channel: Arc::new(RwLock::new(None)),
             receiver_access: ReceiverAccess::default(),
         }

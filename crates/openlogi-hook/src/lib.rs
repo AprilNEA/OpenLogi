@@ -27,6 +27,21 @@
 
 pub use openlogi_core::binding::ButtonId;
 
+/// Best-effort identity for the physical device that produced an OS event.
+///
+/// Platform hooks fill the stable fields they can read cheaply from the native
+/// event. Consumers use this to apply host-side settings per device rather than
+/// through the currently selected UI device.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EventDevice {
+    /// USB/Bluetooth vendor id when the platform exposes it.
+    pub vendor_id: Option<u32>,
+    /// USB/Bluetooth/HID product id when the platform exposes it.
+    pub product_id: Option<u32>,
+    /// Human-readable product name, normalized by consumers before matching.
+    pub product_name: Option<String>,
+}
+
 /// An event captured at the OS layer.
 #[derive(Clone, Debug)]
 pub enum MouseEvent {
@@ -43,13 +58,20 @@ pub enum MouseEvent {
         delta_x: f32,
         /// Positive = down, negative = up.
         delta_y: f32,
-        /// `true` for a smooth, momentum-carrying scroll — a trackpad or Magic
-        /// Mouse gesture (macOS `kCGScrollWheelEventIsContinuous`); `false` for a
-        /// discrete mouse-wheel detent. Lets a consumer transform the wheel while
-        /// leaving native trackpad scrolling alone (issue #126). Always `false`
-        /// on Linux/Windows, where the wheel and trackpad arrive as distinct
-        /// event types rather than one flagged stream.
-        is_continuous: bool,
+        /// `true` when the OS attributes this scroll to a trackpad / Magic Mouse
+        /// gesture rather than a mouse wheel, so a consumer can transform the
+        /// wheel while leaving native trackpad scrolling alone (issue #126).
+        ///
+        /// On macOS this is resolved from the `IOHIDEvent` sender's IOKit device
+        /// identity, because Logitech free-spin wheels can carry the same phase
+        /// flags as a trackpad. Sender-less events fall back to the phase fields.
+        /// Always `false` on Linux/Windows, where the wheel and trackpad arrive
+        /// as distinct event types rather than one flagged stream.
+        from_trackpad: bool,
+        /// Best-effort physical source of the scroll event. `None` means the
+        /// platform could not attribute the event to a device, or the event was
+        /// synthetic.
+        device: Option<EventDevice>,
     },
     /// Pointer movement, in device units. Emitted so a held gesture button can
     /// accumulate a swipe; the callback passes these through (the cursor keeps
@@ -69,25 +91,18 @@ pub enum MouseEvent {
 }
 
 /// What the hook callback wants the OS to do with the captured event.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventDisposition {
     /// Let the event reach its original target unchanged.
     PassThrough,
     /// Drop the event; the target application never sees it.
     Suppress,
-    /// Deliver a [`MouseEvent::Scroll`] carrying these deltas in place of the
-    /// captured one — the hook rewrites the live event's axes (and scales its
-    /// smooth-scroll companion fields to match) rather than re-synthesising it,
-    /// so momentum/phase survive. Only meaningful in response to a `Scroll`
-    /// event; the value is the same `(delta_x, delta_y)` units the callback was
-    /// handed. Used to invert the wheel (issue #126): pure negation is exact in
-    /// these units, so no precision is lost.
-    ReplaceScroll {
-        /// Positive = right, negative = left.
-        delta_x: f32,
-        /// Positive = down, negative = up.
-        delta_y: f32,
-    },
+    /// Reverse the vertical direction of a [`MouseEvent::Scroll`] (issue #126).
+    /// Each platform owns the safest transform for its event stream — macOS
+    /// replaces the HID-backed event with a synthetic inverted scroll, while
+    /// Linux and Windows re-inject the wheel tick with the sign flipped. No
+    /// payload: the hook already holds the captured event.
+    InvertScroll,
 }
 
 /// Errors that [`Hook::start`] and related functions can produce.

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::binding::{Action, Binding, ButtonId, GestureDirection, default_binding_for};
-use crate::device::{Capabilities, DeviceKind};
+use crate::device::{Capabilities, DeviceKind, DeviceModelInfo};
 use crate::paths::{self, PathsError};
 
 /// The schema version the current build produces. Bumped on breaking layout
@@ -308,6 +308,14 @@ pub struct DeviceIdentity {
     /// The name shown in the carousel, as resolved from the asset registry the
     /// last time the device was online.
     pub display_name: String,
+    /// HID++ model identity from feature 0x0003, when available. Persisted so
+    /// the GUI can resolve the same curated asset while the device is asleep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_info: Option<DeviceModelInfo>,
+    /// Firmware codename, when available. Used as an asset-resolution hint and
+    /// as a readable fallback for devices without curated model metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codename: Option<String>,
     /// The device's resolved [`DeviceKind`] (asset registry preferred, HID++
     /// classification as fallback).
     pub kind: DeviceKind,
@@ -1129,6 +1137,8 @@ mod tests {
         let mut cfg = Config::default();
         let mouse = DeviceIdentity {
             display_name: "MX Master 3S".to_string(),
+            model_info: None,
+            codename: None,
             kind: DeviceKind::Mouse,
             capabilities: Capabilities {
                 buttons: true,

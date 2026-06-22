@@ -1276,6 +1276,12 @@ fn persist_identities(config: &mut Config, list: &[DeviceRecord]) {
             display_name: record.display_name.clone(),
             kind: record.kind,
             capabilities,
+            model_info: record.model_info.clone().map(|mut model| {
+                model.serial_number = None;
+                model.unit_id = [0; 4];
+                model
+            }),
+            codename: record.codename.clone(),
         };
         if config.device_identity(&record.config_key) != Some(&identity) {
             config.set_device_identity(&record.config_key, identity);

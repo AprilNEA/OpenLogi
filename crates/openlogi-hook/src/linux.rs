@@ -211,39 +211,31 @@ fn wait_readable(device_fd: i32, stop_fd: i32) -> bool {
 }
 
 fn scroll(delta_x: f32, delta_y: f32) -> MouseEvent {
-    // evdev delivers the wheel and the trackpad as distinct devices/axes rather
-    // than one flagged stream, so there is no continuous-scroll flag to carry.
+    // evdev delivers the wheel and the trackpad as distinct devices, so a wheel
+    // event is always a mouse wheel — never a trackpad gesture.
     MouseEvent::Scroll {
         delta_x,
         delta_y,
-        is_continuous: false,
+        from_trackpad: false,
+        device: None,
     }
 }
 
-/// Re-encode a transformed scroll back into one evdev axis event for re-injection
-/// (an [`EventDisposition::ReplaceScroll`]). The captured `event` is a single
-/// wheel axis; `horizontal`/`vertical` are the replacement deltas in the same
-/// units [`translate`] produced, so the relevant axis is mapped back through the
-/// inverse of `translate` (×[`HIRES_UNITS_PER_TICK`] for the hi-res axes). A
-/// non-wheel event is returned unchanged — it is never the target of a
-/// `ReplaceScroll`.
-fn reinject_scroll(event: &InputEvent, horizontal: f32, vertical: f32) -> InputEvent {
-    let EventSummary::RelativeAxis(_, axis, _) = event.destructure() else {
-        return *event;
-    };
-    let units = match axis {
-        RelativeAxisCode::REL_WHEEL => vertical,
-        RelativeAxisCode::REL_WHEEL_HI_RES => vertical * HIRES_UNITS_PER_TICK,
-        RelativeAxisCode::REL_HWHEEL => horizontal,
-        RelativeAxisCode::REL_HWHEEL_HI_RES => horizontal * HIRES_UNITS_PER_TICK,
-        _ => return *event,
-    };
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "re-injected wheel ticks are small integer counts; negation is exact"
-    )]
-    let raw = units.round() as i32;
-    InputEvent::new(EventType::RELATIVE.0, axis.0, raw)
+/// Re-encode a captured vertical-wheel event with its direction reversed, for
+/// re-injection on an [`EventDisposition::InvertScroll`]. The value is simply
+/// negated — exact for any wheel tick. A horizontal or non-wheel event is
+/// returned unchanged (the inversion is vertical-only, and the agent never asks
+/// to invert a horizontal scroll).
+fn invert_wheel_event(event: &InputEvent) -> InputEvent {
+    if let EventSummary::RelativeAxis(_, axis, value) = event.destructure()
+        && matches!(
+            axis,
+            RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_WHEEL_HI_RES
+        )
+    {
+        return InputEvent::new(EventType::RELATIVE.0, axis.0, -value);
+    }
+    *event
 }
 
 fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent> {
@@ -400,12 +392,11 @@ fn device_thread(
                 };
                 match disposition {
                     EventDisposition::PassThrough => pending.push(event),
-                    // Re-inject the wheel tick with transformed deltas (e.g. an
-                    // inverted wheel, #126). uinput events go to the desktop, not
-                    // back into this grabbed device's reader, so there is no
-                    // re-capture loop to guard against.
-                    EventDisposition::ReplaceScroll { delta_x, delta_y } => {
-                        pending.push(reinject_scroll(&event, delta_x, delta_y));
+                    // Re-inject the wheel tick with its direction reversed (#126).
+                    // uinput events go to the desktop, not back into this grabbed
+                    // device's reader, so there is no re-capture loop to guard.
+                    EventDisposition::InvertScroll => {
+                        pending.push(invert_wheel_event(&event));
                     }
                     EventDisposition::Suppress => {}
                 }

@@ -7,14 +7,13 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::binding::{
     Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
 use openlogi_hid::CaptureChannel;
-use openlogi_hook::{EventDisposition, Hook, MouseEvent};
+use openlogi_hook::{EventDevice, EventDisposition, Hook, MouseEvent};
 use tracing::{info, warn};
 
 use crate::DpiCycleState;
@@ -38,6 +37,130 @@ pub struct HookMaps {
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
 /// (orchestrator), the OS-hook callback, and the gesture watcher.
 pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
+
+/// Per-device scroll inversion settings keyed by the identity macOS attaches to
+/// scroll events. Product id is preferred; product name keeps Bluetooth/Bolt
+/// paths working when the OS reports only a human-readable HID product.
+#[derive(Default)]
+pub struct ScrollInversions {
+    by_product_id: BTreeMap<u32, bool>,
+    by_product_name: BTreeMap<String, bool>,
+}
+
+impl ScrollInversions {
+    /// Build a per-device inversion map from known product ids and names.
+    #[must_use]
+    pub fn new(entries: impl IntoIterator<Item = (ScrollDeviceKey, bool)>) -> Self {
+        let mut by_product_id = BTreeMap::new();
+        let mut by_product_name = BTreeMap::new();
+        for (key, invert) in entries {
+            if let Some(product_id) = key.product_id {
+                merge_inversion(&mut by_product_id, product_id, invert);
+            }
+            if let Some(name) = key
+                .product_name
+                .and_then(|name| normalize_product_name(&name))
+            {
+                merge_inversion(&mut by_product_name, name, invert);
+            }
+        }
+        Self {
+            by_product_id: by_product_id
+                .into_iter()
+                .filter_map(|(key, invert)| invert.map(|invert| (key, invert)))
+                .collect(),
+            by_product_name: by_product_name
+                .into_iter()
+                .filter_map(|(key, invert)| invert.map(|invert| (key, invert)))
+                .collect(),
+        }
+    }
+
+    fn inversion_for(&self, device: Option<&EventDevice>) -> Option<(&'static str, bool)> {
+        let device = device?;
+        if let Some(product_id) = device.product_id
+            && let Some(invert) = self.by_product_id.get(&product_id)
+        {
+            return Some(("product_id", *invert));
+        }
+        device
+            .product_name
+            .as_deref()
+            .and_then(normalize_product_name)
+            .and_then(|name| {
+                self.by_product_name
+                    .get(&name)
+                    .copied()
+                    .map(|invert| ("product_name", invert))
+                    .or_else(|| {
+                        self.by_product_name
+                            .iter()
+                            .find(|(known, _)| product_names_match(known, &name))
+                            .map(|(_, invert)| ("product_name_contains", *invert))
+                    })
+            })
+    }
+}
+
+fn merge_inversion<K: Ord>(map: &mut BTreeMap<K, Option<bool>>, key: K, invert: bool) {
+    map.entry(key)
+        .and_modify(|existing| {
+            if *existing != Some(invert) {
+                *existing = None;
+            }
+        })
+        .or_insert(Some(invert));
+}
+
+/// Device identity fields the platform hook can report for a scroll source.
+#[derive(Default)]
+pub struct ScrollDeviceKey {
+    pub product_id: Option<u32>,
+    pub product_name: Option<String>,
+}
+
+fn normalize_product_name(name: &str) -> Option<String> {
+    let normalized = name.trim().to_ascii_lowercase();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn product_names_match(known: &str, event: &str) -> bool {
+    known.len() >= 4 && event.len() >= 4 && (known.contains(event) || event.contains(known))
+}
+
+fn scroll_diag_enabled() -> bool {
+    std::env::var_os("OPENLOGI_SCROLL_DIAG").is_some()
+}
+
+fn scroll_disposition(
+    delta_y: f32,
+    from_trackpad: bool,
+    device: Option<&EventDevice>,
+    scroll_inversions: &SharedScrollInversions,
+) -> EventDisposition {
+    // Invert only the mouse wheel whose physical source matched a device with
+    // `invert_scroll = true` (#126). Trackpad / Magic Mouse gestures pass
+    // through, and unknown devices conservatively do not invert.
+    let (match_source, should_invert) = scroll_inversions
+        .read()
+        .ok()
+        .and_then(|inversions| inversions.inversion_for(device))
+        .unwrap_or(("none", false));
+    if scroll_diag_enabled() {
+        warn!(
+            ?device,
+            from_trackpad, delta_y, match_source, should_invert, "scroll inversion decision"
+        );
+    }
+    if should_invert && !from_trackpad && delta_y != 0.0 {
+        EventDisposition::InvertScroll
+    } else {
+        EventDisposition::PassThrough
+    }
+}
+
+/// Shared, atomically-published [`ScrollInversions`] map.
+pub type SharedScrollInversions = Arc<RwLock<ScrollInversions>>;
 
 /// Tracks which OS-hook button (Middle/Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
@@ -102,7 +225,7 @@ pub fn start(
     hooks: SharedHookMaps,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture: CaptureChannel,
-    invert_scroll: Arc<AtomicBool>,
+    scroll_inversions: SharedScrollInversions,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -213,25 +336,11 @@ pub fn start(
             EventDisposition::PassThrough
         }
         MouseEvent::Scroll {
-            delta_x,
+            delta_x: _,
             delta_y,
-            is_continuous,
-        } => {
-            // Invert only a discrete mouse-wheel tick, and only when the active
-            // device opted in (#126). A continuous trackpad / Magic Mouse gesture
-            // passes through so its native (e.g. natural) scrolling is left alone.
-            // The tap reads the merged HID stream and can't attribute a scroll to
-            // a physical device, so `invert_scroll` reflects the *selected*
-            // device — the same active-device compromise as `thumbwheel_sensitivity`.
-            if !is_continuous && delta_y != 0.0 && invert_scroll.load(Ordering::Relaxed) {
-                EventDisposition::ReplaceScroll {
-                    delta_x,
-                    delta_y: -delta_y,
-                }
-            } else {
-                EventDisposition::PassThrough
-            }
-        }
+            from_trackpad,
+            device,
+        } => scroll_disposition(delta_y, from_trackpad, device.as_ref(), &scroll_inversions),
     });
 
     match result {
@@ -331,6 +440,7 @@ pub fn dispatch_action(
 mod tests {
     use super::*;
     use openlogi_core::binding::GESTURE_SWIPE_THRESHOLD;
+    use openlogi_hook::EventDevice;
 
     // The mid-swipe gate itself is unit-tested on `SwipeAccumulator` in
     // `openlogi-core`; these cover only what `HoldState` adds on top — tagging a
@@ -364,6 +474,99 @@ mod tests {
         assert_eq!(hold.end(ButtonId::Forward), None);
         // ...and ending the held button with no swipe is a plain click.
         assert_eq!(hold.end(ButtonId::Back), Some(true));
+    }
+
+    #[test]
+    fn scroll_inversions_prefer_product_id() {
+        let inversions = ScrollInversions::new([
+            (
+                ScrollDeviceKey {
+                    product_id: Some(0xb037),
+                    product_name: Some("MX Anywhere 3S".to_string()),
+                },
+                true,
+            ),
+            (
+                ScrollDeviceKey {
+                    product_id: Some(0xb042),
+                    product_name: Some("MX Master 4".to_string()),
+                },
+                false,
+            ),
+        ]);
+
+        assert!(
+            inversions
+                .inversion_for(Some(&EventDevice {
+                    vendor_id: Some(0x046d),
+                    product_id: Some(0xb037),
+                    product_name: Some("Different name".to_string()),
+                }))
+                .is_some_and(|(_, invert)| invert)
+        );
+        assert!(
+            !inversions
+                .inversion_for(Some(&EventDevice {
+                    vendor_id: Some(0x046d),
+                    product_id: Some(0xb042),
+                    product_name: Some("MX Anywhere 3S".to_string()),
+                }))
+                .is_some_and(|(_, invert)| invert)
+        );
+    }
+
+    #[test]
+    fn scroll_inversions_match_product_name_when_id_is_missing() {
+        let inversions = ScrollInversions::new([(
+            ScrollDeviceKey {
+                product_id: None,
+                product_name: Some("MX Anywhere 3S".to_string()),
+            },
+            true,
+        )]);
+
+        assert!(
+            inversions
+                .inversion_for(Some(&EventDevice {
+                    vendor_id: Some(0x046d),
+                    product_id: None,
+                    product_name: Some("Logitech MX Anywhere 3S".to_string()),
+                }))
+                .is_some_and(|(_, invert)| invert)
+        );
+        assert!(
+            !inversions
+                .inversion_for(Some(&EventDevice {
+                    vendor_id: Some(0x046d),
+                    product_id: None,
+                    product_name: Some("MX Master 4".to_string()),
+                }))
+                .is_some_and(|(_, invert)| invert)
+        );
+        assert!(inversions.inversion_for(None).is_none());
+    }
+
+    #[test]
+    fn scroll_inversions_drop_ambiguous_receiver_matches() {
+        let receiver = || ScrollDeviceKey {
+            product_id: Some(0xc548),
+            product_name: Some("USB Receiver".to_string()),
+        };
+        let event = EventDevice {
+            vendor_id: Some(0x046d),
+            product_id: Some(0xc548),
+            product_name: Some("USB Receiver".to_string()),
+        };
+
+        let ambiguous = ScrollInversions::new([(receiver(), true), (receiver(), false)]);
+        assert!(ambiguous.inversion_for(Some(&event)).is_none());
+
+        let unambiguous = ScrollInversions::new([(receiver(), true), (receiver(), true)]);
+        assert!(
+            unambiguous
+                .inversion_for(Some(&event))
+                .is_some_and(|(_, invert)| invert)
+        );
     }
 
     #[test]

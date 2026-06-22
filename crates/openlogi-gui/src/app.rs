@@ -1637,6 +1637,8 @@ mod tests {
             config_key: "test".to_string(),
             display_name: "Test".to_string(),
             asset: None,
+            model_info: None,
+            codename: None,
             serial_number: None,
             unit_id: [0; 4],
             route: None,

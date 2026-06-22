@@ -170,7 +170,7 @@ pub struct ReceiverInfo {
 /// Options+ asset registry's `modelId` (e.g. `"6b023"`) is the concatenation
 /// of an extended-model byte and one of these PIDs, so callers usually want
 /// to format `extended_model_id` + `model_ids[N]` to match.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceModelInfo {
     pub entity_count: u8,
     /// HID++ DeviceInformation serial number, when the device supports the
@@ -204,7 +204,7 @@ impl DeviceModelInfo {
     clippy::struct_excessive_bools,
     reason = "bitfield mirroring HID++ DeviceInformation; transports are independent flags"
 )]
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceTransports {
     pub usb: bool,
     pub equad: bool,

@@ -4,7 +4,9 @@ use std::collections::HashSet;
 
 use openlogi_agent_core::device_order::DeviceStableId;
 use openlogi_core::config::{Config, DeviceIdentity};
-use openlogi_core::device::{BatteryInfo, Capabilities, DeviceInventory, DeviceKind};
+use openlogi_core::device::{
+    BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
+};
 use openlogi_hid::DeviceRoute;
 use tracing::debug;
 
@@ -25,6 +27,8 @@ pub struct DeviceRecord {
     pub config_key: String,
     pub display_name: String,
     pub asset: Option<ResolvedAsset>,
+    pub model_info: Option<DeviceModelInfo>,
+    pub codename: Option<String>,
     pub serial_number: Option<String>,
     pub unit_id: [u8; 4],
     pub route: Option<DeviceRoute>,
@@ -59,12 +63,14 @@ pub(super) fn build_device_list(
     let mut list = Vec::new();
     for inv in inventories {
         for paired in &inv.paired {
-            let (config_key, asset, serial_number, unit_id) =
+            let (config_key, asset, model_info, codename, serial_number, unit_id) =
                 if let Some(model) = paired.model_info.as_ref() {
                     let asset = cache.resolve(model, paired.codename.as_deref());
                     (
                         model.config_key(),
                         asset,
+                        Some(model.clone()),
+                        paired.codename.clone(),
                         model.serial_number.clone(),
                         model.unit_id,
                     )
@@ -77,7 +83,7 @@ pub(super) fn build_device_list(
                         || format!("slot{}", paired.slot),
                         |w| format!("wpid{w:04x}"),
                     );
-                    (key, None, None, [0u8; 4])
+                    (key, None, None, paired.codename.clone(), None, [0u8; 4])
                 };
 
             let display_name = asset
@@ -90,6 +96,8 @@ pub(super) fn build_device_list(
                 config_key,
                 display_name,
                 asset,
+                model_info,
+                codename,
                 serial_number,
                 unit_id,
                 route: DeviceRoute::device_route_for(inv, paired.slot),
@@ -105,7 +113,7 @@ pub(super) fn build_device_list(
     if std::env::var_os("OPENLOGI_DEMO_KEYBOARD").is_some() {
         list.push(demo_keyboard());
     }
-    append_offline_known(&mut list, config.known_identities());
+    append_offline_known(&mut list, config.known_identities(), cache);
     sort_device_list(&mut list);
     list
 }
@@ -116,13 +124,14 @@ pub(super) fn build_device_list(
 fn append_offline_known<'a>(
     list: &mut Vec<DeviceRecord>,
     known: impl Iterator<Item = (&'a str, &'a DeviceIdentity)>,
+    cache: &AssetResolver,
 ) {
     let present: HashSet<&str> = list.iter().map(|r| r.config_key.as_str()).collect();
     // Collect before extending: `present` borrows `list`, so the phantoms must
     // be materialized before we can mutate it.
     let phantoms: Vec<DeviceRecord> = known
         .filter(|(key, _)| !present.contains(key))
-        .map(|(key, identity)| offline_record(key, identity))
+        .map(|(key, identity)| offline_record(key, identity, cache))
         .collect();
     drop(present);
     list.extend(phantoms);
@@ -133,14 +142,27 @@ fn append_offline_known<'a>(
 /// `route: None` keeps every hardware write a no-op until the live inventory
 /// supplies the real route when the device wakes; `capabilities: Some(..)` from
 /// the persisted measurement is what keeps the device's config panels visible
-/// while it sleeps. The asset photo is left to the live record (we don't
-/// re-resolve it here), so an offline card shows the synthetic silhouette until
-/// the device comes back online.
-fn offline_record(config_key: &str, identity: &DeviceIdentity) -> DeviceRecord {
+/// while it sleeps. When the identity was written by a version that persisted
+/// model info, the cached asset is resolved immediately so cold-start cards do
+/// not flash the synthetic silhouette while waiting for live inventory.
+fn offline_record(
+    config_key: &str,
+    identity: &DeviceIdentity,
+    cache: &AssetResolver,
+) -> DeviceRecord {
+    let model_info = identity
+        .model_info
+        .clone()
+        .or_else(|| model_info_from_config_key(config_key));
+    let asset = model_info
+        .as_ref()
+        .and_then(|model| cache.resolve(model, identity.codename.as_deref()));
     DeviceRecord {
         config_key: config_key.to_string(),
         display_name: identity.display_name.clone(),
-        asset: None,
+        asset,
+        model_info,
+        codename: identity.codename.clone(),
         serial_number: None,
         unit_id: [0; 4],
         route: None,
@@ -150,6 +172,18 @@ fn offline_record(config_key: &str, identity: &DeviceIdentity) -> DeviceRecord {
         online: false,
         battery: None,
     }
+}
+
+fn model_info_from_config_key(config_key: &str) -> Option<DeviceModelInfo> {
+    let (ext, pid) = config_key.split_at_checked(config_key.len().checked_sub(4)?)?;
+    Some(DeviceModelInfo {
+        entity_count: 0,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports::default(),
+        model_ids: [u16::from_str_radix(pid, 16).ok()?, 0, 0],
+        extended_model_id: u8::from_str_radix(ext, 16).ok()?,
+    })
 }
 
 /// Order the carousel by physical route. HID enumeration order can change as
@@ -184,6 +218,8 @@ fn demo_keyboard() -> DeviceRecord {
         config_key: "demo-g513".to_string(),
         display_name: "Logitech G513".to_string(),
         asset: None,
+        model_info: None,
+        codename: None,
         serial_number: None,
         unit_id: [0; 4],
         route: None,
@@ -272,7 +308,7 @@ mod tests {
 
     use super::{
         Capabilities, DeviceIdentity, DeviceKind, DeviceRecord, append_offline_known,
-        build_device_list, effective_kind, offline_record,
+        build_device_list, effective_kind, model_info_from_config_key, offline_record,
     };
 
     fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
@@ -305,6 +341,8 @@ mod tests {
             config_key: key.to_string(),
             display_name: format!("live {key}"),
             asset: None,
+            model_info: None,
+            codename: None,
             serial_number: None,
             unit_id: [1; 4],
             route: None,
@@ -325,6 +363,8 @@ mod tests {
                 pointer: true,
                 lighting: false,
             },
+            model_info: None,
+            codename: None,
         }
     }
 
@@ -362,12 +402,33 @@ mod tests {
         // measured capabilities (so its panels show) but no route (so writes are
         // no-ops until it wakes).
         let id = mouse_identity("MX Master 3S");
-        let rec = offline_record("2b034", &id);
+        let cache = AssetResolver::new();
+        let rec = offline_record("2b034", &id, &cache);
         assert_eq!(rec.config_key, "2b034");
         assert_eq!(rec.display_name, "MX Master 3S");
         assert!(!rec.online);
         assert!(rec.route.is_none());
         assert_eq!(rec.capabilities, Some(id.capabilities));
+    }
+
+    #[test]
+    fn offline_record_can_rebuild_model_info_from_legacy_config_key() {
+        let id = mouse_identity("MX Master 3S");
+        let cache = AssetResolver::new();
+        let rec = offline_record("2b034", &id, &cache);
+        let model = rec
+            .model_info
+            .expect("legacy config key should rebuild minimal model info");
+        assert_eq!(model.extended_model_id, 0x02);
+        assert_eq!(model.model_ids[0], 0xb034);
+        assert!(model.serial_number.is_none());
+        assert_eq!(model.unit_id, [0; 4]);
+    }
+
+    #[test]
+    fn invalid_legacy_config_key_does_not_make_model_info() {
+        assert!(model_info_from_config_key("wpid4076").is_none());
+        assert!(model_info_from_config_key("123").is_none());
     }
 
     #[test]
@@ -378,7 +439,8 @@ mod tests {
         let mut list = vec![online_record("A")];
         let a = mouse_identity("live A overwritten?");
         let b = mouse_identity("asleep B");
-        append_offline_known(&mut list, [("A", &a), ("B", &b)].into_iter());
+        let cache = AssetResolver::new();
+        append_offline_known(&mut list, [("A", &a), ("B", &b)].into_iter(), &cache);
 
         assert_eq!(list.len(), 2);
         assert!(

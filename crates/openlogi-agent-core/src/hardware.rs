@@ -248,6 +248,62 @@ pub fn write_dpi_in_background(
     });
 }
 
+/// Spawn an OS thread that writes native vertical-scroll inversion to the
+/// device at `target` via HID++ `0x2121`. Unsupported devices are expected and
+/// only logged at debug level because not every Logitech device exposes native
+/// wheel inversion.
+pub fn write_scroll_inversion_in_background(
+    capture: Option<&CaptureChannel>,
+    target: Option<DeviceRoute>,
+    inverted: bool,
+) {
+    let Some(target) = target else {
+        debug!(
+            inverted,
+            "no target device — scroll inversion write skipped"
+        );
+        return;
+    };
+    let shared = reusable_channel(capture, &target);
+    let reused = shared.is_some();
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                warn!(error = %e, "tokio runtime init failed; scroll inversion write skipped");
+                return;
+            }
+        };
+        let result = rt.block_on(async {
+            tokio::time::timeout(WRITE_BUDGET, async {
+                match &shared {
+                    Some(shared) => openlogi_hid::set_scroll_inversion_on(shared, inverted).await,
+                    None => openlogi_hid::set_scroll_inversion(&target, inverted).await,
+                }
+            })
+            .await
+        });
+        let index = target.device_index();
+        match result {
+            Ok(Ok(())) => debug!(index, inverted, reused, "native scroll inversion written"),
+            Ok(Err(WriteError::FeatureUnsupported { feature_hex })) => debug!(
+                index,
+                inverted,
+                feature = format_args!("{feature_hex:#06x}"),
+                "native scroll inversion unsupported"
+            ),
+            Ok(Err(e)) => warn!(error = ?e, "scroll inversion write failed"),
+            Err(_) => warn!(
+                index,
+                inverted, "scroll inversion write timed out (device asleep/unresponsive)"
+            ),
+        }
+    });
+}
+
 /// Apply `lighting` to the keyboard at `target` on a background thread.
 ///
 /// Resolves the configured colour (scaled by brightness, or black when the
