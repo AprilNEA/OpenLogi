@@ -36,6 +36,7 @@ const RECEIVER_LEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Address-keyed cache of the full discovered devices, so the GUI can pair by
 /// address without round-tripping the non-serializable `DiscoveredDevice`.
 type DeviceCache = Arc<StdMutex<HashMap<[u8; 6], DiscoveredDevice>>>;
+type ReceiverLeaseSlot = Arc<StdMutex<Option<PairingReceiverLease>>>;
 
 /// Owns the pairing watcher and translates its event stream for the IPC layer.
 pub struct PairingManager {
@@ -48,7 +49,7 @@ pub struct PairingManager {
     /// it on each terminal event and releases the receiver lease when it returns
     /// to zero. Balanced: one accepted `start` ⇒ exactly one terminal.
     sessions: Arc<AtomicUsize>,
-    receiver_lease: Arc<StdMutex<Option<PairingReceiverLease>>>,
+    receiver_lease: ReceiverLeaseSlot,
     shared: SharedRuntime,
 }
 
@@ -107,15 +108,9 @@ impl PairingManager {
             warn!("timed out waiting for receiver capture to stop; pairing not started");
             return;
         };
-        if let Ok(mut slot) = self.receiver_lease.lock() {
+        with_receiver_lease_slot(&self.receiver_lease, |slot| {
             *slot = Some(receiver_lease);
-        } else {
-            let _ = self.update_tx.send(PairingUpdate::Failed(
-                PairingFailure::ReceiverAccessUnavailable,
-            ));
-            warn!("pairing receiver lease lock poisoned; aborting start");
-            return;
-        }
+        });
         if let Err(e) = self.ctrl.send(Control::Start(selector)) {
             self.release_receiver_lease();
             let _ = self
@@ -155,8 +150,22 @@ impl PairingManager {
     }
 
     fn release_receiver_lease(&self) {
-        if let Ok(mut slot) = self.receiver_lease.lock() {
+        with_receiver_lease_slot(&self.receiver_lease, |slot| {
             *slot = None;
+        });
+    }
+}
+
+fn with_receiver_lease_slot<T>(
+    receiver_lease: &ReceiverLeaseSlot,
+    f: impl FnOnce(&mut Option<PairingReceiverLease>) -> T,
+) -> T {
+    match receiver_lease.lock() {
+        Ok(mut slot) => f(&mut slot),
+        Err(poisoned) => {
+            warn!("pairing receiver lease lock poisoned; recovering lease slot");
+            let mut slot = poisoned.into_inner();
+            f(&mut slot)
         }
     }
 }
@@ -195,7 +204,7 @@ async fn translate(
     upd_tx: mpsc::UnboundedSender<PairingUpdate>,
     devices: DeviceCache,
     sessions: Arc<AtomicUsize>,
-    receiver_lease: Arc<StdMutex<Option<PairingReceiverLease>>>,
+    receiver_lease: ReceiverLeaseSlot,
 ) {
     while let Some(event) = raw.recv().await {
         let update = match event {
@@ -221,10 +230,10 @@ async fn translate(
             // Lift the capture pause when the accepted single session ends.
             // Balanced: `start()` admits one active session, and that session
             // emits exactly one terminal event.
-            if sessions.fetch_sub(1, Ordering::Relaxed) == 1
-                && let Ok(mut lease) = receiver_lease.lock()
-            {
-                *lease = None;
+            if sessions.fetch_sub(1, Ordering::Relaxed) == 1 {
+                with_receiver_lease_slot(&receiver_lease, |lease| {
+                    *lease = None;
+                });
             }
         }
         if upd_tx.send(update).is_err() {
@@ -237,9 +246,9 @@ async fn translate(
     // gesture / DPI-cycle / thumbwheel remapping keeps working (only pairing
     // itself is then unavailable until the agent restarts).
     sessions.store(0, Ordering::Relaxed);
-    if let Ok(mut lease) = receiver_lease.lock() {
+    with_receiver_lease_slot(&receiver_lease, |lease| {
         *lease = None;
-    }
+    });
 }
 
 #[cfg(test)]
@@ -300,6 +309,36 @@ mod tests {
             manager.next_update().await,
             Some(PairingUpdate::Failed(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn release_receiver_lease_recovers_poisoned_slot() {
+        let (ctrl_tx, _ctrl_rx) = mpsc::unbounded_channel();
+        let manager = manager_with_ctrl(ctrl_tx);
+        let receiver_lease = manager.shared.receiver_access.acquire_for_pairing().await;
+        with_receiver_lease_slot(&manager.receiver_lease, |slot| {
+            *slot = Some(receiver_lease);
+        });
+        assert!(manager.shared.receiver_access.pairing_requested());
+
+        let slot = Arc::clone(&manager.receiver_lease);
+        let _ = std::panic::catch_unwind(move || {
+            let Ok(_guard) = slot.lock() else {
+                panic!("test receiver lease slot should start unpoisoned");
+            };
+            panic!("poison receiver lease slot");
+        });
+
+        manager.release_receiver_lease();
+
+        assert!(!manager.shared.receiver_access.pairing_requested());
+        assert!(
+            manager
+                .shared
+                .receiver_access
+                .try_acquire_for_capture()
+                .is_some()
+        );
     }
 
     #[tokio::test]
