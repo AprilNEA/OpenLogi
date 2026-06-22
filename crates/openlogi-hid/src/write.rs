@@ -17,7 +17,6 @@ use hidpp::{
     device::Device,
     feature::CreatableFeature,
     feature::adjustable_dpi::AdjustableDpiFeature,
-    feature::hires_wheel::{HiResWheelFeature, WheelEventTarget},
     feature::smartshift::{SmartShiftFeature, WheelMode},
     protocol::v20::{ErrorType, Hidpp20Error},
 };
@@ -225,7 +224,7 @@ pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, Wri
 /// keeps route-based write/read paths independent from full feature-table
 /// enumeration and also works for feature wrappers that are not in the central
 /// registry yet.
-async fn open_feature<F: CreatableFeature + 'static>(
+pub(crate) async fn open_feature<F: CreatableFeature + 'static>(
     device: &mut Device,
 ) -> Result<Arc<F>, WriteError> {
     let info = device
@@ -480,59 +479,6 @@ pub async fn set_dpi(route: &DeviceRoute, dpi: u16) -> Result<(), WriteError> {
         set_dpi_on_channel(&channel, index, dpi).await
     })
     .await
-}
-
-/// Write the device's native vertical-scroll inversion flag.
-///
-/// HID++ `0x2121` applies this flag while wheel movement is reported through
-/// native HID, so the OS still receives ordinary scroll events but the direction
-/// has already been transformed by the mouse firmware. That preserves true
-/// per-device semantics even when several mice share one receiver.
-///
-/// Returns [`WriteError::FeatureUnsupported`] when the device lacks `0x2121` or
-/// reports that native inversion is not supported.
-pub async fn set_scroll_inversion(route: &DeviceRoute, inverted: bool) -> Result<(), WriteError> {
-    let index = route.device_index();
-    with_route(route, move |channel| async move {
-        set_scroll_inversion_on_channel(&channel, index, inverted).await
-    })
-    .await
-}
-
-async fn set_scroll_inversion_on_channel(
-    channel: &Arc<HidppChannel>,
-    index: u8,
-    inverted: bool,
-) -> Result<(), WriteError> {
-    let mut device = Device::new(Arc::clone(channel), index)
-        .await
-        .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    let feature = open_feature::<HiResWheelFeature>(&mut device).await?;
-    let capabilities = feature
-        .get_wheel_capabilities()
-        .await
-        .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
-    if !capabilities.has_invert {
-        return Err(WriteError::FeatureUnsupported {
-            feature_hex: HiResWheelFeature::ID,
-        });
-    }
-    let mode = feature
-        .get_wheel_mode()
-        .await
-        .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
-    let written = feature
-        .set_wheel_mode(WheelEventTarget::Native, mode.resolution, inverted)
-        .await
-        .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
-    debug!(
-        index,
-        inverted,
-        resolution = ?written.resolution,
-        target = ?written.target,
-        "wrote native scroll inversion"
-    );
-    Ok(())
 }
 
 /// HID++ `PerKeyLighting` (`0x8080`) — streams each key's colour individually.
@@ -898,20 +844,20 @@ impl SharedChannel {
     pub fn matches(&self, route: &DeviceRoute) -> bool {
         self.route == *route
     }
+
+    pub(crate) fn channel(&self) -> &Arc<HidppChannel> {
+        &self.channel
+    }
+
+    pub(crate) fn device_index(&self) -> u8 {
+        self.route.device_index()
+    }
 }
 
 /// Write DPI on an already-open [`SharedChannel`] — the fast path that skips
 /// enumeration and channel setup.
 pub async fn set_dpi_on(shared: &SharedChannel, dpi: u16) -> Result<(), WriteError> {
     set_dpi_on_channel(&shared.channel, shared.route.device_index(), dpi).await
-}
-
-/// Write native scroll inversion on an already-open [`SharedChannel`].
-pub async fn set_scroll_inversion_on(
-    shared: &SharedChannel,
-    inverted: bool,
-) -> Result<(), WriteError> {
-    set_scroll_inversion_on_channel(&shared.channel, shared.route.device_index(), inverted).await
 }
 
 /// Toggle SmartShift on an already-open [`SharedChannel`].
@@ -939,7 +885,7 @@ pub async fn set_smartshift_on(
 
 /// Boilerplate-eater: open the channel that reaches `route`, then run `f` once
 /// with it. The caller addresses features at [`DeviceRoute::device_index`].
-async fn with_route<F, Fut, T>(route: &DeviceRoute, f: F) -> Result<T, WriteError>
+pub(crate) async fn with_route<F, Fut, T>(route: &DeviceRoute, f: F) -> Result<T, WriteError>
 where
     F: FnOnce(Arc<HidppChannel>) -> Fut,
     Fut: std::future::Future<Output = Result<T, WriteError>>,
