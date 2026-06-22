@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.16](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.15...openlogi-core-v0.6.16) - 2026-06-22
+
+### Fixed
+
+- *(scroll)* support per-device inversion
+
+### Other
+
+- *(scroll)* require native hidpp inversion
+- *(config)* key settings by physical device
+- *(infra)* use crates for paths and language matching
+
 ## [0.6.15](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.14...openlogi-core-v0.6.15) - 2026-06-21
 
 ### Added
