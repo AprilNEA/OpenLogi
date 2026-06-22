@@ -1273,7 +1273,7 @@ fn panel_card_inner(
 ) -> impl IntoElement {
     div()
         .w_full()
-        .when(fill_height, |this| this.h_full())
+        .when(fill_height, gpui::Styled::h_full)
         .max_w_full()
         .min_w_0()
         .rounded_lg()
