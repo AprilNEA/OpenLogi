@@ -146,14 +146,14 @@ pub enum BatteryStatus {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatteryInfo {
     pub percentage: u8,
     pub level: BatteryLevel,
     pub status: BatteryStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiverInfo {
     pub name: String,
     pub vendor_id: u16,
@@ -170,7 +170,7 @@ pub struct ReceiverInfo {
 /// Options+ asset registry's `modelId` (e.g. `"6b023"`) is the concatenation
 /// of an extended-model byte and one of these PIDs, so callers usually want
 /// to format `extended_model_id` + `model_ids[N]` to match.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceModelInfo {
     pub entity_count: u8,
     /// HID++ DeviceInformation serial number, when the device supports the
@@ -204,7 +204,7 @@ impl DeviceModelInfo {
     clippy::struct_excessive_bools,
     reason = "bitfield mirroring HID++ DeviceInformation; transports are independent flags"
 )]
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct DeviceTransports {
     pub usb: bool,
     pub equad: bool,
@@ -212,7 +212,7 @@ pub struct DeviceTransports {
     pub bluetooth: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairedDevice {
     /// Receiver-assigned slot (1..=6 for Bolt).
     pub slot: u8,
@@ -239,7 +239,7 @@ pub struct PairedDevice {
 /// field and variant *order*, so reordering, retyping, or wrapping any field
 /// in this tree is a wire-format change and requires a `PROTOCOL_VERSION`
 /// bump (guarded by `openlogi-agent-core/tests/wire_format.rs`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceInventory {
     pub receiver: ReceiverInfo,
     pub paired: Vec<PairedDevice>,
@@ -247,7 +247,51 @@ pub struct DeviceInventory {
 
 #[cfg(test)]
 mod tests {
-    use super::DeviceKind;
+    use super::{
+        BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
+        DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+    };
+
+    fn inventory(slot: u8, wpid: Option<u16>, battery_percentage: u8) -> DeviceInventory {
+        DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Logi Bolt Receiver".to_string(),
+                vendor_id: 0x046d,
+                product_id: 0xc548,
+                unique_id: Some("receiver-1".to_string()),
+            },
+            paired: vec![PairedDevice {
+                slot,
+                codename: Some("MX Test".to_string()),
+                wpid,
+                kind: DeviceKind::Mouse,
+                online: true,
+                battery: Some(BatteryInfo {
+                    percentage: battery_percentage,
+                    level: BatteryLevel::Good,
+                    status: BatteryStatus::Discharging,
+                }),
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: Some("serial-1".to_string()),
+                    unit_id: [1, 2, 3, 4],
+                    transports: DeviceTransports {
+                        usb: true,
+                        equad: true,
+                        btle: false,
+                        bluetooth: false,
+                    },
+                    model_ids: [0xb023, 0, 0],
+                    extended_model_id: 0x02,
+                }),
+                capabilities: Some(Capabilities {
+                    buttons: true,
+                    pointer: true,
+                    lighting: false,
+                }),
+            }],
+        }
+    }
 
     #[test]
     fn registry_type_is_case_folded() {
@@ -312,6 +356,28 @@ mod tests {
         assert_eq!(
             Capabilities::presumed_from_kind(DeviceKind::Unknown),
             Capabilities::default()
+        );
+    }
+
+    #[test]
+    fn device_inventory_equality_includes_nested_device_fields() {
+        let base = inventory(1, Some(0xb023), 86);
+        assert_eq!(base, base.clone());
+
+        assert_ne!(
+            base,
+            inventory(2, Some(0xb023), 86),
+            "slot changes must affect inventory equality"
+        );
+        assert_ne!(
+            base,
+            inventory(1, Some(0xb024), 86),
+            "wireless product id changes must affect inventory equality"
+        );
+        assert_ne!(
+            base,
+            inventory(1, Some(0xb023), 87),
+            "nested battery changes must affect inventory equality"
         );
     }
 }
