@@ -162,9 +162,10 @@ async fn probe_or_reuse(
     cached: Option<&Cached>,
     online: bool,
     tick: u64,
+    want_name: bool,
 ) -> (ProbedFeatures, CacheOutcome) {
     if online && cached.is_none_or(|c| is_stale(c, tick)) {
-        let (fresh, battery_index) = probe_features(channel, index).await;
+        let (fresh, battery_index) = probe_features(channel, index, want_name).await;
         // `capabilities` is `Some` exactly when the feature-table walk succeeded;
         // only then is the probe worth caching.
         if fresh.capabilities.is_some() {
@@ -679,7 +680,7 @@ async fn probe_bolt_slot(
     let cached = id.as_ref().and_then(|i| cache.get(i));
     let register_kind = map_kind(bolt_kind);
 
-    let (probe, outcome) = probe_or_reuse(channel, slot, id, cached, online, tick).await;
+    let (probe, outcome) = probe_or_reuse(channel, slot, id, cached, online, tick, true).await;
     if matches!(outcome, CacheOutcome::Fresh(..))
         && let Some(probed) = probe.kind
         && probed != DeviceKind::Unknown
@@ -696,7 +697,9 @@ async fn probe_bolt_slot(
 
     let device = PairedDevice {
         slot,
-        codename,
+        // Fall back to the device's own `0x0005` marketing name when the Bolt
+        // receiver has no stored codename for this slot.
+        codename: codename.or_else(|| probe.name.clone()),
         wpid,
         // Prefer the device's own `0x0005` type; the register kind is the
         // offline fallback.
@@ -729,8 +732,16 @@ async fn probe_direct(
     let cached = cache.get(&id);
     // A direct device is always "present" (its HID node is the candidate), so
     // treat it as online: reuse the cached probe while fresh, otherwise probe.
-    let (probe, outcome) =
-        probe_or_reuse(&channel, DIRECT_DEVICE_INDEX, Some(id), cached, true, tick).await;
+    let (probe, outcome) = probe_or_reuse(
+        &channel,
+        DIRECT_DEVICE_INDEX,
+        Some(id),
+        cached,
+        true,
+        tick,
+        false,
+    )
+    .await;
     // Hybrid peripheral discriminator. A genuine directly-attached device is
     // either wireless/Bluetooth — which reports a battery — or exposes a
     // configuration feature (buttons / pointer / lighting). A Bolt receiver's
@@ -876,7 +887,15 @@ async fn probe_unifying_slot(
 
     let probe_result = timeout(
         UNIFYING_SLOT_PROBE,
-        probe_or_reuse(channel, slot, Some(id.clone()), cached, event.online, tick),
+        probe_or_reuse(
+            channel,
+            slot,
+            Some(id.clone()),
+            cached,
+            event.online,
+            tick,
+            true,
+        ),
     )
     .await;
     let (probe, outcome) = if let Ok(r) = probe_result {
@@ -890,7 +909,10 @@ async fn probe_unifying_slot(
 
     let device = PairedDevice {
         slot,
-        codename,
+        // The Unifying receiver doesn't store a codename for the slot, so fall
+        // back to the device's own `0x0005` marketing name rather than show it
+        // as "Unknown device".
+        codename: codename.or_else(|| probe.name.clone()),
         wpid: Some(event.wpid),
         kind: resolve_device_kind(probe.kind, register_kind),
         online: event.online,
@@ -929,6 +951,11 @@ struct ProbedFeatures {
     model_info: Option<DeviceModelInfo>,
     /// Marketing type from HID++ `0x0005` — an identity hint only.
     kind: Option<DeviceKind>,
+    /// Marketing name from HID++ `0x0005` (e.g. `"MX Master"`). Used as the
+    /// display-name fallback when the receiver has no stored codename for the
+    /// slot (Unifying never stores one; some Bolt pairings don't either), so an
+    /// otherwise-recognised device isn't shown as "Unknown device".
+    name: Option<String>,
     /// Configuration capabilities derived from the device's feature table.
     capabilities: Option<Capabilities>,
 }
@@ -977,7 +1004,11 @@ fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Option<u8> {
 /// ticks can refresh the battery without repeating it.
 ///
 /// Only online, responsive devices reach here.
-async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> (ProbedFeatures, Option<u8>) {
+async fn probe_features(
+    channel: &Arc<HidppChannel>,
+    slot: u8,
+    want_name: bool,
+) -> (ProbedFeatures, Option<u8>) {
     let mut device = match Device::new(Arc::clone(channel), slot).await {
         Ok(d) => d,
         Err(e) => {
@@ -1054,15 +1085,37 @@ async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> (ProbedFeature
     // the authoritative kind signal. On the direct path it's the only one; on
     // the Bolt path it corrects a pairing register that reported the wrong (or
     // `Unknown`) kind.
-    let kind = match device.get_feature::<DeviceTypeAndNameFeature>() {
-        Some(feature) => match feature.get_device_type().await {
-            Ok(ty) => Some(map_device_type(ty)),
-            Err(e) => {
-                debug!(slot, error = ?e, "DeviceType read failed");
+    let (kind, name) = match device.get_feature::<DeviceTypeAndNameFeature>() {
+        Some(feature) => {
+            let kind = match feature.get_device_type().await {
+                Ok(ty) => Some(map_device_type(ty)),
+                Err(e) => {
+                    debug!(slot, error = ?e, "DeviceType read failed");
+                    None
+                }
+            };
+            // The device's own marketing name, used as the display fallback
+            // when the receiver has no stored codename for this slot. Skipped
+            // on the direct path (`want_name = false`), where the HID node name
+            // is already the codename — fetching it would be several HID++
+            // round-trips whose result is discarded.
+            let name = if want_name {
+                match feature.get_whole_device_name().await {
+                    Ok(n) => {
+                        let trimmed = n.trim();
+                        (!trimmed.is_empty()).then(|| trimmed.to_string())
+                    }
+                    Err(e) => {
+                        debug!(slot, error = ?e, "device name (0x0005) read failed");
+                        None
+                    }
+                }
+            } else {
                 None
-            }
-        },
-        None => None,
+            };
+            (kind, name)
+        }
+        None => (None, None),
     };
 
     (
@@ -1070,6 +1123,7 @@ async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> (ProbedFeature
             battery,
             model_info,
             kind,
+            name,
             capabilities,
         },
         battery_index,
