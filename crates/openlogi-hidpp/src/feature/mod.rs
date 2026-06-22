@@ -9,6 +9,7 @@ use crate::{
 };
 
 pub mod adjustable_dpi;
+pub mod battery_status;
 pub mod device_friendly_name;
 pub mod device_information;
 pub mod device_type_and_name;

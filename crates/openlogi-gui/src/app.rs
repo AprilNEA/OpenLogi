@@ -830,17 +830,32 @@ fn status_dot(online: bool) -> AnyElement {
     .into_any_element()
 }
 
+/// True when the device is charging but still reports 0% — the MX2S `0x1000`
+/// firmware can't gauge charge under load, and on a cold start there's no
+/// pre-charge % cached to carry forward. Show "Charging" without the bogus 0%.
+/// ponytail: cold-start only; once any discharge read is cached, the
+/// carry-forward in `inventory.rs` holds it and `percentage` is non-zero.
+pub(crate) fn battery_charging_no_reading(b: &BatteryInfo) -> bool {
+    matches!(
+        b.status,
+        BatteryStatus::Charging | BatteryStatus::ChargingSlow
+    ) && b.percentage == 0
+}
+
 /// Battery readout for a gallery card: a charge/level glyph plus the
 /// percentage, in the muted metadata style.
 fn battery_view(b: &BatteryInfo, pal: Palette) -> AnyElement {
-    h_flex()
+    let row = h_flex()
         .gap_1()
         .items_center()
         .text_xs()
         .text_color(pal.text_muted)
-        .child(Icon::new(battery_icon(b)).size_3())
-        .child(format!("{}%", b.percentage))
-        .into_any_element()
+        .child(Icon::new(battery_icon(b)).size_3());
+    if battery_charging_no_reading(b) {
+        row.child(tr!("Charging")).into_any_element()
+    } else {
+        row.child(format!("{}%", b.percentage)).into_any_element()
+    }
 }
 
 /// Pick the battery glyph from charge state first (charging / full / error),
@@ -1351,22 +1366,32 @@ fn battery_summary(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
                 .text_xs()
                 .text_color(pal.text_muted)
                 .child(status)
-                .child(format!("{}%", battery.percentage)),
+                .child(if battery_charging_no_reading(battery) {
+                    String::new()
+                } else {
+                    format!("{}%", battery.percentage)
+                }),
         )
-        .child(
-            div()
+        .child({
+            let track = div()
                 .h(px(6.))
                 .w_full()
                 .rounded_full()
-                .bg(pal.surface_hover)
-                .child(
+                .bg(pal.surface_hover);
+            // Charging with no reliable %: leave the track empty rather than
+            // drawing the 1%-wide red critical sliver that percentage==0 yields.
+            if battery_charging_no_reading(battery) {
+                track
+            } else {
+                track.child(
                     div()
                         .h_full()
                         .w(relative_percent(battery.percentage))
                         .rounded_full()
                         .bg(rgb(battery_color(battery.percentage))),
-                ),
-        )
+                )
+            }
+        })
 }
 
 fn sidebar_action(
@@ -1726,7 +1751,8 @@ fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::{
-        Capabilities, DetailTab, DeviceKind, DeviceRecord, DeviceRoute, connection_icon_path,
+        BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DetailTab, DeviceKind,
+        DeviceRecord, DeviceRoute, battery_charging_no_reading, connection_icon_path,
     };
 
     #[test]
@@ -1754,6 +1780,31 @@ mod tests {
         );
         // No route (e.g. a synthetic/placeholder card) falls back to Bluetooth.
         assert_eq!(connection_icon_path(None), "action-icons/bluetooth.svg");
+    }
+
+    /// "Charging" replaces the bogus percentage only when charging *and* the
+    /// reading is still 0% (cold start, no cached pre-charge value). A non-zero
+    /// charge or a real 0% while discharging keeps the number.
+    #[test]
+    fn charging_without_reading_suppresses_percentage() {
+        let b = |percentage, status| BatteryInfo {
+            percentage,
+            level: BatteryLevel::Good,
+            status,
+        };
+        assert!(battery_charging_no_reading(&b(0, BatteryStatus::Charging)));
+        assert!(battery_charging_no_reading(&b(
+            0,
+            BatteryStatus::ChargingSlow
+        )));
+        assert!(!battery_charging_no_reading(&b(
+            40,
+            BatteryStatus::Charging
+        )));
+        assert!(!battery_charging_no_reading(&b(
+            0,
+            BatteryStatus::Discharging
+        )));
     }
 
     fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord {

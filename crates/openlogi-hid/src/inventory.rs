@@ -12,7 +12,8 @@ use hidpp::{
     device::Device,
     feature::hires_wheel::HiResWheelFeature,
     feature::{
-        CreatableFeature, device_information::DeviceInformationFeature,
+        CreatableFeature, battery_status::BatteryStatusFeature,
+        device_information::DeviceInformationFeature,
         device_type_and_name::DeviceTypeAndNameFeature, unified_battery::UnifiedBatteryFeature,
     },
     receiver::{
@@ -27,16 +28,17 @@ use hidpp::{
     },
 };
 use openlogi_core::device::{
-    BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
-    PairedDevice, ReceiverInfo,
+    BatteryInfo, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo,
+    DeviceTransports, PairedDevice, ReceiverInfo,
 };
 use thiserror::Error;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use crate::mappings::{
-    map_battery_level, map_battery_status, map_device_type, map_kind, map_unifying_kind,
-    normalize_serial_number, resolve_device_kind,
+    legacy_battery_level_from_percentage, map_battery_level, map_battery_status, map_device_type,
+    map_kind, map_legacy_battery_status, map_unifying_kind, normalize_serial_number,
+    resolve_device_kind,
 };
 use crate::node_ledger::NodeLedger;
 use crate::route::DIRECT_DEVICE_INDEX;
@@ -120,11 +122,11 @@ const CACHE_MISS_GRACE: u8 = 3;
 #[derive(Clone)]
 struct Cached {
     probe: ProbedFeatures,
-    /// Runtime index of the `UnifiedBattery` feature in this device's feature
-    /// table, captured by the full probe. Lets cache hits re-read the volatile
-    /// battery in one round-trip — no `Device::new` ping, no table walk.
-    /// `None` when the device exposes no `0x1004`.
-    battery_index: Option<u8>,
+    /// Which battery feature this device exposes and its runtime index, captured
+    /// by the full probe. Lets cache hits re-read the volatile battery in one
+    /// round-trip — no `Device::new` ping, no table walk. `None` when the device
+    /// exposes neither `0x1004` nor the legacy `0x1000`.
+    battery: Option<BatteryProbe>,
     probed_tick: u64,
 }
 
@@ -143,6 +145,43 @@ enum CacheOutcome {
 /// `Seen` when the device has a stable key, else `Unkeyed`.
 fn seen(id: Option<CacheKey>) -> CacheOutcome {
     id.map_or(CacheOutcome::Unkeyed, CacheOutcome::Seen)
+}
+
+/// The legacy `0x1000` battery feature (MX2S-era mice) reports `discharge_level
+/// = 0` while charging — the firmware can't gauge charge under load, so the GUI
+/// would show a misleading "Charging · 0%". Carry the last-known percentage
+/// forward for the charge so the reading stays trackable.
+///
+/// ponytail: a *frozen* pre-charge value, not a live charging %, because no
+/// device exposes that on `0x1000`. Only kicks in for the charging-and-zero
+/// sentinel; a genuine 0% while discharging (status != Charging) is untouched.
+/// Cold edge: app started while already charging has no prior, so it shows 0%
+/// until the first discharge read — upgrade to a stored sentinel if that bites.
+fn hold_percentage_while_charging(
+    fresh: BatteryInfo,
+    prev: Option<&BatteryInfo>,
+    probe: BatteryProbe,
+) -> BatteryInfo {
+    // Scoped to the legacy 0x1000 quirk: a 0x1004 device that legitimately
+    // reports 0% while charging must surface that, not a stale prior reading.
+    if !matches!(probe, BatteryProbe::Legacy(_)) {
+        return fresh;
+    }
+    let charging = matches!(
+        fresh.status,
+        BatteryStatus::Charging | BatteryStatus::ChargingSlow
+    );
+    if charging
+        && fresh.percentage == 0
+        && let Some(p) = prev.filter(|p| p.percentage > 0)
+    {
+        return BatteryInfo {
+            percentage: p.percentage,
+            level: p.level,
+            status: fresh.status,
+        };
+    }
+    fresh
 }
 
 /// Whether `cached` is stale enough that the device should be re-probed.
@@ -164,7 +203,14 @@ async fn probe_or_reuse(
     tick: u64,
 ) -> (ProbedFeatures, CacheOutcome) {
     if online && cached.is_none_or(|c| is_stale(c, tick)) {
-        let (fresh, battery_index) = probe_features(channel, index).await;
+        let (mut fresh, battery) = probe_features(channel, index).await;
+        if let (Some(reading), Some(probe)) = (fresh.battery.take(), battery) {
+            fresh.battery = Some(hold_percentage_while_charging(
+                reading,
+                cached.and_then(|c| c.probe.battery.as_ref()),
+                probe,
+            ));
+        }
         // `capabilities` is `Some` exactly when the feature-table walk succeeded;
         // only then is the probe worth caching.
         if fresh.capabilities.is_some() {
@@ -172,7 +218,7 @@ async fn probe_or_reuse(
                 Some(key) => {
                     let value = Cached {
                         probe: fresh.clone(),
-                        battery_index,
+                        battery,
                         probed_tick: tick,
                     };
                     (fresh, CacheOutcome::Fresh(key, value))
@@ -195,10 +241,12 @@ async fn probe_or_reuse(
             // index and fold the reading back into the cache. A failed read
             // (asleep, mid-host-switch) keeps the last-known value.
             if online
-                && let Some(feature_index) = c.battery_index
+                && let Some(probe) = c.battery
                 && let Some(key) = id.clone()
-                && let Some(battery) = read_battery(channel, index, feature_index).await
+                && let Some(battery) = read_battery(channel, index, probe).await
             {
+                let battery =
+                    hold_percentage_while_charging(battery, c.probe.battery.as_ref(), probe);
                 let mut entry = c.clone();
                 entry.probe.battery = Some(battery);
                 return (entry.probe.clone(), CacheOutcome::Update(key, entry));
@@ -933,37 +981,75 @@ struct ProbedFeatures {
     capabilities: Option<Capabilities>,
 }
 
-/// Read just the battery by addressing the `UnifiedBattery` feature at its
-/// known runtime `feature_index` — one round-trip, with no `Device::new` ping
-/// and no feature-table walk. This is both the full probe's battery read (the
-/// walk just produced the index) and the cheap per-tick refresh for cache hits.
-/// `None` when the device doesn't answer (asleep, switched hosts).
+/// Which battery feature a device exposes plus its runtime feature index. Newer
+/// devices answer the unified `0x1004`; MX2S-era ones only the legacy `0x1000`
+/// — the same enhanced-then-legacy split SmartShift has with `0x2111`/`0x2110`.
+#[derive(Clone, Copy)]
+enum BatteryProbe {
+    Unified(u8),
+    Legacy(u8),
+}
+
+/// Read just the battery by addressing its feature at the known runtime index —
+/// one round-trip, with no `Device::new` ping and no feature-table walk. This is
+/// both the full probe's battery read (the walk just produced the index) and the
+/// cheap per-tick refresh for cache hits. `None` when the device doesn't answer
+/// (asleep, switched hosts).
 async fn read_battery(
     channel: &Arc<HidppChannel>,
     slot: u8,
-    feature_index: u8,
+    probe: BatteryProbe,
 ) -> Option<BatteryInfo> {
-    let feature = UnifiedBatteryFeature::new(Arc::clone(channel), slot, feature_index);
-    feature
-        .get_battery_info()
-        .await
-        .ok()
-        .map(|info| BatteryInfo {
-            percentage: info.charging_percentage,
-            level: map_battery_level(info.level),
-            status: map_battery_status(info.status),
-        })
+    match probe {
+        BatteryProbe::Unified(feature_index) => {
+            let feature = UnifiedBatteryFeature::new(Arc::clone(channel), slot, feature_index);
+            feature
+                .get_battery_info()
+                .await
+                .ok()
+                .map(|info| BatteryInfo {
+                    percentage: info.charging_percentage,
+                    level: map_battery_level(info.level),
+                    status: map_battery_status(info.status),
+                })
+        }
+        BatteryProbe::Legacy(feature_index) => {
+            let feature = BatteryStatusFeature::new(Arc::clone(channel), slot, feature_index);
+            feature
+                .get_battery_level_status()
+                .await
+                .ok()
+                .map(|info| BatteryInfo {
+                    percentage: info.discharge_level,
+                    level: legacy_battery_level_from_percentage(info.discharge_level),
+                    status: map_legacy_battery_status(info.status),
+                })
+        }
+    }
 }
 
-/// Runtime index of the `UnifiedBattery` feature in an enumerated feature-ID
-/// table, for [`read_battery`]. The table is 1-based (index 0 is the implicit
-/// root feature, which enumeration omits).
-fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Option<u8> {
-    ids.into_iter()
-        .position(|id| id == UnifiedBatteryFeature::ID)
-        // A feature table holds at most `u8::MAX` entries (its count is a u8),
-        // so the 1-based index always fits.
-        .and_then(|pos| u8::try_from(pos + 1).ok())
+/// Locate a device's battery feature in an enumerated feature-ID table,
+/// preferring the unified `0x1004` and falling back to the legacy `0x1000`. The
+/// table is 1-based (index 0 is the implicit root feature, which enumeration
+/// omits).
+fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Option<BatteryProbe> {
+    // A feature table holds at most `u8::MAX` entries (its count is a u8), so a
+    // 1-based index always fits.
+    let mut legacy = None;
+    for (pos, id) in ids.into_iter().enumerate() {
+        // Stop gracefully past u8::MAX instead of `?`-returning None, which would
+        // discard a `legacy` already found. (The table caps at 255, so unreachable.)
+        let Ok(index) = u8::try_from(pos + 1) else {
+            break;
+        };
+        if id == UnifiedBatteryFeature::ID {
+            return Some(BatteryProbe::Unified(index));
+        }
+        if id == BatteryStatusFeature::ID && legacy.is_none() {
+            legacy = Some(BatteryProbe::Legacy(index));
+        }
+    }
+    legacy
 }
 
 /// Open a HID++ session for `slot` and read everything we care about (battery,
@@ -973,11 +1059,14 @@ fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Option<u8> {
 /// `enumerate_features` — the feature table is the Vec that enumeration already
 /// returns, so capabilities cost no extra round-trip.
 ///
-/// Also returns the `UnifiedBattery` runtime index found by the walk, so later
-/// ticks can refresh the battery without repeating it.
+/// Also returns the battery feature found by the walk, so later ticks can
+/// refresh the battery without repeating it.
 ///
 /// Only online, responsive devices reach here.
-async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> (ProbedFeatures, Option<u8>) {
+async fn probe_features(
+    channel: &Arc<HidppChannel>,
+    slot: u8,
+) -> (ProbedFeatures, Option<BatteryProbe>) {
     let mut device = match Device::new(Arc::clone(channel), slot).await {
         Ok(d) => d,
         Err(e) => {
@@ -987,11 +1076,11 @@ async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> (ProbedFeature
     };
     // The enumeration response IS the device's feature-ID table — capture it
     // for capability derivation instead of discarding it.
-    let mut battery_index = None;
+    let mut battery_probe = None;
     let mut capabilities = match device.enumerate_features().await {
         Ok(Some(features)) => {
             let ids: Vec<u16> = features.iter().map(|f| f.id).collect();
-            battery_index = battery_feature_index(ids.iter().copied());
+            battery_probe = battery_feature_index(ids.iter().copied());
             Some(Capabilities::from_feature_ids(&ids))
         }
         Ok(None) => None,
@@ -1009,8 +1098,8 @@ async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> (ProbedFeature
             .is_ok_and(|wheel| wheel.has_invert);
     }
 
-    let battery = match battery_index {
-        Some(feature_index) => read_battery(channel, slot, feature_index).await,
+    let battery = match battery_probe {
+        Some(probe) => read_battery(channel, slot, probe).await,
         None => None,
     };
 
@@ -1072,7 +1161,7 @@ async fn probe_features(channel: &Arc<HidppChannel>, slot: u8) -> (ProbedFeature
             kind,
             capabilities,
         },
-        battery_index,
+        battery_probe,
     )
 }
 
@@ -1081,15 +1170,71 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        CACHE_MISS_GRACE, CacheKey, Cached, Enumerator, ProbedFeatures, REFRESH_TICKS,
-        UnifiedBatteryFeature, battery_feature_index, is_stale,
+        BatteryInfo, BatteryProbe, BatteryStatus, BatteryStatusFeature, CACHE_MISS_GRACE, CacheKey,
+        Cached, Enumerator, ProbedFeatures, REFRESH_TICKS, UnifiedBatteryFeature,
+        battery_feature_index, hold_percentage_while_charging, is_stale,
     };
     use hidpp::feature::CreatableFeature as _;
+    use openlogi_core::device::BatteryLevel;
+
+    fn battery(percentage: u8, status: BatteryStatus) -> BatteryInfo {
+        BatteryInfo {
+            percentage,
+            level: BatteryLevel::Good,
+            status,
+        }
+    }
+
+    #[test]
+    fn charging_zero_holds_last_known_percentage() {
+        let legacy = BatteryProbe::Legacy(0);
+        // 0x1000 reports 0% mid-charge: keep the pre-charge reading, new status.
+        let held = hold_percentage_while_charging(
+            battery(0, BatteryStatus::Charging),
+            Some(&battery(85, BatteryStatus::Discharging)),
+            legacy,
+        );
+        assert_eq!(held.percentage, 85);
+        assert_eq!(held.status, BatteryStatus::Charging);
+
+        // A real 0% while discharging is left alone (not the charging sentinel).
+        let discharging = hold_percentage_while_charging(
+            battery(0, BatteryStatus::Discharging),
+            Some(&battery(85, BatteryStatus::Discharging)),
+            legacy,
+        );
+        assert_eq!(discharging.percentage, 0);
+
+        // A non-zero charging reading is trusted as-is, not overwritten.
+        let live = hold_percentage_while_charging(
+            battery(40, BatteryStatus::Charging),
+            Some(&battery(85, BatteryStatus::Discharging)),
+            legacy,
+        );
+        assert_eq!(live.percentage, 40);
+
+        // No usable prior (cold start mid-charge): nothing to hold, stays 0.
+        let cold =
+            hold_percentage_while_charging(battery(0, BatteryStatus::Charging), None, legacy);
+        assert_eq!(cold.percentage, 0);
+    }
+
+    #[test]
+    fn unified_charging_zero_is_not_held() {
+        // 0x1004 can report a genuine 0% while charging — the legacy hold must
+        // not mask it with a stale prior. Same inputs that hold for Legacy.
+        let live = hold_percentage_while_charging(
+            battery(0, BatteryStatus::Charging),
+            Some(&battery(85, BatteryStatus::Discharging)),
+            BatteryProbe::Unified(0),
+        );
+        assert_eq!(live.percentage, 0);
+    }
 
     fn cache_entry(probed_tick: u64) -> Cached {
         Cached {
             probe: ProbedFeatures::default(),
-            battery_index: None,
+            battery: None,
             probed_tick,
         }
     }
@@ -1140,7 +1285,7 @@ mod tests {
     fn cached_probe_is_reused_until_refresh_ticks() {
         let cached = Cached {
             probe: ProbedFeatures::default(),
-            battery_index: None,
+            battery: None,
             probed_tick: 10,
         };
         assert!(!is_stale(&cached, 10), "same tick is fresh");
@@ -1159,17 +1304,43 @@ mod tests {
         // `enumerate_features` omits the root feature (index 0), so the first
         // enumerated entry sits at runtime index 1.
         let table = [0x0001, UnifiedBatteryFeature::ID, 0x2201];
-        assert_eq!(battery_feature_index(table), Some(2));
-        assert_eq!(
-            battery_feature_index([UnifiedBatteryFeature::ID]),
-            Some(1),
+        assert!(matches!(
+            battery_feature_index(table),
+            Some(BatteryProbe::Unified(2))
+        ));
+        assert!(
+            matches!(
+                battery_feature_index([UnifiedBatteryFeature::ID]),
+                Some(BatteryProbe::Unified(1))
+            ),
             "first entry maps to index 1, not 0"
         );
     }
 
     #[test]
+    fn unified_battery_is_preferred_over_legacy() {
+        // A device exposing both must use the unified feature, mirroring
+        // SmartShift's enhanced-then-legacy precedence.
+        let table = [0x0001, BatteryStatusFeature::ID, UnifiedBatteryFeature::ID];
+        assert!(matches!(
+            battery_feature_index(table),
+            Some(BatteryProbe::Unified(3))
+        ));
+    }
+
+    #[test]
+    fn legacy_battery_is_the_fallback() {
+        // MX2S-era device: only `0x1000`.
+        let table = [0x0001, BatteryStatusFeature::ID, 0x2201];
+        assert!(matches!(
+            battery_feature_index(table),
+            Some(BatteryProbe::Legacy(2))
+        ));
+    }
+
+    #[test]
     fn no_battery_feature_means_no_index() {
-        assert_eq!(battery_feature_index([0x0001, 0x2201, 0x1b04]), None);
-        assert_eq!(battery_feature_index([]), None);
+        assert!(battery_feature_index([0x0001, 0x2201, 0x1b04]).is_none());
+        assert!(battery_feature_index([]).is_none());
     }
 }

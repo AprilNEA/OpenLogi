@@ -3,6 +3,7 @@
 //! battery level/status, and serial-number normalisation. No I/O — split from
 //! `inventory` purely to keep that file within size bounds.
 
+use hidpp::feature::battery_status::LegacyBatteryStatus as HidppLegacyBatteryStatus;
 use hidpp::feature::device_type_and_name::DeviceType as HidppDeviceType;
 use hidpp::feature::unified_battery::{
     BatteryLevel as HidppBatteryLevel, BatteryStatus as HidppBatteryStatus,
@@ -112,9 +113,45 @@ pub(crate) fn map_battery_status(status: HidppBatteryStatus) -> BatteryStatus {
     }
 }
 
+/// Map a legacy `0x1000` charging status to our [`BatteryStatus`].
+pub(crate) fn map_legacy_battery_status(status: HidppLegacyBatteryStatus) -> BatteryStatus {
+    match status {
+        HidppLegacyBatteryStatus::Discharging => BatteryStatus::Discharging,
+        // The legacy feature splits "charging" into recharging / almost-full;
+        // both are just "charging" to us.
+        HidppLegacyBatteryStatus::Recharging | HidppLegacyBatteryStatus::AlmostFull => {
+            BatteryStatus::Charging
+        }
+        HidppLegacyBatteryStatus::SlowRecharge => BatteryStatus::ChargingSlow,
+        HidppLegacyBatteryStatus::Full => BatteryStatus::Full,
+        HidppLegacyBatteryStatus::InvalidBattery | HidppLegacyBatteryStatus::ThermalError => {
+            BatteryStatus::Error
+        }
+        _ => BatteryStatus::Unknown,
+    }
+}
+
+/// Derive a coarse [`BatteryLevel`] from a discharge percentage. The legacy
+/// `0x1000` feature reports a percentage but, unlike `0x1004`, no level bitmask,
+/// so the bucket is ours to pick.
+///
+/// ponytail: fixed display buckets, not device thresholds. Lift to the device's
+/// own thresholds only if `0x1000`'s capability query (function 1) is wired up.
+pub(crate) fn legacy_battery_level_from_percentage(percentage: u8) -> BatteryLevel {
+    match percentage {
+        90..=u8::MAX => BatteryLevel::Full,
+        50..=89 => BatteryLevel::Good,
+        20..=49 => BatteryLevel::Low,
+        _ => BatteryLevel::Critical,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DeviceKind, UnifyingDeviceKind, map_unifying_kind, resolve_device_kind};
+    use super::{
+        BatteryLevel, DeviceKind, UnifyingDeviceKind, legacy_battery_level_from_percentage,
+        map_unifying_kind, resolve_device_kind,
+    };
 
     #[test]
     fn probe_overrides_a_misreporting_register() {
@@ -153,6 +190,38 @@ mod tests {
             resolve_device_kind(None, DeviceKind::Unknown),
             DeviceKind::Unknown
         );
+    }
+
+    #[test]
+    fn legacy_percentage_buckets_into_levels() {
+        assert_eq!(
+            legacy_battery_level_from_percentage(100),
+            BatteryLevel::Full
+        );
+        assert_eq!(legacy_battery_level_from_percentage(90), BatteryLevel::Full);
+        assert_eq!(legacy_battery_level_from_percentage(89), BatteryLevel::Good);
+        assert_eq!(legacy_battery_level_from_percentage(50), BatteryLevel::Good);
+        assert_eq!(legacy_battery_level_from_percentage(49), BatteryLevel::Low);
+        assert_eq!(legacy_battery_level_from_percentage(20), BatteryLevel::Low);
+        assert_eq!(
+            legacy_battery_level_from_percentage(19),
+            BatteryLevel::Critical
+        );
+        assert_eq!(
+            legacy_battery_level_from_percentage(0),
+            BatteryLevel::Critical
+        );
+    }
+
+    #[test]
+    fn legacy_status_value_7_maps_to_unknown_not_vanish() {
+        use super::{BatteryStatus, HidppLegacyBatteryStatus, map_legacy_battery_status};
+        // Value 7 ("other charging error") must parse and surface as Unknown so
+        // the battery indicator stays visible instead of disappearing.
+        let mapped = HidppLegacyBatteryStatus::try_from(7u8)
+            .ok()
+            .map(map_legacy_battery_status);
+        assert_eq!(mapped, Some(BatteryStatus::Unknown));
     }
 
     #[test]

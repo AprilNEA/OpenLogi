@@ -17,7 +17,9 @@ use hidpp::{
     device::Device,
     feature::CreatableFeature,
     feature::adjustable_dpi::AdjustableDpiFeature,
+    feature::battery_status::BatteryStatusFeature,
     feature::smartshift::{SmartShiftFeature, WheelMode},
+    feature::unified_battery::UnifiedBatteryFeature,
     protocol::v20::{ErrorType, Hidpp20Error},
 };
 use serde::{Deserialize, Serialize};
@@ -538,6 +540,51 @@ pub async fn get_smartshift_status(route: &DeviceRoute) -> Result<SmartShiftStat
             .map_err(|_| WriteError::DeviceUnreachable { index })?;
         let smartshift = SmartShift::open(&mut device).await?;
         smartshift.status().await
+    })
+    .await
+}
+
+/// Diagnostic read of the device's raw battery report — the unified `0x1004`
+/// fields, or the legacy `0x1000` `discharge_level`/`next_level`/`status`. For
+/// `openlogi diag battery`: surfaces exactly what the firmware reports so a
+/// claim like "MX2S shows 0% while charging" can be confirmed against the wire
+/// instead of guessed (the GUI only ever shows the mapped value).
+pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError> {
+    let index = route.device_index();
+    with_route(route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        device
+            .enumerate_features()
+            .await
+            .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+
+        if let Some(feature) = device.get_feature::<UnifiedBatteryFeature>() {
+            let info = feature
+                .get_battery_info()
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            return Ok(format!(
+                "0x1004 UnifiedBattery: percentage={} level={:?} status={:?}",
+                info.charging_percentage, info.level, info.status
+            ));
+        }
+        if let Some(feature) = device.get_feature::<BatteryStatusFeature>() {
+            let info = feature
+                .get_battery_level_status()
+                .await
+                .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+            return Ok(format!(
+                "0x1000 BatteryStatus: discharge_level={} next_level={} status={:?}",
+                info.discharge_level, info.next_level, info.status
+            ));
+        }
+        // Reached only when neither 0x1004 nor 0x1000 is present; report the
+        // preferred feature rather than implying 0x1000 was specifically absent.
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x1004,
+        })
     })
     .await
 }
