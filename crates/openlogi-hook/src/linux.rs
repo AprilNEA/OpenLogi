@@ -21,7 +21,7 @@ use std::sync::{
 use std::thread;
 
 use evdev::uinput::VirtualDevice;
-use evdev::{Device, EventSummary, InputEvent, KeyCode, RelativeAxisCode};
+use evdev::{Device, EventSummary, KeyCode, RelativeAxisCode};
 use tracing::{debug, error, warn};
 use x11rb::connection::Connection as _;
 use x11rb::properties::WmClass;
