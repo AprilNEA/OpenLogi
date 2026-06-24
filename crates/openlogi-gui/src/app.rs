@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, BorrowAppContext as _, BoxShadow, Context, Div, Entity,
-    FontWeight, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, div, img, point,
-    prelude::FluentBuilder as _, px, relative, rgb,
+    AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, BoxShadow, Context, Div,
+    Entity, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, fill,
+    img, point, prelude::FluentBuilder as _, px, relative, rgb,
 };
 use gpui_component::{
     Icon, IconName, Sizable as _,
@@ -21,18 +21,19 @@ use openlogi_core::device::{
 };
 use openlogi_hid::DeviceRoute;
 use tracing::info;
+use url::Url;
 
 use openlogi_agent_core::ipc::InventoryHealth;
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
-use crate::asset::AssetResolver;
+use crate::asset::{AssetResolver, GlowGeometry};
 use crate::components::carousel::Carousel;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AgentLink, AppState, DeviceRecord};
-use crate::theme::{self, FOOTER_H, HEADER_H, Palette};
+use crate::theme::{self, FOOTER_H, HEADER_H, Palette, SelectableStyle as _};
 
 /// Which screen the root view is showing.
 ///
@@ -130,6 +131,7 @@ impl DetailTab {
 
 /// Root application view.
 pub struct AppView {
+    focus_handle: FocusHandle,
     route: Route,
     mouse_model: Entity<MouseModelView>,
     dpi_panel: Entity<DpiPanel>,
@@ -147,47 +149,15 @@ pub struct AppView {
 }
 
 impl AppView {
-    /// Generate any missing keyboard glow overlays off the render thread, once
-    /// each. The gallery only reads the cached PNG ([`lighting_overlay`]); when a
-    /// worker finishes it refreshes the windows and the next render shows it.
-    fn ensure_glow(cx: &mut Context<Self>) {
-        let jobs: Vec<GlowJob> = {
-            let Some(state) = cx.try_global::<AppState>() else {
-                return;
-            };
-            state
-                .device_list
-                .iter()
-                .filter_map(|record| glow_job(state, record))
-                .collect()
-        };
-        for job in jobs {
-            let first = cx.update_global::<AppState, _>(|state, _| {
-                state.mark_glow_attempted(job.cache.clone())
-            });
-            if !first {
-                continue;
-            }
-            let GlowJob { cache, depot, hex } = job;
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            std::thread::spawn(move || {
-                let _ = tx.send(crate::asset::ensure_glow_png(&depot, &hex).is_some());
-            });
-            cx.spawn(async move |_view, cx| {
-                if matches!(rx.await, Ok(true)) {
-                    cx.update_global::<AppState, _>(|state, cx| {
-                        state.mark_glow_ready(cache);
-                        cx.refresh_windows();
-                    });
-                }
-            })
-            .detach();
-        }
-    }
-
     /// Construct the root view and its child entities.
-    pub fn new(_inventories: &[DeviceInventory], cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        _inventories: &[DeviceInventory],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let cache = AssetResolver::new();
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window, cx);
         // `AppState` is installed as a global by `main` (with the IPC command
         // sender) before any window opens; downstream reads use `try_global`
         // and tolerate its absence, so there's no fallback construction here.
@@ -213,6 +183,7 @@ impl AppView {
         let lighting_panel = cx.new(LightingPanel::new);
         let state_obs = cx.observe_global::<AppState>(|_, cx| cx.notify());
         Self {
+            focus_handle,
             route: Route::Home,
             mouse_model,
             dpi_panel,
@@ -367,6 +338,7 @@ impl Render for AppView {
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
+            .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window());
@@ -404,7 +376,6 @@ impl Render for AppView {
                 .child(Self::accessibility_gate(pal, cx))
                 .into_any_element();
         }
-        Self::ensure_glow(cx);
 
         let has_device = cx
             .try_global::<AppState>()
@@ -627,7 +598,9 @@ fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                     return div().into_any_element();
                 };
                 let key = record.config_key.clone();
-                let glow = lighting_overlay(&record, cx);
+                let glow = cx
+                    .try_global::<AppState>()
+                    .and_then(|s| keyboard_glow(s, &record));
                 let view = view.clone();
                 device_card(&record, focused, glow, pal)
                     .id(("device-card", idx))
@@ -645,48 +618,70 @@ fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
     )
 }
 
-/// Path to the cached inter-key colour overlay for a light-up keyboard, if it
-/// has been generated. Generation runs off the render thread in
-/// [`AppView::ensure_glow`]; this lookup only stats the cache. `None` unless the
-/// device is a keyboard with lighting enabled and the overlay exists yet.
-fn lighting_overlay(record: &DeviceRecord, cx: &App) -> Option<PathBuf> {
-    if record.kind != DeviceKind::Keyboard {
-        return None;
-    }
-    let state = cx.try_global::<AppState>()?;
-    let lighting = state
-        .lighting_for(&record.config_key)
-        .filter(|l| l.enabled)?;
-    let asset = record.asset.as_ref()?;
-    asset.hero_image_path.as_ref()?;
-    let path = crate::asset::glow_path(&asset.depot, &lighting.color)?;
-    state.glow_is_ready(&path).then_some(path)
-}
+/// Opacity the lighting colour is painted at over the device image, in both the
+/// home gallery and the device-detail model.
+const GLOW_OPACITY: f32 = 0.6;
 
-/// A pending off-thread glow generation: the cache path to fill plus the inputs
-/// [`crate::asset::ensure_glow_png`] needs.
-struct GlowJob {
-    cache: PathBuf,
-    depot: String,
-    hex: String,
-}
-
-/// The glow job for `record` when it's a keyboard with lighting enabled and a
-/// resolved photo; `None` otherwise.
-fn glow_job(state: &AppState, record: &DeviceRecord) -> Option<GlowJob> {
+/// The inter-key glow geometry and tinted colour for `record`, or `None` unless
+/// it's a keyboard with lighting enabled and a depot that ships a baked mask.
+/// The geometry is painted live by [`glow_canvas`] — no pre-rendered PNG, so a
+/// colour change costs no new texture.
+pub(crate) fn keyboard_glow(
+    state: &AppState,
+    record: &DeviceRecord,
+) -> Option<(Arc<GlowGeometry>, Hsla)> {
     if record.kind != DeviceKind::Keyboard {
         return None;
     }
     let lighting = state
         .lighting_for(&record.config_key)
         .filter(|l| l.enabled)?;
-    let asset = record.asset.as_ref()?;
-    asset.hero_image_path.as_ref()?;
-    Some(GlowJob {
-        cache: crate::asset::glow_path(&asset.depot, &lighting.color)?,
-        depot: asset.depot.clone(),
-        hex: lighting.color,
-    })
+    let geom = record.asset.as_ref()?.glow.clone()?;
+    let [_, r, g, b] = crate::components::lighting_panel::parse_hex(&lighting.color).to_be_bytes();
+    let color = gpui::Rgba {
+        r: f32::from(r) / 255.,
+        g: f32::from(g) / 255.,
+        b: f32::from(b) / 255.,
+        a: GLOW_OPACITY,
+    };
+    Some((geom, color.into()))
+}
+
+/// Paint a keyboard's baked inter-key holes in its lighting colour, scaled with
+/// a contain-fit so the holes register with the keys at any render size. A
+/// `canvas` of tinted quads — no pre-rendered PNG and no per-colour texture, so
+/// the runtime footprint is just the depot's small segment list (#272).
+pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElement {
+    canvas(
+        move |_, _, _| (geom, color),
+        move |bounds, (geom, color), window, _| {
+            let bw = f32::from(bounds.size.width);
+            let bh = f32::from(bounds.size.height);
+            if bw <= 0. || bh <= 0. {
+                return;
+            }
+            // Contain-fit a `geom.aspect` box inside the bounds, matching the
+            // device image's object-fit so the holes line up with the keys.
+            let (rw, rh) = if bw / bh > geom.aspect {
+                (bh * geom.aspect, bh)
+            } else {
+                (bw, bw / geom.aspect)
+            };
+            let ox = f32::from(bounds.origin.x) + (bw - rw) / 2.;
+            let oy = f32::from(bounds.origin.y) + (bh - rh) / 2.;
+            for s in &geom.segments {
+                let quad = Bounds {
+                    origin: point(px(ox + s.x * rw), px(oy + s.y * rh)),
+                    size: gpui::size(px((s.w * rw).max(1.)), px((s.h * rh).max(1.))),
+                };
+                window.paint_quad(fill(quad, color));
+            }
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// A device card in the Home gallery: the device photo floating on the window
@@ -695,7 +690,12 @@ fn glow_job(state: &AppState, record: &DeviceRecord) -> Option<GlowJob> {
 /// faint accent ring; inactive cards reserve the same 1px border in a
 /// transparent colour so selection never nudges the layout. Returns a bare
 /// [`Div`] so the gallery can wire the click handler.
-fn device_card(record: &DeviceRecord, active: bool, glow: Option<PathBuf>, pal: Palette) -> Div {
+fn device_card(
+    record: &DeviceRecord,
+    active: bool,
+    glow: Option<(Arc<GlowGeometry>, Hsla)>,
+    pal: Palette,
+) -> Div {
     let ring = if active {
         rgb(theme::ACCENT_BLUE).into()
     } else {
@@ -718,17 +718,10 @@ fn device_card(record: &DeviceRecord, active: bool, glow: Option<PathBuf>, pal: 
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(device_image(record, pal))
-                .when_some(glow, |this, path| {
-                    this.child(
-                        img(path)
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full()
-                            .opacity(0.6),
-                    )
-                }),
+                .when_some(glow, |this, (geom, color)| {
+                    this.child(glow_canvas(geom, color))
+                })
+                .child(device_image(record, pal)),
         )
         .child(
             v_flex()
@@ -904,7 +897,7 @@ fn detail_content(
 ) -> impl IntoElement {
     match active {
         DetailTab::Buttons => buttons_tab(mouse_model).into_any_element(),
-        DetailTab::Pointer => pointer_tab(dpi_panel, smartshift_panel, pal).into_any_element(),
+        DetailTab::Pointer => pointer_tab(dpi_panel, smartshift_panel, pal, cx).into_any_element(),
         DetailTab::Lighting => lighting_tab(lighting_panel, pal).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
     }
@@ -951,12 +944,15 @@ fn buttons_tab(mouse_model: &Entity<MouseModelView>) -> impl IntoElement {
         .child(div().w_full().max_w(px(760.)).child(mouse_model.clone()))
 }
 
-/// Pointer tab: the DPI panel and the SmartShift wheel controls, each in a
-/// titled card, stacked.
+/// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
+/// scroll-wheel preferences, each in a titled card. Use a responsive two-column
+/// grid that still fits the window's 720 px minimum width, so these short
+/// controls don't force a vertical scroll.
 fn pointer_tab(
     dpi_panel: &Entity<DpiPanel>,
     smartshift_panel: &Entity<SmartShiftPanel>,
     pal: Palette,
+    cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     v_flex()
         .flex_1()
@@ -964,20 +960,117 @@ fn pointer_tab(
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
-        .p_6()
+        .p_5()
+        .child(
+            h_flex()
+                .w_full()
+                .max_w(px(920.))
+                .items_stretch()
+                .gap_4()
+                .flex_wrap()
+                .child(pointer_grid_card(panel_card_fill(
+                    tr!("Pointer tuning"),
+                    IconName::Settings,
+                    pal,
+                    dpi_panel.clone().into_any_element(),
+                )))
+                .child(pointer_grid_card(panel_card_fill(
+                    tr!("SmartShift"),
+                    IconName::Settings,
+                    pal,
+                    smartshift_panel.clone().into_any_element(),
+                )))
+                .child(pointer_grid_card_natural(scrolling_card(pal, cx))),
+        )
+}
+
+fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
+    // Two cards plus one 16 px gap fit exactly inside the 720 px window minimum
+    // after this tab's 20 px side padding, while still leaving a usable slider.
+    div().min_w(px(332.)).flex_1().h_full().child(card)
+}
+
+fn pointer_grid_card_natural(card: impl IntoElement) -> impl IntoElement {
+    div().min_w(px(332.)).flex_1().child(card)
+}
+
+/// Scrolling card: a per-device "invert scroll direction" toggle (#126). Pure
+/// config — no hardware read — so it is a plain switch row rather than an
+/// `Entity` panel like DPI / SmartShift.
+fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let (inverted, supported) = cx.try_global::<AppState>().map_or((false, false), |state| {
+        (
+            state.current_invert_scroll(),
+            state.current_scroll_inversion_supported(),
+        )
+    });
+    let description = if supported {
+        tr!("Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.")
+    } else {
+        tr!("This device does not report native HID++ scroll inversion support.")
+    };
+    let row = h_flex()
+        .justify_between()
+        .items_center()
         .gap_4()
-        .child(div().w_full().max_w(px(560.)).child(panel_card(
-            tr!("Pointer tuning"),
-            IconName::Settings,
-            pal,
-            dpi_panel.clone().into_any_element(),
-        )))
-        .child(div().w_full().max_w(px(560.)).child(panel_card(
-            tr!("SmartShift"),
-            IconName::Settings,
-            pal,
-            smartshift_panel.clone().into_any_element(),
-        )))
+        .child(
+            v_flex()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(pal.text_primary)
+                        .child(tr!("Invert scroll direction")),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(pal.text_muted)
+                        .child(description),
+                ),
+        )
+        .child(invert_scroll_toggle(inverted, supported, pal));
+    panel_card(
+        tr!("Scrolling"),
+        IconName::Settings,
+        pal,
+        row.into_any_element(),
+    )
+}
+
+/// On/Off pill that flips the active device's scroll-wheel inversion, mirroring
+/// the SmartShift permanent-ratchet toggle.
+fn invert_scroll_toggle(on: bool, enabled: bool, pal: Palette) -> AnyElement {
+    let label = if on { tr!("On") } else { tr!("Off") };
+    if !enabled {
+        return div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(pal.border)
+            .text_xs()
+            .text_color(pal.text_muted)
+            .child(tr!("Unavailable"))
+            .into_any_element();
+    }
+    div()
+        .id("invert-scroll-toggle")
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .selected_border(on, pal)
+        .selected_fill(on)
+        .text_xs()
+        .text_color(if on { pal.text_primary } else { pal.text_muted })
+        .cursor_pointer()
+        .child(label)
+        .on_click(move |_event, _window, cx| {
+            cx.update_global::<AppState, _>(|state, _| {
+                state.commit_invert_scroll(!on);
+            });
+            cx.refresh_windows();
+        })
+        .into_any_element()
 }
 
 /// Lighting tab: the RGB controls (swatches, on/off, brightness) in a titled
@@ -1099,8 +1192,10 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                     tr!("Config folder"),
                     pal,
                     |_event, _window, cx| {
-                        if let Ok(path) = openlogi_core::paths::config_dir() {
-                            cx.open_url(&file_url(&path));
+                        if let Ok(path) = openlogi_core::paths::config_dir()
+                            && let Some(url) = file_url(&path)
+                        {
+                            cx.open_url(&url);
                         }
                     },
                 )),
@@ -1157,8 +1252,28 @@ fn panel_card(
     pal: Palette,
     content: AnyElement,
 ) -> impl IntoElement {
+    panel_card_inner(title, icon, pal, content, false)
+}
+
+fn panel_card_fill(
+    title: SharedString,
+    icon: IconName,
+    pal: Palette,
+    content: AnyElement,
+) -> impl IntoElement {
+    panel_card_inner(title, icon, pal, content, true)
+}
+
+fn panel_card_inner(
+    title: SharedString,
+    icon: IconName,
+    pal: Palette,
+    content: AnyElement,
+    fill_height: bool,
+) -> impl IntoElement {
     div()
         .w_full()
+        .when(fill_height, gpui::Styled::h_full)
         .max_w_full()
         .min_w_0()
         .rounded_lg()
@@ -1308,8 +1423,8 @@ fn relative_percent(value: u8) -> gpui::DefiniteLength {
     relative(f32::from(value.clamp(1, 100)) / 100.)
 }
 
-fn file_url(path: &std::path::Path) -> String {
-    format!("file://{}", path.to_string_lossy().replace(' ', "%20"))
+fn file_url(path: &std::path::Path) -> Option<String> {
+    Url::from_file_path(path).ok().map(Into::into)
 }
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"
@@ -1587,8 +1702,11 @@ mod tests {
     fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord {
         DeviceRecord {
             config_key: "test".to_string(),
+            model_key: "test".to_string(),
             display_name: "Test".to_string(),
             asset: None,
+            model_info: None,
+            codename: None,
             serial_number: None,
             unit_id: [0; 4],
             route: None,
@@ -1609,6 +1727,7 @@ mod tests {
             buttons: true,
             pointer: true,
             lighting: false,
+            scroll_inversion: false,
         });
         // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -1626,6 +1745,7 @@ mod tests {
             buttons: true,
             pointer: false,
             lighting: true,
+            scroll_inversion: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(

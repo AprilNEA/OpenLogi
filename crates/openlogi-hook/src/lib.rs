@@ -27,6 +27,21 @@
 
 pub use openlogi_core::binding::ButtonId;
 
+/// Best-effort identity for the physical device that produced an OS event.
+///
+/// Platform hooks fill the stable fields they can read cheaply from the native
+/// event. Consumers use this to apply host-side settings per device rather than
+/// through the currently selected UI device.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EventDevice {
+    /// USB/Bluetooth vendor id when the platform exposes it.
+    pub vendor_id: Option<u32>,
+    /// USB/Bluetooth/HID product id when the platform exposes it.
+    pub product_id: Option<u32>,
+    /// Human-readable product name, normalized by consumers before matching.
+    pub product_name: Option<String>,
+}
+
 /// An event captured at the OS layer.
 #[derive(Clone, Debug)]
 pub enum MouseEvent {
@@ -43,6 +58,20 @@ pub enum MouseEvent {
         delta_x: f32,
         /// Positive = down, negative = up.
         delta_y: f32,
+        /// `true` when the OS attributes this scroll to a trackpad / Magic Mouse
+        /// gesture rather than a mouse wheel, so a consumer can transform the
+        /// wheel while leaving native trackpad scrolling alone (issue #126).
+        ///
+        /// On macOS this is resolved from the `IOHIDEvent` sender's IOKit device
+        /// identity, because Logitech free-spin wheels can carry the same phase
+        /// flags as a trackpad. Sender-less events fall back to the phase fields.
+        /// Always `false` on Linux/Windows, where the wheel and trackpad arrive
+        /// as distinct event types rather than one flagged stream.
+        from_trackpad: bool,
+        /// Best-effort physical source of the scroll event. `None` means the
+        /// platform could not attribute the event to a device, or the event was
+        /// synthetic.
+        device: Option<EventDevice>,
     },
     /// Pointer movement, in device units. Emitted so a held gesture button can
     /// accumulate a swipe; the callback passes these through (the cursor keeps

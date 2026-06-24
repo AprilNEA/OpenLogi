@@ -22,9 +22,6 @@ use crate::components::status::{retry_line, status_line};
 use crate::state::{AppState, DpiStatus};
 use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
 
-/// Slider column width. Matches the right-column layout in `app.rs`.
-const PANEL_W: f32 = 300.;
-
 pub struct DpiPanel {
     slider_state: Option<Entity<SliderState>>,
     slider_sub: Option<Subscription>,
@@ -223,7 +220,7 @@ impl Render for DpiPanel {
 
         v_flex()
             .gap_3()
-            .w(px(PANEL_W))
+            .w_full()
             .child(
                 h_flex()
                     .justify_between()

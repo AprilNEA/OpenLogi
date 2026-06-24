@@ -26,7 +26,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use hidpp::{
-    channel::{HidppChannel, HidppMessage},
+    channel::{HidppChannel, HidppMessage, MessageListenerGuard},
     receiver::{self, Receiver},
 };
 use serde::{Deserialize, Serialize};
@@ -379,16 +379,18 @@ fn parse_notification(sub_id: u8, device_index: u8, p: [u8; 17]) -> Option<Notif
 }
 
 /// Subscribes a listener that forwards unmatched messages to an async channel,
-/// and returns the listener handle plus the receiver end.
-fn subscribe(channel: &HidppChannel) -> (u32, mpsc::UnboundedReceiver<HidppMessage>) {
+/// and returns the listener guard plus the receiver end.
+fn subscribe(
+    channel: &HidppChannel,
+) -> (MessageListenerGuard, mpsc::UnboundedReceiver<HidppMessage>) {
     let (tx, rx) = mpsc::unbounded_channel();
-    let hdl = channel.add_msg_listener(move |msg, matched| {
+    let listener = channel.add_msg_listener_guarded(move |msg, matched| {
         // `matched` messages are responses to our own register writes.
         if !matched {
             let _ = tx.send(msg);
         }
     });
-    (hdl, rx)
+    (listener, rx)
 }
 
 /// Overall guard so a wedged receiver can't hang the session forever.
@@ -408,12 +410,18 @@ pub async fn run_pairing(
     mut commands: mpsc::UnboundedReceiver<PairingCommand>,
     events: mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
-    let (channel, family) = open_receiver(&target).await?;
+    let (channel, family) = match open_receiver(&target).await {
+        Ok(receiver) => receiver,
+        Err(e) => {
+            let _ = events.send(PairingEvent::Failed(e.clone()));
+            return Err(e);
+        }
+    };
     let (listener, mut notifications) = subscribe(&channel);
 
     let result = drive(&channel, family, &mut commands, &mut notifications, &events).await;
 
-    channel.remove_msg_listener(listener);
+    drop(listener);
     // Best-effort restore: clear notification flags we set.
     let _ = channel
         .write_register(RECEIVER_INDEX, reg::NOTIFICATIONS, [0, 0, 0])

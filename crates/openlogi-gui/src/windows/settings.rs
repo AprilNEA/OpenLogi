@@ -11,9 +11,9 @@ use gpui::StatefulInteractiveElement as _;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use gpui::rgb;
 use gpui::{
-    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ParentElement as _, Render, SharedString, Size, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, FocusHandle,
+    InteractiveElement, IntoElement, ParentElement as _, Render, SharedString, Size, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     IconName, IndexPath, Sizable, h_flex,
@@ -38,6 +38,7 @@ use crate::{AssetCommand, AssetControl};
 
 /// Standalone Settings window root view.
 pub struct SettingsView {
+    focus_handle: FocusHandle,
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
     language_select: Entity<SelectState<Vec<LanguageOption>>>,
@@ -54,6 +55,8 @@ impl SettingsView {
         reason = "sensitivity bounds are tiny 1..=100 integers — exact in f32"
     )]
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window, cx);
         let current = cx
             .try_global::<AppState>()
             .and_then(|s| s.app_settings().language.clone());
@@ -78,6 +81,7 @@ impl SettingsView {
             .detach();
 
         Self {
+            focus_handle,
             appearance_obs: None,
             language_select,
             sensitivity_slider,
@@ -156,6 +160,7 @@ impl Render for SettingsView {
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
+            .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())

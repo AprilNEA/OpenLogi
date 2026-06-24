@@ -4,14 +4,16 @@ use std::collections::HashSet;
 
 use openlogi_agent_core::device_order::DeviceStableId;
 use openlogi_core::config::{Config, DeviceIdentity};
-use openlogi_core::device::{BatteryInfo, Capabilities, DeviceInventory, DeviceKind};
+use openlogi_core::device::{
+    BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
+};
 use openlogi_hid::DeviceRoute;
 use tracing::debug;
 
 use crate::asset::{AssetResolver, ResolvedAsset};
 
 /// One paired device with everything the UI needs to switch to it in O(1):
-/// the config key (for bindings/DPI persistence), a display name, the
+/// the physical config key (for bindings/DPI persistence), a display name, the
 /// resolved asset (PNG + metadata, or `None` for the synthetic fallback),
 /// and the [`DeviceRoute`] HID++ writes / capture target.
 ///
@@ -22,9 +24,14 @@ use crate::asset::{AssetResolver, ResolvedAsset};
 /// with [`super::AppState::current_device`].
 #[derive(Debug, Clone)]
 pub struct DeviceRecord {
+    /// Stable physical-device key used for persisted settings.
     pub config_key: String,
+    /// Stable model key used only for asset/model lookup and diagnostics.
+    pub model_key: String,
     pub display_name: String,
     pub asset: Option<ResolvedAsset>,
+    pub model_info: Option<DeviceModelInfo>,
+    pub codename: Option<String>,
     pub serial_number: Option<String>,
     pub unit_id: [u8; 4],
     pub route: Option<DeviceRoute>,
@@ -59,26 +66,36 @@ pub(super) fn build_device_list(
     let mut list = Vec::new();
     for inv in inventories {
         for paired in &inv.paired {
-            let (config_key, asset, serial_number, unit_id) =
+            let route = DeviceRoute::device_route_for(inv, paired.slot);
+            let (model_key, asset, model_info, codename, serial_number, unit_id) =
                 if let Some(model) = paired.model_info.as_ref() {
                     let asset = cache.resolve(model, paired.codename.as_deref());
                     (
                         model.config_key(),
                         asset,
+                        Some(model.clone()),
+                        paired.codename.clone(),
                         model.serial_number.clone(),
                         model.unit_id,
                     )
                 } else {
                     // No HID++ 2.0 model info — HID++ 1.0 device or feature walk
                     // timed out. Surface the device anyway using the wpid (or slot
-                    // as a last resort) as a stable config key so it appears in the
-                    // carousel and its settings survive across sessions.
+                    // as a last-resort model key) so it appears in the carousel
+                    // with a stable display fallback.
                     let key = paired.wpid.map_or_else(
                         || format!("slot{}", paired.slot),
                         |w| format!("wpid{w:04x}"),
                     );
-                    (key, None, None, [0u8; 4])
+                    (key, None, None, paired.codename.clone(), None, [0u8; 4])
                 };
+            let config_key = DeviceStableId::from_parts(
+                route.as_ref(),
+                paired.slot,
+                serial_number.as_deref(),
+                unit_id,
+            )
+            .config_key();
 
             let display_name = asset
                 .as_ref()
@@ -88,11 +105,14 @@ pub(super) fn build_device_list(
             let kind = effective_kind(paired.kind, asset.as_ref().map(|a| a.kind));
             list.push(DeviceRecord {
                 config_key,
+                model_key,
                 display_name,
                 asset,
+                model_info,
+                codename,
                 serial_number,
                 unit_id,
-                route: DeviceRoute::device_route_for(inv, paired.slot),
+                route,
                 kind,
                 capabilities: paired.capabilities,
                 slot: paired.slot,
@@ -105,7 +125,7 @@ pub(super) fn build_device_list(
     if std::env::var_os("OPENLOGI_DEMO_KEYBOARD").is_some() {
         list.push(demo_keyboard());
     }
-    append_offline_known(&mut list, config.known_identities());
+    append_offline_known(&mut list, config.known_identities(), cache);
     sort_device_list(&mut list);
     list
 }
@@ -116,16 +136,28 @@ pub(super) fn build_device_list(
 fn append_offline_known<'a>(
     list: &mut Vec<DeviceRecord>,
     known: impl Iterator<Item = (&'a str, &'a DeviceIdentity)>,
+    cache: &AssetResolver,
 ) {
-    let present: HashSet<&str> = list.iter().map(|r| r.config_key.as_str()).collect();
-    // Collect before extending: `present` borrows `list`, so the phantoms must
-    // be materialized before we can mutate it.
-    let phantoms: Vec<DeviceRecord> = known
-        .filter(|(key, _)| !present.contains(key))
-        .map(|(key, identity)| offline_record(key, identity))
+    let mut blocked_keys: HashSet<String> = list
+        .iter()
+        .flat_map(|r| [r.config_key.clone(), r.model_key.clone()])
         .collect();
-    drop(present);
-    list.extend(phantoms);
+    let mut known = known.collect::<Vec<_>>();
+    known.sort_by_key(|(key, identity)| (identity.model_info.is_none(), (*key).to_string()));
+
+    for (key, identity) in known {
+        let model_key = identity
+            .model_info
+            .as_ref()
+            .map_or_else(|| key.to_string(), DeviceModelInfo::config_key);
+        if blocked_keys.contains(key) || blocked_keys.contains(&model_key) {
+            continue;
+        }
+        let record = offline_record(key, identity, cache);
+        blocked_keys.insert(record.config_key.clone());
+        blocked_keys.insert(record.model_key.clone());
+        list.push(record);
+    }
 }
 
 /// Synthesize an offline placeholder from a persisted [`DeviceIdentity`].
@@ -133,14 +165,31 @@ fn append_offline_known<'a>(
 /// `route: None` keeps every hardware write a no-op until the live inventory
 /// supplies the real route when the device wakes; `capabilities: Some(..)` from
 /// the persisted measurement is what keeps the device's config panels visible
-/// while it sleeps. The asset photo is left to the live record (we don't
-/// re-resolve it here), so an offline card shows the synthetic silhouette until
-/// the device comes back online.
-fn offline_record(config_key: &str, identity: &DeviceIdentity) -> DeviceRecord {
+/// while it sleeps. When the identity was written by a version that persisted
+/// model info, the cached asset is resolved immediately so cold-start cards do
+/// not flash the synthetic silhouette while waiting for live inventory.
+fn offline_record(
+    config_key: &str,
+    identity: &DeviceIdentity,
+    cache: &AssetResolver,
+) -> DeviceRecord {
+    let model_info = identity
+        .model_info
+        .clone()
+        .or_else(|| model_info_from_legacy_model_key(config_key));
+    let asset = model_info
+        .as_ref()
+        .and_then(|model| cache.resolve(model, identity.codename.as_deref()));
+    let model_key = model_info
+        .as_ref()
+        .map_or_else(|| config_key.to_string(), DeviceModelInfo::config_key);
     DeviceRecord {
         config_key: config_key.to_string(),
+        model_key,
         display_name: identity.display_name.clone(),
-        asset: None,
+        asset,
+        model_info,
+        codename: identity.codename.clone(),
         serial_number: None,
         unit_id: [0; 4],
         route: None,
@@ -150,6 +199,22 @@ fn offline_record(config_key: &str, identity: &DeviceIdentity) -> DeviceRecord {
         online: false,
         battery: None,
     }
+}
+
+fn model_info_from_legacy_model_key(key: &str) -> Option<DeviceModelInfo> {
+    if key.len() <= 4 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let split = key.len() - 4;
+    let (ext, pid) = key.split_at(split);
+    Some(DeviceModelInfo {
+        entity_count: 0,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports::default(),
+        model_ids: [u16::from_str_radix(pid, 16).ok()?, 0, 0],
+        extended_model_id: u8::from_str_radix(ext, 16).ok()?,
+    })
 }
 
 /// Order the carousel by physical route. HID enumeration order can change as
@@ -170,7 +235,7 @@ fn device_order_key(record: &DeviceRecord) -> (DeviceStableId, String, String) {
             record.serial_number.as_deref(),
             record.unit_id,
         ),
-        record.config_key.clone(),
+        record.model_key.clone(),
         record.display_name.clone(),
     )
 }
@@ -182,8 +247,11 @@ fn device_order_key(record: &DeviceRecord) -> (DeviceStableId, String, String) {
 fn demo_keyboard() -> DeviceRecord {
     DeviceRecord {
         config_key: "demo-g513".to_string(),
+        model_key: "demo-g513".to_string(),
         display_name: "Logitech G513".to_string(),
         asset: None,
+        model_info: None,
+        codename: None,
         serial_number: None,
         unit_id: [0; 4],
         route: None,
@@ -303,8 +371,11 @@ mod tests {
     fn online_record(key: &str) -> DeviceRecord {
         DeviceRecord {
             config_key: key.to_string(),
+            model_key: key.to_string(),
             display_name: format!("live {key}"),
             asset: None,
+            model_info: None,
+            codename: None,
             serial_number: None,
             unit_id: [1; 4],
             route: None,
@@ -324,17 +395,21 @@ mod tests {
                 buttons: true,
                 pointer: true,
                 lighting: false,
+                scroll_inversion: false,
             },
+            model_info: None,
+            codename: None,
         }
     }
 
     #[test]
-    fn no_model_info_uses_wpid_as_config_key() {
+    fn no_model_info_uses_receiver_slot_as_config_key() {
         let inv = inventory_with(vec![paired_device_no_model_info(1, Some(0x4076))]);
         let cache = AssetResolver::new();
         let list = build_device_list(&[inv], &cache, &Config::default());
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].config_key, "wpid4076");
+        assert_eq!(list[0].config_key, "receiver:da2699e1:slot:1");
+        assert_eq!(list[0].model_key, "wpid4076");
         assert!(list[0].serial_number.is_none());
         assert_eq!(list[0].unit_id, [0u8; 4]);
     }
@@ -345,7 +420,8 @@ mod tests {
         let cache = AssetResolver::new();
         let list = build_device_list(&[inv], &cache, &Config::default());
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].config_key, "slot3");
+        assert_eq!(list[0].config_key, "receiver:da2699e1:slot:3");
+        assert_eq!(list[0].model_key, "slot3");
     }
 
     #[test]
@@ -362,7 +438,8 @@ mod tests {
         // measured capabilities (so its panels show) but no route (so writes are
         // no-ops until it wakes).
         let id = mouse_identity("MX Master 3S");
-        let rec = offline_record("2b034", &id);
+        let cache = AssetResolver::new();
+        let rec = offline_record("2b034", &id, &cache);
         assert_eq!(rec.config_key, "2b034");
         assert_eq!(rec.display_name, "MX Master 3S");
         assert!(!rec.online);
@@ -378,7 +455,8 @@ mod tests {
         let mut list = vec![online_record("A")];
         let a = mouse_identity("live A overwritten?");
         let b = mouse_identity("asleep B");
-        append_offline_known(&mut list, [("A", &a), ("B", &b)].into_iter());
+        let cache = AssetResolver::new();
+        append_offline_known(&mut list, [("A", &a), ("B", &b)].into_iter(), &cache);
 
         assert_eq!(list.len(), 2);
         assert!(

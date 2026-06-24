@@ -1,23 +1,33 @@
 { pkgs, ... }:
 
 let
-  # gpui's build compiles Metal shaders against the REAL Xcode toolchain.
-  # devenv's Nix apple-sdk setup hook sets DEVELOPER_DIR/SDKROOT to an SDK
-  # that has no `metal`, so anything compiling the GUI must force Xcode.
-  # Non-GUI crates still compile fine under this (the Nix clang wrapper keeps
-  # its own isysroot via NIX_CFLAGS), so applying it broadly is safe.
-  xcodeEnv = ''
-    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-    export SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+  # GPUI's build compiles Metal shaders against the real Xcode toolchain.
+  # devenv's Nix apple-sdk setup hook can point DEVELOPER_DIR/SDKROOT at an SDK
+  # that has no `metal`, so macOS dev shells force the full Xcode install.
+  # `MacOSX.sdk` is a stable symlink managed by Xcode, avoiding a shell-time
+  # `xcrun --show-sdk-path` just to populate the environment.
+  xcodeDeveloperDir = "/Applications/Xcode.app/Contents/Developer";
+  xcodeSdkRoot = "${xcodeDeveloperDir}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk";
+  requireXcodeMetal = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+    if ! /usr/bin/xcrun --find metal >/dev/null 2>&1; then
+      echo "OpenLogi GUI builds require full Xcode with Metal tools, not only Command Line Tools." >&2
+      echo "Install Xcode, then run: sudo xcode-select -s ${xcodeDeveloperDir}" >&2
+      exit 1
+    fi
   '';
 in
 {
+  # Use the system Xcode SDK instead of devenv's default Nix apple-sdk. GPUI
+  # needs Xcode's Metal toolchain, and setting this to null keeps the env vars
+  # below from being overwritten by the apple-sdk setup hook.
+  apple.sdk = null;
+
   env = {
     GREET = "devenv";
     RUSTC_WRAPPER = "sccache";
-    # DEVELOPER_DIR/SDKROOT are intentionally NOT set here: the Nix apple-sdk
-    # setup hook would override them anyway. Xcode is forced in enterShell and
-    # in the GUI tasks via xcodeEnv (above).
+  } // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+    DEVELOPER_DIR = xcodeDeveloperDir;
+    SDKROOT = xcodeSdkRoot;
   };
 
   packages = with pkgs; [
@@ -51,7 +61,7 @@ in
 
   enterShell = ''
     export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v xcbuild | paste -sd: -)
-    ${xcodeEnv}
+    ${requireXcodeMetal}
   '';
 
   tasks = {
@@ -61,13 +71,17 @@ in
     };
     "openlogi:gui" = {
       description = "Run the desktop app.";
-      exec = xcodeEnv + "cargo run -p openlogi-gui";
+      exec = ''
+        set -e
+        ${requireXcodeMetal}
+        cargo run -p openlogi-gui
+      '';
     };
     "openlogi:check" = {
       description = "Run fmt, clippy, and tests.";
       exec = ''
         set -e
-        ${xcodeEnv}
+        ${requireXcodeMetal}
         cargo fmt --all -- --check
         cargo clippy --workspace --all-targets -- -D warnings
         cargo test --workspace
@@ -81,6 +95,7 @@ in
       description = "Download translated locale files from Crowdin.";
       exec = ''
         set -e
+        ${requireXcodeMetal}
         crowdin download
         cargo test -p openlogi-gui i18n
       '';
@@ -109,13 +124,17 @@ in
       description = "Build OpenLogi.app.";
       exec = ''
         set -e
-        ${xcodeEnv}
+        ${requireXcodeMetal}
         cargo run -p xtask -- bundle-macos
       '';
     };
     "openlogi:dmg" = {
       description = "Build a macOS DMG.";
-      exec = "cargo run -p xtask -- package-macos";
+      exec = ''
+        set -e
+        ${requireXcodeMetal}
+        cargo run -p xtask -- package-macos
+      '';
     };
   };
 }

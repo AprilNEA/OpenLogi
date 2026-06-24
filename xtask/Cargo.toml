@@ -12,10 +12,17 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+fs-err = "3.3.0"
+icns = { version = "0.4.0", default-features = false, features = ["pngio"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+path-absolutize = "3.1.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
+sha2_hasher = { version = "0.3.2", features = ["sync"] }
+tempfile = "3.27.0"
 time = { version = "0.3", features = ["formatting"] }
+which = "8.0.4"
+xshell = "0.2.7"
 
 [lints]
 workspace = true

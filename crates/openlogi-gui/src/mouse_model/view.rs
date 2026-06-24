@@ -1,18 +1,22 @@
+use std::sync::Arc;
+
 use gpui::{
-    Anchor, AnyElement, App, BorrowAppContext as _, Context, ElementId, Entity, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Render, RenderOnce, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, canvas, div, hsla, img, prelude::FluentBuilder as _, px, rgb,
-    svg,
+    Anchor, AnyElement, App, BorrowAppContext as _, Context, ElementId, Entity, Hsla,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Render, RenderOnce,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
+    prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Icon, IconName, Selectable, h_flex, popover::Popover, v_flex};
 
-use crate::asset::ResolvedAsset;
+use crate::app::{glow_canvas, keyboard_glow};
+use crate::asset::{GlowGeometry, ResolvedAsset};
 use crate::data::mouse_buttons::{
     Action, ButtonId, GestureDirection, Hotspot, MOUSE_MODEL_SIZE, default_binding,
     default_hotspots,
 };
 use crate::mouse_model::geometry::{
-    asset_dimensions_for_png, asset_hotspots_for_png, default_labels, labels_from_hotspots,
+    asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png, default_labels,
+    labels_from_hotspots,
 };
 use crate::mouse_model::leader_lines::{
     Geometry as LeaderGeometry, Label, Side, paint as paint_leader_lines,
@@ -40,6 +44,14 @@ const MODEL_VERTICAL_RESERVE: f32 = 224.;
 /// (≈[`LABEL_H`] each) start to overlap; the window's minimum height is sized to
 /// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
 const MODEL_MIN_H: f32 = 448.;
+
+/// Max width the model (side gutter + image) may occupy, matching the
+/// `buttons_tab` content cap so a wide keyboard image never overflows the panel.
+const MODEL_CONTENT_MAX_W: f32 = 760.;
+/// Horizontal chrome the model can't draw into (the buttons-tab padding).
+const MODEL_HORIZONTAL_RESERVE: f32 = 48.;
+/// Floor for the model's available width on a narrow window.
+const MODEL_MIN_CONTENT_W: f32 = 320.;
 
 /// Interactive mouse model with button hotspots.
 pub struct MouseModelView {
@@ -78,7 +90,7 @@ impl MouseModelView {
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (asset, active, bindings, gesture_owner) = cx
+        let (asset, active, bindings, gesture_owner, glow) = cx
             .try_global::<AppState>()
             .map(|s| {
                 (
@@ -86,22 +98,31 @@ impl Render for MouseModelView {
                     s.active_button,
                     s.button_bindings.clone(),
                     s.current_gesture_owner(),
+                    s.current_record().and_then(|r| keyboard_glow(s, r)),
                 )
             })
             .unwrap_or_default();
 
-        // Scale the model to the viewport height so it always fits the content
-        // area. An oversized model would otherwise overflow and compress the
-        // fixed header/footer. Capped at the design height; floored so the side
-        // labels stay readable (the window's min height keeps the viewport above
-        // the floor — see `main`).
+        // Scale the model to fit the content area in *both* axes. A tall mouse
+        // is bound by the viewport height (capped at the design height, floored
+        // so the side labels stay readable — the window's min height keeps the
+        // viewport above the floor, see `main`). A wide keyboard is bound by the
+        // available width so it can't overflow the panel (#272), and — having no
+        // side labels — drops the label gutter to centre at full width.
         let viewport_h = f32::from(window.viewport_size().height);
+        let viewport_w = f32::from(window.viewport_size().width);
         let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
-        let (mouse_w, mouse_h, hotspots, labels) = scaled_model(asset.as_ref(), target_h);
+        let has_labels = asset.as_ref().is_none_or(asset_has_button_labels);
+        let gutter = if has_labels { SIDE_W + SIDE_GAP } else { 0. };
+        let content_w =
+            (viewport_w - MODEL_HORIZONTAL_RESERVE).clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
+        let max_image_w = (content_w - gutter).max(MODEL_MIN_CONTENT_W / 2.);
+        let (mouse_w, mouse_h, hotspots, labels) =
+            scaled_model(asset.as_ref(), target_h, max_image_w);
 
-        let canvas_w = SIDE_W + SIDE_GAP + mouse_w;
+        let canvas_w = gutter + mouse_w;
         let canvas_h = mouse_h;
-        let mouse_left = SIDE_W + SIDE_GAP;
+        let mouse_left = gutter;
 
         let highlight = self.hovered.or(active);
         let view = cx.entity();
@@ -117,7 +138,7 @@ impl Render for MouseModelView {
         let capable = gesture_capable_buttons(&labels_outer);
         let gesture_owner = gesture_owner.filter(|id| capable.contains(id));
         let leader_canvas = leader_canvas(hotspots, labels, highlight, mouse_left, mouse_w);
-        let breathing_art = breathing_art(asset.as_ref(), mouse_left, mouse_w, mouse_h, pal);
+        let breathing_art = breathing_art(asset.as_ref(), mouse_left, mouse_w, mouse_h, pal, glow);
         let hotspots_layer = hotspots_layer(
             &hotspots_outer,
             mouse_left,
@@ -186,21 +207,22 @@ impl Render for MouseModelView {
     }
 }
 
-/// Model geometry at `target_h`, scaled to fit. With a real asset the hotspots
-/// and labels are recomputed from the scaled dimensions; the synthetic
+/// Model geometry fit inside a `max_w` × `target_h` box. With a real asset the
+/// hotspots and labels are recomputed from the scaled dimensions; the synthetic
 /// silhouette's authored coordinates are scaled by the same factor. Returns
 /// `(mouse_w, mouse_h, hotspots, labels)`.
 fn scaled_model(
     asset: Option<&ResolvedAsset>,
     target_h: f32,
+    max_w: f32,
 ) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
     if let Some(a) = asset {
-        let (w, h) = asset_dimensions_for_png(a, target_h);
+        let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
         let hotspots = asset_hotspots_for_png(a, w, h);
         let labels = labels_from_hotspots(&hotspots, h);
         (w, h, hotspots, labels)
     } else {
-        let scale = target_h / MOUSE_MODEL_SIZE.1;
+        let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
         let hotspots = default_hotspots()
             .into_iter()
             .map(|hs| Hotspot {
@@ -218,7 +240,12 @@ fn scaled_model(
                 ..l
             })
             .collect();
-        (MOUSE_MODEL_SIZE.0 * scale, target_h, hotspots, labels)
+        (
+            MOUSE_MODEL_SIZE.0 * scale,
+            MOUSE_MODEL_SIZE.1 * scale,
+            hotspots,
+            labels,
+        )
     }
 }
 
@@ -349,6 +376,7 @@ fn breathing_art(
     mouse_w: f32,
     mouse_h: f32,
     pal: Palette,
+    glow: Option<(Arc<GlowGeometry>, Hsla)>,
 ) -> impl IntoElement {
     let device_art: AnyElement = match asset {
         Some(a) => img(a.image_path.clone())
@@ -363,6 +391,13 @@ fn breathing_art(
         .top(px(0.))
         .w(px(mouse_w))
         .h(px(mouse_h))
+        // Paint the keyboard's RGB *behind* the render so the opaque keys occlude
+        // it and the colour only reads through the inter-key gaps — light from
+        // behind, not specks on top. Same effect as the home gallery, scaled to
+        // this render with no pre-baked PNG (#272).
+        .when_some(glow, |this, (geom, color)| {
+            this.child(glow_canvas(geom, color))
+        })
         .child(device_art)
 }
 

@@ -54,6 +54,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use backon::{BackoffBuilder, ExponentialBuilder};
 use gpui::{
     AppContext, BorrowAppContext as _, Bounds, SharedString, Size, Styled, TitlebarOptions,
     WindowBounds, WindowOptions, px,
@@ -250,6 +251,10 @@ fn main() -> Result<()> {
             // assets (below). Rebuilding per snapshot was pure waste: the
             // unchanged-list early-return discarded the fresh records anyway.
             let mut cache = asset::AssetResolver::new();
+            // One-time sweep of the legacy pre-rendered glow PNGs the old overlay
+            // baked into the user cache; the glow is painted live now, so they're
+            // dead bytes. Off-thread so it never delays the first paint.
+            std::thread::spawn(asset::cleanup_legacy_glow_pngs);
             // Asset sync runs in the background, in two stages: the first
             // agent snapshot — even a deviceless one — triggers an index
             // prefetch so the registry is on disk before any device needs
@@ -517,10 +522,11 @@ impl gpui::Global for AssetControl {}
 /// is polled ever more slowly (1s, 2s, 4s … 60s) instead of on every tick,
 /// while a recovered host still self-heals on the next attempt.
 fn sync_retry_delay(attempts: u32) -> Duration {
-    const CAP: Duration = Duration::from_secs(60);
-    // Cap the shift so `1 << exp` can't overflow, then clamp the result.
-    let exp = attempts.saturating_sub(1).min(6);
-    Duration::from_secs(1u64 << exp).min(CAP)
+    ExponentialBuilder::default()
+        .without_max_times()
+        .build()
+        .nth(attempts.saturating_sub(1).min(6) as usize)
+        .unwrap_or(Duration::from_secs(60))
 }
 
 /// Refresh the asset cache: the shared index always, plus the depots for
@@ -586,7 +592,7 @@ fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
     let opened = cx.open_window(options, |window, cx| {
         Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
 
-        let view = cx.new(|cx| AppView::new(inventories, cx));
+        let view = cx.new(|cx| AppView::new(inventories, window, cx));
 
         let appearance_obs = window.observe_window_appearance(|window, cx| {
             Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);

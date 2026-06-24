@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, DeviceRoute, DpiInfo, SharedChannel, SmartShiftMode, SmartShiftStatus,
-    WriteError,
+    CaptureChannel, DeviceRoute, DpiInfo, HidppOperation, SharedChannel, SmartShiftMode,
+    SmartShiftStatus, WriteError,
 };
 use tracing::{debug, warn};
 
@@ -36,12 +36,16 @@ pub fn read_dpi_info_blocking(target: &DeviceRoute) -> Result<DpiInfo, WriteErro
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| WriteError::Hidpp(format!("tokio runtime init failed: {e}")))?;
+        .map_err(|e| WriteError::RuntimeInit {
+            message: e.to_string(),
+        })?;
 
     rt.block_on(async {
         tokio::time::timeout(WRITE_BUDGET, openlogi_hid::get_dpi_info(target))
             .await
-            .map_err(|_| WriteError::Hidpp("DPI info read timed out".into()))?
+            .map_err(|_| WriteError::RequestTimedOut {
+                operation: HidppOperation::ReadDpiCapabilities,
+            })?
     })
 }
 
@@ -116,12 +120,16 @@ pub fn read_smartshift_status_blocking(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| WriteError::Hidpp(format!("tokio runtime init failed: {e}")))?;
+        .map_err(|e| WriteError::RuntimeInit {
+            message: e.to_string(),
+        })?;
 
     rt.block_on(async {
         tokio::time::timeout(WRITE_BUDGET, openlogi_hid::get_smartshift_status(target))
             .await
-            .map_err(|_| WriteError::Hidpp("SmartShift status read timed out".into()))?
+            .map_err(|_| WriteError::RequestTimedOut {
+                operation: HidppOperation::ReadSmartShift,
+            })?
     })
 }
 
@@ -248,6 +256,62 @@ pub fn write_dpi_in_background(
     });
 }
 
+/// Spawn an OS thread that writes native vertical-scroll inversion to the
+/// device at `target` via HID++ `0x2121`. Unsupported devices are expected and
+/// only logged at debug level because not every Logitech device exposes native
+/// wheel inversion.
+pub fn write_scroll_inversion_in_background(
+    capture: Option<&CaptureChannel>,
+    target: Option<DeviceRoute>,
+    inverted: bool,
+) {
+    let Some(target) = target else {
+        debug!(
+            inverted,
+            "no target device — scroll inversion write skipped"
+        );
+        return;
+    };
+    let shared = reusable_channel(capture, &target);
+    let reused = shared.is_some();
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                warn!(error = %e, "tokio runtime init failed; scroll inversion write skipped");
+                return;
+            }
+        };
+        let result = rt.block_on(async {
+            tokio::time::timeout(WRITE_BUDGET, async {
+                match &shared {
+                    Some(shared) => openlogi_hid::set_scroll_inversion_on(shared, inverted).await,
+                    None => openlogi_hid::set_scroll_inversion(&target, inverted).await,
+                }
+            })
+            .await
+        });
+        let index = target.device_index();
+        match result {
+            Ok(Ok(())) => debug!(index, inverted, reused, "native scroll inversion written"),
+            Ok(Err(WriteError::FeatureUnsupported { feature_hex })) => debug!(
+                index,
+                inverted,
+                feature = format_args!("{feature_hex:#06x}"),
+                "native scroll inversion unsupported"
+            ),
+            Ok(Err(e)) => warn!(error = ?e, "scroll inversion write failed"),
+            Err(_) => warn!(
+                index,
+                inverted, "scroll inversion write timed out (device asleep/unresponsive)"
+            ),
+        }
+    });
+}
+
 /// Apply `lighting` to the keyboard at `target` on a background thread.
 ///
 /// Resolves the configured colour (scaled by brightness, or black when the
@@ -316,7 +380,7 @@ pub async fn apply_dpi(
 ) -> Result<(), WriteError> {
     let dpi = u16::try_from(dpi).unwrap_or(u16::MAX);
     let shared = reusable_channel(Some(capture), route);
-    timed(async {
+    timed(HidppOperation::WriteDpi, async {
         match &shared {
             Some(shared) => openlogi_hid::set_dpi_on(shared, dpi).await,
             None => openlogi_hid::set_dpi(route, dpi).await,
@@ -334,7 +398,7 @@ pub async fn apply_smartshift(
     tunable_torque: u8,
 ) -> Result<(), WriteError> {
     let shared = reusable_channel(Some(capture), route);
-    timed(async {
+    timed(HidppOperation::WriteSmartShift, async {
         match &shared {
             Some(shared) => {
                 openlogi_hid::set_smartshift_on(shared, mode, auto_disengage, tunable_torque).await
@@ -348,23 +412,38 @@ pub async fn apply_smartshift(
 /// Apply a lighting config to the keyboard at `route`.
 pub async fn apply_lighting(route: &DeviceRoute, lighting: &Lighting) -> Result<(), WriteError> {
     let (r, g, b) = lighting_rgb(lighting);
-    timed(openlogi_hid::set_keyboard_color(route, r, g, b)).await
+    timed(
+        HidppOperation::Lighting,
+        openlogi_hid::set_keyboard_color(route, r, g, b),
+    )
+    .await
 }
 
 /// Read the current DPI + supported values from `route`.
 pub async fn read_dpi(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
-    timed(openlogi_hid::get_dpi_info(route)).await
+    timed(
+        HidppOperation::ReadDpiCapabilities,
+        openlogi_hid::get_dpi_info(route),
+    )
+    .await
 }
 
 /// Read the current SmartShift config from `route`.
 pub async fn read_smartshift(route: &DeviceRoute) -> Result<SmartShiftStatus, WriteError> {
-    timed(openlogi_hid::get_smartshift_status(route)).await
+    timed(
+        HidppOperation::ReadSmartShift,
+        openlogi_hid::get_smartshift_status(route),
+    )
+    .await
 }
 
 /// Bound any single HID++ call by [`WRITE_BUDGET`] so an asleep / unresponsive
 /// device can't hang the awaiting IPC handler indefinitely.
-async fn timed<T>(fut: impl Future<Output = Result<T, WriteError>>) -> Result<T, WriteError> {
-    tokio::time::timeout(WRITE_BUDGET, fut).await.map_err(|_| {
-        WriteError::Hidpp("HID++ request timed out (device asleep/unresponsive)".into())
-    })?
+async fn timed<T>(
+    operation: HidppOperation,
+    fut: impl Future<Output = Result<T, WriteError>>,
+) -> Result<T, WriteError> {
+    tokio::time::timeout(WRITE_BUDGET, fut)
+        .await
+        .map_err(|_| WriteError::RequestTimedOut { operation })?
 }

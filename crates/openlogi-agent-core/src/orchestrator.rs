@@ -11,11 +11,11 @@
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::config::Config;
-use openlogi_core::device::DeviceInventory;
+use openlogi_core::device::{Capabilities, DeviceInventory};
 use openlogi_hid::{CaptureChannel, DeviceRoute};
 use tracing::warn;
 
@@ -24,6 +24,7 @@ use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
 use crate::device_order::DeviceStableId;
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::ipc::InventoryHealth;
+use crate::receiver_access::ReceiverAccess;
 use crate::watchers::gesture::GestureBindings;
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -32,10 +33,12 @@ use crate::watchers::gesture::GestureBindings;
 /// fallback agrees with the GUI carousel — see [`crate::device_order`]).
 struct AgentDevice {
     config_key: String,
+    model_key: String,
     route: Option<DeviceRoute>,
     slot: u8,
     serial: Option<String>,
     unit_id: [u8; 4],
+    capabilities: Option<Capabilities>,
     /// Live link state from the inventory snapshot. An offline→online
     /// transition is a reconnect — the device may have power-cycled, so its
     /// volatile settings need re-applying (#189).
@@ -55,14 +58,9 @@ pub struct SharedRuntime {
     pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
     pub thumbwheel_sensitivity: Arc<AtomicI32>,
     pub capture_channel: CaptureChannel,
-    /// Set while a pairing session runs: the gesture watcher then releases its
-    /// capture session so `run_pairing` can own the receiver's HID node (one
-    /// process still can't read the same node through two channels).
-    pub pairing_active: Arc<AtomicBool>,
-    /// Published by the gesture watcher: `true` when it holds no capture
-    /// session, so the pairing manager can wait for capture to actually release
-    /// before opening the receiver.
-    pub capture_idle: Arc<AtomicBool>,
+    /// Exclusive receiver access shared by HID++ capture and pairing. Capture
+    /// and pairing must never open the same receiver HID node concurrently.
+    pub receiver_access: ReceiverAccess,
 }
 
 /// Owns the config + device selection and keeps [`SharedRuntime`] in sync.
@@ -110,8 +108,7 @@ impl Orchestrator {
                 config.app_settings.thumbwheel_sensitivity,
             )),
             capture_channel: Arc::new(RwLock::new(None)),
-            pairing_active: Arc::new(AtomicBool::new(false)),
-            capture_idle: Arc::new(AtomicBool::new(true)),
+            receiver_access: ReceiverAccess::default(),
         };
         let orch = Self {
             config,
@@ -207,10 +204,11 @@ impl Orchestrator {
             self.reapply_volatile_settings(&devices[idx]);
         }
         let changed = devices.len() != self.devices.len()
-            || devices
-                .iter()
-                .zip(&self.devices)
-                .any(|(a, b)| a.config_key != b.config_key || a.route != b.route);
+            || devices.iter().zip(&self.devices).any(|(a, b)| {
+                a.config_key != b.config_key
+                    || a.route != b.route
+                    || a.capabilities != b.capabilities
+            });
         if !changed {
             // Same set and routes — but keep the fresh `online` flags, or a
             // device that woke this tick would read as a transition forever.
@@ -240,6 +238,13 @@ impl Orchestrator {
             return;
         };
         let key = &dev.config_key;
+        crate::hardware::write_scroll_inversion_in_background(
+            Some(&self.shared.capture_channel),
+            dev.capabilities
+                .is_some_and(|capabilities| capabilities.scroll_inversion)
+                .then_some(route.clone()),
+            self.config.invert_scroll(key),
+        );
         if let Some(lighting) = self.config.lighting(key).filter(|l| l.enabled) {
             crate::hardware::set_lighting_in_background(Some(route.clone()), &lighting);
         }
@@ -257,6 +262,27 @@ impl Orchestrator {
                 smartshift.mode.into(),
                 smartshift.auto_disengage,
                 smartshift.tunable_torque,
+            );
+        }
+    }
+
+    /// Push the saved native scroll-inversion bit to every currently online
+    /// device. This is separated from [`Self::rebuild`] because rebuilding also
+    /// happens for foreground-app changes, while the HID++ write is only needed
+    /// when config or device presence changes.
+    fn apply_native_scroll_inversions(&self) {
+        for dev in self
+            .devices
+            .iter()
+            .filter(|dev| dev.online && dev.route.is_some())
+        {
+            crate::hardware::write_scroll_inversion_in_background(
+                Some(&self.shared.capture_channel),
+                dev.capabilities
+                    .is_some_and(|capabilities| capabilities.scroll_inversion)
+                    .then(|| dev.route.clone())
+                    .flatten(),
+                self.config.invert_scroll(&dev.config_key),
             );
         }
     }
@@ -321,13 +347,14 @@ impl Orchestrator {
         self.config = config;
         self.current = pick_current(&self.devices, self.config.selected_device());
         self.rebuild();
+        self.apply_native_scroll_inversions();
     }
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's
 /// `build_device_list` minus the asset/display fields: a device is included
 /// only once its HID++ DeviceInformation (`model_info`) has resolved, since the
-/// `config_key` is derived from it.
+/// model key is derived from it.
 fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
     let mut devices = Vec::new();
     for inv in inventories {
@@ -335,12 +362,21 @@ fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
             let Some(model) = paired.model_info.as_ref() else {
                 continue;
             };
+            let route = DeviceRoute::device_route_for(inv, paired.slot);
+            let stable_id = DeviceStableId::from_parts(
+                route.as_ref(),
+                paired.slot,
+                model.serial_number.as_deref(),
+                model.unit_id,
+            );
             devices.push(AgentDevice {
-                config_key: model.config_key(),
-                route: DeviceRoute::device_route_for(inv, paired.slot),
+                config_key: stable_id.config_key(),
+                model_key: model.config_key(),
+                route,
                 slot: paired.slot,
                 serial: model.serial_number.clone(),
                 unit_id: model.unit_id,
+                capabilities: paired.capabilities,
                 online: paired.online,
             });
         }
@@ -352,15 +388,14 @@ fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
     devices.sort_by(|a, b| {
         stable_id(a)
             .cmp(&stable_id(b))
-            .then_with(|| a.config_key.cmp(&b.config_key))
+            .then_with(|| a.model_key.cmp(&b.model_key))
     });
     devices
 }
 
-/// The canonical identity of one device: what the GUI carousel orders by and
-/// what [`reapply_targets`] matches a device against across inventory ticks.
-/// Unlike `config_key` (derived from the model id), this stays unique for two
-/// physically distinct devices of the same model.
+/// The canonical identity of one device: what the GUI carousel orders by, what
+/// the config key is derived from, and what [`reapply_targets`] matches a device
+/// against across inventory ticks.
 fn stable_id(dev: &AgentDevice) -> DeviceStableId {
     DeviceStableId::from_parts(
         dev.route.as_ref(),
@@ -375,11 +410,8 @@ fn stable_id(dev: &AgentDevice) -> DeviceStableId {
 /// replug that re-enumerated under a new identity — e.g. a Bolt device that
 /// moved slots), or an offline→online transition (a reconnect after device
 /// sleep); plus — after a system wake — every online device. Devices are
-/// matched across ticks by [`stable_id`], never `config_key`: two same-model
-/// devices share a `config_key`, so keying on it made the second device
-/// perpetually match the first, observe a different route, and re-apply on
-/// every tick. Offline devices are never targeted (the write would just time
-/// out); they re-apply on their own transition.
+/// matched across ticks by [`stable_id`]. Offline devices are never targeted
+/// (the write would just time out); they re-apply on their own transition.
 fn reapply_targets(prev: &[AgentDevice], next: &[AgentDevice], reapply_all: bool) -> Vec<usize> {
     next.iter()
         .enumerate()
@@ -430,6 +462,7 @@ mod tests {
     fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
         AgentDevice {
             config_key: key.to_string(),
+            model_key: key.to_string(),
             route: Some(DeviceRoute::Bolt {
                 receiver_uid: "AA00".to_string(),
                 slot,
@@ -437,6 +470,7 @@ mod tests {
             slot,
             serial: None,
             unit_id: [0; 4],
+            capabilities: None,
             online,
         }
     }
@@ -463,11 +497,9 @@ mod tests {
 
     #[test]
     fn reapply_targets_disambiguates_same_model_duplicates() {
-        // Two devices of the same model share a `config_key` but are distinct
-        // physical units at different Bolt slots, so they have distinct stable
-        // ids. A steady tick with both already online must target NEITHER —
-        // matching prev by `config_key` alone made the second device match the
-        // first, observe a different route, and re-apply on every 2s tick.
+        // Two devices can share a model key but are distinct physical units at
+        // different Bolt slots, so they have distinct stable ids. A steady tick
+        // with both already online must target NEITHER.
         let prev = [dev("dup", 1, true), dev("dup", 2, true)];
         let next = [dev("dup", 1, true), dev("dup", 2, true)];
         assert!(reapply_targets(&prev, &next, false).is_empty());

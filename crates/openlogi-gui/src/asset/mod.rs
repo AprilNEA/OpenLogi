@@ -18,15 +18,17 @@ mod images;
 mod paths;
 pub mod sync;
 
-pub(crate) use self::glow::{ensure_glow_png, glow_path};
+pub(crate) use self::glow::GlowGeometry;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use openlogi_assets::{
     BUTTONS_RENDER_FILES, DeviceEntry, FRONT_RENDER_FILES, Index, METADATA_FILES, Metadata,
 };
 use openlogi_core::device::{DeviceKind, DeviceModelInfo};
 use tracing::{debug, warn};
+use walkdir::WalkDir;
 
 use self::images::{buttons_image_for, load_manifest, read_png_dimensions, variant_image_for};
 use self::paths::{bundle_assets_root, load_index, user_cache_root};
@@ -36,20 +38,12 @@ use self::paths::{bundle_assets_root, load_index, user_cache_root};
 /// separate tier and isn't counted.
 #[must_use]
 pub fn cache_size_bytes() -> u64 {
-    fn dir_size(dir: &Path) -> u64 {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return 0;
-        };
-        entries
-            .flatten()
-            .map(|entry| match entry.file_type() {
-                Ok(ft) if ft.is_dir() => dir_size(&entry.path()),
-                Ok(_) => entry.metadata().map_or(0, |m| m.len()),
-                Err(_) => 0,
-            })
-            .sum()
-    }
-    dir_size(&user_cache_root())
+    WalkDir::new(user_cache_root())
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.metadata().map_or(0, |m| m.len()))
+        .sum()
 }
 
 /// Delete the per-user asset cache. The next sync re-fetches what the
@@ -59,6 +53,30 @@ pub fn clear_cache() -> std::io::Result<()> {
     match std::fs::remove_dir_all(user_cache_root()) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         other => other,
+    }
+}
+
+/// Remove the legacy pre-rendered keyboard glow overlays (`glow-<hex>.png`, plus
+/// any `.tmp` left by an interrupted write) the old overlay path baked into each
+/// depot's user-cache dir. The glow is painted live from the depot's run-mask
+/// now, so these are dead bytes; sweep them once at startup. Best-effort — an
+/// unreadable dir or undeletable file is skipped silently.
+pub fn cleanup_legacy_glow_pngs() {
+    cleanup_glow_pngs_in(&user_cache_root());
+}
+
+fn cleanup_glow_pngs_in(root: &Path) {
+    for file in WalkDir::new(root)
+        .min_depth(2)
+        .max_depth(2)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let name = file.file_name().to_string_lossy();
+        if name.starts_with("glow-") && (name.ends_with(".png") || name.ends_with(".png.tmp")) {
+            let _ = std::fs::remove_file(file.path());
+        }
     }
 }
 
@@ -78,7 +96,7 @@ pub fn reveal_cache_in_file_manager() {
 /// above isn't the function's last statement on non-macOS — `needless_return`.)
 #[cfg(target_os = "macos")]
 fn open_in_file_manager(path: &Path) {
-    if let Err(e) = std::process::Command::new("open").arg(path).spawn() {
+    if let Err(e) = opener::open(path) {
         warn!(error = %e, "could not open cache dir in Finder");
     }
 }
@@ -106,6 +124,10 @@ pub struct ResolvedAsset {
     /// the side/buttons view the mouse model aligns hotspots against. `None`
     /// when the depot ships no front render.
     pub hero_image_path: Option<PathBuf>,
+    /// Precomputed inter-key lighting holes for a light-up keyboard, decoded
+    /// from the depot's baked RLE mask and painted live over the device image
+    /// (see [`crate::app::glow_canvas`]). `None` for depots without a mask.
+    pub glow: Option<Arc<GlowGeometry>>,
     pub metadata: Metadata,
     /// Actual pixel dimensions of `image_path`. Logi's
     /// `core_metadata.json` `origin` field tracks the *bbox of the mouse
@@ -285,6 +307,7 @@ impl AssetResolver {
                 kind: DeviceKind::from_registry_type(&entry.kind),
                 image_path,
                 hero_image_path,
+                glow: self::glow::load_glow_geometry(&dir).map(Arc::new),
                 metadata,
                 png_width,
                 png_height,
@@ -526,5 +549,28 @@ mod tests {
         );
         assert_eq!((asset.png_width, asset.png_height), (100, 200));
         assert_eq!(asset.metadata.assignments().count(), 1);
+    }
+
+    #[test]
+    fn cleanup_removes_only_legacy_glow_pngs() {
+        let root =
+            std::env::temp_dir().join(format!("openlogi-glow-cleanup-{}", std::process::id()));
+        let depot = root.join("g513");
+        std::fs::create_dir_all(&depot).expect("create depot dir");
+        std::fs::write(depot.join("glow-ff9500.png"), b"x").expect("write glow png");
+        std::fs::write(depot.join("glow-af52de.png.tmp"), b"x").expect("write glow tmp");
+        std::fs::write(depot.join("front.png"), b"x").expect("write front render");
+        std::fs::write(depot.join("metadata.json"), b"{}").expect("write metadata");
+
+        cleanup_glow_pngs_in(&root);
+
+        let kept = depot.join("front.png").exists() && depot.join("metadata.json").exists();
+        let swept =
+            !depot.join("glow-ff9500.png").exists() && !depot.join("glow-af52de.png.tmp").exists();
+        // Clean up before asserting so a failing assert doesn't leave the temp dir behind.
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(swept, "legacy glow files must be deleted");
+        assert!(kept, "real assets must be left untouched");
     }
 }

@@ -3,13 +3,15 @@
 //! (a Unix-domain socket on Unix, a named pipe on Windows).
 //!
 //! The agent owns all device I/O, so the GUI never opens a device — it routes
-//! "apply now" / "read" commands here, and polls inventory/status.
+//! "apply now" / "read" commands here, and polls snapshots.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt as _;
-use openlogi_agent_core::ipc::{Agent, AgentStatus, PROTOCOL_VERSION, PairingUpdate};
+use openlogi_agent_core::ipc::{
+    Agent, AgentSnapshot, AgentStatus, PROTOCOL_VERSION, PairingCommandError, PairingUpdate,
+};
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::{hardware, transport};
 use openlogi_core::config::{Config, Lighting};
@@ -121,20 +123,46 @@ impl Agent for AgentServer {
         Hook::prompt_accessibility();
     }
 
-    async fn start_pairing(self, _: Context, selector: ReceiverSelector) {
-        self.pairing.start(selector).await;
+    async fn start_pairing(
+        self,
+        _: Context,
+        selector: ReceiverSelector,
+    ) -> Result<(), PairingCommandError> {
+        self.pairing.start(selector).await
     }
 
-    async fn pair_device(self, _: Context, address: [u8; 6]) {
-        self.pairing.pair(address);
+    async fn pair_device(self, _: Context, address: [u8; 6]) -> Result<(), PairingCommandError> {
+        self.pairing.pair(address)
     }
 
-    async fn cancel_pairing(self, _: Context) {
-        self.pairing.cancel();
+    async fn cancel_pairing(self, _: Context) -> Result<(), PairingCommandError> {
+        self.pairing.cancel()
     }
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {
         self.pairing.next_update().await
+    }
+
+    async fn snapshot(self, _: Context) -> AgentSnapshot {
+        let (launch_at_login, inventory_health, inventory) = {
+            let orch = self.orchestrator.lock().await;
+            (
+                orch.launch_at_login(),
+                orch.inventory_health(),
+                orch.inventory(),
+            )
+        };
+        AgentSnapshot {
+            status: AgentStatus {
+                accessibility_granted: Hook::has_accessibility(),
+                hook_installed: self.hook_installed.load(Ordering::Relaxed),
+                launch_at_login,
+                inventory: inventory_health,
+                protocol_version: PROTOCOL_VERSION,
+                agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            inventory,
+        }
     }
 }
 

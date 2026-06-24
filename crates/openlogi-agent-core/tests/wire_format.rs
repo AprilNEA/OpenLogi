@@ -23,7 +23,8 @@ use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_agent_core::ipc::{
-    AgentRequest, AgentStatus, FoundDevice, InventoryHealth, PROTOCOL_VERSION, PairingUpdate,
+    AgentRequest, AgentSnapshot, AgentStatus, FoundDevice, InventoryHealth, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingUpdate,
 };
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{
@@ -31,8 +32,8 @@ use openlogi_core::device::{
     DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
 };
 use openlogi_hid::{
-    Click, DeviceRoute, DpiCapabilities, DpiInfo, PasskeyMethod, ReceiverSelector, SmartShiftMode,
-    SmartShiftStatus, WriteError,
+    Click, DeviceRoute, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
+    PasskeyMethod, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
 };
 
 /// Serialize exactly as the transport does (`tokio_serde::formats::Bincode`
@@ -60,7 +61,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 3);
+    assert_eq!(PROTOCOL_VERSION, 8);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -80,6 +81,7 @@ fn request_variant_order() {
         "040008463030444341464501fb4006",
     );
     assert_wire(&AgentRequest::NextPairing {}, "0d");
+    assert_wire(&AgentRequest::Snapshot {}, "0e");
 }
 
 #[test]
@@ -99,6 +101,22 @@ fn agent_status() {
     assert_wire(&InventoryHealth::Scanning, "00");
     assert_wire(&InventoryHealth::Ready, "01");
     assert_wire(&InventoryHealth::Unavailable, "02");
+}
+
+#[test]
+fn agent_snapshot() {
+    let snapshot = AgentSnapshot {
+        status: AgentStatus {
+            accessibility_granted: true,
+            hook_installed: false,
+            launch_at_login: true,
+            inventory: InventoryHealth::Ready,
+            protocol_version: 7,
+            agent_version: "0.6.6".into(),
+        },
+        inventory: Vec::new(),
+    };
+    assert_wire(&snapshot, "010001010705302e362e3600");
 }
 
 #[test]
@@ -138,12 +156,13 @@ fn device_inventory() {
                 buttons: true,
                 pointer: true,
                 lighting: false,
+                scroll_inversion: false,
             }),
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000",
     );
 }
 
@@ -169,10 +188,17 @@ fn pairing_updates() {
         "0201023132020001",
     );
     assert_wire(&PairingUpdate::Paired { slot: 2 }, "0302");
+    assert_wire(&PairingUpdate::Failed(PairingFailure::Timeout), "0403");
     assert_wire(
-        &PairingUpdate::Failed("timed out".into()),
-        "040974696d6564206f7574",
+        &PairingUpdate::Failed(PairingFailure::Device { code: 0x1f }),
+        "04041f",
     );
+    assert_wire(
+        &PairingUpdate::Failed(PairingFailure::UnknownDevice),
+        "040b",
+    );
+    assert_wire(&PairingCommandError::AlreadyActive, "00");
+    assert_wire(&PairingCommandError::UnknownDevice, "03");
 }
 
 #[test]
@@ -189,6 +215,35 @@ fn device_settings_payloads() {
         feature_hex: 0x2201,
     });
     assert_wire(&unsupported, "0103fb0122");
+
+    assert_wire(
+        &WriteError::RequestTimedOut {
+            operation: HidppOperation::WriteDpi,
+        },
+        "0804",
+    );
+    assert_wire(
+        &WriteError::HidppFeature {
+            operation: HidppOperation::WriteDpi,
+            feature_hex: 0x2201,
+            kind: HidppFeatureErrorKind::OutOfRange,
+        },
+        "0604fb012203",
+    );
+    assert_wire(
+        &WriteError::UnsupportedResponse {
+            operation: HidppOperation::Lighting,
+            feature_hex: 0x8070,
+        },
+        "0707fb7080",
+    );
+    assert_wire(
+        &WriteError::RuntimeInit {
+            message: "boom".into(),
+        },
+        "0904626f6f6d",
+    );
+    assert_wire(&WriteError::AgentUnavailable, "0a");
 
     // serde encodes SmartShiftMode's variant *index* (Free=0, Ratchet=1), not
     // the `#[repr(u8)]` firmware discriminants (1/2) — pinned here because it

@@ -86,8 +86,8 @@ impl MenuTarget {
 }
 
 fn open_url(url: &str) {
-    match std::process::Command::new("open").arg(url).spawn() {
-        Ok(_) => info!(url, "menu-bar — opening URL"),
+    match opener::open(url) {
+        Ok(()) => info!(url, "menu-bar — opening URL"),
         Err(e) => warn!(error = %e, url, "could not open URL from menu bar"),
     }
 }

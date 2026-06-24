@@ -1,9 +1,9 @@
 //! Client side of the agent IPC.
 //!
 //! The agent owns all device I/O, so the GUI never opens a device — it connects
-//! to the agent's Unix socket and (a) polls status + inventory on a timer to
-//! drive the device list and the Accessibility gate, and (b) forwards "apply
-//! now" / "read" device commands. Both run on one dedicated OS thread with a
+//! to the agent's Unix socket and (a) polls status + inventory snapshots on a
+//! timer to drive the device list and the Accessibility gate, and (b) forwards
+//! "apply now" / "read" device commands. Both run on one dedicated OS thread with a
 //! tokio runtime (the GPUI thread owns no async runtime), mirroring the old
 //! watcher pattern: results cross back over `mpsc` to the GPUI loop.
 //!
@@ -20,7 +20,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use openlogi_agent_core::ipc::{
-    AgentClient, AgentStatus, InventoryHealth, PROTOCOL_VERSION, PairingUpdate,
+    AgentClient, AgentStatus, InventoryHealth, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingUpdate,
 };
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
@@ -41,7 +42,7 @@ const SPAWN_RETRY_PERIOD: Duration = Duration::from_secs(30);
 /// ([`InventoryHealth::Ready`]). The steady `poll_period` is tuned for quiet
 /// background refresh; at startup it would leave the window on its loading
 /// frame for up to a full period *after* the agent already knows the devices.
-/// A status+inventory round every 250 ms is noise for the agent and gets the
+/// A snapshot round every 250 ms is noise for the agent and gets the
 /// gallery up moments after enumeration lands.
 const STARTUP_POLL_PERIOD: Duration = Duration::from_millis(250);
 
@@ -129,9 +130,9 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
             };
             rt.block_on(async move {
                 // Pairing events stream on their own connection + long-poll so
-                // a held next_pairing never delays the status/inventory poll.
-                tokio::spawn(pairing_poll(pairing_tx));
-                poll_loop(poll_period, &update_tx, &mut cmd_rx).await;
+                // a held next_pairing never delays the snapshot poll.
+                tokio::spawn(pairing_poll(pairing_tx.clone()));
+                poll_loop(poll_period, &update_tx, &pairing_tx, &mut cmd_rx).await;
             });
         });
     if let Err(e) = spawn_result {
@@ -151,6 +152,7 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
 async fn poll_loop(
     poll_period: Duration,
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
+    pairing_tx: &mpsc::UnboundedSender<PairingUpdate>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Command>,
 ) {
     let mut client: Option<AgentClient> = None;
@@ -217,7 +219,7 @@ async fn poll_loop(
             }
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break }; // GUI dropped the sender → shut down
-                if handle(&mut client, cmd).await.is_err() {
+                if handle(&mut client, pairing_tx, cmd).await.is_err() {
                     // Same as a poll-detected drop: back to the fast cadence
                     // so the reconnect (agent self-exec, crash) re-converges
                     // just as quickly as at startup.
@@ -452,9 +454,7 @@ async fn pairing_poll(tx: mpsc::UnboundedSender<PairingUpdate>) {
                 client = None; // connection dropped (agent restart) — reconnect
                 if session_active {
                     session_active = false;
-                    let _ = tx.send(PairingUpdate::Failed(
-                        tr!("The background service restarted — try pairing again.").to_string(),
-                    ));
+                    let _ = tx.send(PairingUpdate::Failed(PairingFailure::AgentRestarted));
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
@@ -533,7 +533,7 @@ fn launch_agent(path: &std::path::Path) -> std::io::Result<()> {
     disclaim::Command::new(path).spawn().map(|_| ())
 }
 
-/// The `OpenLogiAgent.app` root of a packaged helper binary, `None` for a bare dev binary.
+/// The `.app` root of a packaged helper binary, `None` for a bare dev binary.
 #[cfg(target_os = "macos")]
 fn helper_bundle(path: &std::path::Path) -> Option<&std::path::Path> {
     let bundle = path.ancestors().nth(3)?;
@@ -555,6 +555,15 @@ mod tests {
             helper_bundle(packaged),
             Some(Path::new(
                 "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app"
+            ))
+        );
+        let dev = Path::new(
+            "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
+        );
+        assert_eq!(
+            helper_bundle(dev),
+            Some(Path::new(
+                "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app"
             ))
         );
         assert_eq!(
@@ -580,12 +589,21 @@ fn agent_binary_path() -> Option<PathBuf> {
     }
     // Packaged: …/OpenLogi.app/Contents/MacOS/openlogi-gui → the helper at
     // …/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent
+    // Dev uses a spaced bundle path so macOS privacy panes never fall back to
+    // displaying the old path-derived `OpenLogiAgent` name when metadata is stale.
     #[cfg(target_os = "macos")]
     {
-        let helper = dir
-            .parent()?
-            .join("Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent");
-        helper.exists().then_some(helper)
+        let contents = dir.parent()?;
+        for relative in [
+            "Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
+            "Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
+        ] {
+            let helper = contents.join(relative);
+            if helper.exists() {
+                return Some(helper);
+            }
+        }
+        None
     }
     #[cfg(not(target_os = "macos"))]
     None
@@ -655,8 +673,8 @@ enum PollOutcome {
     NewerAgent,
 }
 
-/// Poll status + inventory and push a snapshot. `Err` means a live connection
-/// dropped (the caller reconnects fast); the no-agent cases come back as
+/// Poll status + inventory as one agent snapshot and push it. `Err` means a
+/// live connection dropped (the caller reconnects fast); the no-agent cases come back as
 /// [`PollOutcome`] so the caller can tell them apart from a delivery.
 async fn poll(
     client: &mut Option<AgentClient>,
@@ -667,15 +685,11 @@ async fn poll(
         Err(ConnectFailure::Unreachable) => return Ok(PollOutcome::NoAgent),
         Err(ConnectFailure::NewerAgent) => return Ok(PollOutcome::NewerAgent),
     };
-    // Status strictly before inventory: status carries the readiness the
-    // inventory is interpreted under. Fetched the other way around, the
-    // agent's first enumeration could land *between* the two RPCs and pair an
-    // empty pre-enumeration inventory with "ready" — exactly the "No devices"
-    // flash this poll exists to prevent. The inverse pairing (fresh inventory
-    // under a stale not-ready status) is benign: devices render regardless of
-    // the scanning state, and readiness lands next tick.
-    let status = client.status(context::current()).await.map_err(|_| ())?;
-    let inventory = client.inventory(context::current()).await.map_err(|_| ())?;
+    // Fetch status + inventory in one RPC so inventory readiness and the list
+    // are interpreted from the same orchestrator state.
+    let snapshot = client.snapshot(context::current()).await.map_err(|_| ())?;
+    let status = snapshot.status;
+    let inventory = snapshot.inventory;
     let ready = status.inventory == InventoryHealth::Ready;
     let _ = update_tx.send(GuiUpdate::Snapshot(PollUpdate { inventory, status }));
     Ok(PollOutcome::Delivered { ready })
@@ -683,10 +697,14 @@ async fn poll(
 
 /// Run one device command. `Err` signals a dropped connection so the caller
 /// reconnects; the command's own failure is reported back over its oneshot.
-async fn handle(client: &mut Option<AgentClient>, cmd: Command) -> Result<(), ()> {
+async fn handle(
+    client: &mut Option<AgentClient>,
+    pairing_tx: &mpsc::UnboundedSender<PairingUpdate>,
+    cmd: Command,
+) -> Result<(), ()> {
     // keep `client` None on connect failure; that's not a dropped live connection
     let Ok(client) = ensure(client).await else {
-        reply_disconnected(cmd);
+        reply_disconnected(pairing_tx, cmd);
         return Ok(());
     };
     let ctx = context::current();
@@ -710,12 +728,29 @@ async fn handle(client: &mut Option<AgentClient>, cmd: Command) -> Result<(), ()
             .await
             .map_err(|_| ())?,
         Command::StartPairing(selector) => {
-            client.start_pairing(ctx, selector).await.map_err(|_| ())?;
+            pairing_command_result(pairing_tx, client.start_pairing(ctx, selector).await)?;
         }
-        Command::PairDevice(address) => client.pair_device(ctx, address).await.map_err(|_| ())?,
-        Command::CancelPairing => client.cancel_pairing(ctx).await.map_err(|_| ())?,
+        Command::PairDevice(address) => {
+            pairing_command_result(pairing_tx, client.pair_device(ctx, address).await)?;
+        }
+        Command::CancelPairing => {
+            pairing_command_result(pairing_tx, client.cancel_pairing(ctx).await)?;
+        }
     }
     Ok(())
+}
+
+fn pairing_command_result(
+    tx: &mpsc::UnboundedSender<PairingUpdate>,
+    result: Result<Result<(), PairingCommandError>, tarpc::client::RpcError>,
+) -> Result<(), ()> {
+    match result.map_err(|_| ())? {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = tx.send(PairingUpdate::Failed(PairingFailure::from(error)));
+            Ok(())
+        }
+    }
 }
 
 /// A fire-and-forget "apply now": `Err(())` (transport drop) propagates so the
@@ -743,17 +778,20 @@ fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
     clippy::match_same_arms,
     reason = "the two read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
 )]
-fn reply_disconnected(cmd: Command) {
-    // Transient (Hidpp), not a permanent feature error: the agent is just
-    // restarting, so the panel should keep retrying, not latch "unsupported".
-    let unreachable = || WriteError::Hidpp("background agent not running".to_string());
+fn reply_disconnected(pairing_tx: &mpsc::UnboundedSender<PairingUpdate>, cmd: Command) {
+    // Transient, not a permanent feature error: the agent is just restarting,
+    // so the panel should keep retrying, not latch "unsupported".
     match cmd {
         Command::ReadDpi(_, reply) => {
-            let _ = reply.send(Err(unreachable()));
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::ReadSmartShift(_, reply) => {
-            let _ = reply.send(Err(unreachable()));
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
+        Command::StartPairing(_) | Command::PairDevice(_) => {
+            let _ = pairing_tx.send(PairingUpdate::Failed(PairingFailure::AgentRestarted));
+        }
+        Command::CancelPairing => {}
         _ => {}
     }
 }

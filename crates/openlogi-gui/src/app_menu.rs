@@ -11,6 +11,7 @@
 
 use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, actions};
 use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
+use url::Url;
 
 use crate::state::AppState;
 
@@ -75,8 +76,10 @@ pub fn install(cx: &mut App) {
     cx.on_action(|_: &BringAllToFront, cx| cx.activate(true));
     cx.on_action(|_: &CheckForUpdates, cx| check_for_updates(cx));
     cx.on_action(|_: &OpenConfigFolder, cx| {
-        if let Ok(path) = openlogi_core::paths::config_dir() {
-            cx.open_url(&file_url(&path));
+        if let Ok(path) = openlogi_core::paths::config_dir()
+            && let Some(url) = file_url(&path)
+        {
+            cx.open_url(&url);
         }
     });
     cx.on_action(|_: &OpenHelp, cx| cx.open_url(HELP_URL));
@@ -227,6 +230,6 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
     items
 }
 
-fn file_url(path: &std::path::Path) -> String {
-    format!("file://{}", path.to_string_lossy().replace(' ', "%20"))
+fn file_url(path: &std::path::Path) -> Option<String> {
+    Url::from_file_path(path).ok().map(Into::into)
 }

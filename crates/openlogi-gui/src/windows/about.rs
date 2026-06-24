@@ -6,7 +6,7 @@
 //! `img()` resolves it the same inside a packaged `.app` as in a dev build.
 
 use gpui::{
-    App, ClipboardItem, Context, Entity, FontWeight, InteractiveElement, IntoElement,
+    App, ClipboardItem, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement,
     ParentElement as _, Render, Size, StatefulInteractiveElement as _, Styled as _, Subscription,
     Window, div, img, px,
 };
@@ -21,6 +21,7 @@ use crate::windows::{self, AuxWindow};
 
 /// Standalone About window root view.
 pub struct AboutView {
+    focus_handle: FocusHandle,
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
     updater: Entity<Updater>,
@@ -33,7 +34,9 @@ pub struct AboutView {
 }
 
 impl AboutView {
-    fn new(_: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window, cx);
         // Reuse the app-wide shared updater installed at launch, so a launch-time
         // check result is already visible here. Fall back to a fresh one if it
         // somehow wasn't installed.
@@ -43,6 +46,7 @@ impl AboutView {
         };
         let updater_obs = cx.observe(&updater, |_, _, cx| cx.notify());
         Self {
+            focus_handle,
             appearance_obs: None,
             updater,
             updater_obs,
@@ -98,7 +102,7 @@ impl AboutView {
                 Some(
                     Button::new("update-install")
                         .outline()
-                        .label("Download & Install")
+                        .label(tr!("Download & Install"))
                         .on_click(move |_, _, cx| {
                             u.update(cx, Updater::download_and_install);
                         }),
@@ -109,7 +113,7 @@ impl AboutView {
                 Some(
                     Button::new("update-restart")
                         .outline()
-                        .label("Restart to Update")
+                        .label(tr!("Restart to Update"))
                         .on_click(move |_, _, cx| {
                             u.update(cx, |u, cx| u.restart(cx));
                         }),
@@ -120,23 +124,31 @@ impl AboutView {
 
         let message = match &status {
             UpdateStatus::Idle => None,
-            UpdateStatus::Checking => Some("Checking for updates…".to_string()),
-            UpdateStatus::UpToDate => Some("You're on the latest version.".to_string()),
-            UpdateStatus::Available(v) => Some(format!("Version {v} is available.")),
+            UpdateStatus::Checking => Some(tr!("Checking for updates…")),
+            UpdateStatus::UpToDate => Some(tr!("You're on the latest version.")),
+            UpdateStatus::Available(v) => {
+                Some(tr!("Version %{version} is available.", version => v))
+            }
             UpdateStatus::Downloading { downloaded, total } => Some(match total {
-                Some(t) if *t > 0 => format!("Downloading… {}%", *downloaded * 100 / *t),
-                _ => format!("Downloading… {} MB", *downloaded / 1_048_576),
+                Some(t) if *t > 0 => tr!(
+                    "Downloading… %{percent}%",
+                    percent => (*downloaded * 100 / *t).to_string()
+                ),
+                _ => tr!(
+                    "Downloading… %{size} MB",
+                    size => (*downloaded / 1_048_576).to_string()
+                ),
             }),
-            UpdateStatus::Installing => Some("Installing…".to_string()),
-            UpdateStatus::Staged(v) => Some(format!("Version {v} is ready.")),
-            UpdateStatus::Errored(e) => Some(format!("Update failed: {e}")),
+            UpdateStatus::Installing => Some(tr!("Installing…")),
+            UpdateStatus::Staged(v) => Some(tr!("Version %{version} is ready.", version => v)),
+            UpdateStatus::Errored(e) => Some(tr!("Update failed: %{error}", error => e.clone())),
         };
 
         let check = {
             let u = updater.clone();
             Button::new("update-check")
                 .outline()
-                .label("Check for Updates")
+                .label(tr!("Check for Updates"))
                 .on_click(move |_, _, cx| {
                     u.update(cx, Updater::check);
                 })
@@ -167,7 +179,7 @@ impl AuxWindow for AboutView {
 pub fn open(cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.about,
-        "About OpenLogi",
+        tr!("About OpenLogi"),
         Size::new(px(360.), px(460.)),
         AboutView::new,
         cx,
@@ -182,6 +194,7 @@ impl Render for AboutView {
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
+            .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
@@ -225,14 +238,14 @@ impl Render for AboutView {
                         Button::new("about-repo")
                             .outline()
                             .icon(IconName::Github)
-                            .label("GitHub")
+                            .label(tr!("GitHub"))
                             .on_click(|_, _, cx| cx.open_url(REPO_URL)),
                     )
                     .child(
                         Button::new("about-releases")
                             .outline()
                             .icon(IconName::ExternalLink)
-                            .label("Releases")
+                            .label(tr!("Releases"))
                             .on_click(|_, _, cx| cx.open_url(RELEASES_URL)),
                     ),
             )
@@ -242,7 +255,7 @@ impl Render for AboutView {
                 div()
                     .text_xs()
                     .text_color(pal.text_muted)
-                    .child("Licensed under MIT OR Apache-2.0"),
+                    .child(tr!("Licensed under MIT OR Apache-2.0")),
             )
     }
 }

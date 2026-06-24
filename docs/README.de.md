@@ -23,6 +23,11 @@
     <img alt="Hits" src="https://hits.aprilnea.com/hits?url=https://github.com/aprilnea/openlogi">
 </div>
 
+<p align="center">
+    <a href="https://trendshift.io/repositories/42303" target="_blank">
+    <img src="https://trendshift.io/api/badge/trendshift/repositories/42303/daily?language=Rust" alt="AprilNEA%2FOpenLogi | Trendshift" width="250" height="55"/></a>
+</p>
+
 > **Genug von Options+? Probier OpenLogi.**
 
 Tasten neu belegen, DPI und SmartShift steuern, Profile pro App umschalten — ohne Logitech-Konto, ohne Telemetrie, ohne das offizielle Options+. Keine Cloud, Konfiguration als einfaches TOML; die einzigen Netzwerkzugriffe sind Geräte-Bilder und eine standardmäßig deaktivierte Opt-in-Updateprüfung.
@@ -158,3 +163,7 @@ Das OpenLogi-Logo und das App-Icon — die Markenressourcen unter [`design/`](..
 ---
 
 **Nicht mit Logitech verbunden.** „Logitech", „MX Master" und „Options+" sind Marken der Logitech International S.A.
+
+## Repo-Aktivität
+
+![Repobeats analytics image](https://repobeats.axiom.co/api/embed/4a0b576a03e9d528ad31ccf4797a1286c045d021.svg "Repobeats analytics image")

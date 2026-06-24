@@ -12,9 +12,9 @@
 //! `%USERPROFILE%\.config\openlogi` etc. — best-effort until a real Windows
 //! port lands.
 
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use etcetera::{BaseStrategy, base_strategy::Xdg};
 use thiserror::Error;
 
 /// Subdirectory created under each XDG base directory.
@@ -26,31 +26,8 @@ pub enum PathsError {
     HomeNotFound,
 }
 
-/// The user's home directory: `$HOME`, falling back to `%USERPROFILE%`.
-fn home() -> Result<PathBuf, PathsError> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
-        .ok_or(PathsError::HomeNotFound)
-}
-
-/// Resolve an XDG base directory plus the [`APP_DIR`] subdir.
-///
-/// Honours `env_value` only when it is an absolute path — per the spec a
-/// relative `$XDG_*_HOME` is invalid and must be ignored — otherwise falls
-/// back to `$HOME/<fallback>`. Split from the `std::env` read so the
-/// branching can be unit-tested without mutating process-global env vars.
-fn xdg_base(env_value: Option<OsString>, fallback: &[&str]) -> Result<PathBuf, PathsError> {
-    match env_value {
-        Some(v) if Path::new(&v).is_absolute() => Ok(PathBuf::from(v).join(APP_DIR)),
-        _ => {
-            let mut dir = home()?;
-            dir.extend(fallback);
-            dir.push(APP_DIR);
-            Ok(dir)
-        }
-    }
+fn xdg() -> Result<Xdg, PathsError> {
+    Xdg::new().map_err(|_| PathsError::HomeNotFound)
 }
 
 /// The raw XDG config home directory (without the `openlogi` subdirectory).
@@ -59,10 +36,7 @@ fn xdg_base(env_value: Option<OsString>, fallback: &[&str]) -> Result<PathBuf, P
 /// Useful when placing files that belong to other apps under the same base
 /// (e.g. systemd user units at `$XDG_CONFIG_HOME/systemd/user/`).
 pub fn xdg_config_home() -> Result<PathBuf, PathsError> {
-    match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(v) if Path::new(&v).is_absolute() => Ok(PathBuf::from(v)),
-        _ => Ok(home()?.join(".config")),
-    }
+    Ok(xdg()?.config_dir())
 }
 
 /// Directory holding the user's `config.toml`.
@@ -82,23 +56,15 @@ pub fn config_path() -> Result<PathBuf, PathsError> {
 ///
 /// `$XDG_DATA_HOME/openlogi`, default `~/.local/share/openlogi`.
 pub fn data_dir() -> Result<PathBuf, PathsError> {
-    xdg_base(std::env::var_os("XDG_DATA_HOME"), &[".local", "share"])
-}
-
-/// Resolve the runtime directory holding the agent's IPC socket. Honours an
-/// absolute `$XDG_RUNTIME_DIR` (Linux); otherwise falls back to [`config_dir`]
-/// — macOS has no `$XDG_RUNTIME_DIR`, and the config dir is already
-/// user-private. Split from the env read so the branch is unit-testable.
-fn runtime_base(env_value: Option<OsString>) -> Result<PathBuf, PathsError> {
-    match env_value {
-        Some(v) if Path::new(&v).is_absolute() => Ok(PathBuf::from(v).join(APP_DIR)),
-        _ => config_dir(),
-    }
+    Ok(xdg()?.data_dir().join(APP_DIR))
 }
 
 /// Directory for runtime sockets — the background agent's IPC endpoint.
 pub fn runtime_dir() -> Result<PathBuf, PathsError> {
-    runtime_base(std::env::var_os("XDG_RUNTIME_DIR"))
+    let xdg = xdg()?;
+    Ok(xdg
+        .runtime_dir()
+        .map_or_else(|| xdg.config_dir().join(APP_DIR), |dir| dir.join(APP_DIR)))
 }
 
 /// Path to the background agent's Unix-domain IPC socket: the GUI connects here
@@ -113,33 +79,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn absolute_xdg_override_is_used_verbatim() {
-        let dir = xdg_base(Some("/tmp/xdg-config".into()), &[".config"])
-            .expect("absolute override needs no home dir");
-        assert_eq!(dir, PathBuf::from("/tmp/xdg-config/openlogi"));
+    fn config_dir_keeps_openlogi_under_xdg_config_home() {
+        assert!(config_dir().expect("config dir").ends_with("openlogi"));
     }
 
     #[test]
-    fn relative_xdg_value_is_ignored_per_spec() {
-        // A relative $XDG_*_HOME is invalid, so this must fall back to
-        // $HOME/.config/openlogi rather than honour the relative value.
-        let dir = xdg_base(Some("relative/dir".into()), &[".config"]).expect("home dir resolves");
-        assert!(dir.ends_with("openlogi"));
-        assert!(!dir.to_string_lossy().contains("relative"));
+    fn data_dir_keeps_openlogi_under_xdg_data_home() {
+        assert!(data_dir().expect("data dir").ends_with("openlogi"));
     }
 
     #[test]
-    fn absolute_runtime_dir_is_used_verbatim() {
-        let dir = runtime_base(Some("/run/user/501".into())).expect("absolute override");
-        assert_eq!(dir, PathBuf::from("/run/user/501/openlogi"));
-    }
-
-    #[test]
-    fn relative_runtime_dir_falls_back_to_config() {
-        // A relative $XDG_RUNTIME_DIR is invalid, so this falls back to the
-        // config dir (also ending in openlogi) rather than honouring it.
-        let dir = runtime_base(Some("relative/run".into())).expect("config dir resolves");
-        assert!(dir.ends_with("openlogi"));
-        assert!(!dir.to_string_lossy().contains("relative"));
+    fn runtime_dir_keeps_openlogi_suffix() {
+        assert!(runtime_dir().expect("runtime dir").ends_with("openlogi"));
     }
 }

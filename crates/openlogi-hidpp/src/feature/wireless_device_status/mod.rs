@@ -6,23 +6,18 @@ use std::sync::Arc;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-    channel::HidppChannel,
+    channel::{HidppChannel, MessageListenerGuard},
     event::EventEmitter,
     feature::{CreatableFeature, EmittingFeature, Feature, event_payload},
 };
 
 /// Implements the `WirelessDeviceStatus` / `0x1d4b` feature.
 pub struct WirelessDeviceStatusFeature {
-    /// The underlying HID++ channel.
-    chan: Arc<HidppChannel>,
-
     /// The emitter used to emit events.
     emitter: Arc<EventEmitter<WirelessDeviceStatusEvent>>,
 
-    /// The handle assigned to the message listener registered via
-    /// [`HidppChannel::add_msg_listener`].
-    /// This is used to remove the listener when the feature is dropped.
-    msg_listener_hdl: u32,
+    /// Removes the message listener when the feature is dropped.
+    _msg_listener: MessageListenerGuard,
 }
 
 impl CreatableFeature for WirelessDeviceStatusFeature {
@@ -32,7 +27,7 @@ impl CreatableFeature for WirelessDeviceStatusFeature {
     fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
         let emitter = Arc::new(EventEmitter::new());
 
-        let hdl = chan.add_msg_listener({
+        let listener = chan.add_msg_listener_guarded({
             let emitter = Arc::clone(&emitter);
 
             move |raw, matched| {
@@ -65,9 +60,8 @@ impl CreatableFeature for WirelessDeviceStatusFeature {
         });
 
         Self {
-            chan,
             emitter,
-            msg_listener_hdl: hdl,
+            _msg_listener: listener,
         }
     }
 }
@@ -77,12 +71,6 @@ impl Feature for WirelessDeviceStatusFeature {}
 impl EmittingFeature<WirelessDeviceStatusEvent> for WirelessDeviceStatusFeature {
     fn listen(&self) -> async_channel::Receiver<WirelessDeviceStatusEvent> {
         self.emitter.create_receiver()
-    }
-}
-
-impl Drop for WirelessDeviceStatusFeature {
-    fn drop(&mut self) {
-        self.chan.remove_msg_listener(self.msg_listener_hdl);
     }
 }
 

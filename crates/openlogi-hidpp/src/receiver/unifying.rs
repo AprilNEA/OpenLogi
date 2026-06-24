@@ -13,10 +13,10 @@ use std::sync::Arc;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-    channel::HidppChannel,
+    channel::{HidppChannel, MessageListenerGuard},
     event::EventEmitter,
     protocol::v10::{self, Hidpp10Error},
-    receiver::{ListenerDropGuard, RECEIVER_DEVICE_INDEX, ReceiverError},
+    receiver::{RECEIVER_DEVICE_INDEX, ReceiverError},
 };
 
 /// All USB vendor & product ID pairs that are known to identify Unifying
@@ -65,7 +65,7 @@ pub enum InfoSubRegister {
 pub struct Receiver {
     chan: Arc<HidppChannel>,
     emitter: Arc<EventEmitter<Event>>,
-    _listener: Arc<ListenerDropGuard>,
+    _listener: Arc<MessageListenerGuard>,
 }
 
 impl Receiver {
@@ -80,7 +80,7 @@ impl Receiver {
 
         let emitter = Arc::new(EventEmitter::new());
 
-        let hdl = chan.add_msg_listener({
+        let listener = chan.add_msg_listener_guarded({
             let emitter = Arc::clone(&emitter);
             move |raw, matched| {
                 if matched {
@@ -112,10 +112,7 @@ impl Receiver {
         });
 
         Ok(Receiver {
-            _listener: Arc::new(ListenerDropGuard {
-                chan: Arc::clone(&chan),
-                hdl,
-            }),
+            _listener: Arc::new(listener),
             chan,
             emitter,
         })

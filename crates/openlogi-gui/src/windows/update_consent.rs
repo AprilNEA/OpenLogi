@@ -7,7 +7,7 @@
 //! so it never reappears; "Enable" also runs one check immediately.
 
 use gpui::{
-    App, BorrowAppContext as _, Context, FontWeight, InteractiveElement, IntoElement,
+    App, BorrowAppContext as _, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement,
     ParentElement as _, Render, Size, Styled as _, Subscription, Window, div, px,
 };
 use gpui_component::{
@@ -23,13 +23,17 @@ use crate::windows::{self, AuxWindow};
 
 /// Standalone first-run update-consent window root view.
 pub struct UpdateConsentView {
+    focus_handle: FocusHandle,
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
 }
 
 impl UpdateConsentView {
-    fn new(_: &mut Window, _: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window, cx);
         Self {
+            focus_handle,
             appearance_obs: None,
         }
     }
@@ -69,6 +73,7 @@ impl Render for UpdateConsentView {
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
+            .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())

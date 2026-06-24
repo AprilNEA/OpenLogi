@@ -15,12 +15,12 @@
 //! jumps straight from *searching* to *paired*.
 
 use gpui::{
-    App, Context, FontWeight, Global, InteractiveElement, IntoElement, ParentElement as _, Render,
-    SharedString, Size, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    px, rgb,
+    App, Context, FocusHandle, FontWeight, Global, InteractiveElement, IntoElement,
+    ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, px, rgb,
 };
 use gpui_component::v_flex;
-use openlogi_agent_core::ipc::{FoundDevice, PairingUpdate};
+use openlogi_agent_core::ipc::{FoundDevice, PairingFailure, PairingUpdate};
 use openlogi_hid::{Click, PasskeyMethod, ReceiverSelector};
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
@@ -45,7 +45,7 @@ pub enum PairingUi {
     Passkey(PasskeyMethod),
     /// A device paired into `slot`.
     Paired { slot: u8 },
-    /// The session ended without pairing; carries a human-readable detail.
+    /// The session ended without pairing; carries localized display copy.
     Failed(String),
 }
 
@@ -90,9 +90,45 @@ pub fn apply_update(cx: &mut App, update: PairingUpdate) {
         }
         PairingUpdate::Passkey(method) => PairingUi::Passkey(method),
         PairingUpdate::Paired { slot } => PairingUi::Paired { slot },
-        PairingUpdate::Failed(detail) => PairingUi::Failed(detail),
+        PairingUpdate::Failed(failure) => PairingUi::Failed(pairing_failure_text(failure)),
     };
     cx.set_global(next);
+}
+
+fn pairing_failure_text(failure: PairingFailure) -> String {
+    match failure {
+        PairingFailure::Hid { message } => {
+            tr!("HID transport error: %{message}", message => message).to_string()
+        }
+        PairingFailure::ReceiverNotFound => {
+            tr!("No supported pairing-capable receiver was found.").to_string()
+        }
+        PairingFailure::Register { message } => {
+            tr!("Receiver register access failed: %{message}", message => message).to_string()
+        }
+        PairingFailure::Timeout => tr!("Pairing timed out.").to_string(),
+        PairingFailure::Device { code } => tr!(
+            "The receiver reported pairing error %{code}.",
+            code => format!("0x{code:02x}"),
+        )
+        .to_string(),
+        PairingFailure::Cancelled => tr!("Pairing was cancelled.").to_string(),
+        PairingFailure::ReceiverBusy => tr!("The receiver is busy. Try pairing again.").to_string(),
+        PairingFailure::WatcherUnavailable => {
+            tr!("Pairing is unavailable because the background service is not ready.").to_string()
+        }
+        PairingFailure::AgentRestarted => {
+            tr!("The background service restarted — try pairing again.").to_string()
+        }
+        PairingFailure::ReceiverAccessUnavailable => {
+            tr!("Pairing is unavailable because receiver access could not be recorded.").to_string()
+        }
+        PairingFailure::AlreadyActive => tr!("A pairing session is already active.").to_string(),
+        PairingFailure::UnknownDevice => {
+            tr!("That device is no longer available. Search again and retry pairing.").to_string()
+        }
+        PairingFailure::NoActiveSession => tr!("No pairing session is active.").to_string(),
+    }
 }
 
 fn send(cx: &App, command: Command) {
@@ -108,6 +144,7 @@ fn start_search(cx: &mut App) {
 
 /// Standalone Add Device window root view.
 pub struct AddDeviceView {
+    focus_handle: FocusHandle,
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
     #[allow(dead_code, reason = "held to keep the PairingUi observer alive")]
@@ -115,9 +152,12 @@ pub struct AddDeviceView {
 }
 
 impl AddDeviceView {
-    fn new(_: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window, cx);
         let state_obs = cx.observe_global::<PairingUi>(|_, cx| cx.notify());
         Self {
+            focus_handle,
             appearance_obs: None,
             state_obs,
         }
@@ -139,6 +179,7 @@ impl Render for AddDeviceView {
             .size_full()
             .bg(pal.bg)
             .text_color(pal.text_primary)
+            .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())

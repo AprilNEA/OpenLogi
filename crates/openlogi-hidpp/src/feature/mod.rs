@@ -71,11 +71,6 @@ impl FeatureEndpoint {
         }
     }
 
-    /// The channel this endpoint talks over.
-    pub(crate) fn chan(&self) -> &HidppChannel {
-        &self.chan
-    }
-
     /// The request header addressing `function` on this endpoint, stamped with
     /// the channel's next software id.
     ///

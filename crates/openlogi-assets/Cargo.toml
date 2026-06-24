@@ -18,6 +18,7 @@ sha2 = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 backon = { workspace = true }
+atomic-write-file = "0.3.0"
 
 [lints]
 workspace = true

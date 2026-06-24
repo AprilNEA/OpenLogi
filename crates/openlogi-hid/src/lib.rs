@@ -16,6 +16,7 @@ mod transport;
 mod windows_hid;
 
 pub mod gesture;
+mod hires_wheel;
 pub mod inventory;
 pub mod pairing;
 pub mod reprog_controls;
@@ -24,6 +25,7 @@ pub mod thumbwheel;
 pub mod write;
 
 pub use gesture::{CaptureChannel, CapturedInput, GestureError, run_capture_session};
+pub use hires_wheel::{set_scroll_inversion, set_scroll_inversion_on};
 pub use inventory::{Enumerator, InventoryError, enumerate};
 pub use pairing::{
     Click, DiscoveredDevice, PairingCommand, PairingError, PairingEvent, PairingReceiver,
@@ -32,8 +34,8 @@ pub use pairing::{
 pub use route::{BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, UNIFYING_PIDS};
 pub use smartshift::{AUTO_DISENGAGE_PERMANENT, SmartShiftMode, SmartShiftStatus};
 pub use write::{
-    DpiCapabilities, DpiInfo, FeatureEntry, LightingMethod, SharedChannel, WriteError,
-    dump_features, get_dpi, get_dpi_info, get_smartshift_status, set_dpi, set_dpi_on,
-    set_keyboard_color, set_keyboard_color_with, set_smartshift, set_smartshift_on,
-    set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
+    DpiCapabilities, DpiInfo, FeatureEntry, HidppFeatureErrorKind, HidppOperation, LightingMethod,
+    SharedChannel, WriteError, dump_features, get_dpi, get_dpi_info, get_smartshift_status,
+    set_dpi, set_dpi_on, set_keyboard_color, set_keyboard_color_with, set_smartshift,
+    set_smartshift_on, set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
 };

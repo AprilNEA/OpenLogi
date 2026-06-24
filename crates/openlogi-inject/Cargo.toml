@@ -11,7 +11,7 @@ keywords = ["logitech", "input", "uinput", "sendinput", "mouse"]
 categories = ["hardware-support", "os"]
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", version = "0.6.14" }
+openlogi-core = { path = "../openlogi-core", version = "0.6.16" }
 tracing = { workspace = true }
 
 [dev-dependencies]

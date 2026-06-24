@@ -14,6 +14,7 @@
 //! [`AppState::set_language`](crate::state::AppState::set_language); each must be
 //! followed by a window refresh so open views re-render with the new locale.
 
+use fluent_langneg::{LanguageIdentifier, NegotiationStrategy, negotiate_languages};
 use openlogi_core::config::AppSettings;
 
 /// Locales the GUI ships, as `(code, native name)`. The codes match the
@@ -74,52 +75,59 @@ pub fn resolve(setting: Option<&str>) -> &'static str {
 /// - Norwegian's `nb` / `nn` / the macrolanguage `no` all fold onto `nb`
 ///   (the catalog ships Bokmål, shown as "Norsk").
 fn match_supported(code: &str) -> Option<&'static str> {
-    let lower = code.to_ascii_lowercase();
-    let mut subtags = lower.split(['-', '_']);
-    Some(match subtags.next()? {
-        "da" => "da",
-        "de" => "de",
-        "en" => "en",
-        "es" => "es",
-        "fr" => "fr",
-        "it" => "it",
-        "nl" => "nl",
-        "nb" | "nn" | "no" => "nb",
-        "pl" => "pl",
-        "fi" => "fi",
-        "sv" => "sv",
-        "el" => "el",
-        "ru" => "ru",
-        "ja" => "ja",
-        "ko" => "ko",
+    let requested = code.replace('_', "-").parse::<LanguageIdentifier>().ok()?;
+    special_locale(&requested).or_else(|| lookup_supported(&requested))
+}
+
+fn special_locale(requested: &LanguageIdentifier) -> Option<&'static str> {
+    match requested.language.as_str() {
+        "nb" | "nn" | "no" => Some("nb"),
         "pt" => {
-            if subtags.any(|t| t == "br") {
-                "pt-BR"
+            if requested
+                .region
+                .as_ref()
+                .is_some_and(|region| region.as_str() == "BR")
+            {
+                Some("pt-BR")
             } else {
-                "pt-PT"
+                Some("pt-PT")
             }
         }
         "zh" => {
-            let mut script = None;
-            let mut region = None;
-
-            for subtag in subtags {
-                match subtag {
-                    "hans" | "hant" => script = Some(subtag),
-                    "cn" | "sg" | "tw" | "hk" | "mo" => region = Some(subtag),
-                    _ => {}
-                }
-            }
-
-            match (script, region) {
-                (Some("hans"), _) => "zh-CN",
-                (_, Some("hk" | "mo")) => "zh-HK",
-                (_, Some("tw")) | (Some("hant"), _) => "zh-TW",
-                _ => "zh-CN",
+            let script = requested.script.as_ref().map(ToString::to_string);
+            let region = requested.region.as_ref().map(ToString::to_string);
+            match (script.as_deref(), region.as_deref()) {
+                (Some("Hans"), _) => Some("zh-CN"),
+                (_, Some("HK" | "MO")) => Some("zh-HK"),
+                (_, Some("TW")) | (Some("Hant"), _) => Some("zh-TW"),
+                _ => Some("zh-CN"),
             }
         }
-        _ => return None,
-    })
+        _ => None,
+    }
+}
+
+fn lookup_supported(requested: &LanguageIdentifier) -> Option<&'static str> {
+    let available = supported_langids();
+    let matched = negotiate_languages(
+        std::slice::from_ref(requested),
+        &available,
+        None,
+        NegotiationStrategy::Lookup,
+    )
+    .into_iter()
+    .next()?;
+    let matched = matched.to_string();
+    SUPPORTED
+        .iter()
+        .find_map(|(code, _)| (*code == matched).then_some(*code))
+}
+
+fn supported_langids() -> Vec<LanguageIdentifier> {
+    SUPPORTED
+        .iter()
+        .filter_map(|(code, _)| code.parse().ok())
+        .collect()
 }
 
 /// Switch the process-global locale to the resolution of `language`

@@ -16,6 +16,7 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 fs4 = { version = "1.1.0", features = ["sync"] }
+etcetera = "0.11.0"
 
 [dev-dependencies]
 tempfile = "3"

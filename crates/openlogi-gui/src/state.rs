@@ -14,8 +14,7 @@
     reason = "fields are read once their owning component lands in UI.md phases 2–4"
 )]
 
-use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
 
 use gpui::{App, Global};
 use openlogi_core::config::{AppSettings, Config, DeviceIdentity, Lighting};
@@ -295,14 +294,6 @@ pub struct AppState {
     /// [`Self::dpi_data`]; the device persists the values itself, so this is a
     /// read/write cache, not a source of truth saved to disk.
     smartshift_data: LazyDeviceData<SmartShiftStatus>,
-    /// Glow-overlay cache paths we've already spawned generation for, so each
-    /// `(depot, colour)` is attempted exactly once — even when the depot ships
-    /// no mask and no file is ever written (otherwise the worker's
-    /// `refresh_windows` would re-trigger generation every frame, forever).
-    glow_attempted: HashSet<PathBuf>,
-    /// Glow-overlay cache paths whose PNG is generated and ready to render, so
-    /// `lighting_overlay` never stats the filesystem on the render thread.
-    glow_ready: HashSet<PathBuf>,
     /// Devices whose SmartShift was just written optimistically and still need a
     /// confirming re-read, keyed by [`DeviceRecord::config_key`]. A fire-and-
     /// forget write can be rejected/timed-out by a sleeping device, so the panel
@@ -364,8 +355,6 @@ impl AppState {
             dpi_data: LazyDeviceData::default(),
             inventory_misses: BTreeMap::new(),
             smartshift_data: LazyDeviceData::default(),
-            glow_attempted: HashSet::new(),
-            glow_ready: HashSet::new(),
             smartshift_pending_confirm: std::collections::BTreeSet::new(),
             device_list,
             config,
@@ -550,8 +539,8 @@ impl AppState {
         // config_key + route, so that guard would otherwise skip the write.
         persist_identities(&mut self.config, &merged_list);
         // Compare more than config_key: a device can reconnect on a new HID++
-        // index while keeping its model-derived config_key, and the fresh route
-        // must replace the stale one so reads/writes don't target a dead index.
+        // index while keeping its physical config key, and the fresh route must
+        // replace the stale one so reads/writes don't target a dead index.
         // `online` and `capabilities` are compared too, so a device waking up or
         // a probe that resolves its feature table on a stable route still
         // refreshes the carousel (and its config panels) instead of being
@@ -959,6 +948,38 @@ impl AppState {
         self.smartshift_pending_confirm.insert(key);
     }
 
+    /// Whether the active device's scroll wheel is inverted (issue #126).
+    /// `false` when no device is selected or the device hasn't opted in.
+    #[must_use]
+    pub fn current_invert_scroll(&self) -> bool {
+        self.current_record()
+            .is_some_and(|r| self.config.invert_scroll(&r.config_key))
+    }
+
+    /// Whether the active device reports native HID++ wheel inversion support.
+    #[must_use]
+    pub fn current_scroll_inversion_supported(&self) -> bool {
+        self.current_record()
+            .and_then(|record| record.capabilities)
+            .is_some_and(|capabilities| capabilities.scroll_inversion)
+    }
+
+    /// Set the active device's scroll-wheel inversion, persist it, and reload
+    /// the agent so it writes the device's native HID++ wheel inversion. No-op
+    /// when no device is selected or the active device does not report support.
+    pub fn commit_invert_scroll(&mut self, invert: bool) {
+        if !self.current_scroll_inversion_supported() {
+            debug!("active device does not support native scroll inversion");
+            return;
+        }
+        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
+            debug!("no active device — invert-scroll change ignored");
+            return;
+        };
+        self.config.set_invert_scroll(&key, invert);
+        self.persist_and_reload("invert scroll");
+    }
+
     /// Take the active device's pending SmartShift confirm, if any. Returns the
     /// `(config_key, route)` for a one-shot re-read that replaces the optimistic
     /// value with the device's real state; consumed once so it doesn't re-fire.
@@ -984,24 +1005,6 @@ impl AppState {
     #[must_use]
     pub fn lighting_for(&self, key: &str) -> Option<Lighting> {
         self.config.lighting(key)
-    }
-
-    /// Claim `path` for a one-shot glow generation; `true` the first time, so the
-    /// caller spawns the worker exactly once per `(depot, colour)`.
-    pub fn mark_glow_attempted(&mut self, path: PathBuf) -> bool {
-        self.glow_attempted.insert(path)
-    }
-
-    /// Record that `path`'s overlay PNG is generated and ready to render.
-    pub fn mark_glow_ready(&mut self, path: PathBuf) {
-        self.glow_ready.insert(path);
-    }
-
-    /// Whether `path`'s overlay PNG is ready — a cheap in-memory check so the
-    /// render thread never stats the filesystem.
-    #[must_use]
-    pub fn glow_is_ready(&self, path: &Path) -> bool {
-        self.glow_ready.contains(path)
     }
 
     /// Persist a new lighting config for the active device and push it to the
@@ -1284,6 +1287,12 @@ fn persist_identities(config: &mut Config, list: &[DeviceRecord]) {
             display_name: record.display_name.clone(),
             kind: record.kind,
             capabilities,
+            model_info: record.model_info.clone().map(|mut model| {
+                model.serial_number = None;
+                model.unit_id = [0; 4];
+                model
+            }),
+            codename: record.codename.clone(),
         };
         if config.device_identity(&record.config_key) != Some(&identity) {
             config.set_device_identity(&record.config_key, identity);
