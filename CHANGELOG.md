@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.17](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.16...openlogi-core-v0.6.17) - 2026-06-24
+
+### Added
+
+- add Capture Region to Clipboard button action ([#296](https://github.com/AprilNEA/OpenLogi/pull/296))
+
 ## [0.6.16](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.15...openlogi-core-v0.6.16) - 2026-06-22
 
 ### Fixed
