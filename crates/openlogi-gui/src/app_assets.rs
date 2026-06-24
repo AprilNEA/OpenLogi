@@ -19,12 +19,12 @@ const LOGO_BYTES: &[u8] = include_bytes!(concat!(
     "/../../design/icon/openlogi.png"
 ));
 
-/// Vendored [lucide](https://lucide.dev) icons (ISC license) for the binding
-/// menus, embedded so they resolve identically in a packaged `.app` and a dev
-/// build. Served under the `action-icons/` path prefix and rendered by
-/// `mouse_model::picker::action_icon_path` via `svg().path(..)`. These are
-/// command glyphs (paste / cut / volume / lock / …) that gpui-component's
-/// bundled `IconName` set (UI chrome only) does not cover.
+/// Vendored [lucide](https://lucide.dev) icons (ISC license) plus OpenLogi's
+/// generic connection glyphs for the binding menus and device cards, embedded
+/// so they resolve identically in a packaged `.app` and a dev build. Served
+/// under the `action-icons/` path prefix and rendered via `svg().path(..)`.
+/// These are command/status glyphs (paste / cut / volume / receiver / …) that
+/// gpui-component's bundled `IconName` set (UI chrome only) does not cover.
 #[rustfmt::skip]
 const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/arrow-left.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/arrow-left.svg"))),

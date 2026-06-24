@@ -1,3 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="7 7 32 32" fill="none">
-  <path fill-rule="evenodd" clip-rule="evenodd" fill="currentColor" d="M25.5367 36.4498L15.7592 21.831H22.9999L15.7911 10.772L7.66663 23.3069L16.1851 36.4498H25.5367ZM29.8498 36.3957L38.3333 23.3069L29.8148 10.1641L20.0492 10.1641L29.3888 24.9927H22.361L29.8498 36.3957Z"/>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <rect width="10" height="16" x="7" y="4" rx="2" />
+  <path d="M12 8 10 12h3l-1 4 3-6h-3l1-2Z" />
 </svg>
