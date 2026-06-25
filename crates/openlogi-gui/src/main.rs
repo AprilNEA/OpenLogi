@@ -557,6 +557,7 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
         // (`MODEL_MIN_H` + the chrome/padding reserve) so its side labels never
         // overlap; below this the model can't shrink further without crowding.
         window_min_size: Some(Size::new(px(720.), px(680.))),
+        app_id: Some("openlogi".to_string()),
         titlebar: Some(TitlebarOptions {
             title: Some(SharedString::from("OpenLogi")),
             appears_transparent: false,
