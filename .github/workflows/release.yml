@@ -627,6 +627,11 @@ jobs:
             ext="${pkg##*.}"
             cp "$pkg" "dist/openlogi-${ref_name}-linux-${PKG_ARCH}.${ext}"
           done
+          # .pkg.tar.zst has a compound extension; handle it separately.
+          for pkg in target/release/*.pkg.tar.zst; do
+            [ -f "$pkg" ] || continue
+            cp "$pkg" "dist/openlogi-${ref_name}-linux-${PKG_ARCH}.pkg.tar.zst"
+          done
 
       - uses: actions/upload-artifact@v7
         with:
@@ -700,7 +705,7 @@ jobs:
           # nothing instead of erroring on a literal pattern, so the DMGs are
           # hashed alone.
           shopt -s nullglob
-          sha256sum *.dmg *.exe *.msi *.deb *.rpm > SHA256SUMS
+          sha256sum *.dmg *.exe *.msi *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
 
       # softprops' `files` can't list a glob that matches nothing without
       # tripping fail_on_unmatched_files. The Windows exe/msi (per arch leg)
@@ -718,6 +723,11 @@ jobs:
               echo "$ext=false" >> "$GITHUB_OUTPUT"
             fi
           done
+          if compgen -G "dist/*.pkg.tar.zst" > /dev/null; then
+            echo "pacman=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pacman=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Load static updater publishing config from 1Password
         id: r2_config
@@ -780,7 +790,7 @@ jobs:
           # the globs may match nothing; the DMGs are guaranteed by the publish
           # gate.
           shopt -s nullglob
-          for artifact in dist/*.dmg dist/*.exe dist/*.msi dist/*.deb dist/*.rpm; do
+          for artifact in dist/*.dmg dist/*.exe dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst; do
             minisign -S -m "$artifact" -s "$key_file" -x "$artifact.minisig" -W
             minisign -V -m "$artifact" -P "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" -x "$artifact.minisig"
           done
@@ -849,6 +859,7 @@ jobs:
             ${{ steps.artifacts.outputs.msi == 'true' && 'dist/*.msi' || '' }}
             ${{ steps.artifacts.outputs.deb == 'true' && 'dist/*.deb' || '' }}
             ${{ steps.artifacts.outputs.rpm == 'true' && 'dist/*.rpm' || '' }}
+            ${{ steps.artifacts.outputs.pacman == 'true' && 'dist/*.pkg.tar.zst' || '' }}
           fail_on_unmatched_files: true
 
   homebrew-tap:
@@ -879,3 +890,82 @@ jobs:
           event-type: update-openlogi
           client-payload: |
             {"version": "${{ github.ref_name }}"}
+
+  aur-check:
+    name: Check AUR publishing prerequisites
+    runs-on: ubuntu-latest
+    needs: publish
+    if: ${{ github.ref_type == 'tag' }}
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          if [ -n "$AUR_SSH_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  aur-publish:
+    name: Publish openlogi-bin to AUR
+    runs-on: ubuntu-latest
+    needs: [publish, aur-check]
+    if: ${{ needs.aur-check.outputs.enabled == 'true' }}
+    container:
+      image: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: pacman -Syu --noconfirm git openssh
+
+      - name: Set up AUR SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          printf 'Host aur.archlinux.org\n  IdentityFile ~/.ssh/aur\n  User aur\n  StrictHostKeyChecking accept-new\n' >> ~/.ssh/config
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+
+      - name: Compute release checksums
+        id: checksums
+        run: |
+          set -o pipefail
+          version="${GITHUB_REF_NAME#v}"
+          base="https://github.com/AprilNEA/OpenLogi/releases/download/${GITHUB_REF_NAME}"
+          sha_amd64=$(curl -fsSL "${base}/openlogi-${GITHUB_REF_NAME}-linux-amd64.pkg.tar.zst" | sha256sum | awk '{print $1}')
+          sha_aarch64=$(curl -fsSL "${base}/openlogi-${GITHUB_REF_NAME}-linux-arm64.pkg.tar.zst" | sha256sum | awk '{print $1}')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "sha_amd64=${sha_amd64}" >> "$GITHUB_OUTPUT"
+          echo "sha_aarch64=${sha_aarch64}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate PKGBUILD and .SRCINFO
+        run: |
+          version="${{ steps.checksums.outputs.version }}"
+          sed \
+            -e "s/@PKGVER@/${version}/g" \
+            -e "s/@SHA256_AMD64@/${{ steps.checksums.outputs.sha_amd64 }}/g" \
+            -e "s/@SHA256_AARCH64@/${{ steps.checksums.outputs.sha_aarch64 }}/g" \
+            packaging/aur/PKGBUILD.tmpl > /tmp/PKGBUILD
+          cp packaging/aur/openlogi.install /tmp/openlogi.install
+          # Run as a non-root user — makepkg refuses to run as root.
+          useradd -m builder
+          cp /tmp/PKGBUILD /tmp/openlogi.install /home/builder/
+          chown builder /home/builder/PKGBUILD /home/builder/openlogi.install
+          su builder -c "cd /home/builder && makepkg --printsrcinfo > .SRCINFO"
+          cp /home/builder/.SRCINFO /tmp/.SRCINFO
+
+      - name: Push to AUR
+        run: |
+          git config --global user.name "OpenLogi Release Bot"
+          git config --global user.email "dev@aprilnea.me"
+          git clone ssh://aur@aur.archlinux.org/openlogi-bin.git /tmp/aur-repo
+          cp /tmp/PKGBUILD /tmp/.SRCINFO /tmp/openlogi.install /tmp/aur-repo/
+          cd /tmp/aur-repo
+          git add PKGBUILD .SRCINFO openlogi.install
+          git commit -m "Update to ${{ github.ref_name }}"
+          git push

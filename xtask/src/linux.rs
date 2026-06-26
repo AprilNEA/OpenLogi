@@ -48,7 +48,7 @@ pub(crate) fn package_linux(args: &PackageLinux) -> Result<()> {
         other => anyhow::bail!("unsupported Linux package architecture: {other}"),
     };
 
-    for packager in ["deb", "rpm"] {
+    for packager in ["deb", "rpm", "archlinux"] {
         println!("==> nfpm {packager} ({pkg_arch})");
         cmd!(
             sh,
