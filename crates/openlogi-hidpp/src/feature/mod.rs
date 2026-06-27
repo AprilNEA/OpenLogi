@@ -9,6 +9,7 @@ use crate::{
 };
 
 pub mod adjustable_dpi;
+pub mod backlight;
 pub mod brightness_control;
 pub mod change_host;
 pub mod device_friendly_name;
@@ -23,6 +24,7 @@ pub mod feature_set;
 pub mod fn_inversion;
 pub mod hires_wheel;
 pub mod hosts_info;
+pub mod illumination;
 pub mod mode_status;
 pub mod mouse_pointer;
 pub mod multi_platform;
