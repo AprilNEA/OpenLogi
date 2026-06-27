@@ -9,17 +9,24 @@ use crate::{
 };
 
 pub mod adjustable_dpi;
+pub mod brightness_control;
 pub mod device_friendly_name;
 pub mod device_information;
 pub mod device_type_and_name;
+pub mod extended_report_rate;
 pub mod feature_set;
 pub mod hires_wheel;
+pub mod mode_status;
 pub mod registry;
+pub mod report_rate;
 pub mod reprog_controls;
 pub mod root;
+pub mod sidetone;
 pub mod smartshift;
+pub mod smartshift_enhanced;
 pub mod thumbwheel;
 pub mod unified_battery;
+pub mod vertical_scrolling;
 pub mod wireless_device_status;
 
 /// Represents a concrete implementation of a HID++2.0 device feature.
