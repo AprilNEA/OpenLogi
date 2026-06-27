@@ -1,4 +1,4 @@
-//! Live control capture for one device: divert the MX thumb gesture button, the
+//! Live control capture for one device: divert the MX dedicated gesture button, the
 //! DPI/ModeShift button, and the thumb wheel over HID++ and turn their events
 //! into [`CapturedInput`] the GUI can dispatch.
 //!
@@ -70,7 +70,7 @@ pub enum GestureError {
 /// because the channel's read thread invokes the listener by shared reference.
 #[derive(Default)]
 struct CaptureAccum {
-    /// Mid-swipe state for the diverted thumb-pad gesture button (raw-XY).
+    /// Mid-swipe state for the diverted dedicated gesture button (raw-XY).
     swipe: SwipeAccumulator,
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
@@ -81,11 +81,12 @@ struct CaptureAccum {
 /// `capture_thumbwheel`) the thumb wheel on `route` until `shutdown` resolves,
 /// forwarding each event to `sink`.
 ///
-/// The gesture button (raw-XY) is diverted only when `divert_gesture_button` —
+/// The dedicated gesture button (raw-XY) is diverted only when `divert_gesture_button` —
 /// i.e. it is the device's gesture owner. When the user moves the gesture role
-/// to an OS-hook button or turns gestures off, the thumb pad is left undiverted
-/// so it keeps its native behavior instead of being captured-and-swallowed. The
-/// DPI/ModeShift capture and the channel-reuse slot are independent of this.
+/// to an OS-hook button or turns gestures off, the HID++ gesture control is
+/// left undiverted so it keeps its native behavior instead of being
+/// captured-and-swallowed. The DPI/ModeShift capture and the channel-reuse slot
+/// are independent of this.
 ///
 /// Opens and holds one HID++ channel, diverts whichever of those controls the
 /// device exposes, and listens. Returns once `shutdown` fires (or its sender is
@@ -231,7 +232,7 @@ async fn arm_controls(
         let controls = enumerate_controls(&rc).await?;
 
         // Only divert the gesture button when it owns the gesture role; otherwise
-        // leave it native (a non-owner thumb pad must not be captured-and-dropped).
+        // leave it native (a non-owner HID++ control must not be captured-and-dropped).
         if divert_gesture_button
             && controls
                 .iter()

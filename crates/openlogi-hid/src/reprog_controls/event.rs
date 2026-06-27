@@ -46,7 +46,7 @@ impl TryFrom<ReprogControlsEvent> for RawControlEvent {
 /// `0x1b04` event for `(device_index, feature_index)`.
 ///
 /// Returns `None` for request responses (`software_id != 0`), messages from a
-/// different device or feature, and events outside OpenLogi's legacy gesture
+/// different device or feature, and events outside OpenLogi's gesture-control
 /// pipeline.
 #[must_use]
 pub fn decode_event(
@@ -111,7 +111,7 @@ mod tests {
         let p = [0u8; 16];
         // software_id != 0 marks a request response, not an event.
         assert_eq!(decode_event(&event(0, 5, p), 2, 7), None);
-        // Right device + feature, but an event outside the legacy gesture path.
+        // Right device + feature, but an event outside the gesture-control path.
         assert_eq!(decode_event(&event(2, 0, p), 2, 7), None);
         // Wrong feature index.
         assert_eq!(decode_event(&event(0, 0, p), 2, 9), None);

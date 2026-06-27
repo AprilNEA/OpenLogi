@@ -137,7 +137,6 @@ _version: 1
 "Unbound": "Не назначено"
 "Default": "По умолчанию"
 "5 directions": "5 направлений"
-"Thumb pad": "Большой палец"
 "Middle": "Средняя"
 "DPI Preset %{index}": "Пресет DPI %{index}"
 "Gesture %{name}": "Жест %{name}"

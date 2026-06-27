@@ -137,7 +137,6 @@ _version: 1
 "Unbound": "Sin asignar"
 "Default": "Predeterminado"
 "5 directions": "5 direcciones"
-"Thumb pad": "Zona del pulgar"
 "Middle": "Central"
 "DPI Preset %{index}": "Preajuste de DPI %{index}"
 "Gesture %{name}": "Gesto %{name}"

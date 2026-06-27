@@ -191,7 +191,7 @@ async fn manage(
                 } else {
                     let target = dpi_cycle.read().ok().and_then(|guard| guard.target.clone());
                     let sensitivity = thumbwheel_sensitivity.load(Ordering::Relaxed);
-                    // Divert the thumb pad only while it owns the gesture role. The
+                    // Divert the dedicated HID++ gesture button only while it owns the gesture role. The
                     // shared gesture map is non-empty exactly then (gesture_bindings_for
                     // gates on the owner), so it doubles as that signal — no need to
                     // thread the full config in. Re-evaluated each tick, so a

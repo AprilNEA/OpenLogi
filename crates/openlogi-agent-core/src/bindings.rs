@@ -54,11 +54,11 @@ pub fn gesture_bindings_for(
     config: &Config,
     config_key: Option<&str>,
 ) -> BTreeMap<GestureDirection, Action> {
-    // The thumb pad (HID++ 0x00c3) only gestures while it is the device's gesture
+    // The dedicated HID++ gesture button (CID 0x00c3) only gestures while it is the device's gesture
     // owner. When the user moves the role to an OS-hook button (Middle/Back/
     // Forward) or turns gestures off, return an empty map so the gesture watcher
     // dispatches nothing — otherwise the always-seeded defaults would keep the
-    // thumb pad firing regardless of the selection.
+    // HID++ gesture button firing regardless of the selection.
     let owner = config_key.and_then(|key| config.gesture_owner(key));
     if owner != Some(ButtonId::GestureButton) {
         return BTreeMap::new();
@@ -105,7 +105,7 @@ pub fn oshook_gestures_for(
         return BTreeMap::new();
     };
     // Only an OS-hook button (Middle/Back/Forward) as the device's gesture owner
-    // feeds the OS hook: the thumb pad is captured over HID++, and a non-owner
+    // feeds the OS hook: the dedicated HID++ gesture button is captured over HID++, and a non-owner
     // button is dispatched as its single click action. Returning *only* the owner
     // keeps the runtime in lockstep with `gesture_owner` and the GUI, so a stray
     // second gesture map (e.g. a hand-edited config) can't make two buttons fire.
@@ -223,22 +223,22 @@ mod tests {
     }
 
     #[test]
-    fn gesture_bindings_silent_when_thumb_pad_is_not_the_owner() {
+    fn gesture_bindings_silent_when_hidpp_button_is_not_the_owner() {
         let mut cfg = Config::default();
-        // Default device: the thumb pad owns gestures, so its defaults are seeded.
+        // Default device: the dedicated HID++ gesture button owns gestures, so its defaults are seeded.
         let defaults = gesture_bindings_for(&cfg, Some("2b042"));
         assert_eq!(
             defaults.get(&GestureDirection::Up),
             Some(&default_gesture_binding(GestureDirection::Up)),
-            "the default gesture owner is the thumb pad"
+            "the default gesture owner is the dedicated HID++ gesture button"
         );
 
-        // Move the gesture role to an OS-hook button: the thumb pad goes silent,
+        // Move the gesture role to an OS-hook button: the HID++ gesture button goes silent,
         // so the watcher dispatches nothing for 0x00c3.
         cfg.set_gesture_owner("2b042", ButtonId::Back);
         assert!(
             gesture_bindings_for(&cfg, Some("2b042")).is_empty(),
-            "thumb pad must dispatch nothing once another button owns gestures"
+            "HID++ gesture button must dispatch nothing once another button owns gestures"
         );
     }
 }

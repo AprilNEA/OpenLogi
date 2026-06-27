@@ -1,6 +1,5 @@
 //! HID++ `ReprogControlsV4` (feature `0x1b04`) — temporary control diversion
-//! and raw-XY reporting, the mechanism behind the MX-line thumb "gesture
-//! button".
+//! and raw-XY reporting, the mechanism behind MX-line reprogrammable controls.
 //!
 //! The full protocol wrapper lives in `openlogi-hidpp`; this module keeps the
 //! OpenLogi-facing compatibility API used by gesture/button orchestration:
@@ -35,9 +34,13 @@ pub use hidpp_reprog::{
 /// `ReprogControlsV4` HID++ feature ID.
 pub const FEATURE_ID: u16 = 0x1b04;
 
-/// Control ID of the MX-line thumb gesture button (`Mouse_Gesture_Button`,
-/// Logitech "App_Switch_Gesture"). Cross-checked against Solaar
-/// `special_keys.py`.
+/// Control ID of the MX-line dedicated gesture button (`Mouse_Gesture_Button`,
+/// Logitech "App_Switch_Gesture").
+///
+/// MX Master 4 also has a separate Haptic Sense Panel in the thumb area. That
+/// panel is not this CID; it must be discovered from the device's `0x1b04`
+/// control table and supported explicitly before OpenLogi treats it as a
+/// bindable/capturable input.
 pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 
 /// Control IDs of the "DPI / ModeShift" button family. Whichever a device
