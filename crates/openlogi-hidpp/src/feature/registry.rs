@@ -12,7 +12,7 @@ use crate::{
     channel::HidppChannel,
     feature::{
         CreatableFeature, adjustable_dpi::AdjustableDpiFeature,
-        device_friendly_name::DeviceFriendlyNameFeature,
+        battery_status::BatteryStatusFeature, device_friendly_name::DeviceFriendlyNameFeature,
         device_information::DeviceInformationFeature,
         device_type_and_name::DeviceTypeAndNameFeature, feature_set::FeatureSetFeature,
         hires_wheel::HiResWheelFeature, root::RootFeature, smartshift::SmartShiftFeature,
@@ -120,7 +120,7 @@ static KNOWN_FEATURES: LazyLock<HashMap<u16, KnownFeature>> = LazyLock::new(|| {
     0x00c3 "DfuControlBolt",
     0x00d0 "Dfu",
     0x00d1 "DfuResumable",
-    0x1000 "BatteryStatus",
+    0x1000 "BatteryStatus" => BatteryStatusFeature,
     0x1001 "BatteryVoltage",
     0x1004 "UnifiedBattery" => UnifiedBatteryFeature,
     0x1010 "ChargingControl",
