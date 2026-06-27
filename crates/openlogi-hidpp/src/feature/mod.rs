@@ -12,6 +12,7 @@ pub mod adjustable_dpi;
 pub mod backlight;
 pub mod brightness_control;
 pub mod change_host;
+pub mod color_led_effects;
 pub mod device_friendly_name;
 pub mod device_information;
 pub mod device_type_and_name;
