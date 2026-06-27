@@ -23,6 +23,7 @@ use crate::{
         disable_keys::DisableKeysFeature,
         disable_keys_by_usage::DisableKeysByUsageFeature,
         dual_platform::DualPlatformFeature,
+        equalizer::EqualizerFeature,
         extended_dpi::ExtendedDpiFeature,
         extended_report_rate::ExtendedReportRateFeature,
         feature_set::FeatureSetFeature,
@@ -238,7 +239,7 @@ static KNOWN_FEATURES: LazyLock<HashMap<u16, KnownFeature>> = LazyLock::new(|| {
     0x8120 "GamingAttachments",
     0x8123 "ForceFeedback",
     0x8300 "Sidetone" => SidetoneFeature,
-    0x8310 "Equalizer",
+    0x8310 "Equalizer" => EqualizerFeature,
     0x8320 "HeadsetOut",
     }
 });

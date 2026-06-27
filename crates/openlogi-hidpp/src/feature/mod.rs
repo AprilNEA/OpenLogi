@@ -19,6 +19,7 @@ pub mod device_type_and_name;
 pub mod disable_keys;
 pub mod disable_keys_by_usage;
 pub mod dual_platform;
+pub mod equalizer;
 pub mod extended_dpi;
 pub mod extended_report_rate;
 pub mod feature_set;
