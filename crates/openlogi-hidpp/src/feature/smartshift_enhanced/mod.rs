@@ -1,6 +1,6 @@
 //! Implements `SmartShiftWheelEnhanced` (feature `0x2111`).
 
-use std::sync::Arc;
+use std::{num::NonZeroU8, sync::Arc};
 
 use crate::{
     channel::HidppChannel,
@@ -53,9 +53,13 @@ pub struct SmartShiftEnhancedStatusChange {
     /// Wheel mode to apply, or `None` to leave unchanged.
     pub wheel_mode: Option<WheelMode>,
     /// Automatic disengage threshold, or `None` to leave unchanged.
-    pub auto_disengage: Option<u8>,
+    ///
+    /// HID++ encodes `0` as “do not change”, so writable values must be non-zero.
+    pub auto_disengage: Option<NonZeroU8>,
     /// Tunable torque, or `None` to leave unchanged.
-    pub tunable_torque: Option<u8>,
+    ///
+    /// HID++ encodes `0` as “do not change”, so writable values must be non-zero.
+    pub tunable_torque: Option<NonZeroU8>,
 }
 
 /// Implements the `SmartShiftWheelEnhanced` / `0x2111` feature.
@@ -109,8 +113,8 @@ impl SmartShiftEnhancedFeature {
                 2,
                 [
                     change.wheel_mode.map_or(0, u8::from),
-                    change.auto_disengage.unwrap_or(0),
-                    change.tunable_torque.unwrap_or(0),
+                    change.auto_disengage.map_or(0, NonZeroU8::get),
+                    change.tunable_torque.map_or(0, NonZeroU8::get),
                 ],
             )
             .await?

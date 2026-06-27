@@ -9,6 +9,7 @@ use hidpp::{
         smartshift::{SmartShiftFeature, WheelMode},
         smartshift_enhanced::{SmartShiftEnhancedFeature, SmartShiftEnhancedStatusChange},
     },
+    protocol::v20::{ErrorType, Hidpp20Error},
 };
 use tracing::debug;
 
@@ -122,21 +123,25 @@ impl SmartShift {
             tunable_torque,
         } = status;
         match self {
-            Self::Enhanced(feature) => feature
-                .set_ratchet_control_mode(SmartShiftEnhancedStatusChange {
-                    wheel_mode: Some(smartshift_to_wheel(mode)),
-                    auto_disengage: Some(auto_disengage),
-                    tunable_torque: Some(tunable_torque),
-                })
-                .await
-                .map(|_| ())
-                .map_err(|e| {
-                    classify_hidpp_error(
-                        e,
-                        HidppOperation::WriteSmartShift,
-                        SmartShiftEnhancedFeature::ID,
-                    )
-                }),
+            Self::Enhanced(feature) => {
+                let auto_disengage = nonzero_smartshift_value(auto_disengage)?;
+                let tunable_torque = nonzero_smartshift_value(tunable_torque)?;
+                feature
+                    .set_ratchet_control_mode(SmartShiftEnhancedStatusChange {
+                        wheel_mode: Some(smartshift_to_wheel(mode)),
+                        auto_disengage: Some(auto_disengage),
+                        tunable_torque: Some(tunable_torque),
+                    })
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| {
+                        classify_hidpp_error(
+                            e,
+                            HidppOperation::WriteSmartShift,
+                            SmartShiftEnhancedFeature::ID,
+                        )
+                    })
+            }
             Self::Legacy(feature) => feature
                 .set_ratchet_control_mode(
                     Some(smartshift_to_wheel(mode)),
@@ -157,12 +162,43 @@ impl SmartShift {
     /// non-write rather than a real sensitivity update.
     async fn set_sensitivity(&self, value: NonZeroU8) -> Result<(), WriteError> {
         let current = self.status().await?;
-        self.set_status(SmartShiftStatus {
-            auto_disengage: value.get(),
-            ..current
-        })
-        .await
+        match self {
+            Self::Enhanced(feature) => feature
+                .set_ratchet_control_mode(SmartShiftEnhancedStatusChange {
+                    wheel_mode: Some(smartshift_to_wheel(current.mode)),
+                    auto_disengage: Some(value),
+                    // Preserve a reported zero as “do not change”; HID++ uses
+                    // zero as the sentinel and cannot write it as a target value.
+                    tunable_torque: NonZeroU8::new(current.tunable_torque),
+                })
+                .await
+                .map(|_| ())
+                .map_err(|e| {
+                    classify_hidpp_error(
+                        e,
+                        HidppOperation::WriteSmartShift,
+                        SmartShiftEnhancedFeature::ID,
+                    )
+                }),
+            Self::Legacy(_) => {
+                self.set_status(SmartShiftStatus {
+                    auto_disengage: value.get(),
+                    ..current
+                })
+                .await
+            }
+        }
     }
+}
+
+fn nonzero_smartshift_value(value: u8) -> Result<NonZeroU8, WriteError> {
+    NonZeroU8::new(value).ok_or_else(|| {
+        classify_hidpp_error(
+            Hidpp20Error::Feature(ErrorType::InvalidArgument),
+            HidppOperation::WriteSmartShift,
+            SmartShiftEnhancedFeature::ID,
+        )
+    })
 }
 
 /// Read the device's current SmartShift mode + sensitivity — companion to

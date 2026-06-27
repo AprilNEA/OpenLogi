@@ -30,7 +30,7 @@ use crate::{
     channel::{HidppChannel, MessageListenerGuard},
     event::EventEmitter,
     feature::{CreatableFeature, EmittingFeature, Feature, FeatureEndpoint, event_payload},
-    protocol::v20::Hidpp20Error,
+    protocol::v20::{ErrorType, Hidpp20Error},
 };
 
 /// Implements the `ColorLedEffects` / `0x8070` feature.
@@ -144,6 +144,7 @@ impl ColorLedEffectsFeature {
         &self,
         capability: NvCapabilities,
     ) -> Result<NvConfig, Hidpp20Error> {
+        validate_single_nv_capability(capability)?;
         let [cap_hi, cap_lo] = capability.bits().to_be_bytes();
         let payload = self
             .endpoint
@@ -167,6 +168,7 @@ impl ColorLedEffectsFeature {
         param1: u8,
         param2: u8,
     ) -> Result<(), Hidpp20Error> {
+        validate_single_nv_capability(capability)?;
         let [cap_hi, cap_lo] = capability.bits().to_be_bytes();
         let mut args = [0; 16];
         args[..5].copy_from_slice(&[cap_hi, cap_lo, state.into(), param1, param2]);
@@ -306,4 +308,11 @@ impl ColorLedEffectsFeature {
         let payload = self.endpoint.call_long(15, args).await?.extend_payload();
         LedBinInfo::from_payload(&payload)
     }
+}
+
+fn validate_single_nv_capability(capability: NvCapabilities) -> Result<(), Hidpp20Error> {
+    if capability.bits().count_ones() != 1 {
+        return Err(Hidpp20Error::Feature(ErrorType::InvalidArgument));
+    }
+    Ok(())
 }

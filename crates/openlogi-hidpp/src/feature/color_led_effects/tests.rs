@@ -5,7 +5,8 @@ use super::types::{
     ColorLedInfo, EffectId, EffectSettings, ExtCapabilities, LedBinIndex, LedBinInfo,
     LocationEffect, NvCapabilities, PersistencyCapabilities, ZoneEffect, ZoneEffectInfo, ZoneInfo,
 };
-use crate::protocol::v20::Hidpp20Error;
+use super::validate_single_nv_capability;
+use crate::protocol::v20::{ErrorType, Hidpp20Error};
 
 #[test]
 fn parses_info() {
@@ -162,4 +163,17 @@ fn maps_effect_id_wire_values() {
     assert_eq!(EffectId::try_from(11u16).unwrap(), EffectId::Ripple);
     assert!(EffectId::try_from(12u16).is_err());
     assert_eq!(u16::from(EffectId::FixedColor), 1);
+}
+
+#[test]
+fn validates_single_nv_capability() {
+    assert!(validate_single_nv_capability(NvCapabilities::BOOT_UP_EFFECT).is_ok());
+    assert!(matches!(
+        validate_single_nv_capability(NvCapabilities::empty()),
+        Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
+    ));
+    assert!(matches!(
+        validate_single_nv_capability(NvCapabilities::BOOT_UP_EFFECT | NvCapabilities::DEMO),
+        Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
+    ));
 }

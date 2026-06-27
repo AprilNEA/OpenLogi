@@ -44,6 +44,11 @@ const KEYS_PER_FRAME: u8 = 0x0e;
 // agent re-applying the saved colour on device arrival (orchestrator reapply),
 // avoiding flash wear on every colour pick.
 const EFFECT_FIXED: u8 = 0x01;
+// The old raw `0x8070` path intentionally wrote only zones 0..4: enough for the
+// keyboards this path targets and bounded by a small, predictable delay budget.
+// Keep that cap even though the typed wrapper can query the reported zone count;
+// a malformed or unexpectedly large count should not stall a color apply.
+const MAX_COLOR_LED_EFFECT_ZONES: u8 = 4;
 // Zones are paced apart because the controller can drop closely-spaced reports.
 const FRAME_GAP: Duration = Duration::from_millis(8);
 
@@ -149,7 +154,24 @@ async fn set_color_effects(route: &DeviceRoute, r: u8, g: u8, b: u8) -> Result<(
         params[0] = r;
         params[1] = g;
         params[2] = b;
-        for zone in 0..zone_count {
+        let zones_to_write = if zone_count == 0 {
+            debug!(
+                index,
+                "0x8070 reported zero zones; applying legacy 4-zone fallback"
+            );
+            MAX_COLOR_LED_EFFECT_ZONES
+        } else {
+            zone_count.min(MAX_COLOR_LED_EFFECT_ZONES)
+        };
+        if zone_count > MAX_COLOR_LED_EFFECT_ZONES {
+            debug!(
+                index,
+                zone_count,
+                capped_zone_count = MAX_COLOR_LED_EFFECT_ZONES,
+                "0x8070 zone count capped to legacy write limit"
+            );
+        }
+        for zone in 0..zones_to_write {
             feature
                 .set_zone_effect(zone, EFFECT_FIXED, params, Persistence::Volatile)
                 .await
@@ -158,7 +180,7 @@ async fn set_color_effects(route: &DeviceRoute, r: u8, g: u8, b: u8) -> Result<(
         }
         debug!(
             index,
-            zone_count, r, g, b, "set keyboard colour via typed 0x8070"
+            zone_count, zones_to_write, r, g, b, "set keyboard colour via typed 0x8070"
         );
         Ok(())
     })
