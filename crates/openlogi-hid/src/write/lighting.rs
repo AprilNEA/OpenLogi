@@ -1,12 +1,18 @@
 use std::time::Duration;
 
 use async_hid::AsyncHidWrite;
-use hidpp::device::Device;
+use hidpp::{
+    device::Device,
+    feature::{
+        CreatableFeature,
+        color_led_effects::{ColorLedEffectsFeature, Persistence, ZONE_EFFECT_PARAM_COUNT},
+    },
+};
 use tracing::debug;
 
 use crate::route::DeviceRoute;
 
-use super::{HidppOperation, WriteError, classify_hidpp_error, with_route};
+use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 
 /// HID++ `PerKeyLighting` (`0x8080`) — streams each key's colour individually.
 /// Its feature *index* varies per device, so it's resolved at runtime.
@@ -32,19 +38,13 @@ const FN_FRAME_END: u8 = 0x5;
 const SET_RANGE_MODE: u8 = 0x01;
 const KEYS_PER_FRAME: u8 = 0x0e;
 
-// 0x8070 `ColorLedEffects`: function 0x3 is `setZoneEffect(zone, effect, …)`.
-// Effect 0x01 is the fixed/static single colour. The trailing persistence byte
-// is RAM-only (0x00): the effect shows live and overrides the running onboard
-// profile without touching flash. Reboot survival comes from the agent
-// re-applying the saved colour on device arrival (orchestrator reapply), so
-// flashing on every colour pick — which would wear the controller — is avoided.
-const FN_SET_ZONE_EFFECT: u8 = 0x3;
+// 0x8070 `ColorLedEffects`: zone-effect index 0x01 is the fixed/static single
+// colour, applied volatilely (RAM only) so it shows live and overrides the
+// running onboard profile without touching flash. Reboot survival comes from the
+// agent re-applying the saved colour on device arrival (orchestrator reapply),
+// avoiding flash wear on every colour pick.
 const EFFECT_FIXED: u8 = 0x01;
-const PERSIST_RAM_ONLY: u8 = 0x00;
-// G-series report a small zone count; writing a few covers every real zone (a
-// write to a non-existent zone is a harmless no-op). Paced because the
-// controller drops back-to-back reports.
-const MAX_LIGHTING_ZONES: u8 = 4;
+// Zones are paced apart because the controller can drop closely-spaced reports.
 const FRAME_GAP: Duration = Duration::from_millis(8);
 
 /// Which HID++ lighting path drives a solid keyboard colour. [`Auto`] is what
@@ -127,40 +127,47 @@ async fn resolve_feature_index(
 /// Set a solid colour via `ColorLedEffects` (`0x8070`): a fixed effect per zone,
 /// stored in RAM only (overrides the running onboard profile without touching
 /// flash). `FeatureUnsupported` when the device exposes no `0x8070`.
+///
+/// Uses the typed [`ColorLedEffectsFeature`] wrapper: the real zone count is read
+/// first so only existing zones are driven (a typed `set_zone_effect` awaits the
+/// device's reply, so unlike the former raw fire-and-forget path a write to a
+/// non-existent zone would surface as an error rather than a silent no-op).
 async fn set_color_effects(route: &DeviceRoute, r: u8, g: u8, b: u8) -> Result<(), WriteError> {
-    let device_index = route.device_index();
-    let feature_index = resolve_feature_index(route, COLOR_LED_EFFECTS_FEATURE)
-        .await?
-        .ok_or(WriteError::FeatureUnsupported {
-            feature_hex: COLOR_LED_EFFECTS_FEATURE,
-        })?;
-
-    let Some(mut writer) = crate::transport::open_route_writer(route).await? else {
-        return Err(WriteError::DeviceNotFound);
-    };
-    for zone in 0..MAX_LIGHTING_ZONES {
-        let mut rep = vec![0u8; 20];
-        rep[0] = REPORT_LONG;
-        rep[1] = device_index;
-        rep[2] = feature_index;
-        rep[3] = (FN_SET_ZONE_EFFECT << 4) | SW_ID;
-        rep[4] = zone;
-        rep[5] = EFFECT_FIXED;
-        rep[6] = r;
-        rep[7] = g;
-        rep[8] = b;
-        rep[16] = PERSIST_RAM_ONLY;
-        writer
-            .write_output_report(&rep)
+    let index = route.device_index();
+    with_route(route, move |channel| async move {
+        let mut device = Device::new(std::sync::Arc::clone(&channel), index)
             .await
-            .map_err(WriteError::from)?;
-        tokio::time::sleep(FRAME_GAP).await;
-    }
-    debug!(
-        device_index,
-        feature_index, r, g, b, "set keyboard colour via 0x8070"
-    );
-    Ok(())
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let feature = open_feature::<ColorLedEffectsFeature>(&mut device).await?;
+        let zone_count = feature
+            .get_info()
+            .await
+            .map_err(classify_lighting_error)?
+            .zone_count;
+
+        let mut params = [0u8; ZONE_EFFECT_PARAM_COUNT];
+        params[0] = r;
+        params[1] = g;
+        params[2] = b;
+        for zone in 0..zone_count {
+            feature
+                .set_zone_effect(zone, EFFECT_FIXED, params, Persistence::Volatile)
+                .await
+                .map_err(classify_lighting_error)?;
+            tokio::time::sleep(FRAME_GAP).await;
+        }
+        debug!(
+            index,
+            zone_count, r, g, b, "set keyboard colour via typed 0x8070"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// Classify a HID++ error from the `ColorLedEffects` functions.
+fn classify_lighting_error(error: hidpp::protocol::v20::Hidpp20Error) -> WriteError {
+    classify_hidpp_error(error, HidppOperation::Lighting, ColorLedEffectsFeature::ID)
 }
 
 /// Set a solid colour via `PerKeyLighting` (`0x8080`): stream every key's colour
