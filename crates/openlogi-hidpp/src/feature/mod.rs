@@ -42,6 +42,8 @@ pub mod sidetone;
 pub mod smartshift;
 pub mod smartshift_enhanced;
 pub mod thumbwheel;
+pub mod touch_mouse_raw;
+pub mod touchpad_raw_xy;
 pub mod unified_battery;
 pub mod vertical_scrolling;
 pub mod wireless_device_status;
