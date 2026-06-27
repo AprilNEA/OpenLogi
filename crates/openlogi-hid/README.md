@@ -19,4 +19,10 @@ Public entry points include:
 - `list_pairing_receivers`, `run_pairing`, and `unpair` for receiver pairing.
 - `get_dpi`, `set_dpi`, SmartShift, high-resolution wheel, thumbwheel, and
   reprogrammable-control helpers for supported HID++ features.
+- `set_keyboard_color` / `set_keyboard_color_with` for solid keyboard RGB —
+  preferring the typed `ColorLedEffects` (`0x8070`) wrapper and falling back to
+  the `PerKeyLighting` (`0x8080`) stream.
 - `dump_features` and `dump_reprog_controls` for diagnostics.
+
+Protocol-level feature support lives in `openlogi-hidpp`; this crate adds the
+discovery, routing, fallback, and error-classification policy on top.
