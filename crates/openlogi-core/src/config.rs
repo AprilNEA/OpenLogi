@@ -338,9 +338,9 @@ pub struct DeviceIdentity {
 #[serde(from = "RawDeviceConfig")]
 pub struct DeviceConfig {
     /// Which button owns the device's single gesture role, once the user has
-    /// chosen explicitly. Absent means "infer" (the thumb pad owns gestures if
-    /// present) — see [`Config::gesture_owner`]. Listed first so it serializes
-    /// as a scalar ahead of the `bindings` sub-table.
+    /// chosen explicitly. Absent means "infer" (the dedicated HID++ gesture
+    /// button owns gestures if present) — see [`Config::gesture_owner`]. Listed
+    /// first so it serializes as a scalar ahead of the `bindings` sub-table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gesture_owner: Option<GestureOwner>,
     /// Last-known identity (name / kind / capabilities), captured while the
@@ -663,13 +663,13 @@ impl Config {
     ///
     /// Resolved from the explicit [`DeviceConfig::gesture_owner`] when present;
     /// otherwise inferred (see `Self::infer_gesture_owner`) for configs
-    /// predating the field and freshly-migrated pre-v2 files. The dedicated thumb
-    /// pad ([`ButtonId::GestureButton`]) owns the role by default. At most one
-    /// button gestures per device.
+    /// predating the field and freshly-migrated pre-v2 files. The dedicated
+    /// HID++ gesture button ([`ButtonId::GestureButton`]) owns the role by
+    /// default. At most one button gestures per device.
     #[must_use]
     pub fn gesture_owner(&self, device_key: &str) -> Option<ButtonId> {
         let Some(device) = self.devices.get(device_key) else {
-            // No config yet → the thumb pad is the default gesture owner.
+            // No config yet → the dedicated HID++ gesture button is the default gesture owner.
             return Some(ButtonId::GestureButton);
         };
         match device.gesture_owner {
@@ -691,14 +691,14 @@ impl Config {
         {
             return Some(*id);
         }
-        // A thumb pad explicitly demoted to a single action means gestures off.
+        // A dedicated HID++ gesture button explicitly demoted to a single action means gestures off.
         if matches!(
             bindings.get(&ButtonId::GestureButton),
             Some(Binding::Single(_))
         ) {
             return None;
         }
-        // Default: the thumb pad owns the gesture role.
+        // Default: the dedicated HID++ gesture button owns the gesture role.
         Some(ButtonId::GestureButton)
     }
 
@@ -1471,12 +1471,12 @@ Back = \"BrowserBack\"
     }
 
     #[test]
-    fn gesture_owner_defaults_to_thumb_pad_yields_to_oshook_and_can_be_off() {
+    fn gesture_owner_defaults_to_hidpp_button_yields_to_oshook_and_can_be_off() {
         let mut cfg = Config::default();
-        // Default: the thumb pad owns the gesture role even with no config.
+        // Default: the dedicated HID++ gesture button owns the gesture role even with no config.
         assert_eq!(cfg.gesture_owner("2b042"), Some(ButtonId::GestureButton));
 
-        // A thumb-pad gesture binding keeps it the owner.
+        // A dedicated HID++ gesture binding keeps it the owner.
         cfg.set_gesture_direction(
             "2b042",
             ButtonId::GestureButton,
@@ -1493,7 +1493,7 @@ Back = \"BrowserBack\"
         );
         assert_eq!(cfg.gesture_owner("2b042"), Some(ButtonId::Forward));
 
-        // Turning gestures off explicitly yields `None` (not the thumb-pad default).
+        // Turning gestures off explicitly yields `None` (not the HID++ button default).
         let mut off = Config::default();
         off.disable_gestures("2b042");
         assert_eq!(off.gesture_owner("2b042"), None);
@@ -1502,7 +1502,7 @@ Back = \"BrowserBack\"
     #[test]
     fn set_gesture_owner_records_owner_without_destroying_other_maps() {
         let mut cfg = Config::default();
-        // Customize the thumb pad's Up swipe; it is the (inferred) owner.
+        // Customize the dedicated HID++ gesture button's Up swipe; it is the (inferred) owner.
         cfg.set_gesture_direction(
             "2b042",
             ButtonId::GestureButton,
@@ -1511,7 +1511,7 @@ Back = \"BrowserBack\"
         );
         assert_eq!(cfg.gesture_owner("2b042"), Some(ButtonId::GestureButton));
 
-        // Promote Back: the owner becomes Back explicitly; the thumb pad keeps
+        // Promote Back: the owner becomes Back explicitly; the HID++ gesture button keeps
         // its full gesture map (no destructive demotion).
         cfg.set_binding("2b042", ButtonId::Back, Action::BrowserBack.into());
         cfg.set_gesture_owner("2b042", ButtonId::Back);
@@ -1534,12 +1534,12 @@ Back = \"BrowserBack\"
             }
             other => panic!("expected Back to be a gesture binding, got {other:?}"),
         }
-        // The thumb pad's customized map survived the switch intact.
+        // The HID++ gesture button's customized map survived the switch intact.
         match bindings.get(&ButtonId::GestureButton) {
             Some(Binding::Gesture(map)) => {
                 assert_eq!(map.get(&GestureDirection::Up), Some(&Action::Copy));
             }
-            other => panic!("expected the thumb pad map preserved, got {other:?}"),
+            other => panic!("expected the HID++ gesture button map preserved, got {other:?}"),
         }
 
         // Switching back restores the user's customization, not defaults
@@ -1557,7 +1557,7 @@ Back = \"BrowserBack\"
     #[test]
     fn set_gesture_owner_seeds_a_fresh_button_with_full_directions() {
         let mut cfg = Config::default();
-        // The dedicated thumb pad gets the full default direction map.
+        // The dedicated HID++ gesture button gets the full default direction map.
         cfg.set_gesture_owner("2b042", ButtonId::GestureButton);
         match cfg.bindings_for("2b042").get(&ButtonId::GestureButton) {
             Some(Binding::Gesture(map)) => {
@@ -1601,7 +1601,7 @@ Back = \"BrowserBack\"
             Action::Copy,
         );
         cfg.disable_gestures("2b042");
-        // Off, but the thumb pad's customized map is preserved (re-enabling
+        // Off, but the HID++ gesture button's customized map is preserved (re-enabling
         // restores it rather than resurrecting a wiped default).
         assert_eq!(cfg.gesture_owner("2b042"), None);
         match cfg.bindings_for("2b042").get(&ButtonId::GestureButton) {
@@ -1654,7 +1654,7 @@ Back = \"Copy\"
             cfg.bindings_for("2b042").get(&ButtonId::Back),
             Some(&Binding::Single(Action::Copy))
         );
-        // ...and the bad owner degraded to inference (thumb-pad default here).
+        // ...and the bad owner degraded to inference (HID++ button default here).
         assert_eq!(cfg.gesture_owner("2b042"), Some(ButtonId::GestureButton));
     }
 }

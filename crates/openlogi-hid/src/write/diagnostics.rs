@@ -82,9 +82,10 @@ pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, Wri
 }
 
 /// Enumerate the device's HID++ `0x1b04` reprogrammable controls. This is a
-/// diagnostics-only probe used to discover controls for newly released devices
-/// (for example MX Master 4's Haptic Sense Panel) before wiring them into the
-/// capture/remapping model.
+/// diagnostics-only probe used to discover controls for newly released devices.
+/// For example, MX Master 4 has both a Gesture Button and a separate Haptic
+/// Sense Panel in the thumb area; this probe lets us identify the panel's CID
+/// and capabilities before wiring it into the capture/remapping model.
 pub async fn dump_reprog_controls(
     route: &DeviceRoute,
 ) -> Result<Vec<ReprogControlEntry>, WriteError> {

@@ -326,7 +326,7 @@ impl Orchestrator {
     }
 
     /// Foreground-app change → re-overlay per-app bindings on the hook maps (DPI
-    /// and the thumb-pad gesture map are not app-scoped, so they're untouched).
+    /// and the dedicated HID++ gesture map are not app-scoped, so they're untouched).
     /// Both hook maps are recomputed: a per-app override of the gesture owner
     /// turns it into a single action for that app, dropping it from the OS-hook
     /// gesture set — so the gesture map is app-scoped too.

@@ -207,7 +207,7 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
 }
 
 /// The mid-swipe state machine shared by both gesture-capture paths: the HID++
-/// thumb pad (`openlogi-hid`'s `0x1b04` raw-XY divert) and the OS-hook
+/// dedicated gesture button (`openlogi-hid`'s `0x1b04` raw-XY divert) and the OS-hook
 /// Middle/Back/Forward buttons (`openlogi-agent-core`'s CGEventTap). A gesture
 /// button's hold accumulates travel; the instant the dominant axis commits a
 /// direction — after the button has been held [`GESTURE_HOLD_FOR_SWIPE`], so a
@@ -216,7 +216,7 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
 /// commits is a plain click, reported by [`Self::end`].
 ///
 /// The two paths differ only in *what identifies the held control* (a
-/// [`ButtonId`] for the OS hook, a diverted CID for the thumb pad), so each owns
+/// [`ButtonId`] for the OS hook, a diverted CID for the HID++ gesture control), so each owns
 /// that and embeds this for the shared travel logic. Keeping the logic in one
 /// place is deliberate: the two copies it replaced had already drifted apart
 /// (one resolved a swipe only on release), which mis-fired the click.
@@ -845,7 +845,7 @@ impl Action {
 ///
 /// Thumbwheel / GestureButton defaults match what Logi Options+ ships for
 /// MX-line devices: thumb wheel click → App Exposé, gesture button →
-/// Mission Control. The thumb wheel isn't captured yet; the gesture button is
+/// Mission Control. The thumb wheel isn't captured yet; the dedicated gesture button is
 /// (per-direction, see [`default_gesture_binding`]). The bindings persist
 /// regardless so the user only configures once.
 ///

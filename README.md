@@ -56,9 +56,9 @@ Things OpenLogi does that Options+ won't:
   Linux as a first-class platform: evdev/uinput hook, udev rules, a systemd
   user unit, and `.deb` / `.rpm` packages.
 - **Move the Gesture Button.** Pick which physical button owns the gesture
-  role — thumb pad, middle, back, or forward — with per-direction swipe
+  role — the dedicated Gesture Button, middle, back, or forward — with per-direction swipe
   bindings, or turn gestures off entirely. Options+ pins the gesture role to
-  the dedicated thumb pad.
+  the dedicated Gesture Button.
 - **Keep config in plain text.** Everything is one TOML file you can read,
   diff, version-control, and copy between machines.
 - **Script it.** A real CLI: device inventory, asset prefetch, and on-device

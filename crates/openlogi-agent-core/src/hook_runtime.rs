@@ -40,7 +40,7 @@ pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
 
 /// Tracks which OS-hook button (Middle/Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
-/// *mid-motion* like the HID++ thumb-pad path in `openlogi-hid`. This wrapper
+/// *mid-motion* like the HID++ gesture-button path in `openlogi-hid`. This wrapper
 /// adds only the button identity the accumulator doesn't track; a press that
 /// never commits a direction is a plain click, fired on release.
 #[derive(Default)]
