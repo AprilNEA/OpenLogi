@@ -155,6 +155,37 @@ impl SmartShift {
         }
     }
 
+    /// Write a new wheel `mode`, preserving the fields read from the device.
+    ///
+    /// Enhanced SmartShift uses `0` as the “do not change” sentinel, so a zero
+    /// readback is preserved by sending `None` rather than rejected as a target
+    /// value. This is for read-modify-write flows like toggle; explicit user
+    /// writes still go through [`Self::set_status`] and reject zero targets.
+    async fn set_mode_preserving_status(
+        &self,
+        mode: SmartShiftMode,
+        current: SmartShiftStatus,
+    ) -> Result<(), WriteError> {
+        match self {
+            Self::Enhanced(feature) => feature
+                .set_ratchet_control_mode(SmartShiftEnhancedStatusChange {
+                    wheel_mode: Some(smartshift_to_wheel(mode)),
+                    auto_disengage: NonZeroU8::new(current.auto_disengage),
+                    tunable_torque: NonZeroU8::new(current.tunable_torque),
+                })
+                .await
+                .map(|_| ())
+                .map_err(|e| {
+                    classify_hidpp_error(
+                        e,
+                        HidppOperation::WriteSmartShift,
+                        SmartShiftEnhancedFeature::ID,
+                    )
+                }),
+            Self::Legacy(_) => self.set_status(SmartShiftStatus { mode, ..current }).await,
+        }
+    }
+
     /// Write a new auto-disengage `sensitivity`, preserving the current mode
     /// (and, on Enhanced, the tunable torque). Reads the current status first
     /// so every preserved field is written back explicitly. The [`NonZeroU8`]
@@ -269,12 +300,7 @@ pub(super) async fn toggle_smartshift_on_channel(
     let smartshift = SmartShift::open(&mut device).await?;
     let status = smartshift.status().await?;
     let next = status.mode.flipped();
-    smartshift
-        .set_status(SmartShiftStatus {
-            mode: next,
-            ..status
-        })
-        .await?;
+    smartshift.set_mode_preserving_status(next, status).await?;
     debug!(index, ?next, "wrote SmartShift mode");
     Ok(next)
 }
