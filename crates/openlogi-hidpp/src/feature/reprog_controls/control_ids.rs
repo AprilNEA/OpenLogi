@@ -109,13 +109,13 @@ pub const CURSOR_BUTTON_LONG_PRESS: ControlId = ControlId(0xD8);
 pub const NEXT_BUTTON: ControlId = ControlId(0xD9);
 
 /// `Next Button Longpress` (`0xDA`).
-pub const NEXT_BUTTON_LONGPRESS: ControlId = ControlId(0xDA);
+pub const NEXT_BUTTON_LONG_PRESS: ControlId = ControlId(0xDA);
 
 /// `Back` (`0xDB`).
 pub const BACK: ControlId = ControlId(0xDB);
 
 /// `Back Button Longpress` (`0xDC`).
-pub const BACK_BUTTON_LONGPRESS: ControlId = ControlId(0xDC);
+pub const BACK_BUTTON_LONG_PRESS: ControlId = ControlId(0xDC);
 
 /// `Multi Platform Language Switch` (`0xDD`).
 pub const MULTI_PLATFORM_LANGUAGE_SWITCH: ControlId = ControlId(0xDD);

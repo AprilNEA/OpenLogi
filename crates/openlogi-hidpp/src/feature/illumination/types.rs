@@ -2,7 +2,7 @@
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::protocol::v20::Hidpp20Error;
+use crate::protocol::v20::{ErrorType, Hidpp20Error};
 
 /// Reads a big-endian `u16` at `offset` of a payload.
 pub(super) fn be16(payload: &[u8; 16], offset: usize) -> u16 {
@@ -137,7 +137,7 @@ pub enum SetLevels {
 
 impl SetLevels {
     /// Encodes this configuration into a request payload.
-    pub(super) fn to_payload(&self) -> [u8; 16] {
+    pub(super) fn to_payload(&self) -> Result<[u8; 16], Hidpp20Error> {
         let mut args = [0u8; 16];
         match self {
             SetLevels::Reset => {
@@ -155,11 +155,9 @@ impl SetLevels {
                 level_count,
                 values,
             } => {
-                debug_assert!(
-                    (1..=7).contains(&values.len()),
-                    "non-linear level count {} out of range 1..=7",
-                    values.len()
-                );
+                if !(1..=7).contains(&values.len()) || *start_index > 0x0f || *level_count > 0x0f {
+                    return Err(Hidpp20Error::Feature(ErrorType::InvalidArgument));
+                }
                 let valid_count = (values.len() as u8) & 0x07;
                 args[0] = valid_count << 5; // linear = 0, reset = 0
                 args[1] = (start_index << 4) | (level_count & 0x0f);
@@ -168,7 +166,7 @@ impl SetLevels {
                 }
             }
         }
-        args
+        Ok(args)
     }
 }
 

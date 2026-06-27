@@ -28,7 +28,7 @@ use crate::{
     channel::{HidppChannel, MessageListenerGuard},
     event::EventEmitter,
     feature::{CreatableFeature, EmittingFeature, Feature, FeatureEndpoint, event_payload},
-    protocol::v20::Hidpp20Error,
+    protocol::v20::{ErrorType, Hidpp20Error},
 };
 
 // Function ids. Color-temperature functions mirror the brightness ones offset by
@@ -220,6 +220,9 @@ impl IlluminationFeature {
         function: u8,
         start_index: u8,
     ) -> Result<LevelConfig, Hidpp20Error> {
+        if start_index > 0x0f {
+            return Err(Hidpp20Error::Feature(ErrorType::InvalidArgument));
+        }
         // The request carries the start index in the high nibble of byte 0.
         let payload = self
             .endpoint
@@ -232,7 +235,7 @@ impl IlluminationFeature {
     /// Shared `set<Control>Levels` writer.
     async fn write_levels(&self, function: u8, levels: &SetLevels) -> Result<(), Hidpp20Error> {
         self.endpoint
-            .call_long(function, levels.to_payload())
+            .call_long(function, levels.to_payload()?)
             .await?;
         Ok(())
     }

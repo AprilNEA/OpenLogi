@@ -5,7 +5,7 @@ use super::types::{
     DpiCalibrationCorrection, DpiDirection, DpiRange, Lod, parse_dpi_list, parse_dpi_ranges,
     parse_lod_list, terminated_word_len,
 };
-use crate::protocol::v20::Hidpp20Error;
+use crate::protocol::v20::{ErrorType, Hidpp20Error};
 
 #[test]
 fn parses_fixed_dpi_ranges_pws_example() {
@@ -272,11 +272,31 @@ fn ignores_event_with_unknown_lod() {
 
 #[test]
 fn encodes_calibration_correction_sentinels() {
-    assert_eq!(DpiCalibrationCorrection::Adjust(100).to_wire(), 100);
-    assert_eq!(DpiCalibrationCorrection::Adjust(-512).to_wire(), -512);
-    assert_eq!(DpiCalibrationCorrection::RevertToOob.to_wire(), 0);
     assert_eq!(
-        DpiCalibrationCorrection::RevertToProfile.to_wire(),
+        DpiCalibrationCorrection::Adjust(100).to_wire().unwrap(),
+        100
+    );
+    assert_eq!(
+        DpiCalibrationCorrection::Adjust(-512).to_wire().unwrap(),
+        -512
+    );
+    assert_eq!(DpiCalibrationCorrection::RevertToOob.to_wire().unwrap(), 0);
+    assert_eq!(
+        DpiCalibrationCorrection::RevertToProfile.to_wire().unwrap(),
         i16::MIN
     );
+}
+
+#[test]
+fn rejects_out_of_range_calibration_corrections() {
+    for correction in [
+        DpiCalibrationCorrection::Adjust(-1024),
+        DpiCalibrationCorrection::Adjust(1024),
+        DpiCalibrationCorrection::Adjust(i16::MIN),
+    ] {
+        assert!(matches!(
+            correction.to_wire(),
+            Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
+        ));
+    }
 }

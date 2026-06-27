@@ -2,7 +2,7 @@
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::protocol::v20::Hidpp20Error;
+use crate::protocol::v20::{ErrorType, Hidpp20Error};
 
 /// The axis a DPI value or calibration applies to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
@@ -250,20 +250,19 @@ pub enum DpiCalibrationCorrection {
 
 impl DpiCalibrationCorrection {
     /// The signed 16-bit wire value for this correction.
-    pub(super) fn to_wire(self) -> i16 {
+    pub(super) fn to_wire(self) -> Result<i16, Hidpp20Error> {
         match self {
             // 0x8000 as a signed 16-bit integer.
-            DpiCalibrationCorrection::RevertToProfile => i16::MIN,
-            DpiCalibrationCorrection::RevertToOob => 0,
+            DpiCalibrationCorrection::RevertToProfile => Ok(i16::MIN),
+            DpiCalibrationCorrection::RevertToOob => Ok(0),
             DpiCalibrationCorrection::Adjust(value) => {
                 // `i16::MIN` is the `0x8000` "revert to profile" sentinel, not a
                 // correction; an out-of-range adjustment would silently collide
                 // with it instead of eliciting the device's `INVALID_ARGUMENT`.
-                debug_assert!(
-                    (-1023..=1023).contains(&value),
-                    "calibration correction {value} out of range -1023..=1023"
-                );
-                value
+                if !(-1023..=1023).contains(&value) {
+                    return Err(Hidpp20Error::Feature(ErrorType::InvalidArgument));
+                }
+                Ok(value)
             }
         }
     }

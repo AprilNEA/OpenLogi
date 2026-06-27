@@ -127,7 +127,7 @@ pub const TBD: TaskId = TaskId(0xB9);
 pub const MULTIPLATFORM_LANGUAGE_SWITCH: TaskId = TaskId(0xBA);
 
 /// `SWCustomHighligt2` (`0xBB`).
-pub const SW_CUSTOM_HIGHLIGT_2: TaskId = TaskId(0xBB);
+pub const SW_CUSTOM_HIGHLIGHT_2: TaskId = TaskId(0xBB);
 
 /// `FastForward` (`0xBC`).
 pub const FAST_FORWARD: TaskId = TaskId(0xBC);

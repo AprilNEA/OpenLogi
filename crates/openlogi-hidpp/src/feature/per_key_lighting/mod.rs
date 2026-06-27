@@ -17,7 +17,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
     channel::HidppChannel,
     feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
+    protocol::v20::{ErrorType, Hidpp20Error},
 };
 
 /// Length of the zone-presence bitfield page returned by `getInfo`.
@@ -138,6 +138,7 @@ impl PerKeyLightingFeature {
     ///
     /// At most four zones are sent; extra entries are ignored.
     pub async fn set_individual_rgb_zones(&self, zones: &[RgbZone]) -> Result<(), Hidpp20Error> {
+        validate_individual_zones(zones)?;
         self.endpoint
             .call_long(1, individual_zones_args(zones))
             .await?;
@@ -150,6 +151,7 @@ impl PerKeyLightingFeature {
         first_zone_id: u8,
         colors: [Rgb; CONSECUTIVE_ZONES],
     ) -> Result<(), Hidpp20Error> {
+        validate_zone_id(first_zone_id)?;
         self.endpoint
             .call_long(2, consecutive_zones_args(first_zone_id, colors))
             .await?;
@@ -187,6 +189,7 @@ impl PerKeyLightingFeature {
     ///
     /// At most three ranges are sent; extra entries are ignored.
     pub async fn set_range_rgb_zones(&self, ranges: &[RgbZoneRange]) -> Result<(), Hidpp20Error> {
+        validate_ranges(ranges)?;
         self.endpoint.call_long(5, range_zones_args(ranges)).await?;
         Ok(())
     }
@@ -199,6 +202,7 @@ impl PerKeyLightingFeature {
         color: Rgb,
         zone_ids: &[u8],
     ) -> Result<(), Hidpp20Error> {
+        validate_single_value_zones(zone_ids)?;
         self.endpoint
             .call_long(6, single_value_args(color, zone_ids))
             .await?;
@@ -227,11 +231,41 @@ impl PerKeyLightingFeature {
         first_zone_id: u8,
         packed: [u8; DELTA_PACKED_LEN],
     ) -> Result<(), Hidpp20Error> {
+        validate_zone_id(first_zone_id)?;
         self.endpoint
             .call_long(function, delta_args(first_zone_id, packed))
             .await?;
         Ok(())
     }
+}
+
+fn validate_zone_id(zone_id: u8) -> Result<(), Hidpp20Error> {
+    if matches!(zone_id, 0 | 0xff) {
+        return Err(Hidpp20Error::Feature(ErrorType::InvalidArgument));
+    }
+    Ok(())
+}
+
+fn validate_individual_zones(zones: &[RgbZone]) -> Result<(), Hidpp20Error> {
+    for zone in zones.iter().take(MAX_INDIVIDUAL_ZONES) {
+        validate_zone_id(zone.zone_id)?;
+    }
+    Ok(())
+}
+
+fn validate_ranges(ranges: &[RgbZoneRange]) -> Result<(), Hidpp20Error> {
+    for range in ranges.iter().take(MAX_RANGES) {
+        validate_zone_id(range.first_zone_id)?;
+        validate_zone_id(range.last_zone_id)?;
+    }
+    Ok(())
+}
+
+fn validate_single_value_zones(zone_ids: &[u8]) -> Result<(), Hidpp20Error> {
+    for &zone_id in zone_ids.iter().take(MAX_SINGLE_VALUE_ZONES) {
+        validate_zone_id(zone_id)?;
+    }
+    Ok(())
 }
 
 /// Encodes a `setIndividualRgbZones` request.

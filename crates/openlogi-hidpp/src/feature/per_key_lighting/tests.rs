@@ -3,7 +3,9 @@
 use super::{
     FramePersistence, Rgb, RgbZone, RgbZoneRange, ZonePresencePage, consecutive_zones_args,
     delta_args, frame_end_args, individual_zones_args, range_zones_args, single_value_args,
+    validate_individual_zones, validate_ranges, validate_single_value_zones, validate_zone_id,
 };
+use crate::protocol::v20::{ErrorType, Hidpp20Error};
 
 const RED: Rgb = Rgb {
     red: 0xff,
@@ -42,6 +44,36 @@ fn individual_zones_caps_at_four() {
     let args = individual_zones_args(&zones);
     // Only four slots (16 bytes) are produced; the 5th/6th are dropped.
     assert_eq!(args[12..16], [1, 0xff, 0, 0]);
+}
+
+#[test]
+fn rejects_reserved_zone_ids() {
+    for zone_id in [0, 0xff] {
+        assert!(matches!(
+            validate_zone_id(zone_id),
+            Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
+        ));
+    }
+
+    assert!(matches!(
+        validate_individual_zones(&[RgbZone {
+            zone_id: 0,
+            color: RED,
+        }]),
+        Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
+    ));
+    assert!(matches!(
+        validate_ranges(&[RgbZoneRange {
+            first_zone_id: 1,
+            last_zone_id: 0xff,
+            color: RED,
+        }]),
+        Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
+    ));
+    assert!(matches!(
+        validate_single_value_zones(&[1, 0xff]),
+        Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
+    ));
 }
 
 #[test]
