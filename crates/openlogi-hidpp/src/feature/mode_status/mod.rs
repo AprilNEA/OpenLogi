@@ -44,7 +44,6 @@ pub struct ModeStatus {
 /// A mode-status update request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[non_exhaustive]
 pub struct ModeStatusChange {
     /// Desired primary status bits.
     pub status0: ModeStatus0,

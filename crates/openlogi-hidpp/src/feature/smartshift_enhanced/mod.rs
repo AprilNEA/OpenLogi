@@ -49,7 +49,6 @@ pub struct SmartShiftEnhancedStatus {
 /// Enhanced SmartShift status update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[non_exhaustive]
 pub struct SmartShiftEnhancedStatusChange {
     /// Wheel mode to apply, or `None` to leave unchanged.
     pub wheel_mode: Option<WheelMode>,

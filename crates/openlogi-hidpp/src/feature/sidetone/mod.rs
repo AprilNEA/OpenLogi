@@ -20,7 +20,6 @@ pub struct SidetoneMuteStatus {
 /// Change mask and statuses for sidetone mute settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[non_exhaustive]
 pub struct SidetoneMuteChange {
     /// Channels to update. A set bit means the corresponding status bit applies.
     pub change_mask: u8,

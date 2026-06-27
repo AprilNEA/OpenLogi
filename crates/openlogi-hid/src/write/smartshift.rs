@@ -7,12 +7,13 @@ use hidpp::{
     feature::{
         CreatableFeature,
         smartshift::{SmartShiftFeature, WheelMode},
+        smartshift_enhanced::{SmartShiftEnhancedFeature, SmartShiftEnhancedStatusChange},
     },
 };
 use tracing::debug;
 
 use crate::route::DeviceRoute;
-use crate::smartshift::{SmartShiftFeatureV0, SmartShiftMode, SmartShiftStatus};
+use crate::smartshift::{SmartShiftMode, SmartShiftStatus};
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 
@@ -54,7 +55,7 @@ pub(super) fn smartshift_to_wheel(mode: SmartShiftMode) -> WheelMode {
 /// `0x2111` Enhanced variant, the MX Master 2S uses the original `0x2110`.
 enum SmartShift {
     /// `0x2111 SmartShiftWheelEnhanced`.
-    Enhanced(Arc<SmartShiftFeatureV0>),
+    Enhanced(Arc<SmartShiftEnhancedFeature>),
     /// `0x2110 SmartShiftWheel`.
     Legacy(Arc<SmartShiftFeature>),
 }
@@ -64,7 +65,7 @@ impl SmartShift {
     /// first; on a missing-`0x2111` error (and only that), retries with
     /// `0x2110`. Any other error from the first attempt propagates unchanged.
     async fn open(device: &mut Device) -> Result<Self, WriteError> {
-        match open_feature::<SmartShiftFeatureV0>(device).await {
+        match open_feature::<SmartShiftEnhancedFeature>(device).await {
             Ok(feature) => Ok(Self::Enhanced(feature)),
             Err(err) if is_missing_enhanced(&err) => {
                 let feature = open_feature::<SmartShiftFeature>(device).await?;
@@ -79,9 +80,20 @@ impl SmartShift {
     /// `tunable_torque` is reported as `0` per [`SmartShiftStatus`]'s contract.
     async fn status(&self) -> Result<SmartShiftStatus, WriteError> {
         match self {
-            Self::Enhanced(feature) => feature.get_status().await.map_err(|e| {
-                classify_hidpp_error(e, HidppOperation::ReadSmartShift, SmartShiftFeatureV0::ID)
-            }),
+            Self::Enhanced(feature) => {
+                let status = feature.get_ratchet_control_mode().await.map_err(|e| {
+                    classify_hidpp_error(
+                        e,
+                        HidppOperation::ReadSmartShift,
+                        SmartShiftEnhancedFeature::ID,
+                    )
+                })?;
+                Ok(SmartShiftStatus {
+                    mode: wheel_mode_to_smartshift(status.wheel_mode),
+                    auto_disengage: status.auto_disengage,
+                    tunable_torque: status.current_tunable_torque,
+                })
+            }
             Self::Legacy(feature) => {
                 let rcm = feature.get_ratchet_control_mode().await.map_err(|e| {
                     classify_hidpp_error(e, HidppOperation::ReadSmartShift, SmartShiftFeature::ID)
@@ -111,13 +123,18 @@ impl SmartShift {
         } = status;
         match self {
             Self::Enhanced(feature) => feature
-                .set_status(mode, auto_disengage, tunable_torque)
+                .set_ratchet_control_mode(SmartShiftEnhancedStatusChange {
+                    wheel_mode: Some(smartshift_to_wheel(mode)),
+                    auto_disengage: Some(auto_disengage),
+                    tunable_torque: Some(tunable_torque),
+                })
                 .await
+                .map(|_| ())
                 .map_err(|e| {
                     classify_hidpp_error(
                         e,
                         HidppOperation::WriteSmartShift,
-                        SmartShiftFeatureV0::ID,
+                        SmartShiftEnhancedFeature::ID,
                     )
                 }),
             Self::Legacy(feature) => feature
