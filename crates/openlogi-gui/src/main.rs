@@ -60,7 +60,7 @@ use gpui::{
     WindowBounds, WindowOptions, px,
 };
 use gpui_component::{ActiveTheme, Root, Theme, ThemeMode};
-use openlogi_core::brand::DeeplinkCommand;
+use openlogi_core::brand::{APP_ID, DeeplinkCommand};
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, DeviceModelInfo};
 use tracing::{info, warn};
@@ -553,6 +553,13 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
     let bounds = Bounds::centered(None, Size::new(px(1100.), px(750.)), cx);
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
+        // Advertise a Wayland xdg-toplevel app_id (and X11 WM_CLASS). Without it
+        // the window ships no app_id, so GNOME's `get_wm_class()` returns empty
+        // and our own `gnome_shell` frontmost backend reports OpenLogi as `None`
+        // (and the dash can't group the window under its launcher icon). The id
+        // is the shared `brand::APP_ID`, matching the desktop file's
+        // `StartupWMClass` and the macOS bundle-id family.
+        app_id: Some(APP_ID.into()),
         // Min height keeps the buttons tab's mouse model above its scale floor
         // (`MODEL_MIN_H` + the chrome/padding reserve) so its side labels never
         // overlap; below this the model can't shrink further without crowding.
