@@ -10,9 +10,13 @@ use crate::{
 
 pub mod adjustable_dpi;
 pub mod brightness_control;
+pub mod change_host;
 pub mod device_friendly_name;
 pub mod device_information;
 pub mod device_type_and_name;
+pub mod disable_keys;
+pub mod disable_keys_by_usage;
+pub mod dual_platform;
 pub mod extended_dpi;
 pub mod extended_report_rate;
 pub mod feature_set;
@@ -125,6 +129,19 @@ impl FeatureEndpoint {
         self.chan
             .send_v20(v20::Message::Long(self.header(function), args))
             .await
+    }
+
+    /// Sends `function` with a 3-byte short-report payload without waiting for a
+    /// response.
+    ///
+    /// For functions the device answers normally use [`Self::call`]; this is for
+    /// the rare function whose side effect (e.g. a host switch that resets the
+    /// device) prevents a response from ever arriving.
+    pub(crate) async fn notify(&self, function: u8, args: [u8; 3]) -> Result<(), Hidpp20Error> {
+        self.chan
+            .send_and_forget(v20::Message::Short(self.header(function), args).into())
+            .await?;
+        Ok(())
     }
 }
 
