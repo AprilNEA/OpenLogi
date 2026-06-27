@@ -176,14 +176,16 @@ fn fetch_to_cache(
 /// Parse a freshly-downloaded `manifest.json` and resolve the colour
 /// variant filename for `resource_key` (e.g. `"device_image"` or
 /// `"device_buttons_image"`). `None` when the manifest is missing,
-/// malformed, or doesn't list the device's `ext` byte.
+/// malformed, or doesn't list the device's `ext` byte. `ext == 0` is still a
+/// valid manifest lookup: some depots use device-specific base filenames such
+/// as `k850_front.png` instead of the generic `front.png` baseline.
 fn pick_variant_filename(
     manifest_path: &Path,
     base_model_id: &str,
     ext: u8,
     resource_key: &str,
 ) -> Option<String> {
-    if ext == 0 || !manifest_path.exists() {
+    if !manifest_path.exists() {
         return None;
     }
     let manifest = DepotManifest::load_from(manifest_path)
@@ -192,4 +194,72 @@ fn pick_variant_filename(
     manifest
         .resource_for_variant(base_model_id, ext, resource_key)
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::pick_variant_filename;
+
+    fn write_manifest(contents: &str) -> std::io::Result<PathBuf> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir =
+            std::env::temp_dir().join(format!("openlogi-sync-test-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("manifest.json");
+        fs::write(&path, contents)?;
+        Ok(path)
+    }
+
+    #[test]
+    fn picks_base_manifest_image_when_ext_is_zero() -> std::io::Result<()> {
+        let manifest = write_manifest(
+            r#"{
+              "devices": [{
+                "modelId": "6b34d",
+                "resources": [
+                  { "key": "device_image", "src": "k850_front.png" }
+                ]
+              }]
+            }"#,
+        )?;
+
+        let image = pick_variant_filename(&manifest, "6b34d", 0, "device_image");
+
+        assert_eq!(image.as_deref(), Some("k850_front.png"));
+        Ok(())
+    }
+
+    #[test]
+    fn picks_extended_manifest_image_when_ext_is_nonzero() -> std::io::Result<()> {
+        let manifest = write_manifest(
+            r#"{
+              "devices": [
+                {
+                  "modelId": "2b042",
+                  "resources": [
+                    { "key": "device_image", "src": "front_core.png" }
+                  ]
+                },
+                {
+                  "modelId": "2b042_ext2",
+                  "resources": [
+                    { "key": "device_image", "src": "front_ext_2.png" }
+                  ]
+                }
+              ]
+            }"#,
+        )?;
+
+        let image = pick_variant_filename(&manifest, "2b042", 2, "device_image");
+
+        assert_eq!(image.as_deref(), Some("front_ext_2.png"));
+        Ok(())
+    }
 }
