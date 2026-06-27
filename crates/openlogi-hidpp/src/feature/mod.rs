@@ -41,6 +41,7 @@ pub mod root;
 pub mod sidetone;
 pub mod smartshift;
 pub mod smartshift_enhanced;
+pub mod solar_dashboard;
 pub mod thumbwheel;
 pub mod touch_mouse_raw;
 pub mod touchpad_raw_xy;
