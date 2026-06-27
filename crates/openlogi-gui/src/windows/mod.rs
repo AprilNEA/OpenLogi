@@ -73,6 +73,7 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
     let bounds = Bounds::centered(None, size, cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
+        app_id: Some("openlogi".to_string()),
         titlebar: Some(TitlebarOptions {
             title: Some(title.clone()),
             appears_transparent: false,
