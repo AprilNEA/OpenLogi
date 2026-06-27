@@ -29,6 +29,11 @@ pub const VPID_PAIRS: &[(u16, u16)] = &[(0x046d, 0xc52b), (0x046d, 0xc532)];
 #[non_exhaustive]
 #[repr(u8)]
 pub enum Register {
+    /// Controls which notifications the receiver emits. Wireless device-arrival
+    /// (`0x41`) events are only re-broadcast while wireless notifications are
+    /// enabled here; see [`Receiver::set_wireless_notifications`].
+    Notifications = 0x00,
+
     /// Enables or disables wireless device-connection notifications; also used
     /// to read the pairing count and to trigger device-arrival events.
     Connections = 0x02,
@@ -57,6 +62,11 @@ pub enum InfoSubRegister {
 
     /// Provides the codename of a specific paired device. The device index (4
     /// bits) must be added: `0x60 | (device_index & 0x0f)`.
+    ///
+    /// NOTE: `0x60` is the *Bolt* base. Wire-verified Unifying receivers store
+    /// names at base `0x40 + (n-1)` instead, so name reads go directly through
+    /// `read_codename_unifying` in `inventory.rs` rather than this constant —
+    /// don't reuse `DeviceCodename` for Unifying name reads.
     DeviceCodename = 0x60,
 }
 
@@ -136,6 +146,41 @@ impl Receiver {
             .await?;
 
         Ok(response[1])
+    }
+
+    /// Enables or disables wireless device-connection notifications.
+    ///
+    /// The receiver only re-broadcasts `0x41` device-arrival events (the source
+    /// for [`Self::trigger_device_arrival`]) while this is on. With it off the
+    /// trigger write is ACK'd but emits nothing — which is why a paired, online
+    /// device can fail to enumerate. Solaar enables this before listing.
+    ///
+    /// Read-modify-write of just the `WIRELESS` bit so it can't clobber other
+    /// flags already set on register `0x00` — notably `SOFTWARE_PRESENT` (0x08),
+    /// which the pairing flow enables (`pairing.rs` writes `[0x00, 0x09, 0x00]`)
+    /// and a concurrent inventory poll would otherwise drop.
+    pub async fn set_wireless_notifications(&self, enabled: bool) -> Result<(), ReceiverError> {
+        // Notification flags are a 3-byte big-endian word; the receiver-reporting
+        // bits live in byte 1 (WIRELESS = 0x000100, SOFTWARE_PRESENT = 0x000800).
+        const WIRELESS: u8 = 0x01;
+        let mut flags = self
+            .chan
+            .read_register(
+                RECEIVER_DEVICE_INDEX,
+                Register::Notifications.into(),
+                [0; 3],
+            )
+            .await?;
+        if enabled {
+            flags[1] |= WIRELESS;
+        } else {
+            flags[1] &= !WIRELESS;
+        }
+        self.chan
+            .write_register(RECEIVER_DEVICE_INDEX, Register::Notifications.into(), flags)
+            .await?;
+
+        Ok(())
     }
 
     /// Triggers device-arrival notifications for all currently connected
