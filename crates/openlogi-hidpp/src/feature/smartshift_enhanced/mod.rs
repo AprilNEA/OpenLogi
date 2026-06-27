@@ -122,8 +122,7 @@ impl SmartShiftEnhancedFeature {
 impl SmartShiftEnhancedStatus {
     fn from_payload(payload: [u8; 16]) -> Result<Self, Hidpp20Error> {
         Ok(Self {
-            wheel_mode: WheelMode::try_from(payload[0])
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+            wheel_mode: WheelMode::try_from(payload[0]).unwrap_or(WheelMode::Ratchet),
             auto_disengage: payload[1],
             current_tunable_torque: payload[2],
         })
@@ -133,7 +132,6 @@ impl SmartShiftEnhancedStatus {
 #[cfg(test)]
 mod tests {
     use super::{SmartShiftEnhancedStatus, WheelMode};
-    use crate::protocol::v20::Hidpp20Error;
 
     #[test]
     fn parses_status() {
@@ -150,13 +148,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_wheel_mode() {
+    fn falls_back_to_ratchet_for_unknown_wheel_mode() {
         let mut payload = [0; 16];
         payload[0] = 9;
 
-        assert!(matches!(
-            SmartShiftEnhancedStatus::from_payload(payload),
-            Err(Hidpp20Error::UnsupportedResponse)
-        ));
+        let status = SmartShiftEnhancedStatus::from_payload(payload).unwrap();
+
+        assert_eq!(status.wheel_mode, WheelMode::Ratchet);
     }
 }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::{
     channel::HidppChannel,
     feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
+    protocol::v20::{ErrorType, Hidpp20Error},
 };
 
 /// Number of usage bytes carried by one long-report request.
@@ -48,6 +48,7 @@ impl DisableKeysByUsageFeature {
     /// itself be disabled. More usages than fit in one request are sent over
     /// several requests, which the device still accumulates.
     pub async fn disable_keys(&self, usages: &[u8]) -> Result<(), Hidpp20Error> {
+        validate_usages(usages)?;
         for packet in usage_packets(usages) {
             self.endpoint.call_long(1, packet).await?;
         }
@@ -60,6 +61,7 @@ impl DisableKeysByUsageFeature {
     /// Enabling a usage that is not disabled is a no-op. A usage of `0`
     /// terminates the list.
     pub async fn enable_keys(&self, usages: &[u8]) -> Result<(), Hidpp20Error> {
+        validate_usages(usages)?;
         for packet in usage_packets(usages) {
             self.endpoint.call_long(2, packet).await?;
         }
@@ -71,6 +73,13 @@ impl DisableKeysByUsageFeature {
         self.endpoint.call(3, [0; 3]).await?;
         Ok(())
     }
+}
+
+fn validate_usages(usages: &[u8]) -> Result<(), Hidpp20Error> {
+    if usages.contains(&0) {
+        return Err(Hidpp20Error::Feature(ErrorType::InvalidArgument));
+    }
+    Ok(())
 }
 
 /// Splits `usages` into long-report packets of up to [`USAGES_PER_PACKET`]
@@ -92,7 +101,8 @@ fn usage_packets(usages: &[u8]) -> Vec<[u8; USAGES_PER_PACKET]> {
 
 #[cfg(test)]
 mod tests {
-    use super::usage_packets;
+    use super::{usage_packets, validate_usages};
+    use crate::protocol::v20::{ErrorType, Hidpp20Error};
 
     #[test]
     fn empty_usage_list_sends_no_packets() {
@@ -106,6 +116,14 @@ mod tests {
         assert_eq!(packets[0][..3], [0x39, 0x3a, 0x3b]);
         // The remaining bytes are the 0x00 terminator / padding.
         assert!(packets[0][3..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn rejects_zero_usage_before_packetizing() {
+        assert!(matches!(
+            validate_usages(&[0x39, 0, 0x3a]),
+            Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
+        ));
     }
 
     #[test]

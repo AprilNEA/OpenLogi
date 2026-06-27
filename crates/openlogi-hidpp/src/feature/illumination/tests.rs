@@ -5,6 +5,7 @@ use super::types::{
     BrightnessClampedSource, ControlCapabilities, ControlInfo, IlluminationState, LevelConfig,
     SetLevels,
 };
+use crate::protocol::v20::{ErrorType, Hidpp20Error};
 
 #[test]
 fn parses_control_info() {
@@ -77,7 +78,7 @@ fn parses_non_linear_levels() {
 
 #[test]
 fn encodes_reset_levels() {
-    let payload = SetLevels::Reset.to_payload();
+    let payload = SetLevels::Reset.to_payload().unwrap();
     assert_eq!(payload[0], 1 << 1);
     assert!(payload[1..].iter().all(|&b| b == 0));
 }
@@ -89,7 +90,8 @@ fn encodes_linear_levels() {
         max: 500,
         step: 50,
     }
-    .to_payload();
+    .to_payload()
+    .unwrap();
     assert_eq!(payload[0], 1);
     assert_eq!(u16::from_be_bytes([payload[2], payload[3]]), 100);
     assert_eq!(u16::from_be_bytes([payload[4], payload[5]]), 500);
@@ -103,7 +105,8 @@ fn encodes_non_linear_levels() {
         level_count: 5,
         values: vec![100, 200],
     }
-    .to_payload();
+    .to_payload()
+    .unwrap();
 
     assert_eq!(payload[0], 2 << 5); // validCount = 2, linear/reset clear
     assert_eq!(payload[1], (2 << 4) | 5); // startIndex 2, levelCount 5
@@ -120,7 +123,8 @@ fn non_linear_round_trips_through_decoder() {
         level_count: 3,
         values: vec![50, 150, 300],
     }
-    .to_payload();
+    .to_payload()
+    .unwrap();
 
     assert_eq!(
         LevelConfig::from_payload(&payload),
@@ -130,6 +134,37 @@ fn non_linear_round_trips_through_decoder() {
             values: vec![50, 150, 300],
         }
     );
+}
+
+#[test]
+fn rejects_invalid_non_linear_levels() {
+    for levels in [
+        SetLevels::NonLinear {
+            start_index: 0,
+            level_count: 1,
+            values: vec![],
+        },
+        SetLevels::NonLinear {
+            start_index: 0,
+            level_count: 8,
+            values: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        },
+        SetLevels::NonLinear {
+            start_index: 0x10,
+            level_count: 1,
+            values: vec![1],
+        },
+        SetLevels::NonLinear {
+            start_index: 0,
+            level_count: 0x10,
+            values: vec![1],
+        },
+    ] {
+        assert!(matches!(
+            levels.to_payload(),
+            Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
+        ));
+    }
 }
 
 #[test]

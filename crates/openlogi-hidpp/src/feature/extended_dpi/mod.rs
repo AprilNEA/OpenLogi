@@ -299,7 +299,7 @@ impl ExtendedDpiFeature {
         direction: DpiDirection,
         correction: DpiCalibrationCorrection,
     ) -> Result<(), Hidpp20Error> {
-        let [cor_hi, cor_lo] = correction.to_wire().to_be_bytes();
+        let [cor_hi, cor_lo] = correction.to_wire()?.to_be_bytes();
         let mut args = [0; 16];
         args[..4].copy_from_slice(&[sensor_index, direction.into(), cor_hi, cor_lo]);
         self.endpoint.call_long(10, args).await?;
