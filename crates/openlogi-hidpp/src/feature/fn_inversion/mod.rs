@@ -97,11 +97,15 @@ impl FnInversionMultiHostFeature {
     ) -> Result<FnInversionInfo, Hidpp20Error> {
         let payload = self
             .endpoint
-            .call(1, [u8::from(state), u8::from(host), 0])
+            .call(1, set_multi_host_fn_inversion_args(host, state))
             .await?
             .extend_payload();
         FnInversionInfo::from_payload(payload)
     }
+}
+
+fn set_multi_host_fn_inversion_args(host: HostIndex, state: FnInversionState) -> [u8; 3] {
+    [u8::from(host), u8::from(state), 0]
 }
 
 impl FnInversionInfo {
@@ -186,7 +190,9 @@ impl FnInversionWithDefaultStateFeature {
 
 #[cfg(test)]
 mod tests {
-    use super::{FnInversionInfo, FnInversionState, GlobalFnInversion};
+    use super::{
+        FnInversionInfo, FnInversionState, GlobalFnInversion, set_multi_host_fn_inversion_args,
+    };
     use crate::feature::hosts_info::HostIndex;
 
     #[test]
@@ -214,5 +220,13 @@ mod tests {
 
         assert_eq!(global.state, FnInversionState::On);
         assert_eq!(global.default_state, FnInversionState::Off);
+    }
+
+    #[test]
+    fn encodes_multi_host_set_args_as_host_then_state() {
+        assert_eq!(
+            set_multi_host_fn_inversion_args(HostIndex::Slot(2), FnInversionState::On),
+            [2, 1, 0]
+        );
     }
 }
