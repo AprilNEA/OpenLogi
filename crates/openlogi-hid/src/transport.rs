@@ -8,17 +8,18 @@
 //! collections carry both reports; BLE-direct collections are long-only, and the
 //! `hidpp` channel up-converts outgoing short messages to long for them.
 
-use std::{
-    error::Error,
-    sync::{Arc, LazyLock},
-};
+#[cfg(not(target_os = "windows"))]
+use std::error::Error;
+use std::sync::{Arc, LazyLock};
 
-use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceInfo, DeviceReader, DeviceWriter, HidBackend};
+#[cfg(not(target_os = "windows"))]
+use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader};
+use async_hid::{DeviceInfo, DeviceWriter, HidBackend};
 use futures_lite::StreamExt as _;
-use hidpp::{
-    async_trait,
-    channel::{HidppChannel, RawHidChannel},
-};
+use hidpp::channel::HidppChannel;
+#[cfg(not(target_os = "windows"))]
+use hidpp::{async_trait, channel::RawHidChannel};
+#[cfg(not(target_os = "windows"))]
 use tokio::sync::Mutex;
 use tracing::debug;
 
