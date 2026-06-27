@@ -14,7 +14,9 @@ use crate::{
     protocol::v20::Hidpp20Error,
 };
 
+pub mod control_ids;
 mod event;
+pub mod task_ids;
 
 use event::decode_event_payload;
 pub use event::{AnalyticsKeyEvent, RawWheelResolution, ReprogControlsEvent, decode_event};
@@ -161,6 +163,18 @@ fn u16_from_be_payload(bytes: &[u8]) -> u16 {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TaskId(pub u16);
+
+impl From<u16> for TaskId {
+    fn from(value: u16) -> Self {
+        Self(value)
+    }
+}
+
+impl From<TaskId> for u16 {
+    fn from(value: TaskId) -> Self {
+        value.0
+    }
+}
 
 /// One `getCidInfo` row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
