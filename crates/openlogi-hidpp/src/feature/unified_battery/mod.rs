@@ -183,7 +183,8 @@ pub enum BatteryLevel {
     Full = 1 << 3,
 }
 
-/// Represents the charging status of the battery.
+/// Represents the charging status of the battery, as reported in the `0x1004`
+/// `getStatus` battery-status byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
@@ -193,12 +194,18 @@ pub enum BatteryStatus {
     Discharging = 0,
     /// Battery is charging.
     Charging = 1,
-    /// Battery is charging slowly.
-    ChargingSlow = 2,
-    /// Battery is full.
+    /// Battery is charging and in its final stage (nearly full).
+    ChargingNearlyFull = 2,
+    /// Battery charge is complete.
     Full = 3,
-    /// Battery subsystem reported an error.
-    Error = 4,
+    /// Battery is recharging below optimal speed.
+    ChargingSlow = 4,
+    /// The battery type is invalid.
+    InvalidBattery = 5,
+    /// The battery subsystem reported a thermal error.
+    ThermalError = 6,
+    /// The battery subsystem reported a charging error.
+    ChargingError = 7,
 }
 
 /// Represents an event emitted by the [`UnifiedBatteryFeature`] feature.
