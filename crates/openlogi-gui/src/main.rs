@@ -59,7 +59,7 @@ use gpui::{
     AppContext, BorrowAppContext as _, Bounds, SharedString, Size, Styled, TitlebarOptions,
     WindowBounds, WindowOptions, px,
 };
-use gpui_component::{ActiveTheme, Root, Theme, ThemeMode};
+use gpui_component::{ActiveTheme, Root};
 use openlogi_core::brand::DeeplinkCommand;
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, DeviceModelInfo};
@@ -86,7 +86,7 @@ fn dispatch_gui_command(command: DeeplinkCommand, cx: &mut gpui::App) {
         }
         Cmd::OpenAbout => {
             ensure_main_window(cx);
-            windows::about::open(cx);
+            windows::settings::open_at(windows::settings::SettingsPage::About, cx);
         }
         Cmd::CheckForUpdates => {
             ensure_main_window(cx);
@@ -192,6 +192,7 @@ fn main() -> Result<()> {
 
     app.run(move |cx| {
         gpui_component::init(cx);
+        theme::register_builtin_themes(cx);
         app_menu::install(cx);
 
         // Seed the Add Device window's initial state. Its buttons drive pairing
@@ -584,12 +585,12 @@ fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
 
     let options = main_window_options(cx);
     let opened = cx.open_window(options, |window, cx| {
-        Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
+        theme::apply_from_settings(Some(window), cx);
 
         let view = cx.new(|cx| AppView::new(inventories, window, cx));
 
         let appearance_obs = window.observe_window_appearance(|window, cx| {
-            Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
+            theme::apply_from_settings(Some(window), cx);
         });
         view.update(cx, |v, _| v.set_appearance_obs(appearance_obs));
 

@@ -12,8 +12,11 @@
 //!   own widgets — which is what keeps a popover from rendering white under
 //!   an otherwise dark UI (see `main.rs`'s appearance wiring).
 
-use gpui::{App, Hsla, Styled, hsla, rgb};
-use gpui_component::ActiveTheme as _;
+use gpui::{App, Hsla, Styled, Window, hsla, px, rgb};
+use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
+use openlogi_core::config::Appearance;
+
+use crate::state::AppState;
 
 /// Primary action / selection blue. Brand colour, identical in both modes —
 /// it reads on the light card surfaces and the dark window alike.
@@ -39,11 +42,11 @@ pub const GALLERY_PHOTO_H: f32 = 230.;
 /// gpui-component) surfaces. Resolved once per render via [`palette`] and
 /// passed down to the free helper builders.
 ///
-/// We hand-pick both variants rather than reading gpui-component's tokens:
-/// its shadcn-neutral palette collapses the raised-surface and hover fills
-/// onto the same neutral step (`accent` falls back to `secondary`), which
-/// would flatten the app's layered card/hover look. Keeping our own values
-/// preserves the tuned dark appearance and gives a controlled light one.
+/// These are now *derived from the active gpui-component theme's semantic
+/// tokens* (see [`palette`]), so the hand-painted surfaces re-skin with whatever
+/// theme the user selects in Settings → Appearance — the same `cx.theme()` the
+/// framework widgets read. The bundled "OpenLogi" theme (`themes/openlogi.json`)
+/// encodes the original tuned values, so the default look is unchanged.
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
     /// Window background.
@@ -60,44 +63,121 @@ pub struct Palette {
     pub text_muted: Hsla,
 }
 
-impl Palette {
-    /// The dark palette — the original OpenLogi look, unchanged.
-    #[must_use]
-    pub fn dark() -> Self {
-        Self {
-            bg: rgb(0x001a_1a1d).into(),
-            surface: rgb(0x0022_2227).into(),
-            surface_hover: rgb(0x002c_2c33).into(),
-            border: rgb(0x002f_2f36).into(),
-            text_primary: rgb(0x00e8_e8ec).into(),
-            text_muted: rgb(0x008a_8a93).into(),
-        }
+/// Derive the app palette from the active gpui-component theme's semantic
+/// tokens, so the hand-painted surfaces (window, cards, mouse model) re-skin
+/// with the selected theme exactly as the framework widgets do.
+///
+/// - `bg` ← `background` (window)
+/// - `surface` / `surface_hover` ← `secondary` / `secondary_hover` (cards). The
+///   bundled OpenLogi theme sets `group_box` to the same colour, so the Fill
+///   group-box cards and the bespoke `pal.surface` cards match.
+/// - `border`, `text_primary` ← `foreground`, `text_muted` ← `muted_foreground`.
+#[must_use]
+pub fn palette(cx: &App) -> Palette {
+    let t = cx.theme();
+    Palette {
+        bg: t.background,
+        surface: t.secondary,
+        surface_hover: t.secondary_hover,
+        border: t.border,
+        text_primary: t.foreground,
+        text_muted: t.muted_foreground,
     }
+}
 
-    /// The light palette — white cards on a soft-grey window, tuned to sit
-    /// alongside gpui-component's light popover/surface tokens.
-    #[must_use]
-    pub fn light() -> Self {
-        Self {
-            bg: rgb(0x00f4_f4f6).into(),
-            surface: rgb(0x00ff_ffff).into(),
-            surface_hover: rgb(0x00e9_e9ee).into(),
-            border: rgb(0x00d9_d9e0).into(),
-            text_primary: rgb(0x001a_1a1d).into(),
-            text_muted: rgb(0x006b_6b73).into(),
+/// Our brand theme (light + dark), encoding the original tuned surfaces. Kept as
+/// a readable, committed JSON. The upstream gpui-component themes are *not*
+/// vendored into this repo — `build.rs` copies them from the pinned dependency
+/// checkout into `OUT_DIR` and generates the `UPSTREAM_THEME_JSON` list included
+/// just below (gpui-component doesn't ship them inside its compiled crate, so
+/// they must be embedded to be selectable).
+const OPENLOGI_THEME_JSON: &str = include_str!("../themes/openlogi.json");
+
+// Defines `static UPSTREAM_THEME_JSON: &[&str]` from build-time-embedded copies.
+include!(concat!(env!("OUT_DIR"), "/builtin_themes.rs"));
+
+/// The default brand theme names — slots [`apply_from_settings`] falls back to.
+pub const OPENLOGI_LIGHT: &str = "OpenLogi Light";
+pub const OPENLOGI_DARK: &str = "OpenLogi Dark";
+
+/// Register every bundled theme into the [`ThemeRegistry`]. Call once at
+/// startup, after `gpui_component::init` (which seeds the registry global). Our
+/// brand theme loads first; the upstream themes follow.
+pub fn register_builtin_themes(cx: &mut App) {
+    let registry = ThemeRegistry::global_mut(cx);
+    for json in std::iter::once(OPENLOGI_THEME_JSON).chain(UPSTREAM_THEME_JSON.iter().copied()) {
+        if let Err(error) = registry.load_themes_from_str(json) {
+            tracing::warn!(%error, "failed to load a bundled theme");
         }
     }
 }
 
-/// Resolve the app palette from the active gpui-component theme mode, so the
-/// hand-painted surfaces follow the same light/dark switch as the widgets.
-#[must_use]
-pub fn palette(cx: &App) -> Palette {
-    if cx.theme().mode.is_dark() {
-        Palette::dark()
-    } else {
-        Palette::light()
+/// Resolve the user's stored appearance preference and apply it to the global
+/// [`Theme`]. Reads [`AppState`] live, so it is the single entry point for first
+/// paint, OS-appearance changes, and live edits on the Appearance page:
+///
+/// - the chosen named themes fill the light / dark slots (falling back to the
+///   OpenLogi brand theme);
+/// - `System` follows the OS appearance, `Light` / `Dark` force it;
+/// - a chosen corner radius is applied last (after `Theme::change`, which would
+///   otherwise reset it to the theme's own radius).
+///
+/// Pass the window being built (first paint / appearance observer) so its OS
+/// appearance is read directly and it repaints; pass `None` from a settings
+/// edit (no window in hand) — every open window is refreshed instead.
+pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
+    let (appearance, light_name, dark_name, radius) =
+        cx.try_global::<AppState>()
+            .map_or((Appearance::default(), None, None, None), |state| {
+                let s = state.app_settings();
+                (
+                    s.appearance,
+                    s.theme_light.clone(),
+                    s.theme_dark.clone(),
+                    s.ui_radius,
+                )
+            });
+
+    // Sync the native window chrome (titlebar) to the pref first, so the
+    // `System` branch below reads the *real* OS appearance rather than a stale
+    // forced override.
+    crate::platform::os::set_app_appearance(appearance);
+    let os_appearance = cx.window_appearance();
+
+    // Pull the chosen configs out of the registry before borrowing the Theme
+    // mutably (both live as globals).
+    let (light, dark) = {
+        let registry = ThemeRegistry::global(cx);
+        let pick = |name: Option<&str>, fallback: &str| {
+            name.and_then(|n| registry.themes().get(n).cloned())
+                .or_else(|| registry.themes().get(fallback).cloned())
+        };
+        (
+            pick(light_name.as_deref(), OPENLOGI_LIGHT),
+            pick(dark_name.as_deref(), OPENLOGI_DARK),
+        )
+    };
+    {
+        let theme = Theme::global_mut(cx);
+        if let Some(light) = light {
+            theme.light_theme = light;
+        }
+        if let Some(dark) = dark {
+            theme.dark_theme = dark;
+        }
     }
+
+    let mode = match appearance {
+        Appearance::System => ThemeMode::from(os_appearance),
+        Appearance::Light => ThemeMode::Light,
+        Appearance::Dark => ThemeMode::Dark,
+    };
+    Theme::change(mode, window, cx);
+
+    if let Some(radius) = radius {
+        Theme::global_mut(cx).radius = px(f32::from(radius));
+    }
+    cx.refresh_windows();
 }
 
 /// [`ACCENT_BLUE`] as an [`Hsla`] — the selection accent for borders and fills

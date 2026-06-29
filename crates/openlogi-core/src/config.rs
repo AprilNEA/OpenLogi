@@ -61,6 +61,22 @@ impl Default for Config {
     }
 }
 
+/// Light/dark appearance preference. `System` follows the OS appearance (the
+/// historical behaviour); `Light` / `Dark` force a mode regardless of the OS.
+/// Platform-free so the core crate stays GUI-agnostic — the GUI maps this onto
+/// gpui-component's `ThemeMode`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Appearance {
+    /// Follow the operating system's light/dark setting.
+    #[default]
+    System,
+    /// Always use the light variant of the selected theme.
+    Light,
+    /// Always use the dark variant of the selected theme.
+    Dark,
+}
+
 /// App-wide preferences not tied to any particular device.
 ///
 /// All fields are `#[serde(default)]` so adding a new one is backward
@@ -85,6 +101,14 @@ pub struct AppSettings {
     /// available — no automatic download.
     #[serde(default)]
     pub check_for_updates: bool,
+    /// Opt-in automatic install. When true *and* [`Self::check_for_updates`]
+    /// surfaces a newer version, the GUI downloads and stages it in the
+    /// background; the update is applied on the next restart (never mid-session,
+    /// and never auto-relaunched). **Off by default** — it only acts after a
+    /// check the user already opted into, and stays inert in unsigned dev builds
+    /// where verification fails closed.
+    #[serde(default)]
+    pub auto_install_updates: bool,
     /// True once the first-run "check for updates?" prompt has been answered
     /// (either way), so it is never shown again. The prompt is how a
     /// privacy-conscious default of `check_for_updates = false` still lets a
@@ -119,6 +143,22 @@ pub struct AppSettings {
     /// diverted from native scrolling once this leaves the default.
     #[serde(default = "default_thumbwheel_sensitivity")]
     pub thumbwheel_sensitivity: i32,
+    /// Light/dark appearance preference. Defaults to following the OS.
+    #[serde(default)]
+    pub appearance: Appearance,
+    /// Name of the theme used in light mode (a [`crate`]-agnostic string
+    /// matching a gpui-component theme, e.g. `"OpenLogi Light"`). `None` uses
+    /// the OpenLogi brand light theme.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_light: Option<String>,
+    /// Name of the theme used in dark mode. `None` uses the OpenLogi brand dark
+    /// theme.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_dark: Option<String>,
+    /// Corner-radius override for the UI, in pixels (the Appearance page offers
+    /// `0` / `6` / `12`). `None` keeps each theme's own radius.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_radius: Option<u8>,
 }
 
 /// Out-of-the-box [`AppSettings::thumbwheel_sensitivity`]. At this value the
@@ -144,11 +184,16 @@ impl Default for AppSettings {
         Self {
             launch_at_login: false,
             check_for_updates: false,
+            auto_install_updates: false,
             update_prompt_seen: false,
             show_in_menu_bar: true,
             auto_download_assets: true,
             language: None,
             thumbwheel_sensitivity: DEFAULT_THUMBWHEEL_SENSITIVITY,
+            appearance: Appearance::System,
+            theme_light: None,
+            theme_dark: None,
+            ui_radius: None,
         }
     }
 }
@@ -839,6 +884,19 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .identity = Some(identity);
+    }
+
+    /// Whether `device_key` has a non-empty per-app binding overlay for the
+    /// foreground app `app` (bundle id). Drives the menu-bar popover's "override
+    /// active" badge — when the current app has its own bindings for this
+    /// device, the global bindings are (partly) overridden.
+    #[must_use]
+    pub fn has_app_override(&self, device_key: &str, app: &str) -> bool {
+        self.devices.get(device_key).is_some_and(|d| {
+            d.per_app_bindings
+                .get(app)
+                .is_some_and(|overlay| !overlay.is_empty())
+        })
     }
 
     /// Iterate every device we've recorded an identity for, as

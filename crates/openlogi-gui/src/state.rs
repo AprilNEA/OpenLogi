@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use gpui::{App, Global};
-use openlogi_core::config::{AppSettings, Config, DeviceIdentity, Lighting};
+use openlogi_core::config::{AppSettings, Appearance, Config, DeviceIdentity, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     DeviceRoute, DpiCapabilities, DpiInfo, SmartShiftMode, SmartShiftStatus, WriteError,
@@ -1093,6 +1093,62 @@ impl AppState {
         self.config.app_settings.check_for_updates = enabled;
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist update-check setting");
+        }
+    }
+
+    /// Toggle opt-in automatic install and persist it. The launch-time updater
+    /// observer reads this live, so a newer version found after this is enabled
+    /// downloads and stages on its own; no immediate side effect here. No-op
+    /// when unchanged.
+    pub fn set_auto_install_updates(&mut self, enabled: bool) {
+        if self.config.app_settings.auto_install_updates == enabled {
+            return;
+        }
+        self.config.app_settings.auto_install_updates = enabled;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist auto-install setting");
+        }
+    }
+
+    /// Persist the light/dark appearance preference. The caller re-applies the
+    /// live theme via [`crate::theme::apply_from_settings`]; this only writes the
+    /// choice. No-op when unchanged.
+    pub fn set_appearance(&mut self, appearance: Appearance) {
+        if self.config.app_settings.appearance == appearance {
+            return;
+        }
+        self.config.app_settings.appearance = appearance;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist appearance setting");
+        }
+    }
+
+    /// Persist the chosen theme name for one mode (`None` = the OpenLogi brand
+    /// theme). No-op when unchanged.
+    pub fn set_theme(&mut self, dark: bool, name: Option<String>) {
+        let slot = if dark {
+            &mut self.config.app_settings.theme_dark
+        } else {
+            &mut self.config.app_settings.theme_light
+        };
+        if *slot == name {
+            return;
+        }
+        *slot = name;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist theme setting");
+        }
+    }
+
+    /// Persist the UI corner-radius override (`None` = each theme's own radius).
+    /// No-op when unchanged.
+    pub fn set_ui_radius(&mut self, radius: Option<u8>) {
+        if self.config.app_settings.ui_radius == radius {
+            return;
+        }
+        self.config.app_settings.ui_radius = radius;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist UI radius setting");
         }
     }
 
