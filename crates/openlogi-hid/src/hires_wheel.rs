@@ -52,6 +52,17 @@ async fn set_scroll_inversion_on_channel(
         .get_wheel_mode()
         .await
         .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+    // Idempotent: the desired state is "native HID reporting with this invert
+    // flag". When the wheel already holds it, skip the write — config reloads
+    // fire on every DPI / SmartShift / binding change, and re-writing the wheel
+    // mode each time is needless HID++ traffic that can race other writes.
+    if mode.inverted == inverted && mode.target == WheelEventTarget::Native {
+        debug!(
+            index,
+            inverted, "native scroll inversion already set; skipping"
+        );
+        return Ok(());
+    }
     let written = feature
         .set_wheel_mode(WheelEventTarget::Native, mode.resolution, inverted)
         .await

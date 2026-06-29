@@ -271,6 +271,35 @@ pub enum WheelMode {
     Ratchet,
 }
 
+/// SmartShift auto-disengage out-of-box default (`16` ≈ 4 turn/s, per the
+/// x2110 / x2111 spec). The sensitivity slider's default and the heal target
+/// for a corrupt persisted threshold.
+pub const SMARTSHIFT_AUTO_DISENGAGE_DEFAULT: u8 = 16;
+
+/// Smallest auto-disengage threshold OpenLogi will store or apply (`8` ≈
+/// 2 turn/s). Below this the ratchet releases into free-spin at everyday scroll
+/// speeds, leaving the wheel "stuck" spinning (#317); `0` is also the firmware
+/// "do not change" sentinel that must never be stored as a real value. A
+/// persisted threshold below this floor is a corrupt artifact and is healed to
+/// [`SMARTSHIFT_AUTO_DISENGAGE_DEFAULT`] on load.
+pub const SMARTSHIFT_MIN_AUTO_DISENGAGE: u8 = 8;
+
+/// Heal a persisted auto-disengage threshold on load: anything below
+/// [`SMARTSHIFT_MIN_AUTO_DISENGAGE`] (including the `0` sentinel) becomes the
+/// default. `0xFF` (permanent ratchet) and every real threshold at or above the
+/// floor pass through unchanged.
+fn deserialize_auto_disengage<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u8::deserialize(deserializer)?;
+    Ok(if value < SMARTSHIFT_MIN_AUTO_DISENGAGE {
+        SMARTSHIFT_AUTO_DISENGAGE_DEFAULT
+    } else {
+        value
+    })
+}
+
 /// Per-device SmartShift wheel configuration, persisted so the agent can
 /// re-apply it when the device reconnects: the values are written to device
 /// RAM and do not survive a power cycle (#189), despite earlier assumptions
@@ -282,8 +311,10 @@ pub enum WheelMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmartShift {
     pub mode: WheelMode,
-    /// SmartShift auto-disengage threshold (`0x01`–`0xFE`, in 0.25 turn/s
-    /// steps), or `0xFF` for a permanently engaged ratchet.
+    /// SmartShift auto-disengage threshold (`0x08`–`0xFE`, in 0.25 turn/s
+    /// steps), or `0xFF` for a permanently engaged ratchet. A persisted value
+    /// below [`SMARTSHIFT_MIN_AUTO_DISENGAGE`] is healed to the default on load.
+    #[serde(deserialize_with = "deserialize_auto_disengage")]
     pub auto_disengage: u8,
     /// Tunable-torque force percentage (`1`–`100`), `0` when the device
     /// doesn't support tunable torque.
@@ -1099,6 +1130,32 @@ mod tests {
             !body.contains("invert_scroll"),
             "default invert_scroll should be omitted: {body}"
         );
+    }
+
+    #[test]
+    fn low_auto_disengage_heals_to_default_on_load() {
+        // A pre-#317 config could persist a runaway-low threshold (or the `0`
+        // sentinel); loading it must heal to the default so reapply doesn't
+        // re-program free-spin-on-any-scroll into the device — while a real
+        // threshold and the `0xFF` permanent-ratchet value pass through.
+        let heal = |v: u8| {
+            let body = format!("mode = \"ratchet\"\nauto_disengage = {v}\ntunable_torque = 50\n");
+            toml::from_str::<SmartShift>(&body)
+                .expect("parse")
+                .auto_disengage
+        };
+        assert_eq!(heal(0), SMARTSHIFT_AUTO_DISENGAGE_DEFAULT);
+        assert_eq!(heal(1), SMARTSHIFT_AUTO_DISENGAGE_DEFAULT);
+        assert_eq!(
+            heal(SMARTSHIFT_MIN_AUTO_DISENGAGE - 1),
+            SMARTSHIFT_AUTO_DISENGAGE_DEFAULT
+        );
+        assert_eq!(
+            heal(SMARTSHIFT_MIN_AUTO_DISENGAGE),
+            SMARTSHIFT_MIN_AUTO_DISENGAGE
+        );
+        assert_eq!(heal(16), 16);
+        assert_eq!(heal(0xff), 0xff);
     }
 
     #[test]
