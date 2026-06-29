@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.18](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.17...openlogi-core-v0.6.18) - 2026-06-29
+
+### Added
+
+- *(hidpp)* add typed reprog controls support
+
+### Other
+
+- Clarify MX Master 4 gesture control semantics ([#325](https://github.com/AprilNEA/OpenLogi/pull/325))
+
 ## [0.6.17](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.16...openlogi-core-v0.6.17) - 2026-06-24
 
 ### Added
