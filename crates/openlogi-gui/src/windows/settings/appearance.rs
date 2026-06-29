@@ -81,9 +81,10 @@ fn set_appearance(cx: &mut App, appearance: Appearance) {
     theme::apply_from_settings(None, cx);
 }
 
-/// Persist a corner-radius choice and re-apply the live theme.
-fn set_radius(cx: &mut App, radius: u8) {
-    cx.update_global::<AppState, _>(|s, _| s.set_ui_radius(Some(radius)));
+/// Persist a corner-radius choice and re-apply the live theme. `None` defers to
+/// the active theme's own radius.
+fn set_radius(cx: &mut App, radius: Option<u8>) {
+    cx.update_global::<AppState, _>(|s, _| s.set_ui_radius(radius));
     theme::apply_from_settings(None, cx);
 }
 
@@ -264,33 +265,35 @@ fn radio_dot(selected: bool, accent: Hsla, pal: Palette) -> impl IntoElement {
         })
 }
 
-/// The Sharp / Default / Round corner-radius segmented control.
+/// The Sharp / Default / Round corner-radius segmented control. "Default" stores
+/// `None` — defer to the active theme's own radius — rather than a fixed 6px, so
+/// it neither mis-highlights under themes with a different radius nor traps the
+/// user away from the theme default.
 fn radius_segment(cx: &App) -> AnyElement {
     let current = cx
         .try_global::<AppState>()
-        .and_then(|s| s.app_settings().ui_radius)
-        .unwrap_or(6);
-    let radii = [0u8, 6, 12];
+        .and_then(|s| s.app_settings().ui_radius);
+    let options: [Option<u8>; 3] = [Some(0), None, Some(12)];
     ButtonGroup::new("corner-radius")
         .outline()
         .child(
-            Button::new("radius-0")
+            Button::new("radius-sharp")
                 .label(tr!("Sharp"))
-                .selected(current == 0),
+                .selected(current == Some(0)),
         )
         .child(
-            Button::new("radius-6")
+            Button::new("radius-default")
                 .label(tr!("Default"))
-                .selected(current == 6),
+                .selected(current.is_none()),
         )
         .child(
-            Button::new("radius-12")
+            Button::new("radius-round")
                 .label(tr!("Round"))
-                .selected(current == 12),
+                .selected(current == Some(12)),
         )
         .on_click(move |clicks, _, cx| {
             if let Some(&ix) = clicks.first() {
-                set_radius(cx, radii[ix]);
+                set_radius(cx, options[ix]);
             }
         })
         .into_any_element()
@@ -503,11 +506,18 @@ fn theme_card(
             let chosen = stored.to_string();
             cx.update_global::<AppState, _>(move |s, _| {
                 s.set_theme(dark, Some(chosen.clone()));
-                s.set_appearance(if dark {
-                    Appearance::Dark
-                } else {
-                    Appearance::Light
-                });
+                // Picking a theme configures the light or dark *slot*. Only pin
+                // the mode when the user has already chosen an explicit
+                // Light/Dark mode — a "Follow System" preference must survive so
+                // configuring (say) the dark slot doesn't force the whole app to
+                // dark.
+                if s.app_settings().appearance != Appearance::System {
+                    s.set_appearance(if dark {
+                        Appearance::Dark
+                    } else {
+                        Appearance::Light
+                    });
+                }
             });
             theme::apply_from_settings(None, cx);
         })

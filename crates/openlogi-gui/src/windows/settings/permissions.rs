@@ -1,9 +1,14 @@
 //! Permissions settings page (macOS / Linux).
 
+#[cfg(target_os = "macos")]
 use super::{
-    App, AppState, IconName, InteractiveElement, IntoElement, Palette, ParentElement, Permission,
-    PermissionStatus, SettingField, SettingGroup, SettingItem, SettingPage, SharedString,
-    StatefulInteractiveElement, Styled, div, h_flex, rgb, theme,
+    App, AppState, InteractiveElement, Permission, SharedString, StatefulInteractiveElement, h_flex,
+};
+use super::{IconName, Palette, SettingPage};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use super::{
+    IntoElement, ParentElement, PermissionStatus, SettingField, SettingGroup, SettingItem, Styled,
+    div, rgb, theme,
 };
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::platform::permissions;
