@@ -10,7 +10,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
 
-use openlogi_core::binding::{Action, KeyCombo};
+use openlogi_core::binding::{Action, KeyCombo, WorkflowStep};
 
 const WHEEL_DELTA: i32 = 120;
 
@@ -139,16 +139,43 @@ pub(super) fn execute(action: &Action) {
         Action::RunAppleScript(_) => {
             tracing::warn!("RunAppleScript is only supported on macOS");
         }
-        Action::RunShellCommand(cmd) => {
-            let cmd = cmd.clone();
-            std::thread::spawn(move || {
-                let _ = std::process::Command::new("cmd")
-                    .args(["/C", &cmd])
-                    .output();
-            });
-        }
+        Action::RunShellCommand(cmd) => run_shell_command_async(cmd.clone()),
+        Action::Workflow(steps) => run_workflow_async(steps.clone()),
         Action::None => {}
     }
+}
+
+fn run_shell_command_async(cmd: String) {
+    std::thread::spawn(move || run_shell_command(&cmd));
+}
+
+fn run_workflow_async(steps: Vec<WorkflowStep>) {
+    std::thread::spawn(move || run_workflow(&steps));
+}
+
+fn run_workflow(steps: &[WorkflowStep]) {
+    for step in steps {
+        match step {
+            WorkflowStep::TypeText(text) => {
+                tracing::warn!(
+                    chars = text.chars().count(),
+                    "workflow TypeText injection is not implemented on Windows yet"
+                );
+            }
+            WorkflowStep::PressKey(combo) => post_custom_shortcut(combo),
+            WorkflowStep::Delay { millis } => {
+                std::thread::sleep(std::time::Duration::from_millis(*millis));
+            }
+            WorkflowStep::RunAppleScript(_) => {
+                tracing::warn!("workflow RunAppleScript is only supported on macOS");
+            }
+            WorkflowStep::RunShellCommand(cmd) => run_shell_command(cmd),
+        }
+    }
+}
+
+fn run_shell_command(cmd: &str) {
+    let _ = std::process::Command::new("cmd").args(["/C", cmd]).output();
 }
 
 fn post_click(button: MouseButton) {

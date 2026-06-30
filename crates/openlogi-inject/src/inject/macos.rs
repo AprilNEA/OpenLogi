@@ -8,7 +8,7 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
 use core_foundation::base::TCFType as _;
-use openlogi_core::binding::Action;
+use openlogi_core::binding::{Action, WorkflowStep};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -157,22 +157,10 @@ pub(super) fn execute(action: &Action) {
         Action::TypeText(text) => post_unicode(text),
         // Run actions spawn off the tap thread: the callback must not block
         // (posting a key while waiting on a child process would wedge input).
-        Action::RunAppleScript(src) => {
-            let src = src.clone();
-            std::thread::spawn(move || {
-                let _ = std::process::Command::new("osascript")
-                    .args(["-e", &src])
-                    .output();
-            });
-        }
-        Action::RunShellCommand(cmd) => {
-            let cmd = cmd.clone();
-            std::thread::spawn(move || {
-                let _ = std::process::Command::new("/bin/sh")
-                    .args(["-c", &cmd])
-                    .output();
-            });
-        }
+        Action::RunAppleScript(src) => run_apple_script_async(src.clone()),
+        Action::RunShellCommand(cmd) => run_shell_command_async(cmd.clone()),
+        // Workflows can sleep between steps, so they also run off the tap thread.
+        Action::Workflow(steps) => run_workflow_async(steps.clone()),
     }
 }
 
@@ -285,6 +273,66 @@ fn post_unicode(text: &str) {
         ev.set_string(&s);
         ev.post(CGEventTapLocation::HID);
     }
+}
+
+/// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
+/// keycode. Used by the workflow sequencer's `PressKey` step.
+fn post_keycombo(modifiers: u8, vk: u16) {
+    use openlogi_core::binding::KeyCombo;
+
+    let mut flags = CGEventFlags::CGEventFlagNull;
+    if modifiers & KeyCombo::MOD_CMD != 0 {
+        flags |= CGEventFlags::CGEventFlagCommand;
+    }
+    if modifiers & KeyCombo::MOD_SHIFT != 0 {
+        flags |= CGEventFlags::CGEventFlagShift;
+    }
+    if modifiers & KeyCombo::MOD_CTRL != 0 {
+        flags |= CGEventFlags::CGEventFlagControl;
+    }
+    if modifiers & KeyCombo::MOD_OPTION != 0 {
+        flags |= CGEventFlags::CGEventFlagAlternate;
+    }
+    post_key(vk, flags);
+}
+
+fn run_apple_script_async(src: String) {
+    std::thread::spawn(move || run_apple_script(&src));
+}
+
+fn run_shell_command_async(cmd: String) {
+    std::thread::spawn(move || run_shell_command(&cmd));
+}
+
+fn run_workflow_async(steps: Vec<WorkflowStep>) {
+    std::thread::spawn(move || run_workflow(&steps));
+}
+
+/// Run workflow steps on a worker thread, so `Delay` never stalls the event tap.
+fn run_workflow(steps: &[WorkflowStep]) {
+    for step in steps {
+        match step {
+            WorkflowStep::TypeText(text) => post_unicode(text),
+            WorkflowStep::PressKey(combo) => post_keycombo(combo.modifiers, combo.key_code),
+            WorkflowStep::Delay { millis } => {
+                std::thread::sleep(std::time::Duration::from_millis(*millis));
+            }
+            WorkflowStep::RunAppleScript(src) => run_apple_script(src),
+            WorkflowStep::RunShellCommand(cmd) => run_shell_command(cmd),
+        }
+    }
+}
+
+fn run_apple_script(src: &str) {
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", src])
+        .output();
+}
+
+fn run_shell_command(cmd: &str) {
+    let _ = std::process::Command::new("/bin/sh")
+        .args(["-c", cmd])
+        .output();
 }
 
 /// Post a media/system key event (play/pause, track navigation, volume).
