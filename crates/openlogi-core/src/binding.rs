@@ -883,8 +883,8 @@ pub fn default_gesture_binding(direction: GestureDirection) -> Action {
     match direction {
         GestureDirection::Up => Action::MissionControl,
         GestureDirection::Down => Action::ShowDesktop,
-        GestureDirection::Left => Action::PrevTab,
-        GestureDirection::Right => Action::NextTab,
+        GestureDirection::Left => Action::PreviousDesktop,
+        GestureDirection::Right => Action::NextDesktop,
         GestureDirection::Click => Action::AppExpose,
     }
 }
