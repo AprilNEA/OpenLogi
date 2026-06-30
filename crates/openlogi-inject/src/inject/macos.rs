@@ -153,11 +153,8 @@ pub(super) fn execute(action: &Action) {
             }
             post_key(combo.key_code, flags);
         }
-        // TypeText is fully implemented in the next task (needs post_unicode);
-        // until then it is a no-op so the enum match stays exhaustive.
-        Action::TypeText(_) => {
-            tracing::debug!("TypeText not yet implemented (post_unicode pending)");
-        }
+        // TypeText emits a unicode string, layout-independent.
+        Action::TypeText(text) => post_unicode(text),
         // Run actions spawn off the tap thread: the callback must not block
         // (posting a key while waiting on a child process would wedge input).
         Action::RunAppleScript(src) => {
@@ -268,6 +265,26 @@ fn post_key(vk: u16, flags: CGEventFlags) {
     };
     up.set_flags(flags);
     up.post(CGEventTapLocation::HID);
+}
+
+/// Type an arbitrary unicode string by emitting one key event per character,
+/// each carrying its unicode payload via `CGEventKeyboardSetUnicodeString`.
+fn post_unicode(text: &str) {
+    let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        tracing::warn!("CGEventSource::new failed for post_unicode");
+        return;
+    };
+    for ch in text.chars() {
+        // Keycode 0 (A) is a placeholder; the unicode payload determines the
+        // actual inserted character.
+        let Ok(ev) = CGEvent::new_keyboard_event(src.clone(), 0, true) else {
+            tracing::warn!("CGEvent::new_keyboard_event failed in post_unicode");
+            continue;
+        };
+        let s = ch.to_string();
+        ev.set_string(&s);
+        ev.post(CGEventTapLocation::HID);
+    }
 }
 
 /// Post a media/system key event (play/pause, track navigation, volume).
