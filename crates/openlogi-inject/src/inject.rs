@@ -76,6 +76,11 @@ fn execute_linux(action: &Action) {
         // buttons ("back"/"forward") browsers handle natively.
         Action::MouseBack => linux::click(KeyCode::BTN_SIDE),
         Action::MouseForward => linux::click(KeyCode::BTN_EXTRA),
+        // Buttons 6–9 use the evdev extra-button codes beyond the side pair.
+        Action::MouseButton6 => linux::click(KeyCode::BTN_FORWARD),
+        Action::MouseButton7 => linux::click(KeyCode::BTN_BACK),
+        Action::MouseButton8 => linux::click(KeyCode::BTN_TASK),
+        Action::MouseButton9 => linux::click(KeyCode::BTN_0),
         // ── Editing ───────────────────────────────────────────────────────
         Action::Copy => linux::press_key(&[ctrl], KeyCode::KEY_C),
         Action::Paste => linux::press_key(&[ctrl], KeyCode::KEY_V),
@@ -185,6 +190,13 @@ fn execute_macos(action: &Action) {
         // 4 = forward / "button 5").
         Action::MouseBack => macos::post_other_button(3),
         Action::MouseForward => macos::post_other_button(4),
+        // Buttons 6–9 (button numbers 5–8, 0-indexed). Same path as 4/5 —
+        // post_other_button stamps MOUSE_EVENT_BUTTON_NUMBER to address any
+        // button ≥ 3.
+        Action::MouseButton6 => macos::post_other_button(5),
+        Action::MouseButton7 => macos::post_other_button(6),
+        Action::MouseButton8 => macos::post_other_button(7),
+        Action::MouseButton9 => macos::post_other_button(8),
         // ── Editing ───────────────────────────────────────────────────────
         Action::Copy => macos::post_key(VK_C, cmd),
         Action::Paste => macos::post_key(VK_V, cmd),
@@ -289,6 +301,18 @@ fn execute_windows(action: &Action) {
         Action::MiddleClick => windows::post_click(windows::MouseButton::Middle),
         Action::MouseBack => windows::post_click(windows::MouseButton::Back),
         Action::MouseForward => windows::post_click(windows::MouseButton::Forward),
+        // Windows SendInput carries flags for buttons 1–5 only; there is no
+        // flag for button 6+, so these log-and-skip (same pattern as the
+        // macOS-only navigation actions). macOS/Linux emit them natively.
+        Action::MouseButton6
+        | Action::MouseButton7
+        | Action::MouseButton8
+        | Action::MouseButton9 => {
+            tracing::debug!(
+                action = action.label(),
+                "mouse buttons 6-9 are not supported on Windows — press ignored"
+            );
+        }
         Action::Copy => windows::post_key(windows::VK_C, &[windows::VK_CONTROL]),
         Action::Paste => windows::post_key(windows::VK_V, &[windows::VK_CONTROL]),
         Action::Cut => windows::post_key(windows::VK_X, &[windows::VK_CONTROL]),
