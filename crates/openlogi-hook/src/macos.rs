@@ -22,7 +22,8 @@ use foreign_types_shared::ForeignType as _;
 use tracing::{debug, error, warn};
 
 use crate::{
-    ButtonId, EventDevice, EventDisposition, EventTapInfo, HookError, MouseEvent, TapLocation,
+    ButtonId, EventDevice, EventDisposition, EventTapInfo, HookError, HookEvent, MouseEvent,
+    TapLocation,
 };
 
 /// Everything `Hook` needs to control the background thread.
@@ -438,7 +439,7 @@ fn usable_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
 
 /// Create the event tap and run loop on a dedicated thread.
 pub(crate) fn start(
-    cb: impl Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static,
+    cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
 ) -> Result<HookInner, HookError> {
     if !has_accessibility() {
         return Err(HookError::AccessibilityDenied);
@@ -446,7 +447,7 @@ pub(crate) fn start(
 
     // Wrap in Arc so the closure handed to CGEventTap::new captures it by
     // clone rather than by move — avoids a second Box allocation.
-    let cb: Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
+    let cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
 
     let stop = Arc::new(AtomicBool::new(false));
     let (rl_tx, rl_rx) = mpsc::channel::<CFRunLoop>();
@@ -501,7 +502,7 @@ fn hooked_event_types() -> Vec<CGEventType> {
 
 /// Invoke the user callback under `catch_unwind`, always failing open.
 fn run_tap_callback(
-    cb: &dyn Fn(MouseEvent) -> EventDisposition,
+    cb: &dyn Fn(HookEvent) -> EventDisposition,
     etype: CGEventType,
     event: &CGEvent,
 ) -> CallbackResult {
@@ -509,7 +510,7 @@ fn run_tap_callback(
         let Some(mouse_event) = translate(etype, event) else {
             return CallbackResult::Keep;
         };
-        match cb(mouse_event) {
+        match cb(HookEvent::Mouse(mouse_event)) {
             EventDisposition::PassThrough => CallbackResult::Keep,
             EventDisposition::Suppress => CallbackResult::Drop,
         }
@@ -574,7 +575,7 @@ fn spawn_callback_watchdog(
     reason = "rl_tx must be owned: dropping it signals the parent's recv() to return Err on failure paths"
 )]
 fn thread_main(
-    cb: Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync>,
+    cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync>,
     rl_tx: mpsc::Sender<CFRunLoop>,
     stop: Arc<AtomicBool>,
 ) {

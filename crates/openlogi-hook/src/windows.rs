@@ -24,7 +24,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     XBUTTON2,
 };
 
-use crate::{ButtonId, EventDisposition, HookError, MouseEvent};
+use crate::{ButtonId, EventDisposition, HookError, HookEvent, MouseEvent};
 
 const WHEEL_DELTA: f32 = 120.0;
 
@@ -40,7 +40,7 @@ thread_local! {
     static LAST_POINT: Cell<Option<POINT>> = const { Cell::new(None) };
 }
 
-type HookCallback = Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static>;
+type HookCallback = Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync + 'static>;
 
 static CALLBACK: Mutex<Option<HookCallback>> = Mutex::new(None);
 
@@ -50,7 +50,7 @@ pub(crate) struct HookInner {
 }
 
 pub(crate) fn start(
-    cb: impl Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static,
+    cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
 ) -> Result<HookInner, HookError> {
     let callback: HookCallback = Arc::new(cb);
     let (ready_tx, ready_rx) = mpsc::channel();
@@ -212,7 +212,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let callback = CALLBACK.lock().ok().and_then(|slot| slot.clone());
     let disposition = callback
         .as_ref()
-        .map_or(EventDisposition::PassThrough, |cb| cb(event));
+        .map_or(EventDisposition::PassThrough, |cb| cb(HookEvent::Mouse(event)));
     match disposition {
         EventDisposition::PassThrough => call_next(code, wparam, lparam),
         EventDisposition::Suppress => 1,

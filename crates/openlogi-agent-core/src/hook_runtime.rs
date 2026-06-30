@@ -16,7 +16,9 @@ use openlogi_core::binding::{
     Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
 use openlogi_hid::{CaptureChannel, ChannelRegistry};
-use openlogi_hook::{EventDevice, EventDisposition, Hook, MouseEvent, source_is_remappable};
+use openlogi_hook::{
+    EventDevice, EventDisposition, Hook, HookEvent, MouseEvent, source_is_remappable,
+};
 use tracing::{info, warn};
 
 use crate::DpiCycleState;
@@ -290,23 +292,28 @@ pub fn start(
 
     // The per-hold pointer accumulator lives in the thread-local `HOLD`; the
     // callback must never block — see the freeze-hazard note in `macos.rs`.
-    let result = Hook::start(move |event| {
-        monitor.record(&event);
-        match event {
-            MouseEvent::Button {
-                id,
-                pressed,
-                device,
-            } => handle_button(id, pressed, device.as_ref(), &hooks, &action_tx),
-            MouseEvent::Moved { delta_x, delta_y } => {
-                handle_moved(delta_x, delta_y, &hooks, &action_tx)
+    let result = Hook::start(move |event| match event {
+        HookEvent::Mouse(event) => {
+            monitor.record(&event);
+            match event {
+                MouseEvent::Button {
+                    id,
+                    pressed,
+                    device,
+                } => handle_button(id, pressed, device.as_ref(), &hooks, &action_tx),
+                MouseEvent::Moved { delta_x, delta_y } => {
+                    handle_moved(delta_x, delta_y, &hooks, &action_tx)
+                }
+                MouseEvent::CaptureInterrupted => {
+                    HOLD.with_borrow_mut(HoldState::cancel);
+                    EventDisposition::PassThrough
+                }
+                MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
             }
-            MouseEvent::CaptureInterrupted => {
-                HOLD.with_borrow_mut(HoldState::cancel);
-                EventDisposition::PassThrough
-            }
-            MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
         }
+        // Keyboard events arrive once later commits wire them to [keyboard.bindings];
+        // for now they pass through inert so behavior is unchanged.
+        HookEvent::Key(_) => EventDisposition::PassThrough,
     });
 
     match result {
