@@ -295,6 +295,43 @@ fn execute_macos(action: &Action) {
                     .output();
             });
         }
+        // A workflow runs its steps in order with Delay pauses between them,
+        // so it must run off the tap thread — same rule as the Run actions.
+        Action::Workflow(steps) => {
+            let steps = steps.clone();
+            std::thread::spawn(move || run_workflow(&steps));
+        }
+    }
+}
+
+/// Run a workflow's steps in order, awaiting `Delay`s. Reuses the same
+/// primitives the standalone actions use: `post_unicode` (TypeText),
+/// `post_key` (PressKey), and spawned processes for the Run steps. Runs on a
+/// dedicated worker thread (the caller spawns it) so the blocking `Delay`
+/// sleeps never stall the event tap.
+#[cfg(target_os = "macos")]
+fn run_workflow(steps: &[openlogi_core::binding::WorkflowStep]) {
+    use openlogi_core::binding::WorkflowStep;
+    for step in steps {
+        match step {
+            WorkflowStep::TypeText(text) => macos::post_unicode(text),
+            WorkflowStep::PressKey(combo) => {
+                macos::post_keycombo(combo.modifiers, combo.key_code);
+            }
+            WorkflowStep::Delay { millis } => {
+                std::thread::sleep(std::time::Duration::from_millis(*millis));
+            }
+            WorkflowStep::RunAppleScript(src) => {
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", src])
+                    .output();
+            }
+            WorkflowStep::RunShellCommand(cmd) => {
+                let _ = std::process::Command::new("/bin/sh")
+                    .args(["-c", cmd])
+                    .output();
+            }
+        }
     }
 }
 
@@ -575,6 +612,26 @@ mod macos {
             ev.set_string(&s);
             ev.post(CGEventTapLocation::HID);
         }
+    }
+
+    /// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
+    /// keycode. Used by the workflow sequencer's `PressKey` step (and mirrors
+    /// the `CustomShortcut` arm's flag construction so the two never drift).
+    pub(super) fn post_keycombo(modifiers: u8, vk: u16) {
+        let mut flags = CGEventFlags::CGEventFlagNull;
+        if modifiers & openlogi_core::binding::KeyCombo::MOD_CMD != 0 {
+            flags |= CGEventFlags::CGEventFlagCommand;
+        }
+        if modifiers & openlogi_core::binding::KeyCombo::MOD_SHIFT != 0 {
+            flags |= CGEventFlags::CGEventFlagShift;
+        }
+        if modifiers & openlogi_core::binding::KeyCombo::MOD_CTRL != 0 {
+            flags |= CGEventFlags::CGEventFlagControl;
+        }
+        if modifiers & openlogi_core::binding::KeyCombo::MOD_OPTION != 0 {
+            flags |= CGEventFlags::CGEventFlagAlternate;
+        }
+        post_key(vk, flags);
     }
 
     /// Post a media/system key event (play/pause, track navigation, volume).

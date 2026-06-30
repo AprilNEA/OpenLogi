@@ -489,6 +489,35 @@ pub enum Action {
     RunAppleScript(String),
     /// Run a shell command via `/bin/sh -c <command>`. Power-user escape hatch.
     RunShellCommand(String),
+    /// Run a timed, ordered sequence of steps — the native, no-code version of
+    /// "type 'bite me', wait 5s, press Enter, wait 5s, type more, Escape". Each
+    /// step is one of the power-user actions or a `Delay`. The sequencer
+    /// (`openlogi-inject`) runs them in order, awaiting `Delay`s. Power-user
+    /// escape hatch — excluded from the default catalog.
+    Workflow(Vec<WorkflowStep>),
+}
+
+/// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
+/// executed in order by the inject layer; `Delay` introduces a pause between
+/// the surrounding steps.
+///
+/// `PressKey` reuses [`KeyCombo`] (the same model as [`Action::CustomShortcut`])
+/// so a step can press a key chord. The other variants mirror their standalone
+/// [`Action`] counterparts.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WorkflowStep {
+    /// Type a unicode string (see [`Action::TypeText`]).
+    TypeText(String),
+    /// Press a key chord (see [`Action::CustomShortcut`] / [`KeyCombo`]).
+    PressKey(KeyCombo),
+    /// Wait `millis` milliseconds before the next step.
+    Delay {
+        millis: u64,
+    },
+    /// Run an AppleScript (see [`Action::RunAppleScript`]).
+    RunAppleScript(String),
+    /// Run a shell command (see [`Action::RunShellCommand`]).
+    RunShellCommand(String),
 }
 
 /// A modifier + virtual-key keystroke captured by the P1.3 recorder UI or
@@ -734,6 +763,9 @@ impl Action {
             Action::TypeText(s) => format!("Type \"{s}\"").into(),
             Action::RunAppleScript(_) => "Run AppleScript".into(),
             Action::RunShellCommand(_) => "Run Command".into(),
+            Action::Workflow(steps) => {
+                format!("Workflow ({} steps)", steps.len()).into()
+            }
         }
     }
 
@@ -759,7 +791,8 @@ impl Action {
             | Action::CustomShortcut(_)
             | Action::TypeText(_)
             | Action::RunAppleScript(_)
-            | Action::RunShellCommand(_) => Category::Editing,
+            | Action::RunShellCommand(_)
+            | Action::Workflow(_) => Category::Editing,
             Action::BrowserBack
             | Action::BrowserForward
             | Action::NewTab
@@ -1001,6 +1034,40 @@ mod tests {
             let back: Action = toml::from_str(&toml).unwrap();
             assert_eq!(action, back);
         }
+    }
+
+    #[test]
+    fn workflow_label_category_and_catalog_exclusion() {
+        let wf = Action::Workflow(vec![
+            WorkflowStep::TypeText("bite me".into()),
+            WorkflowStep::Delay { millis: 5000 },
+            WorkflowStep::PressKey(KeyCombo {
+                modifiers: 0,
+                key_code: 0x24, // Return
+                display: String::new(),
+            }),
+        ]);
+        assert_eq!(wf.label(), "Workflow (3 steps)");
+        assert_eq!(wf.category(), Category::Editing);
+        // Excluded from the default catalog like the other power-user actions.
+        assert!(Action::catalog().iter().all(|a| !matches!(a, Action::Workflow(_))));
+    }
+
+    #[test]
+    fn workflow_roundtrips_toml() {
+        let wf = Action::Workflow(vec![
+            WorkflowStep::TypeText("bite me".into()),
+            WorkflowStep::Delay { millis: 5000 },
+            WorkflowStep::PressKey(KeyCombo {
+                modifiers: KeyCombo::MOD_SHIFT,
+                key_code: 0x24,
+                display: "⇧↩".into(),
+            }),
+            WorkflowStep::RunShellCommand("echo done".into()),
+        ]);
+        let toml = toml::to_string(&wf).unwrap();
+        let back: Action = toml::from_str(&toml).unwrap();
+        assert_eq!(wf, back);
     }
 
     // ── Binding (merged model) serde routing ──────────────────────────────────
