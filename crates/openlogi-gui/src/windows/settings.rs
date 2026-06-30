@@ -18,8 +18,8 @@ pub(super) use gpui::{
     prelude::FluentBuilder, px, rgb,
 };
 pub(super) use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, IndexPath, Selectable, Sizable, Theme, ThemeColor,
-    ThemeMode, ThemeRegistry,
+    ActiveTheme, Disableable, Icon, IconName, IndexPath, Selectable, Sizable, TITLE_BAR_HEIGHT,
+    Theme, ThemeColor, ThemeMode, ThemeRegistry,
     button::{Button, ButtonGroup, ButtonVariants},
     group_box::GroupBoxVariant,
     h_flex,
@@ -247,7 +247,7 @@ pub fn open(cx: &mut App) {
 pub fn open_at(page: SettingsPage, cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.settings,
-        "Settings",
+        tr!("Settings"),
         Size::new(px(840.), px(600.)),
         move |window, cx| SettingsView::new(page, window, cx),
         cx,
@@ -261,12 +261,27 @@ impl Render for SettingsView {
 
         div()
             .size_full()
+            .relative()
             .bg(pal.bg)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
+            // Linux only: a client-side titlebar as an absolute overlay (with
+            // matching top padding) rather than a flex-column row — the
+            // `Settings` sidebar uses `h_resizable` percentage sizing, which a
+            // flex column would break. macOS / Windows keep their native titlebar.
+            .when(cfg!(target_os = "linux"), |this| {
+                this.pt(TITLE_BAR_HEIGHT).child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .child(windows::aux_title_bar(tr!("Settings"), cx)),
+                )
+            })
             .child(
                 // Outline group boxes give every page bordered cards (depth /
                 // definition that the flat Fill variant lacked); the hero /

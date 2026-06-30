@@ -8,7 +8,8 @@
 
 use gpui::{
     App, BorrowAppContext as _, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement,
-    ParentElement as _, Render, Size, Styled as _, Subscription, Window, div, px,
+    ParentElement as _, Render, Size, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -77,16 +78,23 @@ impl Render for UpdateConsentView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            .items_center()
-            .justify_center()
-            .gap_4()
-            .p_6()
+            .when(cfg!(target_os = "linux"), |this| {
+                this.child(windows::aux_title_bar(tr!("OpenLogi"), cx))
+            })
             .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(tr!("Check for updates?")),
-            )
+                v_flex()
+                    .flex_1()
+                    .w_full()
+                    .items_center()
+                    .justify_center()
+                    .gap_4()
+                    .p_6()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(tr!("Check for updates?")),
+                    )
             .child(
                 div()
                     .max_w(px(320.))
@@ -115,6 +123,7 @@ impl Render for UpdateConsentView {
                             .label(tr!("Enable"))
                             .on_click(|_, window, cx| answer(true, window, cx)),
                     ),
+            )
             )
     }
 }

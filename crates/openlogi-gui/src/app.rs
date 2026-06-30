@@ -7,7 +7,7 @@ use gpui::{
     img, point, prelude::FluentBuilder as _, px, relative, rgb, svg,
 };
 use gpui_component::{
-    Icon, IconName, Sizable as _,
+    Icon, IconName, Sizable as _, TitleBar,
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
     scroll::ScrollableElement as _,
@@ -341,7 +341,13 @@ impl Render for AppView {
             .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window());
+            .on_action(|_: &Zoom, window, _| window.zoom_window())
+            // Linux only: a client-side titlebar (window controls + drag region)
+            // on every frame, so the chrome is present from the first connecting
+            // frame on. macOS / Windows keep their native titlebar.
+            .when(cfg!(target_os = "linux"), |this| {
+                this.child(app_title_bar(pal))
+            });
 
         // The agent is the source of truth for both the permission state and
         // the device list; `AgentLink` is everything the GUI knows about it.
@@ -452,6 +458,25 @@ impl Render for AppView {
             .child(footer(pal, granted))
             .into_any_element()
     }
+}
+
+/// Client-side window titlebar: window controls (minimize / maximize / close on
+/// Linux + Windows), the drag region, and the app name centred. Replaces the
+/// native titlebar so Linux — where the compositor declines server-side
+/// decorations and gpui falls back to client-side ones it doesn't paint — still
+/// gets a titlebar and window controls. On macOS the widget reserves the
+/// traffic-light space.
+fn app_title_bar(pal: Palette) -> impl IntoElement {
+    TitleBar::new().child(
+        div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_sm()
+            .text_color(pal.text_muted)
+            .child("OpenLogi"),
+    )
 }
 
 /// Home (gallery) top bar: the "Devices" title, a Settings gear, and the

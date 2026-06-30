@@ -56,8 +56,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use backon::{BackoffBuilder, ExponentialBuilder};
 use gpui::{
-    AppContext, BorrowAppContext as _, Bounds, SharedString, Size, Styled, TitlebarOptions,
-    WindowBounds, WindowOptions, px,
+    AppContext, BorrowAppContext as _, Bounds, Size, Styled, WindowBounds, WindowOptions, px,
 };
 use gpui_component::{ActiveTheme, Root};
 use openlogi_core::brand::DeeplinkCommand;
@@ -559,11 +558,10 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
         // overlap; below this the model can't shrink further without crowding.
         window_min_size: Some(Size::new(px(720.), px(680.))),
         app_id: Some("openlogi".to_string()),
-        titlebar: Some(TitlebarOptions {
-            title: Some(SharedString::from("OpenLogi")),
-            appears_transparent: false,
-            traffic_light_position: None,
-        }),
+        // Linux: transparent chrome so `AppView::render` can draw a client-side
+        // `TitleBar` (the compositor declines server-side decorations and gpui's
+        // fallback is unpainted). macOS/Windows keep their native titlebar.
+        titlebar: Some(windows::titlebar_options("OpenLogi")),
         ..WindowOptions::default()
     }
 }
