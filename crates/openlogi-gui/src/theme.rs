@@ -142,7 +142,17 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
     // `System` branch below reads the *real* OS appearance rather than a stale
     // forced override.
     crate::platform::os::set_app_appearance(appearance);
-    let os_appearance = cx.window_appearance();
+    // Read the OS appearance from the window in hand (a borrow-free field read)
+    // rather than `cx.window_appearance()`. On Linux the latter routes through
+    // the platform client's `RefCell` (`with_common`), and this is called from
+    // the window-appearance observer, which gpui fires from inside its
+    // xdg-desktop-portal handler while that same `RefCell` is already borrowed —
+    // querying it there panics with "RefCell already borrowed". With no window
+    // (a settings edit), the platform query is safe and gives every window's
+    // shared appearance.
+    let os_appearance = window
+        .as_ref()
+        .map_or_else(|| cx.window_appearance(), |w| w.appearance());
 
     // Pull the chosen configs out of the registry before borrowing the Theme
     // mutably (both live as globals).
