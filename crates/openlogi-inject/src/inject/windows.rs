@@ -130,6 +130,23 @@ pub(super) fn execute(action: &Action) {
         | Action::HorizontalScrollLeft
         | Action::HorizontalScrollRight => post_scroll(action),
         Action::CustomShortcut(combo) => post_custom_shortcut(combo),
+        Action::TypeText(text) => {
+            tracing::warn!(
+                chars = text.chars().count(),
+                "TypeText injection is not implemented on Windows yet"
+            );
+        }
+        Action::RunAppleScript(_) => {
+            tracing::warn!("RunAppleScript is only supported on macOS");
+        }
+        Action::RunShellCommand(cmd) => {
+            let cmd = cmd.clone();
+            std::thread::spawn(move || {
+                let _ = std::process::Command::new("cmd")
+                    .args(["/C", &cmd])
+                    .output();
+            });
+        }
         Action::None => {}
     }
 }

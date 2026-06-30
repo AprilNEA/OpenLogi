@@ -110,6 +110,23 @@ pub(super) fn execute(action: &Action) {
             };
             press_key(&modifiers_to_keycodes(combo.modifiers), key);
         }
+        Action::TypeText(text) => {
+            tracing::warn!(
+                chars = text.chars().count(),
+                "TypeText injection is not implemented on Linux yet"
+            );
+        }
+        Action::RunAppleScript(_) => {
+            tracing::warn!("RunAppleScript is only supported on macOS");
+        }
+        Action::RunShellCommand(cmd) => {
+            let cmd = cmd.clone();
+            std::thread::spawn(move || {
+                let _ = std::process::Command::new("/bin/sh")
+                    .args(["-c", &cmd])
+                    .output();
+            });
+        }
     }
 }
 
