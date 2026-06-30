@@ -275,11 +275,8 @@ fn execute_macos(action: &Action) {
             }
             macos::post_key(combo.key_code, flags);
         }
-        // TypeText is fully implemented in the next task (needs post_unicode);
-        // until then it is a no-op so the enum match stays exhaustive.
-        Action::TypeText(_) => {
-            tracing::debug!("TypeText not yet implemented (post_unicode pending)");
-        }
+        // TypeText emits a unicode string, layout-independent.
+        Action::TypeText(text) => macos::post_unicode(text),
         // Run actions spawn off the tap thread: the callback must not block
         // (posting a key while waiting on a child process would wedge input).
         Action::RunAppleScript(src) => {
@@ -553,6 +550,31 @@ mod macos {
         };
         up.set_flags(flags);
         up.post(CGEventTapLocation::HID);
+    }
+
+    /// Type an arbitrary unicode string by emitting one key event per
+    /// character, each carrying its unicode payload via
+    /// `CGEventKeyboardSetUnicodeString`. The unicode string overrides the
+    /// keycode, so the layout-independent character is typed regardless of the
+    /// active keyboard layout. One event per char keeps the per-call UTF-16
+    /// length inside the API's limit.
+    pub(super) fn post_unicode(text: &str) {
+        let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+            tracing::warn!("CGEventSource::new failed for post_unicode");
+            return;
+        };
+        for ch in text.chars() {
+            // keycode 0 (A) is a placeholder — the unicode string set below
+            // determines what's actually typed. key=true; the unicode payload
+            // turns it into a text-insertion event.
+            let Ok(ev) = CGEvent::new_keyboard_event(src.clone(), 0, true) else {
+                tracing::warn!("CGEvent::new_keyboard_event failed in post_unicode");
+                continue;
+            };
+            let s = ch.to_string();
+            ev.set_string(&s);
+            ev.post(CGEventTapLocation::HID);
+        }
     }
 
     /// Post a media/system key event (play/pause, track navigation, volume).
