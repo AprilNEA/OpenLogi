@@ -12,6 +12,7 @@ use std::sync::{Arc, RwLock};
 use openlogi_core::binding::{
     Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
+use openlogi_core::config::{KeyModifiers, KeyTrigger};
 use openlogi_hid::CaptureChannel;
 use openlogi_hook::{EventDisposition, Hook, HookEvent, MouseEvent};
 use tracing::{info, warn};
@@ -37,6 +38,25 @@ pub struct HookMaps {
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
 /// (orchestrator), the OS-hook callback, and the gesture watcher.
 pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
+
+/// Shared keyboard trigger→action map for the function-key remapper. Unlike
+/// mouse bindings these are not per-app-profile (M1 scope — per the spec's
+/// non-goals), so a single map suffices. Keyed by the config `KeyTrigger`
+/// (keycode + modifiers).
+pub type SharedKeyboardBindings = Arc<RwLock<std::collections::HashMap<KeyTrigger, Action>>>;
+
+/// Convert the hook-layer modifier state into the config-layer type (the two
+/// live in different crates — core is leaf-level and duplicates the four
+/// bools). Drop-in identity once the field names align.
+fn convert_modifiers(m: openlogi_hook::KeyModifiers) -> KeyModifiers {
+    KeyModifiers {
+        shift: m.shift,
+        control: m.control,
+        option: m.option,
+        command: m.command,
+    }
+}
+
 
 /// Tracks which OS-hook button (Middle/Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
@@ -99,6 +119,7 @@ thread_local! {
 /// granted or on an unsupported platform — the app continues without crashing.
 pub fn start(
     hooks: SharedHookMaps,
+    keyboard_bindings: SharedKeyboardBindings,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture: CaptureChannel,
 ) -> Option<Hook> {
@@ -213,9 +234,28 @@ pub fn start(
         }
         MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
         },
-        // Keyboard events arrive once Task 6 wires them to [keyboard.bindings];
-        // for now they pass through inert so behavior is unchanged.
-        HookEvent::Key(_) => EventDisposition::PassThrough,
+        // Function-key remapper: on key-down, look up a [keyboard.bindings]
+        // entry for this keycode + modifier mask. A match fires its action
+        // (suppressing the original key so it doesn't also type / trigger its
+        // native function); an unmatched key passes through untouched. Key-up
+        // is ignored to avoid double-firing the action.
+        HookEvent::Key(openlogi_hook::KeyEvent { keycode, pressed, modifiers }) => {
+            if !pressed {
+                return EventDisposition::PassThrough;
+            }
+            let trigger = KeyTrigger {
+                keycode,
+                modifiers: convert_modifiers(modifiers),
+            };
+            match keyboard_bindings.read().ok().and_then(|m| m.get(&trigger).cloned()) {
+                Some(action) => {
+                    info!(keycode, action = %action.label(), "key → executing bound action");
+                    dispatch_action(&action, &dpi_cycle, &capture);
+                    EventDisposition::Suppress
+                }
+                None => EventDisposition::PassThrough,
+            }
+        }
     });
 
     match result {

@@ -54,6 +54,9 @@ pub struct SharedRuntime {
     /// rebuild publishes both atomically (see [`HookMaps`]). Also read by the
     /// gesture watcher for the thumb-wheel/DPI-button single actions.
     pub hook_maps: SharedHookMaps,
+    /// Function-key remapper bindings (keycode+modifiers → action). Not
+    /// per-app-profile in M1 (spec non-goal), so a single shared map.
+    pub keyboard_bindings: crate::hook_runtime::SharedKeyboardBindings,
     pub gesture_bindings: GestureBindings,
     pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
     pub thumbwheel_sensitivity: Arc<AtomicI32>,
@@ -102,6 +105,7 @@ impl Orchestrator {
     pub fn new(config: Config) -> Self {
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
+            keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
             gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
             dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
             thumbwheel_sensitivity: Arc::new(AtomicI32::new(
