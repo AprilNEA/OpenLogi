@@ -18,7 +18,7 @@ use core_graphics::event::{
 use foreign_types_shared::ForeignType as _;
 use tracing::{debug, error, warn};
 
-use crate::{ButtonId, EventDevice, EventDisposition, HookError, MouseEvent};
+use crate::{ButtonId, EventDevice, EventDisposition, HookError, HookEvent, MouseEvent};
 
 /// Everything `Hook` needs to control the background thread.
 pub(crate) struct HookInner {
@@ -410,7 +410,7 @@ fn usable_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
 
 /// Create the event tap and run loop on a dedicated thread.
 pub(crate) fn start(
-    cb: impl Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static,
+    cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
 ) -> Result<HookInner, HookError> {
     if !has_accessibility() {
         return Err(HookError::AccessibilityDenied);
@@ -418,7 +418,7 @@ pub(crate) fn start(
 
     // Wrap in Arc so the closure handed to CGEventTap::new captures it by
     // clone rather than by move — avoids a second Box allocation.
-    let cb: Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
+    let cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
 
     let (rl_tx, rl_rx) = mpsc::channel::<CFRunLoop>();
 
@@ -446,7 +446,7 @@ pub(crate) fn start(
     reason = "rl_tx must be owned: dropping it signals the parent's recv() to return Err on failure paths"
 )]
 fn thread_main(
-    cb: Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync>,
+    cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync>,
     rl_tx: mpsc::Sender<CFRunLoop>,
 ) {
     let event_types = vec![
@@ -476,7 +476,7 @@ fn thread_main(
             let Some(mouse_event) = translate(etype, event) else {
                 return CallbackResult::Keep;
             };
-            match cb(mouse_event) {
+            match cb(HookEvent::Mouse(mouse_event)) {
                 EventDisposition::PassThrough => CallbackResult::Keep,
                 EventDisposition::Suppress => CallbackResult::Drop,
             }

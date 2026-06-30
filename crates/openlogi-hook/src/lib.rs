@@ -42,6 +42,39 @@ pub struct EventDevice {
     pub product_name: Option<String>,
 }
 
+/// Which modifier keys were held when a key event fired. Mirrors the
+/// detectable macOS modifier flags. Note `Fn` is deliberately absent — it is
+/// firmware-internal and never reported on non-function-row keys (see the
+/// function-key-remapper spec, Appendix A).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct KeyModifiers {
+    pub shift: bool,
+    pub control: bool,
+    pub option: bool,
+    pub command: bool,
+}
+
+/// A keyboard event observed by the hook.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyEvent {
+    /// Platform virtual keycode (macOS: `kVK_*`, e.g. 122 = F1, 53 = Escape).
+    pub keycode: u16,
+    /// `true` = key down; `false` = key up.
+    pub pressed: bool,
+    /// Which modifiers were held.
+    pub modifiers: KeyModifiers,
+}
+
+/// Anything the OS hook can observe. `Mouse` preserves the existing callback
+/// payload; `Key` is the keyboard path added by the function-key remapper.
+/// Wrapping both in a union means `Hook::start`'s callback widens once and
+/// stays stable as further event classes arrive.
+#[derive(Clone, Debug)]
+pub enum HookEvent {
+    Mouse(MouseEvent),
+    Key(KeyEvent),
+}
+
 /// An event captured at the OS layer.
 #[derive(Clone, Debug)]
 pub enum MouseEvent {
@@ -188,7 +221,7 @@ impl Hook {
     /// [`HookError::NoDeviceFound`] when no mouse device is accessible. On
     /// Windows, installs a `WH_MOUSE_LL` low-level mouse hook.
     pub fn start(
-        cb: impl Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static,
+        cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
     ) -> Result<Self, HookError> {
         #[cfg(target_os = "macos")]
         {

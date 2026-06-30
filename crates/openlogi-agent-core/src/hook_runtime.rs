@@ -13,7 +13,7 @@ use openlogi_core::binding::{
     Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
 use openlogi_hid::CaptureChannel;
-use openlogi_hook::{EventDisposition, Hook, MouseEvent};
+use openlogi_hook::{EventDisposition, Hook, HookEvent, MouseEvent};
 use tracing::{info, warn};
 
 use crate::DpiCycleState;
@@ -113,6 +113,7 @@ pub fn start(
     // The per-hold pointer accumulator lives in the thread-local `HOLD`; the
     // callback must never block — see the freeze-hazard note in `macos.rs`.
     let result = Hook::start(move |event| match event {
+        HookEvent::Mouse(mouse_event) => match mouse_event {
         MouseEvent::Button { id, pressed } => {
             // The CGEventTap only sees standard buttons 0-4. We remap
             // Middle/Back/Forward; the primary L/R clicks always pass through
@@ -211,6 +212,10 @@ pub fn start(
             EventDisposition::PassThrough
         }
         MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
+        },
+        // Keyboard events arrive once Task 6 wires them to [keyboard.bindings];
+        // for now they pass through inert so behavior is unchanged.
+        HookEvent::Key(_) => EventDisposition::PassThrough,
     });
 
     match result {
