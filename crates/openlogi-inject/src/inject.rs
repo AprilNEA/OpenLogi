@@ -275,6 +275,29 @@ fn execute_macos(action: &Action) {
             }
             macos::post_key(combo.key_code, flags);
         }
+        // TypeText is fully implemented in the next task (needs post_unicode);
+        // until then it is a no-op so the enum match stays exhaustive.
+        Action::TypeText(_) => {
+            tracing::debug!("TypeText not yet implemented (post_unicode pending)");
+        }
+        // Run actions spawn off the tap thread: the callback must not block
+        // (posting a key while waiting on a child process would wedge input).
+        Action::RunAppleScript(src) => {
+            let src = src.clone();
+            std::thread::spawn(move || {
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", &src])
+                    .output();
+            });
+        }
+        Action::RunShellCommand(cmd) => {
+            let cmd = cmd.clone();
+            std::thread::spawn(move || {
+                let _ = std::process::Command::new("/bin/sh")
+                    .args(["-c", &cmd])
+                    .output();
+            });
+        }
     }
 }
 

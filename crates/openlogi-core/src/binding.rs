@@ -481,6 +481,14 @@ pub enum Action {
     /// The `display` field is used by [`Action::label`] so the popover
     /// shows the user-friendly chord name.
     CustomShortcut(KeyCombo),
+    /// Type an arbitrary string by emitting unicode characters (macOS
+    /// `CGEventKeyboardSetUnicodeString`). Used for macro text. Power-user
+    /// escape hatch — excluded from the default catalog.
+    TypeText(String),
+    /// Run an AppleScript via `osascript -e <source>`. Power-user escape hatch.
+    RunAppleScript(String),
+    /// Run a shell command via `/bin/sh -c <command>`. Power-user escape hatch.
+    RunShellCommand(String),
 }
 
 /// A modifier + virtual-key keystroke captured by the P1.3 recorder UI or
@@ -723,6 +731,9 @@ impl Action {
             Action::HorizontalScrollLeft => "Scroll Left".into(),
             Action::HorizontalScrollRight => "Scroll Right".into(),
             Action::CustomShortcut(combo) => combo.rendered_label(),
+            Action::TypeText(s) => format!("Type \"{s}\"").into(),
+            Action::RunAppleScript(_) => "Run AppleScript".into(),
+            Action::RunShellCommand(_) => "Run Command".into(),
         }
     }
 
@@ -745,7 +756,10 @@ impl Action {
             | Action::SelectAll
             | Action::Find
             | Action::Save
-            | Action::CustomShortcut(_) => Category::Editing,
+            | Action::CustomShortcut(_)
+            | Action::TypeText(_)
+            | Action::RunAppleScript(_)
+            | Action::RunShellCommand(_) => Category::Editing,
             Action::BrowserBack
             | Action::BrowserForward
             | Action::NewTab
@@ -953,6 +967,39 @@ mod tests {
                 !matches!(action, Action::CustomShortcut(_)),
                 "catalog must not contain CustomShortcut"
             );
+        }
+    }
+
+    #[test]
+    fn power_user_action_labels_and_category() {
+        assert_eq!(Action::TypeText("hi".into()).label(), "Type \"hi\"");
+        assert_eq!(Action::RunAppleScript("osascript".into()).label(), "Run AppleScript");
+        assert_eq!(Action::RunShellCommand("echo hi".into()).label(), "Run Command");
+        // All three are power-user escape hatches: classed as Editing so a
+        // hand-authored binding has a home group, but never in the default
+        // catalog (asserted below).
+        assert_eq!(Action::TypeText("x".into()).category(), Category::Editing);
+        assert_eq!(Action::RunAppleScript("x".into()).category(), Category::Editing);
+        assert_eq!(Action::RunShellCommand("x".into()).category(), Category::Editing);
+    }
+
+    #[test]
+    fn power_user_actions_excluded_from_catalog() {
+        let cat = Action::catalog();
+        assert!(cat.iter().all(|a| !matches!(a,
+            Action::TypeText(_) | Action::RunAppleScript(_) | Action::RunShellCommand(_))));
+    }
+
+    #[test]
+    fn power_user_actions_roundtrip_toml() {
+        for action in [
+            Action::TypeText("hello".into()),
+            Action::RunAppleScript("beep".into()),
+            Action::RunShellCommand("date".into()),
+        ] {
+            let toml = toml::to_string(&action).unwrap();
+            let back: Action = toml::from_str(&toml).unwrap();
+            assert_eq!(action, back);
         }
     }
 
