@@ -161,6 +161,24 @@ mod tests {
     }
 
     #[test]
+    fn thumbwheel_tap_is_off_by_default_but_preserves_explicit_actions() {
+        let mut cfg = Config::default();
+        let projected = bindings_for(&cfg, Some("2b042"), None);
+        assert_eq!(projected.get(&ButtonId::Thumbwheel), Some(&Action::None));
+
+        cfg.set_binding(
+            "2b042",
+            ButtonId::Thumbwheel,
+            Binding::Single(Action::AppExpose),
+        );
+        let projected = bindings_for(&cfg, Some("2b042"), None);
+        assert_eq!(
+            projected.get(&ButtonId::Thumbwheel),
+            Some(&Action::AppExpose)
+        );
+    }
+
+    #[test]
     fn oshook_gestures_collects_only_os_hook_gesture_buttons() {
         let mut cfg = Config::default();
         // A gesture-mode Back (an OS-hook button) — included, raw map preserved.

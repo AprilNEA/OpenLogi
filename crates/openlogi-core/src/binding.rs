@@ -25,10 +25,9 @@ pub enum ButtonId {
     /// The "ModeShift" button under the wheel — typically used for SmartShift /
     /// DPI cycle. Named `DpiToggle` for historical reasons.
     DpiToggle,
-    /// The horizontal thumb wheel's click. Kept in [`ButtonId::ALL`] so its
-    /// default still seeds and dispatches when the wheel is diverted, even
-    /// though the mouse model surfaces the two rotation directions instead of
-    /// the click (see `mouse_model::geometry`).
+    /// The horizontal thumb wheel's capacitive single-tap gesture. Kept
+    /// separate from its two rotation directions because HID++ reports all
+    /// three independently while the wheel is diverted.
     Thumbwheel,
     /// Rotating the thumb wheel "up" (positive rotation). Bound, by default, to
     /// continuous horizontal scroll; see the agent-core `watchers`-side dispatch.
@@ -79,7 +78,7 @@ impl ButtonId {
             ButtonId::Back => "Back",
             ButtonId::Forward => "Forward",
             ButtonId::DpiToggle => "DPI Toggle",
-            ButtonId::Thumbwheel => "Thumb Wheel",
+            ButtonId::Thumbwheel => "Thumb Wheel Tap",
             ButtonId::ThumbwheelScrollUp => "Thumb Wheel Up",
             ButtonId::ThumbwheelScrollDown => "Thumb Wheel Down",
             ButtonId::GestureButton => "Gesture Button",
@@ -843,11 +842,10 @@ impl Action {
 
 /// Sensible defaults for a fresh device so the panel isn't empty on first run.
 ///
-/// Thumbwheel / GestureButton defaults match what Logi Options+ ships for
-/// MX-line devices: thumb wheel click → App Exposé, gesture button →
-/// Mission Control. The thumb wheel isn't captured yet; the dedicated gesture button is
-/// (per-direction, see [`default_gesture_binding`]). The bindings persist
-/// regardless so the user only configures once.
+/// The capacitive thumb-wheel tap defaults to no action because ordinary
+/// rotation-and-release can be reported as a single tap by some devices.
+/// Rotation still defaults to horizontal scrolling, while the dedicated
+/// gesture button defaults to Mission Control.
 ///
 /// `GestureButton`'s entry here is vestigial: in the merged [`Binding`] model
 /// the gesture button defaults to [`Binding::Gesture`] (see
@@ -863,7 +861,7 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::Back => Action::BrowserBack,
         ButtonId::Forward => Action::BrowserForward,
         ButtonId::DpiToggle => Action::CycleDpiPresets,
-        ButtonId::Thumbwheel => Action::AppExpose,
+        ButtonId::Thumbwheel => Action::None,
         // The thumb wheel scrolls horizontally by default: rotating it produces
         // continuous horizontal scroll, with "up" → right and "down" → left.
         // The wheel watcher renders these two actions as smooth, sensitivity-
@@ -1406,5 +1404,10 @@ mod tests {
             default_binding(ButtonId::DpiToggle),
             Action::CycleDpiPresets
         );
+    }
+
+    #[test]
+    fn thumbwheel_tap_defaults_to_do_nothing() {
+        assert_eq!(default_binding(ButtonId::Thumbwheel), Action::None);
     }
 }
