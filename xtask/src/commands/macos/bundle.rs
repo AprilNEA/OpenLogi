@@ -57,6 +57,14 @@ fn write_icns(master: &Path, output: &Path) -> Result<()> {
 }
 
 pub(crate) fn run() -> Result<()> {
+    run_with_profile(BundleProfile::Local)
+}
+
+pub(crate) fn run_for_distribution(sign_identity: Option<&str>) -> Result<()> {
+    run_with_profile(BundleProfile::Distribution { sign_identity })
+}
+
+fn run_with_profile(profile: BundleProfile<'_>) -> Result<()> {
     let root = repo_root()?;
     let sh = Shell::new()?;
     let _repo = sh.push_dir(&root);
@@ -95,12 +103,41 @@ pub(crate) fn run() -> Result<()> {
             .envs(xcode_env.iter().map(|(key, value)| (key, value)))
             .run()?;
     }
+    remove_cargo_bundle_dmg(&root)?;
 
     let app = root.join("target/release/bundle/osx/OpenLogi.app");
     ensure_dir(&app)?;
     embed_agent_helper(&root, &app, &xcode_env)?;
+    match profile {
+        BundleProfile::Local => {
+            stamp_local_bundle_identity(&app)?;
+            local_sign_app_if_available()?;
+        }
+        BundleProfile::Distribution { sign_identity } => {
+            if let Some(identity) = sign_identity {
+                sign_app_with_timestamp(identity, TimestampMode::Secure)?;
+            }
+        }
+    }
     println!();
     println!("Bundle ready: {}", app.display());
+    Ok(())
+}
+
+enum BundleProfile<'a> {
+    Local,
+    Distribution { sign_identity: Option<&'a str> },
+}
+
+fn remove_cargo_bundle_dmg(root: &Path) -> Result<()> {
+    let dmg = root.join("target/release/bundle/dmg/OpenLogi.dmg");
+    if dmg.exists() {
+        fs_err::remove_file(&dmg)
+            .with_context(|| format!("could not remove stale {}", dmg.display()))?;
+        println!(
+            "    removed cargo-bundle DMG before helper embedding; use `macos package` for a DMG"
+        );
+    }
     Ok(())
 }
 
@@ -177,7 +214,81 @@ fn xcode_env() -> Result<Vec<(String, String)>> {
     ])
 }
 
-pub(crate) fn sign_app(identity: &str) -> Result<()> {
+fn stamp_local_bundle_identity(app: &Path) -> Result<()> {
+    println!("==> local bundle identity");
+    let app_info = app.join("Contents/Info.plist");
+    stamp_plist_strings(
+        &app_info,
+        &[
+            ("CFBundleDisplayName", "OpenLogi Dev"),
+            ("CFBundleIdentifier", "org.openlogi.openlogi.dev"),
+            ("CFBundleName", "OpenLogi Dev"),
+        ],
+    )?;
+
+    let helper_info = app.join("Contents/Library/LoginItems/OpenLogiAgent.app/Contents/Info.plist");
+    if helper_info.exists() {
+        stamp_plist_strings(
+            &helper_info,
+            &[
+                ("CFBundleDisplayName", "OpenLogi Agent Dev"),
+                ("CFBundleIdentifier", "org.openlogi.agent.dev"),
+                ("CFBundleName", "OpenLogi Agent Dev"),
+            ],
+        )?;
+    }
+
+    println!("    stamped local IDs: org.openlogi.openlogi.dev / org.openlogi.agent.dev");
+    Ok(())
+}
+
+fn stamp_plist_strings(info_plist: &Path, entries: &[(&str, &str)]) -> Result<()> {
+    let mut plist = Value::from_file(info_plist)
+        .with_context(|| format!("could not read {}", info_plist.display()))?;
+    let dict = plist
+        .as_dictionary_mut()
+        .with_context(|| format!("{} is not a plist dictionary", info_plist.display()))?;
+    for (key, value) in entries {
+        dict.insert((*key).into(), Value::String((*value).to_string()));
+    }
+    plist
+        .to_file_xml(info_plist)
+        .with_context(|| format!("could not write {}", info_plist.display()))
+}
+
+fn local_sign_app_if_available() -> Result<()> {
+    if env::var("OPENLOGI_LOCAL_CODESIGN").as_deref() == Ok("0") {
+        println!("==> local codesign: skipped (OPENLOGI_LOCAL_CODESIGN=0)");
+        return Ok(());
+    }
+
+    if let Some(identity) = env_nonempty("OPENLOGI_SIGN_IDENTITY") {
+        sign_app_with_timestamp(&identity, TimestampMode::Secure)?;
+        return Ok(());
+    }
+
+    if let Some(identity) = env_nonempty("OPENLOGI_LOCAL_CODESIGN_IDENTITY") {
+        sign_app_with_timestamp(&identity, TimestampMode::None)?;
+        return Ok(());
+    }
+
+    if let Some(identity) = first_apple_development_identity()? {
+        sign_app_with_timestamp(&identity, TimestampMode::None)?;
+        return Ok(());
+    }
+
+    println!(
+        "==> local codesign: skipped (no Apple Development identity found; \
+         set OPENLOGI_LOCAL_CODESIGN_IDENTITY or OPENLOGI_SIGN_IDENTITY to sign)"
+    );
+    println!(
+        "    warning: unsigned/ad-hoc local bundles with production bundle IDs can \
+         make macOS Accessibility grants appear stale or missing"
+    );
+    Ok(())
+}
+
+fn sign_app_with_timestamp(identity: &str, timestamp: TimestampMode) -> Result<()> {
     let sh = Shell::new()?;
     let app = repo_root()?.join("target/release/bundle/osx/OpenLogi.app");
     let helper = app.join("Contents/Library/LoginItems/OpenLogiAgent.app");
@@ -188,9 +299,9 @@ pub(crate) fn sign_app(identity: &str) -> Result<()> {
     // stable, separately-signed helper identity is exactly what lets the agent's
     // Accessibility (TCC) grant persist across updates. So sign each explicitly.
     if helper.exists() {
-        codesign_runtime(identity, &helper)?;
+        codesign_runtime(identity, &helper, timestamp)?;
     }
-    codesign_runtime(identity, &app)?;
+    codesign_runtime(identity, &app, timestamp)?;
     cmd!(sh, "codesign --verify --strict {app}").run()?;
     if helper.exists() {
         cmd!(sh, "codesign --verify --strict {helper}").run()?;
@@ -198,13 +309,52 @@ pub(crate) fn sign_app(identity: &str) -> Result<()> {
     Ok(())
 }
 
-/// Sign one bundle with the hardened runtime + a secure timestamp.
-fn codesign_runtime(identity: &str, target: &Path) -> Result<()> {
+/// Sign one bundle with the hardened runtime and the requested timestamp mode.
+fn codesign_runtime(identity: &str, target: &Path, timestamp: TimestampMode) -> Result<()> {
     let sh = Shell::new()?;
-    cmd!(
-        sh,
-        "codesign --force --options runtime --timestamp --sign {identity} {target}"
-    )
-    .run()?;
+    match timestamp {
+        TimestampMode::Secure => {
+            cmd!(
+                sh,
+                "codesign --force --options runtime --timestamp --sign {identity} {target}"
+            )
+            .run()?;
+        }
+        TimestampMode::None => {
+            cmd!(
+                sh,
+                "codesign --force --options runtime --timestamp=none --sign {identity} {target}"
+            )
+            .run()?;
+        }
+    }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum TimestampMode {
+    Secure,
+    None,
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+fn first_apple_development_identity() -> Result<Option<String>> {
+    let sh = Shell::new()?;
+    let output = match cmd!(sh, "security find-identity -v -p codesigning").read() {
+        Ok(output) => output,
+        Err(_) => return Ok(None),
+    };
+    Ok(output
+        .lines()
+        .filter_map(quoted_identity)
+        .find(|identity| identity.starts_with("Apple Development:")))
+}
+
+fn quoted_identity(line: &str) -> Option<String> {
+    let start = line.find('"')? + 1;
+    let end = line[start..].find('"')?;
+    Some(line[start..start + end].to_string())
 }

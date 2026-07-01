@@ -11,14 +11,21 @@
 //! On Windows `$HOME` falls back to `%USERPROFILE%`, so paths resolve to
 //! `%USERPROFILE%\.config\openlogi` etc. — best-effort until a real Windows
 //! port lands.
+//!
+//! Local packaged macOS builds stamped with `.dev` bundle identifiers use the
+//! same layout under an `openlogi-dev` app directory.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use etcetera::{BaseStrategy, base_strategy::Xdg};
 use thiserror::Error;
 
-/// Subdirectory created under each XDG base directory.
+/// Production subdirectory created under each XDG base directory.
 const APP_DIR: &str = "openlogi";
+/// Local macOS `.dev` bundles use a separate profile so development agents
+/// cannot take over the installed app's socket, lock, config, or asset cache.
+const DEV_APP_DIR: &str = "openlogi-dev";
 
 #[derive(Debug, Error)]
 pub enum PathsError {
@@ -28,6 +35,57 @@ pub enum PathsError {
 
 fn xdg() -> Result<Xdg, PathsError> {
     Xdg::new().map_err(|_| PathsError::HomeNotFound)
+}
+
+fn app_dir() -> &'static str {
+    static IS_DEV_PROFILE: OnceLock<bool> = OnceLock::new();
+    if *IS_DEV_PROFILE.get_or_init(is_dev_profile) {
+        DEV_APP_DIR
+    } else {
+        APP_DIR
+    }
+}
+
+fn is_dev_profile() -> bool {
+    match std::env::var("OPENLOGI_PROFILE") {
+        Ok(value) if value == "dev" => return true,
+        Ok(value) if matches!(value.as_str(), "prod" | "production") => return false,
+        _ => {}
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(identifier) = current_bundle_identifier() {
+            return identifier.ends_with(".dev");
+        }
+    }
+
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn current_bundle_identifier() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    for ancestor in exe.ancestors() {
+        if ancestor.extension().and_then(|ext| ext.to_str()) != Some("app") {
+            continue;
+        }
+
+        let info = ancestor.join("Contents/Info.plist");
+        let Ok(plist) = plist::Value::from_file(info) else {
+            continue;
+        };
+        let Some(identifier) = plist
+            .as_dictionary()
+            .and_then(|dictionary| dictionary.get("CFBundleIdentifier"))
+            .and_then(plist::Value::as_string)
+        else {
+            continue;
+        };
+        return Some(identifier.to_owned());
+    }
+
+    None
 }
 
 /// The raw XDG config home directory (without the `openlogi` subdirectory).
@@ -42,8 +100,9 @@ pub fn xdg_config_home() -> Result<PathBuf, PathsError> {
 /// Directory holding the user's `config.toml`.
 ///
 /// `$XDG_CONFIG_HOME/openlogi`, default `~/.config/openlogi`.
+/// Local macOS `.dev` bundles use `openlogi-dev` instead.
 pub fn config_dir() -> Result<PathBuf, PathsError> {
-    Ok(xdg_config_home()?.join(APP_DIR))
+    Ok(xdg_config_home()?.join(app_dir()))
 }
 
 /// Full path to the user config file.
@@ -55,16 +114,18 @@ pub fn config_path() -> Result<PathBuf, PathsError> {
 /// lives under `data_dir()/assets`.
 ///
 /// `$XDG_DATA_HOME/openlogi`, default `~/.local/share/openlogi`.
+/// Local macOS `.dev` bundles use `openlogi-dev` instead.
 pub fn data_dir() -> Result<PathBuf, PathsError> {
-    Ok(xdg()?.data_dir().join(APP_DIR))
+    Ok(xdg()?.data_dir().join(app_dir()))
 }
 
 /// Directory for runtime sockets — the background agent's IPC endpoint.
 pub fn runtime_dir() -> Result<PathBuf, PathsError> {
     let xdg = xdg()?;
-    Ok(xdg
-        .runtime_dir()
-        .map_or_else(|| xdg.config_dir().join(APP_DIR), |dir| dir.join(APP_DIR)))
+    Ok(xdg.runtime_dir().map_or_else(
+        || xdg.config_dir().join(app_dir()),
+        |dir| dir.join(app_dir()),
+    ))
 }
 
 /// Path to the background agent's Unix-domain IPC socket: the GUI connects here

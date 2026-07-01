@@ -275,6 +275,63 @@ fn execute_macos(action: &Action) {
             }
             macos::post_key(combo.key_code, flags);
         }
+        // TypeText emits a unicode string, layout-independent.
+        Action::TypeText(text) => macos::post_unicode(text),
+        // Run actions spawn off the tap thread: the callback must not block
+        // (posting a key while waiting on a child process would wedge input).
+        Action::RunAppleScript(src) => {
+            let src = src.clone();
+            std::thread::spawn(move || {
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", &src])
+                    .output();
+            });
+        }
+        Action::RunShellCommand(cmd) => {
+            let cmd = cmd.clone();
+            std::thread::spawn(move || {
+                let _ = std::process::Command::new("/bin/sh")
+                    .args(["-c", &cmd])
+                    .output();
+            });
+        }
+        // A workflow runs its steps in order with Delay pauses between them,
+        // so it must run off the tap thread — same rule as the Run actions.
+        Action::Workflow(steps) => {
+            let steps = steps.clone();
+            std::thread::spawn(move || run_workflow(&steps));
+        }
+    }
+}
+
+/// Run a workflow's steps in order, awaiting `Delay`s. Reuses the same
+/// primitives the standalone actions use: `post_unicode` (TypeText),
+/// `post_key` (PressKey), and spawned processes for the Run steps. Runs on a
+/// dedicated worker thread (the caller spawns it) so the blocking `Delay`
+/// sleeps never stall the event tap.
+#[cfg(target_os = "macos")]
+fn run_workflow(steps: &[openlogi_core::binding::WorkflowStep]) {
+    use openlogi_core::binding::WorkflowStep;
+    for step in steps {
+        match step {
+            WorkflowStep::TypeText(text) => macos::post_unicode(text),
+            WorkflowStep::PressKey(combo) => {
+                macos::post_keycombo(combo.modifiers, combo.key_code);
+            }
+            WorkflowStep::Delay { millis } => {
+                std::thread::sleep(std::time::Duration::from_millis(*millis));
+            }
+            WorkflowStep::RunAppleScript(src) => {
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", src])
+                    .output();
+            }
+            WorkflowStep::RunShellCommand(cmd) => {
+                let _ = std::process::Command::new("/bin/sh")
+                    .args(["-c", cmd])
+                    .output();
+            }
+        }
     }
 }
 
@@ -530,6 +587,51 @@ mod macos {
         };
         up.set_flags(flags);
         up.post(CGEventTapLocation::HID);
+    }
+
+    /// Type an arbitrary unicode string by emitting one key event per
+    /// character, each carrying its unicode payload via
+    /// `CGEventKeyboardSetUnicodeString`. The unicode string overrides the
+    /// keycode, so the layout-independent character is typed regardless of the
+    /// active keyboard layout. One event per char keeps the per-call UTF-16
+    /// length inside the API's limit.
+    pub(super) fn post_unicode(text: &str) {
+        let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+            tracing::warn!("CGEventSource::new failed for post_unicode");
+            return;
+        };
+        for ch in text.chars() {
+            // keycode 0 (A) is a placeholder — the unicode string set below
+            // determines what's actually typed. key=true; the unicode payload
+            // turns it into a text-insertion event.
+            let Ok(ev) = CGEvent::new_keyboard_event(src.clone(), 0, true) else {
+                tracing::warn!("CGEvent::new_keyboard_event failed in post_unicode");
+                continue;
+            };
+            let s = ch.to_string();
+            ev.set_string(&s);
+            ev.post(CGEventTapLocation::HID);
+        }
+    }
+
+    /// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
+    /// keycode. Used by the workflow sequencer's `PressKey` step (and mirrors
+    /// the `CustomShortcut` arm's flag construction so the two never drift).
+    pub(super) fn post_keycombo(modifiers: u8, vk: u16) {
+        let mut flags = CGEventFlags::CGEventFlagNull;
+        if modifiers & openlogi_core::binding::KeyCombo::MOD_CMD != 0 {
+            flags |= CGEventFlags::CGEventFlagCommand;
+        }
+        if modifiers & openlogi_core::binding::KeyCombo::MOD_SHIFT != 0 {
+            flags |= CGEventFlags::CGEventFlagShift;
+        }
+        if modifiers & openlogi_core::binding::KeyCombo::MOD_CTRL != 0 {
+            flags |= CGEventFlags::CGEventFlagControl;
+        }
+        if modifiers & openlogi_core::binding::KeyCombo::MOD_OPTION != 0 {
+            flags |= CGEventFlags::CGEventFlagAlternate;
+        }
+        post_key(vk, flags);
     }
 
     /// Post a media/system key event (play/pause, track navigation, volume).

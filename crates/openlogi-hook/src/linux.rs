@@ -28,7 +28,7 @@ use x11rb::properties::WmClass;
 use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, Window};
 use x11rb::rust_connection::RustConnection;
 
-use crate::{ButtonId, EventDisposition, HookError, MouseEvent};
+use crate::{ButtonId, EventDisposition, HookError, HookEvent, MouseEvent};
 
 /// Name stamped on every uinput pass-through device; used to skip those
 /// devices during enumeration so we don't hook our own virtual mice.
@@ -46,7 +46,7 @@ pub(crate) struct HookInner {
 }
 
 pub(crate) fn start(
-    cb: impl Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static,
+    cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
 ) -> Result<HookInner, HookError> {
     let devices = find_mouse_devices();
     if devices.is_empty() {
@@ -54,7 +54,7 @@ pub(crate) fn start(
     }
 
     let stop = Arc::new(AtomicBool::new(false));
-    let cb: Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
+    let cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
     let mut threads: Vec<thread::JoinHandle<()>> = Vec::with_capacity(devices.len());
     let mut stop_pipes: Vec<OwnedFd> = Vec::with_capacity(devices.len());
 
@@ -292,7 +292,7 @@ fn device_thread(
     path: std::path::PathBuf,
     mut device: Device,
     mut virtual_device: VirtualDevice,
-    cb: Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync>,
+    cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync>,
     stop: Arc<AtomicBool>,
     stop_rx: OwnedFd,
 ) {
@@ -356,7 +356,7 @@ fn device_thread(
                 }
             } else {
                 let disposition = match translate(&event, hires_scroll) {
-                    Some(me) => cb(me),
+                    Some(me) => cb(HookEvent::Mouse(me)),
                     // Low-res companions (REL_WHEEL/REL_HWHEEL) must be suppressed when hi-res
                     // is active — passing them through would double the scroll distance.
                     None if hires_scroll

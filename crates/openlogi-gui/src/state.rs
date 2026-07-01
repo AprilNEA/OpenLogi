@@ -17,7 +17,9 @@
 use std::collections::BTreeMap;
 
 use gpui::{App, Global};
-use openlogi_core::config::{AppSettings, Appearance, Config, DeviceIdentity, Lighting};
+use openlogi_core::config::{
+    AppSettings, Appearance, Config, DeviceIdentity, KeyTrigger, Lighting,
+};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     DeviceRoute, DpiCapabilities, DpiInfo, SmartShiftMode, SmartShiftStatus, WriteError,
@@ -281,6 +283,12 @@ pub struct AppState {
     ///
     /// [`DeviceConfig::bindings`]: openlogi_core::config::DeviceConfig::bindings
     pub gesture_bindings: BTreeMap<GestureDirection, Action>,
+    /// Global keyboard F-key bindings (Esc + F1-F19). Device-agnostic — one
+    /// map applies across all keyboards — so, unlike [`Self::button_bindings`],
+    /// this is *not* reloaded on device switch. Seeded once from
+    /// [`Config::keyboard`] and kept in sync via [`Self::commit_keyboard_binding`].
+    /// Sorted (`BTreeMap`) for stable render order in the function-row view.
+    pub keyboard_bindings: BTreeMap<KeyTrigger, Action>,
     pub dpi: u32,
     /// DPI capability load state keyed by [`DeviceRecord::config_key`]. Loaded
     /// lazily because HID++ reads must not block device switching or rendering.
@@ -351,6 +359,7 @@ impl AppState {
             agent_link: AgentLink::Connecting,
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),
+            keyboard_bindings: BTreeMap::new(),
             dpi: DEFAULT_DPI,
             dpi_data: LazyDeviceData::default(),
             inventory_misses: BTreeMap::new(),
@@ -363,6 +372,15 @@ impl AppState {
         };
         state.button_bindings = state.bindings_for_current();
         state.gesture_bindings = state.gesture_bindings_for_current();
+        // Keyboard bindings are global, so they seed straight from the config
+        // map — no per-device resolution like mouse bindings above.
+        state.keyboard_bindings = state
+            .config
+            .keyboard
+            .bindings
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         state
     }
 
@@ -1233,6 +1251,24 @@ impl AppState {
             .set_binding(&key, button, Binding::Single(action));
         // The agent owns the hook; have it rebuild its live map from config.
         self.persist_and_reload("binding");
+    }
+
+    /// Records (or, with `action = None`, clears) the F-key `trigger` binding
+    /// in the global `[keyboard]` map. Mirrors [`Self::commit_binding`] minus
+    /// the device key — keyboard bindings are device-agnostic, so there's no
+    /// `current_record()` dependency. The agent's `rebuild()` republishes its
+    /// shared keyboard map on `reload_config`, so this lands live.
+    pub fn commit_keyboard_binding(&mut self, trigger: KeyTrigger, action: Option<Action>) {
+        match action {
+            Some(ref a) => {
+                self.keyboard_bindings.insert(trigger.clone(), a.clone());
+            }
+            None => {
+                self.keyboard_bindings.remove(&trigger);
+            }
+        }
+        self.config.set_keyboard_binding(trigger, action);
+        self.persist_and_reload("keyboard binding");
     }
 
     fn bindings_for_current(&self) -> BTreeMap<ButtonId, Action> {

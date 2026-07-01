@@ -38,11 +38,11 @@ use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
 /// Floor width for the [`action_picker`] popover. The action labels drive the
 /// actual width; this only stops the list from collapsing too narrow. Matches
 /// gpui-component's own `PopupMenu` floor (`min_w(rems(8.))`).
-const POPOVER_W: f32 = 128.;
+pub(crate) const POPOVER_W: f32 = 128.;
 
 /// Cap the scrollable action list height. The catalog has 29+ entries across
 /// half a dozen categories; without a cap the list overflows the window.
-const POPOVER_LIST_MAX_H: f32 = 360.;
+pub(crate) const POPOVER_LIST_MAX_H: f32 = 360.;
 
 /// Build the popover body that re-binds a single `btn`.
 ///
@@ -115,7 +115,7 @@ pub fn gesture_overview(
 /// card uses `rounded_lg` (8px). The shadow is gpui's soft `shadow_md`, not a
 /// hard drop. Not stateful (no interaction → no element id, so two sibling cards
 /// can't collide on one).
-fn menu_card(pal: Palette) -> gpui::Div {
+pub(crate) fn menu_card(pal: Palette) -> gpui::Div {
     v_flex()
         .bg(pal.surface)
         .border_1()
@@ -268,11 +268,11 @@ fn flyout_card(
 /// Commit callback invoked when a row is clicked. Boxed so the row builder can
 /// be shared between the button picker and any future custom picker, which
 /// differ only in what they do after committing.
-type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
+pub(crate) type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
 
 /// The action catalog grouped by [`Category`], preserving catalog order within
 /// each group and first-seen order across groups.
-fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
+pub(crate) fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
     let mut sections: Vec<(Category, Vec<Action>)> = Vec::new();
     for action in Action::catalog() {
         let cat = action.category();
@@ -340,6 +340,12 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
         Action::CustomShortcut(_) => "action-icons/keyboard.svg",
+        // Power-user actions (M1 function-key remapper). These carry payload,
+        // so the icon doubles as the row glyph *and* the bound-key caption.
+        Action::TypeText(_) => "action-icons/keyboard.svg",
+        Action::RunAppleScript(_) => "action-icons/terminal.svg",
+        Action::RunShellCommand(_) => "action-icons/terminal.svg",
+        Action::Workflow(_) => "action-icons/list-checks.svg",
     }
 }
 
@@ -347,7 +353,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
 /// icon, then its label; `current` adds a trailing accent check. Clicking any
 /// row invokes `on_pick`. `id_prefix` disambiguates element IDs between pickers
 /// that share this builder.
-fn action_rows(
+pub(crate) fn action_rows(
     id_prefix: &'static str,
     current: Option<&Action>,
     on_pick: &PickFn,
@@ -401,7 +407,7 @@ fn action_rows(
 /// fill deepens on hover. Unselected rows are transparent at rest, neutral on
 /// hover. One accent, one signal per state — no blue label text (which fails AA
 /// contrast on the near-white surface).
-fn menu_row(
+pub(crate) fn menu_row(
     id: impl Into<gpui::ElementId>,
     pal: Palette,
     selected: bool,
@@ -428,7 +434,7 @@ fn menu_row(
 }
 
 /// Small uppercase muted group header.
-fn section_header(label: &str, pal: Palette) -> AnyElement {
+pub(crate) fn section_header(label: &str, pal: Palette) -> AnyElement {
     div()
         .w_full()
         .px_2()
@@ -442,7 +448,7 @@ fn section_header(label: &str, pal: Palette) -> AnyElement {
 }
 
 /// Popover title — the binding context, e.g. "Bind Back".
-fn title(text: impl Into<gpui::SharedString>, pal: Palette) -> impl IntoElement {
+pub(crate) fn title(text: impl Into<gpui::SharedString>, pal: Palette) -> impl IntoElement {
     div()
         .px_2()
         .pb_1()
@@ -453,12 +459,12 @@ fn title(text: impl Into<gpui::SharedString>, pal: Palette) -> impl IntoElement 
 }
 
 /// 1px hairline separating the title from the list.
-fn divider(pal: Palette) -> impl IntoElement {
+pub(crate) fn divider(pal: Palette) -> impl IntoElement {
     div().mb_1().h(px(1.)).w_full().bg(pal.border)
 }
 
 /// Wrap `rows` in the height-capped, vertically scrollable list region.
-fn scroll_list(id: &'static str, rows: Vec<AnyElement>) -> impl IntoElement {
+pub(crate) fn scroll_list(id: &'static str, rows: Vec<AnyElement>) -> impl IntoElement {
     div()
         .id(id)
         .max_h(px(POPOVER_LIST_MAX_H))

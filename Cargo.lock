@@ -4907,6 +4907,7 @@ version = "0.6.18"
 dependencies = [
  "etcetera",
  "fs4",
+ "plist",
  "serde",
  "tempfile",
  "thiserror 2.0.18",

@@ -31,6 +31,7 @@ use crate::components::carousel::Carousel;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
+use crate::keyboard_model::function_row::FunctionRowView;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AgentLink, AppState, DeviceRecord};
 use crate::theme::{self, FOOTER_H, HEADER_H, Palette, SelectableStyle as _};
@@ -66,6 +67,8 @@ enum Route {
 enum DetailTab {
     /// The mouse model with clickable button hotspots.
     Buttons,
+    /// The keyboard function-row remapper with clickable F-key bubbles.
+    Keys,
     /// Pointer tuning — DPI and presets.
     Pointer,
     /// RGB lighting — color, brightness, on/off.
@@ -85,21 +88,23 @@ impl DetailTab {
     /// measured capabilities; we presume a set from their kind so a sleeping
     /// mouse still shows its (host-side) button bindings.
     ///
-    /// The Buttons panel renders a *mouse-model* silhouette with hotspots. It is
-    /// only useful for pointer-type devices (Mouse / Trackball) or when the device
-    /// has a resolved asset that provides its own correct layout. A keyboard that
-    /// exposes ReprogControls via HID++ but has no asset would get the generic
-    /// mouse fallback hotspots — confusing and wrong. Suppress the Buttons tab for
-    /// such devices until a proper keyboard-layout UI is available.
+    /// The Buttons panel renders a mouse-model silhouette with hotspots. It is
+    /// only useful for pointer-type devices; keyboards get the Keys panel
+    /// instead, even when they expose ReprogControls over HID++.
     fn tabs_for(record: &DeviceRecord) -> Vec<Self> {
         let caps = record
             .capabilities
             .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
-        let can_show_mouse_model = record.asset.is_some()
-            || matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
+        let can_show_mouse_model = matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
         let mut tabs = Vec::new();
         if caps.buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
+        }
+        // A keyboard gets the function-row remapper only when the device
+        // reports remappable-button capability. Lighting-only keyboards should
+        // not surface a dead Keys panel.
+        if matches!(record.kind, DeviceKind::Keyboard) && caps.buttons {
+            tabs.push(Self::Keys);
         }
         if caps.pointer {
             tabs.push(Self::Pointer);
@@ -122,6 +127,7 @@ impl DetailTab {
     fn label(self) -> SharedString {
         match self {
             Self::Buttons => tr!("Buttons"),
+            Self::Keys => tr!("Keys"),
             Self::Pointer => tr!("Pointer"),
             Self::Lighting => tr!("Lighting"),
             Self::Device => tr!("Device"),
@@ -134,6 +140,7 @@ pub struct AppView {
     focus_handle: FocusHandle,
     route: Route,
     mouse_model: Entity<MouseModelView>,
+    keyboard_model: Entity<FunctionRowView>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
@@ -178,6 +185,7 @@ impl AppView {
         }
 
         let mouse_model = cx.new(MouseModelView::new);
+        let keyboard_model = cx.new(FunctionRowView::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
@@ -186,6 +194,7 @@ impl AppView {
             focus_handle,
             route: Route::Home,
             mouse_model,
+            keyboard_model,
             dpi_panel,
             smartshift_panel,
             lighting_panel,
@@ -423,6 +432,7 @@ impl Render for AppView {
                 detail_header(record.as_ref(), &tabs, active, pal, cx).into_any_element(),
                 detail_content(
                     &self.mouse_model,
+                    &self.keyboard_model,
                     &self.dpi_panel,
                     &self.smartshift_panel,
                     &self.lighting_panel,
@@ -901,6 +911,7 @@ fn main_window_title(show_device: bool, cx: &Context<AppView>) -> SharedString {
 /// tab set, so this only has to render the chosen section.
 fn detail_content(
     mouse_model: &Entity<MouseModelView>,
+    keyboard_model: &Entity<FunctionRowView>,
     dpi_panel: &Entity<DpiPanel>,
     smartshift_panel: &Entity<SmartShiftPanel>,
     lighting_panel: &Entity<LightingPanel>,
@@ -910,6 +921,7 @@ fn detail_content(
 ) -> impl IntoElement {
     match active {
         DetailTab::Buttons => buttons_tab(mouse_model).into_any_element(),
+        DetailTab::Keys => keys_tab(keyboard_model).into_any_element(),
         DetailTab::Pointer => pointer_tab(dpi_panel, smartshift_panel, pal, cx).into_any_element(),
         DetailTab::Lighting => lighting_tab(lighting_panel, pal).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
@@ -955,6 +967,27 @@ fn buttons_tab(mouse_model: &Entity<MouseModelView>) -> impl IntoElement {
         .justify_center()
         .p_6()
         .child(div().w_full().max_w(px(760.)).child(mouse_model.clone()))
+}
+
+/// Keys tab: the function-row remapper for a keyboard. Same centred, max-width
+/// column as [`buttons_tab`] so the keyboard photo + bubbles read as a sibling
+/// of the mouse-model screen. F-key bindings are global (`AppState`'s keyboard
+/// map), but the panel surfaces them in the device context where the user
+/// expects keyboard configuration to live.
+fn keys_tab(keyboard_model: &Entity<FunctionRowView>) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .items_center()
+        .justify_center()
+        .p_6()
+        .child(
+            div()
+                .w_full()
+                .max_w(px(1040.))
+                .child(keyboard_model.clone()),
+        )
 }
 
 /// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
@@ -1725,6 +1758,12 @@ fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use openlogi_assets::Metadata;
+
+    use crate::asset::ResolvedAsset;
+
     use super::{
         Capabilities, DetailTab, DeviceKind, DeviceRecord, DeviceRoute, connection_icon_path,
     };
@@ -1775,6 +1814,20 @@ mod tests {
         }
     }
 
+    fn resolved_asset(kind: DeviceKind) -> ResolvedAsset {
+        ResolvedAsset {
+            depot: "test".to_string(),
+            display_name: "Test".to_string(),
+            kind,
+            image_path: PathBuf::from("test.png"),
+            hero_image_path: None,
+            glow: None,
+            metadata: Metadata::default(),
+            png_width: 1,
+            png_height: 1,
+        }
+    }
+
     /// Tabs follow measured capabilities, not kind — the core of the #127 fix.
     /// A device the Bolt register mislabels as Keyboard but whose 0x0005 probe
     /// returns Mouse ends up with kind=Mouse; measured caps drive the tabs.
@@ -1809,6 +1862,36 @@ mod tests {
             !tabs.contains(&DetailTab::Buttons),
             "mouse model shown for keyboard"
         );
+        assert!(tabs.contains(&DetailTab::Lighting));
+    }
+
+    #[test]
+    fn keyboard_with_buttons_shows_keys_tab() {
+        let caps = Some(Capabilities {
+            buttons: true,
+            pointer: false,
+            lighting: true,
+            scroll_inversion: false,
+        });
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+        assert!(tabs.contains(&DetailTab::Keys));
+    }
+
+    #[test]
+    fn keyboard_with_asset_hides_buttons_tab() {
+        let caps = Some(Capabilities {
+            buttons: true,
+            pointer: false,
+            lighting: true,
+            scroll_inversion: false,
+        });
+        let mut keyboard = record(DeviceKind::Keyboard, caps);
+        keyboard.asset = Some(resolved_asset(DeviceKind::Keyboard));
+
+        let tabs = DetailTab::tabs_for(&keyboard);
+
+        assert!(!tabs.contains(&DetailTab::Buttons));
+        assert!(tabs.contains(&DetailTab::Keys));
         assert!(tabs.contains(&DetailTab::Lighting));
     }
 
