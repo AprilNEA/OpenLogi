@@ -88,18 +88,14 @@ impl DetailTab {
     /// measured capabilities; we presume a set from their kind so a sleeping
     /// mouse still shows its (host-side) button bindings.
     ///
-    /// The Buttons panel renders a *mouse-model* silhouette with hotspots. It is
-    /// only useful for pointer-type devices (Mouse / Trackball) or when the device
-    /// has a resolved asset that provides its own correct layout. A keyboard that
-    /// exposes ReprogControls via HID++ but has no asset would get the generic
-    /// mouse fallback hotspots — confusing and wrong. Suppress the Buttons tab for
-    /// such devices until a proper keyboard-layout UI is available.
+    /// The Buttons panel renders a mouse-model silhouette with hotspots. It is
+    /// only useful for pointer-type devices; keyboards get the Keys panel
+    /// instead, even when they expose ReprogControls over HID++.
     fn tabs_for(record: &DeviceRecord) -> Vec<Self> {
         let caps = record
             .capabilities
             .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
-        let can_show_mouse_model = record.asset.is_some()
-            || matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
+        let can_show_mouse_model = matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
         let mut tabs = Vec::new();
         if caps.buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
@@ -1762,6 +1758,12 @@ fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use openlogi_assets::Metadata;
+
+    use crate::asset::ResolvedAsset;
+
     use super::{
         Capabilities, DetailTab, DeviceKind, DeviceRecord, DeviceRoute, connection_icon_path,
     };
@@ -1812,6 +1814,20 @@ mod tests {
         }
     }
 
+    fn resolved_asset(kind: DeviceKind) -> ResolvedAsset {
+        ResolvedAsset {
+            depot: "test".to_string(),
+            display_name: "Test".to_string(),
+            kind,
+            image_path: PathBuf::from("test.png"),
+            hero_image_path: None,
+            glow: None,
+            metadata: Metadata::default(),
+            png_width: 1,
+            png_height: 1,
+        }
+    }
+
     /// Tabs follow measured capabilities, not kind — the core of the #127 fix.
     /// A device the Bolt register mislabels as Keyboard but whose 0x0005 probe
     /// returns Mouse ends up with kind=Mouse; measured caps drive the tabs.
@@ -1859,6 +1875,24 @@ mod tests {
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(tabs.contains(&DetailTab::Keys));
+    }
+
+    #[test]
+    fn keyboard_with_asset_hides_buttons_tab() {
+        let caps = Some(Capabilities {
+            buttons: true,
+            pointer: false,
+            lighting: true,
+            scroll_inversion: false,
+        });
+        let mut keyboard = record(DeviceKind::Keyboard, caps);
+        keyboard.asset = Some(resolved_asset(DeviceKind::Keyboard));
+
+        let tabs = DetailTab::tabs_for(&keyboard);
+
+        assert!(!tabs.contains(&DetailTab::Buttons));
+        assert!(tabs.contains(&DetailTab::Keys));
+        assert!(tabs.contains(&DetailTab::Lighting));
     }
 
     /// Each panel is independent: a lighting-only device (e.g. a keyboard with
