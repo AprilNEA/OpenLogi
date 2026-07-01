@@ -22,10 +22,8 @@ pub(crate) fn run(command: Command) -> Result<()> {
         Command::Bundle => bundle::run(),
         Command::Dmg(args) => dmg::run(&args),
         Command::Package(args) => {
-            bundle::run()?;
-            if let Some(identity) = &args.sign_identity {
-                bundle::sign_app(identity)?;
-            } else {
+            bundle::run_for_distribution(args.sign_identity.as_deref())?;
+            if args.sign_identity.is_none() {
                 println!("==> codesign: skipped (unsigned — set OPENLOGI_SIGN_IDENTITY to sign)");
             }
             dmg::run(&args)

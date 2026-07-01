@@ -18,15 +18,16 @@ devenv shell -- cargo run -p xtask -- <command>
 - `linux package` — build release binaries and package `.deb` / `.rpm` artifacts with nfpm.
 - `release latest-json` — generate the static updater manifest for the stable channel.
 
-`macos bundle` signs the final app/helper layout with `OPENLOGI_SIGN_IDENTITY`,
-`OPENLOGI_LOCAL_CODESIGN_IDENTITY`, or the first Apple Development identity it
-finds. This keeps local Accessibility/TCC testing tied to a real code-signing
-identity instead of an ad-hoc production bundle ID. Set
-`OPENLOGI_LOCAL_CODESIGN=0` only when you explicitly want an unsigned bundle.
-When an installed `/Applications/OpenLogi.app` also exists, launch the exact
-bundle you built with `target/release/bundle/osx/OpenLogi.app/Contents/MacOS/openlogi-gui`
-or stop the installed agent first; plain `open OpenLogi.app` can reuse the
-registered installed copy with the same bundle identifier.
+For local testing, `macos bundle` stamps the built app/helper as
+`org.openlogi.openlogi.dev` / `org.openlogi.agent.dev`, then signs the final
+layout with `OPENLOGI_LOCAL_CODESIGN_IDENTITY` or the first Apple Development
+identity it finds. This keeps local Accessibility/TCC grants isolated from the
+installed production `org.openlogi.agent` grant. Set `OPENLOGI_LOCAL_CODESIGN=0`
+only when you explicitly want an unsigned local bundle. `macos package` keeps
+the production bundle IDs and signs with `OPENLOGI_SIGN_IDENTITY` / `--sign-identity`.
+The raw DMG emitted by `cargo-bundle` is deleted during `macos bundle` because it
+is created before xtask embeds and signs the helper; use `macos package` when
+you need a DMG.
 
 The Cargo runner in `../scripts/cargo-run-macos.sh` stays outside xtask because
 Cargo must execute it while running arbitrary binaries, including this crate.

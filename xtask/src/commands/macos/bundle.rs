@@ -57,6 +57,14 @@ fn write_icns(master: &Path, output: &Path) -> Result<()> {
 }
 
 pub(crate) fn run() -> Result<()> {
+    run_with_profile(BundleProfile::Local)
+}
+
+pub(crate) fn run_for_distribution(sign_identity: Option<&str>) -> Result<()> {
+    run_with_profile(BundleProfile::Distribution { sign_identity })
+}
+
+fn run_with_profile(profile: BundleProfile<'_>) -> Result<()> {
     let root = repo_root()?;
     let sh = Shell::new()?;
     let _repo = sh.push_dir(&root);
@@ -95,13 +103,41 @@ pub(crate) fn run() -> Result<()> {
             .envs(xcode_env.iter().map(|(key, value)| (key, value)))
             .run()?;
     }
+    remove_cargo_bundle_dmg(&root)?;
 
     let app = root.join("target/release/bundle/osx/OpenLogi.app");
     ensure_dir(&app)?;
     embed_agent_helper(&root, &app, &xcode_env)?;
-    local_sign_app_if_available()?;
+    match profile {
+        BundleProfile::Local => {
+            stamp_local_bundle_identity(&app)?;
+            local_sign_app_if_available()?;
+        }
+        BundleProfile::Distribution { sign_identity } => {
+            if let Some(identity) = sign_identity {
+                sign_app_with_timestamp(identity, TimestampMode::Secure)?;
+            }
+        }
+    }
     println!();
     println!("Bundle ready: {}", app.display());
+    Ok(())
+}
+
+enum BundleProfile<'a> {
+    Local,
+    Distribution { sign_identity: Option<&'a str> },
+}
+
+fn remove_cargo_bundle_dmg(root: &Path) -> Result<()> {
+    let dmg = root.join("target/release/bundle/dmg/OpenLogi.dmg");
+    if dmg.exists() {
+        fs_err::remove_file(&dmg)
+            .with_context(|| format!("could not remove stale {}", dmg.display()))?;
+        println!(
+            "    removed cargo-bundle DMG before helper embedding; use `macos package` for a DMG"
+        );
+    }
     Ok(())
 }
 
@@ -178,8 +214,46 @@ fn xcode_env() -> Result<Vec<(String, String)>> {
     ])
 }
 
-pub(crate) fn sign_app(identity: &str) -> Result<()> {
-    sign_app_with_timestamp(identity, TimestampMode::Secure)
+fn stamp_local_bundle_identity(app: &Path) -> Result<()> {
+    println!("==> local bundle identity");
+    let app_info = app.join("Contents/Info.plist");
+    stamp_plist_strings(
+        &app_info,
+        &[
+            ("CFBundleDisplayName", "OpenLogi Dev"),
+            ("CFBundleIdentifier", "org.openlogi.openlogi.dev"),
+            ("CFBundleName", "OpenLogi Dev"),
+        ],
+    )?;
+
+    let helper_info = app.join("Contents/Library/LoginItems/OpenLogiAgent.app/Contents/Info.plist");
+    if helper_info.exists() {
+        stamp_plist_strings(
+            &helper_info,
+            &[
+                ("CFBundleDisplayName", "OpenLogi Agent Dev"),
+                ("CFBundleIdentifier", "org.openlogi.agent.dev"),
+                ("CFBundleName", "OpenLogi Agent Dev"),
+            ],
+        )?;
+    }
+
+    println!("    stamped local IDs: org.openlogi.openlogi.dev / org.openlogi.agent.dev");
+    Ok(())
+}
+
+fn stamp_plist_strings(info_plist: &Path, entries: &[(&str, &str)]) -> Result<()> {
+    let mut plist = Value::from_file(info_plist)
+        .with_context(|| format!("could not read {}", info_plist.display()))?;
+    let dict = plist
+        .as_dictionary_mut()
+        .with_context(|| format!("{} is not a plist dictionary", info_plist.display()))?;
+    for (key, value) in entries {
+        dict.insert((*key).into(), Value::String((*value).to_string()));
+    }
+    plist
+        .to_file_xml(info_plist)
+        .with_context(|| format!("could not write {}", info_plist.display()))
 }
 
 fn local_sign_app_if_available() -> Result<()> {
