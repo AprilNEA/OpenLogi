@@ -580,6 +580,25 @@ mod tests {
     }
 
     #[test]
+    fn thumbwheel_capture_arms_only_for_non_default_behavior() {
+        let maps = Arc::new(RwLock::new(hook_runtime::HookMaps::default()));
+        assert!(!thumbwheel_armed(&maps, DEFAULT_THUMBWHEEL_SENSITIVITY));
+
+        maps.write()
+            .expect("hook maps")
+            .bindings
+            .insert(ButtonId::Thumbwheel, Action::AppExpose);
+        assert!(thumbwheel_armed(&maps, DEFAULT_THUMBWHEEL_SENSITIVITY));
+
+        maps.write()
+            .expect("hook maps")
+            .bindings
+            .insert(ButtonId::Thumbwheel, Action::None);
+        assert!(!thumbwheel_armed(&maps, DEFAULT_THUMBWHEEL_SENSITIVITY));
+        assert!(thumbwheel_armed(&maps, DEFAULT_THUMBWHEEL_SENSITIVITY + 1));
+    }
+
+    #[test]
     fn rearms_when_the_current_session_dies_with_a_target() {
         // The live session ended on its own while a device is still targeted.
         assert!(should_rearm(7, 7, true));
