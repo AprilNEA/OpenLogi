@@ -21,6 +21,7 @@ use crate::components::dpi_panel::DpiPanel;
 use crate::components::light_panel::LightPanel;
 use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
+use crate::keyboard_model::function_row::FunctionRowView;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AgentLink, AppState, DeviceRecord};
 use crate::theme::{self, Palette, Typography as _};
@@ -68,6 +69,8 @@ enum Route {
 enum DetailTab {
     /// The mouse model with clickable button hotspots.
     Buttons,
+    /// The keyboard function-row remapper with clickable F-key bubbles.
+    Keys,
     /// Pointer tuning — DPI and presets.
     Pointer,
     /// RGB lighting — color, brightness, on/off.
@@ -101,8 +104,9 @@ impl DetailTab {
         let caps = record
             .capabilities
             .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
-        let can_show_mouse_model = record.asset.is_some()
-            || matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
+        // Buttons panel is a mouse-model silhouette — only for pointer devices.
+        // Keyboards get the Keys panel instead, even when they expose ReprogControls.
+        let can_show_mouse_model = matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
         let mut tabs = Vec::new();
         // A webcam is a UVC device with no HID++ capabilities; its detail screen
         // leads with the live preview, then the generic info tab.
@@ -111,6 +115,10 @@ impl DetailTab {
         }
         if caps.buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
+        }
+        // Function-row remapper when the keyboard reports remappable buttons.
+        if matches!(record.kind, DeviceKind::Keyboard) && caps.buttons {
+            tabs.push(Self::Keys);
         }
         if caps.pointer {
             tabs.push(Self::Pointer);
@@ -136,6 +144,7 @@ impl DetailTab {
     fn label(self) -> gpui::SharedString {
         match self {
             Self::Buttons => tr!("Buttons"),
+            Self::Keys => tr!("Keys"),
             Self::Pointer => tr!("Pointer"),
             Self::Lighting | Self::Light => tr!("Lighting"),
             Self::Camera => tr!("Camera"),
@@ -149,6 +158,7 @@ pub struct AppView {
     focus_handle: FocusHandle,
     route: Route,
     mouse_model: Entity<MouseModelView>,
+    keyboard_model: Entity<FunctionRowView>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
@@ -196,6 +206,7 @@ impl AppView {
         }
 
         let mouse_model = cx.new(MouseModelView::new);
+        let keyboard_model = cx.new(FunctionRowView::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
@@ -207,6 +218,7 @@ impl AppView {
             focus_handle,
             route: Route::Home,
             mouse_model,
+            keyboard_model,
             dpi_panel,
             smartshift_panel,
             lighting_panel,

@@ -369,11 +369,11 @@ pub fn start(
 
     match result {
         Ok(hook) => {
-            info!("OS mouse hook installed");
+            info!("OS input hook installed");
             Some(hook)
         }
         Err(e) => {
-            warn!(error = %e, "could not install OS mouse hook — events will not be captured");
+            warn!(error = %e, "could not install OS input hook — events will not be captured");
             None
         }
     }
