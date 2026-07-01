@@ -203,6 +203,33 @@ mod tests {
     }
 
     #[test]
+    fn decodes_rotation_and_tap_independently() {
+        let mut rotation = [0u8; 16];
+        rotation[0..2].copy_from_slice(&4i16.to_be_bytes());
+        assert_eq!(
+            decode_event(&event(0, 0, rotation), 2, 6),
+            Some(ThumbwheelEvent {
+                rotation: 4,
+                single_tap: false,
+                touch: false,
+                proxy: false,
+            })
+        );
+
+        let mut tap = [0u8; 16];
+        tap[5] = EV_SINGLE_TAP;
+        assert_eq!(
+            decode_event(&event(0, 0, tap), 2, 6),
+            Some(ThumbwheelEvent {
+                rotation: 0,
+                single_tap: true,
+                touch: false,
+                proxy: false,
+            })
+        );
+    }
+
+    #[test]
     fn ignores_responses_and_foreign_messages() {
         let p = [0u8; 16];
         // software_id != 0 marks a request response, not an event.
