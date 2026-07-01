@@ -1336,6 +1336,14 @@ fn persist_identities(config: &mut Config, list: &[DeviceRecord]) {
         if !record.online {
             continue;
         }
+        if !has_persistable_device_identity(record) {
+            debug!(
+                key = %record.config_key,
+                display = %record.display_name,
+                "online device lacks a persistable identity — not recording offline placeholder"
+            );
+            continue;
+        }
         let Some(capabilities) = record.capabilities else {
             continue;
         };
@@ -1357,6 +1365,19 @@ fn persist_identities(config: &mut Config, list: &[DeviceRecord]) {
     }
     if changed && let Err(e) = config.save_atomic() {
         warn!(error = %e, "could not persist device identities to config.toml");
+    }
+}
+
+fn has_persistable_device_identity(record: &DeviceRecord) -> bool {
+    match record.route {
+        Some(DeviceRoute::Direct { .. }) => {
+            record
+                .model_info
+                .as_ref()
+                .is_some_and(openlogi_core::device::DeviceModelInfo::has_model_identity)
+                && (record.serial_number.is_some() || record.unit_id != [0; 4])
+        }
+        Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. }) | None => true,
     }
 }
 

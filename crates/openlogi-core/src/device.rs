@@ -203,6 +203,18 @@ impl DeviceModelInfo {
     pub fn config_key(&self) -> String {
         format!("{:x}{:04x}", self.extended_model_id, self.model_ids[0])
     }
+
+    /// Whether this `DeviceInformation` payload names a real Logitech model.
+    ///
+    /// Some direct macOS HID interfaces answer the `0x0003` function with a
+    /// structurally valid but semantically empty payload: unit id set, every
+    /// transport bit clear, and all model IDs zero. Unit id alone can
+    /// disambiguate two devices, but it cannot identify the model, resolve an
+    /// asset, or produce a trustworthy direct config key.
+    #[must_use]
+    pub fn has_model_identity(&self) -> bool {
+        self.model_ids.iter().any(|id| *id != 0)
+    }
 }
 
 /// Mirror of hidpp's `DeviceTransport` bitfield — one bool per protocol the
@@ -324,5 +336,26 @@ mod tests {
             Capabilities::presumed_from_kind(DeviceKind::Unknown),
             Capabilities::default()
         );
+    }
+
+    #[test]
+    fn model_info_identity_requires_a_real_model_id() {
+        use super::{DeviceModelInfo, DeviceTransports};
+
+        let mut info = DeviceModelInfo {
+            entity_count: 15,
+            serial_number: None,
+            unit_id: [0x1c, 0x18, 0x18, 0x00],
+            transports: DeviceTransports::default(),
+            model_ids: [0, 0, 0],
+            extended_model_id: 0,
+        };
+        assert!(
+            !info.has_model_identity(),
+            "a HID interface that reports no model id must not create a direct config key"
+        );
+
+        info.model_ids[0] = 0xb034;
+        assert!(info.has_model_identity());
     }
 }
