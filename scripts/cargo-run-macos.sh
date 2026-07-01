@@ -7,7 +7,7 @@
 # the desktop binary it's a transparent passthrough (`exec "$@"`).
 #
 # For `openlogi-gui` it launches the build from inside a throwaway
-# `OpenLogi.app` so macOS shows the real app name (the bold menu-bar title)
+# `OpenLogi.app` so macOS shows the dev app name (the bold menu-bar title)
 # and the Dock icon during development. Both are read from the bundle's
 # `Info.plist` / `Resources` — a bare `target/debug/openlogi-gui` has neither,
 # so macOS falls back to the executable name and a generic icon.
@@ -94,8 +94,9 @@ if [ "$ICON_SRC" -nt "$RES/AppIcon.icns" ]; then
   cp -f "$ICON_SRC" "$RES/AppIcon.icns"
 fi
 
-# Info.plist — minimal, dev-only. A distinct `.dev` identifier keeps this
-# target artifact from registering as the production app in LaunchServices.
+# Info.plist — minimal, dev-only. A distinct `.dev` identifier and display name
+# keep this target artifact from registering as the production app in
+# LaunchServices or macOS Privacy & Security.
 PLIST="$APP/Contents/Info.plist"
 if [ "$PLIST_SRC" -nt "$PLIST" ]; then
   cp -f "$PLIST_SRC" "$PLIST"
