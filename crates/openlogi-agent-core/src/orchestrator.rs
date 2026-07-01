@@ -179,6 +179,15 @@ impl Orchestrator {
             },
             "dpi_cycle",
         );
+        // Keyboard F-key bindings are global (not per-device), so they key off
+        // the top-level config map rather than the selected device. Published
+        // here so `reload_config` (GUI commit) takes effect live, not only on
+        // agent restart.
+        write_value(
+            &self.shared.keyboard_bindings,
+            self.config.keyboard.bindings.clone(),
+            "keyboard_bindings",
+        );
         self.shared.thumbwheel_sensitivity.store(
             self.config.app_settings.thumbwheel_sensitivity,
             Ordering::Relaxed,

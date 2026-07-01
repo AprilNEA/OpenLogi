@@ -198,7 +198,9 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let callback = CALLBACK.lock().ok().and_then(|slot| slot.clone());
     let disposition = callback
         .as_ref()
-        .map_or(EventDisposition::PassThrough, |cb| cb(HookEvent::Mouse(event)));
+        .map_or(EventDisposition::PassThrough, |cb| {
+            cb(HookEvent::Mouse(event))
+        });
     match disposition {
         EventDisposition::PassThrough => call_next(code, wparam, lparam),
         EventDisposition::Suppress => 1,

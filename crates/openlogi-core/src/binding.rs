@@ -511,9 +511,7 @@ pub enum WorkflowStep {
     /// Press a key chord (see [`Action::CustomShortcut`] / [`KeyCombo`]).
     PressKey(KeyCombo),
     /// Wait `millis` milliseconds before the next step.
-    Delay {
-        millis: u64,
-    },
+    Delay { millis: u64 },
     /// Run an AppleScript (see [`Action::RunAppleScript`]).
     RunAppleScript(String),
     /// Run a shell command (see [`Action::RunShellCommand`]).
@@ -763,9 +761,7 @@ impl Action {
             Action::TypeText(s) => format!("Type \"{s}\"").into(),
             Action::RunAppleScript(_) => "Run AppleScript".into(),
             Action::RunShellCommand(_) => "Run Command".into(),
-            Action::Workflow(steps) => {
-                format!("Workflow ({} steps)", steps.len()).into()
-            }
+            Action::Workflow(steps) => format!("Workflow ({} steps)", steps.len()).into(),
         }
     }
 
@@ -1006,21 +1002,35 @@ mod tests {
     #[test]
     fn power_user_action_labels_and_category() {
         assert_eq!(Action::TypeText("hi".into()).label(), "Type \"hi\"");
-        assert_eq!(Action::RunAppleScript("osascript".into()).label(), "Run AppleScript");
-        assert_eq!(Action::RunShellCommand("echo hi".into()).label(), "Run Command");
+        assert_eq!(
+            Action::RunAppleScript("osascript".into()).label(),
+            "Run AppleScript"
+        );
+        assert_eq!(
+            Action::RunShellCommand("echo hi".into()).label(),
+            "Run Command"
+        );
         // All three are power-user escape hatches: classed as Editing so a
         // hand-authored binding has a home group, but never in the default
         // catalog (asserted below).
         assert_eq!(Action::TypeText("x".into()).category(), Category::Editing);
-        assert_eq!(Action::RunAppleScript("x".into()).category(), Category::Editing);
-        assert_eq!(Action::RunShellCommand("x".into()).category(), Category::Editing);
+        assert_eq!(
+            Action::RunAppleScript("x".into()).category(),
+            Category::Editing
+        );
+        assert_eq!(
+            Action::RunShellCommand("x".into()).category(),
+            Category::Editing
+        );
     }
 
     #[test]
     fn power_user_actions_excluded_from_catalog() {
         let cat = Action::catalog();
-        assert!(cat.iter().all(|a| !matches!(a,
-            Action::TypeText(_) | Action::RunAppleScript(_) | Action::RunShellCommand(_))));
+        assert!(cat.iter().all(|a| !matches!(
+            a,
+            Action::TypeText(_) | Action::RunAppleScript(_) | Action::RunShellCommand(_)
+        )));
     }
 
     #[test]
@@ -1050,7 +1060,11 @@ mod tests {
         assert_eq!(wf.label(), "Workflow (3 steps)");
         assert_eq!(wf.category(), Category::Editing);
         // Excluded from the default catalog like the other power-user actions.
-        assert!(Action::catalog().iter().all(|a| !matches!(a, Action::Workflow(_))));
+        assert!(
+            Action::catalog()
+                .iter()
+                .all(|a| !matches!(a, Action::Workflow(_)))
+        );
     }
 
     #[test]

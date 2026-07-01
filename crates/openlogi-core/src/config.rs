@@ -40,7 +40,9 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// bools are mirrored here and converted at the agent boundary (which depends
 /// on both crates). `Fn` is absent: firmware-internal, unusable as a trigger
 /// (function-key-remapper spec, Appendix A).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub struct KeyModifiers {
     pub shift: bool,
     pub control: bool,
@@ -57,11 +59,11 @@ impl KeyModifiers {
 /// A keyboard trigger: a keycode plus an optional modifier mask. The parse
 /// format is `[mod+]+key`, e.g. `"f1"`, `"shift+cmd+f5"`. Modifier names:
 /// `shift`, `control` (alias `ctrl`), `option` (alias `alt`), `command`
-/// (alias `cmd`). Key names: `esc`, `f1`..`f12` (macOS virtual keycodes).
+/// (alias `cmd`). Key names: `esc`, `f1`..`f19` (macOS virtual keycodes).
 ///
 /// Serializes as its string form (via `Display`) so it can be a TOML map key:
 /// `[keyboard.bindings]` keys are `"f1"`, `"shift+f2"`, etc.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeyTrigger {
     pub keycode: u16,
     pub modifiers: KeyModifiers,
@@ -71,10 +73,18 @@ impl std::fmt::Display for KeyTrigger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut parts: Vec<&str> = Vec::new();
         let m = &self.modifiers;
-        if m.shift { parts.push("shift"); }
-        if m.control { parts.push("control"); }
-        if m.option { parts.push("option"); }
-        if m.command { parts.push("command"); }
+        if m.shift {
+            parts.push("shift");
+        }
+        if m.control {
+            parts.push("control");
+        }
+        if m.option {
+            parts.push("option");
+        }
+        if m.command {
+            parts.push("command");
+        }
         parts.push(keycode_to_name(self.keycode).ok_or(std::fmt::Error)?);
         write!(f, "{}", parts.join("+"))
     }
@@ -85,9 +95,25 @@ impl std::fmt::Display for KeyTrigger {
 fn keycode_to_name(code: u16) -> Option<&'static str> {
     Some(match code {
         0x35 => "esc",
-        0x7A => "f1", 0x78 => "f2", 0x63 => "f3", 0x76 => "f4",
-        0x60 => "f5", 0x61 => "f6", 0x62 => "f7", 0x64 => "f8",
-        0x65 => "f9", 0x6D => "f10", 0x67 => "f11", 0x6F => "f12",
+        0x7A => "f1",
+        0x78 => "f2",
+        0x63 => "f3",
+        0x76 => "f4",
+        0x60 => "f5",
+        0x61 => "f6",
+        0x62 => "f7",
+        0x64 => "f8",
+        0x65 => "f9",
+        0x6D => "f10",
+        0x67 => "f11",
+        0x6F => "f12",
+        0x69 => "f13",
+        0x6B => "f14",
+        0x71 => "f15",
+        0x6A => "f16",
+        0x40 => "f17",
+        0x4F => "f18",
+        0x50 => "f19",
         _ => return None,
     })
 }
@@ -136,12 +162,31 @@ impl std::str::FromStr for KeyTrigger {
         }
         let keycode = match key_part[0].to_ascii_lowercase().as_str() {
             "esc" => 0x35,
-            "f1" => 0x7A, "f2" => 0x78, "f3" => 0x63, "f4" => 0x76,
-            "f5" => 0x60, "f6" => 0x61, "f7" => 0x62, "f8" => 0x64,
-            "f9" => 0x65, "f10" => 0x6D, "f11" => 0x67, "f12" => 0x6F,
+            "f1" => 0x7A,
+            "f2" => 0x78,
+            "f3" => 0x63,
+            "f4" => 0x76,
+            "f5" => 0x60,
+            "f6" => 0x61,
+            "f7" => 0x62,
+            "f8" => 0x64,
+            "f9" => 0x65,
+            "f10" => 0x6D,
+            "f11" => 0x67,
+            "f12" => 0x6F,
+            "f13" => 0x69,
+            "f14" => 0x6B,
+            "f15" => 0x71,
+            "f16" => 0x6A,
+            "f17" => 0x40,
+            "f18" => 0x4F,
+            "f19" => 0x50,
             other => return Err(ParseTriggerError(format!("unknown key '{other}'"))),
         };
-        Ok(KeyTrigger { keycode, modifiers: mods })
+        Ok(KeyTrigger {
+            keycode,
+            modifiers: mods,
+        })
     }
 }
 
@@ -771,6 +816,27 @@ impl Config {
             .insert(button, binding);
     }
 
+    /// Records (or, with `action = None`, clears) the F-key `trigger` binding
+    /// in the global `[keyboard]` map. Keyboard bindings are device-agnostic —
+    /// one map applies across all keyboards — so this mirrors [`Self::set_binding`]
+    /// minus the device key.
+    pub fn set_keyboard_binding(&mut self, trigger: KeyTrigger, action: Option<Action>) {
+        match action {
+            Some(a) => {
+                self.keyboard.bindings.insert(trigger, a);
+            }
+            None => {
+                self.keyboard.bindings.remove(&trigger);
+            }
+        }
+    }
+
+    /// The global keyboard F-key bindings (read accessor).
+    #[must_use]
+    pub fn keyboard_bindings(&self) -> &std::collections::HashMap<KeyTrigger, Action> {
+        &self.keyboard.bindings
+    }
+
     /// Returns the gesture sub-bindings for `device_key`'s gesture button, or an
     /// empty map if it isn't in gesture mode. Derived from the unified
     /// [`DeviceConfig::bindings`]; kept as a convenience for the agent-side
@@ -1157,6 +1223,19 @@ mod tests {
     }
 
     #[test]
+    fn key_trigger_parses_and_displays_extended_function_keys() {
+        let f13: KeyTrigger = "f13".parse().unwrap();
+        let f17: KeyTrigger = "command+f17".parse().unwrap();
+        let f19: KeyTrigger = "f19".parse().unwrap();
+
+        assert_eq!(f13.keycode, 0x69);
+        assert_eq!(f17.keycode, 0x40);
+        assert_eq!(f17.to_string(), "command+f17");
+        assert_eq!(f19.keycode, 0x50);
+        assert_eq!(f19.to_string(), "f19");
+    }
+
+    #[test]
     fn key_trigger_rejects_unknown() {
         assert!("f99".parse::<KeyTrigger>().is_err());
         assert!("shift+".parse::<KeyTrigger>().is_err());
@@ -1166,23 +1245,60 @@ mod tests {
     #[test]
     fn keyboard_section_roundtrips_through_config() {
         let mut config = Config::default();
-        config.keyboard.bindings.insert(
-            "f1".parse().unwrap(),
-            Action::TypeText("hello".into()),
-        );
-        config.keyboard.bindings.insert(
-            "shift+f2".parse().unwrap(),
-            Action::VolumeUp,
-        );
+        config
+            .keyboard
+            .bindings
+            .insert("f1".parse().unwrap(), Action::TypeText("hello".into()));
+        config
+            .keyboard
+            .bindings
+            .insert("shift+f2".parse().unwrap(), Action::VolumeUp);
+        config
+            .keyboard
+            .bindings
+            .insert("f17".parse().unwrap(), Action::MissionControl);
 
         let roundtripped = write_and_read(&config);
-        assert_eq!(roundtripped.keyboard.bindings.len(), 2);
+        assert_eq!(roundtripped.keyboard.bindings.len(), 3);
         assert_eq!(
-            roundtripped.keyboard.bindings.get(&"f1".parse::<KeyTrigger>().unwrap()),
+            roundtripped
+                .keyboard
+                .bindings
+                .get(&"f1".parse::<KeyTrigger>().unwrap()),
             Some(&Action::TypeText("hello".into()))
+        );
+        assert_eq!(
+            roundtripped
+                .keyboard
+                .bindings
+                .get(&"f17".parse::<KeyTrigger>().unwrap()),
+            Some(&Action::MissionControl)
         );
     }
 
+    #[test]
+    fn set_keyboard_binding_inserts_and_clears() {
+        let mut config = Config::default();
+        let f1: KeyTrigger = "f1".parse().unwrap();
+
+        // Insert.
+        config.set_keyboard_binding(f1.clone(), Some(Action::VolumeUp));
+        assert_eq!(config.keyboard_bindings().get(&f1), Some(&Action::VolumeUp));
+        assert_eq!(config.keyboard_bindings().len(), 1);
+
+        // Overwrite.
+        config.set_keyboard_binding(f1.clone(), Some(Action::MuteVolume));
+        assert_eq!(
+            config.keyboard_bindings().get(&f1),
+            Some(&Action::MuteVolume)
+        );
+        assert_eq!(config.keyboard_bindings().len(), 1);
+
+        // Clear via None.
+        config.set_keyboard_binding(f1.clone(), None);
+        assert!(config.keyboard_bindings().get(&f1).is_none());
+        assert!(config.keyboard_bindings().is_empty());
+    }
 
     #[test]
     fn missing_file_yields_default() {

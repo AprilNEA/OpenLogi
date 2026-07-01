@@ -498,7 +498,7 @@ fn thread_main(
         CGEventType::LeftMouseDragged,
         CGEventType::RightMouseDragged,
         CGEventType::OtherMouseDragged,
-        // NEW — keyboard capture for the function-key remapper. F1-F12/Esc
+        // Keyboard capture for the function-key remapper. Esc/F1-F19
         // arrive here (proven: F1 = keycode 0x7A + SecondaryFn flag).
         CGEventType::KeyDown,
         CGEventType::KeyUp,
