@@ -84,7 +84,7 @@ Things OpenLogi does that Options+ won't:
 | Interface localization (20 languages: da, de, el, en, es, fi, fr, it, ja, ko, nb, nl, pl, pt-BR, pt-PT, ru, sv, zh-CN, zh-HK, zh-TW) | ✅ |
 | Linux packaging: udev rules, systemd unit, `.deb` / `.rpm` | ✅ Linux |
 | Gesture-button per-direction bindings | 🟡 configurable; hardware capture pending |
-| Middle / mode-shift / thumbwheel button capture | 🟡 configurable; hook owns side buttons only |
+| Middle / mode-shift / thumbwheel tap + rotation capture | 🟡 configurable; hook owns side buttons only |
 | Windows (agent, GUI, event hook) | 🟡 untested preview — signed `.exe` / `.msi` ship per release |
 
 ¹ Media key actions use D-Bus MPRIS on Linux; a handful of macOS-specific actions (e.g. Launchpad) have no Linux equivalent and are no-ops.

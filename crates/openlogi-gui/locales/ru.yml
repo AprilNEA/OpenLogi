@@ -149,6 +149,7 @@ _version: 1
 "Forward": "Вперёд"
 "DPI Toggle": "Переключение DPI"
 "Thumb Wheel": "Колесо под большой палец"
+"Thumb Wheel Tap": "Касание колеса под большой палец"
 "Gesture Button": "Кнопка жестов"
 "Up": "Вверх"
 "Down": "Вниз"
