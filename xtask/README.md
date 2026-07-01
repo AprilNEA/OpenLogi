@@ -18,6 +18,16 @@ devenv shell -- cargo run -p xtask -- <command>
 - `linux package` — build release binaries and package `.deb` / `.rpm` artifacts with nfpm.
 - `release latest-json` — generate the static updater manifest for the stable channel.
 
+`macos bundle` signs the final app/helper layout with `OPENLOGI_SIGN_IDENTITY`,
+`OPENLOGI_LOCAL_CODESIGN_IDENTITY`, or the first Apple Development identity it
+finds. This keeps local Accessibility/TCC testing tied to a real code-signing
+identity instead of an ad-hoc production bundle ID. Set
+`OPENLOGI_LOCAL_CODESIGN=0` only when you explicitly want an unsigned bundle.
+When an installed `/Applications/OpenLogi.app` also exists, launch the exact
+bundle you built with `target/release/bundle/osx/OpenLogi.app/Contents/MacOS/openlogi-gui`
+or stop the installed agent first; plain `open OpenLogi.app` can reuse the
+registered installed copy with the same bundle identifier.
+
 The Cargo runner in `../scripts/cargo-run-macos.sh` stays outside xtask because
 Cargo must execute it while running arbitrary binaries, including this crate.
 The release-notes generator stays in `../scripts/release-notes` because it is a

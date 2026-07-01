@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 /// v6: `Capabilities::scroll_inversion` added.
 /// v7: pairing commands return typed acceptance errors.
 /// v8: [`WriteError`] carries typed HID++ operation failures.
-pub const PROTOCOL_VERSION: u32 = 8;
+/// v9: agent owns global keyboard bindings and function-key dispatch.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep
