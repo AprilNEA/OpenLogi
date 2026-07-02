@@ -10,7 +10,7 @@
 //! [`DpiCycleState::capabilities`] stays `None` and presets cycle at their raw
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -80,6 +80,9 @@ pub struct Orchestrator {
     /// set/route/online state looks identical across the sleep gap, so the
     /// next refresh re-applies volatile settings to every online device.
     reapply_all_next_refresh: bool,
+    /// Config keys of devices first sighted last refresh, due one confirming
+    /// re-apply: the first write can race the device's own boot and be lost.
+    reapply_followup: HashSet<String>,
     shared: SharedRuntime,
 }
 
@@ -117,6 +120,7 @@ impl Orchestrator {
             current_app: None,
             inventory: InventoryState::Pending,
             reapply_all_next_refresh: false,
+            reapply_followup: HashSet::new(),
             shared,
         };
         orch.rebuild();
@@ -200,7 +204,11 @@ impl Orchestrator {
         // (new route), a wake from device sleep (offline→online), or — via the
         // flag — a system wake where none of those are observable.
         let reapply_all = std::mem::take(&mut self.reapply_all_next_refresh);
-        for idx in reapply_targets(&self.devices, &devices, reapply_all) {
+        let followup = std::mem::take(&mut self.reapply_followup);
+        let (targets, next_followup) =
+            plan_reapply(&self.devices, &devices, &followup, reapply_all);
+        self.reapply_followup = next_followup;
+        for idx in targets {
             self.reapply_volatile_settings(&devices[idx]);
         }
         let changed = devices.len() != self.devices.len()
@@ -433,6 +441,36 @@ fn reapply_targets(prev: &[AgentDevice], next: &[AgentDevice], reapply_all: bool
         .collect()
 }
 
+/// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
+/// plus one confirming re-apply for devices first sighted last refresh, and
+/// the follow-up keys to confirm next refresh.
+fn plan_reapply(
+    prev: &[AgentDevice],
+    next: &[AgentDevice],
+    followup: &HashSet<String>,
+    reapply_all: bool,
+) -> (Vec<usize>, HashSet<String>) {
+    let mut targets = reapply_targets(prev, next, reapply_all);
+    let next_followup = targets
+        .iter()
+        .filter(|&&idx| {
+            let id = stable_id(&next[idx]);
+            !prev.iter().any(|p| stable_id(p) == id)
+        })
+        .map(|&idx| next[idx].config_key.clone())
+        .collect();
+    for (idx, dev) in next.iter().enumerate() {
+        if dev.online
+            && dev.route.is_some()
+            && followup.contains(&dev.config_key)
+            && !targets.contains(&idx)
+        {
+            targets.push(idx);
+        }
+    }
+    (targets, next_followup)
+}
+
 /// Index of the selected device: the one whose `config_key` matches the saved
 /// selection, else the first. `build_devices` sorts by the same canonical key
 /// the GUI carousel uses, so "the first" is the same physical device in both
@@ -455,7 +493,7 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentDevice, InventoryHealth, Orchestrator, reapply_targets};
+    use super::{AgentDevice, InventoryHealth, Orchestrator, plan_reapply, reapply_targets};
     use openlogi_core::config::Config;
     use openlogi_hid::DeviceRoute;
 
@@ -524,6 +562,52 @@ mod tests {
         // The post-wake snapshot looks identical to the pre-sleep one; the
         // flag still re-applies to the online device (and only that one).
         assert_eq!(reapply_targets(&prev, &next, true), vec![0]);
+    }
+
+    #[test]
+    fn plan_reapply_confirms_a_first_sighting_once() {
+        use std::collections::HashSet;
+        // First sighting: applied now, queued for one confirming re-apply.
+        let (targets, followup) = plan_reapply(&[], &[dev("a", 1, true)], &HashSet::new(), false);
+        assert_eq!(targets, vec![0]);
+        assert_eq!(followup, HashSet::from(["a".to_string()]));
+        // Next refresh: the confirming apply fires, then the queue drains.
+        let prev = [dev("a", 1, true)];
+        let (targets, followup) = plan_reapply(&prev, &prev, &followup, false);
+        assert_eq!(targets, vec![0]);
+        assert!(followup.is_empty());
+        // Steady state after that: nothing.
+        let (targets, _) = plan_reapply(&prev, &prev, &followup, false);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn plan_reapply_transitions_are_not_queued_for_confirmation() {
+        use std::collections::HashSet;
+        // A wake from device sleep re-applies once — the device was already
+        // booted, so no confirming write is queued.
+        let (targets, followup) = plan_reapply(
+            &[dev("a", 1, false)],
+            &[dev("a", 1, true)],
+            &HashSet::new(),
+            false,
+        );
+        assert_eq!(targets, vec![0]);
+        assert!(followup.is_empty());
+    }
+
+    #[test]
+    fn plan_reapply_skips_a_followup_that_went_offline() {
+        use std::collections::HashSet;
+        let prev = [dev("a", 1, true)];
+        let (targets, followup) = plan_reapply(
+            &prev,
+            &[dev("a", 1, false)],
+            &HashSet::from(["a".to_string()]),
+            false,
+        );
+        assert!(targets.is_empty());
+        assert!(followup.is_empty());
     }
 
     /// An *empty* snapshot still flips the health to `Ready`: the watcher only
