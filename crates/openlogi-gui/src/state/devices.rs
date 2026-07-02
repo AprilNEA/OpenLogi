@@ -203,6 +203,9 @@ fn receiver_uid_of(key: &str) -> Option<String> {
 fn record_wire_pid(record: &DeviceRecord) -> Option<String> {
     match record.model_info.as_ref().map(|m| m.model_ids[0]) {
         Some(pid) if pid != 0 => Some(format!("{pid:04x}")),
+        // A degenerate `model_ids[0] == 0` falls through to `None` (no PID dedup);
+        // the record still dedups by key, so two identical zero-id models showing
+        // as separate offline cards is a rare, accepted gap.
         _ => record
             .model_key
             .strip_prefix("wpid")

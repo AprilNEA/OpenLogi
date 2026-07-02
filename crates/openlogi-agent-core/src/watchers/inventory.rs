@@ -131,7 +131,10 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<InventoryEvent> {
             let mut enumerator = openlogi_hid::Enumerator::default();
             let mut state = WatchState::default();
             let mut last_tick = SystemTime::now();
-            let mut hotplug = match openlogi_hid::watch_hotplug() {
+            // `block_on` installs runtime context so a backend that registers an
+            // `AsyncFd` (Linux udev) fails as a catchable `Err`, not a panic that
+            // would take down the whole watcher thread.
+            let mut hotplug = match rt.block_on(async { openlogi_hid::watch_hotplug() }) {
                 Ok(stream) => Some(stream),
                 Err(e) => {
                     warn!(error = ?e, "hotplug watch unavailable — polling only");
@@ -170,13 +173,19 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<InventoryEvent> {
                             Some(event) => {
                                 debug!(?event, "hotplug event — enumerating early");
                                 tokio::time::sleep(HOTPLUG_SETTLE).await;
-                                // Drain the burst: one enumerate covers every node that just arrived.
-                                while futures_lite::future::poll_once(stream.next())
-                                    .await
-                                    .flatten()
-                                    .is_some()
-                                {}
-                                true
+                                // Drain the burst so one enumerate covers every node that just
+                                // arrived; a `None` here is the stream closing, so report it now
+                                // rather than after a spurious extra enumerate next tick.
+                                let mut alive = true;
+                                while let Some(drained) =
+                                    futures_lite::future::poll_once(stream.next()).await
+                                {
+                                    if drained.is_none() {
+                                        alive = false;
+                                        break;
+                                    }
+                                }
+                                alive
                             }
                             None => false,
                         },
