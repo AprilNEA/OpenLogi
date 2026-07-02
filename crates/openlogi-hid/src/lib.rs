@@ -21,6 +21,7 @@ mod windows_hid;
 
 pub mod gesture;
 mod hires_wheel;
+pub mod hotplug;
 pub mod inventory;
 pub mod pairing;
 pub mod reprog_controls;
@@ -30,6 +31,7 @@ pub mod write;
 
 pub use gesture::{CaptureChannel, CapturedInput, GestureError, run_capture_session};
 pub use hires_wheel::{set_scroll_inversion, set_scroll_inversion_on};
+pub use hotplug::{HotplugEvent, watch_hotplug};
 pub use inventory::{Enumerator, InventoryError, enumerate};
 pub use pairing::{
     Click, DiscoveredDevice, PairingCommand, PairingError, PairingEvent, PairingReceiver,
