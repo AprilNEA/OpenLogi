@@ -57,7 +57,9 @@ pub struct DeviceRecord {
 /// what makes the list independent of whether a probe wins its timing race: a
 /// known device (with its Pointer/Buttons panels) is always shown, and the live
 /// probe only *enriches* it (online state, battery, asset photo) rather than
-/// *gating* whether it appears at all. See issue #159.
+/// *gating* whether it appears at all. See issue #159. Placeholders that are
+/// unreachable (their receiver is unplugged) or duplicate a visible same-model
+/// card are suppressed — see [`append_offline_known`] (#271/#280).
 pub(super) fn build_device_list(
     inventories: &[DeviceInventory],
     cache: &AssetResolver,
@@ -125,27 +127,52 @@ pub(super) fn build_device_list(
     if std::env::var_os("OPENLOGI_DEMO_KEYBOARD").is_some() {
         list.push(demo_keyboard());
     }
-    append_offline_known(&mut list, config.known_identities(), cache);
+    let present_receivers: HashSet<String> = inventories
+        .iter()
+        .filter_map(|inv| inv.receiver.unique_id.as_deref())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    append_offline_known(
+        &mut list,
+        config.known_identities(),
+        cache,
+        &present_receivers,
+    );
     sort_device_list(&mut list);
     list
 }
 
 /// Append an offline placeholder for every known device not already present in
-/// `list` (matched by `config_key`). Split out from [`build_device_list`] so
-/// the union rule is unit-testable without an [`AssetResolver`].
+/// `list`, skipping unreachable devices and duplicates of a visible one.
+///
+/// Three gates keep phantom cards out (#271/#280):
+/// - an exact key/model match against a live record — the device is already
+///   in the list;
+/// - a `receiver:` key whose receiver is not plugged in — its paired devices
+///   are unreachable until that receiver returns (e.g. the work receiver's
+///   mouse while at home);
+/// - a wire PID already visible live or as an earlier placeholder — two units
+///   of one model render as identical cards, so a second one only confuses.
+///   The PID comparison also absorbs the flaky extended-model byte that made
+///   `0b034` and `2b034` read as different models in #271.
 fn append_offline_known<'a>(
     list: &mut Vec<DeviceRecord>,
     known: impl Iterator<Item = (&'a str, &'a DeviceIdentity)>,
     cache: &AssetResolver,
+    present_receivers: &HashSet<String>,
 ) {
     let mut blocked_keys: HashSet<String> = list
         .iter()
         .flat_map(|r| [r.config_key.clone(), r.model_key.clone()])
         .collect();
+    let mut blocked_pids: HashSet<String> = list.iter().filter_map(record_wire_pid).collect();
     let mut known = known.collect::<Vec<_>>();
     known.sort_by_key(|(key, identity)| (identity.model_info.is_none(), (*key).to_string()));
 
     for (key, identity) in known {
+        if receiver_uid_of(key).is_some_and(|uid| !present_receivers.contains(&uid)) {
+            continue;
+        }
         let model_key = identity
             .model_info
             .as_ref()
@@ -154,9 +181,32 @@ fn append_offline_known<'a>(
             continue;
         }
         let record = offline_record(key, identity, cache);
+        if let Some(pid) = record_wire_pid(&record)
+            && !blocked_pids.insert(pid)
+        {
+            continue;
+        }
         blocked_keys.insert(record.config_key.clone());
         blocked_keys.insert(record.model_key.clone());
         list.push(record);
+    }
+}
+
+/// The receiver UID embedded in a `receiver:<uid>:slot:<n>` config key.
+fn receiver_uid_of(key: &str) -> Option<String> {
+    key.strip_prefix("receiver:")
+        .and_then(|rest| rest.split(':').next())
+        .map(str::to_ascii_lowercase)
+}
+
+/// The record's wire product id, used to suppress same-model duplicate cards.
+fn record_wire_pid(record: &DeviceRecord) -> Option<String> {
+    match record.model_info.as_ref().map(|m| m.model_ids[0]) {
+        Some(pid) if pid != 0 => Some(format!("{pid:04x}")),
+        _ => record
+            .model_key
+            .strip_prefix("wpid")
+            .map(str::to_ascii_lowercase),
     }
 }
 
@@ -338,9 +388,11 @@ mod tests {
 
     use crate::asset::AssetResolver;
 
+    use std::collections::HashSet;
+
     use super::{
-        Capabilities, DeviceIdentity, DeviceKind, DeviceRecord, append_offline_known,
-        build_device_list, effective_kind, offline_record,
+        Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord, DeviceTransports,
+        append_offline_known, build_device_list, effective_kind, offline_record,
     };
 
     fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
@@ -456,7 +508,12 @@ mod tests {
         let a = mouse_identity("live A overwritten?");
         let b = mouse_identity("asleep B");
         let cache = AssetResolver::new();
-        append_offline_known(&mut list, [("A", &a), ("B", &b)].into_iter(), &cache);
+        append_offline_known(
+            &mut list,
+            [("A", &a), ("B", &b)].into_iter(),
+            &cache,
+            &HashSet::new(),
+        );
 
         assert_eq!(list.len(), 2);
         assert!(
@@ -467,6 +524,77 @@ mod tests {
             list.iter().any(|r| r.config_key == "B" && !r.online),
             "B is added back as a persisted offline placeholder"
         );
+    }
+
+    fn model_info(ext: u8, pid: u16) -> DeviceModelInfo {
+        DeviceModelInfo {
+            entity_count: 0,
+            serial_number: None,
+            unit_id: [0; 4],
+            transports: DeviceTransports::default(),
+            model_ids: [pid, 0, 0],
+            extended_model_id: ext,
+        }
+    }
+
+    #[test]
+    fn placeholders_for_absent_receivers_are_hidden() {
+        // The work receiver's mouse must not haunt the list at home: with its
+        // receiver unplugged the device is unreachable, so no card is shown.
+        let id = mouse_identity("MX Master 3S");
+        let cache = AssetResolver::new();
+        let mut list = Vec::new();
+        append_offline_known(
+            &mut list,
+            [("receiver:aabb:slot:1", &id)].into_iter(),
+            &cache,
+            &HashSet::new(),
+        );
+        assert!(list.is_empty());
+        append_offline_known(
+            &mut list,
+            [("receiver:aabb:slot:1", &id)].into_iter(),
+            &cache,
+            &HashSet::from(["aabb".to_string()]),
+        );
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn same_model_placeholder_is_blocked_by_a_live_unit() {
+        // #271: the live mouse reads ext-model 02 while the stale identity was
+        // recorded as 00 — the wire PID still identifies them as one model, so
+        // the phantom card is suppressed.
+        let mut live = online_record("receiver:aabb:slot:2");
+        live.model_key = "2b034".to_string();
+        live.model_info = Some(model_info(2, 0xb034));
+        let mut list = vec![live];
+        let id = mouse_identity("MX Master 3S");
+        let cache = AssetResolver::new();
+        append_offline_known(
+            &mut list,
+            [("0b034", &id)].into_iter(),
+            &cache,
+            &HashSet::new(),
+        );
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn same_model_placeholders_collapse_to_one_card() {
+        // Two persisted identities of one model render identically — a second
+        // offline card carries no information, only confusion.
+        let id_a = mouse_identity("MX Master 3S");
+        let id_b = mouse_identity("MX Master 3S");
+        let cache = AssetResolver::new();
+        let mut list = Vec::new();
+        append_offline_known(
+            &mut list,
+            [("0b034", &id_a), ("2b034", &id_b)].into_iter(),
+            &cache,
+            &HashSet::new(),
+        );
+        assert_eq!(list.len(), 1);
     }
 
     #[test]
