@@ -278,19 +278,33 @@ fn open_or_focus_gui() {
     }
 }
 
-/// PIDs of running GUI processes: `OpenLogi.exe` (installed / portable
-/// layout) or `openlogi-gui.exe` (cargo target dir).
+/// PIDs of this user's running GUI processes: `OpenLogi.exe` (installed /
+/// portable layout) or `openlogi-gui.exe` (cargo target dir).
+///
+/// Matching by *name* rather than by install directory is deliberate: the
+/// GUI is a per-user singleton (`openlogi.lock` lives under the profile), so
+/// whichever copy is running — MSI, portable, dev — it is the only one that
+/// *can* run, it is the one talking to this agent (the IPC pipe name is
+/// machine-global), and a directory-scoped Show would spawn a sibling that
+/// immediately loses the singleton and exits, doing nothing visible. The
+/// same-user filter keeps other sessions (fast user switching) out of
+/// Show/Quit — their windows are invisible to `EnumWindows` and their
+/// processes unkillable anyway, but don't even consider them.
 fn gui_pids() -> Vec<u32> {
-    use sysinfo::{ProcessesToUpdate, System};
+    use sysinfo::{Pid, Process, ProcessesToUpdate, System};
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);
+    let own_user = system
+        .process(Pid::from_u32(std::process::id()))
+        .and_then(Process::user_id);
     system
         .processes()
         .values()
         .filter(|p| {
             let name = p.name().to_string_lossy();
-            name.eq_ignore_ascii_case("OpenLogi.exe")
-                || name.eq_ignore_ascii_case("openlogi-gui.exe")
+            (name.eq_ignore_ascii_case("OpenLogi.exe")
+                || name.eq_ignore_ascii_case("openlogi-gui.exe"))
+                && (own_user.is_none() || p.user_id() == own_user)
         })
         .map(|p| p.pid().as_u32())
         .collect()

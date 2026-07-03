@@ -1431,8 +1431,13 @@ fn connection_icon_path(
         // Explicit arms (not `_`) so a new DeviceRoute variant trips the
         // compiler here, matching the exhaustive sibling `route_label`.
         Some(DeviceRoute::Direct { .. }) | None => match transports {
-            Some(t) if t.usb && !t.bluetooth && !t.btle => "action-icons/usb.svg",
-            // Unknown transports (no 0x0003 snapshot) keep the old default.
+            // No Bluetooth radio at all ⇒ the direct link can only be the
+            // cable. eQuad counts as wired-capable here: eQuad is
+            // receiver-only by definition, so it is never the *direct* link —
+            // an equad-only table still means this connection is a cable.
+            Some(t) if (t.usb || t.equad) && !t.bluetooth && !t.btle => "action-icons/usb.svg",
+            // Unknown transports (no 0x0003 snapshot, or an all-false table)
+            // keep the old default.
             _ => "action-icons/bluetooth.svg",
         },
     }
@@ -1787,6 +1792,21 @@ mod tests {
         assert_eq!(
             connection_icon_path(Some(&direct), Some(&wired)),
             "action-icons/usb.svg"
+        );
+        // eQuad is receiver-only, so an equad-only table on a *direct* route
+        // still means a cable — not Bluetooth.
+        let equad_only = DeviceTransports {
+            equad: true,
+            ..DeviceTransports::default()
+        };
+        assert_eq!(
+            connection_icon_path(Some(&direct), Some(&equad_only)),
+            "action-icons/usb.svg"
+        );
+        // An all-false table is "unknown", not "wired".
+        assert_eq!(
+            connection_icon_path(Some(&direct), Some(&DeviceTransports::default())),
+            "action-icons/bluetooth.svg"
         );
         // Direct + any radio keeps the Bluetooth mark.
         assert_eq!(

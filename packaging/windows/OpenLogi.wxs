@@ -72,6 +72,15 @@
       The GUI does have a window, so ask it to close first; terminate as the
       fallback so silent upgrades (msiexec /qn, the future auto-updater) never
       stall on a FilesInUse prompt.
+
+      Target matches by image NAME, machine-wide by design of the element —
+      there is no per-directory scoping. That is the correct scope here, not
+      an accident: both processes are per-user singletons (profile-scoped
+      agent.lock / openlogi.lock), so the only same-user copies that can be
+      running — whichever install they came from — are exactly the ones
+      holding the IPC pipe and the locks the upgraded install needs freed.
+      Other users' processes survive: this is a per-user package, and the
+      deferred close action runs without the rights to terminate them.
     -->
     <util:CloseApplication Id="CloseAgent"
                            Target="openlogi-agent.exe"
