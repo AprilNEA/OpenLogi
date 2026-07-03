@@ -153,9 +153,10 @@ Windows support works and has been validated end-to-end on Windows 11 with
 real hardware — a wired keyboard and a Unifying-receiver mouse, including
 install, in-place upgrade, and uninstall of the MSI. It is newer than the
 macOS build, so if you hit a rough edge please
-[report it](https://github.com/AprilNEA/OpenLogi/issues). Known gap: no
-system-tray icon yet — the agent runs headless and the GUI window is the
-whole UI.
+[report it](https://github.com/AprilNEA/OpenLogi/issues). The agent shows a
+system-tray icon (Show Main Window / Quit) so the app stays reachable after
+the main window is closed; disable it with the same "show in menu bar"
+setting macOS uses.
 
 To build from source, see [DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
