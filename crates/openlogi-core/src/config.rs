@@ -115,10 +115,11 @@ pub struct AppSettings {
     /// user opt in on first launch.
     #[serde(default)]
     pub update_prompt_seen: bool,
-    /// Whether OpenLogi shows a macOS menu-bar (status item) icon. `true`
-    /// (default) → it lives in the menu bar, dropping the Dock icon while no
-    /// window is open; `false` → it stays an ordinary Dock app with no status
-    /// item. macOS-only; ignored on other platforms.
+    /// Whether OpenLogi shows a macOS menu-bar (status item) icon — and, on
+    /// Windows, the notification-area (tray) icon. `true` (default) → the
+    /// agent is visible in the menu bar / tray; `false` → it runs with no
+    /// visible presence (macOS additionally keeps the ordinary Dock icon
+    /// while a window is open). Ignored on Linux.
     #[serde(default = "default_true")]
     pub show_in_menu_bar: bool,
     /// Whether the GUI automatically downloads device images from
