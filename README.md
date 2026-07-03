@@ -143,10 +143,13 @@ and distros without systemd.
 
 ### Windows (preview)
 
-Signed `.exe` and per-user `.msi` installers (x86_64 and arm64) are attached to
-each release. Windows support is an early preview that hasn't been broadly
-tested on real hardware yet — expect rough edges, and please
-[report issues](https://github.com/AprilNEA/OpenLogi/issues).
+Signed portable `.zip` archives and per-user `.msi` installers (x86_64 and
+arm64) are attached to each release. Both ship the GUI (`OpenLogi.exe`)
+together with the background agent (`openlogi-agent.exe`), which owns all
+device I/O — keep the two files side by side when using the portable zip, or
+the GUI has nothing to connect to. Windows support is an early preview that
+hasn't been broadly tested on real hardware yet — expect rough edges, and
+please [report issues](https://github.com/AprilNEA/OpenLogi/issues).
 
 To build from source, see [DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
