@@ -1803,7 +1803,10 @@ mod tests {
             "action-icons/bluetooth.svg"
         );
         // No route (e.g. a synthetic/placeholder card) falls back to Bluetooth.
-        assert_eq!(connection_icon_path(None, None), "action-icons/bluetooth.svg");
+        assert_eq!(
+            connection_icon_path(None, None),
+            "action-icons/bluetooth.svg"
+        );
     }
 
     fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord {

@@ -43,10 +43,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CW_USEDEFAULT, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW,
     GetWindowThreadProcessId, HICON, IDI_APPLICATION, IsIconic, IsWindowVisible, LR_DEFAULTCOLOR,
-    LoadIconW, MF_SEPARATOR, MF_STRING, MSG, RegisterClassW, RegisterWindowMessageW,
-    SW_RESTORE, SetForegroundWindow, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL,
-    WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
+    LoadIconW, MF_SEPARATOR, MF_STRING, MSG, RegisterClassW, RegisterWindowMessageW, SW_RESTORE,
+    SetForegroundWindow, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+    TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
+    WS_OVERLAPPED,
 };
 
 /// Tray callback message the icon posts to the hidden window.
@@ -139,7 +139,12 @@ fn run_tray_loop() {
     }
 }
 
-unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_TRAY => {
             match lparam as u32 {
@@ -284,7 +289,8 @@ fn gui_pids() -> Vec<u32> {
         .values()
         .filter(|p| {
             let name = p.name().to_string_lossy();
-            name.eq_ignore_ascii_case("OpenLogi.exe") || name.eq_ignore_ascii_case("openlogi-gui.exe")
+            name.eq_ignore_ascii_case("OpenLogi.exe")
+                || name.eq_ignore_ascii_case("openlogi-gui.exe")
         })
         .map(|p| p.pid().as_u32())
         .collect()
@@ -315,7 +321,10 @@ fn focus_window_of(pids: &[u32]) -> bool {
             1
         }
     }
-    let mut search = Search { pids, focused: false };
+    let mut search = Search {
+        pids,
+        focused: false,
+    };
     // SAFETY: the callback only dereferences the &mut Search for the duration
     // of this call.
     unsafe {
