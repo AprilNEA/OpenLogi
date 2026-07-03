@@ -29,7 +29,10 @@
 //! - **`drain_events`** (poll path) — flushes pending writes, then attempts a
 //!   non-blocking `prepare_read` + `read` with a short 25 ms `poll(2)` cap.
 //!   If nothing arrives in time the last known state is returned unchanged;
-//!   millisecond-stale frontmost data is acceptable by design.
+//!   millisecond-stale frontmost data is acceptable by design. A genuine
+//!   connection error here (as opposed to a timeout) marks the session
+//!   finished so the next poll reconnects, the same as an explicit
+//!   `Finished` event.
 //!
 //! - **`timed_roundtrip`** (init path) — sends `wl_display.sync`, then loops
 //!   `flush` → `poll(2)` → `read` → `dispatch_pending` until the sync callback
@@ -318,10 +321,16 @@ fn timed_roundtrip(
 
 /// Drains pending compositor events without blocking longer than `POLL_CAP_MS`.
 /// Used on every frontmost poll. Stale data within the cap is acceptable by
-/// design; errors are silently ignored so the last known state is returned.
+/// design; a genuine connection error (e.g. the compositor crashing and
+/// closing the socket, rather than sending a graceful `Finished`) marks
+/// `state.finished` so the caller reconnects on the next poll instead of
+/// returning stale state forever.
 fn drain_events(queue: &mut EventQueue<State>, state: &mut State) {
-    let _ = queue.flush();
-    let _ = queue.dispatch_pending(state);
+    if queue.flush().is_err() || queue.dispatch_pending(state).is_err() {
+        warn!("wlr-foreign-toplevel: connection error while draining — will reconnect on next poll");
+        state.finished = true;
+        return;
+    }
 
     let deadline = Instant::now() + Duration::from_millis(POLL_CAP_MS);
     match queue.prepare_read() {
@@ -330,9 +339,11 @@ fn drain_events(queue: &mut EventQueue<State>, state: &mut State) {
         }
         Some(guard) => {
             let fd = guard.connection_fd().as_raw_fd();
-            if poll_fd(fd, deadline) {
-                let _ = guard.read();
-                let _ = queue.dispatch_pending(state);
+            if poll_fd(fd, deadline) && (guard.read().is_err() || queue.dispatch_pending(state).is_err()) {
+                warn!(
+                    "wlr-foreign-toplevel: connection error while draining — will reconnect on next poll"
+                );
+                state.finished = true;
             }
             // If poll timed out, guard is dropped here and we return stale state.
         }
