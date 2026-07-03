@@ -210,7 +210,9 @@ impl Receiver {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct ReceiverInfo {
+    /// Receiver serial number.
     pub serial_number: String,
+    /// Number of available pairing slots.
     pub pairing_slots: u8,
 }
 
@@ -220,10 +222,15 @@ pub struct ReceiverInfo {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct DevicePairingInformation {
+    /// Wireless product ID of the paired device.
     pub wpid: u16,
+    /// Device kind reported by the receiver.
     pub kind: DeviceKind,
+    /// Whether the link is encrypted.
     pub encrypted: bool,
+    /// Whether the device is currently online.
     pub online: bool,
+    /// Device unit ID.
     pub unit_id: [u8; 4],
 }
 
@@ -237,13 +244,21 @@ pub struct DevicePairingInformation {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum DeviceKind {
+    /// Unknown device kind.
     Unknown = 0x00,
+    /// Keyboard device.
     Keyboard = 0x01,
+    /// Mouse device.
     Mouse = 0x02,
+    /// Numeric keypad device.
     Numpad = 0x03,
+    /// Presenter device.
     Presenter = 0x04,
+    /// Remote-control device.
     Remote = 0x05,
+    /// Trackball device.
     Trackball = 0x06,
+    /// Touchpad device.
     Touchpad = 0x07,
 }
 
@@ -255,8 +270,11 @@ pub enum DeviceKind {
 pub struct DeviceConnection {
     /// Slot index (1-based) of the device.
     pub index: u8,
+    /// Device kind reported by the receiver.
     pub kind: DeviceKind,
+    /// Whether the link is encrypted.
     pub encrypted: bool,
+    /// Whether the device is currently online.
     pub online: bool,
     /// Wireless product ID of the device.
     pub wpid: u16,

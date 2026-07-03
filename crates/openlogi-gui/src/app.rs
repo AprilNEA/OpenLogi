@@ -4,7 +4,7 @@ use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, BoxShadow, Context, Div,
     Entity, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, fill,
-    img, point, prelude::FluentBuilder as _, px, relative, rgb,
+    img, point, prelude::FluentBuilder as _, px, relative, rgb, svg,
 };
 use gpui_component::{
     Icon, IconName, Sizable as _,
@@ -761,9 +761,22 @@ fn device_card(
                                     record.slot
                                 )),
                         )
-                        .when_some(record.battery.as_ref(), |this, b| {
-                            this.child(battery_view(b, pal))
-                        }),
+                        .child(
+                            h_flex()
+                                .flex_none()
+                                .items_center()
+                                .gap_1p5()
+                                .child(
+                                    svg()
+                                        .path(connection_icon_path(record.route.as_ref()))
+                                        .size_3()
+                                        .flex_none()
+                                        .text_color(pal.text_muted),
+                                )
+                                .when_some(record.battery.as_ref(), |this, b| {
+                                    this.child(battery_view(b, pal))
+                                }),
+                        ),
                 ),
         )
 }
@@ -1394,6 +1407,21 @@ fn route_label(route: Option<&DeviceRoute>) -> String {
     }
 }
 
+/// Connection-type glyph for a gallery card: a dongle for receiver-paired
+/// devices, a Bluetooth mark for direct ones.
+/// ponytail: `Direct` is treated as Bluetooth — a USB-cable mouse would read
+/// "bluetooth" here. The route enum carries no transport; split on
+/// `capabilities.transports` if a wired device ever needs its own glyph.
+fn connection_icon_path(route: Option<&DeviceRoute>) -> &'static str {
+    match route {
+        Some(DeviceRoute::Bolt { .. }) => "action-icons/bolt.svg",
+        Some(DeviceRoute::Unifying { .. }) => "action-icons/unifying.svg",
+        // Explicit arms (not `_`) so a new DeviceRoute variant trips the
+        // compiler here, matching the exhaustive sibling `route_label`.
+        Some(DeviceRoute::Direct { .. }) | None => "action-icons/bluetooth.svg",
+    }
+}
+
 fn kind_label(kind: DeviceKind) -> String {
     match kind {
         DeviceKind::Mouse => tr!("Mouse").to_string(),
@@ -1697,7 +1725,36 @@ fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
+    use super::{
+        Capabilities, DetailTab, DeviceKind, DeviceRecord, DeviceRoute, connection_icon_path,
+    };
+
+    #[test]
+    fn connection_icon_matches_route() {
+        let bolt = DeviceRoute::Bolt {
+            receiver_uid: "r".into(),
+            slot: 1,
+        };
+        let uni = DeviceRoute::Unifying {
+            receiver_uid: "r".into(),
+            slot: 1,
+        };
+        let direct = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb019,
+        };
+        assert_eq!(connection_icon_path(Some(&bolt)), "action-icons/bolt.svg");
+        assert_eq!(
+            connection_icon_path(Some(&uni)),
+            "action-icons/unifying.svg"
+        );
+        assert_eq!(
+            connection_icon_path(Some(&direct)),
+            "action-icons/bluetooth.svg"
+        );
+        // No route (e.g. a synthetic/placeholder card) falls back to Bluetooth.
+        assert_eq!(connection_icon_path(None), "action-icons/bluetooth.svg");
+    }
 
     fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord {
         DeviceRecord {

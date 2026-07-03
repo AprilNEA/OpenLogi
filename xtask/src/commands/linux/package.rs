@@ -4,10 +4,10 @@ use anyhow::Result;
 use clap::Parser;
 use xshell::{Shell, cmd};
 
-use crate::util::{absolutize, ensure_command, ensure_file, repo_root};
+use crate::support::fs::{absolutize, ensure_command, ensure_file, repo_root};
 
 #[derive(Parser)]
-pub(crate) struct PackageLinux {
+pub(crate) struct Args {
     /// Output directory for .deb and .rpm packages (default: target/release).
     #[arg(long, default_value = "target/release")]
     output: PathBuf,
@@ -16,7 +16,7 @@ pub(crate) struct PackageLinux {
     no_build: bool,
 }
 
-pub(crate) fn package_linux(args: &PackageLinux) -> Result<()> {
+pub(crate) fn run(args: &Args) -> Result<()> {
     let root = repo_root()?;
     let sh = Shell::new()?;
     let _repo = sh.push_dir(&root);

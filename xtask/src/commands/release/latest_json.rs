@@ -12,7 +12,7 @@ const CHANNEL: &str = "stable";
 const MINIMUM_OS_VERSION: &str = "13.0";
 
 #[derive(Parser)]
-pub(crate) struct GenerateUpdaterManifest {
+pub(crate) struct Args {
     /// Directory containing release artifacts.
     #[arg(long, default_value = "dist")]
     dist: PathBuf,
@@ -53,7 +53,7 @@ struct Asset {
     minimum_os_version: &'static str,
 }
 
-pub(crate) fn generate_updater_manifest(args: &GenerateUpdaterManifest) -> Result<()> {
+pub(crate) fn run(args: &Args) -> Result<()> {
     let version = args.tag.strip_prefix('v').unwrap_or(&args.tag).to_string();
     let release_base = format!(
         "{}/releases/{}",
@@ -71,7 +71,9 @@ pub(crate) fn generate_updater_manifest(args: &GenerateUpdaterManifest) -> Resul
         version,
         tag: args.tag.clone(),
         channel: CHANNEL,
-        published_at: published_at()?,
+        published_at: OffsetDateTime::from(SystemTime::now())
+            .format(&Rfc3339)
+            .context("could not format current timestamp")?,
         release_url: format!(
             "https://github.com/AprilNEA/OpenLogi/releases/tag/{}",
             args.tag
@@ -126,7 +128,9 @@ fn collect_assets(dist: &Path, release_base: &str) -> Result<Vec<Asset>> {
                 .metadata()
                 .with_context(|| format!("could not stat {}", path.display()))?
                 .len(),
-            sha256: sha256(&path)?,
+            sha256: path
+                .sha256()
+                .with_context(|| format!("could not hash artifact {}", path.display()))?,
             minimum_os_version: MINIMUM_OS_VERSION,
         });
     }
@@ -138,17 +142,6 @@ fn dmg_arch(name: &str) -> Option<&str> {
     let stem = name.strip_suffix(".dmg")?;
     let (_, arch) = stem.rsplit_once("-macos-")?;
     matches!(arch, "arm64" | "x86_64").then_some(arch)
-}
-
-fn sha256(path: &Path) -> Result<String> {
-    path.sha256()
-        .with_context(|| format!("could not hash artifact {}", path.display()))
-}
-
-fn published_at() -> Result<String> {
-    OffsetDateTime::from(SystemTime::now())
-        .format(&Rfc3339)
-        .context("could not format current timestamp")
 }
 
 #[cfg(test)]

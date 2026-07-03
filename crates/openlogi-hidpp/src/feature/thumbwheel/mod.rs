@@ -163,7 +163,9 @@ pub struct ThumbwheelInfo {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum ThumbwheelDirection {
+    /// Positive rotation means left/back for this device orientation.
     PositiveWhenLeftOrBack = 0,
+    /// Positive rotation means right/front for this device orientation.
     PositiveWhenRightOrFront = 1,
 }
 

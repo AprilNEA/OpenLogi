@@ -42,7 +42,9 @@ pub fn detect(chan: Arc<HidppChannel>) -> Option<Receiver> {
 #[derive(Clone)]
 #[non_exhaustive]
 pub enum Receiver {
+    /// Logi Bolt receiver.
     Bolt(bolt::Receiver),
+    /// Logitech Unifying receiver.
     Unifying(unifying::Receiver),
 }
 

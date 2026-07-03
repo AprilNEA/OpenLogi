@@ -106,7 +106,7 @@ jobs:
         run: |
           set -euo pipefail
           export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
-          cargo run -p xtask -- bundle-macos
+          cargo run -p xtask -- macos bundle
 
       - name: Sign app bundle
         env:
@@ -134,7 +134,7 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ steps.load_secrets.outputs.APPLE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
-          cargo run -p xtask -- dmg-macos --sign-identity "$APPLE_SIGNING_IDENTITY"
+          cargo run -p xtask -- macos dmg --sign-identity "$APPLE_SIGNING_IDENTITY"
 
       - name: Notarize DMG
         env:
@@ -596,7 +596,7 @@ jobs:
           NFPM_SHA256: ${{ matrix.nfpm_sha256 }}
         run: |
           sudo apt-get update
-          # package-linux builds openlogi-gui, which links GPUI's full
+          # The Linux packaging task builds openlogi-gui, which links GPUI's full
           # wayland / x11 stack — keep this in sync with ci.yml's Linux deps
           # (the proven set). The previous short list was missing
           # libxkbcommon-x11-dev / libwayland-dev / libx11-xcb-dev, so every
@@ -613,7 +613,7 @@ jobs:
           sudo dpkg -i /tmp/nfpm.deb
 
       - name: Build and package
-        run: cargo run -p xtask -- package-linux
+        run: cargo run -p xtask -- linux package
 
       - name: Collect packages
         env:
@@ -790,7 +790,7 @@ jobs:
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
         run: |
           set -euo pipefail
-          cargo run -p xtask -- generate-updater-manifest \
+          cargo run -p xtask -- release latest-json \
             --dist dist \
             --tag "$GITHUB_REF_NAME" \
             --base-url "$OPENLOGI_UPDATE_BASE_URL" \

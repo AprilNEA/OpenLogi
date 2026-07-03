@@ -1,7 +1,7 @@
 # nfpm package descriptor for OpenLogi Linux packages (.deb / .rpm).
 #
 # Build with the xtask:
-#   cargo run -p xtask -- package-linux
+#   cargo run -p xtask -- linux package
 #
 # Or directly (requires nfpm in PATH; set VERSION and PKG_ARCH):
 #   VERSION=0.6.0 PKG_ARCH=amd64 nfpm package --packager deb --target target/release

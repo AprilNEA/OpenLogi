@@ -109,7 +109,9 @@ pub struct WirelessDeviceStatusBroadcast {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum WirelessDeviceStatus {
+    /// Unknown wireless device status.
     Unknown = 0x00,
+    /// Device is reconnecting.
     Reconnection = 0x01,
 }
 
@@ -120,7 +122,9 @@ pub enum WirelessDeviceStatus {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum WirelessDeviceStatusRequest {
+    /// No host action requested.
     NoRequest = 0x00,
+    /// Host software must reconfigure the device.
     SoftwareReconfigurationNeeded = 0x01,
 }
 
@@ -131,6 +135,8 @@ pub enum WirelessDeviceStatusRequest {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum WirelessDeviceStatusReason {
+    /// Unknown broadcast reason.
     Unknown = 0x00,
+    /// Broadcast was caused by the device power switch.
     PowerSwitchActivated = 0x01,
 }

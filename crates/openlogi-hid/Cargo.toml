@@ -9,9 +9,10 @@ authors.workspace = true
 description = "HID++ device discovery for OpenLogi, wrapping the hidpp crate over async-hid."
 keywords = ["logitech", "hidpp", "hid", "mouse", "async"]
 categories = ["hardware-support", "asynchronous"]
+readme = "README.md"
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", version = "0.6.16" }
+openlogi-core = { path = "../openlogi-core", version = "0.6.18" }
 hidpp = { workspace = true }
 async-hid = { workspace = true }
 tokio = { workspace = true }

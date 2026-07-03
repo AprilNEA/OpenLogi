@@ -28,8 +28,8 @@ devenv.local.yaml
 # macOS finder metadata
 .DS_Store
 
-# Bundle-time asset payload — fetched fresh from assets.openlogi.org by
-# scripts/sync_bundle_assets.py before `cargo bundle`, not checked in.
+# Bundle-time asset payload — fetched fresh from assets.openlogi.org by the
+# macOS bundle task before `cargo bundle`, not checked in.
 /crates/openlogi-gui/assets/
 
 # Packaging output.

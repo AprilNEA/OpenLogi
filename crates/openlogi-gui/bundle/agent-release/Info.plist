@@ -10,7 +10,7 @@
   Developer-ID signature is what lets the Accessibility (TCC) grant persist
   across app updates — the agent, not the GUI, is the hook-trusted process.
 
-  The 0.0.0 version is a sentinel, not a release number: `xtask bundle-macos`
+  The 0.0.0 version is a sentinel, not a release number: `xtask macos bundle`
   stamps the workspace version over it when embedding the helper.
 -->
 <plist version="1.0">

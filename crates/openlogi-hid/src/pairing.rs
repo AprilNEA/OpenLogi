@@ -26,51 +26,36 @@
 use std::{collections::HashMap, sync::Arc};
 
 use hidpp::{
-    channel::{HidppChannel, HidppMessage, MessageListenerGuard},
+    channel::{HidppChannel, HidppMessage},
     receiver::{self, Receiver},
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 
 use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
+mod notification;
+mod registers;
+
+use notification::{Notification, decode, parse_notification, subscribe};
+use registers::{
+    BOLT_DISCOVERY, BOLT_PAIRING, NOTIFICATION_FLAGS, NOTIFICATIONS, UNIFYING_PAIRING,
+    write_long_register, write_register,
+};
+
 /// HID++ device index addressing the receiver itself (not a paired device).
 const RECEIVER_INDEX: u8 = 0xff;
-
-/// Receiver registers (HID++ 1.0 RAP).
-mod reg {
-    /// Notification-flags register (3-byte big-endian value).
-    pub const NOTIFICATIONS: u8 = 0x00;
-    /// Unifying pairing lock + unpair.
-    pub const UNIFYING_PAIRING: u8 = 0xb2;
-    /// Bolt discovery start/stop (short register).
-    pub const BOLT_DISCOVERY: u8 = 0xc0;
-    /// Bolt pair / cancel / unpair (long register).
-    pub const BOLT_PAIRING: u8 = 0xc1;
-}
-
-/// Notification sub-IDs the receiver emits during pairing.
-mod notif {
-    pub const DEVICE_CONNECTION: u8 = 0x41;
-    pub const UNIFYING_LOCK: u8 = 0x4a;
-    pub const PASSKEY_REQUEST: u8 = 0x4d;
-    pub const DEVICE_DISCOVERY: u8 = 0x4f;
-    pub const DISCOVERY_STATUS: u8 = 0x53;
-    pub const PAIRING_STATUS: u8 = 0x54;
-}
-
-/// `WIRELESS` (0x000100) | `SOFTWARE_PRESENT` (0x000800) notification flags,
-/// big-endian. Both must be set for the receiver to stream pairing events.
-const NOTIF_FLAGS: [u8; 3] = [0x00, 0x09, 0x00];
 
 /// Receiver pairing family. Each uses a different register flow.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ReceiverFamily {
+    /// Logi Bolt receiver.
     Bolt,
+    /// Logitech Unifying receiver.
     Unifying,
 }
 
@@ -89,7 +74,9 @@ fn family_for(product_id: u16) -> Option<ReceiverFamily> {
 pub struct PairingReceiver {
     /// Bolt unique ID, when readable. `None` for Unifying (no read path yet).
     pub uid: Option<String>,
+    /// Receiver protocol family.
     pub family: ReceiverFamily,
+    /// USB product ID of the receiver.
     pub product_id: u16,
 }
 
@@ -113,7 +100,9 @@ pub struct DiscoveredDevice {
     pub address: [u8; 6],
     /// Authentication-method bitfield (bit 0 = passkey typed on keyboard).
     pub authentication: u8,
+    /// Device class reported by the receiver discovery notification.
     pub kind: BoltDeviceKind,
+    /// Human-readable name advertised by the discovered device.
     pub name: String,
 }
 
@@ -138,7 +127,9 @@ impl DiscoveredDevice {
 /// A single click in a pointer passkey sequence.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Click {
+    /// Left mouse button click.
     Left,
+    /// Right mouse button click.
     Right,
 }
 
@@ -154,7 +145,12 @@ pub enum PasskeyMethod {
     Keyboard(String),
     /// On the new pointer, perform this left/right click sequence, then click
     /// both buttons together.
-    Pointer { passkey: String, clicks: Vec<Click> },
+    Pointer {
+        /// Numeric passkey shown by the device.
+        passkey: String,
+        /// MSB-first click sequence derived from the passkey.
+        clicks: Vec<Click>,
+    },
 }
 
 /// Renders a Bolt passkey as a 10-bit MSB-first left/right click sequence.
@@ -181,8 +177,11 @@ pub enum PairingEvent {
     DeviceFound(DiscoveredDevice),
     /// Bolt only: the device asks the user to enter a passkey to authenticate.
     Passkey(PasskeyMethod),
-    /// A device was paired and assigned `slot`.
-    Paired { slot: u8 },
+    /// A device was paired and assigned a receiver slot.
+    Paired {
+        /// Assigned pairing slot.
+        slot: u8,
+    },
     /// The flow ended without pairing a device.
     Failed(PairingError),
 }
@@ -199,16 +198,22 @@ pub enum PairingCommand {
 /// Errors raised by pairing operations.
 #[derive(Clone, Debug, Error)]
 pub enum PairingError {
+    /// HID transport failure.
     #[error("HID transport error: {0}")]
     Hid(String),
+    /// No supported receiver matched the requested selector.
     #[error("no supported pairing-capable receiver found")]
     ReceiverNotFound,
+    /// HID++ receiver register read/write failed.
     #[error("receiver register access failed: {0}")]
     Register(String),
+    /// Pairing flow exceeded its timeout.
     #[error("pairing timed out")]
     Timeout,
+    /// Receiver reported a device-specific pairing error code.
     #[error("receiver reported pairing error {0:#04x}")]
     Device(u8),
+    /// Pairing flow was cancelled by the caller.
     #[error("pairing was cancelled")]
     Cancelled,
 }
@@ -277,122 +282,6 @@ async fn open_receiver(
     Err(PairingError::ReceiverNotFound)
 }
 
-/// Decodes a raw HID++ message into `(device_index, sub_id, payload)`, where
-/// `payload[0]` is the HID++ 1.0 notification *address* byte and `payload[k]`
-/// for `k >= 1` is Solaar's `data[k - 1]`. Short payloads are zero-padded.
-fn decode(msg: &HidppMessage) -> (u8, u8, [u8; 17]) {
-    let mut payload = [0u8; 17];
-    match msg {
-        HidppMessage::Short(d) => {
-            payload[..4].copy_from_slice(&d[2..6]);
-            (d[0], d[1], payload)
-        }
-        HidppMessage::Long(d) => {
-            payload.copy_from_slice(&d[2..19]);
-            (d[0], d[1], payload)
-        }
-    }
-}
-
-/// A parsed receiver notification relevant to pairing.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Notification {
-    /// Bolt discovery address frame: kind, BTLE address, auth method.
-    DiscoveryInfo {
-        counter: u16,
-        kind: u8,
-        address: [u8; 6],
-        authentication: u8,
-    },
-    /// Bolt discovery name frame.
-    DiscoveryName { counter: u16, name: String },
-    /// Bolt pairing completed; `slot` is the assigned device index.
-    PairingSucceeded { slot: u8 },
-    /// Bolt pairing/discovery failed with a receiver error code.
-    PairingError(u8),
-    /// Bolt passkey to present to the user (6 ASCII digits).
-    Passkey(String),
-    /// A device linked to the receiver (`slot` = its device index).
-    Connected { slot: u8, established: bool },
-    /// Unifying pairing lock changed state; `error` is non-zero on failure.
-    UnifyingLock { open: bool, error: u8 },
-}
-
-/// Parses a raw message into a pairing [`Notification`], if it is one.
-fn parse_notification(sub_id: u8, device_index: u8, p: [u8; 17]) -> Option<Notification> {
-    match sub_id {
-        notif::DEVICE_CONNECTION => Some(Notification::Connected {
-            slot: device_index,
-            // bit 6 of the flags byte set => link not established (offline).
-            established: p[1] & (1 << 6) == 0,
-        }),
-        notif::DEVICE_DISCOVERY => {
-            let counter = u16::from(p[0]) + u16::from(p[1]) * 256;
-            match p[2] {
-                0 => {
-                    let mut address = [0u8; 6];
-                    address.copy_from_slice(&p[7..13]);
-                    Some(Notification::DiscoveryInfo {
-                        counter,
-                        kind: p[4],
-                        address,
-                        authentication: p[15],
-                    })
-                }
-                1 => {
-                    let len = usize::from(p[3]).min(p.len() - 4);
-                    let name = String::from_utf8_lossy(&p[4..4 + len]).into_owned();
-                    Some(Notification::DiscoveryName { counter, name })
-                }
-                _ => None,
-            }
-        }
-        notif::DISCOVERY_STATUS => {
-            let error = p[1];
-            if error != 0 {
-                Some(Notification::PairingError(error))
-            } else {
-                None
-            }
-        }
-        notif::PAIRING_STATUS => {
-            let error = p[1];
-            if error != 0 {
-                Some(Notification::PairingError(error))
-            } else if p[0] == 0x02 {
-                // address 0x02 with no error => paired; slot is data[7] = p[8].
-                Some(Notification::PairingSucceeded { slot: p[8] })
-            } else {
-                None
-            }
-        }
-        notif::PASSKEY_REQUEST => {
-            let passkey = String::from_utf8_lossy(&p[1..7]).into_owned();
-            Some(Notification::Passkey(passkey))
-        }
-        notif::UNIFYING_LOCK => Some(Notification::UnifyingLock {
-            open: p[0] & 0x01 != 0,
-            error: p[1],
-        }),
-        _ => None,
-    }
-}
-
-/// Subscribes a listener that forwards unmatched messages to an async channel,
-/// and returns the listener guard plus the receiver end.
-fn subscribe(
-    channel: &HidppChannel,
-) -> (MessageListenerGuard, mpsc::UnboundedReceiver<HidppMessage>) {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let listener = channel.add_msg_listener_guarded(move |msg, matched| {
-        // `matched` messages are responses to our own register writes.
-        if !matched {
-            let _ = tx.send(msg);
-        }
-    });
-    (listener, rx)
-}
-
 /// Overall guard so a wedged receiver can't hang the session forever.
 const SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 /// Discovery / lock window opened on the receiver, in seconds.
@@ -424,7 +313,7 @@ pub async fn run_pairing(
     drop(listener);
     // Best-effort restore: clear notification flags we set.
     let _ = channel
-        .write_register(RECEIVER_INDEX, reg::NOTIFICATIONS, [0, 0, 0])
+        .write_register(RECEIVER_INDEX, NOTIFICATIONS, [0, 0, 0])
         .await;
 
     if let Err(ref e) = result {
@@ -441,24 +330,14 @@ async fn drive(
     notifications: &mut mpsc::UnboundedReceiver<HidppMessage>,
     events: &mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
-    write_register(channel, reg::NOTIFICATIONS, NOTIF_FLAGS).await?;
+    write_register(channel, NOTIFICATIONS, NOTIFICATION_FLAGS).await?;
 
     match family {
         ReceiverFamily::Bolt => {
-            write_register(
-                channel,
-                reg::BOLT_DISCOVERY,
-                [DISCOVERY_TIMEOUT, 0x01, 0x00],
-            )
-            .await?;
+            write_register(channel, BOLT_DISCOVERY, [DISCOVERY_TIMEOUT, 0x01, 0x00]).await?;
         }
         ReceiverFamily::Unifying => {
-            write_register(
-                channel,
-                reg::UNIFYING_PAIRING,
-                [0x01, 0x00, DISCOVERY_TIMEOUT],
-            )
-            .await?;
+            write_register(channel, UNIFYING_PAIRING, [0x01, 0x00, DISCOVERY_TIMEOUT]).await?;
         }
     }
     let _ = events.send(PairingEvent::Searching);
@@ -593,22 +472,17 @@ async fn pair_bolt_device(
     payload[2..8].copy_from_slice(&device.address);
     payload[8] = device.authentication;
     payload[9] = device.entropy();
-    write_long_register(channel, reg::BOLT_PAIRING, payload).await
+    write_long_register(channel, BOLT_PAIRING, payload).await
 }
 
 /// Best-effort cancel of an in-progress flow.
 async fn cancel(channel: &HidppChannel, family: ReceiverFamily) {
     let res = match family {
         ReceiverFamily::Bolt => {
-            write_register(
-                channel,
-                reg::BOLT_DISCOVERY,
-                [DISCOVERY_TIMEOUT, 0x02, 0x00],
-            )
-            .await
+            write_register(channel, BOLT_DISCOVERY, [DISCOVERY_TIMEOUT, 0x02, 0x00]).await
         }
         ReceiverFamily::Unifying => {
-            write_register(channel, reg::UNIFYING_PAIRING, [0x02, 0x00, 0x00]).await
+            write_register(channel, UNIFYING_PAIRING, [0x02, 0x00, 0x00]).await
         }
     };
     if let Err(e) = res {
@@ -624,178 +498,13 @@ pub async fn unpair(target: ReceiverSelector, slot: u8) -> Result<(), PairingErr
             let mut payload = [0u8; 16];
             payload[0] = 0x03; // action: unpair
             payload[1] = slot;
-            write_long_register(&channel, reg::BOLT_PAIRING, payload).await
+            write_long_register(&channel, BOLT_PAIRING, payload).await
         }
         ReceiverFamily::Unifying => {
-            write_register(&channel, reg::UNIFYING_PAIRING, [0x03, slot, 0x00]).await
+            write_register(&channel, UNIFYING_PAIRING, [0x03, slot, 0x00]).await
         }
     }
-}
-
-async fn write_register(
-    channel: &HidppChannel,
-    address: u8,
-    payload: [u8; 3],
-) -> Result<(), PairingError> {
-    channel
-        .write_register(RECEIVER_INDEX, address, payload)
-        .await
-        .map_err(|e| {
-            warn!(
-                register = format_args!("{address:#04x}"),
-                ?e,
-                "register write failed"
-            );
-            PairingError::Register(format!("{e}"))
-        })
-}
-
-async fn write_long_register(
-    channel: &HidppChannel,
-    address: u8,
-    payload: [u8; 16],
-) -> Result<(), PairingError> {
-    channel
-        .write_long_register(RECEIVER_INDEX, address, payload)
-        .await
-        .map_err(|e| {
-            warn!(
-                register = format_args!("{address:#04x}"),
-                ?e,
-                "long register write failed"
-            );
-            PairingError::Register(format!("{e}"))
-        })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Builds a long HID++ message from a 17-byte payload (`p[0]` = address).
-    fn long(sub_id: u8, device_index: u8, p: [u8; 17]) -> HidppMessage {
-        let mut d = [0u8; 19];
-        d[0] = device_index;
-        d[1] = sub_id;
-        d[2..19].copy_from_slice(&p);
-        HidppMessage::Long(d)
-    }
-
-    #[test]
-    fn decode_maps_long_payload_to_address_first() {
-        let msg = long(notif::DEVICE_DISCOVERY, 0xff, {
-            let mut p = [0u8; 17];
-            p[0] = 0x07; // counter low (= Solaar address)
-            p[1] = 0x00; // counter high (= Solaar data[0])
-            p
-        });
-        let (idx, sub, payload) = decode(&msg);
-        assert_eq!(idx, 0xff);
-        assert_eq!(sub, notif::DEVICE_DISCOVERY);
-        assert_eq!(payload[0], 0x07);
-        assert_eq!(payload[1], 0x00);
-    }
-
-    #[test]
-    fn parses_discovery_info_frame() {
-        let mut p = [0u8; 17];
-        p[0] = 0x05; // counter low
-        p[1] = 0x00; // counter high
-        p[2] = 0x00; // address frame selector
-        p[4] = 0x02; // kind = mouse
-        p[7..13].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]);
-        p[15] = 0x01; // auth: keyboard-typed bit
-        assert_eq!(
-            parse_notification(notif::DEVICE_DISCOVERY, 0xff, p),
-            Some(Notification::DiscoveryInfo {
-                counter: 5,
-                kind: 0x02,
-                address: [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02],
-                authentication: 0x01,
-            })
-        );
-    }
-
-    #[test]
-    fn parses_discovery_name_frame() {
-        let mut p = [0u8; 17];
-        p[0] = 0x05;
-        p[1] = 0x00;
-        p[2] = 0x01; // name frame selector
-        p[3] = 0x03; // length
-        p[4..7].copy_from_slice(b"MX3");
-        assert_eq!(
-            parse_notification(notif::DEVICE_DISCOVERY, 0xff, p),
-            Some(Notification::DiscoveryName {
-                counter: 5,
-                name: "MX3".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn parses_pairing_success_with_slot() {
-        let mut p = [0u8; 17];
-        p[0] = 0x02; // address 0x02 = complete
-        p[1] = 0x00; // no error
-        p[8] = 0x03; // slot = data[7]
-        assert_eq!(
-            parse_notification(notif::PAIRING_STATUS, 0xff, p),
-            Some(Notification::PairingSucceeded { slot: 3 })
-        );
-    }
-
-    #[test]
-    fn parses_pairing_error() {
-        let mut p = [0u8; 17];
-        p[0] = 0x00;
-        p[1] = 0x01; // BoltPairingError::DEVICE_TIMEOUT
-        assert_eq!(
-            parse_notification(notif::PAIRING_STATUS, 0xff, p),
-            Some(Notification::PairingError(0x01))
-        );
-    }
-
-    #[test]
-    fn parses_passkey_digits() {
-        let mut p = [0u8; 17];
-        p[1..7].copy_from_slice(b"123456");
-        assert_eq!(
-            parse_notification(notif::PASSKEY_REQUEST, 0xff, p),
-            Some(Notification::Passkey("123456".to_string()))
-        );
-    }
-
-    #[test]
-    fn parses_unifying_lock() {
-        let mut p = [0u8; 17];
-        p[0] = 0x01; // lock open
-        assert_eq!(
-            parse_notification(notif::UNIFYING_LOCK, 0xff, p),
-            Some(Notification::UnifyingLock {
-                open: true,
-                error: 0
-            })
-        );
-    }
-
-    #[test]
-    fn passkey_clicks_are_msb_first_10_bits() {
-        // 0b00_0000_0101 = 5 -> eight lefts then right, left, right.
-        assert_eq!(
-            passkey_to_clicks("5"),
-            vec![
-                Click::Left,
-                Click::Left,
-                Click::Left,
-                Click::Left,
-                Click::Left,
-                Click::Left,
-                Click::Left,
-                Click::Right,
-                Click::Left,
-                Click::Right,
-            ]
-        );
-    }
-}
+mod tests;

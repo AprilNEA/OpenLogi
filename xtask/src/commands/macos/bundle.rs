@@ -1,46 +1,16 @@
 use std::env;
 use std::io::BufWriter;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use clap::Parser;
 use icns::{IconFamily, IconType, Image as IcnsImage, PixelFormat};
 use image::imageops::FilterType;
+use plist::Value;
 use xshell::{Shell, cmd};
 
-use crate::util::{absolutize, command_exists, ensure_command, ensure_dir, ensure_file, repo_root};
+use crate::support::fs::{command_exists, ensure_dir, ensure_file, repo_root};
 
-#[derive(Parser)]
-pub(crate) struct DmgMacos {
-    /// App bundle to package.
-    #[arg(long, default_value = "target/release/bundle/osx/OpenLogi.app")]
-    app: PathBuf,
-    /// Output DMG path.
-    #[arg(long, default_value = "target/release/OpenLogi.dmg")]
-    output: PathBuf,
-    /// Developer ID identity used to sign the DMG, and the app when packaging.
-    #[arg(long, env = "OPENLOGI_SIGN_IDENTITY")]
-    sign_identity: Option<String>,
-    /// Branded DMG background URL.
-    #[arg(
-        long,
-        env = "OPENLOGI_DMG_BACKGROUND_URL",
-        default_value = "https://assets.openlogi.org/dmg/dmg-background.tiff"
-    )]
-    background_url: String,
-}
-
-pub(crate) fn package_macos(args: &DmgMacos) -> Result<()> {
-    bundle_macos()?;
-    if let Some(identity) = &args.sign_identity {
-        sign_app(identity)?;
-    } else {
-        println!("==> codesign: skipped (unsigned — set OPENLOGI_SIGN_IDENTITY to sign)");
-    }
-    dmg_macos(args)
-}
-
-pub(crate) fn generate_macos_icns() -> Result<()> {
+pub(crate) fn generate_icns() -> Result<()> {
     let root = repo_root()?;
     let master = root.join("design/icon/openlogi.png");
     let output_dir = root.join("crates/openlogi-gui/icon");
@@ -86,14 +56,14 @@ fn write_icns(master: &Path, output: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn bundle_macos() -> Result<()> {
+pub(crate) fn run() -> Result<()> {
     let root = repo_root()?;
     let sh = Shell::new()?;
     let _repo = sh.push_dir(&root);
     let xcode_env = xcode_env()?;
 
     println!("==> app icon");
-    generate_macos_icns()?;
+    generate_icns()?;
 
     if env::var("OPENLOGI_BUNDLE_ASSETS").as_deref() == Ok("1") {
         println!("==> device assets: bundling (offline build)");
@@ -163,7 +133,7 @@ fn embed_agent_helper(root: &Path, app: &Path, xcode_env: &[(String, String)]) -
         .with_context(|| "could not write the helper Info.plist".to_string())?;
     // Share the GUI's app icon so the agent shows the OpenLogi mark (not a
     // generic blank) in System Settings → Accessibility, where the grant now
-    // lives under "OpenLogi Agent". `bundle_macos` runs `generate_macos_icns`
+    // lives under "OpenLogi Agent". The bundle command runs icon generation
     // first, so the icns is already on disk. Matches the Info.plist
     // CFBundleIconFile = "AppIcon".
     let icon_src = root.join("crates/openlogi-gui/icon/AppIcon.icns");
@@ -173,20 +143,25 @@ fn embed_agent_helper(root: &Path, app: &Path, xcode_env: &[(String, String)]) -
         .with_context(|| format!("could not create {}", resources.display()))?;
     fs_err::copy(&icon_src, resources.join("AppIcon.icns"))
         .with_context(|| "could not copy the app icon into the helper bundle".to_string())?;
-    // The template ships the 0.0.0 sentinel; stamp the workspace version
-    // (= xtask's own, inherited) over it so Finder and update scanners see the
-    // real one.
-    let version = env!("CARGO_PKG_VERSION");
-    for key in ["CFBundleShortVersionString", "CFBundleVersion"] {
-        cmd!(
-            sh,
-            "/usr/bin/plutil -replace {key} -string {version} {info_dst}"
-        )
-        .run()?;
-    }
+
+    stamp_bundle_version(&info_dst, env!("CARGO_PKG_VERSION"))?;
 
     println!("    embedded {}", helper.display());
     Ok(())
+}
+
+fn stamp_bundle_version(info_plist: &Path, version: &str) -> Result<()> {
+    let mut plist = Value::from_file(info_plist)
+        .with_context(|| format!("could not read {}", info_plist.display()))?;
+    let dict = plist
+        .as_dictionary_mut()
+        .with_context(|| format!("{} is not a plist dictionary", info_plist.display()))?;
+    for key in ["CFBundleShortVersionString", "CFBundleVersion"] {
+        dict.insert(key.into(), Value::String(version.to_string()));
+    }
+    plist
+        .to_file_xml(info_plist)
+        .with_context(|| format!("could not write {}", info_plist.display()))
 }
 
 fn xcode_env() -> Result<Vec<(String, String)>> {
@@ -202,58 +177,7 @@ fn xcode_env() -> Result<Vec<(String, String)>> {
     ])
 }
 
-pub(crate) fn dmg_macos(args: &DmgMacos) -> Result<()> {
-    let root = repo_root()?;
-    let sh = Shell::new()?;
-    let _repo = sh.push_dir(&root);
-    let app = absolutize(&root, &args.app);
-    let output = absolutize(&root, &args.output);
-    ensure_dir(&app)?;
-    ensure_command("create-dmg")?;
-
-    println!("==> dmg background");
-    let background = root.join("target/release/dmg-background.tiff");
-    if let Some(parent) = background.parent() {
-        fs_err::create_dir_all(parent)
-            .with_context(|| format!("could not create {}", parent.display()))?;
-    }
-    let background_url = &args.background_url;
-    cmd!(sh, "curl -fsSL {background_url} -o {background}")
-        .run()
-        .with_context(|| {
-            format!(
-                "failed to fetch DMG background from {}",
-                args.background_url
-            )
-        })?;
-
-    println!("==> dmg");
-    if output.exists() {
-        fs_err::remove_file(&output)
-            .with_context(|| format!("could not remove {}", output.display()))?;
-    }
-
-    // Geometry is locked to the painted 760×480 background. `create-dmg` uses
-    // outer window dimensions, so add the 32pt Finder title bar and keep icon
-    // coordinates relative to the 760×480 content area.
-    // ULMO (LZMA) compresses ~20% smaller than the default UDZO (zlib) and
-    // mounts on macOS 10.15+, well under the bundle's 13.0 floor.
-    cmd!(
-        sh,
-        "create-dmg --format ULMO --volname OpenLogi --background {background} --window-pos 240 120 --window-size 760 512 --icon-size 128 --icon OpenLogi.app 212 250 --app-drop-link 548 250 --hide-extension OpenLogi.app {output} {app}"
-    )
-    .run()?;
-
-    if let Some(identity) = &args.sign_identity {
-        sign_dmg(identity, &output)?;
-    }
-
-    println!();
-    println!("done → {}", output.display());
-    Ok(())
-}
-
-fn sign_app(identity: &str) -> Result<()> {
+pub(crate) fn sign_app(identity: &str) -> Result<()> {
     let sh = Shell::new()?;
     let app = repo_root()?.join("target/release/bundle/osx/OpenLogi.app");
     let helper = app.join("Contents/Library/LoginItems/OpenLogiAgent.app");
@@ -282,13 +206,5 @@ fn codesign_runtime(identity: &str, target: &Path) -> Result<()> {
         "codesign --force --options runtime --timestamp --sign {identity} {target}"
     )
     .run()?;
-    Ok(())
-}
-
-fn sign_dmg(identity: &str, dmg: &Path) -> Result<()> {
-    let sh = Shell::new()?;
-    println!("==> codesign dmg ({identity})");
-    cmd!(sh, "codesign --force --timestamp --sign {identity} {dmg}").run()?;
-    cmd!(sh, "codesign --verify --verbose=2 {dmg}").run()?;
     Ok(())
 }

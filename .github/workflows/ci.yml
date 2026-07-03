@@ -55,6 +55,23 @@ jobs:
             libssl-dev libzstd-dev pkg-config
       - run: cargo check --workspace --all-targets
 
+  docs-hid:
+    name: rustdoc (hid crates)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libudev-dev \
+            pkg-config
+      - run: cargo doc -p openlogi-hid --no-deps --document-private-items
+      - run: cargo doc -p openlogi-hidpp --no-deps --document-private-items
+
   # openlogi-core / openlogi-hid / openlogi-assets / openlogi / openlogi-hook
   # all compile on Linux today (the hook crate has stubs for non-macOS targets).
   # openlogi-gui needs GPUI's wayland / x11 system libs; the same dependency set

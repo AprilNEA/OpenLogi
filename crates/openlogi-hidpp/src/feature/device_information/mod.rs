@@ -251,14 +251,24 @@ pub struct DeviceEntityFirmwareInfo {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum DeviceEntityType {
+    /// Main application firmware entity.
     MainApplication = 0,
+    /// Bootloader firmware entity.
     Bootloader = 1,
+    /// Hardware entity.
     Hardware = 2,
+    /// Touchpad firmware/entity.
     Touchpad = 3,
+    /// Optical sensor entity.
     OpticalSensor = 4,
+    /// Bluetooth SoftDevice entity.
     Softdevice = 5,
+    /// RF companion MCU entity.
     RfCompanionMcu = 6,
+    /// Factory application firmware entity.
     FactoryApplication = 7,
+    /// RGB custom effect entity.
     RgbCustomEffect = 8,
+    /// Motor drive entity.
     MotorDrive = 9,
 }

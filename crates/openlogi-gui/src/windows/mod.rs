@@ -1,14 +1,14 @@
-//! Auxiliary application windows (Settings, About) and a registry that keeps
-//! each one a singleton.
+//! Auxiliary application windows (Settings, Add Device, …) and a registry that
+//! keeps each one a singleton. About and Updates are pages inside Settings, not
+//! their own windows.
 //!
-//! macOS apps open exactly one Settings / About window: re-triggering the
-//! menu item, ⌘, or the footer link focuses the existing window rather than
-//! stacking a second copy. [`WindowRegistry`] holds the live [`WindowHandle`]
-//! per slot; [`open_or_focus`] activates it when still open, otherwise opens a
-//! fresh one wired for per-window light/dark tracking (mirroring the main
-//! window's appearance observer in `main.rs`).
+//! macOS apps open exactly one Settings window: re-triggering the menu item, ⌘,
+//! or a footer link focuses the existing window rather than stacking a second
+//! copy. [`WindowRegistry`] holds the live [`WindowHandle`] per slot;
+//! [`open_or_focus`] activates it when still open, otherwise opens a fresh one
+//! wired for per-window light/dark tracking via
+//! [`crate::theme::apply_from_settings`].
 
-pub mod about;
 pub mod add_device;
 pub mod settings;
 pub mod update_consent;
@@ -17,7 +17,8 @@ use gpui::{
     App, AppContext as _, Bounds, Context, Global, Pixels, Render, SharedString, Size, Styled as _,
     Subscription, TitlebarOptions, WindowBounds, WindowHandle, WindowOptions,
 };
-use gpui_component::{ActiveTheme as _, Root, Theme, ThemeMode};
+use gpui_component::{ActiveTheme as _, Root};
+use openlogi_core::brand::APP_ID;
 use tracing::warn;
 
 /// One live handle per auxiliary window, stored as a GPUI global so the menu
@@ -29,7 +30,6 @@ pub struct WindowRegistry {
     /// background (mouse hook + watchers).
     pub main: Option<WindowHandle<Root>>,
     pub settings: Option<WindowHandle<Root>>,
-    pub about: Option<WindowHandle<Root>>,
     pub add_device: Option<WindowHandle<Root>>,
     pub update_consent: Option<WindowHandle<Root>>,
 }
@@ -73,6 +73,7 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
     let bounds = Bounds::centered(None, size, cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
+        app_id: Some(APP_ID.into()),
         titlebar: Some(TitlebarOptions {
             title: Some(title.clone()),
             appears_transparent: false,
@@ -82,10 +83,10 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
     };
 
     let opened = cx.open_window(options, |window, cx| {
-        Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
+        crate::theme::apply_from_settings(Some(window), cx);
         let view = cx.new(|cx| build_view(window, cx));
         let appearance_obs = window.observe_window_appearance(|window, cx| {
-            Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
+            crate::theme::apply_from_settings(Some(window), cx);
         });
         view.update(cx, |v, _| v.set_appearance_obs(appearance_obs));
         cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))

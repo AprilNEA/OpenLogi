@@ -537,10 +537,15 @@ pub struct NotificationState {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct DevicePairingInformation {
+    /// Wireless product ID of the paired device.
     pub wpid: u16,
+    /// Device kind reported by the receiver.
     pub kind: DeviceKind,
+    /// Whether the link is encrypted.
     pub encrypted: bool,
+    /// Whether the device is currently online.
     pub online: bool,
+    /// Device unit ID.
     pub unit_id: [u8; 4],
 }
 
@@ -550,17 +555,29 @@ pub struct DevicePairingInformation {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum DeviceKind {
+    /// Unknown device kind.
     Unknown = 0x00,
+    /// Keyboard device.
     Keyboard = 0x01,
+    /// Mouse device.
     Mouse = 0x02,
+    /// Numeric keypad device.
     Numpad = 0x03,
+    /// Presenter device.
     Presenter = 0x04,
+    /// Remote-control device.
     Remote = 0x07,
+    /// Trackball device.
     Trackball = 0x08,
+    /// Touchpad device.
     Touchpad = 0x09,
+    /// Tablet device.
     Tablet = 0x0a,
+    /// Gamepad device.
     Gamepad = 0x0b,
+    /// Joystick device.
     Joystick = 0x0c,
+    /// Headset device.
     Headset = 0x0d,
 }
 
@@ -585,7 +602,10 @@ pub enum Event {
     DeviceConnection(DeviceConnection),
 
     /// Is emitted whenever the device discovery status changes.
-    DeviceDiscoveryStatus { discovery_enabled: bool },
+    DeviceDiscoveryStatus {
+        /// Whether discovery mode is enabled.
+        discovery_enabled: bool,
+    },
 
     /// Is emitted many times for every device discovered using
     /// [`Receiver::discover_devices`].
@@ -599,7 +619,9 @@ pub enum Event {
         /// [`Event::DeviceDiscoveryDeviceName`] events.
         counter: u16,
 
+        /// Device kind reported by discovery.
         kind: DeviceKind,
+        /// Wireless product ID of the discovered device.
         wpid: u16,
 
         /// The address of the device required to pair it using
@@ -626,12 +648,15 @@ pub enum Event {
         /// [`Event::DeviceDiscoveryDeviceName`] events.
         counter: u16,
 
+        /// Discovered device name.
         name: String,
     },
 
     /// Is emitted whenever the status of a pairing process changes.
     PairingStatus {
+        /// BTLE address of the device being paired.
         device_address: [u8; 6],
+        /// Optional pairing error reported by the receiver.
         pairing_error: Option<PairingError>,
 
         /// The receiver slot the newly paired device was paired to. This can be
@@ -642,6 +667,7 @@ pub enum Event {
     /// Is emitted once the receiver requests a passkey to be entered on a
     /// device that should be paired to it.
     PairingPasskeyRequest {
+        /// BTLE address of the device being paired.
         device_address: [u8; 6],
 
         /// The passkey the user has to enter in order to pair the device.
@@ -663,6 +689,7 @@ pub enum Event {
     /// Is emitted for every keypress a user performs while entering a pairing
     /// passkey.
     PairingPasskeyPressed {
+        /// BTLE address of the device being paired.
         device_address: [u8; 6],
 
         /// The type of the keypress the user performed.
@@ -685,10 +712,15 @@ pub enum Event {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct DeviceConnection {
+    /// Slot index (1-based) of the device.
     pub index: u8,
+    /// Device kind reported by the receiver.
     pub kind: DeviceKind,
+    /// Whether the link is encrypted.
     pub encrypted: bool,
+    /// Whether the device is currently online.
     pub online: bool,
+    /// Wireless product ID of the device.
     pub wpid: u16,
 }
 
@@ -700,7 +732,9 @@ pub struct DeviceConnection {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum PairingError {
+    /// Device timed out during pairing.
     DeviceTimeout = 0x01,
+    /// Pairing failed.
     Failed = 0x02,
 }
 
@@ -713,8 +747,11 @@ pub enum PairingError {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum PairingPasskeyPressType {
+    /// Passkey entry has started.
     Initialization = 0x00,
+    /// A passkey keypress was entered.
     Keypress = 0x01,
+    /// Passkey entry was submitted.
     Submit = 0x04,
 }
 

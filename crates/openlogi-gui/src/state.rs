@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use gpui::{App, Global};
-use openlogi_core::config::{AppSettings, Config, DeviceIdentity, Lighting};
+use openlogi_core::config::{AppSettings, Appearance, Config, DeviceIdentity, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     DeviceRoute, DpiCapabilities, DpiInfo, SmartShiftMode, SmartShiftStatus, WriteError,
@@ -275,7 +275,7 @@ pub struct AppState {
     pub button_bindings: BTreeMap<ButtonId, Action>,
     /// Per-direction sub-bindings for the current device's gesture owner. Edited
     /// via the gesture picker and persisted as a [`Binding::Gesture`] entry under
-    /// the owning button — the thumb pad ([`ButtonId::GestureButton`]) by default,
+    /// the owning button — the HID++ gesture button ([`ButtonId::GestureButton`]) by default,
     /// or a promoted Middle/Back/Forward — in the device's unified binding map
     /// ([`DeviceConfig::bindings`]). Rebuilt by the `gesture_bindings_for_current` helper.
     ///
@@ -1096,6 +1096,62 @@ impl AppState {
         }
     }
 
+    /// Toggle opt-in automatic install and persist it. The launch-time updater
+    /// observer reads this live, so a newer version found after this is enabled
+    /// downloads and stages on its own; no immediate side effect here. No-op
+    /// when unchanged.
+    pub fn set_auto_install_updates(&mut self, enabled: bool) {
+        if self.config.app_settings.auto_install_updates == enabled {
+            return;
+        }
+        self.config.app_settings.auto_install_updates = enabled;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist auto-install setting");
+        }
+    }
+
+    /// Persist the light/dark appearance preference. The caller re-applies the
+    /// live theme via [`crate::theme::apply_from_settings`]; this only writes the
+    /// choice. No-op when unchanged.
+    pub fn set_appearance(&mut self, appearance: Appearance) {
+        if self.config.app_settings.appearance == appearance {
+            return;
+        }
+        self.config.app_settings.appearance = appearance;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist appearance setting");
+        }
+    }
+
+    /// Persist the chosen theme name for one mode (`None` = the OpenLogi brand
+    /// theme). No-op when unchanged.
+    pub fn set_theme(&mut self, dark: bool, name: Option<String>) {
+        let slot = if dark {
+            &mut self.config.app_settings.theme_dark
+        } else {
+            &mut self.config.app_settings.theme_light
+        };
+        if *slot == name {
+            return;
+        }
+        *slot = name;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist theme setting");
+        }
+    }
+
+    /// Persist the UI corner-radius override (`None` = each theme's own radius).
+    /// No-op when unchanged.
+    pub fn set_ui_radius(&mut self, radius: Option<u8>) {
+        if self.config.app_settings.ui_radius == radius {
+            return;
+        }
+        self.config.app_settings.ui_radius = radius;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist UI radius setting");
+        }
+    }
+
     /// Set the thumb-wheel sensitivity (clamped to the valid range), publish it
     /// to the gesture watcher via the shared atomic, and persist it. No-op when
     /// unchanged. Disk failures are logged, not propagated.
@@ -1192,7 +1248,7 @@ impl AppState {
             return BTreeMap::new();
         };
         match self.config.gesture_owner(key) {
-            // The dedicated thumb pad seeds every direction from the defaults.
+            // The HID++ gesture button seeds every direction from the defaults.
             Some(ButtonId::GestureButton) => gesture_bindings_for(&self.config, Some(key)),
             // A promoted OS-hook button is shown from its raw stored map (which
             // `set_gesture_owner` seeds with full defaults), so the menu matches
@@ -1245,9 +1301,9 @@ impl AppState {
             );
             return;
         };
-        // Edit whichever button owns gestures — not always the thumb pad. When
+        // Edit whichever button owns gestures — not always the HID++ gesture button. When
         // gestures are off, a stray edit must NOT silently re-enable them on the
-        // thumb pad (the gesture editor shouldn't be reachable in that state):
+        // default owner (the gesture editor shouldn't be reachable in that state):
         // no-op instead.
         let Some(owner) = self.config.gesture_owner(&key) else {
             debug!(

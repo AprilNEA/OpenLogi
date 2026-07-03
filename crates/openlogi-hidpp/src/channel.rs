@@ -250,7 +250,7 @@ pub struct HidppChannel {
     /// The vendor ID of the connected HID device.
     pub vendor_id: u16,
 
-    // The product ID of the connected HID device.
+    /// The product ID of the connected HID device.
     pub product_id: u16,
 
     /// The underlying raw HID channel.

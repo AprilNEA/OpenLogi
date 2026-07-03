@@ -42,9 +42,10 @@ pub enum DeeplinkCommand {
     Show,
     /// Open the Settings window.
     OpenSettings,
-    /// Open the About window.
+    /// Open Settings on the About page.
     OpenAbout,
-    /// Run a manual update check (and show where its status is rendered).
+    /// Run a manual update check and open Settings on the Updates page, where
+    /// its status is rendered.
     CheckForUpdates,
     /// Quit the GUI.
     Quit,

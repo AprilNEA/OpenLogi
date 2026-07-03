@@ -9,16 +9,44 @@ use crate::{
 };
 
 pub mod adjustable_dpi;
+pub mod backlight;
+pub mod brightness_control;
+pub mod change_host;
+pub mod color_led_effects;
+pub mod crown;
 pub mod device_friendly_name;
 pub mod device_information;
 pub mod device_type_and_name;
+pub mod disable_keys;
+pub mod disable_keys_by_usage;
+pub mod dual_platform;
+pub mod equalizer;
+pub mod extended_dpi;
+pub mod extended_report_rate;
 pub mod feature_set;
+pub mod fn_inversion;
 pub mod hires_wheel;
+pub mod hosts_info;
+pub mod illumination;
+pub mod mode_status;
+pub mod mouse_pointer;
+pub mod multi_platform;
+pub mod per_key_lighting;
+pub mod persistent_remappable_action;
 pub mod registry;
+pub mod report_rate;
+pub mod reprog_controls;
+pub mod rgb_effects;
 pub mod root;
+pub mod sidetone;
 pub mod smartshift;
+pub mod smartshift_enhanced;
+pub mod solar_dashboard;
 pub mod thumbwheel;
+pub mod touch_mouse_raw;
+pub mod touchpad_raw_xy;
 pub mod unified_battery;
+pub mod vertical_scrolling;
 pub mod wireless_device_status;
 
 /// Represents a concrete implementation of a HID++2.0 device feature.
@@ -112,6 +140,19 @@ impl FeatureEndpoint {
         self.chan
             .send_v20(v20::Message::Long(self.header(function), args))
             .await
+    }
+
+    /// Sends `function` with a 3-byte short-report payload without waiting for a
+    /// response.
+    ///
+    /// For functions the device answers normally use [`Self::call`]; this is for
+    /// the rare function whose side effect (e.g. a host switch that resets the
+    /// device) prevents a response from ever arriving.
+    pub(crate) async fn notify(&self, function: u8, args: [u8; 3]) -> Result<(), Hidpp20Error> {
+        self.chan
+            .send_and_forget(v20::Message::Short(self.header(function), args).into())
+            .await?;
+        Ok(())
     }
 }
 
