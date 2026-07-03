@@ -9,8 +9,14 @@
 //! | data   | `$XDG_DATA_HOME`    | `~/.local/share/openlogi`     |
 //!
 //! On Windows `$HOME` falls back to `%USERPROFILE%`, so paths resolve to
-//! `%USERPROFILE%\.config\openlogi` etc. — best-effort until a real Windows
-//! port lands.
+//! `%USERPROFILE%\.config\openlogi` etc.
+//!
+//! **Decision (#347):** the Windows location is final, not best-effort.
+//! XDG-on-every-platform is this module's deliberate design — macOS also
+//! skips its native `~/Library/Application Support` — and Windows follows
+//! the same rule rather than `%APPDATA%`. Recorded before the agent first
+//! shipped in Windows artifacts, because moving it afterwards would strand
+//! every existing user's `config.toml` and the agent's first-run state.
 
 use std::path::PathBuf;
 

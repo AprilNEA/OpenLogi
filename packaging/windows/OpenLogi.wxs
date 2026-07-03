@@ -9,8 +9,12 @@
   - The packaged exe is the already-Authenticode-signed build from the
     `windows` job; the MSI itself is signed on top by the same job.
   - Build-time defines (passed via `wix build -d`):
-      Version  numeric x.y.z ProductVersion (0.0.0 on non-tag dispatches)
-      ExeFile  path to the signed openlogi-gui exe to package
+      Version       numeric x.y.z ProductVersion (0.0.0 on non-tag dispatches)
+      ExeFile       path to the signed openlogi-gui exe to package
+      AgentExeFile  path to the signed openlogi-agent exe to package
+
+  - Requires WixToolset.Util.wixext (util:CloseApplication below); the
+    windows-msi job installs it pinned to the same version as wix itself.
 -->
 
 <!--
@@ -24,7 +28,8 @@
   <?define UpgradeCode = "981D0C70-179E-4EE8-8F1E-0EB6877EAE94" ?>
 <?endif?>
 
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package Name="OpenLogi"
            Manufacturer="AprilNEA"
            Version="$(var.Version)"
@@ -48,7 +53,38 @@
              name is the product name. -->
         <File Id="OpenLogiExe" Name="OpenLogi.exe" Source="$(var.ExeFile)" KeyPath="yes" />
       </Component>
+      <Component Id="AgentExecutable">
+        <!-- The background agent owns all device I/O, the input hook, and the
+             IPC server; the GUI is a thin client that spawns a sibling
+             `openlogi-agent.exe` when the pipe is absent (agent_binary_path()
+             in openlogi-gui's ipc_client.rs) — the name must match exactly. -->
+        <File Id="OpenLogiAgentExe" Name="openlogi-agent.exe" Source="$(var.AgentExeFile)" KeyPath="yes" />
+      </Component>
     </ComponentGroup>
+
+    <!--
+      Upgrades hit a file-in-use on both exes once the agent autostarts (HKCU
+      Run key, registered by the agent on first run). The agent is headless —
+      it owns no top-level window, so WM_CLOSE / end-session messages never
+      reach it — hence TerminateProcess (which requires RebootPrompt="no").
+      Terminating it is safe: it holds no unsaved state, and the GUI's
+      spawn-retry (or the Run key at next login) restarts the new binary.
+      The GUI does have a window, so ask it to close first; terminate as the
+      fallback so silent upgrades (msiexec /qn, the future auto-updater) never
+      stall on a FilesInUse prompt.
+    -->
+    <util:CloseApplication Id="CloseAgent"
+                           Target="openlogi-agent.exe"
+                           CloseMessage="no"
+                           RebootPrompt="no"
+                           Timeout="2"
+                           TerminateProcess="0" />
+    <util:CloseApplication Id="CloseGui"
+                           Target="OpenLogi.exe"
+                           CloseMessage="yes"
+                           RebootPrompt="no"
+                           Timeout="5"
+                           TerminateProcess="0" />
 
     <StandardDirectory Id="ProgramMenuFolder">
       <!-- Shortcuts cannot be a component KeyPath; the HKCU marker stands in,
@@ -68,6 +104,7 @@
     </StandardDirectory>
 
     <Feature Id="Main">
+      <!-- ComponentGroupRef pulls in both MainExecutable and AgentExecutable. -->
       <ComponentGroupRef Id="App" />
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>
