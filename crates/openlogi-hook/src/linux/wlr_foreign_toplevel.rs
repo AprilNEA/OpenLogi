@@ -327,7 +327,9 @@ fn timed_roundtrip(
 /// returning stale state forever.
 fn drain_events(queue: &mut EventQueue<State>, state: &mut State) {
     if queue.flush().is_err() || queue.dispatch_pending(state).is_err() {
-        warn!("wlr-foreign-toplevel: connection error while draining — will reconnect on next poll");
+        warn!(
+            "wlr-foreign-toplevel: connection error while draining — will reconnect on next poll"
+        );
         state.finished = true;
         return;
     }
@@ -339,7 +341,9 @@ fn drain_events(queue: &mut EventQueue<State>, state: &mut State) {
         }
         Some(guard) => {
             let fd = guard.connection_fd().as_raw_fd();
-            if poll_fd(fd, deadline) && (guard.read().is_err() || queue.dispatch_pending(state).is_err()) {
+            if poll_fd(fd, deadline)
+                && (guard.read().is_err() || queue.dispatch_pending(state).is_err())
+            {
                 warn!(
                     "wlr-foreign-toplevel: connection error while draining — will reconnect on next poll"
                 );
