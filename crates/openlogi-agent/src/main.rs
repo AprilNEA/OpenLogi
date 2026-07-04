@@ -6,6 +6,15 @@
 //! core runs on a tokio runtime; on macOS the process main thread hosts the
 //! AppKit run loop the menu bar requires.
 
+// Without this Windows runs the exe as a console app and pops a terminal
+// window whenever the GUI's sibling spawn or the Run-key autostart starts the
+// agent — "headless" must mean no window of any kind. Debug builds keep the
+// console so logs stay visible (matching the GUI's arrangement).
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod launch_agent;
 mod pairing;
 mod self_restart;
