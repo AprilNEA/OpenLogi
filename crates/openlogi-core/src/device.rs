@@ -104,10 +104,10 @@ pub struct Capabilities {
     pub buttons: bool,
     /// Adjustable pointer resolution — HID++ `0x2201` / `0x2202` (AdjustableDpi).
     pub pointer: bool,
-    /// Solid-colour RGB the lighting panel can actually drive — HID++
-    /// `ColorLedEffects` (`0x8070`) or `PerKeyLighting` (`0x8080`), the features
-    /// `set_keyboard_color` writes. Backlight-only families aren't driven by the
-    /// panel, so they don't flip this and don't earn an inert Lighting tab.
+    /// Solid-colour RGB the lighting panel can actually drive — HID++ RGB
+    /// effect engines (`0x8070` / `0x8071`) or per-zone lighting (`0x8080` /
+    /// `0x8081`). Backlight-only families aren't driven by the panel, so they
+    /// don't flip this and don't earn an inert Lighting tab.
     pub lighting: bool,
     /// Native vertical wheel inversion — HID++ `0x2121 HiResWheel` with the
     /// firmware-reported `has_invert` capability.
@@ -137,12 +137,10 @@ impl Capabilities {
     pub fn from_feature_ids(ids: &[u16]) -> Self {
         const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
-        // ColorLedEffects (0x8070), PerKeyLighting2 (0x8081) and PerKeyLighting
-        // (0x8080) — all three driven by `set_keyboard_color`, which prefers
-        // 0x8070's fixed effect to override a running onboard profile and falls
-        // back through 0x8081 to 0x8080. Other families (backlight 0x198x) stay
-        // out so they don't earn a tab the panel can't drive.
-        const LIGHTING: [u16; 3] = [0x8080, 0x8070, 0x8081];
+        // Every family here is driven by `set_keyboard_color`, which tries the
+        // effect engines before the per-zone paths. Other families (backlight
+        // 0x198x) stay out so they don't earn a tab the panel can't drive.
+        const LIGHTING: [u16; 4] = [0x8070, 0x8071, 0x8080, 0x8081];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
             buttons: has(&BUTTONS),
@@ -572,11 +570,11 @@ mod tests {
 
     #[test]
     fn every_drivable_lighting_family_earns_the_tab() {
-        // `set_keyboard_color` walks 0x8070 → 0x8081 → 0x8080, so a keyboard
+        // `set_keyboard_color` walks 0x8070 → 0x8071 → 0x8081 → 0x8080, so a keyboard
         // exposing any one of them can be coloured and must get the tab.
         // 0x8081 was missing here, which left such a keyboard with no lighting
         // UI at all.
-        for id in [0x8070, 0x8080, 0x8081] {
+        for id in [0x8070, 0x8071, 0x8080, 0x8081] {
             assert!(
                 Capabilities::from_feature_ids(&[0x0001, id]).lighting,
                 "0x{id:04x} must offer the lighting tab"
