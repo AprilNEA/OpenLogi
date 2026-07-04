@@ -39,6 +39,15 @@ jobs:
             libssl-dev libzstd-dev pkg-config
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  msrv:
+    name: MSRV (cargo check)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+
   check-linux:
     name: cargo check (linux)
     runs-on: ubuntu-latest
