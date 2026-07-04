@@ -10,12 +10,11 @@
 //! reclaims the lock on the leftover file without any cleanup ceremony.
 
 use std::{
-    fs::{File, OpenOptions},
+    fs::{File, OpenOptions, TryLockError},
     io,
     path::PathBuf,
 };
 
-use fs4::{FileExt, TryLockError};
 use thiserror::Error;
 use tracing::debug;
 
@@ -84,7 +83,7 @@ pub fn acquire(lock_name: &str) -> Result<InstanceGuard, InstanceError> {
             path: path.clone(),
             source,
         })?;
-    match FileExt::try_lock(&file) {
+    match file.try_lock() {
         Ok(()) => {
             debug!(path = %path.display(), "single-instance lock acquired");
             Ok(InstanceGuard { _handle: file })
