@@ -6,6 +6,10 @@ use hidpp::{
     feature::{
         CreatableFeature,
         color_led_effects::{ColorLedEffectsFeature, Persistence, ZONE_EFFECT_PARAM_COUNT},
+        rgb_effects::{
+            CLUSTER_EFFECT_PARAM_COUNT, EventsNotificationFlags, PowerModeTarget,
+            RgbEffectsFeature, RgbPersistence, SwControlFlags,
+        },
     },
 };
 use tracing::debug;
@@ -22,6 +26,9 @@ const PER_KEY_LIGHTING_FEATURE: u16 = 0x8080;
 /// (`0x8080`) write can't override on G-series keyboards (the firmware keeps
 /// replaying its stored effect). Preferred for a solid colour for that reason.
 const COLOR_LED_EFFECTS_FEATURE: u16 = 0x8070;
+/// HID++ `RgbEffects` (`0x8071`) — modern per-cluster RGB effect engine used
+/// by newer G-series devices such as the G502 X PLUS.
+const RGB_EFFECTS_FEATURE: u16 = 0x8071;
 
 // HID++ 2.0 report ids: 0x12 is the 64-byte "very long" report that streams a
 // batch of (keyID, R, G, B) entries; 0x11 is the 20-byte "long" report used both
@@ -44,6 +51,9 @@ const KEYS_PER_FRAME: u8 = 0x0e;
 // agent re-applying the saved colour on device arrival (orchestrator reapply),
 // avoiding flash wear on every colour pick.
 const EFFECT_FIXED: u8 = 0x01;
+// 0x8071's effect id for a static RGB colour. The per-cluster *index* is
+// discovered at runtime because firmware can order supported effects freely.
+const RGB_EFFECT_STATIC: u16 = 0x0001;
 // The old raw `0x8070` path intentionally wrote only zones 0..4: enough for the
 // keyboards this path targets and bounded by a small, predictable delay budget.
 // Keep that cap even though the typed wrapper can query the reported zone count;
@@ -93,15 +103,28 @@ pub async fn set_keyboard_color_with(
     match method {
         LightingMethod::PerKey => set_color_per_key(route, r, g, b).await,
         LightingMethod::Effects => set_color_effects(route, r, g, b).await,
-        LightingMethod::Auto => match set_color_effects(route, r, g, b).await {
-            Err(WriteError::FeatureUnsupported { feature_hex })
-                if feature_hex == COLOR_LED_EFFECTS_FEATURE =>
-            {
-                debug!("no 0x8070 effect engine — falling back to 0x8080 per-key");
-                set_color_per_key(route, r, g, b).await
-            }
-            other => other,
-        },
+        LightingMethod::Auto => set_color_auto(route, r, g, b).await,
+    }
+}
+
+async fn set_color_auto(route: &DeviceRoute, r: u8, g: u8, b: u8) -> Result<(), WriteError> {
+    match set_color_effects(route, r, g, b).await {
+        Err(WriteError::FeatureUnsupported { feature_hex })
+            if feature_hex == COLOR_LED_EFFECTS_FEATURE =>
+        {
+            debug!("no 0x8070 effect engine — trying 0x8071 RGB effects");
+        }
+        other => return other,
+    }
+
+    match set_color_rgb_effects(route, r, g, b).await {
+        Err(WriteError::FeatureUnsupported { feature_hex })
+            if feature_hex == RGB_EFFECTS_FEATURE =>
+        {
+            debug!("no 0x8071 effect engine — falling back to 0x8080 per-key");
+            set_color_per_key(route, r, g, b).await
+        }
+        other => other,
     }
 }
 
@@ -190,6 +213,92 @@ async fn set_color_effects(route: &DeviceRoute, r: u8, g: u8, b: u8) -> Result<(
 /// Classify a HID++ error from the `ColorLedEffects` functions.
 fn classify_lighting_error(error: hidpp::protocol::v20::Hidpp20Error) -> WriteError {
     classify_hidpp_error(error, HidppOperation::Lighting, ColorLedEffectsFeature::ID)
+}
+
+/// Set a solid colour via `RgbEffects` (`0x8071`): take software control, find
+/// each cluster's advertised static-colour effect, and apply it in RAM.
+async fn set_color_rgb_effects(route: &DeviceRoute, r: u8, g: u8, b: u8) -> Result<(), WriteError> {
+    let index = route.device_index();
+    with_route(route, move |channel| async move {
+        let mut device = Device::new(std::sync::Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let feature = open_feature::<RgbEffectsFeature>(&mut device).await?;
+        feature
+            .set_sw_control(
+                SwControlFlags::ALL_CLUSTERS,
+                EventsNotificationFlags::empty(),
+            )
+            .await
+            .map_err(classify_rgb_lighting_error)?;
+
+        let cluster_count = feature
+            .get_device_info()
+            .await
+            .map_err(classify_rgb_lighting_error)?
+            .cluster_count;
+        let mut params = [0u8; CLUSTER_EFFECT_PARAM_COUNT];
+        params[0] = r;
+        params[1] = g;
+        params[2] = b;
+
+        let mut written = 0u8;
+        for cluster in 0..cluster_count {
+            let Some(effect_index) = static_rgb_effect_index(&feature, cluster).await? else {
+                debug!(index, cluster, "0x8071 cluster has no static RGB effect");
+                continue;
+            };
+            feature
+                .set_rgb_cluster_effect(
+                    cluster,
+                    effect_index,
+                    params,
+                    RgbPersistence::VOLATILE,
+                    PowerModeTarget::FullPower,
+                )
+                .await
+                .map_err(classify_rgb_lighting_error)?;
+            written = written.saturating_add(1);
+            tokio::time::sleep(FRAME_GAP).await;
+        }
+        if written == 0 {
+            return Err(WriteError::UnsupportedResponse {
+                operation: HidppOperation::Lighting,
+                feature_hex: RGB_EFFECTS_FEATURE,
+            });
+        }
+        debug!(
+            index,
+            cluster_count, written, r, g, b, "set colour via 0x8071 RGB effects"
+        );
+        Ok(())
+    })
+    .await
+}
+
+async fn static_rgb_effect_index(
+    feature: &RgbEffectsFeature,
+    cluster: u8,
+) -> Result<Option<u8>, WriteError> {
+    let effects_number = feature
+        .get_cluster_info(cluster)
+        .await
+        .map_err(classify_rgb_lighting_error)?
+        .effects_number;
+    for effect_index in 0..effects_number {
+        let info = feature
+            .get_effect_info(cluster, effect_index)
+            .await
+            .map_err(classify_rgb_lighting_error)?;
+        if info.effect_id == RGB_EFFECT_STATIC {
+            return Ok(Some(effect_index));
+        }
+    }
+    Ok(None)
+}
+
+fn classify_rgb_lighting_error(error: hidpp::protocol::v20::Hidpp20Error) -> WriteError {
+    classify_hidpp_error(error, HidppOperation::Lighting, RgbEffectsFeature::ID)
 }
 
 /// Set a solid colour via `PerKeyLighting` (`0x8080`): stream every key's colour

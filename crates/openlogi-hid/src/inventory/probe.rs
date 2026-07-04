@@ -56,7 +56,18 @@ pub(super) async fn probe_one(
     match receiver::detect(Arc::clone(&channel)) {
         Some(Receiver::Bolt(bolt)) => probe_bolt_receiver(channel, info, bolt, cache, tick).await,
         Some(Receiver::Unifying(unifying)) => {
-            probe_unifying_receiver(channel, info, unifying, cache, tick).await
+            probe_unifying_receiver(channel, info, unifying, "Unifying Receiver", cache, tick).await
+        }
+        Some(Receiver::Lightspeed(lightspeed)) => {
+            probe_unifying_receiver(
+                channel,
+                info,
+                lightspeed,
+                "Lightspeed Receiver",
+                cache,
+                tick,
+            )
+            .await
         }
         None | Some(_) => {
             // No recognised receiver — this might be a directly-paired device
@@ -130,6 +141,7 @@ async fn probe_unifying_receiver(
     channel: Arc<HidppChannel>,
     info: async_hid::DeviceInfo,
     unifying: UnifyingReceiver,
+    receiver_name: &str,
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
 ) -> NodeProbe {
@@ -199,7 +211,7 @@ async fn probe_unifying_receiver(
     NodeProbe {
         inventory: Some(DeviceInventory {
             receiver: ReceiverInfo {
-                name: "Unifying Receiver".to_string(),
+                name: receiver_name.to_string(),
                 vendor_id: info.vendor_id,
                 product_id: info.product_id,
                 unique_id,

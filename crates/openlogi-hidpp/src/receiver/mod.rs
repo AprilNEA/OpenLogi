@@ -19,6 +19,7 @@ use thiserror::Error;
 use crate::{channel::HidppChannel, protocol::v10::Hidpp10Error};
 
 pub mod bolt;
+pub mod lightspeed;
 pub mod unifying;
 
 /// The index to use when communicating with the receiver on any HID++ channel.
@@ -35,6 +36,12 @@ pub fn detect(chan: Arc<HidppChannel>) -> Option<Receiver> {
     if unifying::VPID_PAIRS.contains(vpid_pair) {
         return unifying::Receiver::new(chan).ok().map(Receiver::Unifying);
     }
+
+    if lightspeed::VPID_PAIRS.contains(vpid_pair) {
+        return unifying::Receiver::new_lightspeed(chan)
+            .ok()
+            .map(Receiver::Lightspeed);
+    }
     None
 }
 
@@ -46,6 +53,9 @@ pub enum Receiver {
     Bolt(bolt::Receiver),
     /// Logitech Unifying receiver.
     Unifying(unifying::Receiver),
+    /// Logitech LIGHTSPEED gaming receiver. These use the same HID++ 1.0
+    /// receiver registers OpenLogi already uses for Unifying-style devices.
+    Lightspeed(unifying::Receiver),
 }
 
 impl Receiver {
@@ -54,6 +64,7 @@ impl Receiver {
         match self {
             Self::Bolt(_) => "Logi Bolt Receiver",
             Self::Unifying(_) => "Unifying Receiver",
+            Self::Lightspeed(_) => "Lightspeed Receiver",
         }
         .to_string()
     }
@@ -66,7 +77,18 @@ impl Receiver {
         match self {
             Self::Bolt(bolt) => bolt.get_unique_id().await,
             Self::Unifying(unifying) => unifying.get_unique_id().await,
+            Self::Lightspeed(lightspeed) => lightspeed.get_unique_id().await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lightspeed;
+
+    #[test]
+    fn lightspeed_receiver_list_contains_g502_x_plus_receiver() {
+        assert!(lightspeed::VPID_PAIRS.contains(&(0x046d, 0xc547)));
     }
 }
 
