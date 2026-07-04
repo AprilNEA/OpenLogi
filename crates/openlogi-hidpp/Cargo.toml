@@ -17,7 +17,7 @@ edition.workspace = true
 # Upstream HEAD uses std APIs stabilized in 1.87. Keep this explicit instead
 # of inheriting the workspace MSRV so future syncs can see the fork's own lower
 # bound.
-rust-version = "1.87"
+rust-version = "1.96"
 license = "0BSD"
 repository.workspace = true
 description = "OpenLogi's vendored fork of the `hidpp` crate (Logitech HID++ protocol)."
