@@ -21,7 +21,7 @@ openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-assets = { path = "../openlogi-assets" }
 openlogi-agent-core = { path = "../openlogi-agent-core" }
-tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
+tarpc = { workspace = true }
 interprocess = { workspace = true }
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
@@ -46,14 +46,14 @@ url = "2.5.8"
 walkdir = "2.5.0"
 fluent-langneg = "0.14.2"
 backon.workspace = true
-opener = "0.8.5"
+opener = { workspace = true }
 
 # Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. objc2 gives typed,
 # `Retained<T>`-owned AppKit bindings so the status-item code can't leak (#99).
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance"] }
-objc2-foundation = { version = "0.3.2", features = ["NSString", "NSProcessInfo"] }
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance"] }
+objc2-foundation = { workspace = true, features = ["NSString", "NSProcessInfo"] }
 
 # unsafe_code stays denied; the status-item/tray modules opt in locally with
 # #[expect(unsafe_code)] for the few objc2 calls (init-with-action, set-target,

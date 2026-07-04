@@ -16,7 +16,7 @@ openlogi-inject = { path = "../openlogi-inject" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 serde = { workspace = true }
-tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
+tarpc = { workspace = true }
 interprocess = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

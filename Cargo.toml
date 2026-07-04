@@ -51,6 +51,8 @@ async-hid = "0.5.2"
 # socket on Unix, a named pipe on Windows. The `tokio` feature gives the async
 # Stream/Listener used by serde_transport.
 interprocess = { version = "2", features = ["tokio"] }
+# The agent <-> GUI RPC layer itself, over the `interprocess` transport above.
+tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
 # Windows FFI for the leaf input/HID paths (WH_MOUSE_LL hook, SendInput action
 # synthesis, native HID writes). Features are selected per crate.
 windows-sys = "0.61"
@@ -70,6 +72,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 core-graphics = { version = "0.25", default-features = false, features = ["link"] }
 core-foundation = { version = "0.10", default-features = false, features = ["link"] }
+opener = "0.8.5"
+evdev = "0.13"
+# macOS ObjC FFI (see platform/CLAUDE.md): objc2 gives leak-proof Retained<T>
+# bindings. Feature lists are selected per crate; the version stays unified so
+# a resolve can't move gpui's Cargo.lock pin out from under the GUI.
+objc2 = "0.6.4"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
 
 # gpui / gpui_platform track zed's default branch, matching how gpui-component
 # declares them (an explicit rev here would fork the git source and conflict).

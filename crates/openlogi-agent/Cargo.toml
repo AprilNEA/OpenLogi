@@ -19,22 +19,22 @@ openlogi-agent-core = { path = "../openlogi-agent-core" }
 openlogi-core = { path = "../openlogi-core" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
-tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
+tarpc = { workspace = true }
 interprocess = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
 futures = "0.3"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
-opener = "0.8.5"
+opener = { workspace = true }
 
 # Menu-bar status item (NSStatusItem) — the agent hosts the tray now. objc2
 # gives Retained<T>-owned AppKit bindings (no #99-style leaks); versions match
 # the GUI's so the resolve doesn't move the gpui Cargo.lock pin.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication"] }
-objc2-foundation = { version = "0.3.2", features = ["NSString", "NSData", "NSArray"] }
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication"] }
+objc2-foundation = { workspace = true, features = ["NSString", "NSData", "NSArray"] }
 plist = "1.9.0"
 
 # Autostart via the HKCU Run key (launch_agent.rs); winreg also answers the
