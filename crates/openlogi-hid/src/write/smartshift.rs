@@ -273,10 +273,13 @@ pub(super) async fn toggle_smartshift_on_channel(
 }
 
 /// Write a full SmartShift configuration — wheel mode, auto-disengage
-/// threshold, and tunable torque — to `route`. The firmware persists all three
-/// to the device's NVM. Callers that mean to change only one field should read
-/// the rest via [`get_smartshift_status`] first and pass them back unchanged.
-/// On a Legacy (`0x2110`) device the `tunable_torque` field is ignored.
+/// threshold, and tunable torque — to `route`. These values are volatile device
+/// state and should be re-applied after reconnect. Callers that mean to change
+/// only one field should read the rest via [`get_smartshift_status`] first and
+/// pass them back unchanged.
+/// A `0` auto-disengage threshold or tunable torque is the firmware's
+/// "do not change" sentinel, not a real value to apply. On a Legacy (`0x2110`)
+/// device the `tunable_torque` field is ignored.
 ///
 /// `FeatureUnsupported` when the device exposes neither HID++ `0x2111`
 /// (MX Master 3 / 3S) nor the older `0x2110` (MX Master 2S).

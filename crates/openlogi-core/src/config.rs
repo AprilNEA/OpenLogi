@@ -294,6 +294,12 @@ where
 {
     let value = u8::deserialize(deserializer)?;
     Ok(if value < SMARTSHIFT_MIN_AUTO_DISENGAGE {
+        tracing::warn!(
+            value,
+            min = SMARTSHIFT_MIN_AUTO_DISENGAGE,
+            default = SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
+            "healed persisted SmartShift auto-disengage threshold below supported floor"
+        );
         SMARTSHIFT_AUTO_DISENGAGE_DEFAULT
     } else {
         value
