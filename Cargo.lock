@@ -2284,16 +2284,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs4"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
-dependencies = [
- "rustix 1.1.4",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "fsevent-sys"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5068,7 +5058,6 @@ name = "openlogi-core"
 version = "0.6.19"
 dependencies = [
  "etcetera",
- "fs4",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
