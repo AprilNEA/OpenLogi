@@ -6,7 +6,8 @@
 //! thumb-wheel arming — changes, and dispatches each captured input:
 //!
 //! - a gesture swipe through the gesture binding map,
-//! - a DPI/ModeShift or thumb-wheel-tap press through the button binding map,
+//! - a DPI/ModeShift, wheel-tilt, or thumb-wheel-tap press through the button
+//!   binding map,
 //! - thumb-wheel rotation through the [`ButtonId::ThumbwheelScrollUp`] /
 //!   [`ButtonId::ThumbwheelScrollDown`] bindings — either re-synthesised as
 //!   continuous, sensitivity-scaled horizontal scroll or accumulated into a

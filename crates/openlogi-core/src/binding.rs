@@ -12,9 +12,10 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-/// One of the user-rebindable hotspots on a Logi mouse. The order matches the
-/// physical layout from front to side; [`ButtonId::ALL`] is consumed by the
-/// default-binding generator and the popover trigger list.
+/// One of the user-rebindable hotspots on a Logi mouse. New variants are
+/// appended (the identifiers are TOML-stable config keys); [`ButtonId::ALL`]
+/// lists them in physical layout order (front to side) and is what the
+/// default-binding generator and the popover trigger list consume.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ButtonId {
     LeftClick,

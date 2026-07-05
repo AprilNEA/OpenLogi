@@ -40,7 +40,8 @@ pub enum CapturedInput {
     /// A completed gesture-button swipe.
     Gesture(GestureDirection),
     /// A diverted button was pressed — the DPI/ModeShift button
-    /// ([`ButtonId::DpiToggle`]) or the thumb-wheel single tap
+    /// ([`ButtonId::DpiToggle`]), a wheel-tilt button ([`ButtonId::TiltLeft`] /
+    /// [`ButtonId::TiltRight`]), or the thumb-wheel single tap
     /// ([`ButtonId::Thumbwheel`]).
     ButtonPressed(ButtonId),
     /// Thumb-wheel rotation to re-synthesise as horizontal scroll, in the
