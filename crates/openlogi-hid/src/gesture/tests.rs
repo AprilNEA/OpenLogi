@@ -102,3 +102,40 @@ fn a_dpi_button_re_presses_after_a_release() {
     );
     assert!(rx.try_recv().is_err());
 }
+
+#[test]
+fn a_held_tilt_left_presses_once_on_the_rising_edge() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let down = RawControlEvent::DivertedButtons([reprog_controls::TILT_LEFT_CID, 0, 0, 0]);
+
+    handle_reprog(&mut acc, down, &[], &tx);
+    handle_reprog(&mut acc, down, &[], &tx);
+
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(ButtonId::TiltLeft))
+    );
+    assert!(rx.try_recv().is_err(), "a held tilt presses once");
+}
+
+#[test]
+fn tilt_left_and_right_emit_independent_presses() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let left = RawControlEvent::DivertedButtons([reprog_controls::TILT_LEFT_CID, 0, 0, 0]);
+    let right = RawControlEvent::DivertedButtons([reprog_controls::TILT_RIGHT_CID, 0, 0, 0]);
+
+    handle_reprog(&mut acc, left, &[], &tx);
+    handle_reprog(&mut acc, right, &[], &tx);
+
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(ButtonId::TiltLeft))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(ButtonId::TiltRight))
+    );
+    assert!(rx.try_recv().is_err());
+}

@@ -235,6 +235,7 @@ async fn manage(
                         if let Err(e) = run_capture_session(
                             route,
                             capture_thumbwheel,
+                            false,
                             divert_gesture_button,
                             sink,
                             stop_rx,

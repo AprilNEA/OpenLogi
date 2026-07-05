@@ -51,6 +51,15 @@ pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 /// cross-checked against Solaar `special_keys.py`.
 pub const DPI_MODE_SHIFT_CIDS: [u16; 3] = [0x00c4, 0x00ed, 0x00fd];
 
+/// Control IDs of the scroll wheel's horizontal tilt on tilt-wheel devices
+/// (e.g. MX Ergo): left = `0x5b`, right = `0x5d`. These are classic mouse CIDs
+/// (below `0xB8`, so absent from `control_ids.rs`); values cross-checked against
+/// Solaar `special_keys.py` and the MX Ergo asset depot slotIds (`c91`/`c93`).
+/// Their default on-device task is horizontal scroll left/right.
+pub const TILT_LEFT_CID: u16 = 0x005b;
+/// See [`TILT_LEFT_CID`].
+pub const TILT_RIGHT_CID: u16 = 0x005d;
+
 /// Identity and capabilities of one reprogrammable control, as returned by
 /// `getCtrlIdInfo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
