@@ -69,15 +69,29 @@ pub struct Receiver {
 }
 
 impl Receiver {
+    fn new_for_pairs(chan: Arc<HidppChannel>, pairs: &[(u16, u16)]) -> Result<Self, ReceiverError> {
+        if !pairs.contains(&(chan.vendor_id, chan.product_id)) {
+            return Err(ReceiverError::UnknownReceiver);
+        }
+
+        Ok(Self::new_unchecked(chan))
+    }
+
     /// Tries to initialize a new [`Receiver`] from a raw HID++ channel.
     ///
     /// Returns [`ReceiverError::UnknownReceiver`] when the channel's VID/PID
     /// doesn't match any known Unifying receiver.
     pub fn new(chan: Arc<HidppChannel>) -> Result<Self, ReceiverError> {
-        if !VPID_PAIRS.contains(&(chan.vendor_id, chan.product_id)) {
-            return Err(ReceiverError::UnknownReceiver);
-        }
+        Self::new_for_pairs(chan, VPID_PAIRS)
+    }
 
+    /// Initializes a receiver that shares the Unifying-style HID++ receiver
+    /// register layout but is branded as LIGHTSPEED.
+    pub(crate) fn new_lightspeed(chan: Arc<HidppChannel>) -> Result<Self, ReceiverError> {
+        Self::new_for_pairs(chan, super::lightspeed::VPID_PAIRS)
+    }
+
+    fn new_unchecked(chan: Arc<HidppChannel>) -> Self {
         let emitter = Arc::new(EventEmitter::new());
 
         let listener = chan.add_msg_listener_guarded({
@@ -111,11 +125,11 @@ impl Receiver {
             }
         });
 
-        Ok(Receiver {
+        Receiver {
             _listener: Arc::new(listener),
             chan,
             emitter,
-        })
+        }
     }
 
     /// Creates a new listener for receiving receiver events.

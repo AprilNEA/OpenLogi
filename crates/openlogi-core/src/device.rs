@@ -77,10 +77,10 @@ pub struct Capabilities {
     pub buttons: bool,
     /// Adjustable pointer resolution — HID++ `0x2201` / `0x2202` (AdjustableDpi).
     pub pointer: bool,
-    /// Solid-colour RGB the lighting panel can actually drive — HID++
-    /// `ColorLedEffects` (`0x8070`) or `PerKeyLighting` (`0x8080`), the features
-    /// `set_keyboard_color` writes. Backlight-only families aren't driven by the
-    /// panel, so they don't flip this and don't earn an inert Lighting tab.
+    /// Solid-colour RGB the lighting panel can actually drive — HID++ RGB
+    /// effect engines (`0x8070` / `0x8071`) or per-zone lighting (`0x8080` /
+    /// `0x8081`). Backlight-only families aren't driven by the panel, so they
+    /// don't flip this and don't earn an inert Lighting tab.
     pub lighting: bool,
     /// Native vertical wheel inversion — HID++ `0x2121 HiResWheel` with the
     /// firmware-reported `has_invert` capability.
@@ -94,11 +94,9 @@ impl Capabilities {
     pub fn from_feature_ids(ids: &[u16]) -> Self {
         const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
-        // PerKeyLighting (0x8080) and ColorLedEffects (0x8070) — both now driven
-        // by `set_keyboard_color` (it prefers 0x8070's fixed effect to override a
-        // running onboard profile, falling back to 0x8080 per-key). Other families
-        // (backlight 0x198x) stay out so they don't earn a tab the panel can't drive.
-        const LIGHTING: [u16; 2] = [0x8080, 0x8070];
+        // Include the modern G-series RGB families as well: G502 X PLUS reports
+        // 0x8071/0x8081 instead of the older 0x8070/0x8080 pair.
+        const LIGHTING: [u16; 4] = [0x8070, 0x8071, 0x8080, 0x8081];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
             buttons: has(&BUTTONS),
@@ -256,7 +254,7 @@ pub struct DeviceInventory {
 
 #[cfg(test)]
 mod tests {
-    use super::DeviceKind;
+    use super::{Capabilities, DeviceKind};
 
     #[test]
     fn registry_type_is_case_folded() {
@@ -278,6 +276,18 @@ mod tests {
             DeviceKind::Unknown
         );
         assert_eq!(DeviceKind::from_registry_type(""), DeviceKind::Unknown);
+    }
+
+    #[test]
+    fn modern_rgb_effects_enable_lighting_capability() {
+        assert!(
+            Capabilities::from_feature_ids(&[0x8071]).lighting,
+            "G502 X PLUS exposes RGB effects instead of ColorLedEffects"
+        );
+        assert!(
+            Capabilities::from_feature_ids(&[0x8081]).lighting,
+            "G502 X PLUS exposes per-key lighting v2 instead of v1"
+        );
     }
 
     #[test]
