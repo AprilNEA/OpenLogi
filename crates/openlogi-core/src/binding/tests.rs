@@ -533,6 +533,20 @@ fn wheel_tilt_defaults_to_the_scroll_its_firmware_already_does() {
     }
 }
 
+#[test]
+fn g502_native_controls_have_labels_but_are_not_bindable() {
+    for control in [
+        ButtonId::DpiUp,
+        ButtonId::DpiDown,
+        ButtonId::DpiShift,
+        ButtonId::SmartShift,
+    ] {
+        assert!(!control.label().is_empty());
+        assert!(!control.is_bindable());
+        assert!(!ButtonId::ALL.contains(&control));
+    }
+}
+
 // ── Effect classification ─────────────────────────────────────────────────
 //
 // `Action::effect()` is the platform-neutral IR `openlogi-inject`'s three

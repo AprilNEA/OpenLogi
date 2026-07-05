@@ -15,11 +15,12 @@ use gpui_component::{
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
+use super::button_layout::{MouseButtonLayout, MouseModelPerspective};
 use super::geometry::{
     LABEL_H, LabelDistribution, asset_dimensions_for_png, asset_has_button_labels,
-    asset_hotspots_for_png, default_labels, labels_from_hotspots,
+    asset_hotspots_for_png, labels_from_hotspots,
 };
-use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
+use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use super::inspector::{BindingInspectorData, binding_inspector};
 use super::leader_lines::{Geometry as LeaderGeometry, Label, Side, paint as paint_leader_lines};
 use super::picker::{GESTURE_BUTTON_ICON, action_icon_path};
@@ -42,6 +43,7 @@ const HOTSPOT_DOT: f32 = 12.;
 /// Vertical space occupied by the device bar, profile context, and canvas
 /// padding. Normal operation no longer reserves a footer.
 const MODEL_VERTICAL_RESERVE: f32 = 154.;
+const MODEL_PERSPECTIVE_VERTICAL_RESERVE: f32 = 36.;
 /// Floor for the scaled model height. Below this the evenly-slotted side labels
 /// (≈[`LABEL_H`] each) start to overlap; the window's minimum height is sized to
 /// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
@@ -66,35 +68,38 @@ struct MouseWorkspaceData<'a> {
     thumbwheel: bool,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
+    layout: MouseButtonLayout,
 }
 
 impl<'a> MouseWorkspaceData<'a> {
     fn read(cx: &'a App) -> Option<Self> {
-        AppState::try_read(cx).map(|state| Self {
-            device_key: state
-                .current_record()
-                .map(|record| record.config_key.as_str()),
-            asset: state
-                .current_record()
-                .and_then(|record| record.asset.as_ref()),
-            active: state
-                .active_button()
-                .map(MouseControlId::from_active_button),
-            bindings: state.button_bindings(),
-            gesture_maps: state.gesture_bindings(),
-            glow: state
-                .current_record()
-                .and_then(|record| keyboard_glow(state, record)),
-            thumbwheel: state
-                .current_record()
-                .and_then(|record| record.capabilities)
-                .is_some_and(|capabilities| capabilities.thumbwheel),
-            editing_app: state.editing_app().map(|app| {
-                state
-                    .recent_app_name(app)
-                    .map_or_else(|| friendly_app_name(app), str::to_string)
-            }),
-            overridden: state.editing_app_overrides(),
+        AppState::try_read(cx).map(|state| {
+            let record = state.current_record();
+            Self {
+                device_key: record.map(|record| record.config_key.as_str()),
+                asset: record.and_then(|record| record.asset.as_ref()),
+                active: state
+                    .active_button()
+                    .map(MouseControlId::from_active_button),
+                bindings: state.button_bindings(),
+                gesture_maps: state.gesture_bindings(),
+                glow: record.and_then(|record| keyboard_glow(state, record)),
+                thumbwheel: record
+                    .and_then(|record| record.capabilities)
+                    .is_some_and(|capabilities| capabilities.thumbwheel),
+                editing_app: state.editing_app().map(|app| {
+                    state
+                        .recent_app_name(app)
+                        .map_or_else(|| friendly_app_name(app), str::to_string)
+                }),
+                overridden: state.editing_app_overrides(),
+                layout: record.map_or(MouseButtonLayout::Default, |record| {
+                    MouseButtonLayout::for_device(
+                        record.model_info.as_ref(),
+                        Some(&record.model_name),
+                    )
+                }),
+            }
         })
     }
 
@@ -112,6 +117,7 @@ impl<'a> MouseWorkspaceData<'a> {
             thumbwheel: false,
             editing_app: None,
             overridden: None,
+            layout: MouseButtonLayout::Default,
         }
     }
 }
@@ -126,6 +132,7 @@ pub struct MouseModelView {
     gesture_active_dir: Option<GestureDirection>,
     action_picker_open: bool,
     action_search: Entity<InputState>,
+    model_perspective: MouseModelPerspective,
     _state_obs: Subscription,
 }
 
@@ -165,6 +172,7 @@ impl MouseModelView {
             gesture_active_dir: None,
             action_picker_open: false,
             action_search,
+            model_perspective: MouseModelPerspective::View1,
             _state_obs: state_obs,
         }
     }
@@ -174,6 +182,7 @@ impl MouseModelView {
     pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
         self.gesture_active_dir = dir;
         self.action_picker_open = false;
+        self.model_perspective = MouseModelPerspective::View1;
     }
 
     pub(super) fn toggle_action_picker(&mut self) {
@@ -245,10 +254,29 @@ impl Render for MouseModelView {
             thumbwheel,
             editing_app,
             overridden,
+            layout,
         } = MouseWorkspaceData::read(cx)
             .unwrap_or_else(|| MouseWorkspaceData::empty(&empty_bindings, &empty_gesture_maps));
 
         self.reset_for_device(device_key);
+        if self
+            .selected
+            .is_some_and(|control| !layout.binds_control(control))
+        {
+            self.selected = None;
+            self.gesture_active_dir = None;
+            self.action_picker_open = false;
+        }
+        let perspective = if layout.supports_perspectives() {
+            self.model_perspective
+        } else {
+            MouseModelPerspective::View1
+        };
+        let model_asset = if layout.supports_perspectives() {
+            None
+        } else {
+            asset
+        };
 
         let gesture_buttons: Vec<ButtonId> = gesture_maps
             .keys()
@@ -268,7 +296,14 @@ impl Render for MouseModelView {
             mouse_h,
             hotspots,
             labels,
-        } = model_layout(asset, viewport_w, viewport_h, thumbwheel);
+        } = model_layout(
+            model_asset,
+            layout,
+            perspective,
+            viewport_w,
+            viewport_h,
+            thumbwheel,
+        );
         let canvas_h = mouse_h;
 
         let highlight = self.hovered.or(active).or(self.selected);
@@ -279,7 +314,15 @@ impl Render for MouseModelView {
         let hotspots_outer = hotspots.clone();
         let labels_outer = labels.clone();
         let leader_canvas = leader_canvas(hotspots, labels, highlight, mouse_left, mouse_w);
-        let breathing_art = breathing_art(asset, mouse_left, mouse_w, mouse_h, glow);
+        let breathing_art = breathing_art(
+            model_asset,
+            layout,
+            perspective,
+            mouse_left,
+            mouse_w,
+            mouse_h,
+            glow,
+        );
         let model = ModelRect {
             left: mouse_left,
             width: mouse_w,
@@ -291,6 +334,7 @@ impl Render for MouseModelView {
             hovered,
             active,
             self.selected,
+            layout,
             &view,
         );
         let canvas = div()
@@ -300,7 +344,8 @@ impl Render for MouseModelView {
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
-                let binding = binding_label_for_control(label.id, bindings, &gesture_buttons);
+                let binding =
+                    binding_label_for_control(label.id, layout, bindings, &gesture_buttons);
                 label_control(
                     idx,
                     *label,
@@ -327,6 +372,14 @@ impl Render for MouseModelView {
             &view,
             cx,
         );
+        let pal = theme::palette(cx);
+        let canvas = v_flex()
+            .items_center()
+            .gap_2()
+            .child(canvas)
+            .when(layout.supports_perspectives(), |column| {
+                column.child(perspective_selector(perspective, &view, pal))
+            });
         workspace_layout(canvas, profile_status, inspector, &self.focus_handle)
     }
 }
@@ -367,6 +420,58 @@ fn workspace_layout(
         .child(inspector)
 }
 
+fn perspective_selector(
+    active: MouseModelPerspective,
+    view: &Entity<MouseModelView>,
+    pal: theme::Palette,
+) -> impl IntoElement {
+    h_flex().items_center().justify_center().gap_2().children(
+        [MouseModelPerspective::View1, MouseModelPerspective::View2]
+            .into_iter()
+            .map(|perspective| {
+                let selected = perspective == active;
+                let id = match perspective {
+                    MouseModelPerspective::View1 => 1usize,
+                    MouseModelPerspective::View2 => 2usize,
+                };
+                let view = view.clone();
+                BaseButton::new(("g502-perspective", id))
+                    .selected(selected)
+                    .px_3()
+                    .py_1()
+                    .rounded(pal.control_radius)
+                    .border_1()
+                    .border_color(if selected {
+                        rgb(ACCENT_BLUE).into()
+                    } else {
+                        pal.border
+                    })
+                    .bg(if selected {
+                        theme::accent_tint()
+                    } else {
+                        pal.control
+                    })
+                    .text_color(if selected {
+                        rgb(ACCENT_BLUE).into()
+                    } else {
+                        pal.text_muted
+                    })
+                    .cursor_pointer()
+                    .child(tr!(perspective.label()))
+                    .on_click(move |_event, _window, cx| {
+                        view.update(cx, |this, cx| {
+                            this.model_perspective = perspective;
+                            this.hovered = None;
+                            this.selected = None;
+                            this.gesture_active_dir = None;
+                            this.action_picker_open = false;
+                            cx.notify();
+                        });
+                    })
+            }),
+    )
+}
+
 struct ModelLayout {
     canvas_w: f32,
     mouse_left: f32,
@@ -381,11 +486,19 @@ struct ModelLayout {
 /// drops the label gutter so it remains centred.
 fn model_layout(
     asset: Option<&ResolvedAsset>,
+    layout: MouseButtonLayout,
+    perspective: MouseModelPerspective,
     viewport_w: f32,
     viewport_h: f32,
     thumbwheel: bool,
 ) -> ModelLayout {
-    let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
+    let vertical_reserve = MODEL_VERTICAL_RESERVE
+        + if layout.supports_perspectives() {
+            MODEL_PERSPECTIVE_VERTICAL_RESERVE
+        } else {
+            0.
+        };
+    let target_h = (viewport_h - vertical_reserve).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
     let has_labels = asset.is_none_or(asset_has_button_labels) && viewport_w >= 960.;
     let content_w =
         (viewport_w - MODEL_HORIZONTAL_RESERVE).clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
@@ -401,8 +514,15 @@ fn model_layout(
         0.
     };
     let max_image_w = (content_w - left_gutter - right_gutter).max(MODEL_MIN_CONTENT_W / 2.);
-    let (mouse_w, mouse_h, hotspots, mut labels) =
-        scaled_model(asset, target_h, max_image_w, thumbwheel, label_distribution);
+    let (mouse_w, mouse_h, hotspots, mut labels) = scaled_model(
+        asset,
+        layout,
+        perspective,
+        target_h,
+        max_image_w,
+        thumbwheel,
+        label_distribution,
+    );
     if !has_labels {
         labels.clear();
     }
@@ -423,6 +543,8 @@ fn model_layout(
 /// `(mouse_w, mouse_h, hotspots, labels)`.
 fn scaled_model(
     asset: Option<&ResolvedAsset>,
+    layout: MouseButtonLayout,
+    perspective: MouseModelPerspective,
     target_h: f32,
     max_w: f32,
     thumbwheel: bool,
@@ -435,7 +557,8 @@ fn scaled_model(
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
-        let hotspots = default_hotspots(thumbwheel)
+        let hotspots = layout
+            .fallback_hotspots(perspective, thumbwheel)
             .into_iter()
             .map(|hs| Hotspot {
                 x: hs.x * scale,
@@ -445,7 +568,8 @@ fn scaled_model(
                 ..hs
             })
             .collect();
-        let labels = default_labels(thumbwheel, label_distribution)
+        let labels = layout
+            .fallback_labels(perspective, thumbwheel, label_distribution)
             .into_iter()
             .map(|l| Label {
                 y: l.y * scale,
@@ -491,6 +615,8 @@ fn leader_canvas(
 
 fn breathing_art(
     asset: Option<&ResolvedAsset>,
+    layout: MouseButtonLayout,
+    perspective: MouseModelPerspective,
     mouse_left: f32,
     mouse_w: f32,
     mouse_h: f32,
@@ -504,6 +630,8 @@ fn breathing_art(
         None => Silhouette {
             w: mouse_w,
             h: mouse_h,
+            layout,
+            perspective,
         }
         .into_any_element(),
     };
@@ -536,6 +664,7 @@ fn hotspots_layer(
     hovered: Option<MouseControlId>,
     active: Option<MouseControlId>,
     selected: Option<MouseControlId>,
+    layout: MouseButtonLayout,
     view: &Entity<MouseModelView>,
 ) -> impl IntoElement {
     div()
@@ -551,6 +680,7 @@ fn hotspots_layer(
                 hovered,
                 active,
                 selected == Some(hotspot.id),
+                layout.binds_control(hotspot.id),
                 view,
             )
         }))
@@ -594,6 +724,7 @@ struct BindingLabel {
     /// Vendored action-icon asset path (see [`action_icon_path`]) for the
     /// card's leading glyph, or `None` for the gesture summary / unbound.
     icon: Option<&'static str>,
+    editable: bool,
 }
 
 #[derive(IntoElement)]
@@ -625,10 +756,16 @@ impl RenderOnce for LabelTrigger {
         let binding = self.binding.text;
         let binding_description = binding.clone();
         let binding_icon = self.binding.icon;
+        let editable = self.binding.editable;
         let button_name = tr!(self.label.id.label());
+        let accessibility_label = if editable {
+            tr!("Bind %{name}", name => button_name.clone())
+        } else {
+            format!("{button_name}: {}", tr!("Native")).into()
+        };
         BaseButton::new(self.id)
             .selected(selected)
-            .accessibility_label(tr!("Bind %{name}", name => button_name.clone()))
+            .accessibility_label(accessibility_label)
             .aria_description(binding_description)
             .aria_selected(selected)
             .flex()
@@ -650,12 +787,13 @@ impl RenderOnce for LabelTrigger {
             } else {
                 pal.control
             })
-            .cursor_pointer()
-            .hover(move |s| {
-                s.bg(if highlighted {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
+            .when(editable, |button| {
+                button.cursor_pointer().hover(move |s| {
+                    s.bg(if highlighted {
+                        theme::accent_tint_hover()
+                    } else {
+                        pal.control_hover
+                    })
                 })
             })
             .focus_visible(move |s| {
@@ -705,17 +843,21 @@ impl RenderOnce for LabelTrigger {
                             .text_color(binding_color)
                             .child(binding),
                     )
-                    .child(
-                        Icon::new(IconName::ChevronRight)
-                            .size_3()
-                            .text_color(pal.text_muted),
-                    ),
+                    .when(editable, |row| {
+                        row.child(
+                            Icon::new(IconName::ChevronRight)
+                                .size_3()
+                                .text_color(pal.text_muted),
+                        )
+                    }),
             )
-            .on_click(move |_event, _window, cx| {
-                click_view.update(cx, |this, cx| {
-                    this.select(btn);
-                    cx.notify();
-                });
+            .when(editable, |button| {
+                button.on_click(move |_event, _window, cx| {
+                    click_view.update(cx, |this, cx| {
+                        this.select(btn);
+                        cx.notify();
+                    });
+                })
             })
             .on_hover(move |hovered, _window, cx| {
                 set_control_hovered(&view, btn, *hovered, cx);
@@ -726,9 +868,17 @@ impl RenderOnce for LabelTrigger {
 /// The label card's text and icon for one control.
 fn binding_label_for_control(
     control: MouseControlId,
+    layout: MouseButtonLayout,
     bindings: &std::collections::BTreeMap<ButtonId, Action>,
     gesture_buttons: &[ButtonId],
 ) -> BindingLabel {
+    if !layout.binds_control(control) {
+        return BindingLabel {
+            text: tr!("Native"),
+            icon: None,
+            editable: false,
+        };
+    }
     if control
         .button()
         .is_some_and(|button| gesture_buttons.contains(&button))
@@ -736,6 +886,7 @@ fn binding_label_for_control(
         return BindingLabel {
             text: tr!("5 directions"),
             icon: Some(GESTURE_BUTTON_ICON),
+            editable: true,
         };
     }
 
@@ -748,6 +899,7 @@ fn binding_label_for_control(
             BindingLabel {
                 text: localized_action_label(&action),
                 icon: Some(action_icon_path(&action)),
+                editable: true,
             }
         }
         MouseControlId::ThumbwheelRotation => {
@@ -763,11 +915,13 @@ fn binding_label_for_control(
                 BindingLabel {
                     text: tr!(preset.label()),
                     icon: Some(preset.icon()),
+                    editable: true,
                 }
             } else {
                 BindingLabel {
                     text: tr!("Custom"),
                     icon: Some("action-icons/chevrons-right.svg"),
+                    editable: true,
                 }
             }
         }
@@ -783,12 +937,50 @@ fn binding_label_for_control(
 struct Silhouette {
     w: f32,
     h: f32,
+    layout: MouseButtonLayout,
+    perspective: MouseModelPerspective,
 }
 
 impl RenderOnce for Silhouette {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let Self { w, h } = self;
+        let Self {
+            w,
+            h,
+            layout,
+            perspective,
+        } = self;
         let pal = theme::palette(cx);
+        if layout == MouseButtonLayout::G502 && perspective == MouseModelPerspective::View2 {
+            return div()
+                .absolute()
+                .inset_0()
+                .w(px(w))
+                .h(px(h))
+                .rounded_3xl()
+                .border_1()
+                .border_color(pal.text_muted)
+                .bg(pal.muted)
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(w * 0.18))
+                        .top(px(h * 0.14))
+                        .w(px(w * 0.58))
+                        .h(px(h * 0.72))
+                        .rounded_3xl()
+                        .bg(hsla(0., 0., 0.25, 1.0)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(w * 0.38))
+                        .top(px(h * 0.18))
+                        .w(px(w * 0.12))
+                        .h(px(h * 0.38))
+                        .rounded_md()
+                        .bg(pal.muted),
+                );
+        }
         div()
             .absolute()
             .inset_0()
@@ -836,6 +1028,7 @@ fn hotspot_control(
     hovered: Option<MouseControlId>,
     active: Option<MouseControlId>,
     selected: bool,
+    editable: bool,
     view: &Entity<MouseModelView>,
 ) -> gpui::Div {
     let view = view.clone();
@@ -845,6 +1038,7 @@ fn hotspot_control(
         hovered: hovered == Some(hotspot.id) || active == Some(hotspot.id),
         view,
         selected,
+        editable,
     };
     div()
         .absolute()
@@ -862,12 +1056,14 @@ struct HotspotTrigger {
     hovered: bool,
     view: Entity<MouseModelView>,
     selected: bool,
+    editable: bool,
 }
 
 impl RenderOnce for HotspotTrigger {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let highlighted = self.hovered || self.selected;
         let selected = self.selected;
+        let editable = self.editable;
         let view = self.view;
         let click_view = view.clone();
         let hotspot = self.hotspot;
@@ -875,7 +1071,11 @@ impl RenderOnce for HotspotTrigger {
 
         BaseButton::new(self.id)
             .selected(selected)
-            .accessibility_label(tr!("Bind %{name}", name => tr!(btn.label())))
+            .accessibility_label(if editable {
+                tr!("Bind %{name}", name => tr!(btn.label()))
+            } else {
+                format!("{}: {}", tr!(btn.label()), tr!("Native")).into()
+            })
             .aria_selected(selected)
             .flex()
             .items_center()
@@ -905,11 +1105,15 @@ impl RenderOnce for HotspotTrigger {
                     .border_2()
                     .border_color(rgb(ACCENT_BLUE))
             })
-            .on_click(move |_event, _window, cx| {
-                click_view.update(cx, |this, cx| {
-                    this.select(btn);
-                    cx.notify();
-                });
+            .when(editable, |button| {
+                button
+                    .cursor_pointer()
+                    .on_click(move |_event, _window, cx| {
+                        click_view.update(cx, |this, cx| {
+                            this.select(btn);
+                            cx.notify();
+                        });
+                    })
             })
             .on_hover(move |hovered, _window, cx| {
                 set_control_hovered(&view, btn, *hovered, cx);
@@ -1019,8 +1223,24 @@ mod tests {
 
     #[test]
     fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-        let (_, _, without, _) = scaled_model(None, 560., 420., false, LabelDistribution::LeftOnly);
-        let (_, _, with, _) = scaled_model(None, 560., 420., true, LabelDistribution::LeftOnly);
+        let (_, _, without, _) = scaled_model(
+            None,
+            MouseButtonLayout::Default,
+            MouseModelPerspective::View1,
+            560.,
+            420.,
+            false,
+            LabelDistribution::LeftOnly,
+        );
+        let (_, _, with, _) = scaled_model(
+            None,
+            MouseButtonLayout::Default,
+            MouseModelPerspective::View1,
+            560.,
+            420.,
+            true,
+            LabelDistribution::LeftOnly,
+        );
         assert_eq!(
             without
                 .iter()
@@ -1034,5 +1254,19 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn g502_native_controls_are_presented_as_read_only() {
+        let binding = binding_label_for_control(
+            ButtonId::DpiUp.into(),
+            MouseButtonLayout::G502,
+            &BTreeMap::new(),
+            &[],
+        );
+
+        assert_eq!(binding.text, tr!("Native"));
+        assert!(!binding.editable);
+        assert!(binding.icon.is_none());
     }
 }

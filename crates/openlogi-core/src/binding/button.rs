@@ -77,6 +77,15 @@ pub enum ButtonId {
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
     WheelTiltRight,
+    /// Dedicated DPI increase control on G502-family mice. Display-only until
+    /// the gaming-button protocol can capture it.
+    DpiUp,
+    /// Dedicated DPI decrease control on G502-family mice.
+    DpiDown,
+    /// Thumb-side DPI Shift control on G502-family mice.
+    DpiShift,
+    /// Mechanical wheel-mode toggle on G502-family mice.
+    SmartShift,
 }
 
 impl ButtonId {
@@ -114,6 +123,21 @@ impl ButtonId {
         ButtonId::KeyVolumeDown,
         ButtonId::KeyVolumeUp,
     ];
+
+    /// Model-authored controls that the UI can name and locate, but the
+    /// runtime cannot capture yet.
+    pub const DISPLAY_ONLY: [ButtonId; 4] = [
+        ButtonId::DpiUp,
+        ButtonId::DpiDown,
+        ButtonId::DpiShift,
+        ButtonId::SmartShift,
+    ];
+
+    /// Whether OpenLogi can currently capture and dispatch this control.
+    #[must_use]
+    pub fn is_bindable(self) -> bool {
+        Self::ALL.contains(&self) || Self::KEYBOARD_KEYS.contains(&self)
+    }
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
     /// remaps: Middle, Back, or Forward. The primary L/R clicks always pass
@@ -166,6 +190,10 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
+            ButtonId::DpiUp => "DPI Up",
+            ButtonId::DpiDown => "DPI Down",
+            ButtonId::DpiShift => "DPI Shift",
+            ButtonId::SmartShift => "Smart Shift",
         }
     }
 }

@@ -100,7 +100,11 @@ mod tests {
         // `HoldShortcut`) are skipped here and checked explicitly above where
         // needed.
         let covered = |label: &str| rust_i18n::t!(label) != label;
-        for b in ButtonId::ALL {
+        for b in ButtonId::ALL
+            .into_iter()
+            .chain(ButtonId::KEYBOARD_KEYS)
+            .chain(ButtonId::DISPLAY_ONLY)
+        {
             assert!(covered(b.label()), "no zh-CN for ButtonId::{b:?}");
         }
         for d in GestureDirection::ALL {

@@ -266,6 +266,9 @@ pub(super) async fn probe_features(
     // the authoritative kind signal; the marketing name matters especially on
     // Windows Bluetooth, where the OS HID collection is often just `"Mouse"`.
     let (kind, marketing_name) = read_marketing_identity(&device, slot).await;
+    if let Some(caps) = capabilities.as_mut() {
+        caps.include_known_model_support(model_info.as_ref(), marketing_name.as_deref());
+    }
 
     (
         ProbedFeatures {

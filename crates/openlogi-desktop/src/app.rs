@@ -9,7 +9,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     v_flex,
 };
-use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
+use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind, is_g502_family};
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
 
@@ -107,7 +107,8 @@ impl DetailTab {
             .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
         // Buttons panel is a mouse-model silhouette — only for pointer devices.
         // Keyboards get the Keys panel instead, even when they expose ReprogControls.
-        let can_show_mouse_model = matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
+        let can_show_mouse_model = matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball)
+            || is_g502_family(record.model_info.as_ref(), Some(&record.model_name));
         let mut tabs = Vec::new();
         // A webcam is a UVC device with no HID++ capabilities; its detail screen
         // leads with the live preview, then the generic info tab.
@@ -646,8 +647,8 @@ mod tests {
     use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
     use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
     use openlogi_core::device::{
-        BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities,
-        LightValueRange, LightValueUnit,
+        BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports,
+        LightCapabilities, LightValueRange, LightValueUnit,
     };
     use openlogi_core::hid::DeviceRoute;
 
@@ -924,5 +925,31 @@ mod tests {
     fn unprobed_unknown_device_shows_only_device_tab() {
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Unknown, None));
         assert_eq!(tabs, vec![DetailTab::Device]);
+    }
+
+    #[test]
+    fn g502_identity_keeps_the_model_surface_when_kind_is_unknown() {
+        let mut device = record(
+            DeviceKind::Unknown,
+            Some(Capabilities {
+                buttons: true,
+                lighting: true,
+                ..Capabilities::default()
+            }),
+        );
+        device.model_name = "G502 X Plus".to_string();
+        device.model_info = Some(DeviceModelInfo {
+            entity_count: 1,
+            serial_number: None,
+            unit_id: [0; 4],
+            transports: DeviceTransports::default(),
+            model_ids: [0x4099, 0, 0],
+            extended_model_id: 0,
+        });
+
+        let tabs = DetailTab::tabs_for(&device);
+
+        assert!(tabs.contains(&DetailTab::Buttons));
+        assert!(tabs.contains(&DetailTab::Lighting));
     }
 }

@@ -52,6 +52,9 @@ pub fn button_bindings_for(
         .map(|button| (button, Binding::Single(default_binding(button))))
         .collect();
     for (button, mut binding) in stored {
+        if !button.is_bindable() {
+            continue;
+        }
         if let Binding::Gesture(map) = &mut binding {
             map.entry(GestureDirection::Click)
                 .or_insert_with(|| default_binding(button));
@@ -144,6 +147,17 @@ mod tests {
     use crate::binding::{LongPressBinding, default_gesture_binding};
 
     use super::*;
+
+    #[test]
+    fn model_authored_native_controls_never_enter_runtime_bindings() {
+        let mut cfg = Config::default();
+        cfg.set_binding("g502", ButtonId::DpiUp, Binding::Single(Action::Copy));
+
+        let projected = button_bindings_for(&cfg, Some("g502"), None);
+
+        assert!(!ButtonId::DpiUp.is_bindable());
+        assert!(!projected.contains_key(&ButtonId::DpiUp));
+    }
 
     #[test]
     fn click_less_gesture_keeps_default_click_in_projection() {

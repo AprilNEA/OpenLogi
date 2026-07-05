@@ -56,9 +56,9 @@ pub async fn run(args: LightingArgs) -> Result<()> {
     let (route, name) = select_device(device_query, LIGHTING_FEATURES)
         .await
         .map_err(|error| match device_query {
-            Some(query) => anyhow!(
-                "no lighting-capable online device matches `--device {query}`: {error}"
-            ),
+            Some(query) => {
+                anyhow!("no lighting-capable online device matches `--device {query}`: {error}")
+            }
             None => anyhow!("no lighting-capable online device found: {error}"),
         })?;
 

@@ -179,6 +179,18 @@ impl Capabilities {
             _ => Self::default(),
         }
     }
+
+    /// Include controls that are known from the model but absent from the
+    /// generic HID++ feature table.
+    pub fn include_known_model_support(
+        &mut self,
+        model: Option<&DeviceModelInfo>,
+        name: Option<&str>,
+    ) {
+        if is_g502_family(model, name) {
+            self.buttons = true;
+        }
+    }
 }
 
 /// Coarse battery bucket reported by the device firmware.
@@ -296,6 +308,27 @@ impl DeviceModelInfo {
     pub fn config_key(&self) -> String {
         format!("{:x}{:04x}", self.extended_model_id, self.model_ids[0])
     }
+}
+
+/// Whether model metadata identifies a Logitech G502-family mouse.
+#[must_use]
+pub fn is_g502_family(model: Option<&DeviceModelInfo>, name: Option<&str>) -> bool {
+    const MODEL_IDS: [u16; 11] = [
+        0x407e, 0x407f, 0x4099, 0x409a, 0xc08b, 0xc090, 0xc091, 0xc095, 0xc098, 0xc09d, 0xc332,
+    ];
+
+    model.is_some_and(|info| {
+        info.model_ids
+            .iter()
+            .any(|id| *id != 0 && MODEL_IDS.contains(id))
+    }) || name.is_some_and(|value| {
+        value
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .to_ascii_lowercase()
+            .contains("g502")
+    })
 }
 
 /// Mirror of hidpp's `DeviceTransport` bitfield — one bool per protocol the
@@ -582,6 +615,27 @@ mod tests {
         }
         // Backlight (0x198x) stays out — the panel cannot drive it.
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).lighting);
+    }
+
+    #[test]
+    fn g502_identity_adds_the_model_authored_button_surface() {
+        let model = DeviceModelInfo {
+            entity_count: 1,
+            serial_number: None,
+            unit_id: [0; 4],
+            transports: DeviceTransports::default(),
+            model_ids: [0x4099, 0, 0],
+            extended_model_id: 0,
+        };
+        let mut capabilities = Capabilities::from_feature_ids(&[0x8071]);
+
+        capabilities.include_known_model_support(Some(&model), Some("G502 X PLUS"));
+
+        assert!(capabilities.buttons);
+        assert!(capabilities.lighting);
+        assert!(is_g502_family(Some(&model), None));
+        assert!(is_g502_family(None, Some("Logitech G502 X Plus")));
+        assert!(!is_g502_family(None, Some("MX Master 3S")));
     }
 
     #[test]
