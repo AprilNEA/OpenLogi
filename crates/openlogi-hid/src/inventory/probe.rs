@@ -301,6 +301,14 @@ async fn probe_direct(
 ) -> NodeProbe {
     let id = CacheKey::Direct(info.id.clone());
     let cached = cache.get(&id);
+    debug!(
+        name = %info.name,
+        vid = format_args!("{:04x}", info.vendor_id),
+        pid = format_args!("{:04x}", info.product_id),
+        cached = cached.is_some(),
+        tick,
+        "probing direct HID++ self slot"
+    );
     // A direct device is always "present" (its HID node is the candidate), so
     // treat it as online: reuse the cached probe while fresh, otherwise probe.
     let (probe, outcome) =
@@ -315,29 +323,50 @@ async fn probe_direct(
     // at the receiver, which sits at index 0 and steals every DPI / SmartShift
     // write attempt. We reuse the capabilities the probe already derived from
     // the feature table — no extra round-trip.
-    // A completed feature-table walk is what makes this probe's verdict
-    // trustworthy: without it (the device never answered) a rejection below
-    // would be indistinguishable from a transient glitch, so the node is
-    // settled as a failed probe and its last inventory replayed.
+    // A completed direct probe with no previous cache can reject a receiver
+    // secondary interface. Once this node has a last-good direct device, though,
+    // a no-evidence refresh is just another transient miss: replay the cached
+    // inventory instead of clearing it.
     let capabilities = probe.capabilities;
     let walk_succeeded = capabilities.is_some();
     let caps = capabilities.unwrap_or_default();
-    let is_peripheral = probe.battery.is_some() || caps.buttons || caps.pointer || caps.lighting;
+    let is_peripheral = probe.direct_peripheral_evidence;
+    let outcome_name = match &outcome {
+        CacheOutcome::Fresh(..) => "fresh",
+        CacheOutcome::Update(..) => "update",
+        CacheOutcome::Seen(..) => "seen",
+        CacheOutcome::Unkeyed => "unkeyed",
+    };
+    debug!(
+        name = %info.name,
+        vid = format_args!("{:04x}", info.vendor_id),
+        pid = format_args!("{:04x}", info.product_id),
+        walk_succeeded,
+        is_peripheral,
+        has_battery = probe.battery.is_some(),
+        has_model = probe.model_info.is_some(),
+        kind = ?probe.kind,
+        caps_buttons = caps.buttons,
+        caps_pointer = caps.pointer,
+        caps_lighting = caps.lighting,
+        caps_scroll_inversion = caps.scroll_inversion,
+        direct_peripheral_evidence = probe.direct_peripheral_evidence,
+        cache_outcome = outcome_name,
+        "direct HID++ probe verdict"
+    );
     if !is_peripheral {
         debug!(
             vid = format_args!("{:04x}", info.vendor_id),
             pid = format_args!("{:04x}", info.product_id),
             has_model = probe.model_info.is_some(),
+            walk_succeeded,
+            caps_buttons = caps.buttons,
+            caps_pointer = caps.pointer,
+            caps_lighting = caps.lighting,
             "slot 0xff exposes no battery or config feature — likely a receiver \
              secondary interface; skipping"
         );
-        // Don't cache or keep a rejected non-peripheral — `Unkeyed` lets any
-        // prior entry for this node be evicted.
-        return NodeProbe {
-            inventory: None,
-            healthy: walk_succeeded,
-            outcomes: vec![CacheOutcome::Unkeyed],
-        };
+        return direct_non_peripheral_result(cached.is_some(), walk_succeeded, outcome);
     }
 
     // Without a Bolt receiver we don't have a wpid, codename, or pairing
@@ -369,6 +398,40 @@ async fn probe_direct(
         inventory: Some(inventory),
         healthy: true,
         outcomes: vec![outcome],
+    }
+}
+
+fn direct_non_peripheral_result(
+    cached: bool,
+    walk_succeeded: bool,
+    outcome: CacheOutcome,
+) -> NodeProbe {
+    if walk_succeeded && !cached {
+        // A fresh, uncached direct node that answered but exposes no peripheral
+        // evidence is most likely a receiver's secondary HID++ interface.
+        return NodeProbe {
+            inventory: None,
+            healthy: true,
+            outcomes: vec![CacheOutcome::Unkeyed],
+        };
+    }
+
+    // For a known direct device, "no evidence this tick" is not an
+    // authoritative absence. Keep the cache entry seen, but never replace it
+    // with the empty/no-evidence probe that just failed to confirm the device.
+    NodeProbe {
+        inventory: None,
+        healthy: false,
+        outcomes: vec![seen_without_cache_update(outcome)],
+    }
+}
+
+fn seen_without_cache_update(outcome: CacheOutcome) -> CacheOutcome {
+    match outcome {
+        CacheOutcome::Fresh(key, _) | CacheOutcome::Update(key, _) | CacheOutcome::Seen(key) => {
+            CacheOutcome::Seen(key)
+        }
+        CacheOutcome::Unkeyed => CacheOutcome::Unkeyed,
     }
 }
 
@@ -494,4 +557,64 @@ async fn read_codename(channel: &HidppChannel, slot: u8) -> Option<String> {
     core::str::from_utf8(&response[3..3 + len])
         .ok()
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::cache::{CacheKey, Cached};
+    use super::super::features::ProbedFeatures;
+    use super::*;
+
+    fn cached_probe() -> Cached {
+        Cached {
+            probe: ProbedFeatures::default(),
+            battery_index: None,
+            probed_tick: 7,
+        }
+    }
+
+    #[test]
+    fn cached_direct_device_without_fresh_evidence_is_not_cleared() {
+        let result = direct_non_peripheral_result(
+            true,
+            true,
+            CacheOutcome::Fresh(
+                CacheKey::Bolt {
+                    unit_id: [1, 2, 3, 4],
+                },
+                cached_probe(),
+            ),
+        );
+
+        assert!(!result.healthy);
+        assert!(result.inventory.is_none());
+        assert!(
+            matches!(
+                result.outcomes.as_slice(),
+                [CacheOutcome::Seen(CacheKey::Bolt { .. })]
+            ),
+            "a no-evidence refresh must keep the existing cache alive without replacing it"
+        );
+    }
+
+    #[test]
+    fn uncached_direct_non_peripheral_rejection_stays_authoritative() {
+        let result = direct_non_peripheral_result(
+            false,
+            true,
+            CacheOutcome::Fresh(
+                CacheKey::Bolt {
+                    unit_id: [1, 2, 3, 4],
+                },
+                cached_probe(),
+            ),
+        );
+
+        assert!(result.healthy);
+        assert!(result.inventory.is_none());
+        assert!(
+            matches!(result.outcomes.as_slice(), [CacheOutcome::Unkeyed]),
+            "a receiver secondary interface must not be cached as a device"
+        );
+    }
 }
