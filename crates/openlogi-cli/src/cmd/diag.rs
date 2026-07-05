@@ -30,7 +30,7 @@ pub enum DiagCmd {
     Dpi(dpi::DpiArgs),
     /// Read SmartShift mode → toggle → read back → toggle back → report.
     Smartshift(smartshift::SmartshiftArgs),
-    /// Set a wired RGB keyboard to a solid colour (e.g. `ff0000` for red).
+    /// Set an online RGB device to a solid colour (e.g. `ff0000` for red).
     Lighting(lighting::LightingArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
