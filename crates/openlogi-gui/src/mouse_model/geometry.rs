@@ -218,6 +218,8 @@ fn map_slot_name(name: &str) -> Option<ButtonId> {
         "SLOT_NAME_LEFT_BUTTON" => Some(ButtonId::LeftClick),
         "SLOT_NAME_RIGHT_BUTTON" => Some(ButtonId::RightClick),
         "SLOT_NAME_MIDDLE_BUTTON" => Some(ButtonId::MiddleClick),
+        "SLOT_NAME_SCROLL_LEFT" => Some(ButtonId::TiltLeft),
+        "SLOT_NAME_SCROLL_RIGHT" => Some(ButtonId::TiltRight),
         "SLOT_NAME_BACK_BUTTON" => Some(ButtonId::Back),
         "SLOT_NAME_FORWARD_BUTTON" => Some(ButtonId::Forward),
         "SLOT_NAME_MODESHIFT_BUTTON" => Some(ButtonId::DpiToggle),
@@ -296,5 +298,17 @@ mod tests {
         ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         ys.dedup();
         assert_eq!(ys.len(), labels.len(), "each label gets a distinct slot");
+    }
+
+    #[test]
+    fn scroll_slots_map_to_tilt_buttons() {
+        assert_eq!(
+            map_slot_name("SLOT_NAME_SCROLL_LEFT"),
+            Some(ButtonId::TiltLeft)
+        );
+        assert_eq!(
+            map_slot_name("SLOT_NAME_SCROLL_RIGHT"),
+            Some(ButtonId::TiltRight)
+        );
     }
 }
