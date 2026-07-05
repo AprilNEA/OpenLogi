@@ -176,6 +176,7 @@ async fn run(config: Config) {
     // if it's revoked (the tap self-disables on revoke regardless; dropping the
     // handle stops its thread).
     let mut hook: Option<Hook> = None;
+    let mut accessibility_granted = Hook::has_accessibility();
 
     info!("openlogi-agent started");
     // Set once the inventory channel closes (the watcher thread died), so the
@@ -186,9 +187,25 @@ async fn run(config: Config) {
             event = inventory_rx.recv(), if inventory_open => match event {
                 Some(watchers::inventory::InventoryEvent::Snapshot(inventories)) => {
                     orchestrator.lock().await.refresh_inventory(&inventories);
+                    reconcile_hook(
+                        &mut hook,
+                        &hook_installed,
+                        &orchestrator,
+                        &shared,
+                        accessibility_granted,
+                    )
+                    .await;
                 }
                 Some(watchers::inventory::InventoryEvent::Unavailable) => {
                     orchestrator.lock().await.mark_inventory_unavailable();
+                    reconcile_hook(
+                        &mut hook,
+                        &hook_installed,
+                        &orchestrator,
+                        &shared,
+                        accessibility_granted,
+                    )
+                    .await;
                 }
                 Some(watchers::inventory::InventoryEvent::SystemWake) => {
                     // Devices likely power-cycled during the sleep; the next
@@ -200,6 +217,14 @@ async fn run(config: Config) {
                 None => {
                     warn!("inventory watcher channel closed — marking enumeration unavailable");
                     orchestrator.lock().await.mark_inventory_unavailable();
+                    reconcile_hook(
+                        &mut hook,
+                        &hook_installed,
+                        &orchestrator,
+                        &shared,
+                        accessibility_granted,
+                    )
+                    .await;
                     inventory_open = false;
                 }
             },
@@ -207,22 +232,50 @@ async fn run(config: Config) {
                 orchestrator.lock().await.set_current_app(bundle);
             }
             Some(granted) = accessibility_rx.recv() => {
-                if !granted {
-                    hook = None;
-                    hook_installed.store(false, Ordering::Relaxed);
-                }
-                if granted && hook.is_none() {
-                    info!("accessibility granted — installing OS mouse hook");
-                    hook = hook_runtime::start(
-                        shared.hook_maps.clone(),
-                        shared.dpi_cycle.clone(),
-                        shared.capture_channel.clone(),
-                    );
-                    hook_installed.store(hook.is_some(), Ordering::Relaxed);
-                }
+                accessibility_granted = granted;
+                reconcile_hook(
+                    &mut hook,
+                    &hook_installed,
+                    &orchestrator,
+                    &shared,
+                    accessibility_granted,
+                )
+                .await;
             }
             else => break,
         }
+    }
+}
+
+async fn reconcile_hook(
+    hook: &mut Option<Hook>,
+    hook_installed: &AtomicBool,
+    orchestrator: &Mutex<Orchestrator>,
+    shared: &openlogi_agent_core::orchestrator::SharedRuntime,
+    accessibility_granted: bool,
+) {
+    let should_install = if accessibility_granted {
+        orchestrator.lock().await.should_install_os_hook()
+    } else {
+        false
+    };
+
+    if !should_install {
+        if hook.take().is_some() {
+            info!("stopping OS mouse hook — no hookable device or accessibility revoked");
+        }
+        hook_installed.store(false, Ordering::Relaxed);
+        return;
+    }
+
+    if hook.is_none() {
+        info!("hookable device available — installing OS mouse hook");
+        *hook = hook_runtime::start(
+            shared.hook_maps.clone(),
+            shared.dpi_cycle.clone(),
+            shared.capture_channel.clone(),
+        );
+        hook_installed.store(hook.is_some(), Ordering::Relaxed);
     }
 }
 
