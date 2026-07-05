@@ -73,7 +73,9 @@ impl DeviceKind {
     reason = "capabilities is a serialized feature-bit DTO; independent booleans keep the IPC/config shape explicit"
 )]
 pub struct Capabilities {
-    /// Reprogrammable buttons — HID++ `0x1b00`–`0x1b04` (ReprogControls).
+    /// Button bindings the UI/agent can offer. Most devices advertise this via
+    /// HID++ `0x1b00`–`0x1b04` (ReprogControls); known gaming mice can also be
+    /// host-hook bindable without exposing that MX-line feature.
     pub buttons: bool,
     /// Adjustable pointer resolution — HID++ `0x2201` / `0x2202` (AdjustableDpi).
     pub pointer: bool,
@@ -106,6 +108,19 @@ impl Capabilities {
         }
     }
 
+    /// Add measured-by-model capabilities that do not appear in the HID++
+    /// feature table. G502-family mice do not expose MX `0x1b04` controls, but
+    /// their standard mouse buttons are still host-hook bindable.
+    pub fn include_known_model_support(
+        &mut self,
+        model: Option<&DeviceModelInfo>,
+        name: Option<&str>,
+    ) {
+        if is_g502_family(model, name) {
+            self.buttons = true;
+        }
+    }
+
     /// Best-effort capabilities for a device we could not probe (offline /
     /// never reached), guessed from its [`DeviceKind`]. Used only as a fallback
     /// when no measured [`Capabilities`] exist — a sleeping mouse should still
@@ -127,6 +142,36 @@ impl Capabilities {
             _ => Self::default(),
         }
     }
+}
+
+/// Product/model IDs observed for the G502 family across HID++ model-info,
+/// wired USB, and LIGHTSPEED variants. The LIGHTSPEED receiver PID itself is
+/// deliberately excluded: a receiver can host non-G502 devices.
+const G502_FAMILY_MODEL_IDS: &[u16] = &[
+    0x407e, 0x407f, // G502 LIGHTSPEED wireless PID.
+    0x4099, // G502 X PLUS wireless PID (live HID++ model id).
+    0x409a, 0xc08b, // G502 HERO USB PID.
+    0xc090, 0xc091, 0xc095, // G502 X PLUS secondary live HID++ model id.
+    0xc098, 0xc09d, 0xc332,
+];
+
+/// Whether the runtime identity belongs to the Logitech G502 family.
+#[must_use]
+pub fn is_g502_family(model: Option<&DeviceModelInfo>, name: Option<&str>) -> bool {
+    let model_match = model.is_some_and(|info| {
+        info.model_ids
+            .iter()
+            .any(|id| *id != 0 && G502_FAMILY_MODEL_IDS.contains(id))
+    });
+    model_match || name.is_some_and(name_mentions_g502)
+}
+
+fn name_mentions_g502(name: &str) -> bool {
+    name.to_ascii_uppercase()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .contains("G502")
 }
 
 /// Coarse battery bucket reported by the device firmware.
@@ -254,7 +299,22 @@ pub struct DeviceInventory {
 
 #[cfg(test)]
 mod tests {
-    use super::{Capabilities, DeviceKind};
+    use super::{Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports, is_g502_family};
+
+    fn g502_x_plus_model() -> DeviceModelInfo {
+        DeviceModelInfo {
+            entity_count: 1,
+            serial_number: None,
+            unit_id: [0x66, 0x2e, 0xa5, 0xf1],
+            transports: DeviceTransports {
+                usb: true,
+                equad: true,
+                ..Default::default()
+            },
+            model_ids: [0x4099, 0xc095, 0],
+            extended_model_id: 0,
+        }
+    }
 
     #[test]
     fn registry_type_is_case_folded() {
@@ -321,6 +381,31 @@ mod tests {
             Capabilities::from_feature_ids(&[0x0000, 0x0003]),
             Capabilities::default()
         );
+    }
+
+    #[test]
+    fn g502_family_matches_live_model_ids() {
+        assert!(is_g502_family(Some(&g502_x_plus_model()), None));
+    }
+
+    #[test]
+    fn g502_family_matches_marketing_name() {
+        assert!(is_g502_family(None, Some("Logitech G502 X Plus")));
+        assert!(!is_g502_family(None, Some("MX Master 3S")));
+    }
+
+    #[test]
+    fn g502_model_support_exposes_host_button_bindings() {
+        let mut caps = Capabilities::from_feature_ids(&[0x0001, 0x8071]);
+        assert!(
+            !caps.buttons,
+            "the G502 X Plus does not expose MX ReprogControls"
+        );
+
+        caps.include_known_model_support(Some(&g502_x_plus_model()), Some("G502 X PLUS"));
+
+        assert!(caps.buttons);
+        assert!(caps.lighting);
     }
 
     #[test]

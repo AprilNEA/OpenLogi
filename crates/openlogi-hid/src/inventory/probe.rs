@@ -280,6 +280,7 @@ async fn probe_bolt_slot(
         );
     }
 
+    let codename = codename.or_else(|| probe.device_name.clone());
     let device = PairedDevice {
         slot,
         codename,
@@ -353,9 +354,13 @@ async fn probe_direct(
     }
 
     // Without a Bolt receiver we don't have a wpid, codename, or pairing
-    // info — those live on the receiver registers. Use the HID name as
-    // the display fallback and leave wpid empty.
+    // info — those live on the receiver registers. Prefer the device-reported
+    // marketing name, then fall back to the HID node name, and leave wpid empty.
     debug!(name = %info.name, "BT-direct / wired device recognised");
+    let codename = probe
+        .device_name
+        .clone()
+        .unwrap_or_else(|| info.name.clone());
     let inventory = DeviceInventory {
         receiver: ReceiverInfo {
             name: info.name.clone(),
@@ -365,7 +370,7 @@ async fn probe_direct(
         },
         paired: vec![PairedDevice {
             slot: DIRECT_DEVICE_INDEX,
-            codename: Some(info.name.clone()),
+            codename: Some(codename),
             wpid: None,
             // No receiver pairing register here, so `0x0005` is the only kind
             // hint — but kind is just identity now; the UI gates on the
@@ -475,6 +480,7 @@ async fn probe_unifying_slot(
         (probe, CacheOutcome::Seen(id))
     };
 
+    let codename = codename.or_else(|| probe.device_name.clone());
     let device = PairedDevice {
         slot,
         codename,

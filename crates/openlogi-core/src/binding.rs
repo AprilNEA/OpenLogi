@@ -12,9 +12,12 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-/// One of the user-rebindable hotspots on a Logi mouse. The order matches the
-/// physical layout from front to side; [`ButtonId::ALL`] is consumed by the
-/// default-binding generator and the popover trigger list.
+/// One logical control on a Logi mouse. The order matches the physical layout
+/// from front to side.
+///
+/// Not every ID is currently runtime-bindable: some gaming-mouse controls are
+/// display-only until their HID++ gaming-button protocol is implemented. Use
+/// [`ButtonId::BINDABLE`] when seeding or dispatching user bindings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ButtonId {
     LeftClick,
@@ -25,7 +28,19 @@ pub enum ButtonId {
     /// The "ModeShift" button under the wheel — typically used for SmartShift /
     /// DPI cycle. Named `DpiToggle` for historical reasons.
     DpiToggle,
-    /// The horizontal thumb wheel's click. Kept in [`ButtonId::ALL`] so its
+    /// Increase DPI on gaming mice that expose separate DPI buttons.
+    DpiUp,
+    /// Decrease DPI on gaming mice that expose separate DPI buttons.
+    DpiDown,
+    /// Temporary DPI-shift / sniper button on gaming mice.
+    DpiShift,
+    /// Scroll-wheel tilt left on mice that report wheel tilt as a button.
+    WheelLeft,
+    /// Scroll-wheel tilt right on mice that report wheel tilt as a button.
+    WheelRight,
+    /// Hardware wheel mode button on gaming mice with ratchet/free-spin wheels.
+    SmartShift,
+    /// The horizontal thumb wheel's click. Kept in [`ButtonId::BINDABLE`] so its
     /// default still seeds and dispatches when the wheel is diverted, even
     /// though the mouse model surfaces the two rotation directions instead of
     /// the click (see `mouse_model::geometry`).
@@ -41,7 +56,29 @@ pub enum ButtonId {
 }
 
 impl ButtonId {
-    pub const ALL: [ButtonId; 10] = [
+    /// Every known serializable button/control ID, including display-only
+    /// controls surfaced by device-family-specific layouts.
+    pub const ALL: [ButtonId; 16] = [
+        ButtonId::LeftClick,
+        ButtonId::RightClick,
+        ButtonId::MiddleClick,
+        ButtonId::Back,
+        ButtonId::Forward,
+        ButtonId::DpiToggle,
+        ButtonId::DpiUp,
+        ButtonId::DpiDown,
+        ButtonId::DpiShift,
+        ButtonId::WheelLeft,
+        ButtonId::WheelRight,
+        ButtonId::SmartShift,
+        ButtonId::Thumbwheel,
+        ButtonId::ThumbwheelScrollUp,
+        ButtonId::ThumbwheelScrollDown,
+        ButtonId::GestureButton,
+    ];
+
+    /// Controls whose saved bindings can currently be edited and dispatched.
+    pub const BINDABLE: [ButtonId; 10] = [
         ButtonId::LeftClick,
         ButtonId::RightClick,
         ButtonId::MiddleClick,
@@ -53,6 +90,11 @@ impl ButtonId {
         ButtonId::ThumbwheelScrollDown,
         ButtonId::GestureButton,
     ];
+
+    #[must_use]
+    pub fn is_bindable(self) -> bool {
+        Self::BINDABLE.contains(&self)
+    }
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
     /// remaps: Middle, Back, or Forward. The primary L/R clicks always pass
@@ -79,6 +121,12 @@ impl ButtonId {
             ButtonId::Back => "Back",
             ButtonId::Forward => "Forward",
             ButtonId::DpiToggle => "DPI Toggle",
+            ButtonId::DpiUp => "DPI Up",
+            ButtonId::DpiDown => "DPI Down",
+            ButtonId::DpiShift => "DPI Shift",
+            ButtonId::WheelLeft => "Wheel Left",
+            ButtonId::WheelRight => "Wheel Right",
+            ButtonId::SmartShift => "Smart Shift",
             ButtonId::Thumbwheel => "Thumb Wheel",
             ButtonId::ThumbwheelScrollUp => "Thumb Wheel Up",
             ButtonId::ThumbwheelScrollDown => "Thumb Wheel Down",
@@ -862,15 +910,18 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::MiddleClick => Action::MiddleClick,
         ButtonId::Back => Action::BrowserBack,
         ButtonId::Forward => Action::BrowserForward,
-        ButtonId::DpiToggle => Action::CycleDpiPresets,
+        ButtonId::DpiToggle | ButtonId::DpiUp | ButtonId::DpiDown | ButtonId::DpiShift => {
+            Action::CycleDpiPresets
+        }
+        ButtonId::WheelLeft | ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
+        ButtonId::WheelRight | ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollRight,
+        ButtonId::SmartShift => Action::ToggleSmartShift,
         ButtonId::Thumbwheel => Action::AppExpose,
         // The thumb wheel scrolls horizontally by default: rotating it produces
         // continuous horizontal scroll, with "up" → right and "down" → left.
         // The wheel watcher renders these two actions as smooth, sensitivity-
         // scaled scrolling rather than the discrete per-press burst a button
         // would get (see `watchers::gesture`).
-        ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollRight,
-        ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
         ButtonId::GestureButton => Action::MissionControl,
     }
 }

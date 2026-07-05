@@ -12,7 +12,7 @@ use openlogi_core::binding::{
 use openlogi_core::config::Config;
 
 /// Effective per-button single-action map for the device `config_key`, with
-/// `app_bundle`'s per-app overlay applied. Unset buttons fall back to
+/// `app_bundle`'s per-app overlay applied. Unset bindable buttons fall back to
 /// [`default_binding`].
 ///
 /// This is the map the OS hook and the HID++ button-press path consume, so a
@@ -28,12 +28,15 @@ pub fn bindings_for(
     let stored = config_key
         .map(|key| config.effective_bindings(key, app_bundle))
         .unwrap_or_default();
-    let mut bindings: BTreeMap<ButtonId, Action> = ButtonId::ALL
+    let mut bindings: BTreeMap<ButtonId, Action> = ButtonId::BINDABLE
         .iter()
         .copied()
         .map(|b| (b, default_binding(b)))
         .collect();
     for (k, binding) in stored {
+        if !k.is_bindable() {
+            continue;
+        }
         // A gesture binding with no explicit `Click` has no opinion on the
         // plain-press action, so leave the button's default seed in place rather
         // than clobbering it with the `Action::None` that `click_action()` would
@@ -158,6 +161,21 @@ mod tests {
             projected.get(&ButtonId::GestureButton),
             Some(&Action::Paste)
         );
+    }
+
+    #[test]
+    fn display_only_controls_are_not_seeded_or_projected() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "g502",
+            ButtonId::DpiUp,
+            Binding::Single(Action::SetDpiPreset(2)),
+        );
+
+        let projected = bindings_for(&cfg, Some("g502"), None);
+
+        assert!(!projected.contains_key(&ButtonId::DpiUp));
+        assert!(!projected.contains_key(&ButtonId::SmartShift));
     }
 
     #[test]

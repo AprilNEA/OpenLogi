@@ -5,6 +5,7 @@
 
 use crate::asset::ResolvedAsset;
 use crate::data::mouse_buttons::{ButtonId, Hotspot, MOUSE_MODEL_SIZE};
+use crate::mouse_model::button_layout::MouseButtonLayout;
 use crate::mouse_model::leader_lines::{Label, Side};
 
 /// Approx pixel width of each hotspot hit-target. Logitech only gives us a
@@ -45,11 +46,10 @@ pub fn asset_dimensions_for_png(asset: &ResolvedAsset, target_h: f32, max_w: f32
 /// Whether the asset exposes any remappable button markers. Mice do (so the
 /// model reserves a side gutter for their leader-line labels); keyboards and
 /// other label-less devices don't, so the model can hand them the full width.
-pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
-    asset
-        .metadata
-        .assignments()
-        .any(|a| map_slot_name(&a.slot_name).is_some())
+pub fn asset_has_button_labels(asset: &ResolvedAsset, layout: MouseButtonLayout) -> bool {
+    asset.metadata.assignments().any(|a| {
+        map_slot_name_for_layout(&a.slot_name, layout).is_some_and(|id| layout.keeps_hotspot(id))
+    })
 }
 
 /// Convert Logitech's percent-based markers into mouse-local pixel rects,
@@ -75,7 +75,12 @@ pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
     clippy::cast_precision_loss,
     reason = "device images are < 4096 px on either axis — well within f32 mantissa"
 )]
-pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> Vec<Hotspot> {
+pub fn asset_hotspots_for_png(
+    asset: &ResolvedAsset,
+    layout: MouseButtonLayout,
+    mouse_w: f32,
+    mouse_h: f32,
+) -> Vec<Hotspot> {
     let png_w = asset.png_width as f32;
     let origin_w = asset
         .metadata
@@ -98,7 +103,10 @@ pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32)
         .metadata
         .assignments()
         .filter_map(|a| {
-            let id = map_slot_name(&a.slot_name)?;
+            let id = map_slot_name_for_layout(&a.slot_name, layout)?;
+            if !layout.keeps_hotspot(id) {
+                return None;
+            }
             let (cx, cy) = marker_to_canvas(a.marker.x, a.marker.y);
             Some(Hotspot {
                 id,
@@ -179,37 +187,6 @@ pub fn labels_from_hotspots(hotspots: &[Hotspot], mouse_h: f32) -> Vec<Label> {
         .collect()
 }
 
-/// Label positions for the synthetic fallback silhouette.
-pub fn default_labels() -> Vec<Label> {
-    vec![
-        Label {
-            id: ButtonId::MiddleClick,
-            side: Side::Left,
-            y: 120.,
-        },
-        Label {
-            id: ButtonId::Back,
-            side: Side::Left,
-            y: 240.,
-        },
-        Label {
-            id: ButtonId::Forward,
-            side: Side::Left,
-            y: 340.,
-        },
-        Label {
-            id: ButtonId::DpiToggle,
-            side: Side::Left,
-            y: 430.,
-        },
-        Label {
-            id: ButtonId::GestureButton,
-            side: Side::Left,
-            y: 510.,
-        },
-    ]
-}
-
 /// Logitech's stable slot vocabulary → OpenLogi's `ButtonId`. Intentionally
 /// conservative; unknown names fall through so widening `ButtonId` later
 /// doesn't break old depots.
@@ -227,21 +204,33 @@ fn map_slot_name(name: &str) -> Option<ButtonId> {
     }
 }
 
+fn map_slot_name_for_layout(name: &str, layout: MouseButtonLayout) -> Option<ButtonId> {
+    if layout == MouseButtonLayout::G502 {
+        return map_g502_slot_name(name);
+    }
+    map_slot_name(name)
+}
+
+fn map_g502_slot_name(name: &str) -> Option<ButtonId> {
+    match name {
+        // Some G502 asset depots use the generic ModeShift slot for the
+        // wheel-mode button; keep the MX-style mapping for default devices.
+        "SLOT_NAME_MODESHIFT_BUTTON" | "SLOT_NAME_SMART_SHIFT_BUTTON" => Some(ButtonId::SmartShift),
+        "SLOT_NAME_DPI_UP_BUTTON" | "SLOT_NAME_DPI_PLUS_BUTTON" => Some(ButtonId::DpiUp),
+        "SLOT_NAME_DPI_DOWN_BUTTON" | "SLOT_NAME_DPI_MINUS_BUTTON" => Some(ButtonId::DpiDown),
+        "SLOT_NAME_DPI_SHIFT_BUTTON" | "SLOT_NAME_SNIPER_BUTTON" => Some(ButtonId::DpiShift),
+        "SLOT_NAME_WHEEL_LEFT_BUTTON" | "SLOT_NAME_SCROLL_LEFT_BUTTON" => Some(ButtonId::WheelLeft),
+        "SLOT_NAME_WHEEL_RIGHT_BUTTON" | "SLOT_NAME_SCROLL_RIGHT_BUTTON" => {
+            Some(ButtonId::WheelRight)
+        }
+        _ => map_slot_name(name),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::data::mouse_buttons::default_hotspots;
-
-    #[test]
-    fn default_labels_include_the_gesture_button() {
-        let labels = default_labels();
-        assert!(
-            labels
-                .iter()
-                .any(|l| matches!(l.id, ButtonId::GestureButton)),
-            "the gesture button needs a fallback label"
-        );
-    }
 
     #[test]
     fn thumbwheel_click_becomes_two_rotation_hotspots() {
@@ -296,5 +285,37 @@ mod tests {
         ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         ys.dedup();
         assert_eq!(ys.len(), labels.len(), "each label gets a distinct slot");
+    }
+
+    #[test]
+    fn g502_modeshift_asset_slot_maps_to_smartshift() {
+        assert_eq!(
+            map_slot_name_for_layout("SLOT_NAME_MODESHIFT_BUTTON", MouseButtonLayout::G502),
+            Some(ButtonId::SmartShift)
+        );
+        assert_eq!(
+            map_slot_name_for_layout("SLOT_NAME_MODESHIFT_BUTTON", MouseButtonLayout::Default),
+            Some(ButtonId::DpiToggle)
+        );
+    }
+
+    #[test]
+    fn default_layout_ignores_g502_only_asset_slots() {
+        assert_eq!(
+            map_slot_name_for_layout("SLOT_NAME_DPI_UP_BUTTON", MouseButtonLayout::Default),
+            None
+        );
+        assert_eq!(
+            map_slot_name_for_layout("SLOT_NAME_WHEEL_LEFT_BUTTON", MouseButtonLayout::Default),
+            None
+        );
+        assert_eq!(
+            map_slot_name_for_layout("SLOT_NAME_SMART_SHIFT_BUTTON", MouseButtonLayout::Default),
+            None
+        );
+        assert_eq!(
+            map_slot_name_for_layout("SLOT_NAME_DPI_UP_BUTTON", MouseButtonLayout::G502),
+            Some(ButtonId::DpiUp)
+        );
     }
 }

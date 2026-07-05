@@ -24,6 +24,9 @@ use crate::mappings::{
 pub(super) struct ProbedFeatures {
     pub(super) battery: Option<BatteryInfo>,
     pub(super) model_info: Option<DeviceModelInfo>,
+    /// Marketing name from HID++ `0x0005`, used when the receiver register
+    /// does not provide a slot codename.
+    pub(super) device_name: Option<String>,
     /// Marketing type from HID++ `0x0005` — an identity hint only.
     pub(super) kind: Option<DeviceKind>,
     /// Configuration capabilities derived from the device's feature table.
@@ -150,25 +153,17 @@ pub(super) async fn probe_features(
         None => None,
     };
 
-    // `0x0005` reports the device's own marketing type (mouse, keyboard, …) —
-    // the authoritative kind signal. On the direct path it's the only one; on
-    // the Bolt path it corrects a pairing register that reported the wrong (or
-    // `Unknown`) kind.
-    let kind = match device.get_feature::<DeviceTypeAndNameFeature>() {
-        Some(feature) => match feature.get_device_type().await {
-            Ok(ty) => Some(map_device_type(ty)),
-            Err(e) => {
-                debug!(slot, error = ?e, "DeviceType read failed");
-                None
-            }
-        },
-        None => None,
-    };
+    let (device_name, kind) = read_device_type_and_name(&mut device, slot).await;
+
+    if let Some(caps) = capabilities.as_mut() {
+        caps.include_known_model_support(model_info.as_ref(), device_name.as_deref());
+    }
 
     (
         ProbedFeatures {
             battery,
             model_info,
+            device_name,
             kind,
             capabilities,
         },
@@ -176,11 +171,45 @@ pub(super) async fn probe_features(
     )
 }
 
+/// `0x0005` reports the device's own marketing type and name. The type is the
+/// authoritative kind signal; the name fills gaps on LIGHTSPEED receivers whose
+/// slot codename register is empty.
+async fn read_device_type_and_name(
+    device: &mut Device,
+    slot: u8,
+) -> (Option<String>, Option<DeviceKind>) {
+    match device.get_feature::<DeviceTypeAndNameFeature>() {
+        Some(feature) => {
+            let device_name = match feature.get_whole_device_name().await {
+                Ok(name) => normalize_device_name(&name),
+                Err(e) => {
+                    debug!(slot, error = ?e, "DeviceName read failed");
+                    None
+                }
+            };
+            let kind = match feature.get_device_type().await {
+                Ok(ty) => Some(map_device_type(ty)),
+                Err(e) => {
+                    debug!(slot, error = ?e, "DeviceType read failed");
+                    None
+                }
+            };
+            (device_name, kind)
+        }
+        None => (None, None),
+    }
+}
+
+fn normalize_device_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use hidpp::feature::{CreatableFeature as _, unified_battery::UnifiedBatteryFeature};
 
-    use super::battery_feature_index;
+    use super::{battery_feature_index, normalize_device_name};
 
     #[test]
     fn battery_index_is_one_based_in_the_enumerated_table() {
@@ -199,5 +228,14 @@ mod tests {
     fn no_battery_feature_means_no_index() {
         assert_eq!(battery_feature_index([0x0001, 0x2201, 0x1b04]), None);
         assert_eq!(battery_feature_index([]), None);
+    }
+
+    #[test]
+    fn normalizes_empty_device_names_to_absent() {
+        assert_eq!(
+            normalize_device_name("  G502 X PLUS  ").as_deref(),
+            Some("G502 X PLUS")
+        );
+        assert_eq!(normalize_device_name("  "), None);
     }
 }

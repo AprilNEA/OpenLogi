@@ -18,6 +18,7 @@ use gpui_component::{
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
+    is_g502_family,
 };
 use openlogi_hid::DeviceRoute;
 use tracing::info;
@@ -95,8 +96,7 @@ impl DetailTab {
         let caps = record
             .capabilities
             .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
-        let can_show_mouse_model = record.asset.is_some()
-            || matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
+        let can_show_mouse_model = has_mouse_model_surface(record);
         let mut tabs = Vec::new();
         if caps.buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
@@ -127,6 +127,15 @@ impl DetailTab {
             Self::Device => tr!("Device"),
         }
     }
+}
+
+fn has_mouse_model_surface(record: &DeviceRecord) -> bool {
+    let name = record.codename.as_deref().unwrap_or(&record.display_name);
+    record.asset.is_some()
+        || matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball)
+        // G502 can be identified from model info even when 0x0005 kind fails;
+        // it has a family-authored mouse model, so don't depend on kind here.
+        || is_g502_family(record.model_info.as_ref(), Some(name))
 }
 
 /// Root application view.
@@ -1728,6 +1737,7 @@ mod tests {
     use super::{
         Capabilities, DetailTab, DeviceKind, DeviceRecord, DeviceRoute, connection_icon_path,
     };
+    use openlogi_core::device::{DeviceModelInfo, DeviceTransports};
 
     #[test]
     fn connection_icon_matches_route() {
@@ -1840,5 +1850,26 @@ mod tests {
     fn unprobed_unknown_device_shows_only_device_tab() {
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Unknown, None));
         assert_eq!(tabs, vec![DetailTab::Device]);
+    }
+
+    #[test]
+    fn g502_model_info_shows_buttons_even_when_kind_is_unknown() {
+        let mut g502 = record(
+            DeviceKind::Unknown,
+            Some(Capabilities {
+                buttons: true,
+                ..Capabilities::default()
+            }),
+        );
+        g502.model_info = Some(DeviceModelInfo {
+            entity_count: 1,
+            serial_number: None,
+            unit_id: [0; 4],
+            transports: DeviceTransports::default(),
+            model_ids: [0x4099, 0xc095, 0],
+            extended_model_id: 0,
+        });
+
+        assert!(DetailTab::tabs_for(&g502).contains(&DetailTab::Buttons));
     }
 }
