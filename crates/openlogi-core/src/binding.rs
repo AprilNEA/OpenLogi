@@ -38,10 +38,18 @@ pub enum ButtonId {
     /// The HID++ gesture button on MX-line devices. The press itself
     /// fires the bound action; swipe directions are P1.5 territory.
     GestureButton,
+    /// The scroll wheel tilted left — a divertable HID++ `0x1b04` control
+    /// (CID `0x5b`) on tilt-wheel devices like the MX Ergo. Bound to horizontal
+    /// scroll by default; captured over HID++ only when rebound (see agent-core
+    /// `watchers::gesture`), so native tilt-scroll is preserved otherwise.
+    TiltLeft,
+    /// The scroll wheel tilted right — divertable HID++ `0x1b04` control
+    /// (CID `0x5d`). See [`ButtonId::TiltLeft`].
+    TiltRight,
 }
 
 impl ButtonId {
-    pub const ALL: [ButtonId; 10] = [
+    pub const ALL: [ButtonId; 12] = [
         ButtonId::LeftClick,
         ButtonId::RightClick,
         ButtonId::MiddleClick,
@@ -51,6 +59,8 @@ impl ButtonId {
         ButtonId::Thumbwheel,
         ButtonId::ThumbwheelScrollUp,
         ButtonId::ThumbwheelScrollDown,
+        ButtonId::TiltLeft,
+        ButtonId::TiltRight,
         ButtonId::GestureButton,
     ];
 
@@ -82,6 +92,8 @@ impl ButtonId {
             ButtonId::Thumbwheel => "Thumb Wheel",
             ButtonId::ThumbwheelScrollUp => "Thumb Wheel Up",
             ButtonId::ThumbwheelScrollDown => "Thumb Wheel Down",
+            ButtonId::TiltLeft => "Tilt Left",
+            ButtonId::TiltRight => "Tilt Right",
             ButtonId::GestureButton => "Gesture Button",
         }
     }
@@ -856,6 +868,10 @@ impl Action {
 /// hook map, scroll defaults, labels) stay total.
 #[must_use]
 pub fn default_binding(button: ButtonId) -> Action {
+    #[allow(
+        clippy::match_same_arms,
+        reason = "tilt arms mirror the thumbwheel horizontal-scroll actions but are kept separate and documented per physical control"
+    )]
     match button {
         ButtonId::LeftClick => Action::LeftClick,
         ButtonId::RightClick => Action::RightClick,
@@ -871,6 +887,12 @@ pub fn default_binding(button: ButtonId) -> Action {
         // would get (see `watchers::gesture`).
         ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollRight,
         ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
+        // The scroll wheel tilts to scroll horizontally: tilt-left → scroll
+        // left, tilt-right → scroll right. Dispatched as a discrete per-press
+        // horizontal scroll (openlogi_inject::execute) via the generic button
+        // path — see agent-core watchers::gesture.
+        ButtonId::TiltLeft => Action::HorizontalScrollLeft,
+        ButtonId::TiltRight => Action::HorizontalScrollRight,
         ButtonId::GestureButton => Action::MissionControl,
     }
 }
@@ -1406,5 +1428,25 @@ mod tests {
             default_binding(ButtonId::DpiToggle),
             Action::CycleDpiPresets
         );
+    }
+
+    #[test]
+    fn tilt_buttons_default_to_horizontal_scroll() {
+        assert_eq!(
+            default_binding(ButtonId::TiltLeft),
+            Action::HorizontalScrollLeft
+        );
+        assert_eq!(
+            default_binding(ButtonId::TiltRight),
+            Action::HorizontalScrollRight
+        );
+    }
+
+    #[test]
+    fn tilt_buttons_are_in_all_and_have_labels() {
+        assert!(ButtonId::ALL.contains(&ButtonId::TiltLeft));
+        assert!(ButtonId::ALL.contains(&ButtonId::TiltRight));
+        assert_eq!(ButtonId::TiltLeft.label(), "Tilt Left");
+        assert_eq!(ButtonId::TiltRight.label(), "Tilt Right");
     }
 }
