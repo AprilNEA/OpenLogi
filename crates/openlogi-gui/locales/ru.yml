@@ -150,6 +150,8 @@ _version: 1
 "DPI Toggle": "Переключение DPI"
 "Thumb Wheel": "Колесо под большой палец"
 "Gesture Button": "Кнопка жестов"
+"Tilt Left": "Наклон влево"
+"Tilt Right": "Наклон вправо"
 "Up": "Вверх"
 "Down": "Вниз"
 "Left": "Влево"

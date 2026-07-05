@@ -150,6 +150,8 @@ _version: 1
 "DPI Toggle": "DPI wisselen"
 "Thumb Wheel": "Duimwiel"
 "Gesture Button": "Gebarenknop"
+"Tilt Left": "Naar links kantelen"
+"Tilt Right": "Naar rechts kantelen"
 "Up": "Omhoog"
 "Down": "Omlaag"
 "Left": "Links"

@@ -150,6 +150,8 @@ _version: 1
 "DPI Toggle": "DPI-växling"
 "Thumb Wheel": "Tumhjul"
 "Gesture Button": "Gestknapp"
+"Tilt Left": "Luta åt vänster"
+"Tilt Right": "Luta åt höger"
 "Up": "Upp"
 "Down": "Ned"
 "Left": "Vänster"

@@ -150,6 +150,8 @@ _version: 1
 "DPI Toggle": "DPI 전환"
 "Thumb Wheel": "썸휠"
 "Gesture Button": "제스처 버튼"
+"Tilt Left": "왼쪽 틸트"
+"Tilt Right": "오른쪽 틸트"
 "Up": "위"
 "Down": "아래"
 "Left": "왼쪽"
