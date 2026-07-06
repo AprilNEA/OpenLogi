@@ -15,28 +15,31 @@ pub(super) fn updates_page(updater: Entity<Updater>, pal: Palette) -> SettingPag
         update_hero(&updater, pal, cx)
     }));
 
-    let toggles = SettingGroup::new()
-        .item(
-            SettingItem::new(
-                tr!("Check for updates"),
-                SettingField::switch(
-                    |cx| {
-                        cx.try_global::<AppState>()
-                            .is_some_and(|s| s.app_settings().check_for_updates)
-                    },
-                    |enabled, cx| {
-                        cx.update_global::<AppState, _>(move |s, _| {
-                            s.set_check_for_updates(enabled);
-                        });
-                        cx.refresh_windows();
-                    },
-                ),
-            )
-            .description(tr!(
-                "Check once per launch for a new version (query only — no automatic download)."
-            )),
+    let toggles = SettingGroup::new().item(
+        SettingItem::new(
+            tr!("Check for updates"),
+            SettingField::switch(
+                |cx| {
+                    cx.try_global::<AppState>()
+                        .is_some_and(|s| s.app_settings().check_for_updates)
+                },
+                |enabled, cx| {
+                    cx.update_global::<AppState, _>(move |s, _| {
+                        s.set_check_for_updates(enabled);
+                    });
+                    cx.refresh_windows();
+                },
+            ),
         )
-        .item(
+        .description(tr!(
+            "Check once per launch for a new version (query only — no automatic download)."
+        )),
+    );
+    // Offering the auto-install switch on a platform whose install flow isn't
+    // wired (Windows, today) would be a control that silently does nothing —
+    // hide it instead; checks there are notify-only.
+    let toggles = if crate::platform::updater::INSTALL_SUPPORTED {
+        toggles.item(
             SettingItem::new(
                 tr!("Automatically download and install"),
                 SettingField::switch(
@@ -55,7 +58,10 @@ pub(super) fn updates_page(updater: Entity<Updater>, pal: Palette) -> SettingPag
             .description(tr!(
                 "Download updates in the background and apply them the next time OpenLogi restarts."
             )),
-        );
+        )
+    } else {
+        toggles
+    };
 
     let source = SettingGroup::new().item(SettingItem::render(move |_, _, _| update_source(pal)));
 
@@ -108,6 +114,15 @@ fn update_hero(updater: &Entity<Updater>, pal: Palette, cx: &mut App) -> AnyElem
     let action = {
         let u = updater.clone();
         match &status {
+            // No wired install flow (Windows): a found update routes to the
+            // GitHub release for a manual download instead of feeding
+            // gpui-updater an artifact its installer can't apply.
+            UpdateStatus::Available(_) if !crate::platform::updater::INSTALL_SUPPORTED => {
+                Button::new("update-download")
+                    .outline()
+                    .label(tr!("Download from GitHub"))
+                    .on_click(|_, _, cx| cx.open_url(RELEASES_URL))
+            }
             UpdateStatus::Available(_) => Button::new("update-install")
                 .outline()
                 .label(tr!("Download & Install"))
