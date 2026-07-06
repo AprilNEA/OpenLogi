@@ -28,6 +28,12 @@ pub(crate) struct Args {
     /// Public update base URL, for example `https://updates.openlogi.org`.
     #[arg(long, env = "OPENLOGI_UPDATE_BASE_URL")]
     base_url: String,
+    /// Also emit the per-arch Windows `.msi`/`.zip` entries. Off by default so
+    /// the manifest can never reference objects the release workflow's R2
+    /// upload step doesn't ship: flip this in the same workflow change that
+    /// stops excluding the zip/msi from the `releases/` prefix (#347 PR 4).
+    #[arg(long)]
+    include_windows: bool,
 }
 
 #[derive(Serialize)]
@@ -74,7 +80,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         args.base_url.trim_end_matches('/'),
         args.tag
     );
-    let assets = collect_assets(&args.dist, &release_base)?;
+    let assets = collect_assets(&args.dist, &release_base, args.include_windows)?;
     // The DMGs are the publish gate's guaranteed artifact set; the Windows
     // legs are best-effort per arch (a failed leg publishes without them), so
     // their absence must not sink the whole manifest.
@@ -109,7 +115,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     .with_context(|| format!("could not write manifest to {}", args.output.display()))
 }
 
-fn collect_assets(dist: &Path, release_base: &str) -> Result<Vec<Asset>> {
+fn collect_assets(dist: &Path, release_base: &str, include_windows: bool) -> Result<Vec<Asset>> {
     let mut assets = Vec::new();
     for entry in fs_err::read_dir(dist)
         .with_context(|| format!("could not read artifact directory {}", dist.display()))?
@@ -121,6 +127,11 @@ fn collect_assets(dist: &Path, release_base: &str) -> Result<Vec<Asset>> {
         let Some(classified) = classify(name) else {
             continue;
         };
+        // Gated so the manifest and the R2 upload step can never disagree
+        // about the Windows artifacts — see the `include_windows` arg doc.
+        if classified.os == "windows" && !include_windows {
+            continue;
+        }
         let signature_name = format!("{name}.minisig");
         let signature_path = dist.join(&signature_name);
         if !signature_path.is_file() {
@@ -203,7 +214,9 @@ mod tests {
         let dist = tempfile::tempdir().unwrap();
         fs_err::write(dist.path().join("OpenLogi-v1.2.3-macos-arm64.dmg"), b"dmg").unwrap();
 
-        assert!(collect_assets(dist.path(), "https://updates.example/releases/v1.2.3").is_err());
+        assert!(
+            collect_assets(dist.path(), "https://updates.example/releases/v1.2.3", false).is_err()
+        );
     }
 
     #[test]
@@ -217,12 +230,31 @@ mod tests {
         .unwrap();
 
         let assets =
-            collect_assets(dist.path(), "https://updates.example/releases/v1.2.3").unwrap();
+            collect_assets(dist.path(), "https://updates.example/releases/v1.2.3", false).unwrap();
 
         assert_eq!(
             assets[0].signature_url,
             "https://updates.example/releases/v1.2.3/OpenLogi-v1.2.3-macos-arm64.dmg.minisig"
         );
+    }
+
+    #[test]
+    fn collect_assets_skips_windows_artifacts_unless_opted_in() {
+        // Off by default: the manifest must never reference Windows objects
+        // the release workflow's R2 upload step doesn't ship.
+        let dist = tempfile::tempdir().unwrap();
+        for name in [
+            "OpenLogi-v1.2.3-windows-x86_64.msi",
+            "OpenLogi-v1.2.3-windows-x86_64.zip",
+        ] {
+            fs_err::write(dist.path().join(name), b"artifact").unwrap();
+            fs_err::write(dist.path().join(format!("{name}.minisig")), b"signature").unwrap();
+        }
+
+        let assets =
+            collect_assets(dist.path(), "https://updates.example/releases/v1.2.3", false).unwrap();
+
+        assert!(assets.is_empty());
     }
 
     #[test]
@@ -238,7 +270,7 @@ mod tests {
         }
 
         let assets =
-            collect_assets(dist.path(), "https://updates.example/releases/v1.2.3").unwrap();
+            collect_assets(dist.path(), "https://updates.example/releases/v1.2.3", true).unwrap();
 
         assert_eq!(assets.len(), 3);
         assert!(assets.iter().all(|a| a.os == "windows"));
@@ -269,7 +301,7 @@ mod tests {
         }
 
         let assets =
-            collect_assets(dist.path(), "https://updates.example/releases/v1.2.3").unwrap();
+            collect_assets(dist.path(), "https://updates.example/releases/v1.2.3", true).unwrap();
 
         assert!(assets.is_empty());
     }
