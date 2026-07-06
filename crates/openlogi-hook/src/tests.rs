@@ -53,23 +53,27 @@ fn event_disposition_equality() {
     assert_ne!(EventDisposition::PassThrough, EventDisposition::Suppress);
 }
 
-/// On unsupported targets (not macOS, not Linux), `Hook::start` returns `Unsupported`.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// On unsupported targets (not macOS, Linux, or Windows), `Hook::start`
+/// returns `Unsupported`. The cfg predates the Windows port (#167) — Windows
+/// belongs with the supported targets below, where this stale form made
+/// `cargo test` fail on every real Windows box.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[test]
 fn unsupported_start_returns_unsupported() {
     let result = Hook::start(|_| EventDisposition::PassThrough);
     assert!(matches!(result, Err(HookError::Unsupported)));
 }
 
-/// On Linux, `Hook::start` never returns `Unsupported` — it either succeeds or
-/// returns a Linux-specific error (e.g. `NoDeviceFound` in a headless CI env).
-#[cfg(target_os = "linux")]
+/// On Linux and Windows, `Hook::start` never returns `Unsupported` — it either
+/// succeeds (`WH_MOUSE_LL` needs no grant on Windows) or returns a
+/// platform-specific error (e.g. `NoDeviceFound` in a headless Linux CI env).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[test]
-fn linux_start_does_not_return_unsupported() {
+fn supported_start_does_not_return_unsupported() {
     let result = Hook::start(|_| EventDisposition::PassThrough);
     assert!(
         !matches!(result, Err(HookError::Unsupported)),
-        "Hook::start returned Unsupported on Linux"
+        "Hook::start returned Unsupported on a supported platform"
     );
     // Clean up if a hook was actually installed.
     if let Ok(hook) = result {
