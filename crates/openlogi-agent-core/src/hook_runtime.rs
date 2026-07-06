@@ -266,9 +266,17 @@ pub fn start(
 
             // Custom action — fire once per tilt with a cooldown so the burst
             // of scroll events from a single physical tilt triggers exactly
-            // once. Only suppress the native scroll when we actually fire;
-            // when the cooldown blocks the fire, pass through so a continuous
-            // horizontal wheel (e.g. thumbwheel in native mode) still scrolls.
+            // once. Suppress the entire burst so no native horizontal scroll
+            // leaks through alongside the fired action. The cooldown prevents
+            // repeated dispatches without letting the captured tilt burst
+            // continue as native scroll.
+            //
+            // Known limitation: on devices with BOTH a tilt wheel and a
+            // thumbwheel (e.g. MX Master 3S), mapping WheelLeft/WheelRight to
+            // a custom action will also intercept the thumbwheel's native
+            // horizontal scroll. Users who rely on native thumbwheel scroll
+            // should not remap WheelLeft/WheelRight, or should divert the
+            // thumbwheel via HID++ instead.
             let now = Instant::now();
             let fire = WHEEL_TILT.with_borrow_mut(|state| {
                 let last = if is_left {
@@ -286,10 +294,8 @@ pub fn start(
             if fire {
                 info!(button = %button, action = %action.label(), "wheel tilt → executing bound action");
                 dispatch_action(&action, &dpi_cycle, &capture);
-                EventDisposition::Suppress
-            } else {
-                EventDisposition::PassThrough
             }
+            EventDisposition::Suppress
         }
     });
 
