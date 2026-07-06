@@ -1,12 +1,19 @@
 //! Assets (device-image cache) settings page.
 
+use std::time::Duration;
+
 use super::{
-    App, AppState, AssetCommand, AssetControl, BorrowAppContext, IconName, InteractiveElement,
-    IntoElement, Palette, ParentElement, SettingField, SettingGroup, SettingItem, SettingPage,
-    SharedString, StatefulInteractiveElement, Styled, div,
+    App, AppState, AssetCommand, AssetControl, BorrowAppContext, Entity, IconName,
+    InteractiveElement, IntoElement, Palette, ParentElement, SettingField, SettingGroup,
+    SettingItem, SettingPage, SettingsView, SharedString, StatefulInteractiveElement, Styled, div,
 };
 
-pub(super) fn assets_page(pal: Palette, cache_desc: SharedString) -> SettingPage {
+pub(super) fn assets_page(
+    view: Entity<SettingsView>,
+    pal: Palette,
+    cache_desc: SharedString,
+) -> SettingPage {
+    let refresh_view = view.clone();
     let group = SettingGroup::new()
         .item(
             SettingItem::new(
@@ -37,8 +44,14 @@ pub(super) fn assets_page(pal: Palette, cache_desc: SharedString) -> SettingPage
             SettingItem::new(
                 tr!("Refresh assets"),
                 SettingField::render(move |_, _, _| {
-                    action_button("assets-refresh", tr!("Refresh"), pal, |cx| {
+                    let view = refresh_view.clone();
+                    action_button("assets-refresh", tr!("Refresh"), pal, move |cx| {
                         send_asset_command(cx, AssetCommand::Refresh);
+                        // Give the spawned sync a moment to land small fetches,
+                        // then re-quote the size row so the click visibly did
+                        // something. Best-effort — a longer sync is caught by
+                        // the next action or window reopen.
+                        refresh_cache_desc_after(&view, Duration::from_secs(2), cx);
                     })
                 }),
             )
@@ -48,9 +61,15 @@ pub(super) fn assets_page(pal: Palette, cache_desc: SharedString) -> SettingPage
             SettingItem::new(
                 tr!("Clear cache"),
                 SettingField::render(move |_, _, _| {
-                    action_button("assets-clear", tr!("Clear"), pal, |cx| {
+                    let view = view.clone();
+                    action_button("assets-clear", tr!("Clear"), pal, move |cx| {
                         send_asset_command(cx, AssetCommand::ClearCache);
                         cx.refresh_windows();
+                        // The wipe runs on the main loop's channel arm, not
+                        // synchronously here — without a recompute the row
+                        // keeps quoting the pre-Clear size until the window
+                        // reopens, which reads as the button doing nothing.
+                        refresh_cache_desc_after(&view, Duration::from_millis(750), cx);
                     })
                 }),
             )
@@ -72,6 +91,24 @@ pub(super) fn assets_page(pal: Palette, cache_desc: SharedString) -> SettingPage
         .icon(IconName::HardDrive)
         .resettable(false)
         .group(group)
+}
+
+/// Re-walk the cache and swap the size blurb into the view after `delay`. The
+/// manual actions run on the main loop's channel arm, not synchronously in the
+/// click handler, so an immediate recompute would race the wipe/fetch.
+fn refresh_cache_desc_after(view: &Entity<SettingsView>, delay: Duration, cx: &mut App) {
+    // Weak: the window can close before the timer fires; a strong handle
+    // would keep the dead view alive just to update it.
+    let view = view.downgrade();
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(delay).await;
+        view.update(cx, |this, cx| {
+            this.asset_cache_desc = cache_size_description();
+            cx.notify();
+        })
+        .ok();
+    })
+    .detach();
 }
 
 /// Human-readable size of the on-disk asset cache, for the "Clear cache" row.

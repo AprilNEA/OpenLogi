@@ -248,7 +248,10 @@ pub fn open_at(page: SettingsPage, cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.settings,
         "Settings",
-        Size::new(px(840.), px(600.)),
+        // Wide enough that the pages' custom rows keep slack under fonts wider
+        // than the macOS system font (Segoe UI tipped the old 840 into
+        // clipping the hero rows' trailing buttons on Windows).
+        Size::new(px(920.), px(640.)),
         move |window, cx| SettingsView::new(page, window, cx),
         cx,
     );
@@ -288,7 +291,11 @@ impl Render for SettingsView {
                         self.language_select.clone(),
                         pal,
                     ))
-                    .page(assets::assets_page(pal, self.asset_cache_desc.clone()))
+                    .page(assets::assets_page(
+                        view.clone(),
+                        pal,
+                        self.asset_cache_desc.clone(),
+                    ))
                     .page(about::about_page(view, self.copied, pal)),
             )
     }

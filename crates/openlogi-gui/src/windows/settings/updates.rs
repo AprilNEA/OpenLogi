@@ -150,13 +150,21 @@ fn update_hero(updater: &Entity<Updater>, pal: Palette, cx: &mut App) -> AnyElem
         .justify_between()
         .gap_4()
         .child(
+            // The left block yields and ellipsizes; the action button never
+            // shrinks — mirrors the library's own SettingItem rows, which
+            // otherwise protect themselves the same way. Without this a long
+            // status line (or a wide UI font) shoves the button past the
+            // window edge.
             h_flex()
                 .items_center()
                 .gap_3()
+                .flex_1()
+                .min_w_0()
                 .child(img(crate::app_assets::LOGO).w(px(52.)).h(px(52.)))
                 .child(
                     v_flex()
                         .gap_1()
+                        .min_w_0()
                         .child(
                             h_flex()
                                 .items_center()
@@ -172,11 +180,12 @@ fn update_hero(updater: &Entity<Updater>, pal: Palette, cx: &mut App) -> AnyElem
                             div()
                                 .text_xs()
                                 .text_color(pal.text_muted)
+                                .truncate()
                                 .child(message.unwrap_or_else(|| tr!("Stable channel"))),
                         ),
                 ),
         )
-        .child(action.disabled(busy))
+        .child(div().flex_shrink_0().child(action.disabled(busy)))
         .into_any_element()
 }
 
@@ -192,8 +201,12 @@ fn update_source(pal: Palette) -> AnyElement {
                 .justify_between()
                 .gap_3()
                 .child(
+                    // Shrink-safe like the hero row above: the text yields,
+                    // the button stays whole.
                     v_flex()
                         .gap_1()
+                        .flex_1()
+                        .min_w_0()
                         .child(
                             div()
                                 .font_weight(FontWeight::MEDIUM)
@@ -203,15 +216,18 @@ fn update_source(pal: Palette) -> AnyElement {
                             div()
                                 .text_xs()
                                 .text_color(pal.text_muted)
+                                .truncate()
                                 .child("github.com/AprilNEA/OpenLogi/releases"),
                         ),
                 )
                 .child(
-                    Button::new("update-changelog")
-                        .ghost()
-                        .icon(IconName::ExternalLink)
-                        .label(tr!("View changelog"))
-                        .on_click(|_, _, cx| cx.open_url(RELEASES_URL)),
+                    div().flex_shrink_0().child(
+                        Button::new("update-changelog")
+                            .ghost()
+                            .icon(IconName::ExternalLink)
+                            .label(tr!("View changelog"))
+                            .on_click(|_, _, cx| cx.open_url(RELEASES_URL)),
+                    ),
                 ),
         )
         .child(
