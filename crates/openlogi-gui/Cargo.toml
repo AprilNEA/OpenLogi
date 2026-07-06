@@ -48,6 +48,12 @@ fluent-langneg = "0.14.2"
 backon.workspace = true
 opener = "0.8.5"
 
+# Windows exe resources (app icon + VERSIONINFO) — see build.rs. The exact
+# version already in Cargo.lock as gpui's own build-dependency, so the resolve
+# adds an edge, not a crate, and the pinned gpui rev cannot move.
+[build-dependencies]
+embed-resource = "3.0.9"
+
 # Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. objc2 gives typed,
 # `Retained<T>`-owned AppKit bindings so the status-item code can't leak (#99).
 [target.'cfg(target_os = "macos")'.dependencies]
