@@ -54,6 +54,10 @@ mod appearance;
 mod assets;
 mod general;
 mod language;
+// Windows needs no privacy grants — the WH_MOUSE_LL hook and raw HID access
+// work without one — so there the page would render empty; register it only
+// where it has content. `SettingsPage::index` tracks the shift.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod permissions;
 mod updates;
 
@@ -73,7 +77,15 @@ impl SettingsPage {
         match self {
             Self::General => 0,
             Self::Updates => 1,
-            Self::About => 5,
+            // One lower on Windows: the Permissions page isn't registered
+            // there (see the `mod permissions` cfg).
+            Self::About => {
+                if cfg!(any(target_os = "macos", target_os = "linux")) {
+                    5
+                } else {
+                    4
+                }
+            }
         }
     }
 }
@@ -274,29 +286,35 @@ impl Render for SettingsView {
                 // Outline group boxes give every page bordered cards (depth /
                 // definition that the flat Fill variant lacked); the hero /
                 // source / config blocks are custom rows inside them.
-                Settings::new("settings")
-                    .with_group_variant(GroupBoxVariant::Outline)
-                    .sidebar_width(px(210.))
-                    .default_selected_index(SelectIndex {
-                        page_ix: self.initial_page.index(),
-                        group_ix: None,
-                    })
-                    .page(general::general_page(self.sensitivity_slider.clone()))
-                    .page(updates::updates_page(self.updater.clone(), pal))
-                    .page(permissions::permissions_page(pal))
-                    .page(appearance::appearance_page(
-                        view.clone(),
-                        self.theme_filter,
-                        self.theme_search.clone(),
-                        self.language_select.clone(),
-                        pal,
-                    ))
-                    .page(assets::assets_page(
-                        view.clone(),
-                        pal,
-                        self.asset_cache_desc.clone(),
-                    ))
-                    .page(about::about_page(view, self.copied, pal)),
+                {
+                    let settings = Settings::new("settings")
+                        .with_group_variant(GroupBoxVariant::Outline)
+                        .sidebar_width(px(210.))
+                        .default_selected_index(SelectIndex {
+                            page_ix: self.initial_page.index(),
+                            group_ix: None,
+                        })
+                        .page(general::general_page(self.sensitivity_slider.clone()))
+                        .page(updates::updates_page(self.updater.clone(), pal));
+                    // Registered only where grants exist to manage — see the
+                    // `mod permissions` cfg for why Windows skips it.
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
+                    let settings = settings.page(permissions::permissions_page(pal));
+                    settings
+                        .page(appearance::appearance_page(
+                            view.clone(),
+                            self.theme_filter,
+                            self.theme_search.clone(),
+                            self.language_select.clone(),
+                            pal,
+                        ))
+                        .page(assets::assets_page(
+                            view.clone(),
+                            pal,
+                            self.asset_cache_desc.clone(),
+                        ))
+                        .page(about::about_page(view, self.copied, pal))
+                },
             )
     }
 }
