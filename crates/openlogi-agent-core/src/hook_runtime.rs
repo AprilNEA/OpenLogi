@@ -8,6 +8,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{
     Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
@@ -18,6 +19,11 @@ use tracing::{info, warn};
 
 use crate::DpiCycleState;
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
+
+/// Minimum gap between two fires of the same wheel-tilt direction, so one
+/// deliberate tilt triggers once instead of repeating across the burst of
+/// scroll events a single physical tilt produces.
+const WHEEL_TILT_COOLDOWN: Duration = Duration::from_millis(250);
 
 /// The two button maps the OS-hook callback reads, kept behind ONE lock so a
 /// config rebuild publishes both atomically — a press during an owner switch can
@@ -93,6 +99,18 @@ thread_local! {
     /// Thread-local rather than a shared `Mutex` keeps the hot path lock-free and
     /// free of cross-thread contention on the freeze-sensitive callback.
     static HOLD: RefCell<HoldState> = RefCell::new(HoldState::default());
+
+    /// Wheel-tilt cooldown state, one per hook-callback thread. Tracks when each
+    /// direction last fired so a single physical tilt (which produces a burst of
+    /// scroll events) triggers its action exactly once.
+    static WHEEL_TILT: RefCell<WheelTiltState> = RefCell::new(WheelTiltState::default());
+}
+
+/// Cooldown tracking for the main scroll wheel's left/right tilt.
+#[derive(Default)]
+struct WheelTiltState {
+    last_fired_left: Option<Instant>,
+    last_fired_right: Option<Instant>,
 }
 
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not
@@ -210,7 +228,65 @@ pub fn start(
             HOLD.with_borrow_mut(HoldState::cancel);
             EventDisposition::PassThrough
         }
-        MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
+        MouseEvent::Scroll {
+            delta_x,
+            from_trackpad,
+            ..
+        } => {
+            // Only intercept horizontal scroll from a real mouse wheel —
+            // trackpad horizontal scrolling (two-finger swipe) must stay
+            // native.
+            if from_trackpad || delta_x == 0.0 {
+                return EventDisposition::PassThrough;
+            }
+
+            let (button, is_left) = if delta_x < 0.0 {
+                (ButtonId::WheelLeft, true)
+            } else {
+                (ButtonId::WheelRight, false)
+            };
+
+            // Resolve the bound action (owned, so no lock is held across dispatch).
+            let action = hooks.read().ok().and_then(|m| m.bindings.get(&button).cloned());
+            let Some(action) = action else {
+                return EventDisposition::PassThrough;
+            };
+
+            // Default binding → native horizontal scroll passes through.
+            // `None` → captured but suppressed (no scroll, no action).
+            if matches!(
+                action,
+                Action::HorizontalScrollLeft | Action::HorizontalScrollRight
+            ) {
+                return EventDisposition::PassThrough;
+            }
+            if matches!(action, Action::None) {
+                return EventDisposition::Suppress;
+            }
+
+            // Custom action — fire once per tilt with a cooldown so the burst
+            // of scroll events from a single physical tilt triggers exactly
+            // once. Suppress the native horizontal scroll regardless.
+            let now = Instant::now();
+            let fire = WHEEL_TILT.with_borrow_mut(|state| {
+                let last = if is_left {
+                    &mut state.last_fired_left
+                } else {
+                    &mut state.last_fired_right
+                };
+                let ok = last
+                    .is_none_or(|t| now.saturating_duration_since(t) >= WHEEL_TILT_COOLDOWN);
+                if ok {
+                    *last = Some(now);
+                }
+                ok
+            });
+            if fire {
+                info!(button = %button, action = %action.label(), "wheel tilt → executing bound action");
+                dispatch_action(&action, &dpi_cycle, &capture);
+            }
+            EventDisposition::Suppress
+        }
     });
 
     match result {
