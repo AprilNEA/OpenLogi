@@ -45,8 +45,9 @@ two binaries:
 
 Everything is local: bindings live in a plain TOML file, button presses are remapped through the OS event tap, and DPI / SmartShift changes are written straight to the device over HID++.
 
-macOS and Linux are supported. Windows is an early, untested preview — signed
-builds ship with each release; see [Roadmap](#roadmap).
+macOS, Linux, and Windows are supported. Windows is the newest port —
+validated end-to-end on Windows 11 with real hardware; signed builds ship with
+each release. See [Roadmap](#roadmap).
 
 ## Beyond Options+
 
@@ -85,7 +86,7 @@ Things OpenLogi does that Options+ won't:
 | Linux packaging: udev rules, systemd unit, `.deb` / `.rpm` | ✅ Linux |
 | Gesture-button per-direction bindings | 🟡 configurable; hardware capture pending |
 | Middle / mode-shift / thumbwheel button capture | 🟡 configurable; hook owns side buttons only |
-| Windows (agent, GUI, event hook) | 🟡 untested preview — signed `.exe` / `.msi` ship per release |
+| Windows (agent, GUI, event hook, tray) | ✅ validated end-to-end on Windows 11 — signed `.zip` / `.msi` ship per release |
 
 ¹ Media key actions use D-Bus MPRIS on Linux; a handful of macOS-specific actions (e.g. Launchpad) have no Linux equivalent and are no-ops.
 
@@ -143,11 +144,18 @@ and distros without systemd.
 
 ### Windows
 
-Signed portable `.zip` archives and per-user `.msi` installers (x86_64 and
-arm64) are attached to each release. Both ship the GUI (`OpenLogi.exe`)
-together with the background agent (`openlogi-agent.exe`), which owns all
-device I/O — keep the two files side by side when using the portable zip, or
-the GUI has nothing to connect to.
+Each release attaches two signed Windows artifacts per architecture (x86_64
+and arm64), carrying the same two binaries — the GUI (`OpenLogi.exe`) and the
+background agent (`openlogi-agent.exe`), which owns all device I/O:
+
+- **`.msi` (recommended)** — a per-user installer: no admin prompt, a Start
+  Menu shortcut, a clean entry in *Installed apps*, and in-place upgrades that
+  close the running app/agent safely. If you're unsure which to grab, grab
+  this one.
+- **`.zip` (portable)** — unzip and run, no install; suited to machines where
+  you can't (or don't want to) install software. Keep the two exes side by
+  side — the GUI spawns its sibling agent, and without it there's nothing to
+  connect to — and update by replacing the folder yourself.
 
 Windows support works and has been validated end-to-end on Windows 11 with
 real hardware — a wired keyboard and a Unifying-receiver mouse, including
