@@ -215,7 +215,12 @@ mod tests {
         fs_err::write(dist.path().join("OpenLogi-v1.2.3-macos-arm64.dmg"), b"dmg").unwrap();
 
         assert!(
-            collect_assets(dist.path(), "https://updates.example/releases/v1.2.3", false).is_err()
+            collect_assets(
+                dist.path(),
+                "https://updates.example/releases/v1.2.3",
+                false
+            )
+            .is_err()
         );
     }
 
@@ -229,8 +234,12 @@ mod tests {
         )
         .unwrap();
 
-        let assets =
-            collect_assets(dist.path(), "https://updates.example/releases/v1.2.3", false).unwrap();
+        let assets = collect_assets(
+            dist.path(),
+            "https://updates.example/releases/v1.2.3",
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
             assets[0].signature_url,
@@ -251,8 +260,12 @@ mod tests {
             fs_err::write(dist.path().join(format!("{name}.minisig")), b"signature").unwrap();
         }
 
-        let assets =
-            collect_assets(dist.path(), "https://updates.example/releases/v1.2.3", false).unwrap();
+        let assets = collect_assets(
+            dist.path(),
+            "https://updates.example/releases/v1.2.3",
+            false,
+        )
+        .unwrap();
 
         assert!(assets.is_empty());
     }
