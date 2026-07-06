@@ -252,21 +252,23 @@ pub fn start(
                 return EventDisposition::PassThrough;
             };
 
-            // Default binding → native horizontal scroll passes through.
-            // `None` → captured but suppressed (no scroll, no action).
+            // Default binding or `None` → native horizontal scroll passes
+            // through. `None` means "no remapping", so the user keeps native
+            // scrolling rather than losing it with no replacement action.
             if matches!(
                 action,
-                Action::HorizontalScrollLeft | Action::HorizontalScrollRight
+                Action::HorizontalScrollLeft
+                    | Action::HorizontalScrollRight
+                    | Action::None
             ) {
                 return EventDisposition::PassThrough;
-            }
-            if matches!(action, Action::None) {
-                return EventDisposition::Suppress;
             }
 
             // Custom action — fire once per tilt with a cooldown so the burst
             // of scroll events from a single physical tilt triggers exactly
-            // once. Suppress the native horizontal scroll regardless.
+            // once. Only suppress the native scroll when we actually fire;
+            // when the cooldown blocks the fire, pass through so a continuous
+            // horizontal wheel (e.g. thumbwheel in native mode) still scrolls.
             let now = Instant::now();
             let fire = WHEEL_TILT.with_borrow_mut(|state| {
                 let last = if is_left {
@@ -284,8 +286,10 @@ pub fn start(
             if fire {
                 info!(button = %button, action = %action.label(), "wheel tilt → executing bound action");
                 dispatch_action(&action, &dpi_cycle, &capture);
+                EventDisposition::Suppress
+            } else {
+                EventDisposition::PassThrough
             }
-            EventDisposition::Suppress
         }
     });
 
