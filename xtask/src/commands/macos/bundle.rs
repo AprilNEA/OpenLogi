@@ -219,10 +219,20 @@ pub(crate) fn sign_app(identity: &str) -> Result<()> {
     if helper.exists() {
         codesign_runtime(identity, &helper)?;
     }
+    // The embedded CLI is a second Mach-O under Contents/MacOS; sign it with the
+    // hardened runtime before the outer app so it carries a Developer ID
+    // signature (its as-built ad-hoc signature would fail notarization).
+    let cli = app.join("Contents/MacOS/openlogi");
+    if cli.exists() {
+        codesign_runtime(identity, &cli)?;
+    }
     codesign_runtime(identity, &app)?;
     cmd!(sh, "codesign --verify --strict {app}").run()?;
     if helper.exists() {
         cmd!(sh, "codesign --verify --strict {helper}").run()?;
+    }
+    if cli.exists() {
+        cmd!(sh, "codesign --verify --strict {cli}").run()?;
     }
     Ok(())
 }
