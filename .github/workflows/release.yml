@@ -115,6 +115,7 @@ jobs:
           set -euo pipefail
           app="target/release/bundle/osx/OpenLogi.app"
           helper="$app/Contents/Library/LoginItems/OpenLogiAgent.app"
+          cli="$app/Contents/MacOS/openlogi"
           # Inside-out signing: seal the nested agent helper with its own
           # signature first, then the outer app (which seals the signed helper).
           # --deep is deprecated and can't give the helper an independent
@@ -124,10 +125,18 @@ jobs:
             codesign --force --options runtime --timestamp \
               --sign "$APPLE_SIGNING_IDENTITY" "$helper"
           fi
+          # The embedded CLI is a second Mach-O under Contents/MacOS; sign it
+          # with the hardened runtime before the outer app or notarization
+          # rejects its as-built ad-hoc signature.
+          if [ -f "$cli" ]; then
+            codesign --force --options runtime --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" "$cli"
+          fi
           codesign --force --options runtime --timestamp \
             --sign "$APPLE_SIGNING_IDENTITY" "$app"
           codesign --verify --strict --verbose=2 "$app"
           [ -d "$helper" ] && codesign --verify --strict --verbose=2 "$helper"
+          [ -f "$cli" ] && codesign --verify --strict --verbose=2 "$cli"
 
       - name: Create and sign DMG
         env:
