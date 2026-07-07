@@ -51,6 +51,28 @@ pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 /// cross-checked against Solaar `special_keys.py`.
 pub const DPI_MODE_SHIFT_CIDS: [u16; 3] = [0x00c4, 0x00ed, 0x00fd];
 
+/// Control IDs of the Back button family. MX Vertical and similar devices
+/// report Back via HID++ `0x1b04` rather than a standard OS mouse button,
+/// so macOS never translates them into `OtherMouseDown` events. Whichever a
+/// device exposes (and can divert) is captured and mapped to
+/// [`ButtonId::Back`](openlogi_core::binding::ButtonId::Back).
+///
+/// Known CIDs (from the `0x1b04` control-ID list / Solaar `special_keys.py`):
+/// - `0x0053` — Back (classic mouse CID, used by MX Vertical)
+/// - `0x00BD` — MultiPlatform Back
+/// - `0x00CE` — Multiplatform Back (alternate)
+/// - `0x00DB` — Back (generic)
+pub const BACK_CIDS: [u16; 4] = [0x0053, 0x00BD, 0x00CE, 0x00DB];
+
+/// Control IDs of the Forward button family. Counterpart to [`BACK_CIDS`]:
+/// captured and mapped to
+/// [`ButtonId::Forward`](openlogi_core::binding::ButtonId::Forward).
+///
+/// Known CIDs:
+/// - `0x0056` — Forward (classic mouse CID, used by MX Vertical)
+/// - `0x00CF` — Multiplatform Forward
+pub const FORWARD_CIDS: [u16; 2] = [0x0056, 0x00CF];
+
 /// Identity and capabilities of one reprogrammable control, as returned by
 /// `getCtrlIdInfo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

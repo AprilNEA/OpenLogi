@@ -33,6 +33,8 @@ objc2-app-kit = { workspace = true, features = [
   "NSEvent",
   "NSGraphicsContext",
   "objc2-core-graphics",
+  "NSWorkspace",
+  "NSRunningApplication",
 ] }
 objc2-core-graphics = { version = "0.3.2", features = ["CGEvent"] }
 objc2-foundation = { workspace = true }

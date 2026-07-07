@@ -70,6 +70,26 @@ pub fn execute(action: &Action) {
     }
 }
 
+/// Navigate the browser identified by `pid` backwards or forwards using the
+/// Accessibility API (`AXPress` on the "Go back" / "Go forward" toolbar button).
+///
+/// Call this from the gesture watcher **at the moment the button press arrives**
+/// so `pid` reflects the correct frontmost app rather than whatever happens to
+/// be frontmost when the async dispatch completes. Returns `true` on success.
+/// No-op (returns `false`) on non-macOS platforms.
+#[must_use]
+pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::ax_browser_navigate(forward, Some(pid))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (pid, forward);
+        false
+    }
+}
+
 /// Synthesise a horizontal scroll of `delta` wheel lines at the current focus.
 ///
 /// Used by the gesture/thumbwheel capture watcher to re-inject the MX thumb
