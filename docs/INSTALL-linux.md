@@ -2,8 +2,9 @@
 
 > [!NOTE]
 > Linux support is in active development. HID++ device enumeration supports
-> **Logi Bolt** (USB PID `0xC548`) and **Logi Unifying** (PID `0xC52B` and
-> others) receivers, as well as Bluetooth-direct devices.
+> **Logi Bolt** (USB PID `0xC548`), **Logi Unifying** (`0xC52B`, `0xC532`), and
+> **Logitech LIGHTSPEED** gaming receivers (including G305 receiver `0xC53F`),
+> as well as Bluetooth-direct devices.
 
 ## Prerequisites
 
@@ -40,8 +41,8 @@ OpenLogi needs:
 
 - **Write access to `/dev/uinput`** — to create the virtual input device for
   button remapping.
-- **Read/write access to `/dev/hidraw*`** — to send HID++ commands to the Bolt
-  receiver.
+- **Read/write access to `/dev/hidraw*`** — to send HID++ commands to a
+  supported receiver or directly connected device.
 
 Install the bundled udev rules to grant access to the active-seat user without
 requiring `sudo` or group membership (requires `systemd-logind`):

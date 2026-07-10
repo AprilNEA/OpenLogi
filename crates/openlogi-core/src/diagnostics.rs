@@ -24,6 +24,7 @@ pub enum AssetSource {
 pub enum ConnectionKind {
     BoltReceiver,
     UnifyingReceiver,
+    LightspeedReceiver,
     BluetoothDirect,
     Wired,
     Unknown,
@@ -370,6 +371,7 @@ fn connection_label(connection: ConnectionKind) -> &'static str {
     match connection {
         ConnectionKind::BoltReceiver => "Logi Bolt receiver",
         ConnectionKind::UnifyingReceiver => "Logi Unifying receiver",
+        ConnectionKind::LightspeedReceiver => "Logitech LIGHTSPEED receiver",
         ConnectionKind::BluetoothDirect => "Bluetooth (direct)",
         ConnectionKind::Wired => "Wired (USB)",
         ConnectionKind::Unknown => "unknown",
@@ -541,6 +543,7 @@ mod tests {
                     battery: None,
                     capabilities: Some(Capabilities {
                         buttons: true,
+                        native_button_capture: true,
                         pointer: true,
                         lighting: false,
                         scroll_inversion: false,

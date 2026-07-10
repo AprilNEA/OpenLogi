@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use hidpp::channel::HidppChannel;
 
-use super::features::{ProbedFeatures, probe_features, read_battery};
+use super::features::{BatteryFeatureIndex, ProbedFeatures, probe_features, read_battery_at};
 
 /// How many `enumerate` ticks a device's probe is reused before a fresh read.
 /// The expensive part of a probe (the `enumerate_features` feature-table walk)
@@ -26,6 +26,9 @@ pub(super) enum CacheKey {
     /// two receivers whose serials share a common prefix (e.g. "DA2699E1" and
     /// "DA2604F2" share "DA2").
     UnifyingSlot { receiver_uid: String, slot: u8 },
+    /// LIGHTSPEED: receiver serial + slot keeps identical gaming receivers and
+    /// devices isolated while remaining stable across sleep/reconnect.
+    LightspeedSlot { receiver_uid: String, slot: u8 },
     /// Direct (Bluetooth/USB): the OS-assigned HID node id (macOS registry-entry
     /// id, Linux dev path, Windows interface path). Unique *per node*, so two
     /// units of the same model never collide, and stable while connected so the
@@ -46,7 +49,7 @@ pub(super) struct Cached {
     /// table, captured by the full probe. Lets cache hits re-read the volatile
     /// battery in one round-trip — no `Device::new` ping, no table walk.
     /// `None` when the device exposes no `0x1004`.
-    pub(super) battery_index: Option<u8>,
+    pub(super) battery_index: Option<BatteryFeatureIndex>,
     pub(super) probed_tick: u64,
 }
 
@@ -119,7 +122,7 @@ pub(super) async fn probe_or_reuse(
             if online
                 && let Some(feature_index) = c.battery_index
                 && let Some(key) = id.clone()
-                && let Some(battery) = read_battery(channel, index, feature_index).await
+                && let Some(battery) = read_battery_at(channel, index, feature_index).await
             {
                 let mut entry = c.clone();
                 entry.probe.battery = Some(battery);

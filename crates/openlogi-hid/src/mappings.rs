@@ -8,6 +8,7 @@ use hidpp::feature::unified_battery::{
     BatteryLevel as HidppBatteryLevel, BatteryStatus as HidppBatteryStatus,
 };
 use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
+use hidpp::receiver::lightspeed::DeviceKind as LightspeedDeviceKind;
 use hidpp::receiver::unifying::DeviceKind as UnifyingDeviceKind;
 use openlogi_core::device::{BatteryLevel, BatteryStatus, DeviceKind};
 
@@ -46,6 +47,20 @@ pub(crate) fn map_unifying_kind(k: UnifyingDeviceKind) -> DeviceKind {
         UnifyingDeviceKind::Remote => DeviceKind::Remote,
         UnifyingDeviceKind::Trackball => DeviceKind::Trackball,
         UnifyingDeviceKind::Touchpad => DeviceKind::Touchpad,
+        _ => DeviceKind::Unknown,
+    }
+}
+
+/// Map a LIGHTSPEED pairing-register device kind to our [`DeviceKind`].
+pub(crate) fn map_lightspeed_kind(k: LightspeedDeviceKind) -> DeviceKind {
+    match k {
+        LightspeedDeviceKind::Keyboard => DeviceKind::Keyboard,
+        LightspeedDeviceKind::Mouse => DeviceKind::Mouse,
+        LightspeedDeviceKind::Numpad => DeviceKind::Numpad,
+        LightspeedDeviceKind::Presenter => DeviceKind::Presenter,
+        LightspeedDeviceKind::Remote => DeviceKind::Remote,
+        LightspeedDeviceKind::Trackball => DeviceKind::Trackball,
+        LightspeedDeviceKind::Touchpad => DeviceKind::Touchpad,
         _ => DeviceKind::Unknown,
     }
 }

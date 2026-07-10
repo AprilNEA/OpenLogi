@@ -90,7 +90,7 @@ impl MouseModelView {
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (asset, active, bindings, gesture_owner, glow) = cx
+        let (asset, active, bindings, gesture_owner, glow, native_button_capture) = cx
             .try_global::<AppState>()
             .map(|s| {
                 (
@@ -99,6 +99,15 @@ impl Render for MouseModelView {
                     s.button_bindings.clone(),
                     s.current_gesture_owner(),
                     s.current_record().and_then(|r| keyboard_glow(s, r)),
+                    s.current_record()
+                        .and_then(|r| r.capabilities)
+                        .unwrap_or_else(|| {
+                            s.current_record()
+                                .map_or_else(openlogi_core::device::Capabilities::default, |r| {
+                                    openlogi_core::device::Capabilities::presumed_from_kind(r.kind)
+                                })
+                        })
+                        .native_button_capture,
                 )
             })
             .unwrap_or_default();
@@ -118,7 +127,7 @@ impl Render for MouseModelView {
             (viewport_w - MODEL_HORIZONTAL_RESERVE).clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
         let max_image_w = (content_w - gutter).max(MODEL_MIN_CONTENT_W / 2.);
         let (mouse_w, mouse_h, hotspots, labels) =
-            scaled_model(asset.as_ref(), target_h, max_image_w);
+            scaled_model(asset.as_ref(), target_h, max_image_w, native_button_capture);
 
         let canvas_w = gutter + mouse_w;
         let canvas_h = mouse_h;
@@ -215,15 +224,17 @@ fn scaled_model(
     asset: Option<&ResolvedAsset>,
     target_h: f32,
     max_w: f32,
+    native_button_capture: bool,
 ) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
     if let Some(a) = asset {
         let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
-        let hotspots = asset_hotspots_for_png(a, w, h);
+        let mut hotspots = asset_hotspots_for_png(a, w, h);
+        retain_remappable_hotspots(&mut hotspots, native_button_capture);
         let labels = labels_from_hotspots(&hotspots, h);
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
-        let hotspots = default_hotspots()
+        let mut hotspots = default_hotspots()
             .into_iter()
             .map(|hs| Hotspot {
                 x: hs.x * scale,
@@ -233,8 +244,10 @@ fn scaled_model(
                 ..hs
             })
             .collect();
+        retain_remappable_hotspots(&mut hotspots, native_button_capture);
         let labels = default_labels()
             .into_iter()
+            .filter(|label| hotspots.iter().any(|hotspot| hotspot.id == label.id))
             .map(|l| Label {
                 y: l.y * scale,
                 ..l
@@ -246,6 +259,12 @@ fn scaled_model(
             hotspots,
             labels,
         )
+    }
+}
+
+fn retain_remappable_hotspots(hotspots: &mut Vec<Hotspot>, native_button_capture: bool) {
+    if !native_button_capture {
+        hotspots.retain(|hotspot| hotspot.id.is_os_hook_button());
     }
 }
 
@@ -822,6 +841,24 @@ mod tests {
         assert_eq!(
             gesture_owner_label(ButtonId::GestureButton),
             "Gesture Button"
+        );
+    }
+
+    #[test]
+    fn host_only_mouse_exposes_only_os_visible_hotspots() {
+        let mut hotspots = default_hotspots();
+        retain_remappable_hotspots(&mut hotspots, false);
+        assert_eq!(
+            hotspots
+                .iter()
+                .map(|hotspot| hotspot.id)
+                .collect::<Vec<_>>(),
+            [ButtonId::MiddleClick, ButtonId::Back, ButtonId::Forward]
+        );
+        assert!(
+            !hotspots
+                .iter()
+                .any(|hotspot| matches!(hotspot.id, ButtonId::DpiToggle | ButtonId::GestureButton))
         );
     }
 }

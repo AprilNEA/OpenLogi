@@ -1406,6 +1406,7 @@ fn route_label(route: Option<&DeviceRoute>) -> String {
     match route {
         Some(DeviceRoute::Bolt { .. }) => tr!("Bolt receiver").to_string(),
         Some(DeviceRoute::Unifying { .. }) => tr!("Unifying receiver").to_string(),
+        Some(DeviceRoute::Lightspeed { .. }) => tr!("LIGHTSPEED receiver").to_string(),
         Some(DeviceRoute::Direct { .. }) => tr!("Direct connection").to_string(),
         None => tr!("Unavailable").to_string(),
     }
@@ -1428,6 +1429,7 @@ fn connection_icon_path(
     match route {
         Some(DeviceRoute::Bolt { .. }) => "action-icons/bolt.svg",
         Some(DeviceRoute::Unifying { .. }) => "action-icons/unifying.svg",
+        Some(DeviceRoute::Lightspeed { .. }) => "action-icons/unifying.svg",
         // Explicit arms (not `_`) so a new DeviceRoute variant trips the
         // compiler here, matching the exhaustive sibling `route_label`.
         Some(DeviceRoute::Direct { .. }) | None => match transports {
@@ -1855,6 +1857,7 @@ mod tests {
     fn tabs_follow_capabilities_not_kind() {
         let caps = Some(Capabilities {
             buttons: true,
+            native_button_capture: true,
             pointer: true,
             lighting: false,
             scroll_inversion: false,
@@ -1873,6 +1876,7 @@ mod tests {
     fn keyboard_without_asset_hides_buttons_tab() {
         let caps = Some(Capabilities {
             buttons: true,
+            native_button_capture: true,
             pointer: false,
             lighting: true,
             scroll_inversion: false,

@@ -393,6 +393,7 @@ mod tests {
             kind: DeviceKind::Mouse,
             capabilities: Capabilities {
                 buttons: true,
+                native_button_capture: true,
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,
