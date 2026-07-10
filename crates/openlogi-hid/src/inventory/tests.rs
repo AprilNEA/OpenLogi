@@ -280,3 +280,21 @@ fn codename_clamps_overlong_len() {
 fn codename_rejects_short_response() {
     assert_eq!(parse_codename_unifying(&[0x40]), None);
 }
+
+#[test]
+fn lightspeed_cache_is_scoped_to_receiver_and_slot() {
+    let first = CacheKey::LightspeedSlot {
+        receiver_uid: "RX-A".into(),
+        slot: 1,
+    };
+    let other_receiver = CacheKey::LightspeedSlot {
+        receiver_uid: "RX-B".into(),
+        slot: 1,
+    };
+    let other_slot = CacheKey::LightspeedSlot {
+        receiver_uid: "RX-A".into(),
+        slot: 2,
+    };
+    assert_ne!(first, other_receiver);
+    assert_ne!(first, other_slot);
+}

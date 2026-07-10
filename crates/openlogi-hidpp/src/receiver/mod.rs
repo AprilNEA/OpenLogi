@@ -19,6 +19,7 @@ use thiserror::Error;
 use crate::{channel::HidppChannel, protocol::v10::Hidpp10Error};
 
 pub mod bolt;
+pub mod lightspeed;
 pub mod unifying;
 
 /// The index to use when communicating with the receiver on any HID++ channel.
@@ -35,6 +36,11 @@ pub fn detect(chan: Arc<HidppChannel>) -> Option<Receiver> {
     if unifying::VPID_PAIRS.contains(vpid_pair) {
         return unifying::Receiver::new(chan).ok().map(Receiver::Unifying);
     }
+    if lightspeed::VPID_PAIRS.contains(vpid_pair) {
+        return lightspeed::Receiver::new(chan)
+            .ok()
+            .map(Receiver::Lightspeed);
+    }
     None
 }
 
@@ -46,6 +52,8 @@ pub enum Receiver {
     Bolt(bolt::Receiver),
     /// Logitech Unifying receiver.
     Unifying(unifying::Receiver),
+    /// Logitech LIGHTSPEED gaming receiver.
+    Lightspeed(lightspeed::Receiver),
 }
 
 impl Receiver {
@@ -54,6 +62,7 @@ impl Receiver {
         match self {
             Self::Bolt(_) => "Logi Bolt Receiver",
             Self::Unifying(_) => "Unifying Receiver",
+            Self::Lightspeed(_) => "LIGHTSPEED Receiver",
         }
         .to_string()
     }
@@ -66,6 +75,7 @@ impl Receiver {
         match self {
             Self::Bolt(bolt) => bolt.get_unique_id().await,
             Self::Unifying(unifying) => unifying.get_unique_id().await,
+            Self::Lightspeed(lightspeed) => lightspeed.get_unique_id().await,
         }
     }
 }

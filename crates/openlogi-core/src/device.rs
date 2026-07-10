@@ -86,8 +86,16 @@ impl DeviceKind {
     reason = "capabilities is a serialized feature-bit DTO; independent booleans keep the IPC/config shape explicit"
 )]
 pub struct Capabilities {
-    /// Reprogrammable buttons — HID++ `0x1b00`–`0x1b04` (ReprogControls).
+    /// A Buttons panel is useful. This includes native HID++ reprogrammable
+    /// controls (`0x1b00`–`0x1b04`) and gaming control tables (`0x8100` /
+    /// `0x8110`) whose standard middle/back/forward events can be remapped by
+    /// the host input hook.
     pub buttons: bool,
+    /// The device exposes a HID++ ReprogControls capture feature, allowing
+    /// controls beyond the OS-visible middle/back/forward buttons to be
+    /// diverted and remapped.
+    #[serde(default)]
+    pub native_button_capture: bool,
     /// Adjustable pointer resolution — HID++ `0x2201` / `0x2202` (AdjustableDpi).
     pub pointer: bool,
     /// Solid-colour RGB the lighting panel can actually drive — HID++
@@ -109,7 +117,8 @@ impl Capabilities {
     /// Membership of a driving feature ID flips the corresponding flag.
     #[must_use]
     pub fn from_feature_ids(ids: &[u16]) -> Self {
-        const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
+        const NATIVE_BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
+        const GAMING_BUTTONS: [u16; 2] = [0x8100, 0x8110];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
         // PerKeyLighting (0x8080) and ColorLedEffects (0x8070) — both now driven
         // by `set_keyboard_color` (it prefers 0x8070's fixed effect to override a
@@ -118,9 +127,15 @@ impl Capabilities {
         const LIGHTING: [u16; 2] = [0x8080, 0x8070];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
-            buttons: has(&BUTTONS),
+            buttons: has(&NATIVE_BUTTONS) || has(&GAMING_BUTTONS),
+            native_button_capture: has(&NATIVE_BUTTONS),
             pointer: has(&POINTER),
-            lighting: has(&LIGHTING),
+            // Gaming mice may advertise ColorLedEffects for indicator/profile
+            // LEDs, but OpenLogi's current lighting panel is keyboard-focused;
+            // gaming-mouse RGB is explicitly deferred. Keep wired G-series
+            // keyboards eligible by applying the exclusion only to devices
+            // that also advertise an adjustable pointer.
+            lighting: has(&LIGHTING) && !(has(&GAMING_BUTTONS) && has(&POINTER)),
             scroll_inversion: false,
             hires_wheel: ids.contains(&0x2121),
         }
@@ -136,6 +151,7 @@ impl Capabilities {
         match kind {
             DeviceKind::Mouse | DeviceKind::Trackball => Self {
                 buttons: true,
+                native_button_capture: false,
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,
@@ -367,6 +383,7 @@ mod tests {
                 }),
                 capabilities: Some(Capabilities {
                     buttons: true,
+                    native_button_capture: true,
                     pointer: true,
                     lighting: false,
                     scroll_inversion: false,
@@ -430,6 +447,7 @@ mod tests {
             mouse,
             Capabilities {
                 buttons: true,
+                native_button_capture: true,
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,
@@ -442,6 +460,7 @@ mod tests {
             keyboard,
             Capabilities {
                 buttons: false,
+                native_button_capture: false,
                 pointer: false,
                 lighting: true,
                 scroll_inversion: false,
@@ -453,6 +472,12 @@ mod tests {
             Capabilities::from_feature_ids(&[0x0000, 0x0003]),
             Capabilities::default()
         );
+
+        let gaming_mouse =
+            Capabilities::from_feature_ids(&[0x0005, 0x1000, 0x2201, 0x8070, 0x8100, 0x8110]);
+        assert!(gaming_mouse.buttons && gaming_mouse.pointer);
+        assert!(!gaming_mouse.native_button_capture);
+        assert!(!gaming_mouse.lighting, "gaming-mouse RGB remains deferred");
     }
 
     #[test]
@@ -470,6 +495,7 @@ mod tests {
         )?;
 
         assert!(!capabilities.hires_wheel);
+        assert!(!capabilities.native_button_capture);
         assert!(capabilities.scroll_inversion);
         Ok(())
     }

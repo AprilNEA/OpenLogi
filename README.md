@@ -36,9 +36,9 @@ Remap buttons, drive DPI and SmartShift, and switch profiles per app — without
 
 ## What it is
 
-OpenLogi talks to Logitech HID++ peripherals over Logi Bolt and Unifying
-receivers, Bluetooth-direct connections, or USB cables — without running Logi
-Options+. It consists of three components:
+OpenLogi talks to Logitech HID++ peripherals over Logi Bolt, Unifying, and
+LIGHTSPEED receivers, Bluetooth-direct connections, or USB cables — without
+running Logi Options+. It consists of three components:
 
 - **[OpenLogi GUI](crates/openlogi-gui)** — a GPUI desktop app: an interactive mouse diagram with clickable hotspots, a per-button action picker (built-in actions plus custom keyboard shortcuts authored in the TOML config), DPI presets, SmartShift, per-device scroll inversion, RGB keyboard lighting, per-application profiles, a live device carousel, and a Settings window localized into 20 languages.
 - **[OpenLogi agent](crates/openlogi-agent)** — the background service that owns the input hook and all device I/O. The GUI is a pure IPC client and starts the agent when needed.
@@ -77,6 +77,7 @@ Things OpenLogi does that Options+ won't:
 |---|---|
 | Discover Bolt receivers + list paired devices (CLI + GUI) | ✅ |
 | Unifying receivers (older protocol, replaced by Bolt) | ✅ |
+| LIGHTSPEED gaming receivers (G305 / `046d:c53f` certified) | ✅ |
 | Bluetooth-direct / wired devices (no receiver) | ✅ |
 | Battery percentage / charge state | ✅ (online devices) |
 | Interactive GUI: carousel, mouse diagram, action picker | ✅ macOS + Linux + Windows |

@@ -362,6 +362,7 @@ pub(super) fn connection_icon_path(
     match route {
         Some(DeviceRoute::Bolt { .. }) => "action-icons/bolt.svg",
         Some(DeviceRoute::Unifying { .. }) => "action-icons/unifying.svg",
+        Some(DeviceRoute::Lightspeed { .. }) => "action-icons/unifying.svg",
         // Explicit arms (not `_`) so a new DeviceRoute variant trips the
         // compiler here, matching the exhaustive sibling `route_label`.
         Some(DeviceRoute::Direct { .. }) | None => match transports {

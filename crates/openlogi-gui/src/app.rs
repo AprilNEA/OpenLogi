@@ -483,6 +483,10 @@ mod tests {
             receiver_uid: "r".into(),
             slot: 1,
         };
+        let lightspeed = DeviceRoute::Lightspeed {
+            receiver_uid: "r".into(),
+            slot: 1,
+        };
         let direct = DeviceRoute::Direct {
             vendor_id: 0x046d,
             product_id: 0xb019,
@@ -508,6 +512,10 @@ mod tests {
         );
         assert_eq!(
             connection_icon_path(Some(&uni), None),
+            "action-icons/unifying.svg"
+        );
+        assert_eq!(
+            connection_icon_path(Some(&lightspeed), None),
             "action-icons/unifying.svg"
         );
         // Direct + radio-less firmware = the cable is the only possible link.
@@ -578,6 +586,7 @@ mod tests {
     fn tabs_follow_capabilities_not_kind() {
         let caps = Some(Capabilities {
             buttons: true,
+            native_button_capture: true,
             pointer: true,
             lighting: false,
             scroll_inversion: false,
@@ -597,6 +606,7 @@ mod tests {
     fn keyboard_without_asset_hides_buttons_tab() {
         let caps = Some(Capabilities {
             buttons: true,
+            native_button_capture: true,
             pointer: false,
             lighting: true,
             scroll_inversion: false,
