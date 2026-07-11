@@ -283,7 +283,7 @@ _version: 1
 "Round": "Zaokrąglony"
 "All": "Wszystkie"
 "Filter themes…": "Filtruj motywy…"
-"No themes match “%{query}”.": "Żaden motyw nie pasuje do „%{query}”."
+"No themes match “%{query}”.": "Żaden motyw nie pasuje do “%{query}”."
 "Color theme": "Motyw kolorystyczny"
 "Interface language": "Język interfejsu"
 "Diagnostics": "Diagnostyka"
