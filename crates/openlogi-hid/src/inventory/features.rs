@@ -3,10 +3,10 @@ use std::sync::Arc;
 use hidpp::{
     channel::HidppChannel,
     device::Device,
-    feature::hires_wheel::HiResWheelFeature,
     feature::{
         CreatableFeature, device_information::DeviceInformationFeature,
-        device_type_and_name::DeviceTypeAndNameFeature, unified_battery::UnifiedBatteryFeature,
+        device_type_and_name::DeviceTypeAndNameFeature, hires_wheel::HiResWheelFeature,
+        thumbwheel::ThumbwheelFeature, unified_battery::UnifiedBatteryFeature,
     },
 };
 use openlogi_core::device::{
@@ -107,6 +107,21 @@ pub(super) async fn probe_features(
             .get_wheel_capabilities()
             .await
             .is_ok_and(|wheel| wheel.has_invert);
+    }
+    if let Some(caps) = capabilities.as_mut()
+        && let Some(feature) = device.get_feature::<ThumbwheelFeature>()
+    {
+        match feature.get_thumbwheel_info().await {
+            Ok(info) => {
+                caps.thumbwheel_tap = info.capabilities.single_tap;
+                debug!(
+                    slot,
+                    supported = caps.thumbwheel_tap,
+                    "thumb wheel single-tap capability probed"
+                );
+            }
+            Err(e) => debug!(slot, error = ?e, "thumb wheel capability probe failed"),
+        }
     }
 
     let battery = match battery_index {

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- *(thumbwheel)* expose capacitive tap separately, default it to Do Nothing, and keep rotation capture available on devices without tap support
+- *(thumbwheel)* expose firmware-supported capacitive tap separately, default it to Do Nothing, hide it on unsupported devices, and keep rotation capture available without tap support
 
 ## [0.6.22](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.21...openlogi-core-v0.6.22) - 2026-07-21
 

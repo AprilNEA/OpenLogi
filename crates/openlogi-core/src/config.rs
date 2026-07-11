@@ -918,6 +918,7 @@ mod tests {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: true,
+                thumbwheel_tap: false,
             },
         };
         cfg.set_device_identity("2b034", mouse.clone());

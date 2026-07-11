@@ -102,6 +102,10 @@ pub struct Capabilities {
     /// can be read and changed independently of inversion support.
     #[serde(default)]
     pub hires_wheel: bool,
+    /// Capacitive single-tap on the horizontal thumbwheel — HID++ `0x2150`
+    /// `getThumbwheelInfo` with the `c_single_tap` capability bit set.
+    #[serde(default)]
+    pub thumbwheel_tap: bool,
 }
 
 impl Capabilities {
@@ -123,6 +127,7 @@ impl Capabilities {
             lighting: has(&LIGHTING),
             scroll_inversion: false,
             hires_wheel: ids.contains(&0x2121),
+            thumbwheel_tap: false,
         }
     }
 
@@ -140,6 +145,7 @@ impl Capabilities {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: false,
+                thumbwheel_tap: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -371,6 +377,7 @@ mod tests {
                     lighting: false,
                     scroll_inversion: false,
                     hires_wheel: false,
+                    thumbwheel_tap: false,
                 }),
             }],
         }
@@ -434,6 +441,7 @@ mod tests {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: true,
+                thumbwheel_tap: false,
             }
         );
         // A wired G-series keyboard: PerKeyLighting (0x8080), no DPI/buttons.
@@ -446,6 +454,7 @@ mod tests {
                 lighting: true,
                 scroll_inversion: false,
                 hires_wheel: false,
+                thumbwheel_tap: false,
             }
         );
         // No driving features → nothing offered.
