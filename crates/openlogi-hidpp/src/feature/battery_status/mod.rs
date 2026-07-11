@@ -36,8 +36,7 @@ impl BatteryStatusFeature {
         Ok(BatteryInfo {
             percentage: payload[0],
             next_level: payload[1],
-            status: BatteryStatus::try_from(payload[2])
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+            status: BatteryStatus::from_raw(payload[2]),
         })
     }
 }
@@ -77,4 +76,23 @@ pub enum BatteryStatus {
     ThermalError = 6,
     /// Another charging error occurred.
     ChargingError = 7,
+    /// The device reported an unrecognized charge state.
+    Unknown = 0xff,
+}
+
+impl BatteryStatus {
+    fn from_raw(value: u8) -> Self {
+        Self::try_from(value).unwrap_or(Self::Unknown)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BatteryStatus;
+
+    #[test]
+    fn unknown_status_byte_preserves_battery_read() {
+        assert_eq!(BatteryStatus::from_raw(8), BatteryStatus::Unknown);
+        assert_eq!(BatteryStatus::from_raw(0xff), BatteryStatus::Unknown);
+    }
 }
