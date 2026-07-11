@@ -90,7 +90,7 @@ impl MouseModelView {
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (asset, active, bindings, gesture_owner, glow) = cx
+        let (asset, active, bindings, gesture_owner, glow, supports_thumbwheel_tap) = cx
             .try_global::<AppState>()
             .map(|s| {
                 (
@@ -99,6 +99,9 @@ impl Render for MouseModelView {
                     s.button_bindings.clone(),
                     s.current_gesture_owner(),
                     s.current_record().and_then(|r| keyboard_glow(s, r)),
+                    s.current_record()
+                        .and_then(|r| r.capabilities)
+                        .is_some_and(|caps| caps.thumbwheel_tap),
                 )
             })
             .unwrap_or_default();
@@ -117,8 +120,12 @@ impl Render for MouseModelView {
         let content_w =
             (viewport_w - MODEL_HORIZONTAL_RESERVE).clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
         let max_image_w = (content_w - gutter).max(MODEL_MIN_CONTENT_W / 2.);
-        let (mouse_w, mouse_h, hotspots, labels) =
-            scaled_model(asset.as_ref(), target_h, max_image_w);
+        let (mouse_w, mouse_h, hotspots, labels) = scaled_model(
+            asset.as_ref(),
+            target_h,
+            max_image_w,
+            supports_thumbwheel_tap,
+        );
 
         let canvas_w = gutter + mouse_w;
         let canvas_h = mouse_h;
@@ -215,16 +222,18 @@ fn scaled_model(
     asset: Option<&ResolvedAsset>,
     target_h: f32,
     max_w: f32,
+    supports_thumbwheel_tap: bool,
 ) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
     if let Some(a) = asset {
         let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
-        let hotspots = asset_hotspots_for_png(a, w, h);
+        let hotspots = asset_hotspots_for_png(a, w, h, supports_thumbwheel_tap);
         let labels = labels_from_hotspots(&hotspots, h);
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
         let hotspots = default_hotspots()
             .into_iter()
+            .filter(|hs| hs.id != ButtonId::Thumbwheel || supports_thumbwheel_tap)
             .map(|hs| Hotspot {
                 x: hs.x * scale,
                 y: hs.y * scale,

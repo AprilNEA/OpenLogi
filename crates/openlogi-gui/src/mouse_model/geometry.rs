@@ -75,7 +75,12 @@ pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
     clippy::cast_precision_loss,
     reason = "device images are < 4096 px on either axis — well within f32 mantissa"
 )]
-pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> Vec<Hotspot> {
+pub fn asset_hotspots_for_png(
+    asset: &ResolvedAsset,
+    mouse_w: f32,
+    mouse_h: f32,
+    supports_thumbwheel_tap: bool,
+) -> Vec<Hotspot> {
     let png_w = asset.png_width as f32;
     let origin_w = asset
         .metadata
@@ -110,28 +115,26 @@ pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32)
         })
         .collect();
 
-    with_thumbwheel_controls(hotspots)
+    with_thumbwheel_controls(hotspots, supports_thumbwheel_tap)
 }
 
-/// Replace the metadata's single thumb-wheel marker with three independent,
-/// non-overlapping controls for rotation up, capacitive tap, and rotation down.
+/// Replace the metadata's single thumb-wheel marker with independent,
+/// non-overlapping rotation controls and, when the device reports it, a
+/// capacitive tap control.
 ///
 /// No-op when the device has no thumb wheel.
-fn with_thumbwheel_controls(mut hotspots: Vec<Hotspot>) -> Vec<Hotspot> {
+fn with_thumbwheel_controls(
+    mut hotspots: Vec<Hotspot>,
+    supports_thumbwheel_tap: bool,
+) -> Vec<Hotspot> {
     let Some(wheel) = hotspots.iter().find(|h| h.id == ButtonId::Thumbwheel) else {
         return hotspots;
     };
     let center_y = wheel.y + wheel.h / 2.;
-    let controls = [
+    let mut controls = vec![
         Hotspot {
             id: ButtonId::ThumbwheelScrollUp,
             y: center_y - THUMBWHEEL_CONTROL_SPACING - THUMBWHEEL_CONTROL_HEIGHT / 2.,
-            h: THUMBWHEEL_CONTROL_HEIGHT,
-            ..*wheel
-        },
-        Hotspot {
-            id: ButtonId::Thumbwheel,
-            y: center_y - THUMBWHEEL_CONTROL_HEIGHT / 2.,
             h: THUMBWHEEL_CONTROL_HEIGHT,
             ..*wheel
         },
@@ -142,6 +145,17 @@ fn with_thumbwheel_controls(mut hotspots: Vec<Hotspot>) -> Vec<Hotspot> {
             ..*wheel
         },
     ];
+    if supports_thumbwheel_tap {
+        controls.insert(
+            1,
+            Hotspot {
+                id: ButtonId::Thumbwheel,
+                y: center_y - THUMBWHEEL_CONTROL_HEIGHT / 2.,
+                h: THUMBWHEEL_CONTROL_HEIGHT,
+                ..*wheel
+            },
+        );
+    }
     hotspots.retain(|h| h.id != ButtonId::Thumbwheel);
     hotspots.extend(controls);
     hotspots
@@ -259,7 +273,7 @@ mod tests {
             w: ASSET_HOTSPOT,
             h: ASSET_HOTSPOT,
         };
-        let out = with_thumbwheel_controls(vec![wheel]);
+        let out = with_thumbwheel_controls(vec![wheel], true);
         assert_eq!(out.len(), 3);
         let mut controls: Vec<&Hotspot> = out.iter().collect();
         controls.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
@@ -280,6 +294,22 @@ mod tests {
     }
 
     #[test]
+    fn thumbwheel_without_single_tap_exposes_rotation_only() {
+        let wheel = Hotspot {
+            id: ButtonId::Thumbwheel,
+            x: 100.,
+            y: 200.,
+            w: ASSET_HOTSPOT,
+            h: ASSET_HOTSPOT,
+        };
+        let out = with_thumbwheel_controls(vec![wheel], false);
+        assert_eq!(
+            out.iter().map(|h| h.id).collect::<Vec<_>>(),
+            vec![ButtonId::ThumbwheelScrollUp, ButtonId::ThumbwheelScrollDown,]
+        );
+    }
+
+    #[test]
     fn no_thumbwheel_leaves_hotspots_untouched() {
         let middle = Hotspot {
             id: ButtonId::MiddleClick,
@@ -288,7 +318,7 @@ mod tests {
             w: ASSET_HOTSPOT,
             h: ASSET_HOTSPOT,
         };
-        let out = with_thumbwheel_controls(vec![middle]);
+        let out = with_thumbwheel_controls(vec![middle], true);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, ButtonId::MiddleClick);
     }

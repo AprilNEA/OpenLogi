@@ -396,6 +396,7 @@ mod tests {
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,
+                thumbwheel_tap: false,
             },
             model_info: None,
             codename: None,
