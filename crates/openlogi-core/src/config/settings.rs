@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::binding::ButtonId;
+use crate::color::Rgb;
 
 /// Light/dark appearance preference. `System` follows the OS appearance (the
 /// historical behaviour); `Light` / `Dark` force a mode regardless of the OS.
@@ -166,9 +167,15 @@ const fn default_thumbwheel_sensitivity() -> i32 {
 pub struct Lighting {
     #[serde(default = "default_lighting_enabled")]
     pub enabled: bool,
-    /// Static color as 6 hex digits `"RRGGBB"` (no leading `#`).
-    #[serde(default = "default_lighting_color")]
-    pub color: String,
+    /// Static color as 6 hex digits `"RRGGBB"` (no leading `#`). A value
+    /// that does not parse falls back to white on load — the same per-field
+    /// tolerance as `brightness`, because failing the whole load would
+    /// discard the user's entire config (see the `load_or_default` callers).
+    #[serde(
+        default = "default_lighting_color",
+        deserialize_with = "deserialize_lighting_color"
+    )]
+    pub color: Rgb,
     /// Brightness percent, clamped to 0–100 on load.
     #[serde(
         default = "default_lighting_brightness",
@@ -191,8 +198,8 @@ fn default_lighting_enabled() -> bool {
     true
 }
 
-fn default_lighting_color() -> String {
-    "ffffff".to_string()
+fn default_lighting_color() -> Rgb {
+    Rgb::WHITE
 }
 
 fn default_lighting_brightness() -> u8 {
@@ -207,6 +214,18 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(u8::deserialize(deserializer)?.min(100))
+}
+
+/// Fall back to white when the configured color does not parse, mirroring
+/// the `brightness` clamp above: a hand-edited value degrades predictably
+/// instead of failing the whole config load.
+fn deserialize_lighting_color<'de, D>(deserializer: D) -> Result<Rgb, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(String::deserialize(deserializer)?
+        .parse()
+        .unwrap_or(Rgb::WHITE))
 }
 
 /// Scroll-wheel mode for [`SmartShift`]: free-spin or ratchet (clicky).

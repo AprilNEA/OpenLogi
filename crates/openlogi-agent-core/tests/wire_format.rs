@@ -255,10 +255,12 @@ fn device_settings_payloads() {
     });
     assert_wire(&smartshift, "0001103c");
 
+    // `Rgb` serializes as the same hex string the field used to hold raw, so
+    // the pinned bytes are identical to the pre-newtype encoding.
     assert_wire(
         &Lighting {
             enabled: true,
-            color: "8000ff".into(),
+            color: "8000ff".parse().expect("valid hex"),
             brightness: 80,
         },
         "010638303030666650",

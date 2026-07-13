@@ -117,7 +117,7 @@ pub(crate) fn keyboard_glow(
         .lighting_for(&record.config_key)
         .filter(|l| l.enabled)?;
     let geom = record.asset.as_ref()?.glow.clone()?;
-    let [_, r, g, b] = crate::components::lighting_panel::parse_hex(&lighting.color).to_be_bytes();
+    let (r, g, b) = lighting.color.components();
     let color = gpui::Rgba {
         r: f32::from(r) / 255.,
         g: f32::from(g) / 255.,

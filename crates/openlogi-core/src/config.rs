@@ -571,7 +571,7 @@ mod tests {
             "g513",
             Lighting {
                 enabled: true,
-                color: "00aabb".to_string(),
+                color: "00aabb".parse().expect("valid hex"),
                 brightness: 75,
             },
         );
@@ -580,11 +580,29 @@ mod tests {
             restored.lighting("g513"),
             Some(Lighting {
                 enabled: true,
-                color: "00aabb".to_string(),
+                color: "00aabb".parse().expect("valid hex"),
                 brightness: 75,
             })
         );
         assert_eq!(restored.lighting("absent"), None);
+    }
+
+    #[test]
+    fn unparseable_lighting_color_falls_back_to_white() {
+        let cfg: Config = toml::from_str(
+            r#"
+                schema_version = 3
+                [devices.g513.lighting]
+                enabled = true
+                color = "red"
+                brightness = 50
+            "#,
+        )
+        .expect("config with a bad color still loads");
+        assert_eq!(
+            cfg.lighting("g513").map(|l| l.color),
+            Some(crate::color::Rgb::WHITE)
+        );
     }
 
     #[test]

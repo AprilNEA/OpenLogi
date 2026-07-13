@@ -6,6 +6,7 @@
 
 pub mod binding;
 pub mod brand;
+pub mod color;
 pub mod config;
 pub mod device;
 pub mod diagnostics;

@@ -345,23 +345,13 @@ pub fn set_lighting_in_background(target: Option<DeviceRoute>, lighting: &Lighti
     });
 }
 
-/// Parse `"RRGGBB"` (optionally `#`-prefixed) into an `(r, g, b)` triple.
-fn parse_hex(hex: &str) -> (u8, u8, u8) {
-    let v = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0);
-    (
-        u8::try_from((v >> 16) & 0xff).unwrap_or(0),
-        u8::try_from((v >> 8) & 0xff).unwrap_or(0),
-        u8::try_from(v & 0xff).unwrap_or(0),
-    )
-}
-
-/// Resolve a [`Lighting`] config to an `(r, g, b)` triple: the configured hex
+/// Resolve a [`Lighting`] config to an `(r, g, b)` triple: the configured
 /// colour scaled by brightness, or black when lighting is off.
 fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
     if !lighting.enabled {
         return (0, 0, 0);
     }
-    let (r, g, b) = parse_hex(&lighting.color);
+    let (r, g, b) = lighting.color.components();
     let scale =
         |c: u8| u8::try_from(u16::from(c) * u16::from(lighting.brightness) / 100).unwrap_or(c);
     (scale(r), scale(g), scale(b))

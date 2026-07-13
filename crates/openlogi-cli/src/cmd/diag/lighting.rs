@@ -6,6 +6,7 @@
 
 use anyhow::{Result, anyhow};
 use clap::{Args, ValueEnum};
+use openlogi_core::color::Rgb;
 use openlogi_hid::{DeviceRoute, LightingMethod};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -44,15 +45,8 @@ pub struct LightingArgs {
 }
 
 pub async fn run(args: LightingArgs) -> Result<()> {
-    let hex = args.color.trim_start_matches('#');
-    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(anyhow!("color must be exactly 6 hex digits, e.g. ff0000"));
-    }
-    let rgb = u32::from_str_radix(hex, 16)
-        .map_err(|_| anyhow!("color must be 6 hex digits, e.g. ff0000"))?;
-    let r = ((rgb >> 16) & 0xff) as u8;
-    let g = ((rgb >> 8) & 0xff) as u8;
-    let b = (rgb & 0xff) as u8;
+    let color: Rgb = args.color.trim_start_matches('#').parse()?;
+    let (r, g, b) = color.components();
 
     let device_query = args.device;
     let needle = device_query.as_deref().map(str::to_lowercase);
@@ -99,8 +93,14 @@ pub async fn run(args: LightingArgs) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "expect/unwrap are idiomatic in tests"
+)]
 mod color_validation_tests {
+    use openlogi_core::color::RgbParseError;
+
     use super::{LightingArgs, Method, run};
 
     fn args(color: &str) -> LightingArgs {
@@ -118,21 +118,25 @@ mod color_validation_tests {
     async fn rejects_malformed_colors_before_touching_hardware() {
         for bad in ["zzz", "ff000", "ff00001", "gg0000", ""] {
             let err = run(args(bad)).await.unwrap_err();
-            assert_eq!(
-                err.to_string(),
-                "color must be exactly 6 hex digits, e.g. ff0000"
+            assert!(
+                err.downcast_ref::<RgbParseError>().is_some(),
+                "{bad:?} should fail Rgb parsing, got: {err}"
             );
         }
     }
 
     #[tokio::test]
     async fn hash_prefix_is_stripped_before_validation() {
-        // `#zzzzzz` still fails, but with the same message — proving the `#`
-        // is stripped rather than counted toward the 6-digit length.
+        // `#zzzzzz` still fails, and the rejected input the error reports is
+        // `zzzzzz` — proving the `#` is stripped rather than counted toward
+        // the 6-digit length.
         let err = run(args("#zzzzzz")).await.unwrap_err();
+        let parse = err
+            .downcast_ref::<RgbParseError>()
+            .expect("Rgb parse error");
         assert_eq!(
-            err.to_string(),
-            "color must be exactly 6 hex digits, e.g. ff0000"
+            parse.to_string(),
+            r#"invalid RGB color "zzzzzz": expected 6 hex digits ("RRGGBB", no '#')"#
         );
     }
 }
