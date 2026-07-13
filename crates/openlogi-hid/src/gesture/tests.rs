@@ -71,7 +71,7 @@ fn a_held_dpi_button_presses_once_on_the_rising_edge() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle))
+        Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle, None))
     );
     assert!(rx.try_recv().is_err(), "a held DPI button presses once");
 }
@@ -93,11 +93,11 @@ fn a_dpi_button_re_presses_after_a_release() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle))
+        Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle, None))
     );
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle)),
+        Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle, None)),
         "a release re-arms the rising edge"
     );
     assert!(rx.try_recv().is_err());

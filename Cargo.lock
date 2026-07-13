@@ -4962,6 +4962,8 @@ dependencies = [
  "futures-concurrency",
  "futures-lite 2.6.1",
  "num_enum",
+ "objc2",
+ "objc2-app-kit",
  "openlogi-core",
  "openlogi-hidpp",
  "serde",

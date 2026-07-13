@@ -330,14 +330,25 @@ fn dispatch(
                 debug!(?direction, "gesture with no binding — ignored");
             }
         }
-        CapturedInput::ButtonPressed(button) => {
+        CapturedInput::ButtonPressed(button, frontmost_pid) => {
             let action = hook_maps
                 .read()
                 .ok()
                 .and_then(|maps| maps.bindings.get(&button).cloned());
             if let Some(action) = action {
                 debug!(?button, action = %action.label(), "HID++ button → action");
-                hook_runtime::dispatch_action(&action, dpi_cycle, capture);
+                // For browser navigation, use the AX API with the PID captured
+                // at press time (before async dispatch could shift focus).
+                let ax_handled = matches!(action, Action::BrowserBack | Action::BrowserForward)
+                    && frontmost_pid
+                        .map(|pid| openlogi_inject::ax_navigate_browser(
+                            pid,
+                            matches!(action, Action::BrowserForward),
+                        ))
+                        .unwrap_or(false);
+                if !ax_handled {
+                    hook_runtime::dispatch_action(&action, dpi_cycle, capture);
+                }
             } else {
                 debug!(?button, "HID++ button with no binding — ignored");
             }
