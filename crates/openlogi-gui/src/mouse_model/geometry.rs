@@ -11,10 +11,10 @@ use crate::mouse_model::leader_lines::{Label, Side};
 /// marker point per button, not a rectangle, so we size by hand.
 const ASSET_HOTSPOT: f32 = 56.;
 
-/// Vertical offset of each synthetic thumb-wheel rotation hotspot from the
-/// wheel's click marker, so "up" and "down" sit above and below it as two
-/// separately-clickable dots.
-const THUMBWHEEL_ROTATION_OFFSET: f32 = 18.;
+/// Centre-to-centre spacing for the synthetic thumb-wheel Up / Tap / Down
+/// controls. Their hit targets are shorter than this, so they cannot overlap.
+const THUMBWHEEL_CONTROL_SPACING: f32 = 20.;
+const THUMBWHEEL_CONTROL_HEIGHT: f32 = 18.;
 
 /// Scale the device image to *fit inside* a `max_w` × `target_h` box while
 /// preserving the **actual PNG's** aspect ratio. A tall device (a mouse) is
@@ -75,7 +75,12 @@ pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
     clippy::cast_precision_loss,
     reason = "device images are < 4096 px on either axis — well within f32 mantissa"
 )]
-pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> Vec<Hotspot> {
+pub fn asset_hotspots_for_png(
+    asset: &ResolvedAsset,
+    mouse_w: f32,
+    mouse_h: f32,
+    supports_thumbwheel_tap: bool,
+) -> Vec<Hotspot> {
     let png_w = asset.png_width as f32;
     let origin_w = asset
         .metadata
@@ -110,33 +115,49 @@ pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32)
         })
         .collect();
 
-    with_thumbwheel_rotation(hotspots)
+    with_thumbwheel_controls(hotspots, supports_thumbwheel_tap)
 }
 
-/// Replace the thumb-wheel *click* hotspot with two rotation hotspots
-/// (`ThumbwheelScrollUp` / `ThumbwheelScrollDown`) stacked above and below the
-/// wheel's marker — the click stays bound to its default and still dispatches
-/// when the wheel is diverted, it just isn't surfaced in the model.
+/// Replace the metadata's single thumb-wheel marker with independent,
+/// non-overlapping rotation controls and, when the device reports it, a
+/// capacitive tap control.
 ///
 /// No-op when the device has no thumb wheel.
-fn with_thumbwheel_rotation(mut hotspots: Vec<Hotspot>) -> Vec<Hotspot> {
+fn with_thumbwheel_controls(
+    mut hotspots: Vec<Hotspot>,
+    supports_thumbwheel_tap: bool,
+) -> Vec<Hotspot> {
     let Some(wheel) = hotspots.iter().find(|h| h.id == ButtonId::Thumbwheel) else {
         return hotspots;
     };
-    let rotation = [
+    let center_y = wheel.y + wheel.h / 2.;
+    let mut controls = vec![
         Hotspot {
             id: ButtonId::ThumbwheelScrollUp,
-            y: wheel.y - THUMBWHEEL_ROTATION_OFFSET,
+            y: center_y - THUMBWHEEL_CONTROL_SPACING - THUMBWHEEL_CONTROL_HEIGHT / 2.,
+            h: THUMBWHEEL_CONTROL_HEIGHT,
             ..*wheel
         },
         Hotspot {
             id: ButtonId::ThumbwheelScrollDown,
-            y: wheel.y + THUMBWHEEL_ROTATION_OFFSET,
+            y: center_y + THUMBWHEEL_CONTROL_SPACING - THUMBWHEEL_CONTROL_HEIGHT / 2.,
+            h: THUMBWHEEL_CONTROL_HEIGHT,
             ..*wheel
         },
     ];
+    if supports_thumbwheel_tap {
+        controls.insert(
+            1,
+            Hotspot {
+                id: ButtonId::Thumbwheel,
+                y: center_y - THUMBWHEEL_CONTROL_HEIGHT / 2.,
+                h: THUMBWHEEL_CONTROL_HEIGHT,
+                ..*wheel
+            },
+        );
+    }
     hotspots.retain(|h| h.id != ButtonId::Thumbwheel);
-    hotspots.extend(rotation);
+    hotspots.extend(controls);
     hotspots
 }
 
@@ -244,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn thumbwheel_click_becomes_two_rotation_hotspots() {
+    fn thumbwheel_marker_becomes_three_non_overlapping_controls() {
         let wheel = Hotspot {
             id: ButtonId::Thumbwheel,
             x: 100.,
@@ -252,23 +273,39 @@ mod tests {
             w: ASSET_HOTSPOT,
             h: ASSET_HOTSPOT,
         };
-        let out = with_thumbwheel_rotation(vec![wheel]);
-        assert!(
-            !out.iter().any(|h| h.id == ButtonId::Thumbwheel),
-            "the click hotspot is not surfaced in the model"
+        let out = with_thumbwheel_controls(vec![wheel], true);
+        assert_eq!(out.len(), 3);
+        let mut controls: Vec<&Hotspot> = out.iter().collect();
+        controls.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
+        assert_eq!(
+            controls.iter().map(|h| h.id).collect::<Vec<_>>(),
+            vec![
+                ButtonId::ThumbwheelScrollUp,
+                ButtonId::Thumbwheel,
+                ButtonId::ThumbwheelScrollDown,
+            ]
         );
-        assert_eq!(out.len(), 2, "click is replaced by the two rotations");
-        let up_y = out
-            .iter()
-            .find(|h| h.id == ButtonId::ThumbwheelScrollUp)
-            .map(|h| h.y);
-        let down_y = out
-            .iter()
-            .find(|h| h.id == ButtonId::ThumbwheelScrollDown)
-            .map(|h| h.y);
         assert!(
-            matches!((up_y, down_y), (Some(up), Some(down)) if up < down),
-            "up sits above down"
+            controls
+                .windows(2)
+                .all(|pair| pair[0].y + pair[0].h <= pair[1].y),
+            "thumb-wheel control hit targets must not overlap"
+        );
+    }
+
+    #[test]
+    fn thumbwheel_without_single_tap_exposes_rotation_only() {
+        let wheel = Hotspot {
+            id: ButtonId::Thumbwheel,
+            x: 100.,
+            y: 200.,
+            w: ASSET_HOTSPOT,
+            h: ASSET_HOTSPOT,
+        };
+        let out = with_thumbwheel_controls(vec![wheel], false);
+        assert_eq!(
+            out.iter().map(|h| h.id).collect::<Vec<_>>(),
+            vec![ButtonId::ThumbwheelScrollUp, ButtonId::ThumbwheelScrollDown,]
         );
     }
 
@@ -281,7 +318,7 @@ mod tests {
             w: ASSET_HOTSPOT,
             h: ASSET_HOTSPOT,
         };
-        let out = with_thumbwheel_rotation(vec![middle]);
+        let out = with_thumbwheel_controls(vec![middle], true);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, ButtonId::MiddleClick);
     }

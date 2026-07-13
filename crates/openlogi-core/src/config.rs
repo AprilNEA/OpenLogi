@@ -23,6 +23,10 @@ use crate::paths::{self, PathsError};
 /// changes; readers branch on the parsed value before consuming the rest of
 /// the file.
 ///
+/// v4 removes the historical `Thumbwheel = AppExpose` default from existing
+/// device configs. The capacitive tap now defaults to `None`; retaining the old
+/// implicit value would unnecessarily divert and re-synthesise wheel rotation.
+///
 /// v3 changes the device map from model keys to physical-device keys. No v2
 /// device entries are migrated because model-scoped settings cannot be assigned
 /// safely when two identical devices exist.
@@ -32,7 +36,7 @@ use crate::paths::{self, PathsError};
 /// `RawDeviceConfig` shim folds the legacy fields) and self-heals to v2 on the
 /// next save; [`Config::load_from_path`] rejects only versions *newer* than this
 /// so a forward file fails loudly instead of silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -627,9 +631,12 @@ impl Config {
                         found: config.schema_version,
                     });
                 }
+                if config.schema_version < 4 {
+                    config.remove_legacy_thumbwheel_tap_defaults();
+                }
                 // Stamp the in-memory doc to the current version so a re-save
-                // writes the migrated v2 shape (the device shim already folded
-                // the legacy fields during deserialize).
+                // writes every migrated shape (the device shim already folded
+                // the legacy binding fields during deserialize).
                 config.schema_version = SCHEMA_VERSION;
                 Ok(config)
             }
@@ -661,6 +668,22 @@ impl Config {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    /// Drop the pre-v4 thumbwheel tap default. Before the tap was exposed as a
+    /// separate control, `AppExpose` was stored as its default; preserving that
+    /// implicit value would arm HID++ diversion after the default changed to
+    /// `None`. New v4 configs can still intentionally bind the tap to
+    /// `AppExpose` (or any other action).
+    fn remove_legacy_thumbwheel_tap_defaults(&mut self) {
+        for device in self.devices.values_mut() {
+            if matches!(
+                device.bindings.get(&ButtonId::Thumbwheel),
+                Some(Binding::Single(Action::AppExpose))
+            ) {
+                device.bindings.remove(&ButtonId::Thumbwheel);
+            }
+        }
     }
 
     /// Returns the bindings stored for `device_key`, or an empty map if the
@@ -1220,7 +1243,7 @@ mod tests {
         // The key only contains [A-Za-z0-9_], so TOML emits it as a bare-word
         // table key (no surrounding quotes). The test asserts the observable
         // structure rather than locking in a specific quoting.
-        assert!(body.contains("schema_version = 3"), "got: {body}");
+        assert!(body.contains("schema_version = 4"), "got: {body}");
         assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
         // A `Single` binding serializes byte-identically to the pre-v2 bare
         // `Action`, so the leaf line is unchanged.
@@ -1270,6 +1293,7 @@ mod tests {
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,
+                thumbwheel_tap: false,
             },
         };
         cfg.set_device_identity("2b034", mouse.clone());
@@ -1452,10 +1476,58 @@ Click = \"Paste\"
         // Saving self-heals to the current shape: stamped version + merged table,
         // legacy field names gone.
         let body = toml::to_string_pretty(&cfg).expect("serialize");
-        assert!(body.contains("schema_version = 3"), "got: {body}");
+        assert!(body.contains("schema_version = 4"), "got: {body}");
         assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
         assert!(!body.contains("button_bindings"), "got: {body}");
         assert!(!body.contains("gesture_bindings"), "got: {body}");
+    }
+
+    #[test]
+    fn migration_removes_only_the_legacy_thumbwheel_tap_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"schema_version = 3
+
+[devices.mouse.bindings]
+Thumbwheel = "AppExpose"
+Back = "Copy"
+"#,
+        )
+        .expect("write v3 config");
+
+        let cfg = Config::load_from_path(&path).expect("load v3 config");
+        assert_eq!(cfg.schema_version, SCHEMA_VERSION);
+        assert!(
+            !cfg.bindings_for("mouse")
+                .contains_key(&ButtonId::Thumbwheel)
+        );
+        assert_eq!(
+            cfg.bindings_for("mouse").get(&ButtonId::Back),
+            Some(&Binding::Single(Action::Copy))
+        );
+    }
+
+    #[test]
+    fn current_schema_preserves_an_intentional_thumbwheel_tap_binding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"schema_version = 4
+
+[devices.mouse.bindings]
+Thumbwheel = "AppExpose"
+"#,
+        )
+        .expect("write v4 config");
+
+        let cfg = Config::load_from_path(&path).expect("load v4 config");
+        assert_eq!(
+            cfg.bindings_for("mouse").get(&ButtonId::Thumbwheel),
+            Some(&Binding::Single(Action::AppExpose))
+        );
     }
 
     #[test]

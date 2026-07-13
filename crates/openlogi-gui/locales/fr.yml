@@ -149,6 +149,7 @@ _version: 1
 "Forward": "Suivant"
 "DPI Toggle": "Bascule DPI"
 "Thumb Wheel": "Molette latérale"
+"Thumb Wheel Tap": "Toucher la molette latérale"
 "Gesture Button": "Bouton de gestes"
 "Up": "Haut"
 "Down": "Bas"

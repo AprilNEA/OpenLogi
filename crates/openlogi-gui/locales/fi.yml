@@ -149,6 +149,7 @@ _version: 1
 "Forward": "Eteenpäin"
 "DPI Toggle": "DPI-vaihto"
 "Thumb Wheel": "Peukalorulla"
+"Thumb Wheel Tap": "Peukalorullan napautus"
 "Gesture Button": "Eletoiminto"
 "Up": "Ylös"
 "Down": "Alas"
