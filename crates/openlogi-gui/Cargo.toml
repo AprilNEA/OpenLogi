@@ -68,6 +68,9 @@ expect_used = "warn"
 missing_errors_doc = "allow"
 doc_markdown = "allow"
 
+[dev-dependencies]
+tempfile = "3.27.0"
+
 [package.metadata.bundle]
 name = "OpenLogi"
 identifier = "org.openlogi.openlogi"

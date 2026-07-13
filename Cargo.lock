@@ -5096,6 +5096,7 @@ dependencies = [
  "serde_json",
  "sys-locale",
  "tarpc",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
