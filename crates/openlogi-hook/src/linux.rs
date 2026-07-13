@@ -244,8 +244,10 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
                 delta_y: value,
             }),
             _ => {
-                #[allow(clippy::cast_precision_loss)]
-                // scroll deltas fit comfortably in f32 mantissa
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "scroll deltas fit comfortably in the f32 mantissa"
+                )]
                 let v = value as f32;
                 if hires_scroll {
                     match axis {
@@ -286,8 +288,10 @@ fn key_to_button(key: KeyCode) -> Option<ButtonId> {
     }
 }
 
-// All params are owned: path/cb/stop/stop_rx are moved into the thread and must not be refs.
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "path/cb/stop/stop_rx are moved into the spawned thread and must not be refs"
+)]
 fn device_thread(
     path: std::path::PathBuf,
     mut device: Device,

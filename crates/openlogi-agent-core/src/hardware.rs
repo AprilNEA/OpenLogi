@@ -364,13 +364,11 @@ fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
     (scale(r), scale(g), scale(b))
 }
 
-// ---------------------------------------------------------------------------
 // Async, awaitable variants used by the IPC server (the GUI routes "apply now"
 // / "read" device commands through the agent, which awaits and reports the
 // result). Writes reuse the capture session's open channel when it targets the
 // same device, exactly like the fire-and-forget `*_in_background` helpers, so
 // the daemon never opens a second channel to a device it already holds.
-// ---------------------------------------------------------------------------
 
 /// Apply `dpi` to `route`, reusing the capture session's channel when possible.
 pub async fn apply_dpi(
