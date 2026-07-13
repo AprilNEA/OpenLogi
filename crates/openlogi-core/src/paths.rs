@@ -36,6 +36,14 @@ fn xdg() -> Result<Xdg, PathsError> {
     Xdg::new().map_err(|_| PathsError::HomeNotFound)
 }
 
+/// The current user's home directory.
+///
+/// The plain home, not an XDG base — for callers placing files under
+/// OS-native locations (e.g. macOS `~/Library/LaunchAgents`).
+pub fn home_dir() -> Result<PathBuf, PathsError> {
+    Ok(xdg()?.home_dir().to_path_buf())
+}
+
 /// The raw XDG config home directory (without the `openlogi` subdirectory).
 ///
 /// Honours an absolute `$XDG_CONFIG_HOME`; falls back to `~/.config`.
