@@ -153,9 +153,8 @@ pub enum PasskeyMethod {
     },
 }
 
-/// Renders a Bolt passkey as a 10-bit MSB-first left/right click sequence.
-fn passkey_to_clicks(passkey: &str) -> Vec<Click> {
-    let value: u32 = passkey.trim().parse().unwrap_or(0);
+/// Renders a Bolt passkey value as a 10-bit MSB-first left/right click sequence.
+fn passkey_to_clicks(value: u32) -> Vec<Click> {
     (0..10)
         .rev()
         .map(|bit| {
@@ -216,6 +215,10 @@ pub enum PairingError {
     /// Pairing flow was cancelled by the caller.
     #[error("pairing was cancelled")]
     Cancelled,
+    /// A receiver notification failed to decode; authentication cannot
+    /// proceed safely, so the flow fails instead of presenting bogus data.
+    #[error("malformed pairing notification ({0})")]
+    MalformedNotification(&'static str),
 }
 
 impl From<async_hid::HidError> for PairingError {
@@ -392,15 +395,18 @@ async fn drive(
                             let _ = events.send(PairingEvent::DeviceFound(device));
                         }
                     }
-                    Notification::Passkey(passkey) => {
+                    Notification::Passkey { digits, value } => {
                         let method = match pairing_auth {
-                            Some(auth) if auth & 0x01 != 0 => PasskeyMethod::Keyboard(passkey),
+                            Some(auth) if auth & 0x01 != 0 => PasskeyMethod::Keyboard(digits),
                             _ => PasskeyMethod::Pointer {
-                                clicks: passkey_to_clicks(&passkey),
-                                passkey,
+                                clicks: passkey_to_clicks(value),
+                                passkey: digits,
                             },
                         };
                         let _ = events.send(PairingEvent::Passkey(method));
+                    }
+                    Notification::MalformedPasskey => {
+                        return Err(PairingError::MalformedNotification("passkey digits"));
                     }
                     Notification::PairingSucceeded { slot } => {
                         let _ = events.send(PairingEvent::Paired { slot });

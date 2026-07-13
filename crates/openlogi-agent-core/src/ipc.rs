@@ -162,6 +162,11 @@ impl From<PairingError> for PairingFailure {
             PairingError::Timeout => Self::Timeout,
             PairingError::Device(code) => Self::Device { code },
             PairingError::Cancelled => Self::Cancelled,
+            // Carried as the generic transport-failure message so the wire
+            // format stays unchanged (PairingFailure variants are append-only).
+            PairingError::MalformedNotification(what) => Self::Hid {
+                message: format!("malformed pairing notification ({what})"),
+            },
         }
     }
 }

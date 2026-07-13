@@ -27,8 +27,12 @@ pub(super) enum Notification {
     PairingSucceeded { slot: u8 },
     /// Bolt pairing/discovery failed with a receiver error code.
     PairingError(u8),
-    /// Bolt passkey to present to the user (6 ASCII digits).
-    Passkey(String),
+    /// Bolt passkey to present to the user: the digits shown by the device
+    /// (validated ASCII digits) plus their numeric value for click rendering.
+    Passkey { digits: String, value: u32 },
+    /// A passkey notification whose payload was not ASCII digits; pairing
+    /// must fail rather than present a bogus authentication sequence.
+    MalformedPasskey,
     /// A device linked to the receiver (`slot` = its device index).
     Connected { slot: u8, established: bool },
     /// Unifying pairing lock changed state; `error` is non-zero on failure.
@@ -105,8 +109,20 @@ pub(super) fn parse_notification(
             }
         }
         id::PASSKEY_REQUEST => {
-            let passkey = String::from_utf8_lossy(&p[1..7]).into_owned();
-            Some(Notification::Passkey(passkey))
+            // 6 bytes, NUL-padded when the passkey is shorter.
+            let digits = &p[1..7];
+            let len = digits.iter().position(|&b| b == 0).unwrap_or(digits.len());
+            let digits = &digits[..len];
+            if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+                return Some(Notification::MalformedPasskey);
+            }
+            let value = digits
+                .iter()
+                .fold(0u32, |acc, &b| acc * 10 + u32::from(b - b'0'));
+            Some(Notification::Passkey {
+                digits: String::from_utf8_lossy(digits).into_owned(),
+                value,
+            })
         }
         id::UNIFYING_LOCK => Some(Notification::UnifyingLock {
             open: p[0] & 0x01 != 0,
@@ -225,7 +241,42 @@ mod tests {
         p[1..7].copy_from_slice(b"123456");
         assert_eq!(
             parse_notification(id::PASSKEY_REQUEST, 0xff, p),
-            Some(Notification::Passkey("123456".to_string()))
+            Some(Notification::Passkey {
+                digits: "123456".to_string(),
+                value: 123_456,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_nul_padded_passkey() {
+        let mut p = [0u8; 17];
+        p[1..4].copy_from_slice(b"042");
+        assert_eq!(
+            parse_notification(id::PASSKEY_REQUEST, 0xff, p),
+            Some(Notification::Passkey {
+                digits: "042".to_string(),
+                value: 42,
+            })
+        );
+    }
+
+    #[test]
+    fn non_digit_passkey_is_malformed() {
+        let mut p = [0u8; 17];
+        p[1..7].copy_from_slice(b"12x456");
+        assert_eq!(
+            parse_notification(id::PASSKEY_REQUEST, 0xff, p),
+            Some(Notification::MalformedPasskey)
+        );
+    }
+
+    #[test]
+    fn empty_passkey_is_malformed() {
+        let p = [0u8; 17];
+        assert_eq!(
+            parse_notification(id::PASSKEY_REQUEST, 0xff, p),
+            Some(Notification::MalformedPasskey)
         );
     }
 
