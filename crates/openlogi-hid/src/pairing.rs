@@ -62,7 +62,8 @@ pub enum ReceiverFamily {
 fn family_for(product_id: u16) -> Option<ReceiverFamily> {
     if crate::BOLT_PIDS.contains(&product_id) {
         Some(ReceiverFamily::Bolt)
-    } else if crate::UNIFYING_PIDS.contains(&product_id) {
+    } else if crate::speaks_unifying_protocol(product_id) {
+        // Unifying proper plus protocol-compatible Lightspeed receivers.
         Some(ReceiverFamily::Unifying)
     } else {
         None

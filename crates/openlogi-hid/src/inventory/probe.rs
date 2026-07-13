@@ -199,7 +199,7 @@ async fn probe_unifying_receiver(
     NodeProbe {
         inventory: Some(DeviceInventory {
             receiver: ReceiverInfo {
-                name: "Unifying Receiver".to_string(),
+                name: crate::route::receiver_display_name(info.product_id).to_string(),
                 vendor_id: info.vendor_id,
                 product_id: info.product_id,
                 unique_id,
