@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, DeviceRoute, DpiInfo, HidppOperation, SharedChannel, SmartShiftMode,
-    SmartShiftStatus, WriteError,
+    CaptureChannel, DeviceRoute, DpiInfo, HidppFeatureErrorKind, HidppOperation, SharedChannel,
+    SmartShiftMode, SmartShiftStatus, WriteError,
 };
 use tracing::{debug, warn};
 
@@ -228,9 +228,12 @@ pub fn write_dpi_in_background(
                 return;
             }
         };
-        // All device-supported DPI values fit in HID++'s u16 wire field. The
-        // saturating fallback exists only for type-system exhaustiveness.
-        let dpi_u16 = u16::try_from(dpi).unwrap_or(u16::MAX);
+        // All device-supported DPI values fit in HID++'s u16 wire field; a
+        // larger value is a caller bug and must not be clamped onto the device.
+        let Ok(dpi_u16) = u16::try_from(dpi) else {
+            warn!(dpi, "DPI exceeds the HID++ u16 wire field; write skipped");
+            return;
+        };
         let result = rt.block_on(async {
             tokio::time::timeout(WRITE_BUDGET, async {
                 match &shared {
@@ -376,7 +379,13 @@ pub async fn apply_dpi(
     route: &DeviceRoute,
     dpi: u32,
 ) -> Result<(), WriteError> {
-    let dpi = u16::try_from(dpi).unwrap_or(u16::MAX);
+    // Reject a DPI beyond the HID++ u16 wire field the same way the device
+    // itself would reject an out-of-range argument.
+    let dpi = u16::try_from(dpi).map_err(|_| WriteError::HidppFeature {
+        operation: HidppOperation::WriteDpi,
+        feature_hex: 0x2201,
+        kind: HidppFeatureErrorKind::OutOfRange,
+    })?;
     let shared = reusable_channel(Some(capture), route);
     timed(HidppOperation::WriteDpi, async {
         match &shared {
