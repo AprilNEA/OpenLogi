@@ -14,13 +14,13 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::device::DeviceKind;
-use url::Url;
 
 use super::widgets::{
     add_device_button, back_button, battery_summary, kind_label, panel_card, panel_card_fill,
     route_label, sidebar_action, status_badge,
 };
 use super::{AppView, DetailTab};
+use crate::app_menu::file_url;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
@@ -177,7 +177,12 @@ fn pointer_tab(
                     pal,
                     smartshift_panel.clone().into_any_element(),
                 )))
-                .child(pointer_grid_card_natural(scrolling_card(pal, cx))),
+                .child(
+                    div()
+                        .min_w(px(332.))
+                        .flex_1()
+                        .child(scrolling_card(pal, cx)),
+                ),
         )
 }
 
@@ -185,10 +190,6 @@ fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
     // Two cards plus one 16 px gap fit exactly inside the 720 px window minimum
     // after this tab's 20 px side padding, while still leaving a usable slider.
     div().min_w(px(332.)).flex_1().h_full().child(card)
-}
-
-fn pointer_grid_card_natural(card: impl IntoElement) -> impl IntoElement {
-    div().min_w(px(332.)).flex_1().child(card)
 }
 
 /// Scrolling card: a per-device "invert scroll direction" toggle (#126). Pure
@@ -441,8 +442,4 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
         .label_width(px(100.))
         .bordered(false)
         .children(items)
-}
-
-fn file_url(path: &std::path::Path) -> Option<String> {
-    Url::from_file_path(path).ok().map(Into::into)
 }
