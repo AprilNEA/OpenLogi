@@ -39,13 +39,13 @@ pub(super) use openlogi_core::config::{
 };
 
 pub(super) use crate::app_menu::{CloseWindow, Minimize, Zoom};
+pub(super) use crate::asset::sync::{AssetCommand, AssetControl};
 #[cfg(target_os = "macos")]
 pub(super) use crate::platform::permissions::Permission;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(super) use crate::platform::permissions::PermissionStatus;
 pub(super) use crate::state::AppState;
 pub(super) use crate::theme::{self, Palette};
-pub(super) use crate::{AssetCommand, AssetControl};
 
 use crate::windows::{self, AuxWindow};
 
