@@ -12,6 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -511,33 +512,24 @@ impl Config {
     }
 }
 
+/// Write `bytes` to `path` atomically via a randomized temp file + rename,
+/// with the directory fsync the old hand-rolled writer lacked.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let tmp = path.with_extension("toml.tmp");
+    #[cfg_attr(
+        not(unix),
+        expect(unused_mut, reason = "only the unix path mutates the options")
+    )]
+    let mut options = AtomicWriteFile::options();
+    #[cfg(unix)]
     {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut f = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)?;
-            io::Write::write_all(&mut f, bytes)?;
-            f.sync_all()?;
-        }
-        #[cfg(not(unix))]
-        {
-            let mut f = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp)?;
-            io::Write::write_all(&mut f, bytes)?;
-            f.sync_all()?;
-        }
+        use atomic_write_file::unix::OpenOptionsExt as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // Force 0600 on every save, matching the previous writer.
+        options.preserve_mode(false).mode(0o600);
     }
-    fs::rename(&tmp, path)
+    let mut file = options.open(path)?;
+    io::Write::write_all(&mut file, bytes)?;
+    file.commit()
 }
 
 #[cfg(test)]
