@@ -22,10 +22,18 @@ use crate::{
 /// All USB vendor & product ID pairs that are known to identify Unifying
 /// receivers.
 ///
-/// `046d:c539` is the Lightspeed gaming receiver, which answers the same
-/// HID++ 1.0 registers (pairing count, connection state, pairing information)
-/// as Unifying receivers.
-pub const VPID_PAIRS: &[(u16, u16)] = &[(0x046d, 0xc52b), (0x046d, 0xc532), (0x046d, 0xc539)];
+/// `046d:c539` is the Lightspeed gaming receiver; `046d:c53f` is the Lightspeed
+/// nano receiver (bundled with G-series wireless mice such as the G305). Both
+/// answer the same HID++ 1.0 registers (pairing count, connection state, pairing
+/// information) as Unifying receivers. Callers that surface a user-facing
+/// receiver name label Lightspeed PIDs separately (see `openlogi-hid`).
+/// `0xc53f` was verified against a G305 (paired device wpid `0x4074`).
+pub const VPID_PAIRS: &[(u16, u16)] = &[
+    (0x046d, 0xc52b),
+    (0x046d, 0xc532),
+    (0x046d, 0xc539),
+    (0x046d, 0xc53f),
+];
 
 /// All known registers of the Unifying receiver.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, TryFromPrimitive)]
