@@ -128,7 +128,13 @@ impl SettingsView {
     )]
     fn new(initial_page: SettingsPage, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        focus_handle.focus(window, cx);
+        // Defer the initial focus: focusing during view construction re-enters
+        // the platform window handler and panics ("RefCell already borrowed")
+        // on the Linux Wayland/X11 gpui backends.
+        cx.defer_in(window, {
+            let focus_handle = focus_handle.clone();
+            move |_, window, cx| focus_handle.focus(window, cx)
+        });
         // Reuse the app-wide shared updater installed at launch, so a launch-time
         // check result is already visible. Fall back to a fresh one if it somehow
         // wasn't installed.

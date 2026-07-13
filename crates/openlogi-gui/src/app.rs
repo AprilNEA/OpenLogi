@@ -158,7 +158,13 @@ impl AppView {
     ) -> Self {
         let cache = AssetResolver::new();
         let focus_handle = cx.focus_handle();
-        focus_handle.focus(window, cx);
+        // Defer the initial focus: focusing during view construction re-enters
+        // the platform window handler and panics ("RefCell already borrowed")
+        // on the Linux Wayland/X11 gpui backends.
+        cx.defer_in(window, {
+            let focus_handle = focus_handle.clone();
+            move |_, window, cx| focus_handle.focus(window, cx)
+        });
         // `AppState` is installed as a global by `main` (with the IPC command
         // sender) before any window opens; downstream reads use `try_global`
         // and tolerate its absence, so there's no fallback construction here.

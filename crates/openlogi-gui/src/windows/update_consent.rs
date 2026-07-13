@@ -31,7 +31,13 @@ pub struct UpdateConsentView {
 impl UpdateConsentView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        focus_handle.focus(window, cx);
+        // Defer the initial focus: focusing during view construction re-enters
+        // the platform window handler and panics ("RefCell already borrowed")
+        // on the Linux Wayland/X11 gpui backends.
+        cx.defer_in(window, {
+            let focus_handle = focus_handle.clone();
+            move |_, window, cx| focus_handle.focus(window, cx)
+        });
         Self {
             focus_handle,
             appearance_obs: None,
