@@ -369,6 +369,16 @@ pub enum Action {
     /// Mouse "forward" side button (extra button 5). Native counterpart to
     /// [`Action::MouseBack`]; see [`Action::BrowserForward`] for the ⌘] form.
     MouseForward,
+    /// Extra mouse button 6. Emitted as the real button-6 event for apps, games,
+    /// and CAD software that bind it. macOS/Linux only — Windows `SendInput`
+    /// caps at button 5, so this logs-and-skips there.
+    MouseButton6,
+    /// Extra mouse button 7. See [`Action::MouseButton6`].
+    MouseButton7,
+    /// Extra mouse button 8. See [`Action::MouseButton6`].
+    MouseButton8,
+    /// Extra mouse button 9. See [`Action::MouseButton6`].
+    MouseButton9,
 
     // ── Editing ──────────────────────────────────────────────────────────────
     /// Copy the current selection (⌘C / Ctrl+C).
@@ -684,6 +694,10 @@ impl Action {
             Action::MiddleClick => "Middle Click".into(),
             Action::MouseBack => "Back (Button 4)".into(),
             Action::MouseForward => "Forward (Button 5)".into(),
+            Action::MouseButton6 => "Button 6".into(),
+            Action::MouseButton7 => "Button 7".into(),
+            Action::MouseButton8 => "Button 8".into(),
+            Action::MouseButton9 => "Button 9".into(),
             Action::Copy => "Copy".into(),
             Action::Paste => "Paste".into(),
             Action::Cut => "Cut".into(),
@@ -734,7 +748,11 @@ impl Action {
             | Action::RightClick
             | Action::MiddleClick
             | Action::MouseBack
-            | Action::MouseForward => Category::Mouse,
+            | Action::MouseForward
+            | Action::MouseButton6
+            | Action::MouseButton7
+            | Action::MouseButton8
+            | Action::MouseButton9 => Category::Mouse,
             // CustomShortcut is assigned to Editing so it doesn't need a
             // separate arm (it's not in the picker catalog).
             Action::Copy
@@ -792,6 +810,10 @@ impl Action {
             Action::MiddleClick,
             Action::MouseBack,
             Action::MouseForward,
+            Action::MouseButton6,
+            Action::MouseButton7,
+            Action::MouseButton8,
+            Action::MouseButton9,
             // Editing
             Action::Copy,
             Action::Paste,
@@ -1347,6 +1369,20 @@ mod tests {
         assert_eq!(Action::LeftClick.category(), Category::Mouse);
         assert_eq!(Action::RightClick.category(), Category::Mouse);
         assert_eq!(Action::MiddleClick.category(), Category::Mouse);
+        assert_eq!(Action::MouseBack.category(), Category::Mouse);
+        assert_eq!(Action::MouseForward.category(), Category::Mouse);
+        assert_eq!(Action::MouseButton6.category(), Category::Mouse);
+        assert_eq!(Action::MouseButton7.category(), Category::Mouse);
+        assert_eq!(Action::MouseButton8.category(), Category::Mouse);
+        assert_eq!(Action::MouseButton9.category(), Category::Mouse);
+    }
+
+    #[test]
+    fn extra_mouse_button_labels() {
+        assert_eq!(Action::MouseButton6.label(), "Button 6");
+        assert_eq!(Action::MouseButton7.label(), "Button 7");
+        assert_eq!(Action::MouseButton8.label(), "Button 8");
+        assert_eq!(Action::MouseButton9.label(), "Button 9");
     }
 
     #[test]

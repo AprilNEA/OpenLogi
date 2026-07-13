@@ -303,6 +303,12 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         // BrowserBack/BrowserForward's bare arrows in the Navigation section.
         Action::MouseBack => "action-icons/circle-arrow-left.svg",
         Action::MouseForward => "action-icons/circle-arrow-right.svg",
+        // Buttons 6–9 have no canonical glyph; reuse the generic mouse icon
+        // (same as MiddleClick). The button number is in the label.
+        Action::MouseButton6
+        | Action::MouseButton7
+        | Action::MouseButton8
+        | Action::MouseButton9 => "action-icons/mouse.svg",
         Action::Copy => "action-icons/copy.svg",
         Action::Paste => "action-icons/clipboard-paste.svg",
         Action::Cut => "action-icons/scissors.svg",
