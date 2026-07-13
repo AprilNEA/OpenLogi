@@ -190,7 +190,7 @@ pub(super) fn battery_summary(battery: &BatteryInfo, pal: Palette) -> impl IntoE
                 .child(
                     div()
                         .h_full()
-                        .w(relative_percent(battery.percentage))
+                        .w(relative(f32::from(battery.percentage.clamp(1, 100)) / 100.))
                         .rounded_full()
                         .bg(rgb(battery_color(battery.percentage))),
                 ),
@@ -203,10 +203,6 @@ fn battery_color(percentage: u8) -> u32 {
         21..=50 => theme::STATUS_CONNECTING,
         _ => theme::STATUS_CONNECTED,
     }
-}
-
-fn relative_percent(value: u8) -> gpui::DefiniteLength {
-    relative(f32::from(value.clamp(1, 100)) / 100.)
 }
 
 pub(super) fn sidebar_action(
