@@ -56,8 +56,11 @@ pub fn new_entity(cx: &mut App) -> Entity<Updater> {
             .os(std::env::consts::OS)
             .arch(release_arch())
             .format(release_format());
-        let version =
-            Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 0, 0));
+        #[expect(
+            clippy::expect_used,
+            reason = "CARGO_PKG_VERSION is cargo-provided and always valid semver"
+        )]
+        let version = Version::parse(env!("CARGO_PKG_VERSION")).expect("valid embedded version");
         let mut config = EngineConfig::new(version).verification(Verification::Strict);
         if let Some(key) = minisign_public_key() {
             config = config.minisign_public_key(key);
