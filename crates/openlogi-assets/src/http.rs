@@ -297,27 +297,23 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
     fn write_replace_overwrites_in_place() {
-        let dir = std::env::temp_dir().join(format!("openlogi-http-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let dst = dir.join("a.png");
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let dst = dir.path().join("a.png");
 
         write_replace(&dst, b"one").expect("first write");
         write_replace(&dst, b"two").expect("replace");
 
         assert_eq!(std::fs::read(&dst).expect("read back"), b"two");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
     #[test]
     #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
     fn write_replace_replaces_a_planted_symlink_instead_of_following_it() {
-        let dir =
-            std::env::temp_dir().join(format!("openlogi-http-symlink-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let victim = dir.join("victim.txt");
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let victim = dir.path().join("victim.txt");
         std::fs::write(&victim, b"untouched").expect("seed victim");
-        let dst = dir.join("b.png");
+        let dst = dir.path().join("b.png");
         std::os::unix::fs::symlink(&victim, &dst).expect("plant symlink");
 
         write_replace(&dst, b"payload").expect("write through planted link");
@@ -328,7 +324,6 @@ mod tests {
         let meta = std::fs::symlink_metadata(&dst).expect("stat dst");
         assert!(meta.file_type().is_file());
         assert_eq!(std::fs::read(&dst).expect("read dst"), b"payload");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
