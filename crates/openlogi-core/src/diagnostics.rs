@@ -22,10 +22,15 @@ pub enum AssetSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionKind {
+    /// Paired through a Logi Bolt receiver.
     BoltReceiver,
+    /// Paired through a legacy Unifying receiver.
     UnifyingReceiver,
+    /// Connected directly over Bluetooth — no receiver involved.
     BluetoothDirect,
+    /// Connected over a USB cable.
     Wired,
+    /// The route could not be classified from the announced transports.
     Unknown,
 }
 
@@ -33,7 +38,10 @@ pub enum ConnectionKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "depot")]
 pub enum RenderState {
+    /// A curated render resolved; carries the depot name (e.g.
+    /// `"mx_master_3s"`).
     Resolved(String),
+    /// No depot matched — the UI draws the synthetic silhouette instead.
     Silhouette,
 }
 
@@ -53,20 +61,28 @@ pub enum InventoryState {
 /// A receiver, by model only — never its `unique_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiverDiag {
+    /// Receiver product string — model-level, carries no per-unit identity.
     pub name: String,
+    /// USB vendor ID (`0x046d` for Logitech).
     pub vendor_id: u16,
+    /// USB product ID distinguishing the receiver model.
     pub product_id: u16,
 }
 
 /// One paired device, model-level only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceDiag {
+    /// The name the GUI shows for this device.
     pub display_name: String,
+    /// Classified device kind — an identity guess, not a capability claim.
     pub kind: DeviceKind,
     /// Firmware codename (e.g. `"MX Master 3S"`), when known.
     pub codename: Option<String>,
+    /// How the device reaches the host.
     pub connection: ConnectionKind,
+    /// Whether the device was reachable when the report was generated.
     pub online: bool,
+    /// Battery snapshot, `None` when offline or unreported.
     pub battery: Option<BatteryInfo>,
     /// Measured HID++ capabilities, or `None` if never probed since the agent started.
     pub capabilities: Option<Capabilities>,
@@ -74,66 +90,99 @@ pub struct DeviceDiag {
     pub dpi: Option<String>,
     /// Model identifier (e.g. `"2b35a"`) — a per-model key, not user-identifying.
     pub config_key: String,
+    /// Wireless PID from the receiver's pairing table, when paired via a
+    /// receiver.
     pub wpid: Option<u16>,
     /// Per-transport PID array from HID++ DeviceInformation (0x0003).
     pub model_ids: Option<[u16; 3]>,
+    /// Extended-model byte pairing with [`Self::model_ids`] to form the
+    /// registry `modelId`.
     pub extended_model_id: Option<u8>,
+    /// Transports announced by the firmware, when the device was probed.
     pub transports: Option<DeviceTransports>,
+    /// Whether a curated render resolved, or the silhouette fallback drew.
     pub render: RenderState,
+    /// Receiver slot, or `0xFF` for direct connections (rendered as
+    /// "direct").
     pub slot: u8,
 }
 
 /// App, agent, and host environment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppInfo {
+    /// Version of the GUI process writing the report.
     pub gui_version: String,
     /// `"debug"` or `"release"`.
     pub build_profile: String,
     /// `None` when the agent is unreachable (not yet connected / restarting).
     pub agent_version: Option<String>,
+    /// IPC protocol version compiled into the GUI.
     pub protocol_gui: u32,
+    /// IPC protocol version the agent reported, `None` when unreachable.
+    /// A mismatch with [`Self::protocol_gui`] is flagged in the rendered
+    /// report.
     pub protocol_agent: Option<u32>,
     /// Enumeration health behind the device section, `None` when the agent
     /// status is unavailable.
     pub inventory: Option<InventoryState>,
     /// Raw `std::env::consts::OS` (`"macos"` / `"linux"` / `"windows"`).
     pub os: String,
+    /// OS version string, when the platform exposes one.
     pub os_version: Option<String>,
+    /// Host CPU architecture (e.g. `"arm64"`).
     pub arch: String,
+    /// OS-reported locale, `None` when detection failed.
     pub system_locale: Option<String>,
     /// Explicit UI-language override, or `None` for "follow system".
     pub ui_language: Option<String>,
+    /// Input-monitoring/Accessibility permission state — macOS gates the
+    /// input hook on it.
     pub accessibility_granted: bool,
     /// `None` when the agent status is unavailable.
     pub hook_installed: Option<bool>,
+    /// Launch-at-login setting, `None` when unknown.
     pub launch_at_login: Option<bool>,
+    /// Menu-bar/tray icon setting, `None` when unknown.
     pub show_in_menu_bar: Option<bool>,
+    /// Automatic update-check setting, `None` when unknown.
     pub check_for_updates: Option<bool>,
+    /// Thumbwheel sensitivity setting, `None` when unknown.
     pub thumbwheel_sensitivity: Option<i32>,
+    /// `schema_version` of the loaded `config.toml`, when one loaded.
     pub config_schema_version: Option<u32>,
+    /// Number of device entries in the config, when known.
     pub configured_device_count: Option<usize>,
+    /// `true` for an installed app bundle, `false` for a source/dev build.
     pub running_from_bundle: bool,
 }
 
 /// Asset-cache state behind device renders.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetInfo {
+    /// Which tier the render resolver is serving from.
     pub source: AssetSource,
+    /// Whether a registry `index.json` parsed successfully.
     pub index_loaded: bool,
     /// Number of device models in the loaded index, when known.
     pub index_entries: Option<usize>,
+    /// Whether the per-user asset cache directory exists.
     pub user_cache_present: bool,
     /// Cache directory with the home prefix redacted to `~`.
     pub cache_path: String,
+    /// Whether the assets shipped inside the app bundle were found.
     pub bundle_present: bool,
 }
 
 /// The whole report. Render with [`Self::to_markdown`] for the clipboard.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticsReport {
+    /// App, agent, and host environment section.
     pub app: AppInfo,
+    /// Asset-cache state behind device renders.
     pub assets: AssetInfo,
+    /// Model-level receiver list (may be empty for direct-only setups).
     pub receivers: Vec<ReceiverDiag>,
+    /// Per-device detail, one entry per enumerated device.
     pub devices: Vec<DeviceDiag>,
 }
 

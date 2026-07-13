@@ -20,17 +20,30 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeviceKind {
+    /// Mice — the family OpenLogi's binding/DPI panels primarily target.
     Mouse,
+    /// Keyboards, including lighting-capable ones.
     Keyboard,
+    /// Standalone numeric keypads.
     Numpad,
+    /// Presentation remotes (slide clickers).
     Presenter,
+    /// Remote controls; the registry's `"remotecontrol"` string also folds here.
     Remote,
+    /// Trackballs — treated like mice for presumed capabilities.
     Trackball,
+    /// External touchpads; the registry's `"trackpad"` string also folds here.
     Touchpad,
+    /// Pen/graphics tablets.
     Tablet,
+    /// Game controllers, mirrored from the Bolt pairing vocabulary.
     Gamepad,
+    /// Joysticks, mirrored from the Bolt pairing vocabulary.
     Joystick,
+    /// Audio headsets paired through a receiver.
     Headset,
+    /// Not classified by any source — also the "no asset opinion" value
+    /// [`DeviceKind::from_registry_type`] returns for unmodelled strings.
     Unknown,
 }
 
@@ -135,10 +148,15 @@ impl Capabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BatteryLevel {
+    /// Almost depleted — the firmware's most urgent bucket.
     Critical,
+    /// Running low; worth surfacing a charge hint.
     Low,
+    /// Comfortable middle range, no user action needed.
     Good,
+    /// At or near full charge.
     Full,
+    /// The firmware did not report a level, or reported one we don't model.
     Unknown,
 }
 
@@ -147,26 +165,44 @@ pub enum BatteryLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BatteryStatus {
+    /// Running on battery.
     Discharging,
+    /// Charging at the normal rate.
     Charging,
+    /// Charging at reduced current (e.g. from a weak power source).
     ChargingSlow,
+    /// Charge complete while still connected to power.
     Full,
+    /// The device reported a charging fault.
     Error,
+    /// A status value this build doesn't model (future protocol additions).
     Unknown,
 }
 
+/// Battery snapshot for one paired device, as last polled over HID++.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatteryInfo {
+    /// Reported charge percentage (`0..=100`).
     pub percentage: u8,
+    /// Coarse bucket for UI that doesn't want the raw percentage.
     pub level: BatteryLevel,
+    /// Charging state at poll time.
     pub status: BatteryStatus,
 }
 
+/// Identity of an enumerated receiver — no paired-device state (that lives
+/// in [`DeviceInventory::paired`]). For a direct (Bluetooth/wired) device,
+/// a synthetic entry mirroring the device's own HID identity fills this role.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReceiverInfo {
+    /// Product string from the HID enumeration (e.g. `"Logi Bolt Receiver"`).
     pub name: String,
+    /// USB vendor ID (`0x046d` for Logitech).
     pub vendor_id: u16,
+    /// USB product ID distinguishing the receiver model.
     pub product_id: u16,
+    /// Platform-reported serial, when one is exposed. Deliberately excluded
+    /// from diagnostics (see [`crate::diagnostics::ReceiverDiag`]).
     pub unique_id: Option<String>,
 }
 
@@ -181,13 +217,23 @@ pub struct ReceiverInfo {
 /// to format `extended_model_id` + `model_ids[N]` to match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceModelInfo {
+    /// Number of firmware entities (main firmware, bootloader, …) the
+    /// device reports.
     pub entity_count: u8,
     /// HID++ DeviceInformation serial number, when the device supports the
     /// optional serial-number function.
     pub serial_number: Option<String>,
+    /// Per-unit ID bytes — unique to the physical unit, unlike the
+    /// model-level fields around it.
     pub unit_id: [u8; 4],
+    /// Which transports the firmware supports; defines the slot order of
+    /// [`Self::model_ids`].
     pub transports: DeviceTransports,
+    /// Per-transport PIDs ordered to match [`Self::transports`] (USB, eQuad,
+    /// BTLE, Bluetooth); slots for disabled transports stay `0`.
     pub model_ids: [u16; 3],
+    /// Extra model byte prefixed to a PID to form the asset registry's
+    /// `modelId` — see [`Self::config_key`].
     pub extended_model_id: u8,
 }
 
@@ -215,21 +261,37 @@ impl DeviceModelInfo {
 )]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceTransports {
+    /// Wired USB.
     pub usb: bool,
+    /// Logitech eQuad — the Unifying/Bolt receiver RF protocol.
     pub equad: bool,
+    /// Bluetooth Low Energy.
     pub btle: bool,
+    /// Classic Bluetooth.
     pub bluetooth: bool,
 }
 
+/// One device in the agent's inventory snapshot: a receiver pairing slot,
+/// or a direct (Bluetooth/wired) attachment under its synthetic
+/// [`ReceiverInfo`]. Embedded in [`DeviceInventory`], so its field order is
+/// IPC wire format — see that type's contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairedDevice {
     /// Receiver-assigned slot (1..=6 for Bolt).
     pub slot: u8,
+    /// Firmware codename (e.g. `"MX Master 3S"`), when reported.
     pub codename: Option<String>,
     /// Wireless product ID. `None` for offline / unreachable devices on hidpp 0.2.
     pub wpid: Option<u16>,
+    /// Best-guess classification. Identity only — panel gating uses
+    /// [`Self::capabilities`] instead, so a misread kind can't hide panels
+    /// (issue #127).
     pub kind: DeviceKind,
+    /// Whether the device was reachable at enumeration time; offline devices
+    /// keep their slot with reduced detail.
     pub online: bool,
+    /// Last battery reading, `None` when offline or the device doesn't
+    /// report battery.
     pub battery: Option<BatteryInfo>,
     /// Output of HID++ feature 0x0003 — populated for online devices that
     /// expose the feature. Drives asset-registry lookups in the GUI.
@@ -250,7 +312,11 @@ pub struct PairedDevice {
 /// bump (guarded by `openlogi-agent-core/tests/wire_format.rs`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceInventory {
+    /// The receiver's identity — synthetic (mirroring the device itself)
+    /// for a direct Bluetooth/wired attachment.
     pub receiver: ReceiverInfo,
+    /// The devices reached through this receiver; a direct attachment
+    /// carries exactly one entry.
     pub paired: Vec<PairedDevice>,
 }
 

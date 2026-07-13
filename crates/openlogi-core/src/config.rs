@@ -47,6 +47,9 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Schema version the file was written with. Compared against
+    /// [`SCHEMA_VERSION`] on load: older layouts migrate, newer ones are
+    /// rejected loudly rather than silently losing settings.
     pub schema_version: u32,
     /// Non-device-scoped preferences (autostart, tray, language, …).
     #[serde(default, skip_serializing_if = "AppSettings::is_default")]
@@ -56,6 +59,9 @@ pub struct Config {
     /// first paired device. `None` means "fall back to the first device".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_device: Option<String>,
+    /// Per-device state, keyed by the stable physical-device identifier
+    /// (e.g. `"receiver:abc123:slot:2"`) so two identical models never share
+    /// an entry.
     #[serde(default)]
     pub devices: BTreeMap<String, DeviceConfig>,
 }
@@ -71,32 +77,56 @@ impl Default for Config {
     }
 }
 
+/// Failure loading or persisting `config.toml`. The file-scoped variants
+/// carry the offending path so callers can surface an actionable message.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    /// The platform config directory could not be resolved (no home
+    /// directory for the current user).
     #[error("could not resolve config path")]
     Path(#[from] PathsError),
+    /// Reading the config file from disk failed.
     #[error("could not read config at {path}")]
     Read {
+        /// The config file the read targeted.
         path: PathBuf,
+        /// The underlying I/O error.
         #[source]
         source: io::Error,
     },
+    /// The file was read but is not valid TOML for this schema.
     #[error("could not parse config at {path}")]
     Parse {
+        /// The config file that failed to parse.
         path: PathBuf,
+        /// The underlying TOML deserialization error.
         #[source]
         source: toml::de::Error,
     },
+    /// Writing the updated config back to disk failed.
     #[error("could not write config at {path}")]
     Write {
+        /// The config file the write targeted.
         path: PathBuf,
+        /// The underlying I/O error.
         #[source]
         source: io::Error,
     },
+    /// The in-memory config could not be serialized to TOML — a bug in the
+    /// config types rather than user error, since [`Config`] always
+    /// serializes cleanly.
     #[error("could not serialize config")]
     Serialize(#[from] toml::ser::Error),
+    /// The file declares a `schema_version` newer than this build
+    /// understands; failing loudly avoids silently dropping settings a newer
+    /// build wrote.
     #[error("config at {path} has unsupported schema_version {found}")]
-    UnsupportedSchemaVersion { path: PathBuf, found: u32 },
+    UnsupportedSchemaVersion {
+        /// The config file carrying the unsupported version.
+        path: PathBuf,
+        /// The `schema_version` the file declared.
+        found: u32,
+    },
 }
 
 #[allow(

@@ -165,6 +165,8 @@ const fn default_thumbwheel_sensitivity() -> i32 {
 /// `openlogi-agent-core/tests/wire_format.rs`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lighting {
+    /// Master on/off for the device's lighting. The color and brightness
+    /// persist while disabled, so re-enabling restores the previous look.
     #[serde(default = "default_lighting_enabled")]
     pub enabled: bool,
     /// Static color as 6 hex digits `"RRGGBB"` (no leading `#`). A value
@@ -232,7 +234,11 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WheelMode {
+    /// Free-spin — the wheel rotates without détentes.
     Free,
+    /// Ratchet (clicky) scrolling. With SmartShift enabled the firmware
+    /// auto-releases into free-spin past the configured
+    /// [`auto_disengage`](SmartShift::auto_disengage) speed.
     Ratchet,
 }
 
@@ -281,6 +287,7 @@ where
 /// `PROTOCOL_VERSION` bump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmartShift {
+    /// The persisted wheel mode, re-applied to device RAM on reconnect.
     pub mode: WheelMode,
     /// SmartShift auto-disengage threshold (`0x08`–`0xFE`, in 0.25 turn/s
     /// steps), or `0xFF` for a permanently engaged ratchet. A persisted value

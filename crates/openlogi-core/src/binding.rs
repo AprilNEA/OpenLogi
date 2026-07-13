@@ -23,10 +23,17 @@ pub use swipe::{
 /// default-binding generator and the popover trigger list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ButtonId {
+    /// The primary button. Rebindable in the config schema, but the OS hook
+    /// never suppresses it — see [`ButtonId::is_os_hook_button`].
     LeftClick,
+    /// The secondary button. Like [`ButtonId::LeftClick`], it always passes
+    /// through the OS hook.
     RightClick,
+    /// The wheel click — one of the three buttons the OS hook remaps.
     MiddleClick,
+    /// The thumb-side "back" button (mouse button 4), remapped by the OS hook.
     Back,
+    /// The thumb-side "forward" button (mouse button 5), remapped by the OS hook.
     Forward,
     /// The "ModeShift" button under the wheel — typically used for SmartShift /
     /// DPI cycle. Named `DpiToggle` for historical reasons.
@@ -47,6 +54,9 @@ pub enum ButtonId {
 }
 
 impl ButtonId {
+    /// Every rebindable button in declaration (physical front-to-side) order —
+    /// the iteration source for default-binding seeding and the popover
+    /// trigger list.
     pub const ALL: [ButtonId; 10] = [
         ButtonId::LeftClick,
         ButtonId::RightClick,
@@ -108,14 +118,23 @@ impl fmt::Display for ButtonId {
 /// Variant identifiers are TOML-stable: renames are migration events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum GestureDirection {
+    /// Hold + swipe up (negative raw-XY `dy`).
     Up,
+    /// Hold + swipe down (positive raw-XY `dy`).
     Down,
+    /// Hold + swipe left (negative raw-XY `dx`).
     Left,
+    /// Hold + swipe right (positive raw-XY `dx`).
     Right,
+    /// A press-and-release that never committed a swipe — the gesture
+    /// button's plain-click slot.
     Click,
 }
 
 impl GestureDirection {
+    /// All five direction slots, swipes first and [`Click`](Self::Click) last.
+    /// Iterated to seed or complete a full gesture map — see
+    /// [`Binding::fill_gesture_defaults`] and [`default_binding_for`].
     pub const ALL: [GestureDirection; 5] = [
         GestureDirection::Up,
         GestureDirection::Down,
@@ -124,6 +143,7 @@ impl GestureDirection {
         GestureDirection::Click,
     ];
 
+    /// Human-readable label for popovers and tooltips.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -371,9 +391,13 @@ pub struct KeyCombo {
 }
 
 impl KeyCombo {
+    /// Bit for the ⌘ Command modifier in [`Self::modifiers`].
     pub const MOD_CMD: u8 = 1 << 0;
+    /// Bit for the ⇧ Shift modifier in [`Self::modifiers`].
     pub const MOD_SHIFT: u8 = 1 << 1;
+    /// Bit for the ⌃ Control modifier in [`Self::modifiers`].
     pub const MOD_CTRL: u8 = 1 << 2;
+    /// Bit for the ⌥ Option/Alt modifier in [`Self::modifiers`].
     pub const MOD_OPTION: u8 = 1 << 3;
 
     /// Build the human-readable label from the modifier bitmask + key code.
