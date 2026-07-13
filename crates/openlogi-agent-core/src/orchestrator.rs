@@ -275,9 +275,12 @@ impl Orchestrator {
     }
 
     /// Push the saved native scroll-inversion bit to every currently online
-    /// device. This is separated from [`Self::rebuild`] because rebuilding also
-    /// happens for foreground-app changes, while the HID++ write is only needed
-    /// when config or device presence changes.
+    /// device. Separated from [`Self::rebuild`] (which also runs on
+    /// foreground-app changes) because the HID++ write is only needed when
+    /// config or device presence changes. The write short-circuits at the
+    /// `0x2121` layer when the wheel already holds the desired state, so calling
+    /// it on every reload costs at most one wheel-mode read per device — and
+    /// still recovers a device whose earlier write timed out while it was waking.
     fn apply_native_scroll_inversions(&self) {
         for dev in self
             .devices

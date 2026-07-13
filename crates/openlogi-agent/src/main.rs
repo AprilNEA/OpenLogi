@@ -6,6 +6,15 @@
 //! core runs on a tokio runtime; on macOS the process main thread hosts the
 //! AppKit run loop the menu bar requires.
 
+// Without this Windows runs the exe as a console app and pops a terminal
+// window whenever the GUI's sibling spawn or the Run-key autostart starts the
+// agent — "headless" must mean no window of any kind. Debug builds keep the
+// console so logs stay visible (matching the GUI's arrangement).
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod launch_agent;
 mod pairing;
 mod self_restart;
@@ -15,6 +24,8 @@ mod status_item;
 mod takeover;
 #[cfg(target_os = "macos")]
 mod tray;
+#[cfg(target_os = "windows")]
+mod tray_windows;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -99,7 +110,13 @@ fn main() {
         tray::run_app_loop(show_in_menu_bar);
     }
     #[cfg(not(target_os = "macos"))]
-    runtime.block_on(run(config));
+    {
+        // Windows hosts the notification-area icon on its own win32 thread
+        // (message pump included); the async core keeps the main thread.
+        #[cfg(target_os = "windows")]
+        tray_windows::spawn(config.app_settings.show_in_menu_bar);
+        runtime.block_on(run(config));
+    }
 }
 
 async fn run(config: Config) {

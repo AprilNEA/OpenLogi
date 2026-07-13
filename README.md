@@ -141,12 +141,22 @@ systemctl --user enable --now openlogi-agent.service
 See [docs/INSTALL-linux.md](docs/INSTALL-linux.md) for manual / source installs
 and distros without systemd.
 
-### Windows (preview)
+### Windows
 
-Signed `.exe` and per-user `.msi` installers (x86_64 and arm64) are attached to
-each release. Windows support is an early preview that hasn't been broadly
-tested on real hardware yet — expect rough edges, and please
-[report issues](https://github.com/AprilNEA/OpenLogi/issues).
+Signed portable `.zip` archives and per-user `.msi` installers (x86_64 and
+arm64) are attached to each release. Both ship the GUI (`OpenLogi.exe`)
+together with the background agent (`openlogi-agent.exe`), which owns all
+device I/O — keep the two files side by side when using the portable zip, or
+the GUI has nothing to connect to.
+
+Windows support works and has been validated end-to-end on Windows 11 with
+real hardware — a wired keyboard and a Unifying-receiver mouse, including
+install, in-place upgrade, and uninstall of the MSI. It is newer than the
+macOS build, so if you hit a rough edge please
+[report it](https://github.com/AprilNEA/OpenLogi/issues). The agent shows a
+system-tray icon (Show Main Window / Quit) so the app stays reachable after
+the main window is closed; disable it with the same "show in menu bar"
+setting macOS uses.
 
 To build from source, see [DEVELOPMENT.md](docs/DEVELOPMENT.md).
 

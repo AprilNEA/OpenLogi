@@ -18,6 +18,7 @@ use gpui_component::{
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
+    DeviceTransports,
 };
 use openlogi_hid::DeviceRoute;
 use tracing::info;
@@ -768,7 +769,10 @@ fn device_card(
                                 .gap_1p5()
                                 .child(
                                     svg()
-                                        .path(connection_icon_path(record.route.as_ref()))
+                                        .path(connection_icon_path(
+                                            record.route.as_ref(),
+                                            record.model_info.as_ref().map(|m| &m.transports),
+                                        ))
                                         .size_3()
                                         .flex_none()
                                         .text_color(pal.text_muted),
@@ -1408,17 +1412,34 @@ fn route_label(route: Option<&DeviceRoute>) -> String {
 }
 
 /// Connection-type glyph for a gallery card: a dongle for receiver-paired
-/// devices, a Bluetooth mark for direct ones.
-/// ponytail: `Direct` is treated as Bluetooth — a USB-cable mouse would read
-/// "bluetooth" here. The route enum carries no transport; split on
-/// `capabilities.transports` if a wired device ever needs its own glyph.
-fn connection_icon_path(route: Option<&DeviceRoute>) -> &'static str {
+/// devices, a USB mark for radio-less direct ones (a wired keyboard is only
+/// ever on the cable), a Bluetooth mark for the rest.
+///
+/// The route says how the device is *addressed*, not what medium carries it,
+/// so `Direct` alone can't pick a glyph — the firmware transport table
+/// (HID++ 0x0003) disambiguates. A radio-capable device on a direct route
+/// keeps the Bluetooth mark: it *may* be on a cable right now, but the
+/// current link medium isn't reported, and Bluetooth is how such devices are
+/// normally attached.
+fn connection_icon_path(
+    route: Option<&DeviceRoute>,
+    transports: Option<&DeviceTransports>,
+) -> &'static str {
     match route {
         Some(DeviceRoute::Bolt { .. }) => "action-icons/bolt.svg",
         Some(DeviceRoute::Unifying { .. }) => "action-icons/unifying.svg",
         // Explicit arms (not `_`) so a new DeviceRoute variant trips the
         // compiler here, matching the exhaustive sibling `route_label`.
-        Some(DeviceRoute::Direct { .. }) | None => "action-icons/bluetooth.svg",
+        Some(DeviceRoute::Direct { .. }) | None => match transports {
+            // No Bluetooth radio at all ⇒ the direct link can only be the
+            // cable. eQuad counts as wired-capable here: eQuad is
+            // receiver-only by definition, so it is never the *direct* link —
+            // an equad-only table still means this connection is a cable.
+            Some(t) if (t.usb || t.equad) && !t.bluetooth && !t.btle => "action-icons/usb.svg",
+            // Unknown transports (no 0x0003 snapshot, or an all-false table)
+            // keep the old default.
+            _ => "action-icons/bluetooth.svg",
+        },
     }
 }
 
@@ -1726,7 +1747,8 @@ fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::{
-        Capabilities, DetailTab, DeviceKind, DeviceRecord, DeviceRoute, connection_icon_path,
+        Capabilities, DetailTab, DeviceKind, DeviceRecord, DeviceRoute, DeviceTransports,
+        connection_icon_path,
     };
 
     #[test]
@@ -1743,17 +1765,68 @@ mod tests {
             vendor_id: 0x046d,
             product_id: 0xb019,
         };
-        assert_eq!(connection_icon_path(Some(&bolt)), "action-icons/bolt.svg");
+        // Firmware transport tables (HID++ 0x0003): a wired-only device (G513),
+        // a Bluetooth-capable one (MX Master on a cable or BT), and BLE-direct.
+        let wired = DeviceTransports {
+            usb: true,
+            ..DeviceTransports::default()
+        };
+        let bt = DeviceTransports {
+            usb: true,
+            bluetooth: true,
+            ..DeviceTransports::default()
+        };
+        let btle = DeviceTransports {
+            btle: true,
+            ..DeviceTransports::default()
+        };
         assert_eq!(
-            connection_icon_path(Some(&uni)),
-            "action-icons/unifying.svg"
+            connection_icon_path(Some(&bolt), None),
+            "action-icons/bolt.svg"
         );
         assert_eq!(
-            connection_icon_path(Some(&direct)),
+            connection_icon_path(Some(&uni), None),
+            "action-icons/unifying.svg"
+        );
+        // Direct + radio-less firmware = the cable is the only possible link.
+        assert_eq!(
+            connection_icon_path(Some(&direct), Some(&wired)),
+            "action-icons/usb.svg"
+        );
+        // eQuad is receiver-only, so an equad-only table on a *direct* route
+        // still means a cable — not Bluetooth.
+        let equad_only = DeviceTransports {
+            equad: true,
+            ..DeviceTransports::default()
+        };
+        assert_eq!(
+            connection_icon_path(Some(&direct), Some(&equad_only)),
+            "action-icons/usb.svg"
+        );
+        // An all-false table is "unknown", not "wired".
+        assert_eq!(
+            connection_icon_path(Some(&direct), Some(&DeviceTransports::default())),
+            "action-icons/bluetooth.svg"
+        );
+        // Direct + any radio keeps the Bluetooth mark.
+        assert_eq!(
+            connection_icon_path(Some(&direct), Some(&bt)),
+            "action-icons/bluetooth.svg"
+        );
+        assert_eq!(
+            connection_icon_path(Some(&direct), Some(&btle)),
+            "action-icons/bluetooth.svg"
+        );
+        // Unknown transports (no 0x0003 snapshot) keep the old default.
+        assert_eq!(
+            connection_icon_path(Some(&direct), None),
             "action-icons/bluetooth.svg"
         );
         // No route (e.g. a synthetic/placeholder card) falls back to Bluetooth.
-        assert_eq!(connection_icon_path(None), "action-icons/bluetooth.svg");
+        assert_eq!(
+            connection_icon_path(None, None),
+            "action-icons/bluetooth.svg"
+        );
     }
 
     fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord {

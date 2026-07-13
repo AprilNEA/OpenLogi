@@ -12,7 +12,7 @@ categories = ["hardware-support", "asynchronous"]
 readme = "README.md"
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", version = "0.6.18" }
+openlogi-core = { path = "../openlogi-core", version = "0.6.19" }
 hidpp = { workspace = true }
 async-hid = { workspace = true }
 tokio = { workspace = true }
