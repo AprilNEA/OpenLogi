@@ -10,12 +10,12 @@
 
 use std::sync::Arc;
 
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 
 use crate::{
     channel::{HidppChannel, MessageListenerGuard},
     event::EventEmitter,
-    protocol::v10::{self, Hidpp10Error},
+    protocol::v10,
     receiver::{RECEIVER_DEVICE_INDEX, ReceiverError},
 };
 
@@ -97,13 +97,13 @@ impl Receiver {
                     return;
                 }
 
-                let Ok(kind) = DeviceKind::try_from(payload[1] & 0x0f) else {
-                    return;
-                };
-
+                // Kind is identity-only; an unrecognised nibble folds to
+                // `Unknown` — dropping the event would hide the device
+                // entirely (arrival notifications are the only device
+                // source on this path).
                 emitter.emit(Event::DeviceConnection(DeviceConnection {
                     index: header.device_index,
-                    kind,
+                    kind: DeviceKind::from(payload[1] & 0x0f),
                     encrypted: payload[1] & (1 << 4) != 0,
                     online: payload[1] & (1 << 6) == 0,
                     wpid: u16::from_le_bytes(payload[2..=3].try_into().unwrap()),
@@ -191,8 +191,9 @@ impl Receiver {
 
         Ok(DevicePairingInformation {
             wpid: u16::from_le_bytes(response[2..=3].try_into().unwrap()),
-            kind: DeviceKind::try_from(response[1] & 0x0f)
-                .map_err(|_| Hidpp10Error::UnsupportedResponse)?,
+            // Kind is identity-only: an unrecognised nibble folds to
+            // `Unknown` instead of failing the whole pairing-info read.
+            kind: DeviceKind::from(response[1] & 0x0f),
             encrypted: response[1] & (1 << 4) != 0,
             online: response[1] & (1 << 6) == 0,
             unit_id: response[4..=7].try_into().unwrap(),
@@ -239,12 +240,14 @@ pub struct DevicePairingInformation {
 /// The encoding matches Bolt for values 1–4; from 5 onwards Unifying uses a
 /// shifted table (Remote=5, Trackball=6, Touchpad=7) while Bolt reserves those
 /// values and places them at 7–9.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, TryFromPrimitive)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum DeviceKind {
-    /// Unknown device kind.
+    /// Unknown device kind — also the fold target for values this crate
+    /// does not model (kind is identity-only and must never drop an event).
+    #[num_enum(default)]
     Unknown = 0x00,
     /// Keyboard device.
     Keyboard = 0x01,
