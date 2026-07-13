@@ -142,7 +142,16 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
     // `System` branch below reads the *real* OS appearance rather than a stale
     // forced override.
     crate::platform::os::set_app_appearance(appearance);
-    let os_appearance = cx.window_appearance();
+    // Read the OS appearance from the window's own cached value when we have a
+    // window in hand. This runs inside `observe_window_appearance`, where the
+    // Wayland/X11 client state is already borrowed for the appearance-change
+    // dispatch; re-querying the platform via `cx.window_appearance()` re-enters
+    // that borrow and panics ("RefCell already borrowed"). The cached value was
+    // just refreshed by the same dispatch, so it is the live OS appearance.
+    let os_appearance = match &window {
+        Some(window) => window.appearance(),
+        None => cx.window_appearance(),
+    };
 
     // Pull the chosen configs out of the registry before borrowing the Theme
     // mutably (both live as globals).
