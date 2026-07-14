@@ -38,10 +38,16 @@ pub enum ButtonId {
     /// The HID++ gesture button on MX-line devices. The press itself
     /// fires the bound action; swipe directions are P1.5 territory.
     GestureButton,
+    /// Tilting the main scroll wheel left. Arrives as a horizontal scroll
+    /// event (negative `delta_x`) at the OS hook, not as a button press —
+    /// intercepted in `hook_runtime` when bound to a non-default action.
+    WheelLeft,
+    /// Tilting the main scroll wheel right. Positive `delta_x`.
+    WheelRight,
 }
 
 impl ButtonId {
-    pub const ALL: [ButtonId; 10] = [
+    pub const ALL: [ButtonId; 12] = [
         ButtonId::LeftClick,
         ButtonId::RightClick,
         ButtonId::MiddleClick,
@@ -52,6 +58,8 @@ impl ButtonId {
         ButtonId::ThumbwheelScrollUp,
         ButtonId::ThumbwheelScrollDown,
         ButtonId::GestureButton,
+        ButtonId::WheelLeft,
+        ButtonId::WheelRight,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -83,6 +91,8 @@ impl ButtonId {
             ButtonId::ThumbwheelScrollUp => "Thumb Wheel Up",
             ButtonId::ThumbwheelScrollDown => "Thumb Wheel Down",
             ButtonId::GestureButton => "Gesture Button",
+            ButtonId::WheelLeft => "Wheel Left",
+            ButtonId::WheelRight => "Wheel Right",
         }
     }
 }
@@ -872,6 +882,13 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollRight,
         ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
         ButtonId::GestureButton => Action::MissionControl,
+        // The main wheel tilt scrolls horizontally by default: tilting left
+        // produces native horizontal scroll left, tilting right produces
+        // native horizontal scroll right. When the user binds a custom
+        // action, the OS hook intercepts the horizontal scroll and fires it
+        // instead (see `hook_runtime`).
+        ButtonId::WheelLeft => Action::HorizontalScrollLeft,
+        ButtonId::WheelRight => Action::HorizontalScrollRight,
     }
 }
 

@@ -110,7 +110,7 @@ pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32)
         })
         .collect();
 
-    with_thumbwheel_rotation(hotspots)
+    with_thumbwheel_rotation(with_wheel_tilt(hotspots))
 }
 
 /// Replace the thumb-wheel *click* hotspot with two rotation hotspots
@@ -137,6 +137,33 @@ fn with_thumbwheel_rotation(mut hotspots: Vec<Hotspot>) -> Vec<Hotspot> {
     ];
     hotspots.retain(|h| h.id != ButtonId::Thumbwheel);
     hotspots.extend(rotation);
+    hotspots
+}
+
+/// Add `WheelLeft` / `WheelRight` hotspots flanking the middle-click area, so
+/// the main scroll wheel's left/right tilt is remappable even on devices whose
+/// Logitech metadata has no explicit tilt marker. No-op when the device has no
+/// middle-click marker.
+fn with_wheel_tilt(mut hotspots: Vec<Hotspot>) -> Vec<Hotspot> {
+    let Some(wheel) = hotspots.iter().find(|h| h.id == ButtonId::MiddleClick).copied() else {
+        return hotspots;
+    };
+    let tilt_w = (wheel.w * 0.8).min(50.);
+    let gap = 6.;
+    hotspots.push(Hotspot {
+        id: ButtonId::WheelLeft,
+        x: wheel.x - tilt_w - gap,
+        y: wheel.y + (wheel.h - wheel.h * 0.7) / 2.,
+        w: tilt_w,
+        h: wheel.h * 0.7,
+    });
+    hotspots.push(Hotspot {
+        id: ButtonId::WheelRight,
+        x: wheel.x + wheel.w + gap,
+        y: wheel.y + (wheel.h - wheel.h * 0.7) / 2.,
+        w: tilt_w,
+        h: wheel.h * 0.7,
+    });
     hotspots
 }
 
@@ -180,32 +207,45 @@ pub fn labels_from_hotspots(hotspots: &[Hotspot], mouse_h: f32) -> Vec<Label> {
 }
 
 /// Label positions for the synthetic fallback silhouette.
+///
+/// Seven labels evenly spaced down the 560 px canvas (step = 560 / 8 = 70),
+/// so each has enough vertical room for the 56 px tall label card.
 pub fn default_labels() -> Vec<Label> {
     vec![
         Label {
+            id: ButtonId::WheelLeft,
+            side: Side::Left,
+            y: 70.,
+        },
+        Label {
             id: ButtonId::MiddleClick,
             side: Side::Left,
-            y: 120.,
+            y: 140.,
+        },
+        Label {
+            id: ButtonId::WheelRight,
+            side: Side::Left,
+            y: 210.,
         },
         Label {
             id: ButtonId::Back,
             side: Side::Left,
-            y: 240.,
+            y: 280.,
         },
         Label {
             id: ButtonId::Forward,
             side: Side::Left,
-            y: 340.,
+            y: 350.,
         },
         Label {
             id: ButtonId::DpiToggle,
             side: Side::Left,
-            y: 430.,
+            y: 420.,
         },
         Label {
             id: ButtonId::GestureButton,
             side: Side::Left,
-            y: 510.,
+            y: 490.,
         },
     ]
 }

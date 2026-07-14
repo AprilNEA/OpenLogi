@@ -79,6 +79,22 @@ pub fn default_hotspots() -> Vec<Hotspot> {
             w: 44.,
             h: 80.,
         },
+        // Wheel tilt: two hotspots flanking the middle-click area, so the
+        // user can click "left tilt" or "right tilt" to rebind them.
+        Hotspot {
+            id: ButtonId::WheelLeft,
+            x: 120.,
+            y: 120.,
+            w: 50.,
+            h: 70.,
+        },
+        Hotspot {
+            id: ButtonId::WheelRight,
+            x: 250.,
+            y: 120.,
+            w: 50.,
+            h: 70.,
+        },
     ]
 }
 
@@ -105,6 +121,23 @@ mod tests {
                 .iter()
                 .any(|h| matches!(h.id, ButtonId::LeftClick | ButtonId::RightClick)),
             "primary clicks are not remappable and must stay out of the model"
+        );
+    }
+
+    #[test]
+    fn default_hotspots_expose_wheel_tilt() {
+        let hotspots = default_hotspots();
+        assert!(
+            hotspots
+                .iter()
+                .any(|h| matches!(h.id, ButtonId::WheelLeft)),
+            "wheel-left tilt must be a mappable hotspot"
+        );
+        assert!(
+            hotspots
+                .iter()
+                .any(|h| matches!(h.id, ButtonId::WheelRight)),
+            "wheel-right tilt must be a mappable hotspot"
         );
     }
 }
