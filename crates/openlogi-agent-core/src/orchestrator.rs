@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::config::Config;
-use openlogi_core::device::{Capabilities, DeviceInventory};
+use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
 use openlogi_hid::{CaptureChannel, DeviceRoute};
 use tracing::warn;
 
@@ -39,6 +39,7 @@ struct AgentDevice {
     serial: Option<String>,
     unit_id: [u8; 4],
     capabilities: Option<Capabilities>,
+    kind: DeviceKind,
     /// Live link state from the inventory snapshot. An offline→online
     /// transition is a reconnect — the device may have power-cycled, so its
     /// volatile settings need re-applying (#189).
@@ -311,6 +312,22 @@ impl Orchestrator {
         }
     }
 
+    /// Whether there is a current online pointing device for the OS mouse hook
+    /// to manage. Without this guard the Linux backend enumerates system input
+    /// devices before HID++ discovery has found anything, which can grab a
+    /// laptop's built-in touchpad/TrackPoint for no useful OpenLogi target.
+    #[must_use]
+    pub fn should_install_os_hook(&self) -> bool {
+        self.devices.iter().any(|dev| {
+            dev.online
+                && dev.route.is_some()
+                && matches!(dev.kind, DeviceKind::Mouse | DeviceKind::Trackball)
+                && dev
+                    .capabilities
+                    .is_none_or(|capabilities| capabilities.buttons || capabilities.pointer)
+        })
+    }
+
     /// Record that enumeration has never worked and has stopped being treated
     /// as "still starting" (persistent initial failure, or the watcher died).
     /// Downgrades only [`InventoryState::Pending`]: once a snapshot exists the
@@ -380,6 +397,7 @@ fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
                 serial: model.serial_number.clone(),
                 unit_id: model.unit_id,
                 capabilities: paired.capabilities,
+                kind: paired.kind,
                 online: paired.online,
             });
         }
@@ -460,6 +478,7 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 mod tests {
     use super::{AgentDevice, InventoryHealth, Orchestrator, reapply_targets};
     use openlogi_core::config::Config;
+    use openlogi_core::device::{Capabilities, DeviceKind};
     use openlogi_hid::DeviceRoute;
 
     fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
@@ -474,6 +493,7 @@ mod tests {
             serial: None,
             unit_id: [0; 4],
             capabilities: None,
+            kind: DeviceKind::Mouse,
             online,
         }
     }
@@ -554,5 +574,55 @@ mod tests {
         assert_eq!(orch.inventory_health(), InventoryHealth::Ready);
         orch.mark_inventory_unavailable();
         assert_eq!(orch.inventory_health(), InventoryHealth::Ready);
+    }
+
+    #[test]
+    fn os_hook_waits_for_online_pointing_device() {
+        let mut orch = Orchestrator::new(Config::default());
+        assert!(
+            !orch.should_install_os_hook(),
+            "empty/pending inventory must not install the OS hook"
+        );
+
+        orch.devices = vec![dev("mouse", 1, true)];
+        assert!(
+            orch.should_install_os_hook(),
+            "online mouse with unknown capabilities should be hookable"
+        );
+
+        orch.devices = vec![dev("mouse", 1, false)];
+        assert!(
+            !orch.should_install_os_hook(),
+            "offline mouse should not keep the OS hook installed"
+        );
+
+        orch.devices = vec![AgentDevice {
+            kind: DeviceKind::Keyboard,
+            capabilities: Some(Capabilities {
+                buttons: false,
+                pointer: false,
+                lighting: true,
+                scroll_inversion: false,
+            }),
+            ..dev("keyboard", 1, true)
+        }];
+        assert!(
+            !orch.should_install_os_hook(),
+            "keyboard-only inventory should not install a mouse hook"
+        );
+
+        orch.devices = vec![AgentDevice {
+            capabilities: Some(Capabilities {
+                buttons: false,
+                pointer: false,
+                lighting: false,
+                scroll_inversion: false,
+            }),
+            ..dev("presenter", 1, true)
+        }];
+        assert!(
+            !orch.should_install_os_hook(),
+            "pointing device without button or pointer capability should not install the hook"
+        );
     }
 }

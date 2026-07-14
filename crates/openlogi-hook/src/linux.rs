@@ -34,6 +34,9 @@ use crate::{ButtonId, EventDisposition, HookError, MouseEvent};
 /// devices during enumeration so we don't hook our own virtual mice.
 const VIRTUAL_DEVICE_NAME: &str = "OpenLogi virtual mouse";
 
+/// Linux input vendor id assigned to Logitech.
+const LOGITECH_VENDOR_ID: u16 = 0x046d;
+
 /// Hi-res scroll resolution: 120 units per standard wheel tick, matching the
 /// Linux kernel's `REL_WHEEL_HI_RES` convention and Windows HID semantics.
 const HIRES_UNITS_PER_TICK: f32 = 120.0;
@@ -135,12 +138,16 @@ fn create_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
 
 fn find_mouse_devices() -> Vec<(std::path::PathBuf, Device)> {
     evdev::enumerate()
-        .filter(|(_, d)| d.name().unwrap_or("") != VIRTUAL_DEVICE_NAME)
-        .filter(|(_, d)| {
-            d.supported_keys()
-                .is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT))
-        })
+        .filter(|(_, d)| is_hook_candidate(d))
         .collect()
+}
+
+fn is_hook_candidate(device: &Device) -> bool {
+    device.name().unwrap_or("") != VIRTUAL_DEVICE_NAME
+        && device.input_id().vendor() == LOGITECH_VENDOR_ID
+        && device
+            .supported_keys()
+            .is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT))
 }
 
 fn build_virtual_device(device: &Device) -> io::Result<evdev::uinput::VirtualDevice> {
