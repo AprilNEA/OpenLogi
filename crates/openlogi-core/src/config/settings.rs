@@ -218,14 +218,17 @@ where
     Ok(u8::deserialize(deserializer)?.min(100))
 }
 
-/// Fall back to white when the configured color does not parse, mirroring
-/// the `brightness` clamp above: a hand-edited value degrades predictably
-/// instead of failing the whole config load.
+/// Accept the optional `#` prefix supported by older releases, then fall back
+/// to white when the configured color does not parse, mirroring the `brightness`
+/// clamp above instead of failing the whole config load.
 fn deserialize_lighting_color<'de, D>(deserializer: D) -> Result<Rgb, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(String::deserialize(deserializer)?
+    let color = String::deserialize(deserializer)?;
+    Ok(color
+        .strip_prefix('#')
+        .unwrap_or(color.as_str())
         .parse()
         .unwrap_or(Rgb::WHITE))
 }

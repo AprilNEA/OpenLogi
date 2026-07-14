@@ -628,6 +628,34 @@ mod tests {
     }
 
     #[test]
+    fn hash_prefixed_lighting_color_migrates_to_canonical_hex() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r##"
+                schema_version = 3
+                [devices.g513.lighting]
+                enabled = true
+                color = "#ff0000"
+                brightness = 50
+            "##,
+        )
+        .expect("write config");
+
+        let cfg = Config::load_from_path(&path).expect("load hash-prefixed color");
+        assert_eq!(
+            cfg.lighting("g513").map(|lighting| lighting.color),
+            Some(crate::color::Rgb::new(0xff, 0x00, 0x00))
+        );
+
+        cfg.save_to_path(&path).expect("save canonical color");
+        let saved = fs::read_to_string(path).expect("read saved config");
+        assert!(saved.contains("color = \"ff0000\""));
+        assert!(!saved.contains("color = \"#"));
+    }
+
+    #[test]
     fn dpi_roundtrips_per_device() {
         let mut cfg = Config::default();
         cfg.set_dpi("2b042", 1600);
