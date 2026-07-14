@@ -150,6 +150,8 @@ _version: 1
 "DPI Toggle": "DPI-veksling"
 "Thumb Wheel": "Tommelhjul"
 "Gesture Button": "Bevegelsesknapp"
+"Tilt Left": "Vipp til venstre"
+"Tilt Right": "Vipp til høyre"
 "Up": "Opp"
 "Down": "Ned"
 "Left": "Venstre"

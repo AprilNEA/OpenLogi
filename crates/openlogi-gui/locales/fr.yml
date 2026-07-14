@@ -150,6 +150,8 @@ _version: 1
 "DPI Toggle": "Bascule DPI"
 "Thumb Wheel": "Molette latérale"
 "Gesture Button": "Bouton de gestes"
+"Tilt Left": "Incliner à gauche"
+"Tilt Right": "Incliner à droite"
 "Up": "Haut"
 "Down": "Bas"
 "Left": "Gauche"

@@ -150,6 +150,8 @@ _version: 1
 "DPI Toggle": "DPI-vaihto"
 "Thumb Wheel": "Peukalorulla"
 "Gesture Button": "Eletoiminto"
+"Tilt Left": "Kallista vasemmalle"
+"Tilt Right": "Kallista oikealle"
 "Up": "Ylös"
 "Down": "Alas"
 "Left": "Vasen"

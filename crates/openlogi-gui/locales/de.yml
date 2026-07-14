@@ -150,6 +150,8 @@ _version: 1
 "DPI Toggle": "DPI-Umschaltung"
 "Thumb Wheel": "Daumenrad"
 "Gesture Button": "Gestentaste"
+"Tilt Left": "Nach links kippen"
+"Tilt Right": "Nach rechts kippen"
 "Up": "Oben"
 "Down": "Unten"
 "Left": "Links"

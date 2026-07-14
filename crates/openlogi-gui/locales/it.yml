@@ -150,6 +150,8 @@ _version: 1
 "DPI Toggle": "Cambia DPI"
 "Thumb Wheel": "Volante da pollice"
 "Gesture Button": "Pulsante gesture"
+"Tilt Left": "Inclina a sinistra"
+"Tilt Right": "Inclina a destra"
 "Up": "Su"
 "Down": "Giù"
 "Left": "Sinistra"
