@@ -14,9 +14,10 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 
+use openlogi_core::binding::Action;
 use openlogi_core::config::Config;
-use openlogi_core::device::{Capabilities, DeviceInventory};
-use openlogi_hid::{CaptureChannel, DeviceRoute};
+use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
+use openlogi_hid::{CaptureChannel, DeviceRoute, KEYBOARD_KEY_CIDS};
 use tracing::warn;
 
 use crate::DpiCycleState;
@@ -26,6 +27,7 @@ use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::ipc::InventoryHealth;
 use crate::receiver_access::ReceiverAccess;
 use crate::watchers::gesture::GestureBindings;
+use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
 
 /// The minimal per-device facts the agent needs: the config key (binding /
 /// preset lookup), the HID++ route (DPI/SmartShift writes + capture target), and
@@ -39,6 +41,10 @@ struct AgentDevice {
     serial: Option<String>,
     unit_id: [u8; 4],
     capabilities: Option<Capabilities>,
+    /// HID++-reported device kind — identity only (capability decisions come
+    /// from the feature table). Used to find the keyboard the key-capture
+    /// watcher should target.
+    kind: DeviceKind,
     /// Live link state from the inventory snapshot. An offline→online
     /// transition is a reconnect — the device may have power-cycled, so its
     /// volatile settings need re-applying (#189).
@@ -58,8 +64,14 @@ pub struct SharedRuntime {
     pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
     pub thumbwheel_sensitivity: Arc<AtomicI32>,
     pub capture_channel: CaptureChannel,
-    /// Exclusive receiver access shared by HID++ capture and pairing. Capture
-    /// and pairing must never open the same receiver HID node concurrently.
+    /// The keyboard key-capture watcher's target + bindings, `None` while no
+    /// online keyboard has bound keys.
+    pub keyboard_spec: SharedKeyboardSpec,
+    /// The keyboard capture session's open channel, reused by Fn-lock writes
+    /// (the mouse-oriented [`Self::capture_channel`] points elsewhere).
+    pub keyboard_channel: CaptureChannel,
+    /// Receiver access shared by HID++ capture and pairing: capture leases are
+    /// shared (mouse + keyboard watchers), pairing is exclusive.
     pub receiver_access: ReceiverAccess,
 }
 
@@ -108,6 +120,8 @@ impl Orchestrator {
                 config.app_settings.thumbwheel_sensitivity,
             )),
             capture_channel: Arc::new(RwLock::new(None)),
+            keyboard_spec: Arc::new(RwLock::new(None)),
+            keyboard_channel: Arc::new(RwLock::new(None)),
             receiver_access: ReceiverAccess::default(),
         };
         let orch = Self {
@@ -150,6 +164,38 @@ impl Orchestrator {
         }
     }
 
+    /// The keyboard key-capture spec for the first online keyboard, or `None`
+    /// when no keyboard is online or none of its capturable keys carries a
+    /// real binding (an unbound key must never be diverted).
+    fn keyboard_spec_for(&self) -> Option<KeyboardSpec> {
+        let dev = self
+            .devices
+            .iter()
+            .find(|d| d.kind == DeviceKind::Keyboard && d.online && d.route.is_some())?;
+        let bindings = bindings_for(
+            &self.config,
+            Some(&dev.config_key),
+            self.current_app.as_deref(),
+        );
+        let wanted: BTreeMap<u16, _> = KEYBOARD_KEY_CIDS
+            .iter()
+            .filter(|(_, button)| {
+                bindings
+                    .get(button)
+                    .is_some_and(|action| *action != Action::None)
+            })
+            .copied()
+            .collect();
+        if wanted.is_empty() {
+            return None;
+        }
+        Some(KeyboardSpec {
+            route: dev.route.clone()?,
+            wanted,
+            bindings,
+        })
+    }
+
     /// Rewrite every shared map from the current config + selected device.
     fn rebuild(&self) {
         let key = self.current_key();
@@ -178,6 +224,11 @@ impl Orchestrator {
         self.shared.thumbwheel_sensitivity.store(
             self.config.app_settings.thumbwheel_sensitivity,
             Ordering::Relaxed,
+        );
+        write_value(
+            &self.shared.keyboard_spec,
+            self.keyboard_spec_for(),
+            "keyboard_spec",
         );
     }
 
@@ -258,10 +309,17 @@ impl Orchestrator {
         if let Some(smartshift) = self.config.smartshift(key) {
             crate::hardware::write_smartshift_in_background(
                 Some(&self.shared.capture_channel),
-                Some(route),
+                Some(route.clone()),
                 smartshift.mode.into(),
                 smartshift.auto_disengage,
                 smartshift.tunable_torque,
+            );
+        }
+        if let Some(fn_lock) = self.config.fn_lock(key) {
+            crate::hardware::write_fn_lock_in_background(
+                Some(&self.shared.keyboard_channel),
+                Some(route),
+                fn_lock,
             );
         }
     }
@@ -343,6 +401,12 @@ impl Orchestrator {
             self.hook_maps_for(self.current_key(), self.current_app.as_deref()),
             "hook_maps",
         );
+        // The keyboard's effective bindings are app-scoped too.
+        write_value(
+            &self.shared.keyboard_spec,
+            self.keyboard_spec_for(),
+            "keyboard_spec",
+        );
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.
@@ -351,6 +415,27 @@ impl Orchestrator {
         self.current = pick_current(&self.devices, self.config.selected_device());
         self.rebuild();
         self.apply_native_scroll_inversions();
+        self.apply_fn_locks();
+    }
+
+    /// Push the saved Fn-lock state to every online keyboard that has one.
+    /// Runs on config reloads (the reconnect path is
+    /// [`Self::reapply_volatile_settings`]); the write is a single HID++ call,
+    /// so re-applying an unchanged state is cheap.
+    fn apply_fn_locks(&self) {
+        for dev in self
+            .devices
+            .iter()
+            .filter(|dev| dev.online && dev.route.is_some())
+        {
+            if let Some(fn_lock) = self.config.fn_lock(&dev.config_key) {
+                crate::hardware::write_fn_lock_in_background(
+                    Some(&self.shared.keyboard_channel),
+                    dev.route.clone(),
+                    fn_lock,
+                );
+            }
+        }
     }
 }
 
@@ -380,6 +465,7 @@ fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
                 serial: model.serial_number.clone(),
                 unit_id: model.unit_id,
                 capabilities: paired.capabilities,
+                kind: paired.kind,
                 online: paired.online,
             });
         }
@@ -474,6 +560,7 @@ mod tests {
             serial: None,
             unit_id: [0; 4],
             capabilities: None,
+            kind: openlogi_core::device::DeviceKind::Mouse,
             online,
         }
     }

@@ -1,17 +1,23 @@
 //! Exclusive receiver access coordination between HID++ capture and pairing.
 //!
-//! The active-device capture session and a pairing session cannot both open the
-//! same receiver HID node. This small arbiter makes that ownership explicit: the
-//! capture watcher may run only while it holds a capture lease, and pairing first
-//! announces its intent (so capture stops) before awaiting an exclusive pairing
-//! lease.
+//! A capture session and a pairing session cannot both open the same receiver
+//! HID node. This small arbiter makes that ownership explicit: capture
+//! watchers may run only while they hold a capture lease, and pairing first
+//! announces its intent (so capture stops) before awaiting an exclusive
+//! pairing lease.
+//!
+//! Capture leases are *shared*: the mouse capture session and the keyboard
+//! capture session target different devices (each opens its own channel), so
+//! they may hold leases concurrently. Pairing is exclusive — it waits for
+//! every capture lease to drop and blocks new ones while waiting.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
-/// Coordinates exclusive access to the receiver HID node.
+/// Coordinates receiver access between capture (shared) and pairing
+/// (exclusive).
 #[derive(Clone, Default)]
 pub struct ReceiverAccess {
     inner: Arc<ReceiverAccessInner>,
@@ -19,18 +25,18 @@ pub struct ReceiverAccess {
 
 #[derive(Default)]
 struct ReceiverAccessInner {
-    lease: Arc<Mutex<()>>,
+    lease: Arc<RwLock<()>>,
     pairing_requested: Arc<AtomicBool>,
 }
 
-/// Exclusive receiver lease held by the capture watcher.
+/// Shared receiver lease held by one capture watcher.
 pub struct CaptureReceiverLease {
-    _guard: OwnedMutexGuard<()>,
+    _guard: OwnedRwLockReadGuard<()>,
 }
 
 /// Exclusive receiver lease held by a pairing session.
 pub struct PairingReceiverLease {
-    _guard: OwnedMutexGuard<()>,
+    _guard: OwnedRwLockWriteGuard<()>,
     pairing_requested: Arc<AtomicBool>,
 }
 
@@ -47,16 +53,17 @@ impl ReceiverAccess {
         self.inner.pairing_requested.load(Ordering::Acquire)
     }
 
-    /// Try to acquire receiver access for the capture watcher.
+    /// Try to acquire a shared receiver lease for a capture watcher.
     ///
-    /// Capture is opportunistic: if pairing is waiting or active, capture should
-    /// stay idle and retry on its next management tick.
+    /// Capture is opportunistic: if pairing is waiting or active, capture
+    /// should stay idle and retry on its next management tick. Multiple
+    /// capture watchers (mouse + keyboard) may hold leases concurrently.
     #[must_use]
     pub fn try_acquire_for_capture(&self) -> Option<CaptureReceiverLease> {
         if self.pairing_requested() {
             return None;
         }
-        let guard = Arc::clone(&self.inner.lease).try_lock_owned().ok()?;
+        let guard = Arc::clone(&self.inner.lease).try_read_owned().ok()?;
         if self.pairing_requested() {
             return None;
         }
@@ -65,11 +72,11 @@ impl ReceiverAccess {
 
     /// Request and acquire exclusive receiver access for pairing.
     ///
-    /// If the returned future is cancelled while waiting, the pairing request is
-    /// withdrawn automatically so capture can resume.
+    /// If the returned future is cancelled while waiting, the pairing request
+    /// is withdrawn automatically so capture can resume.
     pub async fn acquire_for_pairing(&self) -> PairingReceiverLease {
         let request = PairingRequest::new(Arc::clone(&self.inner.pairing_requested));
-        let guard = Arc::clone(&self.inner.lease).lock_owned().await;
+        let guard = Arc::clone(&self.inner.lease).write_owned().await;
         request.disarm();
         PairingReceiverLease {
             _guard: guard,
@@ -142,6 +149,37 @@ mod tests {
         let _ = waiting.await;
         assert!(!access.pairing_requested());
         drop(capture);
+        assert!(access.try_acquire_for_capture().is_some());
+    }
+
+    #[tokio::test]
+    async fn capture_leases_are_shared_between_watchers() {
+        let access = ReceiverAccess::default();
+
+        // Mouse and keyboard capture watchers hold leases concurrently.
+        let mouse = access.try_acquire_for_capture();
+        assert!(mouse.is_some());
+        let keyboard = access.try_acquire_for_capture();
+        assert!(keyboard.is_some());
+
+        // Pairing waits for BOTH to drop; a pending request blocks new leases.
+        let waiting = tokio::spawn({
+            let access = access.clone();
+            async move { access.acquire_for_pairing().await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(access.pairing_requested());
+        assert!(access.try_acquire_for_capture().is_none());
+
+        drop(mouse);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(!waiting.is_finished(), "pairing must wait for every lease");
+
+        drop(keyboard);
+        let pairing = waiting.await.unwrap_or_else(|_| {
+            panic!("pairing acquisition should complete once leases drop");
+        });
+        drop(pairing);
         assert!(access.try_acquire_for_capture().is_some());
     }
 }
