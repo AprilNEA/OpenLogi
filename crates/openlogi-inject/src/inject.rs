@@ -112,6 +112,8 @@ fn execute_linux(action: &Action) {
         // ── System ────────────────────────────────────────────────────────
         // logind LockSessions() via the system bus; falls back to Super+L.
         Action::LockScreen => linux::lock_screen(),
+        // logind Suspend() via the system bus.
+        Action::Sleep => linux::sleep_system(),
         // Region vs full-screen capture depends on the desktop environment's
         // screenshot handler for Print Screen, so both map to the same key.
         Action::Screenshot | Action::CaptureRegion => linux::press_key(&[], KeyCode::KEY_SYSRQ),
@@ -225,6 +227,10 @@ fn execute_macos(action: &Action) {
         Action::Screenshot => macos::post_key(0x14, cmd | shift),
         // Capture region to clipboard = Cmd+Shift+Ctrl+4 (kVK_ANSI_4 = 0x15)
         Action::CaptureRegion => macos::post_key(0x15, cmd | shift | ctrl),
+        // Sleep has no CGEvent equivalent (the WindowServer ignores a
+        // synthesised power key), so ask powermanagement directly. `pmset
+        // sleepnow` works for the console user without privileges.
+        Action::Sleep => macos::sleep_system(),
         // ── Media ─────────────────────────────────────────────────────────
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
@@ -325,6 +331,12 @@ fn execute_windows(action: &Action) {
         // and region capture on Windows.
         Action::Screenshot | Action::CaptureRegion => {
             windows::post_key(windows::VK_S, &[windows::VK_LWIN, windows::VK_SHIFT]);
+        }
+        // Suspending reliably needs `SetSuspendState` (powrprof.dll), which
+        // hibernates instead when hibernation is enabled — no clean win from
+        // a background agent, so the action is skipped on Windows for now.
+        Action::Sleep => {
+            tracing::debug!("Sleep has no Windows synthesis yet — action skipped");
         }
         Action::PlayPause => windows::post_key(windows::VK_MEDIA_PLAY_PAUSE, &[]),
         Action::NextTrack => windows::post_key(windows::VK_MEDIA_NEXT_TRACK, &[]),
@@ -574,6 +586,19 @@ mod macos {
                 CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&cg_event));
             }
         });
+    }
+
+    /// Put the system to sleep via `pmset sleepnow` — sleep has no CGEvent
+    /// equivalent, and `pmset` performs the console user's sleep request
+    /// without privileges. Fire-and-forget; a spawn failure is logged.
+    pub(super) fn sleep_system() {
+        match std::process::Command::new("/usr/bin/pmset")
+            .arg("sleepnow")
+            .spawn()
+        {
+            Ok(_) => tracing::debug!("Sleep via pmset sleepnow"),
+            Err(e) => tracing::warn!(error = %e, "pmset sleepnow spawn failed"),
+        }
     }
 
     /// Post a synthetic scroll event for `action` (one of the `Scroll*` variants).
@@ -1186,6 +1211,27 @@ mod linux {
     /// player is found. When a player is found but the call fails, the fallback
     /// is suppressed to avoid double-toggling (the player likely handles the
     /// XF86 key too).
+    /// Suspend the system via logind's `Suspend()` on the system bus. The
+    /// `false` argument declines the "interactive" polkit prompt — if the
+    /// session isn't allowed to suspend, the call fails and is logged rather
+    /// than popping an authentication dialog from a background agent.
+    pub(super) fn sleep_system() {
+        let Some(conn) = SYSTEM_BUS.as_ref() else {
+            tracing::warn!("no system bus — Sleep skipped");
+            return;
+        };
+        match conn.call_method(
+            Some("org.freedesktop.login1"),
+            "/org/freedesktop/login1",
+            Some("org.freedesktop.login1.Manager"),
+            "Suspend",
+            &(false,),
+        ) {
+            Ok(_) => tracing::debug!("Sleep via logind Suspend"),
+            Err(e) => tracing::warn!("logind Suspend failed: {e}"),
+        }
+    }
+
     pub(super) fn mpris_command(command: &str) {
         if try_mpris_command(command).is_none() {
             let fallback = match command {
