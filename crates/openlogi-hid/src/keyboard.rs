@@ -16,10 +16,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use hidpp::{device::Device, protocol::v20};
+use hidpp::{
+    device::Device,
+    feature::{
+        CreatableFeature, EmittingFeature,
+        wireless_device_status::{WirelessDeviceStatusEvent, WirelessDeviceStatusFeature},
+    },
+    protocol::v20,
+};
 use openlogi_core::binding::ButtonId;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::gesture::{CaptureChannel, CapturedInput, GestureError, enumerate_controls, restore};
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
@@ -74,20 +81,7 @@ pub async fn run_keyboard_capture_session(
     let rc = ReprogControlsV4::new(Arc::clone(&chan), device_index, info.index);
     let controls = enumerate_controls(&rc).await?;
 
-    let mut diverted: BTreeMap<u16, ButtonId> = BTreeMap::new();
-    for (&cid, &button) in &wanted {
-        if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-            rc.set_cid_reporting(cid, true, false)
-                .await
-                .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-            diverted.insert(cid, button);
-        } else {
-            debug!(
-                cid = format_args!("{cid:#06x}"),
-                "bound key not divertable on this keyboard — left native"
-            );
-        }
-    }
+    let diverted = arm_keys(&rc, &controls, &wanted).await?;
 
     // Rising-edge press state per CID. Behind a `Mutex` because the channel's
     // read thread invokes the listener by shared reference.
@@ -125,6 +119,20 @@ pub async fn run_keyboard_capture_session(
         }
     });
 
+    // Wireless keyboards drop their diverted-control state when they
+    // power-cycle (idle sleep, power switch, Easy-Switch host change) — the
+    // reconnection broadcast on `0x1d4b` is the firmware asking the host to
+    // reconfigure. Re-arm the diversion on every broadcast, or the bound keys
+    // silently revert to their native functions after the first nap.
+    let wireless = device
+        .root()
+        .get_feature(WirelessDeviceStatusFeature::ID)
+        .await
+        .ok()
+        .flatten()
+        .map(|info| WirelessDeviceStatusFeature::new(Arc::clone(&chan), device_index, info.index));
+    let wake_events = wireless.as_ref().map(EmittingFeature::listen);
+
     // Publish this keyboard's open channel so hardware writes (Fn-lock)
     // reuse it instead of opening the same HID node a second time. Cleared
     // on the way out.
@@ -135,9 +143,30 @@ pub async fn run_keyboard_capture_session(
     info!(
         index = device_index,
         keys = diverted.len(),
+        wake_rearm = wake_events.is_some(),
         "keyboard key capture active"
     );
-    let _ = shutdown.await;
+    let mut shutdown = shutdown;
+    match wake_events {
+        None => {
+            let _ = shutdown.await;
+        }
+        Some(wake_events) => loop {
+            tokio::select! {
+                _ = &mut shutdown => break,
+                event = wake_events.recv() => {
+                    let Ok(WirelessDeviceStatusEvent::StatusBroadcast(broadcast)) = event else {
+                        // Emitter gone (feature dropped) — nothing left to
+                        // watch; fall back to a plain shutdown wait.
+                        let _ = shutdown.await;
+                        break;
+                    };
+                    info!(?broadcast, "keyboard reconnected — re-arming key diversion");
+                    rearm_keys(&rc, &diverted).await;
+                }
+            }
+        },
+    }
 
     drop(listener);
     if let Ok(mut slot) = channel_slot.write() {
@@ -151,4 +180,48 @@ pub async fn run_keyboard_capture_session(
     }
     debug!(index = device_index, "keyboard key capture stopped");
     Ok(())
+}
+
+/// Divert every wanted control the keyboard exposes as divertable, returning
+/// the armed `CID → ButtonId` subset. Missing / non-divertable controls are
+/// skipped with a debug log, so a partially-supported keyboard degrades per
+/// key rather than failing whole.
+async fn arm_keys(
+    rc: &ReprogControlsV4,
+    controls: &[reprog_controls::CtrlIdInfo],
+    wanted: &BTreeMap<u16, ButtonId>,
+) -> Result<BTreeMap<u16, ButtonId>, GestureError> {
+    let mut diverted = BTreeMap::new();
+    for (&cid, &button) in wanted {
+        if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
+            rc.set_cid_reporting(cid, true, false)
+                .await
+                .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+            diverted.insert(cid, button);
+        } else {
+            debug!(
+                cid = format_args!("{cid:#06x}"),
+                "bound key not divertable on this keyboard — left native"
+            );
+        }
+    }
+    Ok(diverted)
+}
+
+/// Re-issue diversion for every armed control after a device power-cycle.
+/// Failures are logged, not propagated — the next reconnection broadcast
+/// retries.
+async fn rearm_keys(rc: &ReprogControlsV4, diverted: &BTreeMap<u16, ButtonId>) {
+    // A settling pause: the broadcast arrives the instant the link is back,
+    // occasionally before the device accepts feature writes again.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    for &cid in diverted.keys() {
+        if let Err(e) = rc.set_cid_reporting(cid, true, false).await {
+            warn!(
+                cid = format_args!("{cid:#06x}"),
+                error = ?e,
+                "re-divert after wake failed — key stays native until next wake"
+            );
+        }
+    }
 }

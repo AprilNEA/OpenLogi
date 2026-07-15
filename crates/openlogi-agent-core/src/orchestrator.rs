@@ -164,14 +164,22 @@ impl Orchestrator {
         }
     }
 
-    /// The keyboard key-capture spec for the first online keyboard, or `None`
-    /// when no keyboard is online or none of its capturable keys carries a
+    /// The keyboard key-capture spec for the first known keyboard, or `None`
+    /// when no keyboard is paired or none of its capturable keys carries a
     /// real binding (an unbound key must never be diverted).
+    ///
+    /// Deliberately does NOT require the keyboard to be online: an idle
+    /// keyboard sleeps within minutes and probe timeouts can flap it offline,
+    /// and tearing the capture session down on every nap would hand the
+    /// diverted keys back to the firmware (dead bindings) until the re-arm
+    /// races through. The session instead stays up across sleeps — its
+    /// channel is to the always-present receiver — and re-arms diversion on
+    /// the device's `0x1d4b` reconnection broadcast.
     fn keyboard_spec_for(&self) -> Option<KeyboardSpec> {
         let dev = self
             .devices
             .iter()
-            .find(|d| d.kind == DeviceKind::Keyboard && d.online && d.route.is_some())?;
+            .find(|d| d.kind == DeviceKind::Keyboard && d.route.is_some())?;
         let bindings = bindings_for(
             &self.config,
             Some(&dev.config_key),
