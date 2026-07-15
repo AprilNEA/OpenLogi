@@ -8,6 +8,7 @@ use crate::smartshift::SmartShiftStatus;
 
 use super::WriteError;
 use super::dpi::{DpiInfo, get_dpi_info_on_channel, set_dpi_on_channel};
+use super::fn_lock::set_fn_lock_on_channel;
 use super::lighting::{LightingMethod, set_keyboard_color_with_on_channel};
 use super::smartshift::{
     get_smartshift_status_on_channel, set_smartshift_on_channel, toggle_smartshift_on_channel,
@@ -69,6 +70,12 @@ pub async fn get_smartshift_status_on(
     shared: &SharedChannel,
 ) -> Result<SmartShiftStatus, WriteError> {
     get_smartshift_status_on_channel(&shared.channel, shared.route.device_index()).await
+}
+
+/// Write keyboard Fn-lock on an already-open [`SharedChannel`] — the fast
+/// path that skips enumeration and channel setup.
+pub async fn set_fn_lock_on(shared: &SharedChannel, on: bool) -> Result<(), WriteError> {
+    set_fn_lock_on_channel(&shared.channel, shared.route.device_index(), on).await
 }
 
 /// Write a full SmartShift configuration on an already-open [`SharedChannel`]

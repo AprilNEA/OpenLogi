@@ -18,6 +18,7 @@ mod backlight;
 mod diagnostics;
 mod dpi;
 mod error;
+mod fn_lock;
 mod lighting;
 mod shared;
 mod smartshift;
@@ -28,10 +29,11 @@ pub use diagnostics::{
 };
 pub use dpi::{DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, set_dpi};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
+pub use fn_lock::set_fn_lock;
 pub use lighting::{LightingMethod, set_keyboard_color, set_keyboard_color_with};
 pub use shared::{
-    SharedChannel, get_dpi_info_on, get_smartshift_status_on, set_dpi_on, set_keyboard_color_on,
-    set_keyboard_color_with_on, set_smartshift_on, toggle_smartshift_on,
+    SharedChannel, get_dpi_info_on, get_smartshift_status_on, set_dpi_on, set_fn_lock_on,
+    set_keyboard_color_on, set_keyboard_color_with_on, set_smartshift_on, toggle_smartshift_on,
 };
 pub use smartshift::{
     get_smartshift_status, set_smartshift, set_smartshift_sensitivity, toggle_smartshift,
