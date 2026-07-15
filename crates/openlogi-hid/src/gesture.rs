@@ -295,15 +295,17 @@ async fn arm_controls(
 }
 
 /// Log (don't propagate) a failure to hand a control back to the firmware.
-fn restore<E: std::fmt::Display>(result: Result<(), E>, what: &str) {
+/// Shared with the keyboard capture session (`crate::keyboard`).
+pub(crate) fn restore<E: std::fmt::Display>(result: Result<(), E>, what: &str) {
     if let Err(e) = result {
         warn!(error = %e, control = what, "failed to restore control mapping on shutdown");
     }
 }
 
 /// Read the device's full reprogrammable-control table in one pass, so we can
-/// test several CIDs without rescanning per control.
-async fn enumerate_controls(
+/// test several CIDs without rescanning per control. Shared with the keyboard
+/// capture session (`crate::keyboard`).
+pub(crate) async fn enumerate_controls(
     rc: &ReprogControlsV4,
 ) -> Result<Vec<reprog_controls::CtrlIdInfo>, GestureError> {
     let count = rc
