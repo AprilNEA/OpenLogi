@@ -222,6 +222,55 @@ pub fn write_smartshift_in_background(
     });
 }
 
+/// Spawn an OS thread that writes the keyboard Fn-lock state to the device at
+/// `target` via [`openlogi_hid::set_fn_lock_on`]. Returns immediately; failures
+/// (incl. keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion)
+/// are logged.
+///
+/// `target == None` is a no-op (dev environment without a real device).
+pub fn write_fn_lock_in_background(
+    capture: Option<&CaptureChannel>,
+    registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
+    target: Option<DeviceRoute>,
+    on: bool,
+) {
+    let Some(target) = target else {
+        debug!(on, "no target device — Fn-lock write skipped");
+        return;
+    };
+    let Ok(shared) = authoritative_channel(capture, registry, &target) else {
+        debug!(route = %target, "no inventory channel — Fn-lock write skipped");
+        return;
+    };
+    let receiver_access = receiver_access.clone();
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                warn!(error = %e, "tokio runtime init failed; Fn-lock write skipped");
+                return;
+            }
+        };
+        let result = rt.block_on(async {
+            let _lease = receiver_access.acquire_for_io().await;
+            tokio::time::timeout(WRITE_BUDGET, openlogi_hid::set_fn_lock_on(&shared, on)).await
+        });
+        let index = target.device_index();
+        match result {
+            Ok(Ok(())) => debug!(index, on, "Fn-lock written"),
+            Ok(Err(e)) => warn!(error = ?e, "Fn-lock write failed"),
+            Err(_) => warn!(
+                index,
+                "Fn-lock write timed out (device asleep/unresponsive)"
+            ),
+        }
+    });
+}
+
 /// Desired SmartShift values for a reconnect re-apply.
 #[derive(Debug, Clone, Copy)]
 pub struct SmartShiftApply {

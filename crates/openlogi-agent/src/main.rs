@@ -177,6 +177,19 @@ async fn run(config: Config) {
         shared.receiver_access.clone(),
     );
 
+    // The keyboard key-capture watcher: diverts bound F-row controls on the
+    // keyboard the orchestrator publishes and dispatches their presses. Holds
+    // a shared receiver lease alongside the gesture watcher; also needs no
+    // Accessibility permission.
+    watchers::keyboard::spawn(
+        shared.keyboard_spec.clone(),
+        shared.dpi_cycle.clone(),
+        shared.capture_channel.clone(),
+        shared.keyboard_channel.clone(),
+        shared.receiver_access.clone(),
+        shared.channel_registry.clone(),
+    );
+
     let mut inventory_rx = watchers::inventory::spawn_with_registry(
         Duration::from_secs(2),
         shared.channel_registry.clone(),
