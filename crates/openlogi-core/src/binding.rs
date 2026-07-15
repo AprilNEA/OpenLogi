@@ -38,6 +38,29 @@ pub enum ButtonId {
     /// The HID++ gesture button on MX-line devices. The press itself
     /// fires the bound action; swipe directions are P1.5 territory.
     GestureButton,
+    /// Keyboard F-row "Search" control (`0x1b04` CID `0x00d4`,
+    /// `MultiPlatform_Search`) — F4 on the Signature series.
+    KeySearch,
+    /// Keyboard "Dictation" control (CID `0x0103`) — F5 on the Signature series.
+    KeyDictation,
+    /// Keyboard "Emoji" control (CID `0x0108`) — F6 on the Signature series.
+    KeyEmoji,
+    /// Keyboard "Screen Capture" control (CID `0x010a`) — F7 on the Signature
+    /// series.
+    KeyScreenCapture,
+    /// Keyboard "Mute Microphone" control (CID `0x011c`) — F8 on the Signature
+    /// series.
+    KeyMicMute,
+    /// Keyboard "Play/Pause" control (CID `0x00e5`) — F9 on the Signature series.
+    KeyPlayPause,
+    /// Keyboard "Mute" control (CID `0x00e7`) — F10 on the Signature series.
+    KeyMute,
+    /// Keyboard "Volume Down" control (CID `0x00e8`) — F11 on the Signature
+    /// series.
+    KeyVolumeDown,
+    /// Keyboard "Volume Up" control (CID `0x00e9`) — F12 on the Signature
+    /// series.
+    KeyVolumeUp,
 }
 
 impl ButtonId {
@@ -52,6 +75,22 @@ impl ButtonId {
         ButtonId::ThumbwheelScrollUp,
         ButtonId::ThumbwheelScrollDown,
         ButtonId::GestureButton,
+    ];
+
+    /// The divertable keyboard F-row controls, in F-row order. Kept out of
+    /// [`ButtonId::ALL`]: that array seeds mouse defaults and the mouse
+    /// popover trigger list, while keyboard keys stay native unless the user
+    /// binds them (an unbound key is never diverted).
+    pub const KEYBOARD_KEYS: [ButtonId; 9] = [
+        ButtonId::KeySearch,
+        ButtonId::KeyDictation,
+        ButtonId::KeyEmoji,
+        ButtonId::KeyScreenCapture,
+        ButtonId::KeyMicMute,
+        ButtonId::KeyPlayPause,
+        ButtonId::KeyMute,
+        ButtonId::KeyVolumeDown,
+        ButtonId::KeyVolumeUp,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -83,6 +122,15 @@ impl ButtonId {
             ButtonId::ThumbwheelScrollUp => "Thumb Wheel Up",
             ButtonId::ThumbwheelScrollDown => "Thumb Wheel Down",
             ButtonId::GestureButton => "Gesture Button",
+            ButtonId::KeySearch => "Search Key",
+            ButtonId::KeyDictation => "Dictation Key",
+            ButtonId::KeyEmoji => "Emoji Key",
+            ButtonId::KeyScreenCapture => "Screen Capture Key",
+            ButtonId::KeyMicMute => "Mic Mute Key",
+            ButtonId::KeyPlayPause => "Play/Pause Key",
+            ButtonId::KeyMute => "Mute Key",
+            ButtonId::KeyVolumeDown => "Volume Down Key",
+            ButtonId::KeyVolumeUp => "Volume Up Key",
         }
     }
 }
@@ -481,6 +529,12 @@ pub enum Action {
     /// The `display` field is used by [`Action::label`] so the popover
     /// shows the user-friendly chord name.
     CustomShortcut(KeyCombo),
+
+    // ── System (appended) ────────────────────────────────────────────────────
+    /// Put the computer to sleep. Appended after `CustomShortcut` because the
+    /// serde variant index is the wire format (see the stability contract
+    /// above) — new variants only ever go at the end.
+    Sleep,
 }
 
 /// A modifier + virtual-key keystroke captured by the P1.3 recorder UI or
@@ -723,6 +777,7 @@ impl Action {
             Action::HorizontalScrollLeft => "Scroll Left".into(),
             Action::HorizontalScrollRight => "Scroll Right".into(),
             Action::CustomShortcut(combo) => combo.rendered_label(),
+            Action::Sleep => "Sleep".into(),
         }
     }
 
@@ -760,9 +815,11 @@ impl Action {
             | Action::NextDesktop
             | Action::ShowDesktop
             | Action::LaunchpadShow => Category::Navigation,
-            Action::None | Action::LockScreen | Action::Screenshot | Action::CaptureRegion => {
-                Category::System
-            }
+            Action::None
+            | Action::LockScreen
+            | Action::Screenshot
+            | Action::CaptureRegion
+            | Action::Sleep => Category::System,
             Action::PlayPause
             | Action::NextTrack
             | Action::PrevTrack
@@ -822,6 +879,7 @@ impl Action {
             Action::LockScreen,
             Action::Screenshot,
             Action::CaptureRegion,
+            Action::Sleep,
             // Media
             Action::PlayPause,
             Action::NextTrack,
@@ -872,6 +930,18 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollRight,
         ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
         ButtonId::GestureButton => Action::MissionControl,
+        // Keyboard keys stay on their native firmware function until the user
+        // explicitly binds them; an unbound key is never diverted, so a
+        // `None` default keeps the projection total without capturing anything.
+        ButtonId::KeySearch
+        | ButtonId::KeyDictation
+        | ButtonId::KeyEmoji
+        | ButtonId::KeyScreenCapture
+        | ButtonId::KeyMicMute
+        | ButtonId::KeyPlayPause
+        | ButtonId::KeyMute
+        | ButtonId::KeyVolumeDown
+        | ButtonId::KeyVolumeUp => Action::None,
     }
 }
 
