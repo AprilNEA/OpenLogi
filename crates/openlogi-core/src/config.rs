@@ -597,6 +597,13 @@ impl Config {
         self.devices.get(device_key).and_then(|d| d.smartshift)
     }
 
+    /// The persisted keyboard Fn-lock state for `device_key`, or `None` when
+    /// the user never set one (the keyboard keeps its own state).
+    #[must_use]
+    pub fn fn_lock(&self, device_key: &str) -> Option<bool> {
+        self.devices.get(device_key).and_then(|d| d.fn_lock)
+    }
+
     /// Record the SmartShift wheel config for `device_key`, so the agent can
     /// re-apply it when the device reconnects (#189).
     pub fn set_smartshift(&mut self, device_key: &str, smartshift: SmartShift) {
