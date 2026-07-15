@@ -107,6 +107,12 @@ pub(super) fn execute(action: &Action) {
         Action::Screenshot | Action::CaptureRegion => {
             post_key(VK_S, &[VK_LWIN, VK_SHIFT]);
         }
+        // Suspending reliably needs `SetSuspendState` (powrprof.dll), which
+        // hibernates instead when hibernation is enabled — no clean win from
+        // a background agent, so the action is skipped on Windows for now.
+        Action::Sleep => {
+            tracing::debug!("Sleep has no Windows synthesis yet — action skipped");
+        }
         Action::PlayPause => post_key(VK_MEDIA_PLAY_PAUSE, &[]),
         Action::NextTrack => post_key(VK_MEDIA_NEXT_TRACK, &[]),
         Action::PrevTrack => post_key(VK_MEDIA_PREV_TRACK, &[]),
