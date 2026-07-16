@@ -135,6 +135,11 @@ async fn run(config: Config) {
         Hook::prompt_accessibility();
     }
 
+    // Read the hook kill-switch before `config` moves into the orchestrator.
+    // Startup-only on purpose (like `show_in_menu_bar`): flipping it requires
+    // an agent restart, which the config docs state.
+    let capture_mouse_events = config.app_settings.capture_mouse_events;
+
     // The orchestrator is shared with the IPC server (which serves inventory /
     // reload / status) and mutated by the watcher select loop, so it lives
     // behind an async mutex. Locks are brief (a map rebuild or a clone).
@@ -220,14 +225,21 @@ async fn run(config: Config) {
                     hook_installed.store(false, Ordering::Relaxed);
                 }
                 if granted && hook.is_none() {
-                    info!("accessibility granted — installing OS mouse hook");
-                    hook = hook_runtime::start(
-                        shared.hook_maps.clone(),
-                        shared.dpi_cycle.clone(),
-                        shared.capture_channel.clone(),
-                        Arc::clone(&event_monitor),
-                    );
-                    hook_installed.store(hook.is_some(), Ordering::Relaxed);
+                    if capture_mouse_events {
+                        info!("accessibility granted — installing OS mouse hook");
+                        hook = hook_runtime::start(
+                            shared.hook_maps.clone(),
+                            shared.dpi_cycle.clone(),
+                            shared.capture_channel.clone(),
+                            Arc::clone(&event_monitor),
+                        );
+                        hook_installed.store(hook.is_some(), Ordering::Relaxed);
+                    } else {
+                        info!(
+                            "OS mouse hook disabled by app_settings.capture_mouse_events — \
+                             button remapping is off"
+                        );
+                    }
                 }
             }
             else => break,

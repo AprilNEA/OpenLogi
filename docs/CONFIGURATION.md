@@ -36,10 +36,14 @@ MX Master 4):
 The app-wide `[app_settings]` block holds `launch_at_login`,
 `check_for_updates`, and `auto_install_updates` (all off by default);
 `show_in_menu_bar` (macOS menu bar / Windows tray, ignored on Linux; on by
-default); `auto_download_assets` (on by default); `language` (absent = follow
-the system locale); `thumbwheel_sensitivity` (default `14`); and the
-`appearance` (default `"system"`), `theme_light`, `theme_dark`, and `ui_radius`
-presentation settings. The theme and radius overrides are absent by default.
+default); `capture_mouse_events` (on by default; set to `false` to keep the
+agent from installing the OS-level mouse hook at all — button remapping stops
+working, but no input device is grabbed or intercepted; DPI, SmartShift, and
+the other HID++-side features keep working; takes effect on agent restart);
+`auto_download_assets` (on by default); `language` (absent = follow the system
+locale); `thumbwheel_sensitivity` (default `14`); and the `appearance` (default
+`"system"`), `theme_light`, `theme_dark`, and `ui_radius` presentation
+settings. The theme and radius overrides are absent by default.
 
 ```toml
 schema_version = 2
