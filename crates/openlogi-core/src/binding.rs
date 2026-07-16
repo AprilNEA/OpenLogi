@@ -363,6 +363,24 @@ pub enum Action {
     /// The `display` field is used by [`Action::label`] so the popover
     /// shows the user-friendly chord name.
     CustomShortcut(KeyCombo),
+
+    /// Hold an arbitrary recorded key chord for as long as the physical
+    /// button is held — push-to-talk.
+    ///
+    /// Unlike [`Action::CustomShortcut`], which taps the chord (down+up) on
+    /// button-down and ignores the release, this synthesises the key-down on
+    /// press and the matching key-up on release. The chord therefore stays
+    /// held from the OS's point of view, which is what conferencing and games
+    /// listen for.
+    ///
+    /// Only reachable from the OS-hook path ([`ButtonId::is_os_hook_button`]),
+    /// which is the only capture route that observes both edges. The HID++
+    /// gesture button reports an instantaneous click with no release, so a
+    /// hold bound there degrades to a tap rather than jamming the key down.
+    ///
+    /// [`KeyCombo::key_code`] must be non-zero: a modifier-only hold is
+    /// representable but the recorder rejects it, so nothing can produce one.
+    HoldShortcut(KeyCombo),
 }
 
 /// A modifier + virtual-key keystroke captured by the P1.3 recorder UI or
@@ -609,6 +627,17 @@ impl Action {
             Action::HorizontalScrollLeft => "Scroll Left".into(),
             Action::HorizontalScrollRight => "Scroll Right".into(),
             Action::CustomShortcut(combo) => combo.rendered_label(),
+            Action::HoldShortcut(combo) => format!("Hold {}", combo.rendered_label()),
+        }
+    }
+
+    /// The chord this action holds down for the duration of the physical
+    /// press, if any. `None` for every tap-style action.
+    #[must_use]
+    pub fn held_combo(&self) -> Option<&KeyCombo> {
+        match self {
+            Action::HoldShortcut(combo) => Some(combo),
+            _ => None,
         }
     }
 
@@ -631,7 +660,8 @@ impl Action {
             | Action::SelectAll
             | Action::Find
             | Action::Save
-            | Action::CustomShortcut(_) => Category::Editing,
+            | Action::CustomShortcut(_)
+            | Action::HoldShortcut(_) => Category::Editing,
             Action::BrowserBack
             | Action::BrowserForward
             | Action::NewTab
@@ -667,7 +697,8 @@ impl Action {
 
     /// All pickable actions in a deterministic order.
     ///
-    /// [`Action::CustomShortcut`] is intentionally excluded — it is opened via
+    /// [`Action::CustomShortcut`] and [`Action::HoldShortcut`] are
+    /// intentionally excluded — both carry a recorded chord and are opened via
     /// "Record shortcut…" (P1.3), not selected from the catalog.
     #[must_use]
     pub fn catalog() -> Vec<Action> {
@@ -841,6 +872,78 @@ mod tests {
                 "catalog must not contain CustomShortcut"
             );
         }
+    }
+
+    #[test]
+    fn catalog_excludes_hold_shortcut() {
+        let catalog = Action::catalog();
+        for action in &catalog {
+            assert!(
+                !matches!(action, Action::HoldShortcut(_)),
+                "catalog must not contain HoldShortcut — it carries a recorded \
+                 chord and is reached via the recorder's Hold toggle"
+            );
+        }
+    }
+
+    // ── HoldShortcut ──────────────────────────────────────────────────────────
+
+    fn ptt_combo() -> KeyCombo {
+        KeyCombo {
+            modifiers: KeyCombo::MOD_OPTION,
+            key_code: 0x31,
+            display: "⌥Space".into(),
+        }
+    }
+
+    #[test]
+    fn held_combo_is_some_only_for_hold_shortcut() {
+        assert_eq!(
+            Action::HoldShortcut(ptt_combo()).held_combo(),
+            Some(&ptt_combo())
+        );
+        assert_eq!(
+            Action::CustomShortcut(ptt_combo()).held_combo(),
+            None,
+            "a tap shortcut must never be treated as a hold — it has no release"
+        );
+        assert_eq!(Action::BrowserBack.held_combo(), None);
+        assert_eq!(Action::None.held_combo(), None);
+    }
+
+    #[test]
+    fn hold_shortcut_label_distinguishes_itself_from_a_tap() {
+        assert_eq!(Action::HoldShortcut(ptt_combo()).label(), "Hold ⌥Space");
+        assert_eq!(Action::CustomShortcut(ptt_combo()).label(), "⌥Space");
+    }
+
+    #[test]
+    fn hold_shortcut_roundtrips_through_toml() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            ButtonId::Back,
+            Binding::Single(Action::HoldShortcut(ptt_combo())),
+        );
+        let back = binding_roundtrip(bindings)
+            .remove(&ButtonId::Back)
+            .expect("Back survives the roundtrip");
+        assert_eq!(back, Binding::Single(Action::HoldShortcut(ptt_combo())));
+    }
+
+    /// The untagged `Binding` enum tries `Single(Action)` first, so a payload
+    /// variant must not be mistaken for a gesture map (same hazard the
+    /// `CustomShortcut` case guards).
+    #[test]
+    fn hold_shortcut_stays_single_not_gesture() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            ButtonId::Back,
+            Binding::Single(Action::HoldShortcut(ptt_combo())),
+        );
+        assert!(matches!(
+            binding_roundtrip(bindings).remove(&ButtonId::Back),
+            Some(Binding::Single(Action::HoldShortcut(_)))
+        ));
     }
 
     // ── Binding (merged model) serde routing ──────────────────────────────────

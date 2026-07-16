@@ -146,6 +146,7 @@ _version: 1
 "Middle": "中键"
 "DPI Preset %{index}": "灵敏度预设 %{index}"
 "Gesture %{name}": "手势 %{name}"
+"Hold %{chord}": "按住 %{chord}"
 "Left Click": "左键单击"
 "Right Click": "右键单击"
 "Middle Click": "中键单击"

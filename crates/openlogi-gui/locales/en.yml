@@ -146,6 +146,7 @@ _version: 1
 "Middle": "Middle"
 "DPI Preset %{index}": "DPI Preset %{index}"
 "Gesture %{name}": "Gesture %{name}"
+"Hold %{chord}": "Hold %{chord}"
 "Left Click": "Left Click"
 "Right Click": "Right Click"
 "Middle Click": "Middle Click"

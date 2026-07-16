@@ -7,7 +7,7 @@ use core_graphics::event::{
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
-use openlogi_core::binding::Action;
+use openlogi_core::binding::{Action, KeyCombo};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -34,8 +34,6 @@ const VK_TAB: u16 = 0x30;
 
 /// macOS implementation: dispatch to the appropriate event helper.
 pub(super) fn execute(action: &Action) {
-    use openlogi_core::binding::KeyCombo;
-
     // Modifier bit shorthands.
     let cmd = CGEventFlags::CGEventFlagCommand;
     let shift = CGEventFlags::CGEventFlagShift;
@@ -131,20 +129,24 @@ pub(super) fn execute(action: &Action) {
                 );
                 return;
             }
-            let mut flags = CGEventFlags::CGEventFlagNull;
-            if combo.modifiers & KeyCombo::MOD_CMD != 0 {
-                flags |= CGEventFlags::CGEventFlagCommand;
+            post_key(combo.key_code, combo_flags(combo));
+        }
+        // A hold that reaches `execute` came from a dispatch path with no
+        // release edge (the HID++ gesture button), so it degrades to a tap
+        // rather than jamming the chord down forever.
+        Action::HoldShortcut(combo) => {
+            if combo.key_code == 0 {
+                tracing::warn!(
+                    chord = %combo.rendered_label(),
+                    "HoldShortcut with no key code — press ignored"
+                );
+                return;
             }
-            if combo.modifiers & KeyCombo::MOD_SHIFT != 0 {
-                flags |= CGEventFlags::CGEventFlagShift;
-            }
-            if combo.modifiers & KeyCombo::MOD_CTRL != 0 {
-                flags |= CGEventFlags::CGEventFlagControl;
-            }
-            if combo.modifiers & KeyCombo::MOD_OPTION != 0 {
-                flags |= CGEventFlags::CGEventFlagAlternate;
-            }
-            post_key(combo.key_code, flags);
+            tracing::debug!(
+                chord = %combo.rendered_label(),
+                "HoldShortcut dispatched without a release edge — tapping instead"
+            );
+            post_key(combo.key_code, combo_flags(combo));
         }
     }
 }
@@ -220,24 +222,45 @@ fn tag_synthetic(ev: &CGEvent) {
     );
 }
 
-/// Post a key-down + key-up pair for `vk` with `flags` set.
-fn post_key(vk: u16, flags: CGEventFlags) {
+/// Post a single key event for `vk` with `flags` set — `down` picks the edge.
+///
+/// Isolated edges are what [`super::press_hold`] and [`super::release_hold`]
+/// need; [`post_key`] pairs them for a tap.
+pub(super) fn post_key_phase(vk: u16, flags: CGEventFlags, down: bool) {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed");
         return;
     };
-    let Ok(down) = CGEvent::new_keyboard_event(src.clone(), vk, true) else {
-        tracing::warn!("CGEvent::new_keyboard_event(down) failed");
+    let Ok(ev) = CGEvent::new_keyboard_event(src, vk, down) else {
+        tracing::warn!(down, "CGEvent::new_keyboard_event failed");
         return;
     };
-    down.set_flags(flags);
-    down.post(CGEventTapLocation::HID);
-    let Ok(up) = CGEvent::new_keyboard_event(src, vk, false) else {
-        tracing::warn!("CGEvent::new_keyboard_event(up) failed");
-        return;
-    };
-    up.set_flags(flags);
-    up.post(CGEventTapLocation::HID);
+    ev.set_flags(flags);
+    ev.post(CGEventTapLocation::HID);
+}
+
+/// Post a key-down + key-up pair for `vk` with `flags` set.
+fn post_key(vk: u16, flags: CGEventFlags) {
+    post_key_phase(vk, flags, true);
+    post_key_phase(vk, flags, false);
+}
+
+/// Translate a [`KeyCombo`]'s modifier bitmask into `CGEventFlags`.
+pub(super) fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
+    let mut flags = CGEventFlags::CGEventFlagNull;
+    if combo.modifiers & KeyCombo::MOD_CMD != 0 {
+        flags |= CGEventFlags::CGEventFlagCommand;
+    }
+    if combo.modifiers & KeyCombo::MOD_SHIFT != 0 {
+        flags |= CGEventFlags::CGEventFlagShift;
+    }
+    if combo.modifiers & KeyCombo::MOD_CTRL != 0 {
+        flags |= CGEventFlags::CGEventFlagControl;
+    }
+    if combo.modifiers & KeyCombo::MOD_OPTION != 0 {
+        flags |= CGEventFlags::CGEventFlagAlternate;
+    }
+    flags
 }
 
 /// Post a media/system key event (play/pause, track navigation, volume).

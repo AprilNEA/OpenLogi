@@ -146,6 +146,7 @@ _version: 1
 "Middle": "Keskipainike"
 "DPI Preset %{index}": "DPI-esiasetus %{index}"
 "Gesture %{name}": "Ele %{name}"
+"Hold %{chord}": "Pidä %{chord}"
 "Left Click": "Vasen napsautus"
 "Right Click": "Oikea napsautus"
 "Middle Click": "Keskinapsautus"

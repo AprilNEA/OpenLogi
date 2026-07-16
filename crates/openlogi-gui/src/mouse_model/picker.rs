@@ -339,7 +339,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::ScrollDown => "action-icons/chevrons-down.svg",
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
-        Action::CustomShortcut(_) => "action-icons/keyboard.svg",
+        Action::CustomShortcut(_) | Action::HoldShortcut(_) => "action-icons/keyboard.svg",
     }
 }
 

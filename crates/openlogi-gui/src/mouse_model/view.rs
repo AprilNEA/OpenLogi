@@ -653,6 +653,7 @@ fn localized_action_label(action: &Action) -> gpui::SharedString {
             tr!("DPI Preset %{index}", index => (index + 1).to_string())
         }
         Action::CustomShortcut(combo) => combo.rendered_label().into(),
+        Action::HoldShortcut(combo) => tr!("Hold %{chord}", chord => combo.rendered_label()),
         _ => tr!(action.label()),
     }
 }

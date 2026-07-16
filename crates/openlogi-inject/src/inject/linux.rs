@@ -108,6 +108,28 @@ pub(super) fn execute(action: &Action) {
             };
             press_key(&modifiers_to_keycodes(combo.modifiers), key);
         }
+        // See the macOS arm: a hold with no release edge degrades to a tap.
+        Action::HoldShortcut(combo) => {
+            if combo.key_code == 0 {
+                tracing::warn!(
+                    chord = %combo.rendered_label(),
+                    "HoldShortcut with no key code — press ignored"
+                );
+                return;
+            }
+            let Some(key) = macos_vk_to_linux(combo.key_code) else {
+                tracing::warn!(
+                    key_code = combo.key_code,
+                    "HoldShortcut key code has no Linux mapping — press ignored"
+                );
+                return;
+            };
+            tracing::debug!(
+                chord = %combo.rendered_label(),
+                "HoldShortcut dispatched without a release edge — tapping instead"
+            );
+            press_key(&modifiers_to_keycodes(combo.modifiers), key);
+        }
     }
 }
 
@@ -234,6 +256,37 @@ fn press_key(mods: &[KeyCode], key: KeyCode) {
     }
     up.push(syn());
     emit(&up);
+}
+
+/// Inject one edge of a held chord in a single SYN frame.
+///
+/// Down order is modifiers-then-key and up order is key-then-modifiers
+/// (the reverse), matching [`press_key`] — a chord whose modifiers lifted
+/// before its key would surface to the focused app as a bare keypress.
+pub(super) fn key_phase(combo: &openlogi_core::binding::KeyCombo, down: bool) {
+    let Some(key) = macos_vk_to_linux(combo.key_code) else {
+        tracing::warn!(
+            key_code = combo.key_code,
+            "hold chord key code has no Linux mapping — ignored"
+        );
+        return;
+    };
+    let mods = modifiers_to_keycodes(combo.modifiers);
+
+    let mut events: Vec<InputEvent> = Vec::with_capacity(mods.len() + 2);
+    if down {
+        for &m in &mods {
+            events.push(key_ev(m, 1));
+        }
+        events.push(key_ev(key, 1));
+    } else {
+        events.push(key_ev(key, 0));
+        for &m in mods.iter().rev() {
+            events.push(key_ev(m, 0));
+        }
+    }
+    events.push(syn());
+    emit(&events);
 }
 
 /// Inject a button-down in one SYN frame and button-up in a second.

@@ -146,6 +146,7 @@ _version: 1
 "Middle": "Central"
 "DPI Preset %{index}": "Predefinição de DPI %{index}"
 "Gesture %{name}": "Gesto %{name}"
+"Hold %{chord}": "Manter %{chord}"
 "Left Click": "Clique esquerdo"
 "Right Click": "Clique direito"
 "Middle Click": "Clique central"
