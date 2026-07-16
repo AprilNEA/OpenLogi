@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::binding::{
-    Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
+    Action, ButtonId, GestureDirection, KeyCombo, SwipeAccumulator, default_binding,
 };
 use openlogi_hid::CaptureChannel;
 use openlogi_hook::{EventDisposition, Hook, MouseEvent};
@@ -87,6 +87,41 @@ impl HoldState {
     }
 }
 
+/// Chords currently held down by an [`Action::HoldShortcut`] binding, keyed by
+/// the physical button holding them — push-to-talk.
+///
+/// The combo is **stored on press** rather than re-resolved on release, so a
+/// rebind, an unbind, or a per-app profile switch mid-hold still releases the
+/// chord that actually went down. Re-resolving would strand it.
+#[derive(Default)]
+struct HeldChords(BTreeMap<ButtonId, KeyCombo>);
+
+impl HeldChords {
+    /// Record `combo` as held by `button`. Returns the combo to press, or
+    /// `None` when the button is already holding one — a repeated button-down
+    /// (key auto-repeat, a re-delivered event) must not stack a second
+    /// key-down that the single release could never balance.
+    fn press(&mut self, button: ButtonId, combo: KeyCombo) -> Option<KeyCombo> {
+        if self.0.contains_key(&button) {
+            return None;
+        }
+        self.0.insert(button, combo.clone());
+        Some(combo)
+    }
+
+    /// Release `button`'s chord. `None` for a stray release of a button that
+    /// wasn't holding one.
+    fn release(&mut self, button: ButtonId) -> Option<KeyCombo> {
+        self.0.remove(&button)
+    }
+
+    /// Drain every held chord — used when the OS interrupts capture and the
+    /// button-ups are never coming.
+    fn drain(&mut self) -> Vec<KeyCombo> {
+        std::mem::take(&mut self.0).into_values().collect()
+    }
+}
+
 thread_local! {
     /// In-progress gesture hold, one instance per hook-callback thread: the
     /// single macOS tap thread, or — on Linux — one thread per device, so two
@@ -94,6 +129,109 @@ thread_local! {
     /// Thread-local rather than a shared `Mutex` keeps the hot path lock-free and
     /// free of cross-thread contention on the freeze-sensitive callback.
     static HOLD: RefCell<HoldState> = RefCell::new(HoldState::default());
+
+    /// Push-to-talk chords held down on this callback thread. Same
+    /// thread-per-device reasoning as [`HOLD`]: press and release for a given
+    /// device arrive on the same thread, so the pair always balances.
+    static HELD_CHORDS: RefCell<HeldChords> = RefCell::new(HeldChords::default());
+}
+
+/// Handle one OS-hook button edge: gesture holds, push-to-talk holds, and
+/// single-action dispatch.
+///
+/// Every path resolves to owned data and drops the `HOLD` / `HELD_CHORDS`
+/// borrow (and any `hooks` read guard) *before* injecting. A synthesized event
+/// can re-enter the tap on this same thread, and a re-borrow would be a
+/// `RefCell` double-borrow panic — a freeze hazard on the callback thread.
+fn on_button(
+    id: ButtonId,
+    pressed: bool,
+    hooks: &SharedHookMaps,
+    dpi_cycle: &Arc<RwLock<DpiCycleState>>,
+    capture: &CaptureChannel,
+) -> EventDisposition {
+    // The CGEventTap only sees standard buttons 0-4. We remap
+    // Middle/Back/Forward; the primary L/R clicks always pass through
+    // (suppressing them would brick the mouse), and the DPI / thumb /
+    // dedicated gesture button aren't visible to the tap at all — the
+    // dedicated gesture button is captured separately over HID++.
+    if !id.is_os_hook_button() {
+        return EventDisposition::PassThrough;
+    }
+
+    // Release of a push-to-talk chord, resolved from stored state *before* the
+    // binding maps are consulted: if the binding changed or was removed
+    // mid-hold, resolution below would yield a different action (or none,
+    // returning PassThrough early) and the chord would stay down system-wide.
+    if !pressed {
+        let held = HELD_CHORDS.with_borrow_mut(|h| h.release(id));
+        if let Some(combo) = held {
+            info!(button = %id, chord = %combo.rendered_label(), "hold released");
+            openlogi_inject::release_hold(&combo);
+            return EventDisposition::Suppress;
+        }
+    }
+
+    // Gesture button: suppress the native click and begin a hold. The swipe
+    // commits mid-motion in the `Moved` arm; here, on release, we only fire the
+    // plain `Click` when no swipe committed. The cursor is free to drift via
+    // the pass-through `Moved` events during the hold.
+    if pressed {
+        let is_gesture = hooks.read().is_ok_and(|m| m.gestures.contains_key(&id));
+        if is_gesture {
+            HOLD.with_borrow_mut(|h| h.begin(id));
+            return EventDisposition::Suppress;
+        }
+    } else {
+        let ended = HOLD.with_borrow_mut(|h| h.end(id));
+        if let Some(was_click) = ended {
+            if was_click {
+                // No swipe committed → fire the plain click.
+                let action = hooks
+                    .read()
+                    .ok()
+                    .map(|m| resolve_gesture_click(&m.gestures, id));
+                if let Some(action) = action {
+                    info!(button = %id, action = %action.label(), "gesture click → executing bound action");
+                    dispatch_action(&action, dpi_cycle, capture);
+                }
+            }
+            return EventDisposition::Suppress;
+        }
+    }
+
+    // Single-action button.
+    let action = hooks.read().ok().and_then(|m| m.bindings.get(&id).cloned());
+    let Some(action) = action else {
+        // Unbound → leave the physical button to the OS.
+        return EventDisposition::PassThrough;
+    };
+
+    // A button left on its own native click (e.g. Middle → MiddleClick) should
+    // just do that click; suppressing and re-synthesising it would be pointless
+    // churn.
+    if is_native_click(id, &action) {
+        return EventDisposition::PassThrough;
+    }
+
+    // Push-to-talk: hold the chord down for the duration of the press instead
+    // of tapping it. The release is handled above, from stored state.
+    if let Some(combo) = action.held_combo() {
+        if pressed {
+            let press = HELD_CHORDS.with_borrow_mut(|h| h.press(id, combo.clone()));
+            if let Some(combo) = press {
+                info!(button = %id, chord = %combo.rendered_label(), "hold pressed");
+                openlogi_inject::press_hold(&combo);
+            }
+        }
+        return EventDisposition::Suppress;
+    }
+
+    if pressed {
+        info!(button = %id, action = %action.label(), "button → executing bound action");
+        dispatch_action(&action, dpi_cycle, capture);
+    }
+    EventDisposition::Suppress
 }
 
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not
@@ -121,68 +259,7 @@ pub fn start(
         monitor.record(&event);
         match event {
             MouseEvent::Button { id, pressed } => {
-                // The CGEventTap only sees standard buttons 0-4. We remap
-                // Middle/Back/Forward; the primary L/R clicks always pass through
-                // (suppressing them would brick the mouse), and the DPI / thumb /
-                // dedicated gesture button aren't visible to the tap at all — the
-                // dedicated gesture button is captured separately over HID++.
-                if !id.is_os_hook_button() {
-                    return EventDisposition::PassThrough;
-                }
-
-                // Gesture button: suppress the native click and begin a hold. The
-                // swipe commits mid-motion in the `Moved` arm; here, on release, we
-                // only fire the plain `Click` when no swipe committed. The cursor is
-                // free to drift via the pass-through `Moved` events during the hold.
-                if pressed {
-                    let is_gesture = hooks.read().is_ok_and(|m| m.gestures.contains_key(&id));
-                    if is_gesture {
-                        HOLD.with_borrow_mut(|h| h.begin(id));
-                        return EventDisposition::Suppress;
-                    }
-                } else {
-                    // Release: end the hold and release the `HOLD` borrow *before* any
-                    // dispatch — the callback must stay lock-light, since a
-                    // synthesized event could otherwise re-enter the tap and re-borrow
-                    // `HOLD` (a RefCell double-borrow panic, freeze hazard).
-                    let ended = HOLD.with_borrow_mut(|h| h.end(id));
-                    if let Some(was_click) = ended {
-                        if was_click {
-                            // No swipe committed → fire the plain click. Resolve to an
-                            // owned action (so no lock is held across dispatch), then
-                            // dispatch with the guard already dropped.
-                            let action = hooks
-                                .read()
-                                .ok()
-                                .map(|m| resolve_gesture_click(&m.gestures, id));
-                            if let Some(action) = action {
-                                info!(button = %id, action = %action.label(), "gesture click → executing bound action");
-                                dispatch_action(&action, &dpi_cycle, &capture);
-                            }
-                        }
-                        return EventDisposition::Suppress;
-                    }
-                }
-
-                // Single-action button.
-                let action = hooks.read().ok().and_then(|m| m.bindings.get(&id).cloned());
-                let Some(action) = action else {
-                    // Unbound → leave the physical button to the OS.
-                    return EventDisposition::PassThrough;
-                };
-
-                // A button left on its own native click (e.g. Middle → MiddleClick)
-                // should just do that click; suppressing and re-synthesising it
-                // would be pointless churn.
-                if is_native_click(id, &action) {
-                    return EventDisposition::PassThrough;
-                }
-
-                if pressed {
-                    info!(button = %id, action = %action.label(), "button → executing bound action");
-                    dispatch_action(&action, &dpi_cycle, &capture);
-                }
-                EventDisposition::Suppress
+                on_button(id, pressed, &hooks, &dpi_cycle, &capture)
             }
             MouseEvent::Moved { delta_x, delta_y } => {
                 // Feed an in-progress hold; a committed swipe fires here, mid-motion.
@@ -215,6 +292,16 @@ pub fn start(
                 // The OS dropped events (tap disabled); cancel any hold so a lost
                 // button-up can't later commit a phantom swipe off ordinary motion.
                 HOLD.with_borrow_mut(HoldState::cancel);
+
+                // The button-ups are never coming, so force-release every held
+                // chord: a stuck key-down jams that key for every app on the
+                // system, which no amount of clicking recovers. Drain first, then
+                // inject with the borrow dropped.
+                let stranded = HELD_CHORDS.with_borrow_mut(HeldChords::drain);
+                for combo in stranded {
+                    warn!(chord = %combo.rendered_label(), "capture interrupted mid-hold — force-releasing chord");
+                    openlogi_inject::release_hold(&combo);
+                }
                 EventDisposition::PassThrough
             }
             MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
@@ -393,6 +480,97 @@ mod tests {
         assert_eq!(
             resolve_gesture_click(&empty, ButtonId::Forward),
             default_binding(ButtonId::Forward)
+        );
+    }
+
+    // `HeldChords` is the push-to-talk bookkeeping. Every unbalanced path here
+    // ends with a chord stuck down system-wide, so the edge cases below matter
+    // more than the happy path.
+
+    fn combo(key_code: u16) -> KeyCombo {
+        KeyCombo {
+            modifiers: KeyCombo::MOD_OPTION,
+            key_code,
+            display: String::new(),
+        }
+    }
+
+    #[test]
+    fn press_then_release_returns_the_stored_chord() {
+        let mut held = HeldChords::default();
+        assert_eq!(held.press(ButtonId::Back, combo(49)), Some(combo(49)));
+        assert_eq!(held.release(ButtonId::Back), Some(combo(49)));
+        assert_eq!(
+            held.release(ButtonId::Back),
+            None,
+            "a chord is released exactly once"
+        );
+    }
+
+    #[test]
+    fn repeated_press_does_not_stack_a_second_key_down() {
+        let mut held = HeldChords::default();
+        assert_eq!(held.press(ButtonId::Back, combo(49)), Some(combo(49)));
+        assert_eq!(
+            held.press(ButtonId::Back, combo(49)),
+            None,
+            "a re-delivered button-down must not press twice — the single \
+             release could not balance it"
+        );
+        // The one release still clears the hold entirely.
+        assert_eq!(held.release(ButtonId::Back), Some(combo(49)));
+        assert!(held.0.is_empty());
+    }
+
+    #[test]
+    fn release_returns_the_pressed_chord_not_a_rebound_one() {
+        // A rebind mid-hold must release what actually went down. The map is
+        // the only record of that — this is why the release path reads stored
+        // state instead of re-resolving the binding.
+        let mut held = HeldChords::default();
+        held.press(ButtonId::Back, combo(49));
+        assert_eq!(held.release(ButtonId::Back), Some(combo(49)));
+    }
+
+    #[test]
+    fn stray_release_of_an_unheld_button_is_inert() {
+        let mut held = HeldChords::default();
+        held.press(ButtonId::Back, combo(49));
+        assert_eq!(
+            held.release(ButtonId::Forward),
+            None,
+            "releasing a button that holds nothing must not touch another's chord"
+        );
+        assert_eq!(held.release(ButtonId::Back), Some(combo(49)));
+    }
+
+    #[test]
+    fn buttons_hold_independent_chords() {
+        let mut held = HeldChords::default();
+        held.press(ButtonId::Back, combo(49));
+        held.press(ButtonId::Forward, combo(50));
+        assert_eq!(held.release(ButtonId::Forward), Some(combo(50)));
+        assert_eq!(
+            held.release(ButtonId::Back),
+            Some(combo(49)),
+            "one release must not disturb the other button's hold"
+        );
+    }
+
+    #[test]
+    fn drain_force_releases_every_chord_and_empties() {
+        let mut held = HeldChords::default();
+        held.press(ButtonId::Back, combo(49));
+        held.press(ButtonId::Forward, combo(50));
+
+        let mut stranded = held.drain();
+        stranded.sort_by_key(|c| c.key_code);
+        assert_eq!(stranded, vec![combo(49), combo(50)]);
+        assert!(held.0.is_empty(), "drain leaves nothing to strand");
+        assert_eq!(
+            held.release(ButtonId::Back),
+            None,
+            "a button-up arriving after the force-release is inert"
         );
     }
 }
