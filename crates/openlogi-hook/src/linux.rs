@@ -1,9 +1,16 @@
 //! Linux `evdev` + `uinput` implementation of the OS-level mouse hook.
 //!
-//! Each physical mouse found under `/dev/input/` is grabbed exclusively;
-//! a paired `uinput` virtual device re-injects events the callback marks
+//! Each physical mouse — a relative pointer with buttons — found under
+//! `/dev/input/` is grabbed exclusively; a paired `uinput` virtual device
+//! re-injects events the callback marks
 //! [`crate::EventDisposition::PassThrough`]. Events marked
 //! [`crate::EventDisposition::Suppress`] are consumed and never reach the desktop.
+//!
+//! Touch-driven devices (touchpads, touchscreens) and pointing sticks are
+//! never grabbed, even though they advertise mouse buttons: the virtual
+//! device mirrors only keys and relative axes, so a grab would swallow their
+//! multitouch `EV_ABS` stream (and the input properties libinput keys
+//! behavior on) with no way to re-inject it — killing the built-in pointer.
 //!
 //! # Permissions
 //!
@@ -21,7 +28,9 @@ use std::sync::{
 use std::thread;
 
 use evdev::uinput::VirtualDevice;
-use evdev::{Device, EventSummary, KeyCode, RelativeAxisCode};
+use evdev::{
+    AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, KeyCode, PropType, RelativeAxisCode,
+};
 use tracing::{debug, error, warn};
 use x11rb::connection::Connection as _;
 use x11rb::properties::WmClass;
@@ -30,8 +39,14 @@ use x11rb::rust_connection::RustConnection;
 
 use crate::{ButtonId, EventDisposition, HookError, MouseEvent};
 
-/// Name stamped on every uinput pass-through device; used to skip those
-/// devices during enumeration so we don't hook our own virtual mice.
+/// Prefix carried by every uinput device OpenLogi creates — the hook's
+/// pass-through mice ([`VIRTUAL_DEVICE_NAME`]) and openlogi-inject's
+/// "OpenLogi action injector" (which also advertises mouse buttons).
+/// Enumeration refuses anything with this prefix so the hook can never grab
+/// one of our own virtual devices.
+const OPENLOGI_DEVICE_PREFIX: &str = "OpenLogi ";
+
+/// Name stamped on every uinput pass-through device.
 const VIRTUAL_DEVICE_NAME: &str = "OpenLogi virtual mouse";
 
 /// Hi-res scroll resolution: 120 units per standard wheel tick, matching the
@@ -135,12 +150,70 @@ fn create_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
 
 fn find_mouse_devices() -> Vec<(std::path::PathBuf, Device)> {
     evdev::enumerate()
-        .filter(|(_, d)| d.name().unwrap_or("") != VIRTUAL_DEVICE_NAME)
-        .filter(|(_, d)| {
-            d.supported_keys()
-                .is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT))
+        .filter(|(path, d)| {
+            let hookable = is_hookable_mouse(
+                d.name(),
+                d.supported_keys(),
+                d.supported_relative_axes(),
+                d.supported_absolute_axes(),
+                d.properties(),
+            );
+            if !hookable
+                && d.supported_keys()
+                    .is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT))
+            {
+                debug!(
+                    "not hooking {} ({}): has mouse buttons but is not a plain relative-pointer mouse",
+                    path.display(),
+                    d.name().unwrap_or("unnamed"),
+                );
+            }
+            hookable
         })
         .collect()
+}
+
+/// Decide whether an input device is a physical mouse the hook may grab.
+///
+/// Grabbing is only correct for devices whose full event stream the paired
+/// virtual device can re-inject, i.e. relative pointers. Touch-driven
+/// devices (touchpads, touchscreens) speak multitouch `EV_ABS`, which
+/// [`build_virtual_device`] does not mirror — grabbing one swallows its
+/// events and kills the pointer. Pointing sticks are relative pointers but
+/// are excluded too: libinput derives their on-button scrolling from the
+/// `POINTING_STICK` input property, which a re-injected uinput stream loses,
+/// and built-in sticks are never OpenLogi's target hardware.
+fn is_hookable_mouse(
+    name: Option<&str>,
+    keys: Option<&AttributeSetRef<KeyCode>>,
+    rel_axes: Option<&AttributeSetRef<RelativeAxisCode>>,
+    abs_axes: Option<&AttributeSetRef<AbsoluteAxisCode>>,
+    props: &AttributeSetRef<PropType>,
+) -> bool {
+    // Never hook one of our own uinput devices (an unnamed device is fine —
+    // ours are always named).
+    if name.is_some_and(|n| n.starts_with(OPENLOGI_DEVICE_PREFIX)) {
+        return false;
+    }
+    // A mouse clicks and moves relatively; nothing else qualifies. This alone
+    // rejects pure-ABS touchpads, keyboards with stray button bits, and
+    // wheel-only devices like the action injector.
+    let clicks = keys.is_some_and(|k| k.contains(KeyCode::BTN_LEFT));
+    let moves = rel_axes.is_some_and(|r| {
+        r.contains(RelativeAxisCode::REL_X) && r.contains(RelativeAxisCode::REL_Y)
+    });
+    if !clicks || !moves {
+        return false;
+    }
+    // Combo devices that qualify as relative pointers but also expose a touch
+    // surface must stay un-grabbed: their touch stream cannot be re-injected.
+    let touches = keys
+        .is_some_and(|k| k.contains(KeyCode::BTN_TOUCH) || k.contains(KeyCode::BTN_TOOL_FINGER))
+        || abs_axes.is_some_and(|a| a.contains(AbsoluteAxisCode::ABS_MT_POSITION_X))
+        || props.contains(PropType::BUTTONPAD)
+        || props.contains(PropType::SEMI_MT)
+        || props.contains(PropType::DIRECT);
+    !touches && !props.contains(PropType::POINTING_STICK)
 }
 
 fn build_virtual_device(device: &Device) -> io::Result<evdev::uinput::VirtualDevice> {
@@ -661,5 +734,190 @@ mod tests {
     fn translate_sync_event_returns_none() {
         let event = InputEvent::new(EventType::SYNCHRONIZATION.0, 0, 0);
         assert!(translate(&event, false).is_none());
+    }
+
+    // ── is_hookable_mouse ────────────────────────────────────────────────────
+
+    use evdev::{AbsoluteAxisCode, AttributeSet, PropType};
+
+    /// Capability profile fed to [`is_hookable_mouse`]. [`Caps::mouse`] models a
+    /// plain relative mouse; tests mutate it toward the device they model.
+    struct Caps {
+        name: Option<&'static str>,
+        keys: Option<AttributeSet<KeyCode>>,
+        rel: Option<AttributeSet<RelativeAxisCode>>,
+        abs: Option<AttributeSet<AbsoluteAxisCode>>,
+        props: AttributeSet<PropType>,
+    }
+
+    impl Caps {
+        fn mouse() -> Self {
+            Self {
+                name: Some("Logitech MX Master 3S"),
+                keys: Some(
+                    [KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE]
+                        .into_iter()
+                        .collect(),
+                ),
+                rel: Some(
+                    [
+                        RelativeAxisCode::REL_X,
+                        RelativeAxisCode::REL_Y,
+                        RelativeAxisCode::REL_WHEEL,
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                abs: None,
+                props: AttributeSet::new(),
+            }
+        }
+
+        fn is_hookable(&self) -> bool {
+            is_hookable_mouse(
+                self.name,
+                self.keys.as_deref(),
+                self.rel.as_deref(),
+                self.abs.as_deref(),
+                &self.props,
+            )
+        }
+    }
+
+    #[test]
+    fn plain_mouse_is_hookable() {
+        assert!(Caps::mouse().is_hookable());
+    }
+
+    #[test]
+    fn unnamed_mouse_is_hookable() {
+        let mut caps = Caps::mouse();
+        caps.name = None;
+        assert!(
+            caps.is_hookable(),
+            "a missing name must not exclude a device"
+        );
+    }
+
+    #[test]
+    fn touchpad_is_not_hookable() {
+        // A libinput touchpad: clicks via BTN_LEFT but moves via multitouch
+        // EV_ABS, no relative axes — the device class the old BTN_LEFT-only
+        // filter wrongly grabbed, killing the built-in touchpad.
+        let mut caps = Caps::mouse();
+        caps.name = Some("ELAN0670:00 04F3:3150 Touchpad");
+        caps.keys = Some(
+            [
+                KeyCode::BTN_LEFT,
+                KeyCode::BTN_TOUCH,
+                KeyCode::BTN_TOOL_FINGER,
+            ]
+            .into_iter()
+            .collect(),
+        );
+        caps.rel = None;
+        caps.abs = Some([AbsoluteAxisCode::ABS_MT_POSITION_X].into_iter().collect());
+        caps.props = [PropType::POINTER, PropType::BUTTONPAD]
+            .into_iter()
+            .collect();
+        assert!(!caps.is_hookable());
+    }
+
+    #[test]
+    fn touch_keys_exclude_a_relative_pointer() {
+        for touch_key in [KeyCode::BTN_TOUCH, KeyCode::BTN_TOOL_FINGER] {
+            let mut caps = Caps::mouse();
+            caps.keys = Some(
+                [KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, touch_key]
+                    .into_iter()
+                    .collect(),
+            );
+            assert!(
+                !caps.is_hookable(),
+                "{touch_key:?} should mark the device as touch-driven"
+            );
+        }
+    }
+
+    #[test]
+    fn multitouch_abs_axis_excludes_a_relative_pointer() {
+        let mut caps = Caps::mouse();
+        caps.abs = Some([AbsoluteAxisCode::ABS_MT_POSITION_X].into_iter().collect());
+        assert!(!caps.is_hookable());
+    }
+
+    #[test]
+    fn touch_props_exclude_a_relative_pointer() {
+        for prop in [PropType::BUTTONPAD, PropType::SEMI_MT, PropType::DIRECT] {
+            let mut caps = Caps::mouse();
+            caps.props = [prop].into_iter().collect();
+            assert!(
+                !caps.is_hookable(),
+                "{prop:?} should mark the device as touch-driven"
+            );
+        }
+    }
+
+    #[test]
+    fn pointing_stick_is_not_hookable() {
+        let mut caps = Caps::mouse();
+        caps.name = Some("TPPS/2 Elan TrackPoint");
+        caps.props = [PropType::POINTER, PropType::POINTING_STICK]
+            .into_iter()
+            .collect();
+        assert!(!caps.is_hookable());
+    }
+
+    #[test]
+    fn device_without_relative_motion_is_not_hookable() {
+        // Buttons but no REL_X/REL_Y: keyboards with stray button bits and
+        // wheel-only virtual devices (the action injector's shape).
+        let mut caps = Caps::mouse();
+        caps.rel = None;
+        assert!(!caps.is_hookable());
+
+        let mut caps = Caps::mouse();
+        caps.rel = Some([RelativeAxisCode::REL_WHEEL].into_iter().collect());
+        assert!(!caps.is_hookable());
+    }
+
+    #[test]
+    fn device_without_buttons_is_not_hookable() {
+        let mut caps = Caps::mouse();
+        caps.keys = Some(
+            [KeyCode::KEY_A, KeyCode::KEY_LEFTSHIFT]
+                .into_iter()
+                .collect(),
+        );
+        assert!(!caps.is_hookable());
+    }
+
+    #[test]
+    fn own_virtual_devices_are_not_hookable() {
+        // Both uinput devices OpenLogi creates carry the prefix; even with
+        // fully mouse-like capabilities they must never be grabbed.
+        for name in ["OpenLogi virtual mouse", "OpenLogi action injector"] {
+            let mut caps = Caps::mouse();
+            caps.name = Some(name);
+            assert!(!caps.is_hookable(), "{name:?} must be excluded by prefix");
+        }
+    }
+
+    #[test]
+    fn virtual_device_name_carries_exclusion_prefix() {
+        assert!(
+            VIRTUAL_DEVICE_NAME.starts_with(OPENLOGI_DEVICE_PREFIX),
+            "renaming the virtual device away from the prefix would let the \
+             hook grab its own pass-through mice"
+        );
+    }
+
+    #[test]
+    fn stray_abs_axis_does_not_exclude_a_mouse() {
+        // Some mice expose odd ABS codes (e.g. ABS_MISC for tilt); only the
+        // multitouch position axis marks a touch surface.
+        let mut caps = Caps::mouse();
+        caps.abs = Some([AbsoluteAxisCode::ABS_MISC].into_iter().collect());
+        assert!(caps.is_hookable());
     }
 }
