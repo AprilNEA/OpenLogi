@@ -25,6 +25,8 @@
 //! hook.stop();
 //! ```
 
+use std::cfg_select;
+
 pub use openlogi_core::binding::ButtonId;
 
 /// Best-effort identity for the physical device that produced an OS event.
@@ -158,21 +160,7 @@ pub struct Hook {
 
 impl Drop for Hook {
     fn drop(&mut self) {
-        #[cfg(target_os = "macos")]
-        if let Some(inner) = self.inner.take() {
-            macos::stop(inner);
-        }
-        #[cfg(target_os = "linux")]
-        if let Some(inner) = self.inner.take() {
-            linux::stop(inner);
-        }
-        #[cfg(target_os = "windows")]
-        if let Some(inner) = self.inner.take() {
-            windows::stop(inner);
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-        // Unreachable: `never: Infallible` makes `Hook` uninhabited here.
-        {}
+        self.shutdown();
     }
 }
 
@@ -190,22 +178,20 @@ impl Hook {
     pub fn start(
         cb: impl Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static,
     ) -> Result<Self, HookError> {
-        #[cfg(target_os = "macos")]
-        {
-            macos::start(cb).map(|inner| Self { inner: Some(inner) })
-        }
-        #[cfg(target_os = "linux")]
-        {
-            linux::start(cb).map(|inner| Self { inner: Some(inner) })
-        }
-        #[cfg(target_os = "windows")]
-        {
-            windows::start(cb).map(|inner| Self { inner: Some(inner) })
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-        {
-            let _ = cb;
-            Err(HookError::Unsupported)
+        cfg_select! {
+            target_os = "macos" => {
+                macos::start(cb).map(|inner| Self { inner: Some(inner) })
+            }
+            target_os = "linux" => {
+                linux::start(cb).map(|inner| Self { inner: Some(inner) })
+            }
+            target_os = "windows" => {
+                windows::start(cb).map(|inner| Self { inner: Some(inner) })
+            }
+            _ => {
+                let _ = cb;
+                Err(HookError::Unsupported)
+            }
         }
     }
 
@@ -214,28 +200,34 @@ impl Hook {
     /// Signals background threads to exit and blocks until they join. Calling
     /// this explicitly is preferred over relying on `Drop` when errors in
     /// cleanup should be visible. `Drop` calls this automatically.
-    #[cfg_attr(
-        not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
-        allow(
-            unused_mut,
-            reason = "`mut self` is only consumed by platform teardown paths"
-        )
-    )]
     pub fn stop(mut self) {
-        #[cfg(target_os = "macos")]
-        if let Some(inner) = self.inner.take() {
-            macos::stop(inner);
+        self.shutdown();
+    }
+
+    /// Tear down the platform hook if it is still running. Idempotent: the
+    /// first call takes `inner`, so the `Drop` after an explicit [`Self::stop`]
+    /// is a no-op.
+    fn shutdown(&mut self) {
+        cfg_select! {
+            target_os = "macos" => {
+                if let Some(inner) = self.inner.take() {
+                    macos::stop(inner);
+                }
+            }
+            target_os = "linux" => {
+                if let Some(inner) = self.inner.take() {
+                    linux::stop(inner);
+                }
+            }
+            target_os = "windows" => {
+                if let Some(inner) = self.inner.take() {
+                    windows::stop(inner);
+                }
+            }
+            _ => {
+                // Unreachable: `never: Infallible` makes `Hook` uninhabited here.
+            }
         }
-        #[cfg(target_os = "linux")]
-        if let Some(inner) = self.inner.take() {
-            linux::stop(inner);
-        }
-        #[cfg(target_os = "windows")]
-        if let Some(inner) = self.inner.take() {
-            windows::stop(inner);
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-        match self.never {}
     }
 
     /// Returns `true` when the process has the permissions required to install
@@ -247,13 +239,9 @@ impl Hook {
     /// Windows low-level hook needs no separate privacy grant).
     #[must_use]
     pub fn has_accessibility() -> bool {
-        #[cfg(target_os = "macos")]
-        {
-            macos::has_accessibility()
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            true
+        cfg_select! {
+            target_os = "macos" => { macos::has_accessibility() }
+            _ => { true }
         }
     }
 
@@ -267,9 +255,9 @@ impl Hook {
     /// its side effect; the resulting trust state is observed separately via
     /// [`Self::has_accessibility`]. No-op on non-macOS.
     pub fn prompt_accessibility() {
-        #[cfg(target_os = "macos")]
-        {
-            macos::prompt_accessibility();
+        cfg_select! {
+            target_os = "macos" => { macos::prompt_accessibility(); }
+            _ => {}
         }
     }
 }
@@ -288,21 +276,11 @@ impl Hook {
 /// `openlogi-gui::app_watcher`.
 #[must_use]
 pub fn frontmost_bundle_id() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        macos::frontmost_bundle_id()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        linux::frontmost_bundle_id()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        windows::frontmost_process_path()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        None
+    cfg_select! {
+        target_os = "macos" => { macos::frontmost_bundle_id() }
+        target_os = "linux" => { linux::frontmost_bundle_id() }
+        target_os = "windows" => { windows::frontmost_process_path() }
+        _ => { None }
     }
 }
 
