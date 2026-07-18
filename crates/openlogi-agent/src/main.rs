@@ -159,7 +159,6 @@ async fn run(config: Config) {
         shared.capture_plans.clone(),
         shared.dpi_cycle.clone(),
         shared.capture_channel.clone(),
-        shared.thumbwheel_sensitivity.clone(),
         shared.receiver_access.clone(),
     );
 

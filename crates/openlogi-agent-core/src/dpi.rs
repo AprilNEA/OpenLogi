@@ -1,6 +1,30 @@
 //! DPI-cycle state shared with background action dispatch.
 
+use std::collections::HashMap;
+
 use openlogi_hid::{DeviceRoute, DpiCapabilities};
+
+/// Per-device DPI-cycle states plus the GUI's current selection.
+///
+/// HID++ capture dispatch resolves against the device an event arrived on; the
+/// OS hook cannot attribute an event to a device, so it dispatches against the
+/// selection — the same behavior the runtime had when this was a single state.
+#[derive(Debug, Clone, Default)]
+pub struct DpiCycles {
+    /// Config key of the GUI-selected device (the OS hook's dispatch target).
+    pub selected: Option<String>,
+    /// One cycle state per online device, keyed by config key.
+    pub by_key: HashMap<String, DpiCycleState>,
+}
+
+impl DpiCycles {
+    /// The state for `key`, falling back to the selected device when `key` is
+    /// `None` (the OS hook path).
+    pub fn state_for(&mut self, key: Option<&str>) -> Option<&mut DpiCycleState> {
+        let key = key.or(self.selected.as_deref())?;
+        self.by_key.get_mut(key)
+    }
+}
 
 /// Shared state consumed by the OS hook thread and the DPI panel UI to
 /// implement DPI preset cycling and direct preset selection actions.

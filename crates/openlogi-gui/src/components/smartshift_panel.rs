@@ -22,7 +22,10 @@ use gpui_component::{
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
-use openlogi_core::config::{SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE};
+use openlogi_core::config::{
+    DEFAULT_THUMBWHEEL_SENSITIVITY, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
+    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE,
+};
 use openlogi_hid::{AUTO_DISENGAGE_PERMANENT, DeviceRoute, SmartShiftMode, SmartShiftStatus};
 
 use crate::components::device_read::issue_device_read;
@@ -52,6 +55,14 @@ pub struct SmartShiftPanel {
     /// The live drag value, shown in the numeric label until release commits.
     pending_threshold: Option<u8>,
     _threshold_sub: Subscription,
+    /// The per-device thumb-wheel sensitivity slider (device override; devices
+    /// without one follow the app-wide default from Settings → General).
+    wheel_sensitivity: Entity<SliderState>,
+    /// Last committed sensitivity, to re-seat the thumb on a device switch.
+    last_wheel_sensitivity: i32,
+    /// Live drag value shown in the numeric label until release commits.
+    pending_wheel_sensitivity: Option<i32>,
+    _wheel_sensitivity_sub: Subscription,
     _state_obs: Subscription,
 }
 
@@ -88,12 +99,52 @@ impl SmartShiftPanel {
                     }
                 },
             );
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "sensitivity bounds are small 1..=100 integers — exact in f32"
+        )]
+        let wheel_sensitivity = cx.new(|_| {
+            SliderState::new()
+                .min(MIN_THUMBWHEEL_SENSITIVITY as f32)
+                .max(MAX_THUMBWHEEL_SENSITIVITY as f32)
+                .step(1.)
+                .default_value(DEFAULT_THUMBWHEEL_SENSITIVITY as f32)
+        });
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "slider values are small integers well inside i32"
+        )]
+        let wheel_sensitivity_sub = cx.subscribe(
+            &wheel_sensitivity,
+            |panel, _slider, event: &SliderEvent, cx| match event {
+                SliderEvent::Change(value) => {
+                    panel.pending_wheel_sensitivity = Some(value.start().round() as i32);
+                    cx.notify();
+                }
+                SliderEvent::Release(value) => {
+                    let sensitivity = value.start().round() as i32;
+                    panel.pending_wheel_sensitivity = None;
+                    panel.last_wheel_sensitivity = sensitivity;
+                    cx.update_global::<AppState, _>(|state, _| {
+                        let key = state.current_record().map(|r| r.config_key.clone());
+                        if let Some(key) = key {
+                            state.set_device_thumbwheel_sensitivity(&key, sensitivity);
+                        }
+                    });
+                    cx.notify();
+                }
+            },
+        );
         let state_obs = cx.observe_global::<AppState>(|_, cx| cx.notify());
         Self {
             threshold,
             last_threshold: DEFAULT_THRESHOLD,
             pending_threshold: None,
             _threshold_sub: threshold_sub,
+            wheel_sensitivity,
+            last_wheel_sensitivity: DEFAULT_THUMBWHEEL_SENSITIVITY,
+            pending_wheel_sensitivity: None,
+            _wheel_sensitivity_sub: wheel_sensitivity_sub,
             _state_obs: state_obs,
         }
     }
@@ -230,26 +281,9 @@ impl SmartShiftPanel {
                 "Higher keeps the ratchet engaged longer before free-spin."
             )));
 
-        let permanent_row = h_flex()
-            .justify_between()
-            .items_center()
-            .child(
-                v_flex()
-                    .child(section_label(tr!("Permanent ratchet"), pal))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(pal.text_muted)
-                            .child(tr!("Never auto-switch to free-spin.")),
-                    ),
-            )
-            .child(permanent_toggle(
-                permanent,
-                ratchet,
-                restore_threshold,
-                torque,
-                pal,
-            ));
+        let wheel_row = self.wheel_sensitivity_row(window, pal, cx);
+
+        let permanent_row = permanent_row(permanent, ratchet, restore_threshold, torque, pal);
 
         v_flex()
             .gap_4()
@@ -257,6 +291,58 @@ impl SmartShiftPanel {
             .child(mode_row)
             .child(sensitivity_row)
             .child(permanent_row)
+            .child(wheel_row)
+            .into_any_element()
+    }
+}
+
+impl SmartShiftPanel {
+    /// The per-device thumb-wheel sensitivity row: label, live value, slider.
+    /// Reads the selected device's effective value and re-seats the thumb on a
+    /// device switch / external config change, never mid-drag.
+    fn wheel_sensitivity_row(
+        &mut self,
+        window: &mut Window,
+        pal: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let committed = cx
+            .try_global::<AppState>()
+            .and_then(|state| {
+                state
+                    .current_record()
+                    .map(|r| state.device_thumbwheel_sensitivity(&r.config_key))
+            })
+            .unwrap_or(DEFAULT_THUMBWHEEL_SENSITIVITY);
+        if self.pending_wheel_sensitivity.is_none() && committed != self.last_wheel_sensitivity {
+            self.last_wheel_sensitivity = committed;
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "sensitivity is a small 1..=100 integer — exact in f32"
+            )]
+            self.wheel_sensitivity
+                .update(cx, |s, cx| s.set_value(committed as f32, window, cx));
+        }
+        let display = self.pending_wheel_sensitivity.unwrap_or(committed);
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_baseline()
+                    .child(section_label(tr!("Thumb Wheel Sensitivity"), pal))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(ACCENT_BLUE))
+                            .child(format!("{display}")),
+                    ),
+            )
+            .child(
+                Slider::new(&self.wheel_sensitivity)
+                    .horizontal()
+                    .into_any_element(),
+            )
             .into_any_element()
     }
 }
@@ -309,6 +395,36 @@ fn smartshift_load_target(cx: &mut Context<SmartShiftPanel>) -> Option<(String, 
         let record = state.current_record()?;
         Some((record.config_key.clone(), record.route.clone()?))
     })
+}
+
+/// The "Permanent ratchet" label + toggle row.
+fn permanent_row(
+    permanent: bool,
+    ratchet: bool,
+    restore_threshold: u8,
+    torque: u8,
+    pal: Palette,
+) -> gpui::Div {
+    h_flex()
+        .justify_between()
+        .items_center()
+        .child(
+            v_flex()
+                .child(section_label(tr!("Permanent ratchet"), pal))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(pal.text_muted)
+                        .child(tr!("Never auto-switch to free-spin.")),
+                ),
+        )
+        .child(permanent_toggle(
+            permanent,
+            ratchet,
+            restore_threshold,
+            torque,
+            pal,
+        ))
 }
 
 /// A small muted section heading.
