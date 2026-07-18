@@ -206,8 +206,8 @@ impl ArmedControls {
 
 /// Resolve features off the device's root and divert the controls we capture:
 /// the gesture button (raw-XY) and DPI/ModeShift buttons over `0x1b04`, and —
-/// when `capture_thumbwheel` and the wheel reports a single tap — the thumb
-/// wheel over `0x2150`. The root-feature lookup mirrors `write::open_feature`,
+/// when `capture_thumbwheel` — the thumb wheel over `0x2150`. The
+/// root-feature lookup mirrors `write::open_feature`,
 /// since hidpp 0.2's registry doesn't carry the features OpenLogi reimplements.
 async fn arm_controls(
     chan: &Arc<HidppChannel>,
@@ -273,14 +273,17 @@ async fn arm_controls(
                 false
             }
         };
-        if supports_single_tap {
-            tw.set_reporting(true, false)
-                .await
-                .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-            thumb = Some((tw, info.index));
-        } else {
+        // Divert whenever capture was requested: rotation rebinds and the
+        // sensitivity multiplier need the diverted event stream even on wheels
+        // that report no single-tap capability (e.g. MX Master 4) — lacking the
+        // tap only means a bound click can never fire.
+        if !supports_single_tap {
             debug!("thumb wheel reports no single tap — click not capturable");
         }
+        tw.set_reporting(true, false)
+            .await
+            .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+        thumb = Some((tw, info.index));
     }
 
     if !gesture_diverted && dpi_cids.is_empty() && thumb.is_none() {

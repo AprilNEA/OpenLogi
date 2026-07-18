@@ -4,7 +4,8 @@
 //!
 //! The wheel only has two reporting modes — Native (HID scroll) or Diverted
 //! (HID++ events) — there is no "report taps but keep scrolling" mode. So the
-//! capture session diverts the wheel only when the user has bound its click,
+//! capture session diverts the wheel whenever the user's thumbwheel config
+//! leaves its defaults (click bound, rotation rebound, or sensitivity changed),
 //! and re-synthesises horizontal scroll from the rotation deltas to keep
 //! scrolling working.
 //!
