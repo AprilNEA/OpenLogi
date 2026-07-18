@@ -146,3 +146,59 @@ pub(crate) async fn select_device(
         .map(|c| (c.route, c.name))
         .ok_or_else(|| no_match_err(&[], None))
 }
+
+#[cfg(test)]
+mod no_match_err_tests {
+    use openlogi_hid::DeviceRoute;
+
+    use super::{Candidate, no_match_err};
+
+    fn candidate(name: &str) -> Candidate {
+        Candidate {
+            route: DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xc539,
+            },
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn no_devices_at_all_gives_a_generic_not_found_message() {
+        let err = no_match_err(&[], None).to_string();
+        assert_eq!(
+            err,
+            "no online HID++ device found — is a Logi device paired and awake?"
+        );
+    }
+
+    #[test]
+    fn no_devices_at_all_ignores_a_query_and_still_uses_the_generic_message() {
+        // `devices.is_empty()` short-circuits before `query` is inspected.
+        let err = no_match_err(&[], Some("mouse")).to_string();
+        assert_eq!(
+            err,
+            "no online HID++ device found — is a Logi device paired and awake?"
+        );
+    }
+
+    #[test]
+    fn unmatched_query_names_the_query_and_lists_online_devices() {
+        let devices = vec![candidate("MX Master 3S"), candidate("G Pro")];
+        let err = no_match_err(&devices, Some("keyboard")).to_string();
+
+        assert!(err.contains("no online device matches `--device keyboard`"));
+        assert!(err.contains("MX Master 3S"));
+        assert!(err.contains("G Pro"));
+    }
+
+    #[test]
+    fn no_query_suggests_the_device_flag_and_lists_online_devices() {
+        let devices = vec![candidate("MX Master 3S")];
+        let err = no_match_err(&devices, None).to_string();
+
+        assert!(err.contains("could not pick a device automatically"));
+        assert!(err.contains("pass --device <name> to choose one"));
+        assert!(err.contains("MX Master 3S"));
+    }
+}
