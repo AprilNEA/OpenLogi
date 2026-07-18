@@ -39,13 +39,28 @@ jobs:
             libssl-dev libzstd-dev pkg-config
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # Both first-class platforms: macOS and Linux compile disjoint cfg-gated
+  # code (evdev/zbus vs the ObjC surface), so a single-runner MSRV check would
+  # miss a too-new stabilization on the other side.
   msrv:
-    name: MSRV (cargo check)
-    runs-on: macos-latest
+    name: MSRV (cargo check, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libudev-dev \
+            gcc g++ clang libfontconfig-dev libwayland-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev \
+            libssl-dev libzstd-dev pkg-config
       - run: cargo check --workspace --all-targets
 
   check-linux:
