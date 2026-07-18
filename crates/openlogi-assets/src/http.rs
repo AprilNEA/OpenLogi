@@ -14,7 +14,6 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
 use atomic_write_file::AtomicWriteFile;
 use backon::{BlockingRetryable, ExponentialBuilder};
 use serde::de::DeserializeOwned;
@@ -22,6 +21,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 use ureq::Agent;
 
+use crate::error::AssetError;
 use crate::index::{FileEntry, Index};
 
 const USER_AGENT: &str = concat!(
@@ -81,22 +81,26 @@ impl AssetClient {
     }
 
     /// GET `<base>/index.json` and parse it.
-    pub fn fetch_index(&self) -> Result<Index> {
+    pub fn fetch_index(&self) -> Result<Index, AssetError> {
         Ok(self.fetch_index_raw()?.1)
     }
 
     /// GET `<base>/index.json`, returning both the raw bytes (so callers can
     /// persist them verbatim) and the parsed struct.
-    pub fn fetch_index_raw(&self) -> Result<(Vec<u8>, Index)> {
+    pub fn fetch_index_raw(&self) -> Result<(Vec<u8>, Index), AssetError> {
         let url = format!("{}/{INDEX_NAME}", self.base);
         debug!(%url, "fetching index.json");
         let body = self.get_bytes(&url)?;
-        let parsed: Index = serde_json::from_slice(&body).context("parse fetched index.json")?;
+        let parsed: Index =
+            serde_json::from_slice(&body).map_err(|source| AssetError::ParseJson {
+                what: "fetched index.json".to_owned(),
+                source,
+            })?;
         Ok((body, parsed))
     }
 
     /// Fetch `<base>/index.json`, write it into `dir`, and return the parsed index.
-    pub fn fetch_index_to_dir(&self, dir: &Path) -> Result<Index> {
+    pub fn fetch_index_to_dir(&self, dir: &Path) -> Result<Index, AssetError> {
         let (raw, index) = self.fetch_index_raw()?;
         write_replace(&dir.join(INDEX_NAME), &raw)?;
         Ok(index)
@@ -104,7 +108,7 @@ impl AssetClient {
 
     /// GET a per-depot file, e.g.
     /// `fetch_file("v1/devices/mx_master_4/", "front_core.png")`.
-    fn fetch_file(&self, asset_path: &str, name: &str) -> Result<Vec<u8>> {
+    fn fetch_file(&self, asset_path: &str, name: &str) -> Result<Vec<u8>, AssetError> {
         let asset_path = asset_path.trim_start_matches('/');
         let url = format!("{}/{asset_path}{name}", self.base);
         debug!(%url, "fetching file");
@@ -123,7 +127,7 @@ impl AssetClient {
         asset_path: &str,
         dir: &Path,
         file: &FileEntry,
-    ) -> Result<FetchOutcome> {
+    ) -> Result<FetchOutcome, AssetError> {
         // `name` comes from remote metadata; validate it down to a single
         // path component before any path is built.
         let dst = safe_component_path(dir, &file.name, "asset file name")?;
@@ -133,11 +137,11 @@ impl AssetClient {
         let bytes = self.fetch_file(asset_path, &file.name)?;
         let actual = sha256_hex(&bytes);
         if !actual.eq_ignore_ascii_case(&file.sha256) {
-            bail!(
-                "downloaded asset checksum mismatch for {}: expected {}, got {actual}",
-                file.name,
-                file.sha256
-            );
+            return Err(AssetError::ChecksumMismatch {
+                name: file.name.clone(),
+                expected: file.sha256.clone(),
+                actual,
+            });
         }
         write_replace(&dst, &bytes)?;
         Ok(FetchOutcome::Fetched { bytes: bytes.len() })
@@ -153,7 +157,7 @@ impl AssetClient {
     /// The backoff sleeps block the calling thread, which is fine: every
     /// caller runs on the sync's dedicated background thread, never the
     /// async runtime. `backon` defaults to `std::thread::sleep` here.
-    fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
+    fn get_bytes(&self, url: &str) -> Result<Vec<u8>, AssetError> {
         let policy = ExponentialBuilder::default()
             .with_min_delay(RETRY_MIN_DELAY)
             .with_factor(2.0)
@@ -166,7 +170,10 @@ impl AssetClient {
                 warn!(%url, backoff_ms = dur.as_millis(), error = ?e, "transient fetch error — retrying");
             })
             .call()
-            .map_err(|e| anyhow::Error::new(e).context(format!("GET {url}")))
+            .map_err(|source| AssetError::Http {
+                url: url.to_owned(),
+                source,
+            })
     }
 
     /// One GET + full body read, surfacing the typed [`ureq::Error`] so the
@@ -195,15 +202,21 @@ fn is_retryable(error: &ureq::Error) -> bool {
 }
 
 /// Load and parse a JSON document from disk.
-pub(crate) fn load_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+pub(crate) fn load_json<T: DeserializeOwned>(path: &Path) -> Result<T, AssetError> {
     let bytes = read_bytes(path)?;
-    serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+    serde_json::from_slice(&bytes).map_err(|source| AssetError::ParseJson {
+        what: path.display().to_string(),
+        source,
+    })
 }
 
 /// Raw bytes of `path`. Avoid for very large files — held entirely in
 /// memory.
-pub fn read_bytes(path: &Path) -> Result<Vec<u8>> {
-    fs::read(path).with_context(|| format!("read {}", path.display()))
+pub fn read_bytes(path: &Path) -> Result<Vec<u8>, AssetError> {
+    fs::read(path).map_err(|source| AssetError::ReadFile {
+        path: path.to_owned(),
+        source,
+    })
 }
 
 /// Join one untrusted registry component onto a trusted directory.
@@ -211,19 +224,24 @@ pub fn read_bytes(path: &Path) -> Result<Vec<u8>> {
 /// Remote asset metadata is expected to carry depot and file *names*, not
 /// paths. Rejecting separators, absolute prefixes, and `.`/`..` keeps every
 /// sync write inside the cache or bundle directory chosen by the caller.
-pub fn safe_component_path(base: &Path, component: &str, label: &str) -> Result<PathBuf> {
-    if component.is_empty() {
-        bail!("{label} is empty");
-    }
+pub fn safe_component_path(
+    base: &Path,
+    component: &str,
+    label: &str,
+) -> Result<PathBuf, AssetError> {
+    let reject = || AssetError::UnsafeComponent {
+        label: label.to_owned(),
+        component: component.to_owned(),
+    };
     // `Path::components` never yields separators on the platform that didn't
     // produce them, so reject both kinds explicitly before consulting it.
-    if component.contains('/') || component.contains('\\') {
-        bail!("{label} must be a single path component: {component}");
+    if component.is_empty() || component.contains('/') || component.contains('\\') {
+        return Err(reject());
     }
     let mut parts = Path::new(component).components();
     match (parts.next(), parts.next()) {
         (Some(Component::Normal(_)), None) => Ok(base.join(component)),
-        _ => bail!("{label} must be a safe relative path component: {component}"),
+        _ => Err(reject()),
     }
 }
 
@@ -232,15 +250,16 @@ pub fn safe_component_path(base: &Path, component: &str, label: &str) -> Result<
 /// The temporary file is created in the destination directory and committed via
 /// rename, so a concurrent reader sees the old file or the new one, never a
 /// half-written one. A planted symlink at `dst` is replaced, not followed.
-fn write_replace(dst: &Path, bytes: &[u8]) -> Result<()> {
+fn write_replace(dst: &Path, bytes: &[u8]) -> Result<(), AssetError> {
     use std::io::Write as _;
 
-    let mut file =
-        AtomicWriteFile::open(dst).with_context(|| format!("create {}", dst.display()))?;
-    file.write_all(bytes)
-        .with_context(|| format!("write {}", dst.display()))?;
-    file.commit()
-        .with_context(|| format!("replace {}", dst.display()))
+    let fail = |source| AssetError::WriteFile {
+        path: dst.to_owned(),
+        source,
+    };
+    let mut file = AtomicWriteFile::open(dst).map_err(fail)?;
+    file.write_all(bytes).map_err(fail)?;
+    file.commit().map_err(fail)
 }
 
 /// Hex SHA-256 of an in-memory blob.
@@ -250,10 +269,14 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Streamed hex SHA-256 of `path`.
-pub fn sha256_of_file(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+pub fn sha256_of_file(path: &Path) -> Result<String, AssetError> {
+    let fail = |source| AssetError::ReadFile {
+        path: path.to_owned(),
+        source,
+    };
+    let mut file = fs::File::open(path).map_err(fail)?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher).with_context(|| format!("read {}", path.display()))?;
+    std::io::copy(&mut file, &mut hasher).map_err(fail)?;
     Ok(format!("{:x}", hasher.finalize()))
 }
 

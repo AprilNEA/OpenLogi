@@ -35,6 +35,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::error::AssetError;
 use crate::http;
 
 #[derive(Debug, Deserialize)]
@@ -121,7 +122,8 @@ impl DeviceEntry {
 }
 
 impl Index {
-    pub fn load_from(path: &Path) -> anyhow::Result<Self> {
+    /// Load and parse an `index.json` from disk.
+    pub fn load_from(path: &Path) -> Result<Self, AssetError> {
         http::load_json(path)
     }
 

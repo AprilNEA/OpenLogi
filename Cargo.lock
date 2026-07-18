@@ -5039,12 +5039,12 @@ dependencies = [
 name = "openlogi-assets"
 version = "0.6.19"
 dependencies = [
- "anyhow",
  "atomic-write-file",
  "backon",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "thiserror 2.0.18",
  "tracing",
  "ureq",
 ]

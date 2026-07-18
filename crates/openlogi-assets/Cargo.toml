@@ -15,7 +15,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 ureq = { workspace = true }
 sha2 = { workspace = true }
-anyhow = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 backon = { workspace = true }
 atomic-write-file = "0.3.0"
