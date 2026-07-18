@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 
-use openlogi_core::config::Config;
+use openlogi_core::config::{Config, ScrollResolution};
 use openlogi_core::device::{Capabilities, DeviceInventory};
 use openlogi_hid::{CaptureChannel, DeviceRoute};
 use tracing::warn;
@@ -198,10 +198,11 @@ impl Orchestrator {
         // a recovered backend upgrades `Unavailable` back to live data).
         self.inventory = InventoryState::Ready(inventories.to_vec());
         let devices = build_devices(inventories);
-        // Volatile settings (lighting colour, sensor DPI, SmartShift) live in
-        // device RAM and reset on a power cycle, so every reconnect shape
-        // re-applies the persisted values (#189): a first sighting, a replug
-        // (new route), a wake from device sleep (offline→online), or — via the
+        // Volatile settings (lighting colour, sensor DPI, SmartShift, native
+        // wheel mode) live in device RAM and reset on a power cycle. Every
+        // reconnect shape re-applies the persisted values (#189): a first
+        // sighting, a replug (new route), a wake from device sleep
+        // (offline→online), or — via the
         // flag — a system wake where none of those are observable.
         let reapply_all = std::mem::take(&mut self.reapply_all_next_refresh);
         let followup = std::mem::take(&mut self.reapply_followup);
@@ -237,21 +238,21 @@ impl Orchestrator {
         self.reapply_all_next_refresh = true;
     }
 
-    /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift)
-    /// to one device, fire-and-forget on background threads. Reuses the
-    /// capture session's channel when it already points at the device, like
-    /// every other hardware write.
+    /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift,
+    /// native wheel mode) to one device, fire-and-forget on background threads.
+    /// Reuses the capture session's channel when it already points at the
+    /// device, like every other hardware write.
     fn reapply_volatile_settings(&self, dev: &AgentDevice) {
         let Some(route) = dev.route.clone() else {
             return;
         };
         let key = &dev.config_key;
-        crate::hardware::write_scroll_inversion_in_background(
+        let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
+        crate::hardware::write_scroll_wheel_mode_in_background(
             Some(&self.shared.capture_channel),
-            dev.capabilities
-                .is_some_and(|capabilities| capabilities.scroll_inversion)
-                .then_some(route.clone()),
-            self.config.invert_scroll(key),
+            (resolution.is_some() || inverted.is_some()).then_some(route.clone()),
+            resolution,
+            inverted,
         );
         if let Some(lighting) = self.config.lighting(key).filter(|l| l.enabled) {
             crate::hardware::set_lighting_in_background(Some(route.clone()), &lighting);
@@ -274,26 +275,27 @@ impl Orchestrator {
         }
     }
 
-    /// Push the saved native scroll-inversion bit to every currently online
+    /// Push the saved native wheel resolution/inversion to every currently online
     /// device. Separated from [`Self::rebuild`] (which also runs on
     /// foreground-app changes) because the HID++ write is only needed when
     /// config or device presence changes. The write short-circuits at the
     /// `0x2121` layer when the wheel already holds the desired state, so calling
     /// it on every reload costs at most one wheel-mode read per device — and
     /// still recovers a device whose earlier write timed out while it was waking.
-    fn apply_native_scroll_inversions(&self) {
+    fn apply_native_wheel_modes(&self) {
         for dev in self
             .devices
             .iter()
             .filter(|dev| dev.online && dev.route.is_some())
         {
-            crate::hardware::write_scroll_inversion_in_background(
+            let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
+            crate::hardware::write_scroll_wheel_mode_in_background(
                 Some(&self.shared.capture_channel),
-                dev.capabilities
-                    .is_some_and(|capabilities| capabilities.scroll_inversion)
+                (resolution.is_some() || inverted.is_some())
                     .then(|| dev.route.clone())
                     .flatten(),
-                self.config.invert_scroll(&dev.config_key),
+                resolution,
+                inverted,
             );
         }
     }
@@ -358,8 +360,27 @@ impl Orchestrator {
         self.config = config;
         self.current = pick_current(&self.devices, self.config.selected_device());
         self.rebuild();
-        self.apply_native_scroll_inversions();
+        self.apply_native_wheel_modes();
     }
+}
+
+/// Resolve the two independently-gated HiResWheel settings for one device.
+/// `None` means preserve the device's current value.
+fn configured_wheel_mode(
+    config: &Config,
+    dev: &AgentDevice,
+) -> (Option<ScrollResolution>, Option<bool>) {
+    let Some(capabilities) = dev.capabilities else {
+        return (None, None);
+    };
+    let resolution = capabilities
+        .hires_wheel
+        .then(|| config.scroll_resolution(&dev.config_key))
+        .flatten();
+    let inverted = capabilities
+        .scroll_inversion
+        .then(|| config.invert_scroll(&dev.config_key));
+    (resolution, inverted)
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's
@@ -496,8 +517,12 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentDevice, InventoryHealth, Orchestrator, plan_reapply, reapply_targets};
-    use openlogi_core::config::Config;
+    use super::{
+        AgentDevice, InventoryHealth, Orchestrator, configured_wheel_mode, plan_reapply,
+        reapply_targets,
+    };
+    use openlogi_core::config::{Config, ScrollResolution};
+    use openlogi_core::device::Capabilities;
     use openlogi_hid::DeviceRoute;
 
     fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
@@ -514,6 +539,47 @@ mod tests {
             capabilities: None,
             online,
         }
+    }
+
+    #[test]
+    fn configured_wheel_mode_gates_resolution_and_inversion_independently() {
+        let mut config = Config::default();
+        config.set_scroll_resolution("a", Some(ScrollResolution::Low));
+        config.set_invert_scroll("a", true);
+        let mut device = dev("a", 1, true);
+
+        device.capabilities = Some(Capabilities {
+            hires_wheel: true,
+            scroll_inversion: false,
+            ..Capabilities::default()
+        });
+        assert_eq!(
+            configured_wheel_mode(&config, &device),
+            (Some(ScrollResolution::Low), None)
+        );
+
+        device.capabilities = Some(Capabilities {
+            hires_wheel: false,
+            scroll_inversion: true,
+            ..Capabilities::default()
+        });
+        assert_eq!(configured_wheel_mode(&config, &device), (None, Some(true)));
+
+        device.capabilities = None;
+        assert_eq!(configured_wheel_mode(&config, &device), (None, None));
+    }
+
+    #[test]
+    fn configured_wheel_mode_leaves_unset_resolution_unmanaged() {
+        let config = Config::default();
+        let mut device = dev("a", 1, true);
+        device.capabilities = Some(Capabilities {
+            hires_wheel: true,
+            scroll_inversion: false,
+            ..Capabilities::default()
+        });
+
+        assert_eq!(configured_wheel_mode(&config, &device), (None, None));
     }
 
     #[test]

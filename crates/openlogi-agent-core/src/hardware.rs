@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, DeviceRoute, DpiInfo, HidppFeatureErrorKind, HidppOperation, SharedChannel,
-    SmartShiftMode, SmartShiftStatus, WriteError,
+    CaptureChannel, DeviceRoute, DpiInfo, HidppFeatureErrorKind, HidppOperation, ScrollResolution,
+    SharedChannel, SmartShiftMode, SmartShiftStatus, WriteError,
 };
 use tracing::{debug, warn};
 
@@ -259,22 +259,30 @@ pub fn write_dpi_in_background(
     });
 }
 
-/// Spawn an OS thread that writes native vertical-scroll inversion to the
-/// device at `target` via HID++ `0x2121`. Unsupported devices are expected and
-/// only logged at debug level because not every Logitech device exposes native
-/// wheel inversion.
-pub fn write_scroll_inversion_in_background(
+/// Spawn an OS thread that reconciles the configured native HiResWheel mode.
+///
+/// `resolution == None` preserves the current device resolution;
+/// `inverted == None` preserves the current inversion bit. At least one field
+/// must be set by the caller. Unsupported devices are expected and only logged
+/// at debug level.
+pub fn write_scroll_wheel_mode_in_background(
     capture: Option<&CaptureChannel>,
     target: Option<DeviceRoute>,
-    inverted: bool,
+    resolution: Option<ScrollResolution>,
+    inverted: Option<bool>,
 ) {
     let Some(target) = target else {
         debug!(
-            inverted,
-            "no target device — scroll inversion write skipped"
+            ?resolution,
+            ?inverted,
+            "no target device — wheel mode write skipped"
         );
         return;
     };
+    if resolution.is_none() && inverted.is_none() {
+        debug!("no configured wheel mode fields — write skipped");
+        return;
+    }
     let shared = reusable_channel(capture, &target);
     let reused = shared.is_some();
     std::thread::spawn(move || {
@@ -284,32 +292,66 @@ pub fn write_scroll_inversion_in_background(
         {
             Ok(rt) => rt,
             Err(e) => {
-                warn!(error = %e, "tokio runtime init failed; scroll inversion write skipped");
+                warn!(error = %e, "tokio runtime init failed; wheel mode write skipped");
                 return;
             }
         };
         let result = rt.block_on(async {
             tokio::time::timeout(WRITE_BUDGET, async {
-                match &shared {
-                    Some(shared) => openlogi_hid::set_scroll_inversion_on(shared, inverted).await,
-                    None => openlogi_hid::set_scroll_inversion(&target, inverted).await,
+                match (resolution, inverted, &shared) {
+                    (Some(resolution), Some(inverted), Some(shared)) => {
+                        openlogi_hid::set_scroll_wheel_mode_on(shared, resolution, inverted)
+                            .await
+                            .map(|_| ())
+                    }
+                    (Some(resolution), Some(inverted), None) => {
+                        openlogi_hid::set_scroll_wheel_mode(&target, resolution, inverted)
+                            .await
+                            .map(|_| ())
+                    }
+                    (Some(resolution), None, Some(shared)) => {
+                        openlogi_hid::set_scroll_resolution_on(shared, resolution)
+                            .await
+                            .map(|_| ())
+                    }
+                    (Some(resolution), None, None) => {
+                        openlogi_hid::set_scroll_resolution(&target, resolution)
+                            .await
+                            .map(|_| ())
+                    }
+                    (None, Some(inverted), Some(shared)) => {
+                        openlogi_hid::set_scroll_inversion_on(shared, inverted).await
+                    }
+                    (None, Some(inverted), None) => {
+                        openlogi_hid::set_scroll_inversion(&target, inverted).await
+                    }
+                    (None, None, _) => Ok(()),
                 }
             })
             .await
         });
         let index = target.device_index();
         match result {
-            Ok(Ok(())) => debug!(index, inverted, reused, "native scroll inversion written"),
+            Ok(Ok(())) => debug!(
+                index,
+                ?resolution,
+                ?inverted,
+                reused,
+                "native wheel mode written"
+            ),
             Ok(Err(WriteError::FeatureUnsupported { feature_hex })) => debug!(
                 index,
-                inverted,
+                ?resolution,
+                ?inverted,
                 feature = format_args!("{feature_hex:#06x}"),
-                "native scroll inversion unsupported"
+                "native wheel mode unsupported"
             ),
-            Ok(Err(e)) => warn!(error = ?e, "scroll inversion write failed"),
+            Ok(Err(e)) => warn!(error = ?e, "wheel mode write failed"),
             Err(_) => warn!(
                 index,
-                inverted, "scroll inversion write timed out (device asleep/unresponsive)"
+                ?resolution,
+                ?inverted,
+                "wheel mode write timed out (device asleep/unresponsive)"
             ),
         }
     });
