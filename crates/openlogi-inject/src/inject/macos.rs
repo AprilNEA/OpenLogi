@@ -293,13 +293,20 @@ fn post_media_key(nx_key: i32) {
 
 /// Put the system to sleep via `pmset sleepnow` — sleep has no CGEvent
 /// equivalent, and `pmset` performs the console user's sleep request
-/// without privileges. Fire-and-forget; a spawn failure is logged.
+/// without privileges. Fire-and-forget; a spawn failure is logged. The
+/// child is reaped on a detached thread so it can't linger as a zombie
+/// in this long-running agent.
 fn sleep_system() {
     match std::process::Command::new("/usr/bin/pmset")
         .arg("sleepnow")
         .spawn()
     {
-        Ok(_) => tracing::debug!("Sleep via pmset sleepnow"),
+        Ok(mut child) => {
+            tracing::debug!("Sleep via pmset sleepnow");
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
         Err(e) => tracing::warn!(error = %e, "pmset sleepnow spawn failed"),
     }
 }
