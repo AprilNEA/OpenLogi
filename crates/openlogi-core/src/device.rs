@@ -370,6 +370,7 @@ mod tests {
                     pointer: true,
                     lighting: false,
                     scroll_inversion: false,
+                    hires_wheel: false,
                 }),
             }],
         }
