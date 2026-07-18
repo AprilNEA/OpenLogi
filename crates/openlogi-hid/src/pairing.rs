@@ -452,10 +452,19 @@ impl PartialDevice {
             self.name.clone()?,
         );
         self.emitted = true;
+        // Clippy 1.96 falsely claims this `TryFrom` is infallible (its
+        // `From::from` suggestion does not compile): `BoltDeviceKind` derives
+        // only `TryFromPrimitive`, and unlisted nibbles must fall back to
+        // `Unknown`.
+        #[allow(
+            clippy::unnecessary_fallible_conversions,
+            reason = "false positive: BoltDeviceKind has no infallible From<u8>"
+        )]
+        let kind = BoltDeviceKind::try_from(kind & 0x0f).unwrap_or(BoltDeviceKind::Unknown);
         Some(DiscoveredDevice {
             address,
             authentication,
-            kind: BoltDeviceKind::try_from(kind & 0x0f).unwrap_or(BoltDeviceKind::Unknown),
+            kind,
             name,
         })
     }
