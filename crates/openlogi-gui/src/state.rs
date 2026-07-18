@@ -1015,6 +1015,10 @@ impl AppState {
     /// the next time the agent launches (a no-restart live toggle would need a
     /// main-thread hop from the agent's IPC reload). `ReloadConfig` keeps the
     /// agent's other config in sync meanwhile. No-op when unchanged.
+    ///
+    /// The only caller is the macOS-gated menu-bar toggle in Settings, so the
+    /// setter is gated the same way to stay dead-code-clean on other targets.
+    #[cfg(target_os = "macos")]
     pub fn set_show_in_menu_bar(&mut self, enabled: bool) {
         if self.config.app_settings.show_in_menu_bar == enabled {
             return;
