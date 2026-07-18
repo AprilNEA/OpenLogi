@@ -1,9 +1,10 @@
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, FocusHandle,
     FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, div, px, rgb,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::{Icon, IconName, h_flex, v_flex};
+use gpui_component::{Icon, IconName, TitleBar, h_flex, v_flex};
 use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
 use tracing::info;
 
@@ -320,6 +321,25 @@ fn request_accessibility(cx: &mut App) {
     permissions::open_pane(Permission::Accessibility);
 }
 
+/// Client-side main-window titlebar: window controls (minimize / maximize /
+/// close on Linux + Windows), the drag region, and the app name centred.
+/// Replaces the native titlebar so Linux — where the compositor declines
+/// server-side decorations and gpui falls back to client-side ones it doesn't
+/// paint — still gets a titlebar and window controls. On macOS the widget
+/// reserves the traffic-light space.
+fn app_title_bar(pal: Palette) -> impl IntoElement {
+    TitleBar::new().child(
+        div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_sm()
+            .text_color(pal.text_muted)
+            .child("OpenLogi"),
+    )
+}
+
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
@@ -334,7 +354,14 @@ impl Render for AppView {
             .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window());
+            .on_action(|_: &Zoom, window, _| window.zoom_window())
+            // Linux only: a client-side titlebar (window controls + drag region)
+            // as the first row of every frame — including the pre-connection and
+            // error frames — so the chrome is present from the first frame on.
+            // macOS / Windows keep their native titlebar.
+            .when(cfg!(target_os = "linux"), |this| {
+                this.child(app_title_bar(pal))
+            });
 
         // The agent is the source of truth for both the permission state and
         // the device list; `AgentLink` is everything the GUI knows about it.
