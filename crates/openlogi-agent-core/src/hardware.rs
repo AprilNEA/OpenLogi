@@ -259,6 +259,16 @@ pub fn write_dpi_in_background(
     });
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ScrollWheelModeChange {
+    Resolution(ScrollResolution),
+    Inversion(bool),
+    ResolutionAndInversion {
+        resolution: ScrollResolution,
+        inverted: bool,
+    },
+}
+
 /// Spawn an OS thread that reconciles the configured native HiResWheel mode.
 ///
 /// `resolution == None` preserves the current device resolution;
@@ -279,10 +289,18 @@ pub fn write_scroll_wheel_mode_in_background(
         );
         return;
     };
-    if resolution.is_none() && inverted.is_none() {
-        debug!("no configured wheel mode fields — write skipped");
-        return;
-    }
+    let change = match (resolution, inverted) {
+        (Some(resolution), Some(inverted)) => ScrollWheelModeChange::ResolutionAndInversion {
+            resolution,
+            inverted,
+        },
+        (Some(resolution), None) => ScrollWheelModeChange::Resolution(resolution),
+        (None, Some(inverted)) => ScrollWheelModeChange::Inversion(inverted),
+        (None, None) => {
+            debug!("no configured wheel mode fields — write skipped");
+            return;
+        }
+    };
     let shared = reusable_channel(capture, &target);
     let reused = shared.is_some();
     std::thread::spawn(move || {
@@ -298,34 +316,41 @@ pub fn write_scroll_wheel_mode_in_background(
         };
         let result = rt.block_on(async {
             tokio::time::timeout(WRITE_BUDGET, async {
-                match (resolution, inverted, &shared) {
-                    (Some(resolution), Some(inverted), Some(shared)) => {
-                        openlogi_hid::set_scroll_wheel_mode_on(shared, resolution, inverted)
-                            .await
-                            .map(|_| ())
-                    }
-                    (Some(resolution), Some(inverted), None) => {
-                        openlogi_hid::set_scroll_wheel_mode(&target, resolution, inverted)
-                            .await
-                            .map(|_| ())
-                    }
-                    (Some(resolution), None, Some(shared)) => {
+                match (change, &shared) {
+                    (
+                        ScrollWheelModeChange::ResolutionAndInversion {
+                            resolution,
+                            inverted,
+                        },
+                        Some(shared),
+                    ) => openlogi_hid::set_scroll_wheel_mode_on(shared, resolution, inverted)
+                        .await
+                        .map(|_| ()),
+                    (
+                        ScrollWheelModeChange::ResolutionAndInversion {
+                            resolution,
+                            inverted,
+                        },
+                        None,
+                    ) => openlogi_hid::set_scroll_wheel_mode(&target, resolution, inverted)
+                        .await
+                        .map(|_| ()),
+                    (ScrollWheelModeChange::Resolution(resolution), Some(shared)) => {
                         openlogi_hid::set_scroll_resolution_on(shared, resolution)
                             .await
                             .map(|_| ())
                     }
-                    (Some(resolution), None, None) => {
+                    (ScrollWheelModeChange::Resolution(resolution), None) => {
                         openlogi_hid::set_scroll_resolution(&target, resolution)
                             .await
                             .map(|_| ())
                     }
-                    (None, Some(inverted), Some(shared)) => {
+                    (ScrollWheelModeChange::Inversion(inverted), Some(shared)) => {
                         openlogi_hid::set_scroll_inversion_on(shared, inverted).await
                     }
-                    (None, Some(inverted), None) => {
+                    (ScrollWheelModeChange::Inversion(inverted), None) => {
                         openlogi_hid::set_scroll_inversion(&target, inverted).await
                     }
-                    (None, None, _) => Ok(()),
                 }
             })
             .await

@@ -49,12 +49,9 @@ pub async fn run(args: WheelArgs) -> Result<()> {
         return Ok(());
     };
 
-    openlogi_hid::set_scroll_resolution(&route, requested)
+    let after = openlogi_hid::set_scroll_resolution(&route, requested)
         .await
         .context("set wheel resolution")?;
-    let after = openlogi_hid::get_scroll_wheel_mode(&route)
-        .await
-        .context("read HiResWheel mode after write")?;
     print_mode("read-back", after);
 
     if after.resolution != requested {
