@@ -97,3 +97,42 @@ pub async fn run(args: LightingArgs) -> Result<()> {
     println!("done — {name} should now be solid #{r:02x}{g:02x}{b:02x}");
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
+mod color_validation_tests {
+    use super::{LightingArgs, Method, run};
+
+    fn args(color: &str) -> LightingArgs {
+        LightingArgs {
+            color: color.to_string(),
+            device: None,
+            method: Method::Auto,
+        }
+    }
+
+    /// Invalid colours are rejected before any device I/O, so `run` is safe to
+    /// call in-process here. Valid colours proceed to hardware enumeration and
+    /// are deliberately not exercised.
+    #[tokio::test]
+    async fn rejects_malformed_colors_before_touching_hardware() {
+        for bad in ["zzz", "ff000", "ff00001", "gg0000", ""] {
+            let err = run(args(bad)).await.unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "color must be exactly 6 hex digits, e.g. ff0000"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn hash_prefix_is_stripped_before_validation() {
+        // `#zzzzzz` still fails, but with the same message — proving the `#`
+        // is stripped rather than counted toward the 6-digit length.
+        let err = run(args("#zzzzzz")).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "color must be exactly 6 hex digits, e.g. ff0000"
+        );
+    }
+}
