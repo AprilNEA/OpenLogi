@@ -388,22 +388,22 @@ mod dock {
     use super::app_services_symbol;
 
     /// Show all windows across spaces (Mission Control).
-    pub(crate) fn mission_control() {
+    pub(super) fn mission_control() {
         send("com.apple.expose.awake");
     }
 
     /// Show the front app's windows (App Exposé).
-    pub(crate) fn app_expose() {
+    pub(super) fn app_expose() {
         send("com.apple.expose.front.awake");
     }
 
     /// Move all windows aside to reveal the desktop.
-    pub(crate) fn show_desktop() {
+    pub(super) fn show_desktop() {
         send("com.apple.showdesktop.awake");
     }
 
     /// Toggle Launchpad. A no-op on macOS 26, which removed Launchpad.
-    pub(crate) fn launchpad() {
+    pub(super) fn launchpad() {
         send("com.apple.launchpad.toggle");
     }
 
@@ -455,12 +455,12 @@ mod symbolic_hotkey {
     const SPACE_RIGHT: u32 = 81;
 
     /// Switch to the previous desktop / Space.
-    pub(crate) fn previous_desktop() {
+    pub(super) fn previous_desktop() {
         post_symbolic_hotkey(SPACE_LEFT);
     }
 
     /// Switch to the next desktop / Space.
-    pub(crate) fn next_desktop() {
+    pub(super) fn next_desktop() {
         post_symbolic_hotkey(SPACE_RIGHT);
     }
 
