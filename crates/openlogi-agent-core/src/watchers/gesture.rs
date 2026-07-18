@@ -19,7 +19,7 @@
 //! the events arrive over HID++, and the bound action is synthesised the same
 //! way regardless.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -197,18 +197,27 @@ async fn manage(
                     };
                 // Stop sessions whose device disappeared or whose plan changed.
                 // Sending on the oneshot lets the session restore its controls.
+                // A key stopped this tick restarts on the *next* tick, never
+                // this one: arming the replacement immediately could interleave
+                // its divert writes with the old session's restore writes on
+                // the same device, leaving a control un-diverted while the new
+                // session believes it owns it.
+                let mut stopping: HashSet<String> = HashSet::new();
                 sessions.retain(|key, session| {
                     let keep = want
                         .get(key)
                         .is_some_and(|(route, spec)| *route == session.route && *spec == session.spec);
-                    if !keep && let Some(stop) = session.stop.take() {
-                        let _ = stop.send(());
+                    if !keep {
+                        if let Some(stop) = session.stop.take() {
+                            let _ = stop.send(());
+                        }
+                        stopping.insert(key.clone());
                     }
                     keep
                 });
                 accumulators.retain(|key, _| want.contains_key(key));
                 for (key, (route, spec)) in want {
-                    if sessions.contains_key(&key) {
+                    if sessions.contains_key(&key) || stopping.contains(&key) {
                         continue;
                     }
                     // All sessions share one exclusive lease; acquire it with the
