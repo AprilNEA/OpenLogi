@@ -10,6 +10,7 @@ use gpui_component::{
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
     scroll::ScrollableElement as _,
+    switch::Switch,
     tab::TabBar,
     v_flex,
 };
@@ -462,6 +463,14 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
 }
 
 fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let device_enabled = cx
+        .try_global::<AppState>()
+        .and_then(|state| {
+            state
+                .current_record()
+                .map(|r| state.device_enabled(&r.config_key))
+        })
+        .unwrap_or(true);
     let (binding_count, gesture_count, preset_count, app_profile) = cx
         .try_global::<AppState>()
         .map_or((0, 0, 0, tr!("Default profile").to_string()), |state| {
@@ -478,6 +487,32 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
 
     let content = v_flex()
         .gap_3()
+        .child(
+            h_flex()
+                .justify_between()
+                .items_center()
+                .child(
+                    v_flex()
+                        .child(div().text_sm().child(tr!("Manage this device")))
+                        .child(div().text_xs().text_color(pal.text_muted).child(tr!(
+                            "Off leaves every control native and stops re-applying settings."
+                        ))),
+                )
+                .child(
+                    Switch::new("device-enabled")
+                        .checked(device_enabled)
+                        .on_click(|checked, _window, cx| {
+                            let enabled = *checked;
+                            cx.update_global::<AppState, _>(|state, _| {
+                                let key = state.current_record().map(|r| r.config_key.clone());
+                                if let Some(key) = key {
+                                    state.set_device_enabled(&key, enabled);
+                                }
+                            });
+                            cx.refresh_windows();
+                        }),
+                ),
+        )
         .child(
             DescriptionList::new()
                 .columns(1)
