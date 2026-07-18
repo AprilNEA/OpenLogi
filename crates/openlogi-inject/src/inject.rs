@@ -590,13 +590,20 @@ mod macos {
 
     /// Put the system to sleep via `pmset sleepnow` — sleep has no CGEvent
     /// equivalent, and `pmset` performs the console user's sleep request
-    /// without privileges. Fire-and-forget; a spawn failure is logged.
+    /// without privileges. Fire-and-forget; a spawn failure is logged. The
+    /// child is reaped on a detached thread so it can't linger as a zombie
+    /// in this long-running agent.
     pub(super) fn sleep_system() {
         match std::process::Command::new("/usr/bin/pmset")
             .arg("sleepnow")
             .spawn()
         {
-            Ok(_) => tracing::debug!("Sleep via pmset sleepnow"),
+            Ok(mut child) => {
+                tracing::debug!("Sleep via pmset sleepnow");
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
             Err(e) => tracing::warn!(error = %e, "pmset sleepnow spawn failed"),
         }
     }
@@ -1206,11 +1213,6 @@ mod linux {
         press_key(&[KeyCode::KEY_LEFTMETA], KeyCode::KEY_L);
     }
 
-    /// Send `command` to the first MPRIS-capable media player on the session bus,
-    /// falling back to the corresponding XF86 multimedia key only if no MPRIS
-    /// player is found. When a player is found but the call fails, the fallback
-    /// is suppressed to avoid double-toggling (the player likely handles the
-    /// XF86 key too).
     /// Suspend the system via logind's `Suspend()` on the system bus. The
     /// `false` argument declines the "interactive" polkit prompt — if the
     /// session isn't allowed to suspend, the call fails and is logged rather
@@ -1232,6 +1234,11 @@ mod linux {
         }
     }
 
+    /// Send `command` to the first MPRIS-capable media player on the session bus,
+    /// falling back to the corresponding XF86 multimedia key only if no MPRIS
+    /// player is found. When a player is found but the call fails, the fallback
+    /// is suppressed to avoid double-toggling (the player likely handles the
+    /// XF86 key too).
     pub(super) fn mpris_command(command: &str) {
         if try_mpris_command(command).is_none() {
             let fallback = match command {
