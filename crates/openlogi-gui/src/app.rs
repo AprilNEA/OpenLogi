@@ -1,7 +1,8 @@
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, FocusHandle,
-    InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
+    InteractiveElement, IntoElement, MouseButton, NavigationDirection, ParentElement, Render,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     Icon, IconName, TitleBar,
@@ -265,6 +266,31 @@ impl AppView {
         cx.notify();
     }
 
+    /// Attach the window-level back-navigation listeners to `root`: a mouse
+    /// configurator should honor the hardware it configures. Two routes reach
+    /// us — the native navigate button (its default binding never diverts, so
+    /// the OS still sees it), and Alt+Left, which is both what a rebound
+    /// button's BrowserBack action injects on Linux and what keyboard users
+    /// expect.
+    fn with_back_navigation(root: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        root.on_mouse_down(
+            MouseButton::Navigate(NavigationDirection::Back),
+            cx.listener(|this, _, _, cx| {
+                if !matches!(this.route, Route::Home) {
+                    this.go_home(cx);
+                }
+            }),
+        )
+        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+            if event.keystroke.modifiers.alt
+                && event.keystroke.key == "left"
+                && !matches!(this.route, Route::Home)
+            {
+                this.go_home(cx);
+            }
+        }))
+    }
+
     fn accessibility_gate(pal: Palette, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .size_full()
@@ -392,6 +418,7 @@ impl Render for AppView {
             .when(cfg!(target_os = "linux"), |this| {
                 this.child(app_title_bar(pal))
             });
+        let root = Self::with_back_navigation(root, cx);
 
         // The agent is the source of truth for both the permission state and
         // the device list; `AgentLink` is everything the GUI knows about it.
