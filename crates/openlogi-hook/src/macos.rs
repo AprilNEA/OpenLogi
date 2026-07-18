@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
@@ -24,6 +25,12 @@ use crate::{ButtonId, EventDevice, EventDisposition, HookError, MouseEvent};
 pub(crate) struct HookInner {
     thread: thread::JoinHandle<()>,
     run_loop: CFRunLoop,
+    /// Termination flag, re-checked at the top of every run-loop slice.
+    /// `run_loop.stop()` only interrupts the loop while it is *inside* a
+    /// `run_in_mode` slice; a stop landing in the gap between slices is
+    /// dropped, so this flag — not the CF stop alone — is the reliable
+    /// shutdown signal that guarantees the thread can never hang forever.
+    stop: Arc<AtomicBool>,
 }
 
 // SAFETY: CFRunLoop is a Core Foundation ref-counted object. The CF
@@ -420,12 +427,16 @@ pub(crate) fn start(
     // clone rather than by move — avoids a second Box allocation.
     let cb: Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
 
+    let stop = Arc::new(AtomicBool::new(false));
     let (rl_tx, rl_rx) = mpsc::channel::<CFRunLoop>();
 
-    let thread = thread::Builder::new()
-        .name("openlogi-hook".into())
-        .spawn(move || thread_main(cb, rl_tx))
-        .map_err(|e| HookError::MacOsTap(e.to_string()))?;
+    let thread = {
+        let stop = Arc::clone(&stop);
+        thread::Builder::new()
+            .name("openlogi-hook".into())
+            .spawn(move || thread_main(cb, rl_tx, stop))
+            .map_err(|e| HookError::MacOsTap(e.to_string()))?
+    };
 
     // Block until the background thread confirms the run loop is live, or
     // reports failure by dropping its sender.
@@ -437,7 +448,11 @@ pub(crate) fn start(
         )
     })?;
 
-    Ok(HookInner { thread, run_loop })
+    Ok(HookInner {
+        thread,
+        run_loop,
+        stop,
+    })
 }
 
 /// Body of the background hook thread.
@@ -448,6 +463,7 @@ pub(crate) fn start(
 fn thread_main(
     cb: Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync>,
     rl_tx: mpsc::Sender<CFRunLoop>,
+    stop: Arc<AtomicBool>,
 ) {
     let event_types = vec![
         CGEventType::LeftMouseDown,
@@ -515,9 +531,19 @@ fn thread_main(
     // *entire* system input stream — mouse and keyboard alike — until
     // reboot. If the user revokes access while we're live, tear the tap
     // down right here, on the tap's own thread, so input is restored even
-    // when the UI thread is already stuck. `stop()` (normal shutdown)
-    // returns `Stopped` and also breaks the loop.
+    // when the UI thread is already stuck.
+    //
+    // `stop()` requests shutdown two ways: it sets `stop` and calls
+    // `run_loop.stop()`. The CF stop returns `Stopped` and breaks promptly
+    // while a slice is running, but is a no-op if it lands in the gap
+    // between slices (CFRunLoopStop only acts on a running loop). The `stop`
+    // flag, checked at the top of every slice, is the reliable signal: in
+    // that race the thread notices one 500 ms slice later instead of joining
+    // forever.
     loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         match CFRunLoop::run_in_mode(
             // SAFETY: framework-provided static CFStringRef, 'static.
             unsafe { kCFRunLoopDefaultMode },
@@ -565,6 +591,11 @@ fn disable_tap(tap: &CGEventTap) {
 
 /// Signal the run loop to stop and join the background thread.
 pub(crate) fn stop(inner: HookInner) {
+    // Set the flag *before* waking the loop: if `run_loop.stop()` lands in
+    // the gap between slices and is dropped, the thread still observes the
+    // flag at the next slice top. Relaxed suffices — the flag carries no
+    // other data, and `thread.join()` below is the final synchronisation.
+    inner.stop.store(true, Ordering::Relaxed);
     inner.run_loop.stop();
     if let Err(e) = inner.thread.join() {
         error!("hook thread panicked on shutdown: {e:?}");
