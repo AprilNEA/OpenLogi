@@ -64,7 +64,7 @@ direnv exec . git commit …
 
 ## Rust standards
 
-Edition 2024, MSRV 1.88. Workspace lints (root `Cargo.toml`): `unsafe_code = "deny"`
+Edition 2024, MSRV 1.96. Workspace lints (root `Cargo.toml`): `unsafe_code = "deny"`
 (opt out per item with `#[expect(unsafe_code, reason = "…")]` plus a `// SAFETY:`
 comment), `clippy::pedantic` at warn, `unwrap_used`/`expect_used` at warn.
 `openlogi-hidpp` deliberately does not inherit workspace lints (vendored code). Any

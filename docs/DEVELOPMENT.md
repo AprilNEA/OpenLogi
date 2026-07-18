@@ -5,7 +5,7 @@ build instructions, see the [README](../README.md).
 
 ## Toolchain
 
-- Stable Rust (Edition 2024, MSRV 1.88)
+- Stable Rust (Edition 2024, MSRV 1.96)
 - macOS: Xcode 16+ with the optional **Metal Toolchain** component (required by
   GPUI's `gpui_macos` build script to compile shaders)
 - Linux: system libraries — on Debian/Ubuntu:
