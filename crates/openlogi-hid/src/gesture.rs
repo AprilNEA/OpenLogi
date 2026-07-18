@@ -13,7 +13,8 @@
 //! it, mirroring how the CGEventTap hook handles the side buttons. The thumb
 //! wheel is special: diverting it stops native horizontal scroll, so the GUI
 //! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas — the wheel
-//! is therefore only diverted when its click is actually bound.
+//! is therefore only diverted when the user's thumbwheel config leaves its
+//! defaults (click bound, rotation rebound, or sensitivity changed).
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
@@ -44,8 +45,8 @@ pub enum CapturedInput {
     /// ([`ButtonId::Thumbwheel`]).
     ButtonPressed(ButtonId),
     /// Thumb-wheel rotation to re-synthesise as horizontal scroll, in the
-    /// wheel's `diverted_res` increments. Emitted only while the wheel is
-    /// diverted to capture its click.
+    /// wheel's `diverted_res` increments. Emitted while the wheel is diverted
+    /// (click bound, rotation rebound, or sensitivity changed).
     Scroll(i16),
 }
 
