@@ -1040,6 +1040,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
     use crate::binding::{default_binding, default_gesture_binding};
 
@@ -1528,10 +1530,10 @@ Back = \"BrowserBack\"
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         fs::write(&path, "schema_version = 99\n").expect("write");
-        assert!(matches!(
+        assert_matches!(
             Config::load_from_path(&path).expect_err("v99 should fail"),
             ConfigError::UnsupportedSchemaVersion { found: 99, .. }
-        ));
+        );
 
         fs::write(&path, "schema_version = 1\n").expect("write");
         assert!(

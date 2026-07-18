@@ -455,6 +455,8 @@ pub(crate) fn frontmost_bundle_id() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use evdev::{EventType, InputEvent, KeyCode, RelativeAxisCode};
 
     use super::*;
@@ -493,61 +495,61 @@ mod tests {
     #[test]
     fn translate_btn_left_down_returns_button_pressed() {
         let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_LEFT.0, 1);
-        assert!(matches!(
+        assert_matches!(
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::LeftClick,
                 pressed: true
             })
-        ));
+        );
     }
 
     #[test]
     fn translate_btn_left_up_returns_button_released() {
         let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_LEFT.0, 0);
-        assert!(matches!(
+        assert_matches!(
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::LeftClick,
                 pressed: false
             })
-        ));
+        );
     }
 
     #[test]
     fn translate_btn_back_returns_back() {
         let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_BACK.0, 1);
-        assert!(matches!(
+        assert_matches!(
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::Back,
                 pressed: true
             })
-        ));
+        );
     }
 
     #[test]
     fn translate_btn_side_returns_back() {
         let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_SIDE.0, 1);
-        assert!(matches!(
+        assert_matches!(
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::Back,
                 pressed: true
             })
-        ));
+        );
     }
 
     #[test]
     fn translate_btn_forward_returns_forward() {
         let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_FORWARD.0, 1);
-        assert!(matches!(
+        assert_matches!(
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::Forward,
                 pressed: true
             })
-        ));
+        );
     }
 
     // ── movement ─────────────────────────────────────────────────────────────
@@ -555,25 +557,25 @@ mod tests {
     #[test]
     fn translate_rel_x_returns_horizontal_move() {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_X.0, 7);
-        assert!(matches!(
+        assert_matches!(
             translate(&event, false),
             Some(MouseEvent::Moved {
                 delta_x: 7,
                 delta_y: 0
             })
-        ));
+        );
     }
 
     #[test]
     fn translate_rel_y_returns_vertical_move() {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_Y.0, -4);
-        assert!(matches!(
+        assert_matches!(
             translate(&event, false),
             Some(MouseEvent::Moved {
                 delta_x: 0,
                 delta_y: -4
             })
-        ));
+        );
     }
 
     // ── scroll — standard ────────────────────────────────────────────────────

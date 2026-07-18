@@ -57,8 +57,11 @@ fn event_disposition_equality() {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[test]
 fn unsupported_start_returns_unsupported() {
+    use std::assert_matches;
+
+    // Asserted via `.err()` because `Hook` itself has no `Debug` impl to print.
     let result = Hook::start(|_| EventDisposition::PassThrough);
-    assert!(matches!(result, Err(HookError::Unsupported)));
+    assert_matches!(result.err(), Some(HookError::Unsupported));
 }
 
 /// On Linux, `Hook::start` never returns `Unsupported` — it either succeeds or

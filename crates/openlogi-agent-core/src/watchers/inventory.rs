@@ -33,6 +33,7 @@ const INITIAL_FAILURE_LIMIT: u8 = 3;
 const WAKE_GAP: Duration = Duration::from_secs(60);
 
 /// What the watcher tells the agent.
+#[derive(Debug)]
 pub enum InventoryEvent {
     /// A completed enumeration — empty means "checked, no devices".
     Snapshot(Vec<DeviceInventory>),
@@ -163,6 +164,8 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<InventoryEvent> {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use openlogi_hid::InventoryError;
 
     use super::{INITIAL_FAILURE_LIMIT, InventoryEvent, WatchState};
@@ -178,10 +181,10 @@ mod tests {
         let mut state = WatchState::default();
         // A genuine "checked, nothing there" still propagates as a disconnect —
         // the resilience must not swallow a real empty.
-        assert!(matches!(
+        assert_matches!(
             state.classify(Ok(vec![])),
             Some(InventoryEvent::Snapshot(snap)) if snap.is_empty()
-        ));
+        );
         assert!(state.succeeded);
     }
 
@@ -189,10 +192,10 @@ mod tests {
     fn failure_after_a_success_keeps_the_last_snapshot() {
         let mut state = WatchState::default();
         // A good tick first, so there is a last-known-good set to preserve.
-        assert!(matches!(
+        assert_matches!(
             state.classify(Ok(vec![])),
             Some(InventoryEvent::Snapshot(_))
-        ));
+        );
         // Then transient enumerate failures emit nothing — the agent keeps the
         // last snapshot instead of flapping to "No devices" (#218).
         assert!(state.classify(Err(enumerate_failed())).is_none());
@@ -207,16 +210,16 @@ mod tests {
         for _ in 0..INITIAL_FAILURE_LIMIT - 1 {
             assert!(state.classify(Err(enumerate_failed())).is_none());
         }
-        assert!(matches!(
+        assert_matches!(
             state.classify(Err(enumerate_failed())),
             Some(InventoryEvent::Unavailable)
-        ));
+        );
         // Reported once, not on every later failure.
         assert!(state.classify(Err(enumerate_failed())).is_none());
         // …and a later success recovers with a live snapshot.
-        assert!(matches!(
+        assert_matches!(
             state.classify(Ok(vec![])),
             Some(InventoryEvent::Snapshot(_))
-        ));
+        );
     }
 }

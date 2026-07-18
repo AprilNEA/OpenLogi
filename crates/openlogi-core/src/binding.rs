@@ -918,6 +918,7 @@ pub fn default_binding_for(button: ButtonId) -> Binding {
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
+    use std::assert_matches;
     use std::collections::BTreeMap;
 
     use serde::{Deserialize, Serialize};
@@ -994,10 +995,10 @@ mod tests {
             back[&ButtonId::DpiToggle],
             Binding::Single(Action::SetDpiPreset(2))
         );
-        assert!(matches!(
+        assert_matches!(
             back[&ButtonId::Forward],
             Binding::Single(Action::CustomShortcut(_))
-        ));
+        );
     }
 
     #[test]
