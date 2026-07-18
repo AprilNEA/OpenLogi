@@ -27,6 +27,9 @@ MX Master 4):
   RGB keyboards.
 - `gesture_owner` — which button owns the gesture role, when chosen
   explicitly (otherwise inferred).
+- `fn_lock` — keyboards only: `true` makes the F-row send F1–F12 without
+  holding Fn, `false` keeps the printed media/shortcut functions. Absent
+  means the keyboard's own state is left alone. Re-applied on reconnect.
 
 The app-wide `[app_settings]` block holds `launch_at_login`,
 `check_for_updates` (both off by default), `show_in_menu_bar` (macOS-only)
@@ -63,6 +66,18 @@ Back = "Undo"
 enabled = true
 color = "ff0000"
 brightness = 80
+
+# Keyboard F-row keys (Signature-series layout): a bound key is diverted
+# over HID++ and dispatches its action; an unbound key keeps its native
+# firmware function. Key names: KeySearch, KeyDictation, KeyEmoji,
+# KeyScreenCapture, KeyMicMute, KeyPlayPause, KeyMute, KeyVolumeDown,
+# KeyVolumeUp.
+[devices.2b372]
+fn_lock = false
+
+[devices.2b372.bindings]
+KeySearch = "MissionControl"
+KeyScreenCapture = "Sleep"
 ```
 
 Action names are the catalog's variant names (`LeftClick`, `MouseBack`,
