@@ -31,7 +31,16 @@ multiple-versions = "warn"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# The two deliberate direct git deps, plus the git sources they pull in
+# transitively (zed's forks and the gpui-updater sibling crate) — everything
+# that appears as `git+…` in Cargo.lock must be listed here.
 allow-git = [
     "https://github.com/zed-industries/zed",
     "https://github.com/longbridge/gpui-component",
+    "https://github.com/AprilNEA/gpui-updater",
+    "https://github.com/zed-industries/font-kit",
+    "https://github.com/zed-industries/reqwest.git",
+    "https://github.com/zed-industries/scap",
+    "https://github.com/zed-industries/wgpu.git",
+    "https://github.com/zed-industries/xim-rs.git",
 ]
