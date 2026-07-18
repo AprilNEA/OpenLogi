@@ -99,8 +99,10 @@ pub struct CaptureSpec {
     /// Divert the dedicated gesture button with raw-XY (it owns the gesture
     /// role).
     pub divert_gesture_button: bool,
-    /// Standard buttons to divert, from [`DIVERTABLE_STANDARD_BUTTONS`],
-    /// filtered to those whose binding leaves the default.
+    /// Buttons to divert as plain presses (no raw-XY): the
+    /// [`DIVERTABLE_STANDARD_BUTTONS`] whose binding leaves the default, plus
+    /// the dedicated gesture button when it carries a non-default single
+    /// binding without owning the gesture role.
     pub divert_buttons: Vec<(u16, ButtonId)>,
 }
 
@@ -110,8 +112,10 @@ pub struct CaptureSpec {
 /// The dedicated gesture button (raw-XY) is diverted only when
 /// `spec.divert_gesture_button` — i.e. it is the device's gesture owner. When
 /// the user moves the gesture role to an OS-hook button or turns gestures off,
-/// the HID++ gesture control is left undiverted so it keeps its native behavior
-/// instead of being captured-and-swallowed. The DPI/ModeShift capture and the
+/// the HID++ gesture control keeps its native behavior — unless a non-default
+/// single binding puts it in `spec.divert_buttons`, in which case it is
+/// diverted as a plain button (the OS hook never sees CID `0x00c3`, so this is
+/// the binding's only delivery path). The DPI/ModeShift capture and the
 /// channel-reuse slot are independent of this.
 ///
 /// Opens and holds one HID++ channel, diverts whichever of those controls the
@@ -139,6 +143,7 @@ pub async fn run_capture_session(
 
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
     let reprog_index = armed.reprog.as_ref().map(|(_, idx)| *idx);
+    let gesture_diverted = armed.gesture_diverted;
     let thumb_index = armed.thumb.as_ref().map(|(_, idx)| *idx);
     let dpi_set = armed.dpi_cids.clone();
     let button_set = armed.button_cids.clone();
@@ -156,7 +161,14 @@ pub async fn run_capture_session(
                 // Recover the guard even if a prior holder panicked — the
                 // critical section is panic-free, so the data is consistent.
                 let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
-                handle_reprog(&mut acc, event, &dpi_set, &button_set, &sink);
+                handle_reprog(
+                    &mut acc,
+                    event,
+                    gesture_diverted,
+                    &dpi_set,
+                    &button_set,
+                    &sink,
+                );
                 return;
             }
             if let Some(idx) = thumb_index
@@ -282,6 +294,12 @@ async fn arm_controls(
             }
         }
         for &(cid, button) in &spec.divert_buttons {
+            // The plan never lists CID 0x00c3 while the raw-XY gesture divert
+            // owns it, but guard anyway: a plain (divert, no raw-XY) write here
+            // would strip the raw-XY reporting armed above.
+            if gesture_diverted && cid == reprog_controls::GESTURE_BUTTON_CID {
+                continue;
+            }
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
                 rc.set_cid_reporting(cid, true, false)
                     .await
@@ -370,20 +388,27 @@ async fn enumerate_controls(
 fn handle_reprog(
     acc: &mut CaptureAccum,
     event: RawControlEvent,
+    gesture_diverted: bool,
     dpi_cids: &[u16],
     button_cids: &[(u16, ButtonId)],
     sink: &mpsc::UnboundedSender<CapturedInput>,
 ) {
     match event {
         RawControlEvent::DivertedButtons(cids) => {
-            let gesture_held = cids.contains(&reprog_controls::GESTURE_BUTTON_CID);
-            if gesture_held && !acc.swipe.is_holding() {
-                acc.swipe.begin();
-            } else if !gesture_held && acc.swipe.is_holding() {
-                // A press that never committed a direction is a plain click.
-                if acc.swipe.end() {
-                    debug!("gesture click");
-                    let _ = sink.send(CapturedInput::Gesture(GestureDirection::Click));
+            // The swipe accumulator belongs to the raw-XY gesture divert. When
+            // the gesture button is instead diverted as a plain button (it has
+            // a single binding but not the gesture role), its press must flow
+            // through the `button_cids` loop only — not also emit a click.
+            if gesture_diverted {
+                let gesture_held = cids.contains(&reprog_controls::GESTURE_BUTTON_CID);
+                if gesture_held && !acc.swipe.is_holding() {
+                    acc.swipe.begin();
+                } else if !gesture_held && acc.swipe.is_holding() {
+                    // A press that never committed a direction is a plain click.
+                    if acc.swipe.end() {
+                        debug!("gesture click");
+                        let _ = sink.send(CapturedInput::Gesture(GestureDirection::Click));
+                    }
                 }
             }
 

@@ -15,6 +15,7 @@ use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding
 use openlogi_core::config::Config;
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::gesture::DIVERTABLE_STANDARD_BUTTONS;
+use openlogi_hid::reprog_controls::GESTURE_BUTTON_CID;
 
 use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
 
@@ -60,8 +61,17 @@ pub fn plan_for_device(
     // needs to see its press to run hold+swipe detection, and diverting it
     // would starve the hook of events.
     let oshook = oshook_gestures_for(config, Some(config_key), app);
+    // The dedicated gesture button never reaches the OS hook, so a non-default
+    // single binding on it is deliverable only via a plain HID++ divert — but
+    // only while it does NOT own the gesture role (the raw-XY gesture divert
+    // owns CID 0x00c3 in that case, and `gesture_bindings` is how the watcher
+    // arms that divert).
+    let plain_gesture_button = gesture_bindings
+        .is_empty()
+        .then_some((GESTURE_BUTTON_CID, ButtonId::GestureButton));
     let divert_buttons: Vec<(u16, ButtonId)> = DIVERTABLE_STANDARD_BUTTONS
         .into_iter()
+        .chain(plain_gesture_button)
         .filter(|(_, button)| !oshook.contains_key(button))
         .filter(|(_, button)| {
             bindings
@@ -106,7 +116,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "RED: plain gesture-button divert not implemented yet"]
     fn gestures_off_single_bound_gesture_button_is_plain_diverted() {
         // The dedicated gesture button (CID 0x00c3) never reaches the OS hook,
         // so with gestures off a non-default single binding on it is only
