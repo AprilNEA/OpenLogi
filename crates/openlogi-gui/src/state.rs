@@ -9,11 +9,6 @@
 //! target up front so views can switch instantly when the carousel selection
 //! changes — no synchronous I/O during the device switch.
 
-#![allow(
-    dead_code,
-    reason = "fields are read once their owning component lands in UI.md phases 2–4"
-)]
-
 use std::collections::BTreeMap;
 
 use gpui::{App, Global};
@@ -28,7 +23,6 @@ use tracing::{debug, warn};
 mod devices;
 
 pub use devices::DeviceRecord;
-pub use openlogi_agent_core::DpiCycleState;
 
 use crate::asset::AssetResolver;
 use crate::data::mouse_buttons::{Action, Binding, ButtonId, GestureDirection};
@@ -326,10 +320,6 @@ impl AppState {
     ///
     /// The initial selection prefers [`Config::selected_device`] if it still
     /// matches one of the paired devices; otherwise it falls back to index 0.
-    ///
-    /// A fresh `Arc<RwLock<…>>` is created for [`Self::hook_bindings`]. When
-    /// the OS event hook (P0.1) needs to share the same map, the caller
-    /// builds the `Arc` first and uses [`Self::with_runtime_shared`] instead.
     #[must_use]
     pub fn with_runtime(
         mut config: Config,
@@ -428,56 +418,6 @@ impl AppState {
     /// grant the wrong binary and the hook would never install.
     pub fn request_accessibility_prompt(&self) {
         self.send_ipc(crate::ipc_client::Command::RequestAccessibilityPrompt);
-    }
-
-    /// Build the button-binding, gesture-binding, and DPI snapshots consumed by
-    /// the OS hook and gesture watcher before the GPUI global exists. Uses the
-    /// same device-selection and binding rules as [`Self::with_runtime_shared`].
-    #[must_use]
-    pub fn initial_hook_state(
-        config: &Config,
-        inventories: &[DeviceInventory],
-        cache: &AssetResolver,
-    ) -> (
-        BTreeMap<ButtonId, Action>,
-        BTreeMap<GestureDirection, Action>,
-        DpiCycleState,
-    ) {
-        let device_list = build_device_list(inventories, cache, config);
-        let current_device = pick_initial_device(&device_list, config.selected_device());
-        let record = device_list.get(current_device);
-        let config_key = record.map(|r| r.config_key.as_str());
-        let bindings = bindings_for(config, config_key, None);
-        let gesture_bindings = gesture_bindings_for(config, config_key);
-        let presets = record
-            .map(|r| config.dpi_presets(&r.config_key))
-            .unwrap_or_default();
-        let target = record.and_then(|r| r.route.clone());
-        (
-            bindings,
-            gesture_bindings,
-            DpiCycleState {
-                presets,
-                index: 0,
-                target,
-                capabilities: None,
-            },
-        )
-    }
-
-    /// Update the frontmost-app tracking + reload the binding map to overlay
-    /// any per-app overrides for the new app (P1.4). Hook-shared `Arc` gets
-    /// the same map so background button presses observe the new bindings
-    /// immediately.
-    ///
-    /// No-op when `bundle` matches the current value.
-    pub fn set_current_app(&mut self, bundle: Option<String>) {
-        if bundle == self.current_app_bundle {
-            return;
-        }
-        debug!(?bundle, "foreground app changed");
-        self.current_app_bundle = bundle;
-        self.button_bindings = self.bindings_for_current();
     }
 
     /// The active device, or `None` when [`Self::device_list`] is empty or
