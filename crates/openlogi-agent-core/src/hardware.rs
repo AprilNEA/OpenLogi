@@ -202,6 +202,55 @@ pub fn write_smartshift_in_background(
     });
 }
 
+/// Spawn an OS thread that writes the keyboard Fn-lock state to the device at
+/// `target` via [`openlogi_hid::set_fn_lock`]. Returns immediately; failures
+/// (incl. keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion)
+/// are logged.
+///
+/// `target == None` is a no-op (dev environment without a real device).
+pub fn write_fn_lock_in_background(
+    capture: Option<&CaptureChannel>,
+    target: Option<DeviceRoute>,
+    on: bool,
+) {
+    let Some(target) = target else {
+        debug!(on, "no target device — Fn-lock write skipped");
+        return;
+    };
+    let shared = reusable_channel(capture, &target);
+    let reused = shared.is_some();
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                warn!(error = %e, "tokio runtime init failed; Fn-lock write skipped");
+                return;
+            }
+        };
+        let result = rt.block_on(async {
+            tokio::time::timeout(WRITE_BUDGET, async {
+                match &shared {
+                    Some(shared) => openlogi_hid::set_fn_lock_on(shared, on).await,
+                    None => openlogi_hid::set_fn_lock(&target, on).await,
+                }
+            })
+            .await
+        });
+        let index = target.device_index();
+        match result {
+            Ok(Ok(())) => debug!(index, on, reused, "Fn-lock written"),
+            Ok(Err(e)) => warn!(error = ?e, "Fn-lock write failed"),
+            Err(_) => warn!(
+                index,
+                "Fn-lock write timed out (device asleep/unresponsive)"
+            ),
+        }
+    });
+}
+
 /// Spawn an OS thread that writes `dpi` to the device at `target` via
 /// `openlogi_hid::set_dpi`. Returns immediately; failures are logged.
 ///

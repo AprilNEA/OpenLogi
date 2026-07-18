@@ -473,6 +473,12 @@ pub struct DeviceConfig {
     /// (default) is the native direction, and is omitted from `config.toml`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub invert_scroll: bool,
+    /// Keyboard Fn-lock state (HID++ fn inversion, `0x40a2`/`0x40a3`): `true`
+    /// means the F-row sends F1–F12 without holding Fn. The state lives in
+    /// device RAM per host, so the agent re-applies it on reconnect like
+    /// [`Self::dpi`]. `None` means "never set — leave the keyboard alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fn_lock: Option<bool>,
 }
 
 /// `skip_serializing_if` helper for plain `bool` fields whose default is
@@ -520,6 +526,8 @@ struct RawDeviceConfig {
     smartshift: Option<SmartShift>,
     #[serde(default)]
     invert_scroll: bool,
+    #[serde(default)]
+    fn_lock: Option<bool>,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -563,6 +571,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             lighting: raw.lighting,
             smartshift: raw.smartshift,
             invert_scroll: raw.invert_scroll,
+            fn_lock: raw.fn_lock,
         }
     }
 }
@@ -978,6 +987,13 @@ impl Config {
     #[must_use]
     pub fn smartshift(&self, device_key: &str) -> Option<SmartShift> {
         self.devices.get(device_key).and_then(|d| d.smartshift)
+    }
+
+    /// The persisted keyboard Fn-lock state for `device_key`, or `None` when
+    /// the user never set one (the keyboard keeps its own state).
+    #[must_use]
+    pub fn fn_lock(&self, device_key: &str) -> Option<bool> {
+        self.devices.get(device_key).and_then(|d| d.fn_lock)
     }
 
     /// Record the SmartShift wheel config for `device_key`, so the agent can
