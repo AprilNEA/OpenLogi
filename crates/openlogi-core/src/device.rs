@@ -180,7 +180,7 @@ pub enum BatteryStatus {
 }
 
 /// Battery snapshot for one paired device, as last polled over HID++.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatteryInfo {
     /// Reported charge percentage (`0..=100`).
     pub percentage: u8,
@@ -193,7 +193,7 @@ pub struct BatteryInfo {
 /// Identity of an enumerated receiver — no paired-device state (that lives
 /// in [`DeviceInventory::paired`]). For a direct (Bluetooth/wired) device,
 /// a synthetic entry mirroring the device's own HID identity fills this role.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiverInfo {
     /// Product string from the HID enumeration (e.g. `"Logi Bolt Receiver"`).
     pub name: String,
@@ -275,7 +275,7 @@ pub struct DeviceTransports {
 /// or a direct (Bluetooth/wired) attachment under its synthetic
 /// [`ReceiverInfo`]. Embedded in [`DeviceInventory`], so its field order is
 /// IPC wire format — see that type's contract.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairedDevice {
     /// Receiver-assigned slot (1..=6 for Bolt).
     pub slot: u8,
@@ -310,7 +310,7 @@ pub struct PairedDevice {
 /// field and variant *order*, so reordering, retyping, or wrapping any field
 /// in this tree is a wire-format change and requires a `PROTOCOL_VERSION`
 /// bump (guarded by `openlogi-agent-core/tests/wire_format.rs`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceInventory {
     /// The receiver's identity — synthetic (mirroring the device itself)
     /// for a direct Bluetooth/wired attachment.
@@ -322,7 +322,74 @@ pub struct DeviceInventory {
 
 #[cfg(test)]
 mod tests {
-    use super::DeviceKind;
+    use super::{
+        BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
+        DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+    };
+
+    fn inventory(slot: u8, wpid: Option<u16>, battery_percentage: u8) -> DeviceInventory {
+        DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Logi Bolt Receiver".to_string(),
+                vendor_id: 0x046d,
+                product_id: 0xc548,
+                unique_id: Some("receiver-1".to_string()),
+            },
+            paired: vec![PairedDevice {
+                slot,
+                codename: Some("MX Test".to_string()),
+                wpid,
+                kind: DeviceKind::Mouse,
+                online: true,
+                battery: Some(BatteryInfo {
+                    percentage: battery_percentage,
+                    level: BatteryLevel::Good,
+                    status: BatteryStatus::Discharging,
+                }),
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: Some("serial-1".to_string()),
+                    unit_id: [1, 2, 3, 4],
+                    transports: DeviceTransports {
+                        usb: true,
+                        equad: true,
+                        btle: false,
+                        bluetooth: false,
+                    },
+                    model_ids: [0xb023, 0, 0],
+                    extended_model_id: 0x02,
+                }),
+                capabilities: Some(Capabilities {
+                    buttons: true,
+                    pointer: true,
+                    lighting: false,
+                    scroll_inversion: false,
+                }),
+            }],
+        }
+    }
+
+    #[test]
+    fn device_inventory_equality_includes_nested_device_fields() {
+        let base = inventory(1, Some(0xb023), 86);
+        assert_eq!(base, base.clone());
+
+        assert_ne!(
+            base,
+            inventory(2, Some(0xb023), 86),
+            "slot changes must affect inventory equality"
+        );
+        assert_ne!(
+            base,
+            inventory(1, Some(0xb024), 86),
+            "wireless product id changes must affect inventory equality"
+        );
+        assert_ne!(
+            base,
+            inventory(1, Some(0xb023), 87),
+            "nested battery changes must affect inventory equality"
+        );
+    }
 
     #[test]
     fn registry_type_is_case_folded() {
