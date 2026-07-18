@@ -112,6 +112,15 @@ jobs:
         run: test "$(uname -m)" = "${{ matrix.arch }}"
       - run: cargo test --workspace --all-targets
 
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
   clippy-windows:
     name: clippy (windows)
     runs-on: windows-latest
