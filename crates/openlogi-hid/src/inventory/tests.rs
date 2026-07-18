@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
 
 use super::cache::{CACHE_MISS_GRACE, CacheKey, Cached, REFRESH_TICKS, is_stale};
+use super::probe::parse_codename_unifying;
 use super::{Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop};
 use crate::inventory::features::ProbedFeatures;
 
@@ -163,4 +164,28 @@ fn one_shot_retry_stops_at_attempt_cap_when_inventory_keeps_changing() {
         ),
         "the retry loop must remain bounded even if the inventory changes every time"
     );
+}
+
+#[test]
+fn codename_reads_len_prefixed_name() {
+    // wire-verified MX Master 2S reply: `40 0c "MX Master 2S"` then padding.
+    let mut buf = vec![0x40, 0x0c];
+    buf.extend_from_slice(b"MX Master 2S");
+    buf.extend_from_slice(&[0u8; 2]); // trailing bytes of the 16-byte register
+    assert_eq!(
+        parse_codename_unifying(&buf).as_deref(),
+        Some("MX Master 2S")
+    );
+}
+
+#[test]
+fn codename_clamps_overlong_len() {
+    // a bogus length byte must not over-read past the buffer.
+    let buf = [0x40, 0xff, b'h', b'i'];
+    assert_eq!(parse_codename_unifying(&buf).as_deref(), Some("hi"));
+}
+
+#[test]
+fn codename_rejects_short_response() {
+    assert_eq!(parse_codename_unifying(&[0x40]), None);
 }
