@@ -35,9 +35,12 @@ pub struct DeviceCapturePlan {
     /// `0x1b04`. A button at its default keeps its native HID behavior, so no
     /// re-synthesis is ever needed.
     pub divert_buttons: Vec<(u16, ButtonId)>,
-    /// Whether any thumbwheel binding leaves its default. The watcher combines
-    /// this with the live sensitivity to decide thumb-wheel diversion.
+    /// Whether any thumbwheel binding leaves its default. Combined with the
+    /// sensitivity to decide thumb-wheel diversion.
     pub thumbwheel_bindings_nondefault: bool,
+    /// This device's effective thumb-wheel sensitivity (device override or the
+    /// app-wide default).
+    pub thumbwheel_sensitivity: i32,
 }
 
 /// Shared plan list, rewritten by the orchestrator and read by the watcher.
@@ -84,5 +87,6 @@ pub fn plan_for_device(
         gesture_bindings,
         divert_buttons,
         thumbwheel_bindings_nondefault,
+        thumbwheel_sensitivity: config.thumbwheel_sensitivity(config_key),
     }
 }

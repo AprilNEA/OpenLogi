@@ -11,7 +11,6 @@
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::config::{Config, ScrollResolution};
@@ -19,7 +18,6 @@ use openlogi_core::device::{Capabilities, DeviceInventory};
 use openlogi_hid::{CaptureChannel, DeviceRoute};
 use tracing::warn;
 
-use crate::DpiCycleState;
 use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
 use crate::device_order::DeviceStableId;
@@ -27,6 +25,7 @@ use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::ipc::InventoryHealth;
 use crate::receiver_access::ReceiverAccess;
 use crate::watchers::gesture::GestureBindings;
+use crate::{DpiCycleState, DpiCycles};
 
 /// The minimal per-device facts the agent needs: the config key (binding /
 /// preset lookup), the HID++ route (DPI/SmartShift writes + capture target), and
@@ -56,11 +55,11 @@ pub struct SharedRuntime {
     /// gesture watcher for the thumb-wheel/DPI-button single actions.
     pub hook_maps: SharedHookMaps,
     pub gesture_bindings: GestureBindings,
-    pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
+    pub dpi_cycle: Arc<RwLock<DpiCycles>>,
     /// One capture plan per online device — what to divert and how to
-    /// dispatch, keyed by the device the events arrive on.
+    /// dispatch, keyed by the device the events arrive on. Carries each
+    /// device's effective thumb-wheel sensitivity.
     pub capture_plans: SharedCapturePlans,
-    pub thumbwheel_sensitivity: Arc<AtomicI32>,
     pub capture_channel: CaptureChannel,
     /// Exclusive receiver access shared by HID++ capture and pairing. Capture
     /// and pairing must never open the same receiver HID node concurrently.
@@ -110,11 +109,8 @@ impl Orchestrator {
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
-            dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
+            dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans: Arc::new(RwLock::new(Vec::new())),
-            thumbwheel_sensitivity: Arc::new(AtomicI32::new(
-                config.app_settings.thumbwheel_sensitivity,
-            )),
             capture_channel: Arc::new(RwLock::new(None)),
             receiver_access: ReceiverAccess::default(),
         };
@@ -144,10 +140,6 @@ impl Orchestrator {
             .map(|d| d.config_key.as_str())
     }
 
-    fn current_route(&self) -> Option<DeviceRoute> {
-        self.devices.get(self.current).and_then(|d| d.route.clone())
-    }
-
     /// Build the OS-hook callback's maps for `key` + foreground `app`. Both hook
     /// sub-maps are app-scoped (a per-app override can demote the gesture owner),
     /// so they're built together here and published under one lock — keeping
@@ -174,25 +166,45 @@ impl Orchestrator {
             gesture_bindings_for(&self.config, key),
             "gesture_bindings",
         );
-        write_value(
-            &self.shared.dpi_cycle,
-            DpiCycleState {
-                presets: key.map(|k| self.config.dpi_presets(k)).unwrap_or_default(),
-                index: 0,
-                target: self.current_route(),
-                capabilities: None,
-            },
-            "dpi_cycle",
-        );
-        self.shared.thumbwheel_sensitivity.store(
-            self.config.app_settings.thumbwheel_sensitivity,
-            Ordering::Relaxed,
-        );
+        self.rebuild_dpi_cycles(key);
         write_value(
             &self.shared.capture_plans,
             self.capture_plans_for(),
             "capture_plans",
         );
+    }
+
+    /// Rewrite the per-device DPI-cycle map for every online device,
+    /// preserving a device's live cycle index (and lazily discovered
+    /// capabilities) across rebuilds whose presets did not change — a config
+    /// reload must not snap DPI back to `preset[0]`.
+    fn rebuild_dpi_cycles(&self, selected: Option<&str>) {
+        let Ok(mut guard) = self.shared.dpi_cycle.write() else {
+            warn!("dpi_cycle lock poisoned — rebuild skipped");
+            return;
+        };
+        let mut by_key = std::collections::HashMap::new();
+        for dev in self.devices.iter().filter(|dev| dev.online) {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
+            let presets = self.config.dpi_presets(&dev.config_key);
+            let previous = guard
+                .by_key
+                .get(&dev.config_key)
+                .filter(|state| state.presets == presets);
+            by_key.insert(
+                dev.config_key.clone(),
+                DpiCycleState {
+                    index: previous.map_or(0, |state| state.index),
+                    capabilities: previous.and_then(|state| state.capabilities.clone()),
+                    presets,
+                    target: Some(route),
+                },
+            );
+        }
+        guard.selected = selected.map(str::to_owned);
+        guard.by_key = by_key;
     }
 
     /// One capture plan per online device, from the current config + app.

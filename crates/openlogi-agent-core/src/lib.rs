@@ -19,4 +19,4 @@ pub mod receiver_access;
 pub mod transport;
 pub mod watchers;
 
-pub use dpi::DpiCycleState;
+pub use dpi::{DpiCycleState, DpiCycles};

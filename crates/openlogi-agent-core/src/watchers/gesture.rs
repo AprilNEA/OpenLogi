@@ -20,7 +20,6 @@
 //! way regardless.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -32,7 +31,7 @@ use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_sessi
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use crate::DpiCycleState;
+use crate::DpiCycles;
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
 use crate::hook_runtime;
 use crate::receiver_access::{CaptureReceiverLease, ReceiverAccess};
@@ -40,10 +39,6 @@ use crate::receiver_access::{CaptureReceiverLease, ReceiverAccess};
 /// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
 /// direction). The watcher reads it to map a captured swipe to a bound action.
 pub type GestureBindings = Arc<RwLock<BTreeMap<GestureDirection, Action>>>;
-
-/// Shared thumb-wheel sensitivity, mirrored from `AppState`. Read on every wheel
-/// event; written only by `AppState::set_thumbwheel_sensitivity`.
-pub type ThumbwheelSensitivity = Arc<AtomicI32>;
 
 /// How often to re-read the active device target + thumb-wheel arming so a
 /// carousel switch or a binding/sensitivity edit re-points / re-arms capture.
@@ -79,9 +74,8 @@ fn action_threshold(sensitivity: i32) -> i32 {
 /// captured input.
 pub fn spawn(
     capture_plans: SharedCapturePlans,
-    dpi_cycle: Arc<RwLock<DpiCycleState>>,
+    dpi_cycle: Arc<RwLock<DpiCycles>>,
     capture_channel: CaptureChannel,
-    thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
 ) {
     thread::spawn(move || {
@@ -99,7 +93,6 @@ pub fn spawn(
             capture_plans,
             dpi_cycle,
             capture_channel,
-            thumbwheel_sensitivity,
             receiver_access,
         ));
     });
@@ -107,16 +100,17 @@ pub fn spawn(
 
 /// Whether one device's thumb wheel must be diverted over HID++ (which
 /// suppresses native scroll) so we can re-synthesise its scroll or capture its
-/// tap: the sensitivity leaves its default (so we scale scroll ourselves) or
-/// the plan says a thumbwheel binding does.
-fn thumbwheel_armed(plan: &DeviceCapturePlan, sensitivity: i32) -> bool {
-    sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY || plan.thumbwheel_bindings_nondefault
+/// tap: its sensitivity leaves the default (so we scale scroll ourselves) or a
+/// thumbwheel binding does.
+fn thumbwheel_armed(plan: &DeviceCapturePlan) -> bool {
+    plan.thumbwheel_sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY
+        || plan.thumbwheel_bindings_nondefault
 }
 
 /// The [`CaptureSpec`] one device's session should run with right now.
-fn spec_for(plan: &DeviceCapturePlan, sensitivity: i32) -> CaptureSpec {
+fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
     CaptureSpec {
-        capture_thumbwheel: thumbwheel_armed(plan, sensitivity),
+        capture_thumbwheel: thumbwheel_armed(plan),
         divert_gesture_button: !plan.gesture_bindings.is_empty(),
         divert_buttons: plan.divert_buttons.clone(),
     }
@@ -146,9 +140,8 @@ fn should_rearm(done_epoch: u64, live: Option<&RunningSession>) -> bool {
 /// the device they arrived on. Runs for the lifetime of the process.
 async fn manage(
     capture_plans: SharedCapturePlans,
-    dpi_cycle: Arc<RwLock<DpiCycleState>>,
+    dpi_cycle: Arc<RwLock<DpiCycles>>,
     capture_channel: CaptureChannel,
-    thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<(String, CapturedInput)>();
@@ -177,7 +170,6 @@ async fn manage(
                     &capture_plans,
                     &dpi_cycle,
                     &capture_channel,
-                    &thumbwheel_sensitivity,
                 );
             }
             _ = ticker.tick() => {
@@ -188,7 +180,6 @@ async fn manage(
                     if receiver_access.pairing_requested() {
                         HashMap::new()
                     } else {
-                        let sensitivity = thumbwheel_sensitivity.load(Ordering::Relaxed);
                         capture_plans
                             .read()
                             .map(|plans| {
@@ -197,7 +188,7 @@ async fn manage(
                                     .map(|plan| {
                                         (
                                             plan.config_key.clone(),
-                                            (plan.route.clone(), spec_for(plan, sensitivity)),
+                                            (plan.route.clone(), spec_for(plan)),
                                         )
                                     })
                                     .collect()
@@ -352,9 +343,8 @@ fn dispatch(
     input: CapturedInput,
     accumulators: &mut HashMap<String, WheelAccumulators>,
     capture_plans: &SharedCapturePlans,
-    dpi_cycle: &Arc<RwLock<DpiCycleState>>,
+    dpi_cycle: &Arc<RwLock<DpiCycles>>,
     capture: &CaptureChannel,
-    thumbwheel_sensitivity: &ThumbwheelSensitivity,
 ) {
     let Ok(plans) = capture_plans.read() else {
         return;
@@ -367,7 +357,7 @@ fn dispatch(
         CapturedInput::Gesture(direction) => {
             if let Some(action) = plan.gesture_bindings.get(&direction) {
                 debug!(key, ?direction, action = %action.label(), "gesture → action");
-                hook_runtime::dispatch_action(action, dpi_cycle, capture);
+                hook_runtime::dispatch_action(action, dpi_cycle, Some(key), capture);
             } else {
                 debug!(key, ?direction, "gesture with no binding — ignored");
             }
@@ -375,7 +365,7 @@ fn dispatch(
         CapturedInput::ButtonPressed(button) => {
             if let Some(action) = plan.bindings.get(&button) {
                 debug!(key, ?button, action = %action.label(), "HID++ button → action");
-                hook_runtime::dispatch_action(action, dpi_cycle, capture);
+                hook_runtime::dispatch_action(action, dpi_cycle, Some(key), capture);
             } else {
                 debug!(key, ?button, "HID++ button with no binding — ignored");
             }
@@ -393,7 +383,7 @@ fn dispatch(
                 .get(&button)
                 .cloned()
                 .unwrap_or_else(|| default_binding(button));
-            let sensitivity = thumbwheel_sensitivity.load(Ordering::Relaxed);
+            let sensitivity = plan.thumbwheel_sensitivity;
             let wheels = accumulators.entry(key.to_owned()).or_default();
             let dir = if up { &mut wheels.up } else { &mut wheels.down };
             let magnitude = i32::from(rotation).abs();
@@ -404,7 +394,7 @@ fn dispatch(
                 }
                 WheelOutput::FireAction => {
                     debug!(key, ?button, action = %action.label(), "thumb wheel → action");
-                    hook_runtime::dispatch_action(&action, dpi_cycle, capture);
+                    hook_runtime::dispatch_action(&action, dpi_cycle, Some(key), capture);
                 }
             }
         }

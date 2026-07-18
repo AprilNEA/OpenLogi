@@ -101,6 +101,11 @@ pub struct DeviceConfig {
     /// the same reason as [`Self::dpi`]. `None` until the user changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smartshift: Option<SmartShift>,
+    /// Per-device thumb-wheel sensitivity override. `None` falls back to the
+    /// app-wide
+    /// [`AppSettings::thumbwheel_sensitivity`](crate::config::AppSettings::thumbwheel_sensitivity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbwheel_sensitivity: Option<i32>,
     /// Invert this device's scroll-wheel direction relative to the OS setting
     /// (issue #126): on, a wheel tick scrolls the opposite way, so a user who
     /// keeps macOS "natural scrolling" for the trackpad can have a traditional
@@ -160,6 +165,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     smartshift: Option<SmartShift>,
     #[serde(default)]
+    thumbwheel_sensitivity: Option<i32>,
+    #[serde(default)]
     invert_scroll: bool,
     #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
@@ -205,6 +212,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             dpi: raw.dpi,
             lighting: raw.lighting,
             smartshift: raw.smartshift,
+            thumbwheel_sensitivity: raw.thumbwheel_sensitivity,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
         }
