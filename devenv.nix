@@ -25,19 +25,24 @@ in
   env = {
     GREET = "devenv";
     RUSTC_WRAPPER = "sccache";
-  } // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+  }
+  // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
     DEVELOPER_DIR = xcodeDeveloperDir;
     SDKROOT = xcodeSdkRoot;
   };
 
-  packages = with pkgs; [
-    git
-    cmake
-    sccache
-    prek
-    create-dmg
-    crowdin-cli
-  ];
+  packages =
+    with pkgs;
+    [
+      git
+      cmake
+      sccache
+      prek
+      crowdin-cli
+    ]
+    # create-dmg is macOS-only (meta.platforms = darwin); an unconditional entry
+    # breaks evaluation of the shell on Linux.
+    ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ create-dmg ];
 
   languages.rust = {
     enable = true;
