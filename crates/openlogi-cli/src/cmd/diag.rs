@@ -1,7 +1,7 @@
 //! `openlogi diag` — real-device smoke tests for the HID++ write path.
 //!
-//! Each subcommand exercises one round-trip (read → modify → read back →
-//! restore). The intent is verification, not configuration: nothing here
+//! Subcommands exercise direct HID++ reads and verified writes. The intent is
+//! diagnosis, not persistent configuration: nothing here
 //! touches `config.toml` or talks to the GUI; everything runs through the
 //! same `openlogi_hid` API the GPUI app uses, so a green diag means the
 //! GUI's write path works on this host.
@@ -15,6 +15,7 @@ pub mod dpi;
 pub mod features;
 pub mod lighting;
 pub mod smartshift;
+pub mod wheel;
 
 #[derive(Debug, Subcommand)]
 pub enum DiagCmd {
@@ -28,6 +29,8 @@ pub enum DiagCmd {
     Smartshift(smartshift::SmartshiftArgs),
     /// Set a wired RGB keyboard to a solid colour (e.g. `ff0000` for red).
     Lighting(lighting::LightingArgs),
+    /// Read or set the HID++ 0x2121 wheel reporting resolution.
+    Wheel(wheel::WheelArgs),
 }
 
 impl DiagCmd {
@@ -38,6 +41,7 @@ impl DiagCmd {
             Self::Dpi(args) => dpi::run(args).await,
             Self::Smartshift(args) => smartshift::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
+            Self::Wheel(args) => wheel::run(args).await,
         }
     }
 }

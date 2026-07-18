@@ -45,6 +45,7 @@ mod tests {
     use cmd::Command;
     use cmd::diag::DiagCmd;
     use cmd::diag::lighting::Method;
+    use cmd::diag::wheel::ResolutionArg;
 
     /// Clap's own structural validation (arg ID collisions, invalid
     /// `conflicts_with` targets, etc.) — cheap and catches a broken derive
@@ -127,5 +128,27 @@ mod tests {
             "openlogi", "diag", "lighting", "ff0000", "--method", "bogus",
         ]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn wheel_resolution_and_device_flags_are_mapped() {
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "diag",
+            "wheel",
+            "--device",
+            "MX Anywhere 3S",
+            "--resolution",
+            "low",
+        ])
+        .expect("valid wheel invocation parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::Wheel(args)) => {
+                assert_eq!(args.device.as_deref(), Some("MX Anywhere 3S"));
+                assert_eq!(args.resolution, Some(ResolutionArg::Low));
+            }
+            other => panic!("expected Diag(Wheel), got {other:?}"),
+        }
     }
 }
