@@ -5014,7 +5014,7 @@ version = "0.6.20"
 dependencies = [
  "async-hid",
  "bincode",
- "futures-lite 2.6.1",
+ "futures-lite",
  "interprocess",
  "openlogi-core",
  "openlogi-hid",
