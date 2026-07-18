@@ -172,12 +172,21 @@ impl Orchestrator {
             gesture_bindings_for(&self.config, key),
             "gesture_bindings",
         );
-        self.rebuild_dpi_cycles(key);
+        self.publish_device_runtime();
+    }
+
+    /// Republish the runtime views derived from the device set + config: the
+    /// capture plans and the per-device DPI-cycle map. One method so the
+    /// inventory fast path (same set, fresh online flags) can't update one and
+    /// forget the other — a waking device needs both its capture session and
+    /// its DPI-cycle slot.
+    fn publish_device_runtime(&self) {
         write_value(
             &self.shared.capture_plans,
             self.capture_plans_for(),
             "capture_plans",
         );
+        self.rebuild_dpi_cycles(self.current_key());
     }
 
     /// Rewrite the per-device DPI-cycle map for every online device,
@@ -270,14 +279,11 @@ impl Orchestrator {
         if !changed {
             // Same set and routes — but keep the fresh `online` flags, or a
             // device that woke this tick would read as a transition forever.
-            // Capture plans key on `online`, so republish them even here or a
-            // woken device would never get its session armed.
+            // The runtime views key on `online`, so republish them even here or
+            // a woken device would get neither its capture session nor its
+            // DPI-cycle slot.
             self.devices = devices;
-            write_value(
-                &self.shared.capture_plans,
-                self.capture_plans_for(),
-                "capture_plans",
-            );
+            self.publish_device_runtime();
             return;
         }
         self.devices = devices;

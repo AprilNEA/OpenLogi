@@ -296,10 +296,7 @@ pub fn dispatch_action(
             }
         },
         Action::ToggleSmartShift => {
-            let target = dpi_cycle
-                .write()
-                .ok()
-                .and_then(|mut g| g.state_for(device_key).and_then(|s| s.target.clone()));
+            let target = dpi_cycle.read().ok().and_then(|g| g.target_for(device_key));
             info!("SmartShift toggle → flipping wheel mode");
             toggle_smartshift_in_background(Some(capture), target);
             return;
