@@ -527,7 +527,7 @@ fn sync_retry_delay(attempts: u32) -> Duration {
         .without_max_times()
         .build()
         .nth(attempts.saturating_sub(1).min(6) as usize)
-        .unwrap_or(Duration::from_secs(60))
+        .unwrap_or(Duration::from_mins(1))
 }
 
 /// Refresh the asset cache: the shared index always, plus the depots for
@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(sync_retry_delay(3), Duration::from_secs(4));
         assert_eq!(sync_retry_delay(5), Duration::from_secs(16));
         // Caps at 60s and never overflows the shift for large attempt counts.
-        assert_eq!(sync_retry_delay(7), Duration::from_secs(60));
-        assert_eq!(sync_retry_delay(u32::MAX), Duration::from_secs(60));
+        assert_eq!(sync_retry_delay(7), Duration::from_mins(1));
+        assert_eq!(sync_retry_delay(u32::MAX), Duration::from_mins(1));
     }
 }

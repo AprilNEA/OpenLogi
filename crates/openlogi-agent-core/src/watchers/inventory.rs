@@ -30,7 +30,7 @@ const INITIAL_FAILURE_LIMIT: u8 = 3;
 /// timed-out probe pass), so only a genuine suspend trips it; a rare false
 /// positive (e.g. a large NTP step) merely re-applies settings the devices
 /// already have.
-const WAKE_GAP: Duration = Duration::from_secs(60);
+const WAKE_GAP: Duration = Duration::from_mins(1);
 
 /// What the watcher tells the agent.
 pub enum InventoryEvent {
