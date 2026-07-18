@@ -5160,8 +5160,11 @@ dependencies = [
  "openlogi-inject",
  "thiserror 2.0.18",
  "tracing",
+ "wayland-client",
+ "wayland-protocols-wlr",
  "windows-sys 0.61.2",
  "x11rb",
+ "zbus",
 ]
 
 [[package]]

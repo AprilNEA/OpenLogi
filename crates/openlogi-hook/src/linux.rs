@@ -391,70 +391,217 @@ fn device_thread(
 
 // ── frontmost_bundle_id ──────────────────────────────────────────────────────
 
-struct X11State {
+// The frontmost-app reader is backend-driven so that Wayland support can be
+// added without touching callers. Exactly one backend is selected at startup
+// from the session environment (see `detect_frontmost_source`) and cached in
+// `FRONTMOST_SOURCE` for the process lifetime. The X11, wlr-foreign-toplevel,
+// and gnome-shell backends are all available; see `wayland_candidates`.
+
+mod gnome_shell;
+mod wlr_foreign_toplevel;
+
+/// A backend that reports which application is currently frontmost.
+///
+/// Implementations are display-server / desktop specific. The string returned
+/// by `frontmost_bundle_id` is compared against per-app profile keys by exact
+/// match (`openlogi_core::Config::effective_bindings`), so its exact form
+/// matters and is backend-specific. The X11 and gnome-shell backends both
+/// return the `WM_CLASS` class component (e.g. "Firefox"); the wlr backend
+/// returns the xdg-shell `app_id` (e.g. "org.mozilla.firefox"). These two
+/// namespaces do not map onto each other by any simple string rule, so a
+/// per-app profile created under wlroots will not match under GNOME/X11 and
+/// vice versa. This is a known limitation: reconciling it needs a canonical-id
+/// scheme or per-profile aliases rather than naive normalization, and is
+/// deliberately out of scope for the backends themselves.
+trait FrontmostSource: Send + Sync {
+    /// Opaque identifier of the frontmost application, or `None` when there is
+    /// no frontmost window or it cannot be read.
+    fn frontmost_bundle_id(&self) -> Option<String>;
+
+    /// Short backend identifier, for diagnostics / logging only.
+    fn name(&self) -> &'static str;
+}
+
+/// Frontmost backend backed by X11 `_NET_ACTIVE_WINDOW` + `WM_CLASS`.
+///
+/// Works on an X11 session, and on a Wayland session for XWayland windows;
+/// native Wayland windows are invisible through this path and yield `None`.
+struct X11Source {
     conn: RustConnection,
     root: Window,
     net_active_window: Atom,
 }
 
-static X11_STATE: LazyLock<Option<X11State>> = LazyLock::new(|| {
-    let (conn, screen_num) = RustConnection::connect(None)
-        .map_err(|e| debug!("X11 not available, frontmost_bundle_id will return None: {e}"))
-        .ok()?;
-    let root = conn.setup().roots[screen_num].root;
-    let net_active_window = conn
-        .intern_atom(false, b"_NET_ACTIVE_WINDOW")
-        .ok()?
-        .reply()
-        .ok()?
-        .atom;
-    Some(X11State {
-        conn,
-        root,
-        net_active_window,
-    })
-});
+impl X11Source {
+    /// Connect to the X server and resolve the `_NET_ACTIVE_WINDOW` atom.
+    /// Returns `None` when no X display is reachable (a Wayland session without
+    /// XWayland, or `$DISPLAY` unset).
+    fn connect() -> Option<Self> {
+        let (conn, screen_num) = RustConnection::connect(None)
+            .map_err(|e| debug!("X11 not available, frontmost will return None: {e}"))
+            .ok()?;
+        let root = conn.setup().roots[screen_num].root;
+        let net_active_window = conn
+            .intern_atom(false, b"_NET_ACTIVE_WINDOW")
+            .ok()?
+            .reply()
+            .ok()?
+            .atom;
+        Some(Self {
+            conn,
+            root,
+            net_active_window,
+        })
+    }
+}
 
-/// Return the X11 `WM_CLASS` class component of the currently active window,
-/// e.g. `"Firefox"` or `"Code"`.
-///
-/// Returns `None` when there is no active window, when the X11 display is
-/// unavailable (Wayland-only session without XWayland), or on read error.
-/// Native Wayland windows are not visible through this path.
-pub(crate) fn frontmost_bundle_id() -> Option<String> {
-    let state = X11_STATE.as_ref()?;
+impl FrontmostSource for X11Source {
+    fn frontmost_bundle_id(&self) -> Option<String> {
+        // _NET_ACTIVE_WINDOW on the root window holds the focused window's XID.
+        let window: Window = self
+            .conn
+            .get_property(
+                false,
+                self.root,
+                self.net_active_window,
+                AtomEnum::WINDOW,
+                0,
+                1,
+            )
+            .ok()?
+            .reply()
+            .ok()?
+            .value32()?
+            .next()?;
+        if window == 0 {
+            return None;
+        }
 
-    // _NET_ACTIVE_WINDOW on the root window holds the focused window's XID.
-    let window: Window = state
-        .conn
-        .get_property(
-            false,
-            state.root,
-            state.net_active_window,
-            AtomEnum::WINDOW,
-            0,
-            1,
-        )
-        .ok()?
-        .reply()
-        .ok()?
-        .value32()?
-        .next()?;
-    if window == 0 {
-        return None;
+        // WM_CLASS is instance_name\0class_name\0; the class component is more
+        // stable across window instances and is what profiles should key on
+        // (e.g. "Firefox", not "Navigator").
+        let wm = WmClass::get(&self.conn, window)
+            .ok()?
+            .reply_unchecked()
+            .ok()??;
+        std::str::from_utf8(wm.class())
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
     }
 
-    // WM_CLASS is instance_name\0class_name\0; the class component is more
-    // stable across window instances and is what profiles should key on
-    // (e.g. "Firefox", not "Navigator").
-    let wm = WmClass::get(&state.conn, window)
-        .ok()?
-        .reply_unchecked()
-        .ok()??;
-    std::str::from_utf8(wm.class())
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
+    fn name(&self) -> &'static str {
+        "x11"
+    }
+}
+
+/// Fallback used when no backend is available (e.g. a pure Wayland session
+/// before any Wayland backend lands). Always reports `None`, so per-app
+/// profile switching simply no-ops rather than erroring.
+struct NullSource;
+
+impl FrontmostSource for NullSource {
+    fn frontmost_bundle_id(&self) -> Option<String> {
+        None
+    }
+
+    fn name(&self) -> &'static str {
+        "null"
+    }
+}
+
+/// Coarse classification of the graphical session, used to order the frontmost
+/// backend candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionKind {
+    X11,
+    Wayland,
+    Unknown,
+}
+
+/// Classify the session from the environment. `XDG_SESSION_TYPE` is
+/// authoritative when set to `x11` or `wayland`; otherwise fall back to the
+/// presence of `WAYLAND_DISPLAY` / `DISPLAY`.
+fn detect_session_kind() -> SessionKind {
+    if let Ok(kind) = std::env::var("XDG_SESSION_TYPE") {
+        match kind.as_str() {
+            "wayland" => return SessionKind::Wayland,
+            "x11" => return SessionKind::X11,
+            _ => {}
+        }
+    }
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        SessionKind::Wayland
+    } else if std::env::var_os("DISPLAY").is_some() {
+        SessionKind::X11
+    } else {
+        SessionKind::Unknown
+    }
+}
+
+/// A backend constructor: returns the backend if it can initialize on this
+/// system, or `None` to fall through to the next candidate.
+type Candidate = fn() -> Option<Box<dyn FrontmostSource>>;
+
+fn x11_candidate() -> Option<Box<dyn FrontmostSource>> {
+    X11Source::connect().map(|s| Box::new(s) as Box<dyn FrontmostSource>)
+}
+
+/// Wayland-native frontmost backends, in priority order: the wlroots
+/// foreign-toplevel protocol (sway, Hyprland, river, …) and the GNOME Shell
+/// D-Bus extension (Mutter). AT-SPI remains a future fallback. Compositors that
+/// support none of these fall through to the X11/XWayland path (which resolves
+/// XWayland windows, `None` for native Wayland apps).
+fn wayland_candidates() -> Vec<Candidate> {
+    vec![wlr_foreign_toplevel::candidate, gnome_shell::candidate]
+}
+
+/// Pick the frontmost backend for this session, trying each candidate in order
+/// and keeping the first that initializes. Called once, lazily, per process.
+fn detect_frontmost_source() -> Box<dyn FrontmostSource> {
+    let session = detect_session_kind();
+    debug!("frontmost: session kind = {session:?}");
+
+    let mut candidates: Vec<Candidate> = match session {
+        SessionKind::Wayland => wayland_candidates(),
+        SessionKind::X11 | SessionKind::Unknown => Vec::new(),
+    };
+    // X11 / XWayland: the primary path on an X11 session and the universal
+    // fallback everywhere else.
+    candidates.push(x11_candidate);
+
+    for candidate in candidates {
+        if let Some(source) = candidate() {
+            debug!("frontmost: using '{}' backend", source.name());
+            // On Wayland, landing on the X11 backend means no native Wayland
+            // frontmost source was available, so native Wayland windows will
+            // report None (only XWayland windows resolve). Hint at the fix.
+            if session == SessionKind::Wayland && source.name() == "x11" {
+                debug!(
+                    "frontmost: on Wayland but using the X11/XWayland backend; \
+                     native Wayland windows will report None. Install the OpenLogi \
+                     GNOME Shell extension (GNOME) or use a wlroots compositor."
+                );
+            }
+            return source;
+        }
+    }
+
+    debug!("frontmost: no usable backend; frontmost_bundle_id will return None");
+    Box::new(NullSource)
+}
+
+static FRONTMOST_SOURCE: LazyLock<Box<dyn FrontmostSource>> =
+    LazyLock::new(detect_frontmost_source);
+
+/// Return an opaque identifier of the currently frontmost application, or
+/// `None` when unavailable. Dispatches to the backend chosen at startup.
+///
+/// On an X11 session this is the `WM_CLASS` class component (e.g. "Firefox").
+/// On a Wayland session the wlr-foreign-toplevel or gnome-shell backend is used
+/// when available; XWayland windows fall back to the X11 backend.
+pub(crate) fn frontmost_bundle_id() -> Option<String> {
+    FRONTMOST_SOURCE.frontmost_bundle_id()
 }
 
 #[cfg(test)]

@@ -19,6 +19,7 @@ use gpui::{
     WindowOptions, div,
 };
 use gpui_component::{ActiveTheme as _, Root, TitleBar};
+use openlogi_core::brand::APP_ID;
 use tracing::warn;
 
 /// One live handle per auxiliary window, stored as a GPUI global so the menu
@@ -112,7 +113,7 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
     let bounds = Bounds::centered(None, size, cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        app_id: Some("openlogi".to_string()),
+        app_id: Some(APP_ID.into()),
         titlebar: Some(titlebar_options(title.clone())),
         ..WindowOptions::default()
     };
