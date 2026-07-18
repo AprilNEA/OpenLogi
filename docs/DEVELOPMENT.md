@@ -121,13 +121,14 @@ layout: a 760×480 background image in a 760×512 Finder window, with 128px icon
 positioned at `(212, 250)` for `OpenLogi.app` and `(548, 250)` for
 `Applications`.
 
-## Packaging Linux `.deb` / `.rpm`
+## Packaging Linux `.deb` / `.rpm` / `.pkg.tar.zst`
 
 Requires [nfpm](https://nfpm.goreleaser.com/) on `PATH`; the package arch is
 derived from the host (override with `PKG_ARCH`):
 
 ```sh
-cargo run -p xtask -- linux package    # → target/release/openlogi_*.deb / .rpm
+cargo run -p xtask -- linux package
+# → target/release/openlogi_*.deb / .rpm / .pkg.tar.zst
 ```
 
 The package contents (binaries, udev rules, systemd user unit, desktop entry,

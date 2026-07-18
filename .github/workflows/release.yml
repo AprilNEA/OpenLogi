@@ -669,6 +669,11 @@ jobs:
             ext="${pkg##*.}"
             cp "$pkg" "dist/openlogi-${ref_name}-linux-${PKG_ARCH}.${ext}"
           done
+          # .pkg.tar.zst has a compound extension; handle it separately.
+          for pkg in target/release/*.pkg.tar.zst; do
+            [ -f "$pkg" ] || continue
+            cp "$pkg" "dist/openlogi-${ref_name}-linux-${PKG_ARCH}.pkg.tar.zst"
+          done
 
       - uses: actions/upload-artifact@v7
         with:
@@ -743,7 +748,7 @@ jobs:
           # hashed alone. The Windows portable artifact is a zip of the GUI +
           # agent exes (#347); no bare .exe ships anymore.
           shopt -s nullglob
-          sha256sum *.dmg *.zip *.msi *.deb *.rpm > SHA256SUMS
+          sha256sum -- *.dmg *.zip *.msi *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
 
       # softprops' `files` can't list a glob that matches nothing without
       # tripping fail_on_unmatched_files. The Windows zip/msi (per arch leg)
@@ -761,6 +766,11 @@ jobs:
               echo "$ext=false" >> "$GITHUB_OUTPUT"
             fi
           done
+          if compgen -G "dist/*.pkg.tar.zst" > /dev/null; then
+            echo "pacman=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pacman=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Load static updater publishing config from 1Password
         id: r2_config
@@ -823,7 +833,7 @@ jobs:
           # the globs may match nothing; the DMGs are guaranteed by the publish
           # gate.
           shopt -s nullglob
-          for artifact in dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm; do
+          for artifact in dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst; do
             minisign -S -m "$artifact" -s "$key_file" -x "$artifact.minisig" -W
             minisign -V -m "$artifact" -P "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" -x "$artifact.minisig"
           done
@@ -895,6 +905,7 @@ jobs:
             ${{ steps.artifacts.outputs.msi == 'true' && 'dist/*.msi' || '' }}
             ${{ steps.artifacts.outputs.deb == 'true' && 'dist/*.deb' || '' }}
             ${{ steps.artifacts.outputs.rpm == 'true' && 'dist/*.rpm' || '' }}
+            ${{ steps.artifacts.outputs.pacman == 'true' && 'dist/*.pkg.tar.zst' || '' }}
           fail_on_unmatched_files: true
 
   homebrew-tap:

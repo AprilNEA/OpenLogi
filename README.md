@@ -118,7 +118,8 @@ before the official cask autobump lands. Install either `openlogi` or
 
 ### Linux
 
-Download the `.deb` or `.rpm` from the [latest release](https://github.com/AprilNEA/OpenLogi/releases/latest):
+Download the package for your distribution from the
+[latest release](https://github.com/AprilNEA/OpenLogi/releases/latest):
 
 ```sh
 # Debian / Ubuntu
@@ -126,6 +127,9 @@ sudo dpkg -i openlogi_*.deb
 
 # Fedora / RHEL
 sudo rpm -i openlogi-*.rpm
+
+# Arch Linux
+sudo pacman -U openlogi-*.pkg.tar.zst
 ```
 
 Packages are published for both `x86_64`/`amd64` and `arm64`/`aarch64`.
