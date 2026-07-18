@@ -24,6 +24,15 @@ impl DpiCycles {
         let key = key.or(self.selected.as_deref())?;
         self.by_key.get_mut(key)
     }
+
+    /// The write target for `key` (same fallback as [`Self::state_for`])
+    /// without a mutable borrow — for dispatch that only needs the route, like
+    /// the SmartShift toggle.
+    #[must_use]
+    pub fn target_for(&self, key: Option<&str>) -> Option<DeviceRoute> {
+        let key = key.or(self.selected.as_deref())?;
+        self.by_key.get(key).and_then(|state| state.target.clone())
+    }
 }
 
 /// Shared state consumed by the OS hook thread and the DPI panel UI to
@@ -69,5 +78,43 @@ impl DpiCycleState {
         self.capabilities
             .as_ref()
             .map_or(dpi, |caps| caps.snap(dpi))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cycles_with(key: &str, slot: u8) -> DpiCycles {
+        let mut cycles = DpiCycles::default();
+        cycles.by_key.insert(
+            key.to_string(),
+            DpiCycleState {
+                presets: vec![800, 1600],
+                index: 0,
+                target: Some(DeviceRoute::Bolt {
+                    receiver_uid: "AA00".to_string(),
+                    slot,
+                }),
+                capabilities: None,
+            },
+        );
+        cycles
+    }
+
+    #[test]
+    fn target_for_resolves_explicit_key_and_selection_fallback() {
+        let mut cycles = cycles_with("a", 1);
+        assert!(cycles.target_for(Some("a")).is_some());
+        assert!(cycles.target_for(Some("missing")).is_none());
+        // No key and no selection → nothing to target.
+        assert!(cycles.target_for(None).is_none());
+        // The OS-hook path (no key) follows the selection.
+        cycles.selected = Some("a".to_string());
+        assert!(cycles.target_for(None).is_some());
+        assert_eq!(
+            cycles.target_for(None),
+            cycles.state_for(None).and_then(|s| s.target.clone())
+        );
     }
 }
