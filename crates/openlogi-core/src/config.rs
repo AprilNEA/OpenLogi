@@ -23,7 +23,7 @@ pub use device::{DeviceConfig, DeviceIdentity};
 pub use settings::{
     AppSettings, Appearance, DEFAULT_THUMBWHEEL_SENSITIVITY, GestureOwner, Lighting,
     MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
-    SMARTSHIFT_MIN_AUTO_DISENGAGE, SmartShift, WheelMode,
+    SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift, WheelMode,
 };
 
 use crate::binding::{Action, Binding, ButtonId, GestureDirection, default_binding_for};
@@ -540,6 +540,28 @@ impl Config {
             .or_default()
             .invert_scroll = invert;
     }
+
+    /// The configured wheel resolution for `device_key`, or `None` when
+    /// OpenLogi should leave the device's current resolution unchanged.
+    #[must_use]
+    pub fn scroll_resolution(&self, device_key: &str) -> Option<ScrollResolution> {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.scroll_resolution)
+    }
+
+    /// Set the wheel resolution OpenLogi should restore for `device_key`.
+    /// Passing `None` returns the device to its unmanaged default state.
+    pub fn set_scroll_resolution(
+        &mut self,
+        device_key: &str,
+        resolution: Option<ScrollResolution>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .scroll_resolution = resolution;
+    }
 }
 
 /// Write `bytes` to `path` atomically via a randomized temp file + rename,
@@ -713,6 +735,60 @@ mod tests {
     }
 
     #[test]
+    fn scroll_resolution_roundtrips_all_three_states() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.scroll_resolution("mouse"), None);
+
+        cfg.set_scroll_resolution("mouse", Some(ScrollResolution::Low));
+        let low = write_and_read(&cfg);
+        assert_eq!(low.scroll_resolution("mouse"), Some(ScrollResolution::Low));
+
+        cfg.set_scroll_resolution("mouse", Some(ScrollResolution::High));
+        let high = write_and_read(&cfg);
+        assert_eq!(
+            high.scroll_resolution("mouse"),
+            Some(ScrollResolution::High)
+        );
+
+        cfg.set_scroll_resolution("mouse", None);
+        let unmanaged = write_and_read(&cfg);
+        assert_eq!(unmanaged.scroll_resolution("mouse"), None);
+    }
+
+    #[test]
+    fn unset_scroll_resolution_is_omitted_from_toml() {
+        let mut cfg = Config::default();
+        cfg.set_binding("mouse", ButtonId::Back, Binding::Single(Action::Copy));
+        cfg.set_scroll_resolution("mouse", Some(ScrollResolution::Low));
+        cfg.set_scroll_resolution("mouse", None);
+
+        let body = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(
+            !body.contains("scroll_resolution"),
+            "unset scroll resolution should be omitted: {body}"
+        );
+    }
+
+    #[test]
+    fn config_without_scroll_resolution_loads_as_unmanaged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r"
+                schema_version = 3
+                [devices.mouse]
+                invert_scroll = true
+            ",
+        )
+        .expect("write config");
+
+        let cfg = Config::load_from_path(&path).expect("load existing config");
+        assert_eq!(cfg.scroll_resolution("mouse"), None);
+        assert!(cfg.invert_scroll("mouse"));
+    }
+
+    #[test]
     fn bindings_roundtrip_per_device() {
         let mut cfg = Config::default();
         cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Copy));
@@ -817,6 +893,7 @@ mod tests {
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,
+                hires_wheel: true,
             },
         };
         cfg.set_device_identity("2b034", mouse.clone());

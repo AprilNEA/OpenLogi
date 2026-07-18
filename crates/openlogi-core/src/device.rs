@@ -98,6 +98,10 @@ pub struct Capabilities {
     /// Native vertical wheel inversion — HID++ `0x2121 HiResWheel` with the
     /// firmware-reported `has_invert` capability.
     pub scroll_inversion: bool,
+    /// HID++ `0x2121 HiResWheel` is present, so the wheel reporting resolution
+    /// can be read and changed independently of inversion support.
+    #[serde(default)]
+    pub hires_wheel: bool,
 }
 
 impl Capabilities {
@@ -118,6 +122,7 @@ impl Capabilities {
             pointer: has(&POINTER),
             lighting: has(&LIGHTING),
             scroll_inversion: false,
+            hires_wheel: ids.contains(&0x2121),
         }
     }
 
@@ -134,6 +139,7 @@ impl Capabilities {
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,
+                hires_wheel: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -351,7 +357,7 @@ mod tests {
         use super::Capabilities;
         // A typical MX mouse: ReprogControls (0x1b04) + ExtendedAdjustableDpi
         // (0x2202), no lighting.
-        let mouse = Capabilities::from_feature_ids(&[0x0003, 0x1b04, 0x2202, 0x2110]);
+        let mouse = Capabilities::from_feature_ids(&[0x0003, 0x1b04, 0x2121, 0x2202, 0x2110]);
         assert_eq!(
             mouse,
             Capabilities {
@@ -359,6 +365,7 @@ mod tests {
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,
+                hires_wheel: true,
             }
         );
         // A wired G-series keyboard: PerKeyLighting (0x8080), no DPI/buttons.
@@ -370,6 +377,7 @@ mod tests {
                 pointer: false,
                 lighting: true,
                 scroll_inversion: false,
+                hires_wheel: false,
             }
         );
         // No driving features → nothing offered.
@@ -377,6 +385,25 @@ mod tests {
             Capabilities::from_feature_ids(&[0x0000, 0x0003]),
             Capabilities::default()
         );
+    }
+
+    #[test]
+    fn persisted_capabilities_without_hires_wheel_load_as_unsupported()
+    -> Result<(), toml::de::Error> {
+        use super::Capabilities;
+
+        let capabilities: Capabilities = toml::from_str(
+            r"
+                buttons = true
+                pointer = true
+                lighting = false
+                scroll_inversion = true
+            ",
+        )?;
+
+        assert!(!capabilities.hires_wheel);
+        assert!(capabilities.scroll_inversion);
+        Ok(())
     }
 
     #[test]
