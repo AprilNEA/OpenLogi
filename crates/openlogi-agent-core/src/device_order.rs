@@ -61,7 +61,8 @@ impl DeviceStableId {
         match route {
             Some(
                 DeviceRoute::Bolt { receiver_uid, slot }
-                | DeviceRoute::Unifying { receiver_uid, slot },
+                | DeviceRoute::Unifying { receiver_uid, slot }
+                | DeviceRoute::Lightspeed { receiver_uid, slot },
             ) => Self::Bolt {
                 receiver_uid: receiver_uid.to_ascii_lowercase(),
                 slot: *slot,
@@ -151,6 +152,18 @@ mod tests {
         assert_eq!(
             DeviceStableId::from_parts(Some(&bolt), 1, None, [0; 4]),
             DeviceStableId::from_parts(Some(&unifying), 1, None, [0; 4]),
+        );
+    }
+
+    #[test]
+    fn lightspeed_uses_receiver_backed_stable_identity() {
+        let route = DeviceRoute::Lightspeed {
+            receiver_uid: "G305-RX".into(),
+            slot: 1,
+        };
+        assert_eq!(
+            DeviceStableId::from_parts(Some(&route), 1, None, [0; 4]).config_key(),
+            "receiver:g305-rx:slot:1"
         );
     }
 

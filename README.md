@@ -36,9 +36,9 @@ Remap buttons, drive DPI and SmartShift, and switch profiles per app — without
 
 ## What it is
 
-OpenLogi talks to Logitech HID++ mice over a Logi Bolt receiver — or a
-Bluetooth-direct / wired connection — without running Logi Options+. It ships
-two binaries:
+OpenLogi talks to Logitech HID++ mice over Logi Bolt, Unifying, and LIGHTSPEED
+receivers — or a Bluetooth-direct / wired connection — without running Logi
+Options+. It ships two binaries:
 
 - **[OpenLogi GUI](crates/openlogi-gui)** — a GPUI desktop app: an interactive mouse diagram with clickable hotspots, a per-button action picker (41 built-in actions plus custom keyboard shortcuts authored in the TOML config), DPI presets, a SmartShift panel (wheel mode, sensitivity, permanent ratchet), per-application profile overlays, a device carousel that switches between paired devices live, and a Settings window with a UI localized into 20 languages.
 - **[OpenLogi CLI](crates/openlogi-cli)** — a CLI for headless inventory (`list`) plus asset-sync and on-device diagnostic subcommands.
@@ -72,6 +72,7 @@ Things OpenLogi does that Options+ won't:
 |---|---|
 | Discover Bolt receivers + list paired devices (CLI + GUI) | ✅ |
 | Unifying receivers (older protocol, replaced by Bolt) | ✅ |
+| LIGHTSPEED gaming receivers (G305 / `046d:c53f` certified) | ✅ |
 | Bluetooth-direct / wired devices (no receiver) | ✅ |
 | Battery percentage / charge state | ✅ (online devices) |
 | Interactive GUI: carousel, mouse diagram, action picker | ✅ macOS + Linux |

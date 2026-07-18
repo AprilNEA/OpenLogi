@@ -61,7 +61,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 8);
+    assert_eq!(PROTOCOL_VERSION, 9);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -154,6 +154,7 @@ fn device_inventory() {
             }),
             capabilities: Some(Capabilities {
                 buttons: true,
+                native_button_capture: true,
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,
@@ -162,7 +163,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101010000",
     );
 }
 
@@ -203,6 +204,13 @@ fn pairing_updates() {
 
 #[test]
 fn device_settings_payloads() {
+    assert_wire(
+        &DeviceRoute::Lightspeed {
+            receiver_uid: "G305-RX".into(),
+            slot: 1,
+        },
+        "0207473330352d525801",
+    );
     let dpi: Result<DpiInfo, WriteError> = Ok(DpiInfo {
         current: 1600,
         capabilities: DpiCapabilities::new(vec![800, 1600, 3200]).expect("non-empty list"),

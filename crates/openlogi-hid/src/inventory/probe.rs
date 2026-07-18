@@ -8,6 +8,10 @@ use hidpp::{
         bolt::{
             DeviceConnection as BoltDeviceConnection, Event as BoltEvent, Receiver as BoltReceiver,
         },
+        lightspeed::{
+            DeviceConnection as LightspeedDeviceConnection, Event as LightspeedEvent,
+            Receiver as LightspeedReceiver,
+        },
         unifying::{
             DeviceConnection as UnifyingDeviceConnection, Event as UnifyingEvent,
             Receiver as UnifyingReceiver,
@@ -18,7 +22,7 @@ use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverI
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
-use crate::mappings::{map_kind, map_unifying_kind, resolve_device_kind};
+use crate::mappings::{map_kind, map_lightspeed_kind, map_unifying_kind, resolve_device_kind};
 use crate::route::DIRECT_DEVICE_INDEX;
 
 use super::cache::{CacheKey, CacheOutcome, Cached, probe_or_reuse};
@@ -58,6 +62,9 @@ pub(super) async fn probe_one(
         Some(Receiver::Unifying(unifying)) => {
             probe_unifying_receiver(channel, info, unifying, cache, tick).await
         }
+        Some(Receiver::Lightspeed(lightspeed)) => {
+            probe_lightspeed_receiver(channel, info, lightspeed, cache, tick).await
+        }
         None | Some(_) => {
             // No recognised receiver — this might be a directly-paired device
             // (Bluetooth-direct, USB-C cable). HID++ at device-index 0xff
@@ -66,6 +73,123 @@ pub(super) async fn probe_one(
             probe_direct(channel, &info, cache, tick).await
         }
     }
+}
+
+async fn probe_lightspeed_receiver(
+    channel: Arc<HidppChannel>,
+    info: async_hid::DeviceInfo,
+    receiver: LightspeedReceiver,
+    cache: &HashMap<CacheKey, Cached>,
+    tick: u64,
+) -> NodeProbe {
+    let receiver_info = receiver.get_receiver_info().await.ok();
+    let unique_id = receiver_info
+        .as_ref()
+        .and_then(|info| stable_receiver_uid(&info.serial_number));
+    let pairing_count = receiver.count_pairings().await.ok();
+    let connections = drain_device_arrival_lightspeed(&receiver).await;
+    let by_slot: HashMap<u8, LightspeedDeviceConnection> = connections
+        .into_iter()
+        .map(|event| (event.index, event))
+        .collect();
+
+    let uid_fallback;
+    let receiver_uid = if let Some(uid) = unique_id.as_deref() {
+        uid
+    } else {
+        // Keep immutable feature-cache entries isolated even though a missing
+        // receiver identity deliberately disables write routing.
+        uid_fallback = format!("node:{:?}", info.id);
+        &uid_fallback
+    };
+    let capacity = receiver_info
+        .as_ref()
+        .map_or(6, |info| info.pairing_slots.clamp(1, 6));
+    let mut paired = Vec::new();
+    let mut outcomes = Vec::new();
+    for slot in 1..=capacity {
+        if let Some((device, outcome)) = probe_lightspeed_slot(
+            &channel,
+            &receiver,
+            by_slot.get(&slot),
+            receiver_uid,
+            slot,
+            cache,
+            tick,
+        )
+        .await
+        {
+            paired.push(device);
+            outcomes.push(outcome);
+        }
+    }
+    let complete = pairing_count.is_some_and(|count| paired.len() == usize::from(count));
+    if !complete {
+        debug!(
+            ?pairing_count,
+            found = paired.len(),
+            "LIGHTSPEED pairing walk incomplete"
+        );
+    }
+    NodeProbe {
+        inventory: Some(DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "LIGHTSPEED Receiver".to_string(),
+                vendor_id: info.vendor_id,
+                product_id: info.product_id,
+                unique_id,
+            },
+            paired,
+        }),
+        healthy: complete,
+        outcomes,
+    }
+}
+
+fn stable_receiver_uid(serial: &str) -> Option<String> {
+    let serial = serial.trim();
+    (!serial.is_empty() && serial.bytes().any(|byte| byte != b'0')).then(|| serial.to_string())
+}
+
+async fn probe_lightspeed_slot(
+    channel: &Arc<HidppChannel>,
+    receiver: &LightspeedReceiver,
+    event: Option<&LightspeedDeviceConnection>,
+    receiver_uid: &str,
+    slot: u8,
+    cache: &HashMap<CacheKey, Cached>,
+    tick: u64,
+) -> Option<(PairedDevice, CacheOutcome)> {
+    let pairing = receiver.get_device_pairing_information(slot).await.ok()?;
+    // LIGHTSPEED's persistent 0x2N pairing record has no connection-state
+    // bit. An arrival notification is authoritative when present; otherwise
+    // optimistically address the paired slot (the same behavior Solaar uses)
+    // so an awake G-series device can answer its HID++ 2.0 feature probe.
+    let online = event.map_or(true, |event| event.online);
+    let register_kind = map_lightspeed_kind(event.map_or(pairing.kind, |event| event.kind));
+    let id = CacheKey::LightspeedSlot {
+        receiver_uid: receiver_uid.to_string(),
+        slot,
+    };
+    let cached = cache.get(&id);
+    let (probe, outcome) = probe_or_reuse(channel, slot, Some(id), cached, online, tick).await;
+    let receiver_name = receiver.get_device_codename(slot).await.ok();
+    let codename = receiver_name.or_else(|| probe.marketing_name.clone());
+    let wpid = event.map_or(pairing.wpid, |event| event.wpid);
+    debug!(slot, online, wpid = format_args!("{wpid:04x}"), codename = ?codename, "LIGHTSPEED paired slot");
+    Some((
+        PairedDevice {
+            slot,
+            codename,
+            wpid: Some(wpid),
+            kind: resolve_device_kind(probe.kind, register_kind),
+            online,
+            battery: probe.battery,
+            model_info: probe.model_info,
+            capabilities: probe.capabilities,
+        },
+        outcome,
+    ))
 }
 
 async fn probe_bolt_receiver(
@@ -270,7 +394,7 @@ async fn probe_bolt_slot(
 
     let device = PairedDevice {
         slot,
-        codename,
+        codename: codename.or_else(|| probe.marketing_name.clone()),
         wpid,
         // Prefer the device's own `0x0005` type; the register kind is the
         // offline fallback.
@@ -353,7 +477,10 @@ async fn probe_direct(
         },
         paired: vec![PairedDevice {
             slot: DIRECT_DEVICE_INDEX,
-            codename: Some(info.name.clone()),
+            codename: probe
+                .marketing_name
+                .clone()
+                .or_else(|| Some(info.name.clone())),
             wpid: None,
             // No receiver pairing register here, so `0x0005` is the only kind
             // hint — but kind is just identity now; the UI gates on the
@@ -414,6 +541,25 @@ async fn drain_device_arrival_unifying(
     Some(out)
 }
 
+async fn drain_device_arrival_lightspeed(
+    receiver: &LightspeedReceiver,
+) -> Vec<LightspeedDeviceConnection> {
+    let rx = receiver.listen();
+    if let Err(error) = receiver.trigger_device_arrival().await {
+        debug!(?error, "LIGHTSPEED trigger_device_arrival failed");
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    loop {
+        match timeout(ARRIVAL_DRAIN, rx.recv()).await {
+            Ok(Ok(LightspeedEvent::DeviceConnection(connection))) => out.push(connection),
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+    out
+}
+
 /// Probe a Unifying slot from a live device-connection event.
 ///
 /// Device-arrival events carry the slot index, kind, wpid, and online status —
@@ -465,7 +611,7 @@ async fn probe_unifying_slot(
 
     let device = PairedDevice {
         slot,
-        codename,
+        codename: codename.or_else(|| probe.marketing_name.clone()),
         wpid: Some(event.wpid),
         kind: resolve_device_kind(probe.kind, register_kind),
         online: event.online,
@@ -494,4 +640,16 @@ async fn read_codename(channel: &HidppChannel, slot: u8) -> Option<String> {
     core::str::from_utf8(&response[3..3 + len])
         .ok()
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stable_receiver_uid;
+
+    #[test]
+    fn lightspeed_receiver_uid_rejects_missing_identity() {
+        assert_eq!(stable_receiver_uid("A1B2C3D4").as_deref(), Some("A1B2C3D4"));
+        assert_eq!(stable_receiver_uid("00000000"), None);
+        assert_eq!(stable_receiver_uid("  "), None);
+    }
 }

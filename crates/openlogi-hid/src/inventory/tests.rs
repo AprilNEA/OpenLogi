@@ -71,3 +71,21 @@ fn cached_probe_is_reused_until_refresh_ticks() {
         "at the window the probe is refreshed"
     );
 }
+
+#[test]
+fn lightspeed_cache_is_scoped_to_receiver_and_slot() {
+    let first = CacheKey::LightspeedSlot {
+        receiver_uid: "RX-A".into(),
+        slot: 1,
+    };
+    let other_receiver = CacheKey::LightspeedSlot {
+        receiver_uid: "RX-B".into(),
+        slot: 1,
+    };
+    let other_slot = CacheKey::LightspeedSlot {
+        receiver_uid: "RX-A".into(),
+        slot: 2,
+    };
+    assert_ne!(first, other_receiver);
+    assert_ne!(first, other_slot);
+}

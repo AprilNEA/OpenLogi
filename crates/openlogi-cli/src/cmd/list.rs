@@ -20,8 +20,8 @@ pub async fn run(_args: ListArgs) -> Result<()> {
              permission: System Settings → Privacy & Security → Input Monitoring."
         );
         println!(
-            "  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548); other \
-             receivers (Unifying) aren't surfaced yet."
+            "  - Supported receiver families are Logi Bolt, Unifying, and Logitech \
+             LIGHTSPEED (including the G305 receiver, PID 0xC53F)."
         );
         std::process::exit(2);
     }

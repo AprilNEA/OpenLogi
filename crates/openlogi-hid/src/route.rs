@@ -5,6 +5,8 @@
 //!
 //! - [`DeviceRoute::Bolt`] — a device paired to a Logi Bolt receiver, reached
 //!   through the receiver channel at a pairing slot.
+//! - [`DeviceRoute::Lightspeed`] — a gaming device paired to a LIGHTSPEED
+//!   receiver, also reached through the receiver channel at its slot.
 //! - [`DeviceRoute::Direct`] — a device attached straight to the host over a
 //!   USB cable or Bluetooth, reached on its own channel at the HID++
 //!   self-index [`DIRECT_DEVICE_INDEX`].
@@ -53,6 +55,13 @@ pub enum DeviceRoute {
         /// Pairing slot of the target device on that receiver.
         slot: u8,
     },
+    /// Paired to a Logitech LIGHTSPEED gaming receiver.
+    Lightspeed {
+        /// Stable receiver serial used to reopen the same physical receiver.
+        receiver_uid: String,
+        /// Pairing slot of the target device on that receiver.
+        slot: u8,
+    },
     /// Attached straight to the host over USB cable or Bluetooth, addressed at
     /// the HID++ self-index. Re-found by matching the HID node's vendor/product
     /// id — two identical mice on one host are indistinguishable here, so the
@@ -72,13 +81,20 @@ pub const BOLT_PIDS: &[u16] = &[0xc548];
 /// need to construct the correct [`DeviceRoute`] variant from a raw inventory.
 pub const UNIFYING_PIDS: &[u16] = &[0xc52b, 0xc532];
 
+/// USB product IDs that identify Logitech LIGHTSPEED gaming receivers.
+pub const LIGHTSPEED_PIDS: &[u16] = &[
+    0xc539, 0xc53a, 0xc53d, 0xc53f, 0xc541, 0xc545, 0xc547, 0xc54d,
+];
+
 impl DeviceRoute {
     /// The HID++ device index features are addressed at for this route: the
     /// pairing slot for a Bolt device, the self-index for a direct one.
     #[must_use]
     pub fn device_index(&self) -> u8 {
         match self {
-            Self::Bolt { slot, .. } | Self::Unifying { slot, .. } => *slot,
+            Self::Bolt { slot, .. }
+            | Self::Unifying { slot, .. }
+            | Self::Lightspeed { slot, .. } => *slot,
             Self::Direct { .. } => DIRECT_DEVICE_INDEX,
         }
     }
@@ -100,6 +116,12 @@ impl DeviceRoute {
                 receiver_uid: uid.clone(),
                 slot,
             }),
+            Some(uid) if LIGHTSPEED_PIDS.contains(&inv.receiver.product_id) => {
+                Some(Self::Lightspeed {
+                    receiver_uid: uid.clone(),
+                    slot,
+                })
+            }
             Some(uid) => {
                 // Default to Bolt for any receiver whose PID is not in
                 // UNIFYING_PIDS. This covers both known Bolt PIDs (BOLT_PIDS)
@@ -128,7 +150,9 @@ impl DeviceRoute {
 impl fmt::Display for DeviceRoute {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bolt { receiver_uid, slot } | Self::Unifying { receiver_uid, slot } => {
+            Self::Bolt { receiver_uid, slot }
+            | Self::Unifying { receiver_uid, slot }
+            | Self::Lightspeed { receiver_uid, slot } => {
                 write!(f, "slot {slot} on receiver {receiver_uid}")
             }
             Self::Direct {
@@ -188,6 +212,17 @@ pub(crate) async fn open_route_channel(
                     return Ok(Some(channel));
                 }
             }
+            DeviceRoute::Lightspeed { receiver_uid, .. } => {
+                let Some(Receiver::Lightspeed(lightspeed)) = receiver::detect(Arc::clone(&channel))
+                else {
+                    continue;
+                };
+                if let Ok(uid) = lightspeed.get_unique_id().await
+                    && uid.eq_ignore_ascii_case(receiver_uid)
+                {
+                    return Ok(Some(channel));
+                }
+            }
             DeviceRoute::Direct { .. } => return Ok(Some(channel)),
         }
     }
@@ -198,7 +233,7 @@ pub(crate) async fn open_route_channel(
 mod tests {
     use openlogi_core::device::{DeviceInventory, ReceiverInfo};
 
-    use super::{DIRECT_DEVICE_INDEX, DeviceRoute, UNIFYING_PIDS};
+    use super::{DIRECT_DEVICE_INDEX, DeviceRoute, LIGHTSPEED_PIDS, UNIFYING_PIDS};
 
     fn inv(product_id: u16, unique_id: Option<&str>) -> DeviceInventory {
         DeviceInventory {
@@ -235,6 +270,18 @@ mod tests {
     }
 
     #[test]
+    fn device_route_for_lightspeed_pids_creates_lightspeed_route() {
+        for &pid in LIGHTSPEED_PIDS {
+            let route = DeviceRoute::device_route_for(&inv(pid, Some("G305-RX")), 1);
+            assert!(matches!(
+                route,
+                Some(DeviceRoute::Lightspeed { ref receiver_uid, slot: 1 })
+                    if receiver_uid == "G305-RX"
+            ));
+        }
+    }
+
+    #[test]
     fn device_route_for_direct_when_no_uid_and_direct_slot() {
         let route = DeviceRoute::device_route_for(&inv(0xb025, None), DIRECT_DEVICE_INDEX);
         assert!(matches!(
@@ -259,6 +306,15 @@ mod tests {
             slot: 4,
         };
         assert_eq!(route.device_index(), 4);
+    }
+
+    #[test]
+    fn lightspeed_device_index_is_the_slot() {
+        let route = DeviceRoute::Lightspeed {
+            receiver_uid: "X".into(),
+            slot: 1,
+        };
+        assert_eq!(route.device_index(), 1);
     }
 
     #[test]
