@@ -35,10 +35,11 @@ MX Master 4):
 
 The app-wide `[app_settings]` block holds `launch_at_login`,
 `check_for_updates`, and `auto_install_updates` (all off by default);
-`show_in_menu_bar` (macOS menu bar / Windows tray, ignored on Linux);
-`auto_download_assets`; `language` (absent = follow the system locale);
-`thumbwheel_sensitivity`; and the `appearance`, `theme_light`, `theme_dark`,
-and `ui_radius` presentation settings.
+`show_in_menu_bar` (macOS menu bar / Windows tray, ignored on Linux; on by
+default); `auto_download_assets` (on by default); `language` (absent = follow
+the system locale); `thumbwheel_sensitivity` (default `14`); and the
+`appearance` (default `"system"`), `theme_light`, `theme_dark`, and `ui_radius`
+presentation settings. The theme and radius overrides are absent by default.
 
 ```toml
 schema_version = 2
@@ -46,7 +47,17 @@ selected_device = "2b042"
 
 [app_settings]
 launch_at_login = true
+check_for_updates = false
+auto_install_updates = false
+show_in_menu_bar = true
+auto_download_assets = true
 language = "en"
+thumbwheel_sensitivity = 14
+appearance = "system"
+# Optional presentation overrides (omit to use the theme defaults):
+# theme_light = "OpenLogi Light"
+# theme_dark = "OpenLogi Dark"
+# ui_radius = 6
 
 [devices.2b042]
 dpi_presets = [800, 1600, 3200]
