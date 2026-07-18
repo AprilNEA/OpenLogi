@@ -979,6 +979,9 @@ mod tests {
             let (result, ()) = futures::join!(send_fut, feed_fut);
 
             assert_eq!(result.unwrap(), response);
+            // The oneshot resolves before the listener loop runs on the read
+            // thread; wait for both deliveries before asserting on them.
+            wait_for_event_count(&events, 2).await;
             let recorded = events.lock().unwrap().clone();
             assert_eq!(
                 recorded,
