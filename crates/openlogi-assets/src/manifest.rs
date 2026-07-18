@@ -41,6 +41,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::error::AssetError;
 use crate::http;
 
 /// Top-level `manifest.json` document.
@@ -68,7 +69,7 @@ pub struct ManifestResource {
 
 impl DepotManifest {
     /// Load and parse a `manifest.json` from disk.
-    pub fn load_from(path: &Path) -> anyhow::Result<Self> {
+    pub fn load_from(path: &Path) -> Result<Self, AssetError> {
         http::load_json(path)
     }
 

@@ -51,22 +51,24 @@ mod windows;
 rust_i18n::i18n!("locales", fallback = "en");
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
-use backon::{BackoffBuilder, ExponentialBuilder};
 use gpui::{
-    AppContext, BorrowAppContext as _, Bounds, SharedString, Size, Styled, TitlebarOptions,
-    WindowBounds, WindowOptions, px,
+    AppContext, BorrowAppContext as _, Bounds, Size, Styled, WindowBounds, WindowOptions, px,
 };
 use gpui_component::{ActiveTheme, Root};
 use openlogi_core::brand::DeeplinkCommand;
 use openlogi_core::config::Config;
-use openlogi_core::device::{DeviceInventory, DeviceModelInfo};
+use openlogi_core::device::DeviceInventory;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::app::AppView;
+use crate::asset::sync::{
+    AssetCommand, AssetControl, SyncOutcome, collect_models, model_key, run_asset_sync,
+    sync_retry_delay,
+};
 use crate::state::AppState;
 
 fn dispatch_gui_command(command: DeeplinkCommand, cx: &mut gpui::App) {
@@ -477,79 +479,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Result of one background asset-sync run, reported back to the select
-/// loop: whether the run succeeded, and which model keys it covered (folded
-/// into the synced set on success so the same device doesn't re-sync every
-/// snapshot).
-struct SyncOutcome {
-    ok: bool,
-    keys: Vec<String>,
-}
-
-/// Session-stable identity for a synced model: the HID++ model ids plus the
-/// extended-model byte (the colour-variant selector) and the codename the
-/// depot match falls back on. Models that collapse to one key would resolve
-/// to the same depot files anyway.
-fn model_key((model, codename): &(DeviceModelInfo, Option<String>)) -> String {
-    format!(
-        "{:02x}:{:04x}:{:04x}:{:04x}:{}",
-        model.extended_model_id,
-        model.model_ids[0],
-        model.model_ids[1],
-        model.model_ids[2],
-        codename.as_deref().unwrap_or_default()
-    )
-}
-
-/// A manual asset action requested from the Settings → Assets tab, pushed to
-/// the main event loop via [`AssetControl`].
-pub enum AssetCommand {
-    /// Force-fetch assets for the connected devices now, bypassing the
-    /// automatic download policy.
-    Refresh,
-    /// Delete the per-user cache, then re-fetch.
-    ClearCache,
-}
-
-/// Global handle the Settings window uses to push [`AssetCommand`]s into the
-/// main loop, mirroring how the Add Device window drives pairing.
-pub struct AssetControl(pub tokio::sync::mpsc::UnboundedSender<AssetCommand>);
-
-impl gpui::Global for AssetControl {}
-
-/// Minimum gap before re-attempting a failed sync, doubling with each
-/// consecutive attempt and capped at a minute. The first attempt is
-/// immediate (`last_sync_at` is `None`); after that a permanently-down host
-/// is polled ever more slowly (1s, 2s, 4s … 60s) instead of on every tick,
-/// while a recovered host still self-heals on the next attempt.
-fn sync_retry_delay(attempts: u32) -> Duration {
-    ExponentialBuilder::default()
-        .without_max_times()
-        .build()
-        .nth(attempts.saturating_sub(1).min(6) as usize)
-        .unwrap_or(Duration::from_secs(60))
-}
-
-/// Refresh the asset cache: the shared index always, plus the depots for
-/// `models`. Returns `true` when the sync completed and `false` when it
-/// failed and should be retried. Runs on a dedicated background thread —
-/// the HTTP layer's blocking retries are fine here. (Whether sync runs at
-/// all is the caller's gate: the automatic path checks `should_run` once at
-/// startup plus the auto-download setting; the Settings → Assets manual
-/// actions always fetch, even in a release build that would otherwise serve
-/// only bundled art.)
-fn run_asset_sync(models: &[(DeviceModelInfo, Option<String>)]) -> bool {
-    let server =
-        std::env::var("OPENLOGI_ASSETS").unwrap_or_else(|_| asset::sync::DEFAULT_BASE.to_string());
-    match asset::sync::sync(&server, models) {
-        Ok(()) => true,
-        Err(e) => {
-            warn!(error = ?e, "asset sync failed — will retry with backoff");
-            false
-        }
-    }
-}
-
 fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
     let bounds = Bounds::centered(None, Size::new(px(1100.), px(750.)), cx);
     WindowOptions {
@@ -559,11 +488,10 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
         // overlap; below this the model can't shrink further without crowding.
         window_min_size: Some(Size::new(px(720.), px(680.))),
         app_id: Some("openlogi".to_string()),
-        titlebar: Some(TitlebarOptions {
-            title: Some(SharedString::from("OpenLogi")),
-            appears_transparent: false,
-            traffic_light_position: None,
-        }),
+        // Linux: transparent chrome so `AppView::render` can draw a client-side
+        // `TitleBar` (the compositor declines server-side decorations and gpui's
+        // fallback is unpainted). macOS/Windows keep their native titlebar.
+        titlebar: Some(windows::titlebar_options("OpenLogi")),
         ..WindowOptions::default()
     }
 }
@@ -614,31 +542,4 @@ fn init_tracing() {
             EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-}
-
-/// Flatten every paired device's HID++ model snapshot — that's what the
-/// asset sync feeds into the registry lookup.
-fn collect_models(inventories: &[DeviceInventory]) -> Vec<(DeviceModelInfo, Option<String>)> {
-    inventories
-        .iter()
-        .flat_map(|inv| inv.paired.iter())
-        .filter_map(|p| p.model_info.clone().map(|m| (m, p.codename.clone())))
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::sync_retry_delay;
-    use std::time::Duration;
-
-    #[test]
-    fn retry_delay_doubles_then_caps() {
-        assert_eq!(sync_retry_delay(1), Duration::from_secs(1));
-        assert_eq!(sync_retry_delay(2), Duration::from_secs(2));
-        assert_eq!(sync_retry_delay(3), Duration::from_secs(4));
-        assert_eq!(sync_retry_delay(5), Duration::from_secs(16));
-        // Caps at 60s and never overflows the shift for large attempt counts.
-        assert_eq!(sync_retry_delay(7), Duration::from_secs(60));
-        assert_eq!(sync_retry_delay(u32::MAX), Duration::from_secs(60));
-    }
 }

@@ -504,9 +504,9 @@ mod tests {
     /// MX Vertical and the older mice render.
     #[test]
     fn resolves_old_schema_depot_on_disk() {
-        let root = std::env::temp_dir().join(format!("openlogi-asset-test-{}", std::process::id()));
+        let root = tempfile::tempdir().expect("create temp dir");
         let depot = "mx_vertical";
-        let dir = root.join(depot);
+        let dir = root.path().join(depot);
         std::fs::create_dir_all(&dir).expect("create depot dir");
         std::fs::write(
             dir.join("metadata.json"),
@@ -521,8 +521,8 @@ mod tests {
         std::fs::write(dir.join("front.png"), png_header(100, 200)).expect("write front.png");
 
         let resolver = AssetResolver {
-            read_roots: vec![root.clone()],
-            write_root: root.clone(),
+            read_roots: vec![root.path().to_path_buf()],
+            write_root: root.path().to_path_buf(),
             has_bundle: false,
             index: None,
         };
@@ -535,10 +535,9 @@ mod tests {
             files: Vec::new(),
         };
 
-        let result = resolver.load_files(depot, &entry, &bare_model());
-        std::fs::remove_dir_all(&root).ok();
-
-        let asset = result.expect("old-schema depot should resolve");
+        let asset = resolver
+            .load_files(depot, &entry, &bare_model())
+            .expect("old-schema depot should resolve");
         assert_eq!(
             asset.image_path.file_name().expect("image has a file name"),
             "front.png"
@@ -549,24 +548,23 @@ mod tests {
 
     #[test]
     fn cleanup_removes_only_legacy_glow_pngs() {
-        let root =
-            std::env::temp_dir().join(format!("openlogi-glow-cleanup-{}", std::process::id()));
-        let depot = root.join("g513");
+        let root = tempfile::tempdir().expect("create temp dir");
+        let depot = root.path().join("g513");
         std::fs::create_dir_all(&depot).expect("create depot dir");
         std::fs::write(depot.join("glow-ff9500.png"), b"x").expect("write glow png");
         std::fs::write(depot.join("glow-af52de.png.tmp"), b"x").expect("write glow tmp");
         std::fs::write(depot.join("front.png"), b"x").expect("write front render");
         std::fs::write(depot.join("metadata.json"), b"{}").expect("write metadata");
 
-        cleanup_glow_pngs_in(&root);
+        cleanup_glow_pngs_in(root.path());
 
-        let kept = depot.join("front.png").exists() && depot.join("metadata.json").exists();
-        let swept =
-            !depot.join("glow-ff9500.png").exists() && !depot.join("glow-af52de.png.tmp").exists();
-        // Clean up before asserting so a failing assert doesn't leave the temp dir behind.
-        std::fs::remove_dir_all(&root).ok();
-
-        assert!(swept, "legacy glow files must be deleted");
-        assert!(kept, "real assets must be left untouched");
+        assert!(
+            !depot.join("glow-ff9500.png").exists() && !depot.join("glow-af52de.png.tmp").exists(),
+            "legacy glow files must be deleted"
+        );
+        assert!(
+            depot.join("front.png").exists() && depot.join("metadata.json").exists(),
+            "real assets must be left untouched"
+        );
     }
 }

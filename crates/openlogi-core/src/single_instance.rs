@@ -10,12 +10,11 @@
 //! reclaims the lock on the leftover file without any cleanup ceremony.
 
 use std::{
-    fs::{File, OpenOptions},
+    fs::{File, OpenOptions, TryLockError},
     io,
     path::PathBuf,
 };
 
-use fs4::{FileExt, TryLockError};
 use thiserror::Error;
 use tracing::debug;
 
@@ -33,21 +32,36 @@ pub struct InstanceGuard {
     _handle: File,
 }
 
+/// Failure acquiring the single-instance lock.
+/// [`InstanceError::AlreadyRunning`] is the expected "another copy is open"
+/// signal; every other variant indicates filesystem trouble.
 #[derive(Debug, Error)]
 pub enum InstanceError {
+    /// The lock file's directory could not be resolved (no home directory).
     #[error("could not resolve lock path")]
     Path(#[from] PathsError),
+    /// Creating or opening the lock file failed.
     #[error("could not open lock file at {path}")]
     Open {
+        /// The lock file being opened.
         path: PathBuf,
+        /// The underlying I/O error.
         #[source]
         source: io::Error,
     },
+    /// Another process of the same role already holds the lock — surface it
+    /// politely and exit with a non-error status.
     #[error("another instance already holds the lock at {path}")]
-    AlreadyRunning { path: PathBuf },
+    AlreadyRunning {
+        /// The contested lock file.
+        path: PathBuf,
+    },
+    /// The lock syscall itself failed, as opposed to the lock being held.
     #[error("lock attempt at {path} failed")]
     LockFailed {
+        /// The lock file the attempt targeted.
         path: PathBuf,
+        /// The underlying I/O error.
         #[source]
         source: io::Error,
     },
@@ -84,7 +98,7 @@ pub fn acquire(lock_name: &str) -> Result<InstanceGuard, InstanceError> {
             path: path.clone(),
             source,
         })?;
-    match FileExt::try_lock(&file) {
+    match file.try_lock() {
         Ok(()) => {
             debug!(path = %path.display(), "single-instance lock acquired");
             Ok(InstanceGuard { _handle: file })

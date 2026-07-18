@@ -1,7 +1,7 @@
 //! `openlogi diag` — real-device smoke tests for the HID++ write path.
 //!
-//! Each subcommand exercises one round-trip (read → modify → read back →
-//! restore). The intent is verification, not configuration: nothing here
+//! Subcommands exercise direct HID++ reads and verified writes. The intent is
+//! diagnosis, not persistent configuration: nothing here
 //! touches `config.toml` or talks to the GUI; everything runs through the
 //! same `openlogi_hid` API the GPUI app uses, so a green diag means the
 //! GUI's write path works on this host.
@@ -15,6 +15,7 @@ pub mod dpi;
 pub mod features;
 pub mod lighting;
 pub mod smartshift;
+pub mod wheel;
 
 #[derive(Debug, Subcommand)]
 pub enum DiagCmd {
@@ -28,6 +29,8 @@ pub enum DiagCmd {
     Smartshift(smartshift::SmartshiftArgs),
     /// Set a wired RGB keyboard to a solid colour (e.g. `ff0000` for red).
     Lighting(lighting::LightingArgs),
+    /// Read or set the HID++ 0x2121 wheel reporting resolution.
+    Wheel(wheel::WheelArgs),
 }
 
 impl DiagCmd {
@@ -38,6 +41,7 @@ impl DiagCmd {
             Self::Dpi(args) => dpi::run(args).await,
             Self::Smartshift(args) => smartshift::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
+            Self::Wheel(args) => wheel::run(args).await,
         }
     }
 }
@@ -145,4 +149,60 @@ pub(crate) async fn select_device(
         .next()
         .map(|c| (c.route, c.name))
         .ok_or_else(|| no_match_err(&[], None))
+}
+
+#[cfg(test)]
+mod no_match_err_tests {
+    use openlogi_hid::DeviceRoute;
+
+    use super::{Candidate, no_match_err};
+
+    fn candidate(name: &str) -> Candidate {
+        Candidate {
+            route: DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xc539,
+            },
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn no_devices_at_all_gives_a_generic_not_found_message() {
+        let err = no_match_err(&[], None).to_string();
+        assert_eq!(
+            err,
+            "no online HID++ device found — is a Logi device paired and awake?"
+        );
+    }
+
+    #[test]
+    fn no_devices_at_all_ignores_a_query_and_still_uses_the_generic_message() {
+        // `devices.is_empty()` short-circuits before `query` is inspected.
+        let err = no_match_err(&[], Some("mouse")).to_string();
+        assert_eq!(
+            err,
+            "no online HID++ device found — is a Logi device paired and awake?"
+        );
+    }
+
+    #[test]
+    fn unmatched_query_names_the_query_and_lists_online_devices() {
+        let devices = vec![candidate("MX Master 3S"), candidate("G Pro")];
+        let err = no_match_err(&devices, Some("keyboard")).to_string();
+
+        assert!(err.contains("no online device matches `--device keyboard`"));
+        assert!(err.contains("MX Master 3S"));
+        assert!(err.contains("G Pro"));
+    }
+
+    #[test]
+    fn no_query_suggests_the_device_flag_and_lists_online_devices() {
+        let devices = vec![candidate("MX Master 3S")];
+        let err = no_match_err(&devices, None).to_string();
+
+        assert!(err.contains("could not pick a device automatically"));
+        assert!(err.contains("pass --device <name> to choose one"));
+        assert!(err.contains("MX Master 3S"));
+    }
 }

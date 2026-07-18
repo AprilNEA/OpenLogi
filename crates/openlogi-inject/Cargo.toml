@@ -11,7 +11,7 @@ keywords = ["logitech", "input", "uinput", "sendinput", "mouse"]
 categories = ["hardware-support", "os"]
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", version = "0.6.19" }
+openlogi-core = { path = "../openlogi-core", version = "0.6.20" }
 tracing = { workspace = true }
 
 [dev-dependencies]
@@ -22,20 +22,20 @@ tracing-subscriber = { workspace = true }
 workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-evdev = "0.13"
+evdev = { workspace = true }
 zbus = "5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.25.0", features = ["highsierra"] }
 core-foundation = { workspace = true }
-objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", features = [
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = [
   "NSEvent",
   "NSGraphicsContext",
   "objc2-core-graphics",
 ] }
 objc2-core-graphics = { version = "0.3.2", features = ["CGEvent"] }
-objc2-foundation = "0.3.2"
+objc2-foundation = { workspace = true }
 
 # SendInput-based action synthesis (execute_windows).
 [target.'cfg(target_os = "windows")'.dependencies]

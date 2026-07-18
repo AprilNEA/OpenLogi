@@ -5,7 +5,7 @@ build instructions, see the [README](../README.md).
 
 ## Toolchain
 
-- Stable Rust (Edition 2024, MSRV 1.88)
+- Stable Rust (Edition 2024, MSRV 1.96)
 - macOS: Xcode 16+ with the optional **Metal Toolchain** component (required by
   GPUI's `gpui_macos` build script to compile shaders)
 - Linux: system libraries — on Debian/Ubuntu:
@@ -79,14 +79,15 @@ expose `libSystem` the way Apple's real linker wants.
 src/                the `openlogi` binary (workspace root package) — a thin wrapper over openlogi-cli
 crates/
   openlogi-core/    types, config (TOML), paths, button + action catalog — no HID, no async
+  openlogi-inject/  OS input synthesis: CGEvent, uinput/MPRIS, and SendInput
   openlogi-hidpp/   vendored HID++ protocol crate (lib name `hidpp`)
-  openlogi-hid/     hidpp + async-hid: enumerate(), DPI (0x2201) and SmartShift (0x2111) writes
+  openlogi-hid/     device discovery, HID++ reads/writes, and control capture over async-hid
   openlogi-assets/  device-render registry schema + cached HTTP fetch from assets.openlogi.org
   openlogi-cli/     CLI implementation: command tree + `run()`, called by the `openlogi` binary
-  openlogi-agent-core/  headless orchestration shared by agent and GUI: hook runtime, HID++ writes, IPC
+  openlogi-agent-core/  shared orchestration + the agent/GUI IPC contract
   openlogi-agent/   the `openlogi-agent` binary — background agent owning device I/O and the hook
   openlogi-hook/    OS mouse hook: macOS CGEventTap, Linux evdev/uinput, Windows WH_MOUSE_LL
-  openlogi-gui/     the `openlogi-gui` binary — GPUI + gpui-component
+  openlogi-gui/     the `openlogi-gui` binary — GPUI + gpui-component IPC client
 ```
 
 ## Pre-commit checklist
@@ -121,13 +122,14 @@ layout: a 760×480 background image in a 760×512 Finder window, with 128px icon
 positioned at `(212, 250)` for `OpenLogi.app` and `(548, 250)` for
 `Applications`.
 
-## Packaging Linux `.deb` / `.rpm`
+## Packaging Linux `.deb` / `.rpm` / `.pkg.tar.zst`
 
 Requires [nfpm](https://nfpm.goreleaser.com/) on `PATH`; the package arch is
 derived from the host (override with `PKG_ARCH`):
 
 ```sh
-cargo run -p xtask -- linux package    # → target/release/openlogi_*.deb / .rpm
+cargo run -p xtask -- linux package
+# → target/release/openlogi_*.deb / .rpm / .pkg.tar.zst
 ```
 
 The package contents (binaries, udev rules, systemd user unit, desktop entry,

@@ -26,14 +26,25 @@ use thiserror::Error;
 /// Subdirectory created under each XDG base directory.
 const APP_DIR: &str = "openlogi";
 
+/// Failure resolving the per-user base directories.
 #[derive(Debug, Error)]
 pub enum PathsError {
+    /// No home directory could be determined for the current user, so none
+    /// of the XDG bases resolve.
     #[error("could not resolve a home directory for the current user")]
     HomeNotFound,
 }
 
 fn xdg() -> Result<Xdg, PathsError> {
     Xdg::new().map_err(|_| PathsError::HomeNotFound)
+}
+
+/// The current user's home directory.
+///
+/// The plain home, not an XDG base — for callers placing files under
+/// OS-native locations (e.g. macOS `~/Library/LaunchAgents`).
+pub fn home_dir() -> Result<PathBuf, PathsError> {
+    Ok(xdg()?.home_dir().to_path_buf())
 }
 
 /// The raw XDG config home directory (without the `openlogi` subdirectory).

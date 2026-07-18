@@ -170,9 +170,16 @@ fn embed_cli(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<
     Ok(())
 }
 
+/// Every Mach-O the finished bundle must ship, relative to the `.app` root.
+const REQUIRED_BUNDLE_BINARIES: [&str; 3] = [
+    "Contents/MacOS/openlogi",
+    "Contents/MacOS/openlogi-gui",
+    "Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
+];
+
 fn verify_bundle_binaries(app: &Path) -> Result<()> {
-    for binary in ["openlogi", "openlogi-gui"] {
-        let path = app.join("Contents/MacOS").join(binary);
+    for binary in REQUIRED_BUNDLE_BINARIES {
+        let path = app.join(binary);
         ensure_file(&path)
             .with_context(|| format!("missing required bundle binary {}", path.display()))?;
     }
@@ -249,42 +256,42 @@ fn codesign_runtime(identity: &str, target: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
     use super::*;
 
     fn app_with_binaries(binaries: &[&str]) -> tempfile::TempDir {
         let app = tempfile::tempdir().unwrap();
-        let macos = app.path().join("Contents/MacOS");
-        fs_err::create_dir_all(&macos).unwrap();
         for binary in binaries {
-            fs_err::write(macos.join(binary), b"").unwrap();
+            let path = app.path().join(binary);
+            fs_err::create_dir_all(path.parent().unwrap()).unwrap();
+            fs_err::write(path, b"").unwrap();
         }
         app
     }
 
     #[test]
-    fn verify_bundle_binaries_accepts_cli_and_gui() {
-        let app = app_with_binaries(&["openlogi", "openlogi-gui"]);
+    fn verify_bundle_binaries_accepts_a_complete_bundle() {
+        let app = app_with_binaries(&REQUIRED_BUNDLE_BINARIES);
 
         verify_bundle_binaries(app.path()).unwrap();
     }
 
     #[test]
-    fn verify_bundle_binaries_rejects_missing_cli() {
-        let app = app_with_binaries(&["openlogi-gui"]);
+    fn verify_bundle_binaries_names_each_missing_binary() {
+        for missing in REQUIRED_BUNDLE_BINARIES {
+            let shipped: Vec<&str> = REQUIRED_BUNDLE_BINARIES
+                .into_iter()
+                .filter(|binary| *binary != missing)
+                .collect();
+            let app = app_with_binaries(&shipped);
 
-        let error = verify_bundle_binaries(app.path()).unwrap_err();
+            let error = verify_bundle_binaries(app.path()).unwrap_err();
 
-        assert!(error.to_string().contains("openlogi"));
-    }
-
-    #[test]
-    fn verify_bundle_binaries_rejects_missing_gui() {
-        let app = app_with_binaries(&["openlogi"]);
-
-        let error = verify_bundle_binaries(app.path()).unwrap_err();
-
-        assert!(error.to_string().contains("openlogi-gui"));
+            assert!(
+                error.to_string().ends_with(missing),
+                "error should name {missing}, got: {error}"
+            );
+        }
     }
 }

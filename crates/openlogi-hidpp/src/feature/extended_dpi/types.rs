@@ -326,10 +326,10 @@ pub(super) fn parse_dpi_ranges(stream: &[u8]) -> Result<Vec<DpiRange>, Hidpp20Er
             offset += 4;
         } else {
             // A literal value: flush the previous standalone literal first.
-            if let Some(previous) = pending {
-                if !pending_is_range_end {
-                    ranges.push(DpiRange::Fixed(previous));
-                }
+            if let Some(previous) = pending
+                && !pending_is_range_end
+            {
+                ranges.push(DpiRange::Fixed(previous));
             }
             pending = Some(value);
             pending_is_range_end = false;
@@ -337,10 +337,10 @@ pub(super) fn parse_dpi_ranges(stream: &[u8]) -> Result<Vec<DpiRange>, Hidpp20Er
         }
     }
 
-    if let Some(previous) = pending {
-        if !pending_is_range_end {
-            ranges.push(DpiRange::Fixed(previous));
-        }
+    if let Some(previous) = pending
+        && !pending_is_range_end
+    {
+        ranges.push(DpiRange::Fixed(previous));
     }
 
     if ranges.is_empty() {
