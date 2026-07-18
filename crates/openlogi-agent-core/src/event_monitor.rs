@@ -79,10 +79,12 @@ impl EventMonitor {
     /// Enable monitoring (idempotent) and drain everything buffered since the
     /// last poll. Called from the IPC `poll_event_monitor` handler.
     pub fn poll(&self) -> Vec<MonitorEvent> {
-        // Mark the poll *before* enabling so a janitor tick landing between the
-        // two stores can't read enabled-but-never-polled and disable instantly.
+        // Mark the poll *before* enabling, and publish `enabled` with `Release`.
+        // The janitor loads `enabled` with `Acquire`, so a tick that observes
+        // `enabled == true` is guaranteed to also see this `polled = true` and
+        // won't disable a monitor that was just enabled by this very poll.
         self.polled.store(true, Ordering::Relaxed);
-        self.enabled.store(true, Ordering::Relaxed);
+        self.enabled.store(true, Ordering::Release);
         self.buf
             .lock()
             .map(|mut buf| buf.drain(..).collect())
@@ -101,12 +103,22 @@ impl EventMonitor {
     /// the agent: each tick, if monitoring is on but no poll arrived since the
     /// previous tick, the GUI is gone — disable and free the buffer.
     pub async fn run_idle_janitor(self: SharedEventMonitor) {
-        let mut ticker = tokio::time::interval(IDLE_TICK);
+        // `interval` fires its first tick immediately; `interval_at` delays the
+        // first check by a full `IDLE_TICK`. That matters on an agent restart
+        // while monitoring was enabled: an immediate first tick would see
+        // `enabled == true` with no poll yet this window and disable before the
+        // reconnecting GUI repolls. Waiting one full window lets it poll first.
+        let mut ticker =
+            tokio::time::interval_at(tokio::time::Instant::now() + IDLE_TICK, IDLE_TICK);
         loop {
             ticker.tick().await;
-            // `swap` consumes the flag: a poll since the last tick keeps it
-            // alive; an untouched flag means no poll happened this interval.
-            if self.enabled() && !self.polled.swap(false, Ordering::Relaxed) {
+            // Acquire-load `enabled` to pair with `poll`'s Release store: seeing
+            // `enabled == true` here guarantees the matching `polled = true` is
+            // visible, so a monitor enabled by a poll just before this tick is
+            // never torn down for a stale `polled == false`. `swap` then consumes
+            // the flag — a poll since the last tick keeps monitoring alive; an
+            // untouched flag means no poll happened this interval.
+            if self.enabled.load(Ordering::Acquire) && !self.polled.swap(false, Ordering::Relaxed) {
                 self.disable();
             }
         }
