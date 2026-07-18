@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::settings::{GestureOwner, Lighting, SmartShift, deserialize_gesture_owner};
+use super::settings::{
+    GestureOwner, Lighting, ScrollResolution, SmartShift, deserialize_gesture_owner,
+};
 use crate::binding::{Action, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo};
 
@@ -107,6 +109,10 @@ pub struct DeviceConfig {
     /// (default) is the native direction, and is omitted from `config.toml`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub invert_scroll: bool,
+    /// Persisted HID++ `0x2121` wheel resolution. `None` leaves the device's
+    /// current resolution unmanaged and omits the field from `config.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll_resolution: Option<ScrollResolution>,
 }
 
 /// `skip_serializing_if` helper for plain `bool` fields whose default is
@@ -155,6 +161,8 @@ struct RawDeviceConfig {
     smartshift: Option<SmartShift>,
     #[serde(default)]
     invert_scroll: bool,
+    #[serde(default)]
+    scroll_resolution: Option<ScrollResolution>,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -198,6 +206,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             lighting: raw.lighting,
             smartshift: raw.smartshift,
             invert_scroll: raw.invert_scroll,
+            scroll_resolution: raw.scroll_resolution,
         }
     }
 }

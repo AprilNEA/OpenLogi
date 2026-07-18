@@ -563,6 +563,7 @@ mod tests {
             pointer: true,
             lighting: false,
             scroll_inversion: false,
+            hires_wheel: false,
         });
         // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -581,6 +582,7 @@ mod tests {
             pointer: false,
             lighting: true,
             scroll_inversion: false,
+            hires_wheel: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(

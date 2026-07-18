@@ -27,7 +27,8 @@ use serde::{Deserialize, Serialize};
 /// v7: pairing commands return typed acceptance errors.
 /// v8: [`WriteError`] carries typed HID++ operation failures.
 /// v9: `poll_event_monitor` appended + [`MonitorEvent`] (live event monitor).
-pub const PROTOCOL_VERSION: u32 = 9;
+/// v10: `Capabilities::hires_wheel` appended.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep

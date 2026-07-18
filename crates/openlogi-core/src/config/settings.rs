@@ -1,5 +1,6 @@
 //! App-wide and per-device *value* settings: [`AppSettings`], [`Appearance`],
-//! [`Lighting`], [`WheelMode`] / [`SmartShift`], and [`GestureOwner`], plus
+//! [`Lighting`], [`ScrollResolution`], [`WheelMode`] / [`SmartShift`], and
+//! [`GestureOwner`], plus
 //! their serde `default_*` / `deserialize_*` helpers.
 
 use serde::{Deserialize, Serialize};
@@ -231,6 +232,16 @@ where
         .unwrap_or(color.as_str())
         .parse()
         .unwrap_or(Rgb::WHITE))
+}
+
+/// Vertical wheel reporting resolution for HID++ `0x2121 HiResWheel`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollResolution {
+    /// One scroll report per physical ratchet step.
+    Low,
+    /// Finer-grained reports between physical ratchet steps.
+    High,
 }
 
 /// Scroll-wheel mode for [`SmartShift`]: free-spin or ratchet (clicky).
