@@ -563,6 +563,21 @@ impl Config {
             .scroll_resolution = resolution;
     }
 
+    /// Whether OpenLogi manages `device_key` at all (capture + volatile
+    /// re-apply). Unconfigured devices are managed.
+    #[must_use]
+    pub fn device_enabled(&self, device_key: &str) -> bool {
+        self.devices.get(device_key).is_none_or(|d| d.enabled)
+    }
+
+    /// Enable or disable OpenLogi's management of `device_key`.
+    pub fn set_device_enabled(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .enabled = enabled;
+    }
+
     /// The effective thumb-wheel sensitivity for `device_key`: the device's
     /// override when set, else the app-wide default.
     #[must_use]

@@ -53,8 +53,11 @@ const GALLERY_GAP: f32 = 24.;
 /// cards (Logi Options+ style), via [`Carousel`]'s `uniform` mode. Each card
 /// floats the device photo on the window background above its name and battery;
 /// the row centres while the cards fit the viewport and scrolls once they don't.
-/// Clicking a card opens its detail screen and makes it the active device (whose
-/// bindings the hook uses); the active card wears a faint accent ring.
+/// Clicking a card opens its detail screen and makes it the active device.
+/// Every card wears a ring showing its managed state — accent blue when
+/// OpenLogi manages the device, red when the user disabled it. Selection needs
+/// no ring of its own: capture runs per device, so which card is "current"
+/// only decides what the detail screen shows.
 pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
     let (len, active_idx) = cx.try_global::<AppState>().map_or((0, 0), |s| {
         let len = s.device_list.len();
@@ -69,7 +72,7 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
             .uniform(px(theme::GALLERY_CARD_W))
             .gap(px(GALLERY_GAP))
             .accent(rgb(theme::ACCENT_BLUE).into())
-            .render_item(move |idx, focused, _window, cx| {
+            .render_item(move |idx, _focused, _window, cx| {
                 let pal = theme::palette(cx);
                 let Some(record) = cx
                     .try_global::<AppState>()
@@ -78,11 +81,14 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                     return div().into_any_element();
                 };
                 let key = record.config_key.clone();
+                let enabled = cx
+                    .try_global::<AppState>()
+                    .is_some_and(|s| s.device_enabled(&record.config_key));
                 let glow = cx
                     .try_global::<AppState>()
                     .and_then(|s| keyboard_glow(s, &record));
                 let view = view.clone();
-                device_card(&record, focused, glow, pal)
+                device_card(&record, enabled, glow, pal)
                     .id(("device-card", idx))
                     .cursor_pointer()
                     .hover(move |s| s.bg(pal.surface))
@@ -166,20 +172,20 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
 
 /// A device card in the Home gallery: the device photo floating on the window
 /// background above the name, connectivity dot, kind/slot, and battery. Fixed
-/// width so cards stay equal in the scrollable row. The active device wears a
-/// faint accent ring; inactive cards reserve the same 1px border in a
-/// transparent colour so selection never nudges the layout. Returns a bare
-/// [`Div`] so the gallery can wire the click handler.
+/// width so cards stay equal in the scrollable row. The ring shows the managed
+/// state — accent blue while OpenLogi manages the device, red when disabled —
+/// so every card keeps the same 1px border and toggling never nudges the
+/// layout. Returns a bare [`Div`] so the gallery can wire the click handler.
 fn device_card(
     record: &DeviceRecord,
-    active: bool,
+    enabled: bool,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     pal: Palette,
 ) -> Div {
-    let ring = if active {
+    let ring: Hsla = if enabled {
         rgb(theme::ACCENT_BLUE).into()
     } else {
-        gpui::transparent_black()
+        rgb(theme::STATUS_DISABLED).into()
     };
     v_flex()
         .w(px(theme::GALLERY_CARD_W))

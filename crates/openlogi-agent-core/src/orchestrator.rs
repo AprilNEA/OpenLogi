@@ -145,6 +145,12 @@ impl Orchestrator {
     /// so they're built together here and published under one lock — keeping
     /// `rebuild` and `set_current_app` from drifting into a half-populated write.
     fn hook_maps_for(&self, key: Option<&str>, app: Option<&str>) -> HookMaps {
+        // A disabled selected device gets empty maps: the OS hook then passes
+        // its events through untouched instead of applying remaps to a device
+        // the user asked OpenLogi to leave alone.
+        if key.is_some_and(|k| !self.config.device_enabled(k)) {
+            return HookMaps::default();
+        }
         HookMaps {
             bindings: bindings_for(&self.config, key, app),
             gestures: oshook_gestures_for(&self.config, key, app),
@@ -184,7 +190,11 @@ impl Orchestrator {
             return;
         };
         let mut by_key = std::collections::HashMap::new();
-        for dev in self.devices.iter().filter(|dev| dev.online) {
+        for dev in self
+            .devices
+            .iter()
+            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+        {
             let Some(route) = dev.route.clone() else {
                 continue;
             };
@@ -211,7 +221,7 @@ impl Orchestrator {
     fn capture_plans_for(&self) -> Vec<DeviceCapturePlan> {
         self.devices
             .iter()
-            .filter(|dev| dev.online)
+            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
             .filter_map(|dev| {
                 let route = dev.route.clone()?;
                 Some(plan_for_device(
@@ -289,6 +299,10 @@ impl Orchestrator {
     /// Reuses the capture session's channel when it already points at the
     /// device, like every other hardware write.
     fn reapply_volatile_settings(&self, dev: &AgentDevice) {
+        // A disabled device is left fully native — no writes of any kind.
+        if !self.config.device_enabled(&dev.config_key) {
+            return;
+        }
         let Some(route) = dev.route.clone() else {
             return;
         };

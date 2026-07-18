@@ -1006,6 +1006,22 @@ impl AppState {
         }
     }
 
+    /// Whether OpenLogi manages `key` (capture + volatile re-apply).
+    #[must_use]
+    pub fn device_enabled(&self, key: &str) -> bool {
+        self.config.device_enabled(key)
+    }
+
+    /// Enable or disable OpenLogi's management of `key` and persist it. The
+    /// agent tears down or re-arms the device's capture session on reload.
+    pub fn set_device_enabled(&mut self, key: &str, enabled: bool) {
+        if self.config.device_enabled(key) == enabled {
+            return;
+        }
+        self.config.set_device_enabled(key, enabled);
+        self.persist_and_reload("device enabled");
+    }
+
     /// The effective thumb-wheel sensitivity for `key` (its per-device
     /// override, else the app-wide default).
     #[must_use]
