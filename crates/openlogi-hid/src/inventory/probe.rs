@@ -27,11 +27,13 @@ use super::{ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_SLOT_PROBE}
 
 /// One probed node's contribution this tick: its inventory (if any), whether
 /// the node actually answered — the ledger replays the last snapshot when it
-/// didn't (see [`crate::node_ledger::NodeLedger::settle`]) — and each device's
-/// cache contribution, for the caller to apply and to drive eviction.
+/// didn't (see [`crate::node_ledger::NodeLedger::settle`]) — whether the
+/// one-shot retry can stop early, and each device's cache contribution for the
+/// caller to apply and to drive eviction.
 pub(super) struct NodeProbe {
     pub(super) inventory: Option<DeviceInventory>,
     pub(super) healthy: bool,
+    pub(super) complete: bool,
     pub(super) outcomes: Vec<CacheOutcome>,
 }
 
@@ -41,6 +43,7 @@ impl NodeProbe {
         Self {
             inventory: None,
             healthy: false,
+            complete: false,
             outcomes: Vec::new(),
         }
     }
@@ -122,6 +125,7 @@ async fn probe_bolt_receiver(
             paired,
         }),
         healthy: complete,
+        complete,
         outcomes,
     }
 }
@@ -189,12 +193,18 @@ async fn probe_unifying_receiver(
         );
     }
     // Unlike Bolt, a count/list shortfall is *expected* here (offline paired
-    // devices aren't enumerable yet), so completeness can't ride on it. The
-    // health signal is the pairing-count register answering at all: that
+    // devices aren't enumerable yet), so ledger health can't ride on it. The
+    // ledger health signal is the pairing-count register answering at all: that
     // proves the receiver round-trip worked this cycle, while `None` (e.g. a
     // parked channel) is "couldn't fully check" — the ledger then replays the
     // last good snapshot instead of presenting a possibly-empty list (#218).
+    //
+    // The one-shot CLI path still needs a retry when the count says more
+    // devices may appear after a late arrival drain. Report that separately as
+    // `complete = false`; the unchanged-inventory fallback stops expected
+    // offline Unifying shortfalls after they stabilize.
     let healthy = pairing_count.is_some();
+    let complete = pairing_count.is_some_and(|count| paired.len() == usize::from(count));
 
     NodeProbe {
         inventory: Some(DeviceInventory {
@@ -207,6 +217,7 @@ async fn probe_unifying_receiver(
             paired,
         }),
         healthy,
+        complete,
         outcomes,
     }
 }
@@ -353,6 +364,7 @@ async fn probe_direct(
         return NodeProbe {
             inventory: None,
             healthy: walk_succeeded,
+            complete: walk_succeeded,
             outcomes: vec![CacheOutcome::Unkeyed],
         };
     }
@@ -385,6 +397,7 @@ async fn probe_direct(
     NodeProbe {
         inventory: Some(inventory),
         healthy: true,
+        complete: true,
         outcomes: vec![outcome],
     }
 }
