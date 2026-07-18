@@ -90,3 +90,84 @@ pub fn plan_for_device(
         thumbwheel_sensitivity: config.thumbwheel_sensitivity(config_key),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use openlogi_core::binding::Binding;
+    use openlogi_hid::reprog_controls::GESTURE_BUTTON_CID;
+
+    use super::*;
+
+    fn route() -> DeviceRoute {
+        DeviceRoute::Bolt {
+            receiver_uid: "cafe".into(),
+            slot: 2,
+        }
+    }
+
+    #[test]
+    #[ignore = "RED: plain gesture-button divert not implemented yet"]
+    fn gestures_off_single_bound_gesture_button_is_plain_diverted() {
+        // The dedicated gesture button (CID 0x00c3) never reaches the OS hook,
+        // so with gestures off a non-default single binding on it is only
+        // deliverable via a plain HID++ divert.
+        let mut cfg = Config::default();
+        cfg.disable_gestures("2b042");
+        cfg.set_binding(
+            "2b042",
+            ButtonId::GestureButton,
+            Binding::Single(Action::CycleDpiPresets),
+        );
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None);
+        assert!(
+            plan.gesture_bindings.is_empty(),
+            "gestures are off — no raw-XY gesture divert"
+        );
+        assert!(
+            plan.divert_buttons
+                .contains(&(GESTURE_BUTTON_CID, ButtonId::GestureButton)),
+            "a single-bound gesture button must be plain-diverted, or the binding can never fire"
+        );
+    }
+
+    #[test]
+    fn gesture_owner_button_is_never_plain_diverted() {
+        // When the gesture button owns the gesture role, the raw-XY gesture
+        // divert owns CID 0x00c3 — a plain divert on top would strip raw-XY.
+        // (Its default Click projects to a non-default single action, so only
+        // the owner rule keeps it out of the plain list.)
+        let mut cfg = Config::default();
+        cfg.set_gesture_owner("2b042", ButtonId::GestureButton);
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None);
+        assert!(
+            !plan.gesture_bindings.is_empty(),
+            "the gesture button owns the gesture role"
+        );
+        assert!(
+            !plan
+                .divert_buttons
+                .iter()
+                .any(|&(cid, _)| cid == GESTURE_BUTTON_CID),
+            "the gesture owner is delivered via raw-XY divert, never a plain one"
+        );
+    }
+
+    #[test]
+    fn gestures_off_default_gesture_button_stays_native() {
+        // With gestures off and no explicit binding, the gesture button keeps
+        // its native HID behavior — same contract as the standard buttons.
+        let mut cfg = Config::default();
+        cfg.disable_gestures("2b042");
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None);
+        assert!(
+            !plan
+                .divert_buttons
+                .iter()
+                .any(|&(cid, _)| cid == GESTURE_BUTTON_CID),
+            "an unbound gesture button must not be captured"
+        );
+    }
+}
