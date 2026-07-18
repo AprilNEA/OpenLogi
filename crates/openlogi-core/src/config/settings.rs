@@ -73,7 +73,8 @@ pub struct AppSettings {
     /// exclusive `evdev` grab / `WH_MOUSE_LL`) that intercepts mouse events
     /// for button remapping. `true` (default) keeps remapping active;
     /// `false` is an escape hatch that leaves every input device untouched
-    /// (on Linux: no exclusive grabs at all). HID++-side features — DPI,
+    /// (on Linux: no exclusive grabs at all; on macOS the agent also skips
+    /// the startup Accessibility prompt). HID++-side features — DPI,
     /// SmartShift, the gesture button, the thumb wheel — are unaffected.
     /// Takes effect on agent restart.
     #[serde(default = "default_true")]

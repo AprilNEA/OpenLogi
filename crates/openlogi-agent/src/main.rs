@@ -125,20 +125,22 @@ async fn run(config: Config) {
     // LaunchAgent, before `config` moves into the orchestrator.
     launch_agent::reconcile(config.app_settings.launch_at_login);
 
+    // Read the hook kill-switch before `config` moves into the orchestrator.
+    // Startup-only on purpose (like `show_in_menu_bar`): flipping it requires
+    // an agent restart, which the config docs state.
+    let capture_mouse_events = config.app_settings.capture_mouse_events;
+
     // The agent owns the CGEventTap, so it must be the binary the user authorizes
     // for Accessibility. Fire the prompt at startup when we're not yet trusted so
     // openlogi-agent appears (named correctly) in System Settings even on a
     // launchd start with no GUI. macOS only shows the dialog when we're not
     // already in the list, so this doesn't nag on every login. The GUI's grant
     // button drives the same prompt over IPC (`request_accessibility_prompt`).
-    if !Hook::has_accessibility() {
+    // With the hook disabled the agent needs no Accessibility at all, so the
+    // opt-out also silences the permission prompt.
+    if capture_mouse_events && !Hook::has_accessibility() {
         Hook::prompt_accessibility();
     }
-
-    // Read the hook kill-switch before `config` moves into the orchestrator.
-    // Startup-only on purpose (like `show_in_menu_bar`): flipping it requires
-    // an agent restart, which the config docs state.
-    let capture_mouse_events = config.app_settings.capture_mouse_events;
 
     // The orchestrator is shared with the IPC server (which serves inventory /
     // reload / status) and mutated by the watcher select loop, so it lives
