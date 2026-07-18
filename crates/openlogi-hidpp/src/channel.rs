@@ -183,25 +183,20 @@ pub enum HidppMessage {
 impl HidppMessage {
     /// Tries to read a HID++ message from raw data.
     pub fn read_raw(data: &[u8]) -> Option<Self> {
-        if data.is_empty() {
-            return None;
+        let (&report_id, rest) = data.split_first()?;
+
+        // The empty-remainder patterns enforce the exact report lengths.
+        if report_id == SHORT_REPORT_ID
+            && let Some((&payload, [])) = rest.split_first_chunk()
+        {
+            Some(HidppMessage::Short(payload))
+        } else if report_id == LONG_REPORT_ID
+            && let Some((&payload, [])) = rest.split_first_chunk()
+        {
+            Some(HidppMessage::Long(payload))
+        } else {
+            None
         }
-
-        if data[0] == SHORT_REPORT_ID {
-            if data.len() != SHORT_REPORT_LENGTH {
-                return None;
-            }
-
-            return Some(HidppMessage::Short(data[1..].try_into().unwrap()));
-        } else if data[0] == LONG_REPORT_ID {
-            if data.len() != LONG_REPORT_LENGTH {
-                return None;
-            }
-
-            return Some(HidppMessage::Long(data[1..].try_into().unwrap()));
-        }
-
-        None
     }
 
     /// Writes a HID++ message in its raw byte form into a buffer.
