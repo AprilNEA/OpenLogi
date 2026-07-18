@@ -268,6 +268,7 @@ mod tests {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
             dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
+            capture_plans: Arc::new(RwLock::new(Vec::new())),
             thumbwheel_sensitivity: Arc::new(0.into()),
             capture_channel: Arc::new(RwLock::new(None)),
             receiver_access: ReceiverAccess::default(),

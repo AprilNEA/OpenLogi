@@ -7,6 +7,7 @@
 //! without linking gpui.
 
 pub mod bindings;
+pub mod capture_plan;
 pub mod device_order;
 mod dpi;
 pub mod event_monitor;
