@@ -99,6 +99,8 @@ pub(crate) fn run() -> Result<()> {
     let app = root.join("target/release/bundle/osx/OpenLogi.app");
     ensure_dir(&app)?;
     embed_agent_helper(&root, &app, &xcode_env)?;
+    embed_cli(&root, &app, &xcode_env)?;
+    verify_bundle_binaries(&app)?;
     println!();
     println!("Bundle ready: {}", app.display());
     Ok(())
@@ -150,6 +152,33 @@ fn embed_agent_helper(root: &Path, app: &Path, xcode_env: &[(String, String)]) -
     Ok(())
 }
 
+fn embed_cli(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<()> {
+    let sh = Shell::new()?;
+    let _repo = sh.push_dir(root);
+    println!("==> cli (build)");
+    cmd!(sh, "cargo build -p openlogi --release")
+        .envs(xcode_env.iter().map(|(key, value)| (key, value)))
+        .run()?;
+    let cli_bin = root.join("target/release/openlogi");
+    ensure_file(&cli_bin)?;
+
+    let macos = app.join("Contents/MacOS");
+    fs_err::copy(&cli_bin, macos.join("openlogi"))
+        .with_context(|| "could not copy the CLI binary into the app bundle".to_string())?;
+
+    println!("    embedded {}", macos.join("openlogi").display());
+    Ok(())
+}
+
+fn verify_bundle_binaries(app: &Path) -> Result<()> {
+    for binary in ["openlogi", "openlogi-gui"] {
+        let path = app.join("Contents/MacOS").join(binary);
+        ensure_file(&path)
+            .with_context(|| format!("missing required bundle binary {}", path.display()))?;
+    }
+    Ok(())
+}
+
 fn stamp_bundle_version(info_plist: &Path, version: &str) -> Result<()> {
     let mut plist = Value::from_file(info_plist)
         .with_context(|| format!("could not read {}", info_plist.display()))?;
@@ -190,10 +219,20 @@ pub(crate) fn sign_app(identity: &str) -> Result<()> {
     if helper.exists() {
         codesign_runtime(identity, &helper)?;
     }
+    // The embedded CLI is a second Mach-O under Contents/MacOS; sign it with the
+    // hardened runtime before the outer app so it carries a Developer ID
+    // signature (its as-built ad-hoc signature would fail notarization).
+    let cli = app.join("Contents/MacOS/openlogi");
+    if cli.exists() {
+        codesign_runtime(identity, &cli)?;
+    }
     codesign_runtime(identity, &app)?;
     cmd!(sh, "codesign --verify --strict {app}").run()?;
     if helper.exists() {
         cmd!(sh, "codesign --verify --strict {helper}").run()?;
+    }
+    if cli.exists() {
+        cmd!(sh, "codesign --verify --strict {cli}").run()?;
     }
     Ok(())
 }
@@ -207,4 +246,45 @@ fn codesign_runtime(identity: &str, target: &Path) -> Result<()> {
     )
     .run()?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn app_with_binaries(binaries: &[&str]) -> tempfile::TempDir {
+        let app = tempfile::tempdir().unwrap();
+        let macos = app.path().join("Contents/MacOS");
+        fs_err::create_dir_all(&macos).unwrap();
+        for binary in binaries {
+            fs_err::write(macos.join(binary), b"").unwrap();
+        }
+        app
+    }
+
+    #[test]
+    fn verify_bundle_binaries_accepts_cli_and_gui() {
+        let app = app_with_binaries(&["openlogi", "openlogi-gui"]);
+
+        verify_bundle_binaries(app.path()).unwrap();
+    }
+
+    #[test]
+    fn verify_bundle_binaries_rejects_missing_cli() {
+        let app = app_with_binaries(&["openlogi-gui"]);
+
+        let error = verify_bundle_binaries(app.path()).unwrap_err();
+
+        assert!(error.to_string().contains("openlogi"));
+    }
+
+    #[test]
+    fn verify_bundle_binaries_rejects_missing_gui() {
+        let app = app_with_binaries(&["openlogi"]);
+
+        let error = verify_bundle_binaries(app.path()).unwrap_err();
+
+        assert!(error.to_string().contains("openlogi-gui"));
+    }
 }

@@ -830,6 +830,7 @@ fn status_dot(online: bool) -> AnyElement {
         offset: point(px(0.), px(0.)),
         blur_radius: px(6.),
         spread_radius: px(0.5),
+        inset: false,
     }])
     .into_any_element()
 }
