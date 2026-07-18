@@ -14,10 +14,11 @@ pub mod settings;
 pub mod update_consent;
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, Global, Pixels, Render, SharedString, Size, Styled as _,
-    Subscription, TitlebarOptions, WindowBounds, WindowHandle, WindowOptions,
+    App, AppContext as _, Bounds, Context, Global, IntoElement, ParentElement as _, Pixels, Render,
+    SharedString, Size, Styled as _, Subscription, TitlebarOptions, WindowBounds, WindowHandle,
+    WindowOptions, div,
 };
-use gpui_component::{ActiveTheme as _, Root};
+use gpui_component::{ActiveTheme as _, Root, TitleBar};
 use openlogi_core::brand::APP_ID;
 use tracing::warn;
 
@@ -35,6 +36,45 @@ pub struct WindowRegistry {
 }
 
 impl Global for WindowRegistry {}
+
+/// Titlebar options for an app window.
+///
+/// On Linux this returns transparent options so the view can draw a client-side
+/// [`TitleBar`] (see [`aux_title_bar`]); the compositor declines server-side
+/// decorations there and gpui's client-side fallback is otherwise unpainted,
+/// leaving the window with no titlebar or controls. On macOS / Windows it keeps
+/// the native titlebar carrying `title`, unchanged.
+pub fn titlebar_options(title: impl Into<SharedString>) -> TitlebarOptions {
+    if cfg!(target_os = "linux") {
+        TitleBar::title_bar_options()
+    } else {
+        TitlebarOptions {
+            title: Some(title.into()),
+            appears_transparent: false,
+            traffic_light_position: None,
+        }
+    }
+}
+
+/// Client-side window titlebar for auxiliary windows: window controls
+/// (minimize / maximize / close on Linux + Windows), the drag region, and the
+/// window `title` centred. Each auxiliary view renders this as the top of its
+/// layout so the window has a titlebar and controls on Linux, where the
+/// compositor declines server-side decorations and gpui's client-side fallback
+/// is otherwise unpainted. On macOS the widget reserves the traffic-light space.
+pub fn aux_title_bar(title: impl Into<SharedString>, cx: &App) -> impl IntoElement {
+    let title = title.into();
+    TitleBar::new().child(
+        div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(title),
+    )
+}
 
 /// Implemented by every auxiliary root view so [`open_or_focus`] can hand it
 /// the appearance observer to hold onto — dropping the [`Subscription`] would
@@ -74,11 +114,7 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         app_id: Some(APP_ID.into()),
-        titlebar: Some(TitlebarOptions {
-            title: Some(title.clone()),
-            appears_transparent: false,
-            traffic_light_position: None,
-        }),
+        titlebar: Some(titlebar_options(title.clone())),
         ..WindowOptions::default()
     };
 

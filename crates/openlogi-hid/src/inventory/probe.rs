@@ -21,17 +21,19 @@ use tracing::{debug, warn};
 use crate::mappings::{map_kind, map_unifying_kind, resolve_device_kind};
 use crate::route::DIRECT_DEVICE_INDEX;
 
-use super::cache::{CacheKey, CacheOutcome, Cached, probe_or_reuse};
+use super::cache::{CacheKey, CacheOutcome, Cached, probe_or_reuse, seen};
 use super::features::ProbedFeatures;
-use super::{ARRIVAL_DRAIN, MAX_BOLT_SLOTS, UNIFYING_SLOT_PROBE};
+use super::{ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_SLOT_PROBE};
 
 /// One probed node's contribution this tick: its inventory (if any), whether
 /// the node actually answered — the ledger replays the last snapshot when it
-/// didn't (see [`crate::node_ledger::NodeLedger::settle`]) — and each device's
-/// cache contribution, for the caller to apply and to drive eviction.
+/// didn't (see [`crate::node_ledger::NodeLedger::settle`]) — whether the
+/// one-shot retry can stop early, and each device's cache contribution for the
+/// caller to apply and to drive eviction.
 pub(super) struct NodeProbe {
     pub(super) inventory: Option<DeviceInventory>,
     pub(super) healthy: bool,
+    pub(super) complete: bool,
     pub(super) outcomes: Vec<CacheOutcome>,
 }
 
@@ -41,6 +43,7 @@ impl NodeProbe {
         Self {
             inventory: None,
             healthy: false,
+            complete: false,
             outcomes: Vec::new(),
         }
     }
@@ -122,6 +125,7 @@ async fn probe_bolt_receiver(
             paired,
         }),
         healthy: complete,
+        complete,
         outcomes,
     }
 }
@@ -153,6 +157,19 @@ async fn probe_unifying_receiver(
         return NodeProbe::failed();
     };
     debug!(events = connections.len(), "drained device-arrival events");
+
+    // The receiver can re-broadcast the same 0x41 for a slot more than once per
+    // trigger, so keep one connection per slot — otherwise the device is listed
+    // twice. Last write wins: a later event carries the freshest online flag.
+    let mut connections: Vec<_> = connections
+        .into_iter()
+        .map(|c| (c.index, c))
+        .collect::<HashMap<_, _>>()
+        .into_values()
+        .collect();
+    // HashMap iteration is unordered; sort by slot so the device list is stable
+    // across probe cycles instead of jittering.
+    connections.sort_by_key(|c| c.index);
 
     // Probe all online slots concurrently so a slow HID++ 2.0 feature walk on
     // one device doesn't push the next slot past the PROBE_BUDGET deadline.
@@ -189,12 +206,18 @@ async fn probe_unifying_receiver(
         );
     }
     // Unlike Bolt, a count/list shortfall is *expected* here (offline paired
-    // devices aren't enumerable yet), so completeness can't ride on it. The
-    // health signal is the pairing-count register answering at all: that
+    // devices aren't enumerable yet), so ledger health can't ride on it. The
+    // ledger health signal is the pairing-count register answering at all: that
     // proves the receiver round-trip worked this cycle, while `None` (e.g. a
     // parked channel) is "couldn't fully check" — the ledger then replays the
     // last good snapshot instead of presenting a possibly-empty list (#218).
+    //
+    // The one-shot CLI path still needs a retry when the count says more
+    // devices may appear after a late arrival drain. Report that separately as
+    // `complete = false`; the unchanged-inventory fallback stops expected
+    // offline Unifying shortfalls after they stabilize.
     let healthy = pairing_count.is_some();
+    let complete = pairing_count.is_some_and(|count| paired.len() == usize::from(count));
 
     NodeProbe {
         inventory: Some(DeviceInventory {
@@ -207,6 +230,7 @@ async fn probe_unifying_receiver(
             paired,
         }),
         healthy,
+        complete,
         outcomes,
     }
 }
@@ -253,7 +277,24 @@ async fn probe_bolt_slot(
     let cached = id.as_ref().and_then(|i| cache.get(i));
     let register_kind = map_kind(bolt_kind);
 
-    let (probe, outcome) = probe_or_reuse(channel, slot, id, cached, online, tick).await;
+    // Cap the feature walk per slot so one device that stops answering can't
+    // burn the whole receiver's `PROBE_BUDGET` and time out `probe_one` — which
+    // would drop *every* device on the receiver. A timed-out slot falls back to
+    // its cached probe (its pairing-register identity above already read fine),
+    // mirroring the Unifying path (#218).
+    let probe_result = timeout(
+        BOLT_SLOT_PROBE,
+        probe_or_reuse(channel, slot, id.clone(), cached, online, tick),
+    )
+    .await;
+    let (probe, outcome) = if let Ok(r) = probe_result {
+        r
+    } else {
+        debug!(slot, budget = ?BOLT_SLOT_PROBE,
+            "Bolt slot probe timed out; using cached data if available");
+        let probe = cached.map_or_else(ProbedFeatures::default, |c| c.probe.clone());
+        (probe, seen(id))
+    };
     if matches!(outcome, CacheOutcome::Fresh(..))
         && let Some(probed) = probe.kind
         && probed != DeviceKind::Unknown
@@ -336,6 +377,7 @@ async fn probe_direct(
         return NodeProbe {
             inventory: None,
             healthy: walk_succeeded,
+            complete: walk_succeeded,
             outcomes: vec![CacheOutcome::Unkeyed],
         };
     }
@@ -368,6 +410,7 @@ async fn probe_direct(
     NodeProbe {
         inventory: Some(inventory),
         healthy: true,
+        complete: true,
         outcomes: vec![outcome],
     }
 }
@@ -397,6 +440,12 @@ async fn drain_device_arrival(bolt: &BoltReceiver) -> Vec<BoltDeviceConnection> 
 async fn drain_device_arrival_unifying(
     unifying: &UnifyingReceiver,
 ) -> Option<Vec<UnifyingDeviceConnection>> {
+    // The receiver only re-broadcasts 0x41 arrival events while wireless
+    // notifications are on; without this the trigger below is ACK'd but emits
+    // nothing, so a paired online device never surfaces.
+    if let Err(e) = unifying.set_wireless_notifications(true).await {
+        debug!(error = ?e, "enable wireless notifications failed");
+    }
     let rx = unifying.listen();
     if let Err(e) = unifying.trigger_device_arrival().await {
         debug!(error = ?e, "trigger_device_arrival failed; receiver may report no devices");
@@ -430,7 +479,7 @@ async fn probe_unifying_slot(
     tick: u64,
 ) -> Option<(PairedDevice, CacheOutcome)> {
     let slot = event.index;
-    let codename = read_codename(channel, slot).await;
+    let codename = read_codename_unifying(channel, slot).await;
     debug!(
         slot,
         online = event.online,
@@ -449,9 +498,16 @@ async fn probe_unifying_slot(
     let cached = cache.get(&id);
     let register_kind = map_unifying_kind(event.kind);
 
+    // `trigger_device_arrival` re-broadcasts a 0x41 for *every* paired slot,
+    // online or not, and the crate's `event.online` reads the wrong notification
+    // byte (payload[1] bit6, always set here — wire-verified `04 62 69 40`), so
+    // neither tells us if the device is actually reachable on this receiver.
+    // We therefore always attempt the probe (passing `true`) and treat the
+    // feature walk succeeding as the real liveness signal below — a device that
+    // moved to Bluetooth answers `DeviceNotFound` and surfaces as offline.
     let probe_result = timeout(
         UNIFYING_SLOT_PROBE,
-        probe_or_reuse(channel, slot, Some(id.clone()), cached, event.online, tick),
+        probe_or_reuse(channel, slot, Some(id.clone()), cached, true, tick),
     )
     .await;
     let (probe, outcome) = if let Ok(r) = probe_result {
@@ -468,12 +524,40 @@ async fn probe_unifying_slot(
         codename,
         wpid: Some(event.wpid),
         kind: resolve_device_kind(probe.kind, register_kind),
-        online: event.online,
+        // Reachable on this receiver iff the feature walk got through this tick.
+        // Caveat: a GUI cache hit can serve stale capabilities for up to
+        // REFRESH_TICKS after the device leaves for Bluetooth, briefly showing it
+        // online; self-heals on the next forced re-probe. Add a per-tick liveness
+        // ping if that window ever matters.
+        online: probe.capabilities.is_some(),
         battery: probe.battery,
         model_info: probe.model_info,
         capabilities: probe.capabilities,
     };
     Some((device, outcome))
+}
+
+/// Reads a Unifying paired device's name. Unifying stores names at
+/// sub-register base `0x40` (device `n` at `0x40 + (n-1)`), a different layout
+/// from Bolt's `0x60`: the long-register response is `[sub, len, data..]` with
+/// no chunk byte — wire-verified `40 0c "MX Master 2S"`. The name lives on the
+/// receiver, so it reads even while the device is offline (e.g. moved to BT).
+async fn read_codename_unifying(channel: &HidppChannel, slot: u8) -> Option<String> {
+    let response = channel
+        .read_long_register(0xFF, 0xB5, [0x40 + slot - 1, 0x00, 0x00])
+        .await
+        .ok()?;
+    parse_codename_unifying(&response)
+}
+
+/// Parse a Unifying name-register response `[sub, len, data..]` into a string.
+/// The device-reported `len` is clamped to the bytes actually present so a
+/// bogus length can't over-read the fixed long-register buffer.
+pub(super) fn parse_codename_unifying(response: &[u8]) -> Option<String> {
+    let len = usize::from(*response.get(1)?).min(response.len().saturating_sub(2));
+    core::str::from_utf8(response.get(2..2 + len)?)
+        .ok()
+        .map(str::to_string)
 }
 
 /// Reads a paired device's codename, working around a slicing bug in

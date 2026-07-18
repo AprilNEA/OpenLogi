@@ -145,7 +145,7 @@ fn dmg_arch(name: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
     use super::*;
 

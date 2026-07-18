@@ -107,3 +107,30 @@ fn summarize_dpi(capabilities: &openlogi_hid::DpiCapabilities) -> String {
         values.len()
     )
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
+mod summarize_dpi_tests {
+    use openlogi_hid::DpiCapabilities;
+
+    use super::summarize_dpi;
+
+    #[test]
+    fn lists_values_verbatim_at_the_twelve_value_boundary() {
+        let values: Vec<u16> = (1..=12).map(|n| n * 100).collect();
+        let caps = DpiCapabilities::new(values).expect("non-empty");
+
+        assert_eq!(
+            summarize_dpi(&caps),
+            "100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200"
+        );
+    }
+
+    #[test]
+    fn switches_to_a_range_summary_past_twelve_values() {
+        let values: Vec<u16> = (1..=13).map(|n| n * 100).collect();
+        let caps = DpiCapabilities::new(values).expect("non-empty");
+
+        assert_eq!(summarize_dpi(&caps), "100..1300 (step ≈ 100, 13 values)");
+    }
+}

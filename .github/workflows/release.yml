@@ -115,6 +115,7 @@ jobs:
           set -euo pipefail
           app="target/release/bundle/osx/OpenLogi.app"
           helper="$app/Contents/Library/LoginItems/OpenLogiAgent.app"
+          cli="$app/Contents/MacOS/openlogi"
           # Inside-out signing: seal the nested agent helper with its own
           # signature first, then the outer app (which seals the signed helper).
           # --deep is deprecated and can't give the helper an independent
@@ -124,10 +125,18 @@ jobs:
             codesign --force --options runtime --timestamp \
               --sign "$APPLE_SIGNING_IDENTITY" "$helper"
           fi
+          # The embedded CLI is a second Mach-O under Contents/MacOS; sign it
+          # with the hardened runtime before the outer app or notarization
+          # rejects its as-built ad-hoc signature.
+          if [ -f "$cli" ]; then
+            codesign --force --options runtime --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" "$cli"
+          fi
           codesign --force --options runtime --timestamp \
             --sign "$APPLE_SIGNING_IDENTITY" "$app"
           codesign --verify --strict --verbose=2 "$app"
           [ -d "$helper" ] && codesign --verify --strict --verbose=2 "$helper"
+          [ -f "$cli" ] && codesign --verify --strict --verbose=2 "$cli"
 
       - name: Create and sign DMG
         env:
@@ -254,13 +263,14 @@ jobs:
           : "${AZURE_SIGNING_ACCOUNT:?Configure AZURE_SIGNING_ACCOUNT in the Azure 1Password item}"
           : "${AZURE_CERT_PROFILE:?Configure AZURE_CERT_PROFILE in the Azure 1Password item}"
 
-      # The exe IS the product on Windows — no separate CLI artifact will ever
-      # ship there (cargo install covers that audience), so job and artifact
-      # names carry no GUI qualifier. The headless agent (ported in #167)
-      # joins the artifact set once it has been runtime-tested on a real
-      # Windows box.
-      - name: Build OpenLogi
-        run: cargo build --release -p openlogi-gui --target ${{ matrix.target }}
+      # No separate CLI artifact will ever ship on Windows (cargo install
+      # covers that audience), so job and artifact names carry no GUI
+      # qualifier. The GUI is a thin IPC client; the headless agent (ported in
+      # #167) owns the device I/O, input hook, and IPC server, and the GUI
+      # spawns a sibling `openlogi-agent.exe` when the pipe is absent — so the
+      # agent MUST ship next to the GUI or the app connects to nothing (#347).
+      - name: Build OpenLogi (GUI + agent)
+        run: cargo build --release -p openlogi-gui -p openlogi-agent --target ${{ matrix.target }}
 
       # Federated (passwordless) login. Requires an app registration whose federated
       # credential subject is `repo:AprilNEA/OpenLogi:environment:release`, granted the
@@ -287,13 +297,16 @@ jobs:
       # Authenticode-signs via Artifact Signing (ex-Trusted Signing). The action only
       # runs on Windows runners. azure/login leaves an az CLI session that the action's
       # default AzureCliCredential picks up, so no azure-* secret inputs are needed.
-      - name: Sign openlogi-gui.exe with Artifact Signing
+      - name: Sign openlogi-gui.exe and openlogi-agent.exe with Artifact Signing
         uses: azure/artifact-signing-action@v2
         with:
           endpoint: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
           signing-account-name: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
-          files: ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-gui.exe
+          # `files` is a newline-separated list; one call signs both PE files.
+          files: |
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-gui.exe
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-agent.exe
           # Timestamping is mandatory: without it the signature expires after
           # 3 days. The URL must stay http — SignTool rejects an https /tr up
           # front ("SignTool Error: Invalid Timestamp URL", v0.6.5) before
@@ -305,35 +318,43 @@ jobs:
           # per-tag refs no future run can restore, so skip them.
           cache-dependencies: false
 
-      - name: Verify the binary is signed
+      - name: Verify the binaries are signed
         shell: pwsh
         run: |
-          $sig = Get-AuthenticodeSignature target\${{ matrix.target }}\release\openlogi-gui.exe
-          $sig | Format-List
           # The signing step above already fails on error; this guards against it
           # silently producing an unsigned or corrupted binary. NotSigned and
           # HashMismatch (bytes no longer match the signature) are trust-store
           # independent and always ship-blockers; NotTrusted/UnknownError depend
           # on the runner's trust store, so they stay log-only.
-          if ($null -eq $sig.SignerCertificate -or
-              "$($sig.Status)" -in 'NotSigned', 'HashMismatch') {
-            Write-Error "openlogi-gui.exe Authenticode signature is invalid: $($sig.Status)"
-            exit 1
+          foreach ($exe in 'openlogi-gui.exe', 'openlogi-agent.exe') {
+            $sig = Get-AuthenticodeSignature "target\${{ matrix.target }}\release\$exe"
+            $sig | Format-List
+            if ($null -eq $sig.SignerCertificate -or
+                "$($sig.Status)" -in 'NotSigned', 'HashMismatch') {
+              Write-Error "$exe Authenticode signature is invalid: $($sig.Status)"
+              exit 1
+            }
           }
 
-      - name: Collect signed exe artifact
+      # The portable artifact is a zip of both exes: a bare exe has nowhere to
+      # put the agent, and GUI-only can never work (#347). Inside the zip the
+      # GUI carries the product name (`OpenLogi.exe`, matching the MSI layout)
+      # and the agent keeps the exact name the GUI's sibling lookup expects.
+      - name: Collect signed portable zip artifact
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          # Renaming after signing is safe: Authenticode lives in the PE file.
+          New-Item -ItemType Directory -Force -Path dist, stage | Out-Null
+          Copy-Item target\${{ matrix.target }}\release\openlogi-gui.exe stage\OpenLogi.exe
+          Copy-Item target\${{ matrix.target }}\release\openlogi-agent.exe stage\openlogi-agent.exe
+          # Zipping after signing is safe: Authenticode lives in the PE files.
           $ref = $env:GITHUB_REF_NAME -replace '/', '-'
-          Copy-Item target\${{ matrix.target }}\release\openlogi-gui.exe "dist\OpenLogi-$ref-windows-${{ matrix.arch }}.exe"
+          Compress-Archive -Path stage\* -DestinationPath "dist\OpenLogi-$ref-windows-${{ matrix.arch }}.zip"
 
       - uses: actions/upload-artifact@v7
         with:
           name: OpenLogi-windows-${{ matrix.arch }}
-          path: dist/*.exe
-          # 'warn' (the default) would let a no-exe job stay green, and publish
+          path: dist/*.zip
+          # 'warn' (the default) would let a no-zip job stay green, and publish
           # would then die at the by-name download instead of shipping DMG-only.
           if-no-files-found: error
 
@@ -366,11 +387,23 @@ jobs:
       # Needed for packaging/windows/OpenLogi.wxs.
       - uses: actions/checkout@v6
 
-      # The already-signed exe from this arch's windows leg.
+      # The portable zip from this arch's windows leg, containing the
+      # already-signed OpenLogi.exe and openlogi-agent.exe. The MSI packages
+      # exactly the bytes the portable artifact ships.
       - uses: actions/download-artifact@v8
         with:
           name: OpenLogi-windows-${{ matrix.arch }}
-          path: signed-exe
+          path: signed-zip
+
+      - name: Extract the signed exes
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem signed-zip\*.zip | Select-Object -First 1
+          if ($null -eq $zip) {
+            Write-Error "No portable zip found in signed-zip\ — nothing to package"
+            exit 1
+          }
+          Expand-Archive -Path $zip.FullName -DestinationPath signed-exe
 
       - name: Load Azure signing config from 1Password
         id: azure_config
@@ -408,7 +441,11 @@ jobs:
         # Pinned exactly: a WiX point release can silently change the produced
         # MSI (validation, cab layout), and nothing in CI installs the MSI, so
         # drift would only surface on end-user machines. Bump deliberately.
-        run: dotnet tool install --global wix --version 6.0.2
+        # The Util extension (util:CloseApplication in OpenLogi.wxs) is pinned
+        # to the same version — WiX extensions release in lockstep with wix.
+        run: |
+          dotnet tool install --global wix --version 6.0.2
+          wix extension add --global WixToolset.Util.wixext/6.0.2
 
       - name: Build the MSI
         shell: pwsh
@@ -420,20 +457,25 @@ jobs:
           } else {
             $version = '0.0.0'
           }
-          $exe = Get-ChildItem signed-exe\*.exe | Select-Object -First 1
-          # Upstream invariants (upload's if-no-files-found: error, the
-          # by-name download) should make this unreachable; the guard turns a
-          # confusing "$null.FullName -> empty -d ExeFile" wix error into a
-          # named cause if those invariants ever shift.
-          if ($null -eq $exe) {
-            Write-Error "No signed exe found in signed-exe\ — nothing to package"
+          # Selected by exact name, never by glob order: the zip carries two
+          # exes, and Get-ChildItem's alphabetical sort would put the agent
+          # first. Upstream invariants (upload's if-no-files-found: error, the
+          # by-name download, the extract step's guard) should make the misses
+          # unreachable; the guards turn a confusing "$null.FullName -> empty
+          # -d" wix error into a named cause if those invariants ever shift.
+          $gui = Get-Item signed-exe\OpenLogi.exe -ErrorAction SilentlyContinue
+          $agent = Get-Item signed-exe\openlogi-agent.exe -ErrorAction SilentlyContinue
+          if ($null -eq $gui -or $null -eq $agent) {
+            Write-Error "signed-exe\ must contain OpenLogi.exe and openlogi-agent.exe — nothing to package"
             exit 1
           }
           New-Item -ItemType Directory -Force -Path out | Out-Null
           wix build packaging\windows\OpenLogi.wxs `
+            -ext WixToolset.Util.wixext `
             -arch ${{ matrix.msi_platform }} `
             -d Version=$version `
-            -d ExeFile="$($exe.FullName)" `
+            -d ExeFile="$($gui.FullName)" `
+            -d AgentExeFile="$($agent.FullName)" `
             -o out\OpenLogi.msi
 
       - name: Azure login (OIDC)
@@ -627,6 +669,11 @@ jobs:
             ext="${pkg##*.}"
             cp "$pkg" "dist/openlogi-${ref_name}-linux-${PKG_ARCH}.${ext}"
           done
+          # .pkg.tar.zst has a compound extension; handle it separately.
+          for pkg in target/release/*.pkg.tar.zst; do
+            [ -f "$pkg" ] || continue
+            cp "$pkg" "dist/openlogi-${ref_name}-linux-${PKG_ARCH}.pkg.tar.zst"
+          done
 
       - uses: actions/upload-artifact@v7
         with:
@@ -642,13 +689,13 @@ jobs:
     name: Publish release
     runs-on: ubuntu-latest
     needs: [macos, windows, windows-msi, linux-packages, release-notes]
-    # Wait for the Windows jobs (so the successful .exe/.msi set can be attached)
+    # Wait for the Windows jobs (so the successful .zip/.msi set can be attached)
     # but do NOT let their failure block the macOS release. `!cancelled()` removes
     # the implicit "all needs succeeded" gate, so the required deps are checked
     # explicitly here — the windows jobs are deliberately absent from this condition.
     # NOTE: after such a partial publish, do NOT "re-run failed jobs" — publish
     # re-runs as windows' dependent and fails against the now-immutable release
-    # (and would overwrite immutable-cached R2 objects). A missed .exe ships
+    # (and would overwrite immutable-cached R2 objects). A missed .zip ships
     # with the next tag instead.
     if: ${{ github.ref_type == 'tag' && !cancelled() && needs.macos.result == 'success' && needs.release-notes.result == 'success' }}
     permissions:
@@ -668,11 +715,11 @@ jobs:
           merge-multiple: true
 
       # Best-effort per arch — deliberately NOT gated on needs.windows.result:
-      # that is the matrix aggregate, and the proven x86_64 exe must not be
+      # that is the matrix aggregate, and the proven x86_64 zip must not be
       # held hostage by the experimental arm64 leg (or vice versa). Each leg
-      # uploads its artifact only after its exe is built, signed, and verified,
-      # so whatever arrived is safe to ship. A pattern download that matches
-      # nothing succeeds with an empty dist (unlike by-name, which fails).
+      # uploads its artifact only after both exes are built, signed, and
+      # verified, so whatever arrived is safe to ship. A pattern download that
+      # matches nothing succeeds with an empty dist (unlike by-name, which fails).
       - uses: actions/download-artifact@v8
         with:
           pattern: OpenLogi-windows-*
@@ -696,14 +743,15 @@ jobs:
           # The DMGs are the release gate — fail loudly if none arrived (with
           # nullglob alone, sha256sum with zero args would silently hash stdin).
           compgen -G '*.dmg' > /dev/null
-          # nullglob: when the Windows job didn't ship an .exe, *.exe drops to
+          # nullglob: when the Windows job didn't ship a .zip, *.zip drops to
           # nothing instead of erroring on a literal pattern, so the DMGs are
-          # hashed alone.
+          # hashed alone. The Windows portable artifact is a zip of the GUI +
+          # agent exes (#347); no bare .exe ships anymore.
           shopt -s nullglob
-          sha256sum *.dmg *.exe *.msi *.deb *.rpm > SHA256SUMS
+          sha256sum -- *.dmg *.zip *.msi *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
 
       # softprops' `files` can't list a glob that matches nothing without
-      # tripping fail_on_unmatched_files. The Windows exe/msi (per arch leg)
+      # tripping fail_on_unmatched_files. The Windows zip/msi (per arch leg)
       # and the Linux deb/rpm are all best-effort — only the DMGs, SHA256SUMS
       # and the .minisig set are guaranteed by the publish gate — so record
       # what actually arrived. This is what lets a failing Windows or Linux
@@ -711,13 +759,18 @@ jobs:
       - name: Detect best-effort artifacts
         id: artifacts
         run: |
-          for ext in exe msi deb rpm; do
+          for ext in zip msi deb rpm; do
             if compgen -G "dist/*.$ext" > /dev/null; then
               echo "$ext=true" >> "$GITHUB_OUTPUT"
             else
               echo "$ext=false" >> "$GITHUB_OUTPUT"
             fi
           done
+          if compgen -G "dist/*.pkg.tar.zst" > /dev/null; then
+            echo "pacman=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pacman=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Load static updater publishing config from 1Password
         id: r2_config
@@ -776,11 +829,11 @@ jobs:
           # treatment as the DMGs: manual verification today, and the future
           # auto-updaters need the detached signatures to exist for every
           # shipped version.
-          # nullglob: the exe/msi/deb/rpm sets are best-effort per arch leg, so
+          # nullglob: the zip/msi/deb/rpm sets are best-effort per arch leg, so
           # the globs may match nothing; the DMGs are guaranteed by the publish
           # gate.
           shopt -s nullglob
-          for artifact in dist/*.dmg dist/*.exe dist/*.msi dist/*.deb dist/*.rpm; do
+          for artifact in dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst; do
             minisign -S -m "$artifact" -s "$key_file" -x "$artifact.minisig" -W
             minisign -V -m "$artifact" -P "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" -x "$artifact.minisig"
           done
@@ -812,15 +865,18 @@ jobs:
 
           # The Windows binaries' distribution channel is the GitHub Release;
           # latest.json is still dmg-only, so nothing in the updater bucket
-          # references the exe/msi or their minisigs — keep them all out of
+          # references the zip/msi or their minisigs — keep them all out of
           # the immutable releases/ prefix until the Windows auto-updater
-          # lands. SHA256SUMS still lists them — it describes the GitHub
-          # Release's asset set.
+          # lands (#347 PR 4). SHA256SUMS still lists them — it describes the
+          # GitHub Release's asset set. *.exe stays excluded defensively even
+          # though no bare exe ships anymore.
           aws s3 cp dist/ "$release_prefix/" \
             --recursive \
             --exclude latest.json \
             --exclude "*.exe" \
             --exclude "*.exe.minisig" \
+            --exclude "*.zip" \
+            --exclude "*.zip.minisig" \
             --exclude "*.msi" \
             --exclude "*.msi.minisig" \
             --cache-control "public, max-age=31536000, immutable" \
@@ -845,10 +901,11 @@ jobs:
             dist/*.dmg
             dist/*.minisig
             dist/SHA256SUMS
-            ${{ steps.artifacts.outputs.exe == 'true' && 'dist/*.exe' || '' }}
+            ${{ steps.artifacts.outputs.zip == 'true' && 'dist/*.zip' || '' }}
             ${{ steps.artifacts.outputs.msi == 'true' && 'dist/*.msi' || '' }}
             ${{ steps.artifacts.outputs.deb == 'true' && 'dist/*.deb' || '' }}
             ${{ steps.artifacts.outputs.rpm == 'true' && 'dist/*.rpm' || '' }}
+            ${{ steps.artifacts.outputs.pacman == 'true' && 'dist/*.pkg.tar.zst' || '' }}
           fail_on_unmatched_files: true
 
   homebrew-tap:

@@ -18,8 +18,8 @@ pub(super) use gpui::{
     prelude::FluentBuilder, px, rgb,
 };
 pub(super) use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, IndexPath, Selectable, Sizable, Theme, ThemeColor,
-    ThemeMode, ThemeRegistry,
+    ActiveTheme, Disableable, Icon, IconName, IndexPath, Selectable, Sizable, TITLE_BAR_HEIGHT,
+    Theme, ThemeColor, ThemeMode, ThemeRegistry,
     button::{Button, ButtonGroup, ButtonVariants},
     group_box::GroupBoxVariant,
     h_flex,
@@ -39,19 +39,23 @@ pub(super) use openlogi_core::config::{
 };
 
 pub(super) use crate::app_menu::{CloseWindow, Minimize, Zoom};
+pub(super) use crate::asset::sync::{AssetCommand, AssetControl};
 #[cfg(target_os = "macos")]
 pub(super) use crate::platform::permissions::Permission;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(super) use crate::platform::permissions::PermissionStatus;
 pub(super) use crate::state::AppState;
 pub(super) use crate::theme::{self, Palette};
-pub(super) use crate::{AssetCommand, AssetControl};
 
 use crate::windows::{self, AuxWindow};
 
 mod about;
 mod appearance;
 mod assets;
+// Event-tap enumeration is a macOS (`CGEventTap`) concept; the Diagnostics page
+// that surfaces it is macOS-only.
+#[cfg(target_os = "macos")]
+mod diagnostics;
 mod general;
 mod language;
 mod permissions;
@@ -119,6 +123,11 @@ pub struct SettingsView {
     /// re-walking the cache on every render. A snapshot — reopen to refresh
     /// after a Clear.
     asset_cache_desc: SharedString,
+    /// Drives the debug live event monitor: polls the agent on a timer while the
+    /// Settings window is open. Dropping it with the view stops polling, which
+    /// lets the agent's idle janitor turn monitoring back off.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    _monitor_task: gpui::Task<()>,
 }
 
 impl SettingsView {
@@ -167,6 +176,39 @@ impl SettingsView {
         cx.subscribe_in(&sensitivity_slider, window, Self::on_sensitivity_slider)
             .detach();
 
+        // Poll the agent's live event monitor while this window is open. The task
+        // is held in the view, so closing Settings drops it, polling stops, and
+        // the agent disables monitoring on its own.
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        let monitor_task = cx.spawn(async move |_view, cx| {
+            loop {
+                // Refresh the event-tap snapshot the Diagnostics page reads, so
+                // its per-frame render works off this cache instead of issuing
+                // CGGetEventTapList syscalls on every repaint.
+                let taps = openlogi_hook::Hook::list_event_taps();
+                let sender = cx.update_global::<AppState, _>(|s, _| s.ipc_sender());
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let events = if sender
+                    .send(crate::ipc_client::Command::PollEventMonitor(tx))
+                    .is_ok()
+                {
+                    rx.await.unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                cx.update_global::<AppState, _>(|state, cx| {
+                    state.set_event_taps(taps);
+                    if !events.is_empty() {
+                        state.push_monitor_events(events);
+                    }
+                    cx.refresh_windows();
+                });
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(300))
+                    .await;
+            }
+        });
+
         Self {
             focus_handle,
             appearance_obs: None,
@@ -180,6 +222,8 @@ impl SettingsView {
             copied: false,
             copied_gen: 0,
             asset_cache_desc: assets::cache_size_description(),
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            _monitor_task: monitor_task,
         }
     }
 
@@ -247,7 +291,7 @@ pub fn open(cx: &mut App) {
 pub fn open_at(page: SettingsPage, cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.settings,
-        "Settings",
+        tr!("Settings"),
         Size::new(px(840.), px(600.)),
         move |window, cx| SettingsView::new(page, window, cx),
         cx,
@@ -259,37 +303,57 @@ impl Render for SettingsView {
         let pal = theme::palette(cx);
         let view = cx.entity();
 
+        // Outline group boxes give every page bordered cards (depth /
+        // definition that the flat Fill variant lacked); the hero /
+        // source / config blocks are custom rows inside them.
+        let settings = Settings::new("settings")
+            .with_group_variant(GroupBoxVariant::Outline)
+            .sidebar_width(px(210.))
+            .default_selected_index(SelectIndex {
+                page_ix: self.initial_page.index(),
+                group_ix: None,
+            })
+            .page(general::general_page(self.sensitivity_slider.clone()))
+            .page(updates::updates_page(self.updater.clone(), pal))
+            .page(permissions::permissions_page(pal))
+            .page(appearance::appearance_page(
+                view.clone(),
+                self.theme_filter,
+                self.theme_search.clone(),
+                self.language_select.clone(),
+                pal,
+            ))
+            .page(assets::assets_page(pal, self.asset_cache_desc.clone()))
+            .page(about::about_page(view, self.copied, pal));
+        // Surfaces competing macOS event taps (a pointer-lag cause) and, in debug
+        // builds, the full tap list and a live event monitor. Appended after
+        // About so [`SettingsPage::index`] stays platform-independent.
+        #[cfg(target_os = "macos")]
+        let settings = settings.page(diagnostics::diagnostics_page(pal));
+
         div()
             .size_full()
+            .relative()
             .bg(pal.bg)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            .child(
-                // Outline group boxes give every page bordered cards (depth /
-                // definition that the flat Fill variant lacked); the hero /
-                // source / config blocks are custom rows inside them.
-                Settings::new("settings")
-                    .with_group_variant(GroupBoxVariant::Outline)
-                    .sidebar_width(px(210.))
-                    .default_selected_index(SelectIndex {
-                        page_ix: self.initial_page.index(),
-                        group_ix: None,
-                    })
-                    .page(general::general_page(self.sensitivity_slider.clone()))
-                    .page(updates::updates_page(self.updater.clone(), pal))
-                    .page(permissions::permissions_page(pal))
-                    .page(appearance::appearance_page(
-                        view.clone(),
-                        self.theme_filter,
-                        self.theme_search.clone(),
-                        self.language_select.clone(),
-                        pal,
-                    ))
-                    .page(assets::assets_page(pal, self.asset_cache_desc.clone()))
-                    .page(about::about_page(view, self.copied, pal)),
-            )
+            // Linux only: a client-side titlebar as an absolute overlay (with
+            // matching top padding) rather than a flex-column row — the
+            // `Settings` sidebar uses `h_resizable` percentage sizing, which a
+            // flex column would break. macOS / Windows keep their native titlebar.
+            .when(cfg!(target_os = "linux"), |this| {
+                this.pt(TITLE_BAR_HEIGHT).child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .child(windows::aux_title_bar(tr!("Settings"), cx)),
+                )
+            })
+            .child(settings)
     }
 }

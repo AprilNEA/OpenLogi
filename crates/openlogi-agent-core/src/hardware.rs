@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, DeviceRoute, DpiInfo, HidppOperation, SharedChannel, SmartShiftMode,
-    SmartShiftStatus, WriteError,
+    CaptureChannel, DeviceRoute, DpiInfo, HidppFeatureErrorKind, HidppOperation, ScrollResolution,
+    SharedChannel, SmartShiftMode, SmartShiftStatus, WriteError,
 };
 use tracing::{debug, warn};
 
@@ -228,9 +228,12 @@ pub fn write_dpi_in_background(
                 return;
             }
         };
-        // All device-supported DPI values fit in HID++'s u16 wire field. The
-        // saturating fallback exists only for type-system exhaustiveness.
-        let dpi_u16 = u16::try_from(dpi).unwrap_or(u16::MAX);
+        // All device-supported DPI values fit in HID++'s u16 wire field; a
+        // larger value is a caller bug and must not be clamped onto the device.
+        let Ok(dpi_u16) = u16::try_from(dpi) else {
+            warn!(dpi, "DPI exceeds the HID++ u16 wire field; write skipped");
+            return;
+        };
         let result = rt.block_on(async {
             tokio::time::timeout(WRITE_BUDGET, async {
                 match &shared {
@@ -256,21 +259,47 @@ pub fn write_dpi_in_background(
     });
 }
 
-/// Spawn an OS thread that writes native vertical-scroll inversion to the
-/// device at `target` via HID++ `0x2121`. Unsupported devices are expected and
-/// only logged at debug level because not every Logitech device exposes native
-/// wheel inversion.
-pub fn write_scroll_inversion_in_background(
+#[derive(Debug, Clone, Copy)]
+enum ScrollWheelModeChange {
+    Resolution(ScrollResolution),
+    Inversion(bool),
+    ResolutionAndInversion {
+        resolution: ScrollResolution,
+        inverted: bool,
+    },
+}
+
+/// Spawn an OS thread that reconciles the configured native HiResWheel mode.
+///
+/// `resolution == None` preserves the current device resolution;
+/// `inverted == None` preserves the current inversion bit. At least one field
+/// must be set by the caller. Unsupported devices are expected and only logged
+/// at debug level.
+pub fn write_scroll_wheel_mode_in_background(
     capture: Option<&CaptureChannel>,
     target: Option<DeviceRoute>,
-    inverted: bool,
+    resolution: Option<ScrollResolution>,
+    inverted: Option<bool>,
 ) {
     let Some(target) = target else {
         debug!(
-            inverted,
-            "no target device — scroll inversion write skipped"
+            ?resolution,
+            ?inverted,
+            "no target device — wheel mode write skipped"
         );
         return;
+    };
+    let change = match (resolution, inverted) {
+        (Some(resolution), Some(inverted)) => ScrollWheelModeChange::ResolutionAndInversion {
+            resolution,
+            inverted,
+        },
+        (Some(resolution), None) => ScrollWheelModeChange::Resolution(resolution),
+        (None, Some(inverted)) => ScrollWheelModeChange::Inversion(inverted),
+        (None, None) => {
+            debug!("no configured wheel mode fields — write skipped");
+            return;
+        }
     };
     let shared = reusable_channel(capture, &target);
     let reused = shared.is_some();
@@ -281,32 +310,73 @@ pub fn write_scroll_inversion_in_background(
         {
             Ok(rt) => rt,
             Err(e) => {
-                warn!(error = %e, "tokio runtime init failed; scroll inversion write skipped");
+                warn!(error = %e, "tokio runtime init failed; wheel mode write skipped");
                 return;
             }
         };
         let result = rt.block_on(async {
             tokio::time::timeout(WRITE_BUDGET, async {
-                match &shared {
-                    Some(shared) => openlogi_hid::set_scroll_inversion_on(shared, inverted).await,
-                    None => openlogi_hid::set_scroll_inversion(&target, inverted).await,
+                match (change, &shared) {
+                    (
+                        ScrollWheelModeChange::ResolutionAndInversion {
+                            resolution,
+                            inverted,
+                        },
+                        Some(shared),
+                    ) => openlogi_hid::set_scroll_wheel_mode_on(shared, resolution, inverted)
+                        .await
+                        .map(|_| ()),
+                    (
+                        ScrollWheelModeChange::ResolutionAndInversion {
+                            resolution,
+                            inverted,
+                        },
+                        None,
+                    ) => openlogi_hid::set_scroll_wheel_mode(&target, resolution, inverted)
+                        .await
+                        .map(|_| ()),
+                    (ScrollWheelModeChange::Resolution(resolution), Some(shared)) => {
+                        openlogi_hid::set_scroll_resolution_on(shared, resolution)
+                            .await
+                            .map(|_| ())
+                    }
+                    (ScrollWheelModeChange::Resolution(resolution), None) => {
+                        openlogi_hid::set_scroll_resolution(&target, resolution)
+                            .await
+                            .map(|_| ())
+                    }
+                    (ScrollWheelModeChange::Inversion(inverted), Some(shared)) => {
+                        openlogi_hid::set_scroll_inversion_on(shared, inverted).await
+                    }
+                    (ScrollWheelModeChange::Inversion(inverted), None) => {
+                        openlogi_hid::set_scroll_inversion(&target, inverted).await
+                    }
                 }
             })
             .await
         });
         let index = target.device_index();
         match result {
-            Ok(Ok(())) => debug!(index, inverted, reused, "native scroll inversion written"),
+            Ok(Ok(())) => debug!(
+                index,
+                ?resolution,
+                ?inverted,
+                reused,
+                "native wheel mode written"
+            ),
             Ok(Err(WriteError::FeatureUnsupported { feature_hex })) => debug!(
                 index,
-                inverted,
+                ?resolution,
+                ?inverted,
                 feature = format_args!("{feature_hex:#06x}"),
-                "native scroll inversion unsupported"
+                "native wheel mode unsupported"
             ),
-            Ok(Err(e)) => warn!(error = ?e, "scroll inversion write failed"),
+            Ok(Err(e)) => warn!(error = ?e, "wheel mode write failed"),
             Err(_) => warn!(
                 index,
-                inverted, "scroll inversion write timed out (device asleep/unresponsive)"
+                ?resolution,
+                ?inverted,
+                "wheel mode write timed out (device asleep/unresponsive)"
             ),
         }
     });
@@ -342,35 +412,23 @@ pub fn set_lighting_in_background(target: Option<DeviceRoute>, lighting: &Lighti
     });
 }
 
-/// Parse `"RRGGBB"` (optionally `#`-prefixed) into an `(r, g, b)` triple.
-fn parse_hex(hex: &str) -> (u8, u8, u8) {
-    let v = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0);
-    (
-        u8::try_from((v >> 16) & 0xff).unwrap_or(0),
-        u8::try_from((v >> 8) & 0xff).unwrap_or(0),
-        u8::try_from(v & 0xff).unwrap_or(0),
-    )
-}
-
-/// Resolve a [`Lighting`] config to an `(r, g, b)` triple: the configured hex
+/// Resolve a [`Lighting`] config to an `(r, g, b)` triple: the configured
 /// colour scaled by brightness, or black when lighting is off.
 fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
     if !lighting.enabled {
         return (0, 0, 0);
     }
-    let (r, g, b) = parse_hex(&lighting.color);
+    let (r, g, b) = lighting.color.components();
     let scale =
         |c: u8| u8::try_from(u16::from(c) * u16::from(lighting.brightness) / 100).unwrap_or(c);
     (scale(r), scale(g), scale(b))
 }
 
-// ---------------------------------------------------------------------------
 // Async, awaitable variants used by the IPC server (the GUI routes "apply now"
 // / "read" device commands through the agent, which awaits and reports the
 // result). Writes reuse the capture session's open channel when it targets the
 // same device, exactly like the fire-and-forget `*_in_background` helpers, so
 // the daemon never opens a second channel to a device it already holds.
-// ---------------------------------------------------------------------------
 
 /// Apply `dpi` to `route`, reusing the capture session's channel when possible.
 pub async fn apply_dpi(
@@ -378,7 +436,13 @@ pub async fn apply_dpi(
     route: &DeviceRoute,
     dpi: u32,
 ) -> Result<(), WriteError> {
-    let dpi = u16::try_from(dpi).unwrap_or(u16::MAX);
+    // Reject a DPI beyond the HID++ u16 wire field the same way the device
+    // itself would reject an out-of-range argument.
+    let dpi = u16::try_from(dpi).map_err(|_| WriteError::HidppFeature {
+        operation: HidppOperation::WriteDpi,
+        feature_hex: 0x2201,
+        kind: HidppFeatureErrorKind::OutOfRange,
+    })?;
     let shared = reusable_channel(Some(capture), route);
     timed(HidppOperation::WriteDpi, async {
         match &shared {

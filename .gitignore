@@ -22,8 +22,10 @@ devenv.local.yaml
 /UI.md
 /PLAN.md
 
-# Claude Code worktree + transcripts — per-developer state.
-/.claude/
+# Claude Code worktrees, transcripts, local settings — per-developer state.
+# The path-scoped agent rules in .claude/rules/ are project config and stay tracked.
+/.claude/*
+!/.claude/rules/
 
 # macOS finder metadata
 .DS_Store

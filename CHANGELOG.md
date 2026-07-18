@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.20](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.19...openlogi-core-v0.6.20) - 2026-07-18
+
+### Fixed
+
+- *(core)* preserve hash-prefixed lighting colors
+- *(core,gui,agent,cli)* validate the lighting color once as a typed Rgb
+- *(smartshift)* stop runaway free-spin scroll and control snap-back ([#333](https://github.com/AprilNEA/OpenLogi/pull/333))
+
+### Other
+
+- *(core)* document the remaining public items and deny missing_docs
+- *(core)* move the swipe-gesture machinery to binding/swipe.rs
+- *(core)* persist the config through atomic-write-file
+- *(agent,core)* resolve the LaunchAgents path via core paths
+- replace assert!(matches!(…)) with std assert_matches
+- *(core)* split config.rs into settings and device submodules
+- *(core)* drop fs4 in favor of std File::try_lock
+
+## [0.6.19](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.18...openlogi-core-v0.6.19) - 2026-07-04
+
+### Added
+
+- *(windows)* notification-area tray icon for the agent ([#347](https://github.com/AprilNEA/OpenLogi/pull/347))
+- *(windows)* bundle and package the background agent ([#347](https://github.com/AprilNEA/OpenLogi/pull/347))
+
 ## [0.6.18](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.17...openlogi-core-v0.6.18) - 2026-06-29
 
 ### Added

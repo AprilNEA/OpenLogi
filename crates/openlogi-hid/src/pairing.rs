@@ -59,6 +59,22 @@ pub enum ReceiverFamily {
     Unifying,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PairingPhase {
+    BoltDiscovery,
+    BoltPairing,
+    UnifyingPairing,
+}
+
+impl From<ReceiverFamily> for PairingPhase {
+    fn from(family: ReceiverFamily) -> Self {
+        match family {
+            ReceiverFamily::Bolt => Self::BoltDiscovery,
+            ReceiverFamily::Unifying => Self::UnifyingPairing,
+        }
+    }
+}
+
 fn family_for(product_id: u16) -> Option<ReceiverFamily> {
     if crate::BOLT_PIDS.contains(&product_id) {
         Some(ReceiverFamily::Bolt)
@@ -153,9 +169,8 @@ pub enum PasskeyMethod {
     },
 }
 
-/// Renders a Bolt passkey as a 10-bit MSB-first left/right click sequence.
-fn passkey_to_clicks(passkey: &str) -> Vec<Click> {
-    let value: u32 = passkey.trim().parse().unwrap_or(0);
+/// Renders a Bolt passkey value as a 10-bit MSB-first left/right click sequence.
+fn passkey_to_clicks(value: u32) -> Vec<Click> {
     (0..10)
         .rev()
         .map(|bit| {
@@ -216,6 +231,10 @@ pub enum PairingError {
     /// Pairing flow was cancelled by the caller.
     #[error("pairing was cancelled")]
     Cancelled,
+    /// A receiver notification failed to decode; authentication cannot
+    /// proceed safely, so the flow fails instead of presenting bogus data.
+    #[error("malformed pairing notification ({0})")]
+    MalformedNotification(&'static str),
 }
 
 impl From<async_hid::HidError> for PairingError {
@@ -308,7 +327,7 @@ pub async fn run_pairing(
     };
     let (listener, mut notifications) = subscribe(&channel);
 
-    let result = drive(&channel, family, &mut commands, &mut notifications, &events).await;
+    let result = run_session(&channel, family, &mut commands, &mut notifications, &events).await;
 
     drop(listener);
     // Best-effort restore: clear notification flags we set.
@@ -322,10 +341,27 @@ pub async fn run_pairing(
     result
 }
 
-/// Core session loop. Split out so [`run_pairing`] can always run teardown.
+/// Runs the core flow and phase-correct cancellation on every unsuccessful exit.
+async fn run_session(
+    channel: &HidppChannel,
+    family: ReceiverFamily,
+    commands: &mut mpsc::UnboundedReceiver<PairingCommand>,
+    notifications: &mut mpsc::UnboundedReceiver<HidppMessage>,
+    events: &mpsc::UnboundedSender<PairingEvent>,
+) -> Result<(), PairingError> {
+    let mut phase = PairingPhase::from(family);
+    let result = drive(channel, family, &mut phase, commands, notifications, events).await;
+    if result.is_err() {
+        cancel(channel, phase).await;
+    }
+    result
+}
+
+/// Core session loop.
 async fn drive(
     channel: &HidppChannel,
     family: ReceiverFamily,
+    phase: &mut PairingPhase,
     commands: &mut mpsc::UnboundedReceiver<PairingCommand>,
     notifications: &mut mpsc::UnboundedReceiver<HidppMessage>,
     events: &mpsc::UnboundedSender<PairingEvent>,
@@ -356,10 +392,12 @@ async fn drive(
             cmd = commands.recv() => match cmd {
                 Some(PairingCommand::Pair(device)) => {
                     pairing_auth = Some(device.authentication);
+                    if *phase == PairingPhase::BoltDiscovery {
+                        *phase = PairingPhase::BoltPairing;
+                    }
                     pair_bolt_device(channel, &device).await?;
                 }
                 Some(PairingCommand::Cancel) | None => {
-                    cancel(channel, family).await;
                     return Err(PairingError::Cancelled);
                 }
             },
@@ -392,15 +430,18 @@ async fn drive(
                             let _ = events.send(PairingEvent::DeviceFound(device));
                         }
                     }
-                    Notification::Passkey(passkey) => {
+                    Notification::Passkey { digits, value } => {
                         let method = match pairing_auth {
-                            Some(auth) if auth & 0x01 != 0 => PasskeyMethod::Keyboard(passkey),
+                            Some(auth) if auth & 0x01 != 0 => PasskeyMethod::Keyboard(digits),
                             _ => PasskeyMethod::Pointer {
-                                clicks: passkey_to_clicks(&passkey),
-                                passkey,
+                                clicks: passkey_to_clicks(value),
+                                passkey: digits,
                             },
                         };
                         let _ = events.send(PairingEvent::Passkey(method));
+                    }
+                    Notification::MalformedPasskey => {
+                        return Err(PairingError::MalformedNotification("passkey digits"));
                     }
                     Notification::PairingSucceeded { slot } => {
                         let _ = events.send(PairingEvent::Paired { slot });
@@ -455,7 +496,7 @@ impl PartialDevice {
         Some(DiscoveredDevice {
             address,
             authentication,
-            kind: BoltDeviceKind::try_from(kind & 0x0f).unwrap_or(BoltDeviceKind::Unknown),
+            kind: BoltDeviceKind::from(kind & 0x0f),
             name,
         })
     }
@@ -476,17 +517,22 @@ async fn pair_bolt_device(
 }
 
 /// Best-effort cancel of an in-progress flow.
-async fn cancel(channel: &HidppChannel, family: ReceiverFamily) {
-    let res = match family {
-        ReceiverFamily::Bolt => {
+async fn cancel(channel: &HidppChannel, phase: PairingPhase) {
+    let res = match phase {
+        PairingPhase::BoltDiscovery => {
             write_register(channel, BOLT_DISCOVERY, [DISCOVERY_TIMEOUT, 0x02, 0x00]).await
         }
-        ReceiverFamily::Unifying => {
+        PairingPhase::BoltPairing => {
+            let mut payload = [0u8; 16];
+            payload[0] = 0x02;
+            write_long_register(channel, BOLT_PAIRING, payload).await
+        }
+        PairingPhase::UnifyingPairing => {
             write_register(channel, UNIFYING_PAIRING, [0x02, 0x00, 0x00]).await
         }
     };
     if let Err(e) = res {
-        debug!(?e, "cancel write failed");
+        debug!(?phase, ?e, "cancel write failed");
     }
 }
 

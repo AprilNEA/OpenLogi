@@ -10,11 +10,13 @@
 //! No filesystem layout opinions live here — both consumers decide where
 //! files end up. This crate stays I/O-light: parsing, HTTP, hashing.
 
+mod error;
 pub mod http;
 pub mod index;
 pub mod manifest;
 pub mod metadata;
 
+pub use error::AssetError;
 pub use http::{AssetClient, FetchOutcome, cached_matches, read_bytes, sha256_hex, sha256_of_file};
 pub use index::{
     BUTTONS_RENDER_FILES, DeviceEntry, FRONT_RENDER_FILES, FileEntry, Index, METADATA_FILES,

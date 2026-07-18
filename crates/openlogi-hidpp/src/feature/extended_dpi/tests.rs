@@ -1,5 +1,7 @@
 //! Unit tests for `ExtendedAdjustableDpi` payload parsing and event decoding.
 
+use std::assert_matches;
+
 use super::event::{ExtendedDpiEvent, decode_event};
 use super::types::{
     DpiCalibrationCorrection, DpiDirection, DpiRange, Lod, parse_dpi_list, parse_dpi_ranges,
@@ -120,20 +122,20 @@ fn parses_range_followed_by_fixed_value() {
 fn rejects_hyphen_without_preceding_value() {
     let stream = [0xe0, 0x01, 0x01, 0x90, 0x00, 0x00];
 
-    assert!(matches!(
+    assert_matches!(
         parse_dpi_ranges(&stream),
         Err(Hidpp20Error::UnsupportedResponse)
-    ));
+    );
 }
 
 #[test]
 fn rejects_hyphen_without_following_value() {
     let stream = [0x01, 0x90, 0xe0, 0x01, 0x00, 0x00];
 
-    assert!(matches!(
+    assert_matches!(
         parse_dpi_ranges(&stream),
         Err(Hidpp20Error::UnsupportedResponse)
-    ));
+    );
 }
 
 #[test]
@@ -141,30 +143,30 @@ fn rejects_zero_step_unused_marker() {
     // 0xe000 is the documented "unused" marker (step 0); it is not a valid range.
     let stream = [0x01, 0x90, 0xe0, 0x00, 0x04, 0xb0, 0x00, 0x00];
 
-    assert!(matches!(
+    assert_matches!(
         parse_dpi_ranges(&stream),
         Err(Hidpp20Error::UnsupportedResponse)
-    ));
+    );
 }
 
 #[test]
 fn rejects_descending_stepped_range() {
     let stream = [0x06, 0x40, 0xe0, 0x32, 0x01, 0x90, 0x00, 0x00];
 
-    assert!(matches!(
+    assert_matches!(
         parse_dpi_ranges(&stream),
         Err(Hidpp20Error::UnsupportedResponse)
-    ));
+    );
 }
 
 #[test]
 fn rejects_unterminated_dpi_ranges() {
     let stream = [0x01, 0x90, 0x03, 0x20];
 
-    assert!(matches!(
+    assert_matches!(
         parse_dpi_ranges(&stream),
         Err(Hidpp20Error::UnsupportedResponse)
-    ));
+    );
 }
 
 #[test]
@@ -197,20 +199,20 @@ fn parses_lod_list() {
 fn rejects_unknown_lod_value() {
     let bytes = [9];
 
-    assert!(matches!(
+    assert_matches!(
         parse_lod_list(&bytes, 1),
         Err(Hidpp20Error::UnsupportedResponse)
-    ));
+    );
 }
 
 #[test]
 fn rejects_lod_list_longer_than_payload() {
     let bytes = [1, 2];
 
-    assert!(matches!(
+    assert_matches!(
         parse_lod_list(&bytes, 3),
         Err(Hidpp20Error::UnsupportedResponse)
-    ));
+    );
 }
 
 #[test]
@@ -294,9 +296,9 @@ fn rejects_out_of_range_calibration_corrections() {
         DpiCalibrationCorrection::Adjust(1024),
         DpiCalibrationCorrection::Adjust(i16::MIN),
     ] {
-        assert!(matches!(
+        assert_matches!(
             correction.to_wire(),
             Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
-        ));
+        );
     }
 }

@@ -196,6 +196,8 @@ pub(crate) async fn open_route_channel(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use openlogi_core::device::{DeviceInventory, ReceiverInfo};
 
     use super::{DIRECT_DEVICE_INDEX, DeviceRoute, UNIFYING_PIDS};
@@ -228,22 +230,22 @@ mod tests {
         // 0xC548 is Bolt; anything not in UNIFYING_PIDS defaults to Bolt so
         // future Bolt variants with unknown PIDs still work.
         let route = DeviceRoute::device_route_for(&inv(0xc548, Some("UID")), 1);
-        assert!(matches!(
+        assert_matches!(
             route,
             Some(DeviceRoute::Bolt { ref receiver_uid, slot: 1 }) if receiver_uid == "UID"
-        ));
+        );
     }
 
     #[test]
     fn device_route_for_direct_when_no_uid_and_direct_slot() {
         let route = DeviceRoute::device_route_for(&inv(0xb025, None), DIRECT_DEVICE_INDEX);
-        assert!(matches!(
+        assert_matches!(
             route,
             Some(DeviceRoute::Direct {
                 vendor_id: 0x046d,
                 product_id: 0xb025
             })
-        ));
+        );
     }
 
     #[test]

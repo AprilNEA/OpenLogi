@@ -8,7 +8,7 @@ use crate::support::fs::{absolutize, ensure_command, ensure_file, repo_root};
 
 #[derive(Parser)]
 pub(crate) struct Args {
-    /// Output directory for .deb and .rpm packages (default: target/release).
+    /// Output directory for .deb, .rpm, and .pkg.tar.zst packages (default: target/release).
     #[arg(long, default_value = "target/release")]
     output: PathBuf,
     /// Skip the cargo build step (binaries must already exist in target/release).
@@ -48,7 +48,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         other => anyhow::bail!("unsupported Linux package architecture: {other}"),
     };
 
-    for packager in ["deb", "rpm"] {
+    for packager in ["deb", "rpm", "archlinux"] {
         println!("==> nfpm {packager} ({pkg_arch})");
         cmd!(
             sh,

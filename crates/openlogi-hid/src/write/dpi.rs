@@ -82,8 +82,8 @@ impl DpiCapabilities {
     #[must_use]
     pub fn step_hint(&self) -> u16 {
         self.values
-            .windows(2)
-            .filter_map(|pair| pair[1].checked_sub(pair[0]))
+            .array_windows::<2>()
+            .filter_map(|&[low, high]| high.checked_sub(low))
             .filter(|step| *step > 0)
             .min()
             .unwrap_or(1)

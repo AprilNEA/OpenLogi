@@ -120,3 +120,108 @@ fn format_model(m: &DeviceModelInfo) -> String {
         m.extended_model_id
     )
 }
+
+#[cfg(test)]
+mod format_tests {
+    use openlogi_core::device::{BatteryLevel, BatteryStatus, DeviceKind, DeviceTransports};
+
+    use super::{BatteryInfo, DeviceModelInfo};
+    use super::{PairedDevice, format_battery, format_device, format_model};
+
+    fn base_device() -> PairedDevice {
+        PairedDevice {
+            slot: 1,
+            codename: Some("MX Master 3S".to_string()),
+            wpid: Some(0x4082),
+            kind: DeviceKind::Mouse,
+            online: true,
+            battery: None,
+            model_info: None,
+            capabilities: None,
+        }
+    }
+
+    #[test]
+    fn online_device_uses_filled_dot_and_reports_fields() {
+        let d = base_device();
+        let out = format_device(&d);
+        assert_eq!(out, "slot 1 ● MX Master 3S (mouse, wpid=4082, battery=—)");
+    }
+
+    #[test]
+    fn offline_device_uses_hollow_dot() {
+        let mut d = base_device();
+        d.online = false;
+        let out = format_device(&d);
+        assert!(out.starts_with("slot 1 ○ "));
+    }
+
+    #[test]
+    fn missing_codename_and_wpid_fall_back_to_placeholders() {
+        let mut d = base_device();
+        d.codename = None;
+        d.wpid = None;
+        let out = format_device(&d);
+        assert_eq!(out, "slot 1 ● Unknown device (mouse, wpid=?, battery=—)");
+    }
+
+    #[test]
+    fn battery_info_is_embedded_when_present() {
+        let mut d = base_device();
+        d.battery = Some(BatteryInfo {
+            percentage: 42,
+            level: BatteryLevel::Low,
+            status: BatteryStatus::Discharging,
+        });
+        let out = format_device(&d);
+        assert!(out.contains("battery=42% low (discharging)"));
+    }
+
+    #[test]
+    fn battery_status_debug_names_are_lowercased_verbatim() {
+        // `ChargingSlow`'s Debug form has no separator; lowercasing alone
+        // yields "chargingslow", not "charging_slow" or "charging slow".
+        let b = BatteryInfo {
+            percentage: 10,
+            level: BatteryLevel::Critical,
+            status: BatteryStatus::ChargingSlow,
+        };
+        assert_eq!(format_battery(&b), "battery=10% critical (chargingslow)");
+    }
+
+    fn base_model() -> DeviceModelInfo {
+        DeviceModelInfo {
+            entity_count: 1,
+            serial_number: None,
+            unit_id: [0x00, 0x01, 0x02, 0x03],
+            transports: DeviceTransports::default(),
+            model_ids: [0xb042, 0, 0],
+            extended_model_id: 0x02,
+        }
+    }
+
+    #[test]
+    fn model_with_no_transports_shows_placeholder_and_missing_serial() {
+        let m = base_model();
+        let out = format_model(&m);
+        assert_eq!(
+            out,
+            "     model_ids=[b042,0000,0000] ext=02 serial=— unit_id=00010203 transports=—"
+        );
+    }
+
+    #[test]
+    fn model_transports_join_in_declared_field_order() {
+        let mut m = base_model();
+        m.transports = DeviceTransports {
+            usb: true,
+            equad: false,
+            btle: true,
+            bluetooth: true,
+        };
+        m.serial_number = Some("SN123".to_string());
+        let out = format_model(&m);
+        assert!(out.contains("transports=usb+btle+bt"));
+        assert!(out.contains("serial=SN123"));
+    }
+}

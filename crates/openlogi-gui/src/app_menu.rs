@@ -232,6 +232,6 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
     items
 }
 
-fn file_url(path: &std::path::Path) -> Option<String> {
+pub(crate) fn file_url(path: &std::path::Path) -> Option<String> {
     Url::from_file_path(path).ok().map(Into::into)
 }

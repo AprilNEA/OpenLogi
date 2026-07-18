@@ -15,7 +15,8 @@ devenv shell -- cargo run -p xtask -- <command>
 - `macos bundle` — build the release `OpenLogi.app` and embed the agent helper.
 - `macos dmg` — package an existing app bundle into the branded DMG.
 - `macos package` — build the app bundle, optionally sign it, then create the branded DMG.
-- `linux package` — build release binaries and package `.deb` / `.rpm` artifacts with nfpm.
+- `linux package` — build release binaries and package `.deb`, `.rpm`, and
+  `.pkg.tar.zst` artifacts with nfpm.
 - `release latest-json` — generate the static updater manifest for the stable channel.
 
 The Cargo runner in `../scripts/cargo-run-macos.sh` stays outside xtask because

@@ -63,7 +63,7 @@ pub(super) enum CacheOutcome {
 }
 
 /// `Seen` when the device has a stable key, else `Unkeyed`.
-fn seen(id: Option<CacheKey>) -> CacheOutcome {
+pub(super) fn seen(id: Option<CacheKey>) -> CacheOutcome {
     id.map_or(CacheOutcome::Unkeyed, CacheOutcome::Seen)
 }
 

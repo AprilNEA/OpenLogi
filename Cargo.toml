@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "hardware-support"]
 readme = "README.md"
 
 [dependencies]
-openlogi-cli = { path = "crates/openlogi-cli", version = "0.6.18" }
+openlogi-cli = { path = "crates/openlogi-cli", version = "0.6.20" }
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 
@@ -36,21 +36,23 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.18"
+version = "0.6.20"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.96"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/AprilNEA/OpenLogi"
 authors = ["AprilNEA <dev@aprilnea.me>"]
 description = "Lightweight, local-first alternative to Logitech Options+ for HID++ devices"
 
 [workspace.dependencies]
-hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.6.18" }
+hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.6.20" }
 async-hid = "0.5.2"
 # Cross-platform local IPC for the agent <-> GUI tarpc transport: a Unix-domain
 # socket on Unix, a named pipe on Windows. The `tokio` feature gives the async
 # Stream/Listener used by serde_transport.
 interprocess = { version = "2", features = ["tokio"] }
+# The agent <-> GUI RPC layer itself, over the `interprocess` transport above.
+tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
 # Windows FFI for the leaf input/HID paths (WH_MOUSE_LL hook, SendInput action
 # synthesis, native HID writes). Features are selected per crate.
 windows-sys = "0.61"
@@ -70,6 +72,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 core-graphics = { version = "0.25", default-features = false, features = ["link"] }
 core-foundation = { version = "0.10", default-features = false, features = ["link"] }
+opener = "0.8.5"
+evdev = "0.13"
+# macOS ObjC FFI (see platform/CLAUDE.md): objc2 gives leak-proof Retained<T>
+# bindings. Feature lists are selected per crate; the version stays unified so
+# a resolve can't move gpui's Cargo.lock pin out from under the GUI.
+objc2 = "0.6.4"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
 
 # gpui / gpui_platform track zed's default branch, matching how gpui-component
 # declares them (an explicit rev here would fork the git source and conflict).
@@ -77,10 +87,10 @@ core-foundation = { version = "0.10", default-features = false, features = ["lin
 # deliberately with `cargo update`, in lockstep with the gpui-component rev.
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "196b9259b562c26be97c92f88c798bbeefa9cb3d" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
 # Pinned to the same rev as gpui-component: this crate embeds the lucide SVGs
 # that the `IconName` enum is macro-generated from, so the two must agree.
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "196b9259b562c26be97c92f88c798bbeefa9cb3d" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
 
 [workspace.lints.rust]
 # Denied workspace-wide, but `deny` (not `forbid`) so a crate that genuinely

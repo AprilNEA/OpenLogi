@@ -6,6 +6,15 @@
 //! core runs on a tokio runtime; on macOS the process main thread hosts the
 //! AppKit run loop the menu bar requires.
 
+// Without this Windows runs the exe as a console app and pops a terminal
+// window whenever the GUI's sibling spawn or the Run-key autostart starts the
+// agent — "headless" must mean no window of any kind. Debug builds keep the
+// console so logs stay visible (matching the GUI's arrangement).
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod launch_agent;
 mod pairing;
 mod self_restart;
@@ -15,11 +24,14 @@ mod status_item;
 mod takeover;
 #[cfg(target_os = "macos")]
 mod tray;
+#[cfg(target_os = "windows")]
+mod tray_windows;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::orchestrator::Orchestrator;
 use openlogi_agent_core::{hook_runtime, watchers};
 use openlogi_core::config::Config;
@@ -99,7 +111,13 @@ fn main() {
         tray::run_app_loop(show_in_menu_bar);
     }
     #[cfg(not(target_os = "macos"))]
-    runtime.block_on(run(config));
+    {
+        // Windows hosts the notification-area icon on its own win32 thread
+        // (message pump included); the async core keeps the main thread.
+        #[cfg(target_os = "windows")]
+        tray_windows::spawn(config.app_settings.show_in_menu_bar);
+        runtime.block_on(run(config));
+    }
 }
 
 async fn run(config: Config) {
@@ -123,6 +141,12 @@ async fn run(config: Config) {
     let orchestrator = Arc::new(Mutex::new(Orchestrator::new(config)));
     let shared = orchestrator.lock().await.shared();
     let hook_installed = Arc::new(AtomicBool::new(false));
+
+    // Live event monitor: shared between the hook callback (which mirrors events
+    // into it) and the IPC server (which the GUI polls). The janitor turns it
+    // back off once the GUI stops polling.
+    let event_monitor = Arc::new(EventMonitor::default());
+    tokio::spawn(Arc::clone(&event_monitor).run_idle_janitor());
 
     // Pairing runs in the agent (it owns device I/O); the GUI drives it over IPC.
     let pairing = Arc::new(pairing::PairingManager::new(shared.clone()));
@@ -152,6 +176,7 @@ async fn run(config: Config) {
         shared: shared.clone(),
         hook_installed: Arc::clone(&hook_installed),
         pairing: Arc::clone(&pairing),
+        event_monitor: Arc::clone(&event_monitor),
     };
     tokio::spawn(server::run(server));
 
@@ -200,6 +225,7 @@ async fn run(config: Config) {
                         shared.hook_maps.clone(),
                         shared.dpi_cycle.clone(),
                         shared.capture_channel.clone(),
+                        Arc::clone(&event_monitor),
                     );
                     hook_installed.store(hook.is_some(), Ordering::Relaxed);
                 }
