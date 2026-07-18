@@ -21,6 +21,7 @@ use tracing::warn;
 
 use crate::DpiCycleState;
 use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
+use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
 use crate::device_order::DeviceStableId;
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::ipc::InventoryHealth;
@@ -56,6 +57,9 @@ pub struct SharedRuntime {
     pub hook_maps: SharedHookMaps,
     pub gesture_bindings: GestureBindings,
     pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
+    /// One capture plan per online device — what to divert and how to
+    /// dispatch, keyed by the device the events arrive on.
+    pub capture_plans: SharedCapturePlans,
     pub thumbwheel_sensitivity: Arc<AtomicI32>,
     pub capture_channel: CaptureChannel,
     /// Exclusive receiver access shared by HID++ capture and pairing. Capture
@@ -107,6 +111,7 @@ impl Orchestrator {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
             dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
+            capture_plans: Arc::new(RwLock::new(Vec::new())),
             thumbwheel_sensitivity: Arc::new(AtomicI32::new(
                 config.app_settings.thumbwheel_sensitivity,
             )),
@@ -183,6 +188,28 @@ impl Orchestrator {
             self.config.app_settings.thumbwheel_sensitivity,
             Ordering::Relaxed,
         );
+        write_value(
+            &self.shared.capture_plans,
+            self.capture_plans_for(),
+            "capture_plans",
+        );
+    }
+
+    /// One capture plan per online device, from the current config + app.
+    fn capture_plans_for(&self) -> Vec<DeviceCapturePlan> {
+        self.devices
+            .iter()
+            .filter(|dev| dev.online)
+            .filter_map(|dev| {
+                let route = dev.route.clone()?;
+                Some(plan_for_device(
+                    &self.config,
+                    &dev.config_key,
+                    route,
+                    self.current_app.as_deref(),
+                ))
+            })
+            .collect()
     }
 
     /// Apply a fresh inventory snapshot. Always refreshes the snapshot the IPC
@@ -221,7 +248,14 @@ impl Orchestrator {
         if !changed {
             // Same set and routes — but keep the fresh `online` flags, or a
             // device that woke this tick would read as a transition forever.
+            // Capture plans key on `online`, so republish them even here or a
+            // woken device would never get its session armed.
             self.devices = devices;
+            write_value(
+                &self.shared.capture_plans,
+                self.capture_plans_for(),
+                "capture_plans",
+            );
             return;
         }
         self.devices = devices;

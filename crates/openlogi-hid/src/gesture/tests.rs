@@ -13,14 +13,15 @@ fn quick_tap_is_a_click_even_while_the_cursor_moves() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
 
-    handle_reprog(&mut acc, press(), &[], &tx);
+    handle_reprog(&mut acc, press(), &[], &[], &tx);
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
         &[],
+        &[],
         &tx,
     );
-    handle_reprog(&mut acc, release(), &[], &tx);
+    handle_reprog(&mut acc, release(), &[], &[], &tx);
 
     assert_eq!(
         rx.try_recv(),
@@ -37,12 +38,13 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
 
-    handle_reprog(&mut acc, press(), &[], &tx);
+    handle_reprog(&mut acc, press(), &[], &[], &tx);
     // Pretend the button has been held well past the swipe gate.
     acc.swipe.backdate_hold_for_test();
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
+        &[],
         &[],
         &tx,
     );
@@ -52,7 +54,7 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
         Ok(CapturedInput::Gesture(GestureDirection::Right))
     );
 
-    handle_reprog(&mut acc, release(), &[], &tx);
+    handle_reprog(&mut acc, release(), &[], &[], &tx);
     assert!(
         rx.try_recv().is_err(),
         "a committed swipe must not also click on release"
@@ -66,8 +68,8 @@ fn a_held_dpi_button_presses_once_on_the_rising_edge() {
     let dpi = reprog_controls::DPI_MODE_SHIFT_CIDS[0];
     let down = RawControlEvent::DivertedButtons([dpi, 0, 0, 0]);
 
-    handle_reprog(&mut acc, down, &[dpi], &tx);
-    handle_reprog(&mut acc, down, &[dpi], &tx);
+    handle_reprog(&mut acc, down, &[dpi], &[], &tx);
+    handle_reprog(&mut acc, down, &[dpi], &[], &tx);
 
     assert_eq!(
         rx.try_recv(),
@@ -87,9 +89,9 @@ fn a_dpi_button_re_presses_after_a_release() {
     let down = RawControlEvent::DivertedButtons([dpi, 0, 0, 0]);
     let up = RawControlEvent::DivertedButtons([0, 0, 0, 0]);
 
-    handle_reprog(&mut acc, down, &[dpi], &tx);
-    handle_reprog(&mut acc, up, &[dpi], &tx);
-    handle_reprog(&mut acc, down, &[dpi], &tx);
+    handle_reprog(&mut acc, down, &[dpi], &[], &tx);
+    handle_reprog(&mut acc, up, &[dpi], &[], &tx);
+    handle_reprog(&mut acc, down, &[dpi], &[], &tx);
 
     assert_eq!(
         rx.try_recv(),
