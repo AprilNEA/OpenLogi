@@ -13,6 +13,7 @@ use gpui_component::{
     tab::TabBar,
     v_flex,
 };
+use openlogi_core::config::ScrollResolution;
 use openlogi_core::device::DeviceKind;
 
 use super::widgets::{
@@ -192,22 +193,26 @@ fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
     div().min_w(px(332.)).flex_1().h_full().child(card)
 }
 
-/// Scrolling card: a per-device "invert scroll direction" toggle (#126). Pure
-/// config — no hardware read — so it is a plain switch row rather than an
-/// `Entity` panel like DPI / SmartShift.
+/// Scrolling card: per-device native inversion and wheel-resolution controls.
+/// Pure config — no hardware read — so it is a plain settings block rather than
+/// an `Entity` panel like DPI / SmartShift.
 fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let (inverted, supported) = cx.try_global::<AppState>().map_or((false, false), |state| {
-        (
-            state.current_invert_scroll(),
-            state.current_scroll_inversion_supported(),
-        )
-    });
-    let description = if supported {
+    let (inverted, inversion_supported, resolution, hires_supported) = cx
+        .try_global::<AppState>()
+        .map_or((false, false, None, false), |state| {
+            (
+                state.current_invert_scroll(),
+                state.current_scroll_inversion_supported(),
+                state.current_scroll_resolution(),
+                state.current_hires_wheel_supported(),
+            )
+        });
+    let inversion_description = if inversion_supported {
         tr!("Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.")
     } else {
         tr!("This device does not report native HID++ scroll inversion support.")
     };
-    let row = h_flex()
+    let inversion_row = h_flex()
         .justify_between()
         .items_center()
         .gap_4()
@@ -223,16 +228,130 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                     div()
                         .text_xs()
                         .text_color(pal.text_muted)
-                        .child(description),
+                        .child(inversion_description),
                 ),
         )
-        .child(invert_scroll_toggle(inverted, supported, pal));
+        .child(invert_scroll_toggle(inverted, inversion_supported, pal));
+    let resolution_description = if hires_supported {
+        match resolution {
+            None => tr!("OpenLogi does not change the wheel resolution."),
+            Some(ScrollResolution::Low) => tr!("Scrolls once per physical ratchet step."),
+            Some(ScrollResolution::High) => {
+                tr!("Detects finer movement between ratchet steps.")
+            }
+        }
+    } else {
+        tr!("This device does not support wheel resolution control.")
+    };
+    let resolution_row = v_flex()
+        .gap_2()
+        .child(
+            v_flex()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(pal.text_primary)
+                        .child(tr!("Wheel resolution")),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(pal.text_muted)
+                        .child(resolution_description),
+                ),
+        )
+        .child(wheel_resolution_control(resolution, hires_supported, pal));
     panel_card(
         tr!("Scrolling"),
         IconName::Settings,
         pal,
-        row.into_any_element(),
+        v_flex()
+            .gap_4()
+            .child(inversion_row)
+            .child(resolution_row)
+            .into_any_element(),
     )
+}
+
+fn wheel_resolution_control(
+    selected: Option<ScrollResolution>,
+    enabled: bool,
+    pal: Palette,
+) -> AnyElement {
+    h_flex()
+        .w_full()
+        .p_1()
+        .gap_1()
+        .rounded_md()
+        .border_1()
+        .border_color(pal.border)
+        .child(wheel_resolution_segment(
+            "wheel-resolution-default",
+            tr!("Device default"),
+            None,
+            selected,
+            enabled,
+            pal,
+        ))
+        .child(wheel_resolution_segment(
+            "wheel-resolution-low",
+            tr!("Standard"),
+            Some(ScrollResolution::Low),
+            selected,
+            enabled,
+            pal,
+        ))
+        .child(wheel_resolution_segment(
+            "wheel-resolution-high",
+            tr!("High resolution"),
+            Some(ScrollResolution::High),
+            selected,
+            enabled,
+            pal,
+        ))
+        .into_any_element()
+}
+
+fn wheel_resolution_segment(
+    id: &'static str,
+    label: impl IntoElement,
+    value: Option<ScrollResolution>,
+    selected: Option<ScrollResolution>,
+    enabled: bool,
+    pal: Palette,
+) -> AnyElement {
+    let active = value == selected;
+    let segment = div()
+        .id(id)
+        .flex_1()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .text_center()
+        .text_xs()
+        .selected_fill(active)
+        .text_color(if enabled {
+            if active {
+                pal.text_primary
+            } else {
+                pal.text_muted
+            }
+        } else {
+            pal.text_muted
+        })
+        .child(label);
+    if !enabled {
+        return segment.into_any_element();
+    }
+    segment
+        .cursor_pointer()
+        .on_click(move |_event, _window, cx| {
+            cx.update_global::<AppState, _>(|state, _| {
+                state.commit_scroll_resolution(value);
+            });
+            cx.refresh_windows();
+        })
+        .into_any_element()
 }
 
 /// On/Off pill that flips the active device's scroll-wheel inversion, mirroring

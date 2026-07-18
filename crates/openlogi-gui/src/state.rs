@@ -789,6 +789,47 @@ impl AppState {
         self.persist_and_reload("invert scroll");
     }
 
+    /// The active device's persisted wheel resolution, or `None` when OpenLogi
+    /// leaves the device default untouched.
+    #[must_use]
+    pub fn current_scroll_resolution(&self) -> Option<openlogi_core::config::ScrollResolution> {
+        self.current_record()
+            .and_then(|record| self.config.scroll_resolution(&record.config_key))
+    }
+
+    /// Whether the active device exposes HID++ `0x2121 HiResWheel`.
+    #[must_use]
+    pub fn current_hires_wheel_supported(&self) -> bool {
+        self.current_record()
+            .and_then(|record| record.capabilities)
+            .is_some_and(|capabilities| capabilities.hires_wheel)
+    }
+
+    /// Persist the active device's wheel resolution and ask the agent to reload
+    /// it. `None` removes OpenLogi's override. No-op without a selected,
+    /// HiResWheel-capable device.
+    pub fn commit_scroll_resolution(
+        &mut self,
+        resolution: Option<openlogi_core::config::ScrollResolution>,
+    ) {
+        let Some((key, supported)) = self.current_record().map(|record| {
+            (
+                record.config_key.clone(),
+                record
+                    .capabilities
+                    .is_some_and(|capabilities| capabilities.hires_wheel),
+            )
+        }) else {
+            debug!("no active device — wheel-resolution change ignored");
+            return;
+        };
+        if !set_scroll_resolution_if_supported(&mut self.config, &key, supported, resolution) {
+            debug!("active device does not support HiResWheel");
+            return;
+        }
+        self.persist_and_reload("wheel resolution");
+    }
+
     /// Take the active device's pending SmartShift confirm, if any. Returns the
     /// `(config_key, route)` for a one-shot re-read that replaces the optimistic
     /// value with the device's real state; consumed once so it doesn't re-fire.
@@ -1190,4 +1231,59 @@ fn smartshift_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
+fn set_scroll_resolution_if_supported(
+    config: &mut Config,
+    key: &str,
+    supported: bool,
+    resolution: Option<openlogi_core::config::ScrollResolution>,
+) -> bool {
+    if !supported {
+        return false;
+    }
+    config.set_scroll_resolution(key, resolution);
+    true
+}
+
 impl Global for AppState {}
+
+#[cfg(test)]
+mod scroll_resolution_tests {
+    use openlogi_core::config::{Config, ScrollResolution};
+
+    use super::set_scroll_resolution_if_supported;
+
+    #[test]
+    fn gui_state_saves_and_clears_supported_wheel_resolution() {
+        let mut config = Config::default();
+        assert!(set_scroll_resolution_if_supported(
+            &mut config,
+            "mouse",
+            true,
+            Some(ScrollResolution::Low),
+        ));
+        assert_eq!(
+            config.scroll_resolution("mouse"),
+            Some(ScrollResolution::Low)
+        );
+
+        assert!(set_scroll_resolution_if_supported(
+            &mut config,
+            "mouse",
+            true,
+            None,
+        ));
+        assert_eq!(config.scroll_resolution("mouse"), None);
+    }
+
+    #[test]
+    fn gui_state_ignores_unsupported_wheel_resolution() {
+        let mut config = Config::default();
+        assert!(!set_scroll_resolution_if_supported(
+            &mut config,
+            "mouse",
+            false,
+            Some(ScrollResolution::High),
+        ));
+        assert_eq!(config.scroll_resolution("mouse"), None);
+    }
+}
