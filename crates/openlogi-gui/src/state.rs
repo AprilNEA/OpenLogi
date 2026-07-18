@@ -138,6 +138,13 @@ pub struct AppState {
     /// poll loop runs (debug macOS builds only).
     #[cfg(all(target_os = "macos", debug_assertions))]
     monitor_events: std::collections::VecDeque<openlogi_agent_core::ipc::MonitorEvent>,
+    /// Cached event-tap snapshot for the Diagnostics page, refreshed on the same
+    /// ~300ms tick as [`Self::monitor_events`]. Lets that page's per-frame render
+    /// read this cache instead of issuing `CGGetEventTapList` syscalls on every
+    /// repaint. Debug-only: the release Diagnostics page enumerates taps live,
+    /// since it renders on interaction rather than on a 300ms monitor cadence.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    event_taps: Vec<openlogi_hook::EventTapInfo>,
 }
 
 impl AppState {
@@ -177,6 +184,8 @@ impl AppState {
             last_inventory: Vec::new(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             monitor_events: std::collections::VecDeque::new(),
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            event_taps: Vec::new(),
         };
         state.button_bindings = state.bindings_for_current();
         state.gesture_bindings = state.gesture_bindings_for_current();
@@ -244,6 +253,20 @@ impl AppState {
         &self,
     ) -> &std::collections::VecDeque<openlogi_agent_core::ipc::MonitorEvent> {
         &self.monitor_events
+    }
+
+    /// Replace the cached event-tap snapshot the Diagnostics page renders.
+    /// Refreshed on the live-monitor poll tick; see [`Self::event_taps`].
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    pub fn set_event_taps(&mut self, taps: Vec<openlogi_hook::EventTapInfo>) {
+        self.event_taps = taps;
+    }
+
+    /// The cached event-tap snapshot for the Diagnostics page.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[must_use]
+    pub fn event_taps(&self) -> &[openlogi_hook::EventTapInfo] {
+        &self.event_taps
     }
 
     /// Config schema version and the number of devices with saved configuration.

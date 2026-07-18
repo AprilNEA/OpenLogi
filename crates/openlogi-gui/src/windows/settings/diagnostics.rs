@@ -2,6 +2,7 @@
 //! event stream — a common pointer-lag cause — and, in debug builds, dumps the
 //! full event-tap list plus a live event monitor.
 
+#[cfg(not(debug_assertions))]
 use openlogi_hook::Hook;
 
 #[cfg(debug_assertions)]
@@ -35,11 +36,11 @@ pub(super) fn diagnostics_page(pal: Palette) -> SettingPage {
         )
 }
 
-/// Live status: the curated known-conflict check over the current event taps,
-/// plus (debug) the full tap list. Recomputed on each render, so it reflects the
-/// live tap set whenever the window repaints.
+/// Live status: the curated known-conflict check over the current event taps
+/// (see [`current_taps`]), plus (debug) the full tap list. Re-rendered whenever
+/// the window repaints.
 fn input_conflict_field(pal: Palette, cx: &mut App) -> AnyElement {
-    let taps = Hook::list_event_taps();
+    let taps = current_taps(cx);
 
     // Dedup the product names of input-gating taps owned by known conflicts.
     let mut conflicts: Vec<&'static str> = Vec::new();
@@ -79,10 +80,29 @@ fn input_conflict_field(pal: Palette, cx: &mut App) -> AnyElement {
     }
     #[cfg(not(debug_assertions))]
     {
-        let _ = (pal, cx);
+        let _ = pal;
     }
 
     col.into_any_element()
+}
+
+/// The event taps the conflict check inspects. Debug builds read the snapshot
+/// [`SettingsView`](super::SettingsView)'s poll task refreshes every ~300ms, so
+/// this per-frame render never issues `CGGetEventTapList` syscalls; release
+/// builds (no such task) enumerate them live — the page renders only on
+/// interaction there, not on a 300ms monitor cadence.
+fn current_taps(cx: &App) -> Vec<openlogi_hook::EventTapInfo> {
+    #[cfg(debug_assertions)]
+    {
+        cx.try_global::<AppState>()
+            .map(|s| s.event_taps().to_vec())
+            .unwrap_or_default()
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = cx;
+        Hook::list_event_taps()
+    }
 }
 
 /// Debug-only live event monitor: the events the agent's hook has observed,

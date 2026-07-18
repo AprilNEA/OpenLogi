@@ -182,19 +182,27 @@ impl SettingsView {
         #[cfg(all(target_os = "macos", debug_assertions))]
         let monitor_task = cx.spawn(async move |_view, cx| {
             loop {
+                // Refresh the event-tap snapshot the Diagnostics page reads, so
+                // its per-frame render works off this cache instead of issuing
+                // CGGetEventTapList syscalls on every repaint.
+                let taps = openlogi_hook::Hook::list_event_taps();
                 let sender = cx.update_global::<AppState, _>(|s, _| s.ipc_sender());
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                if sender
+                let events = if sender
                     .send(crate::ipc_client::Command::PollEventMonitor(tx))
                     .is_ok()
-                    && let Ok(events) = rx.await
-                    && !events.is_empty()
                 {
-                    cx.update_global::<AppState, _>(|state, cx| {
+                    rx.await.unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                cx.update_global::<AppState, _>(|state, cx| {
+                    state.set_event_taps(taps);
+                    if !events.is_empty() {
                         state.push_monitor_events(events);
-                        cx.refresh_windows();
-                    });
-                }
+                    }
+                    cx.refresh_windows();
+                });
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(300))
                     .await;
