@@ -37,6 +37,9 @@ MX Master 4):
   be paired on corresponding channels. The keyboard's host controls and every
   target must expose the HID++ features needed for host switching. Configure
   the link on every computer from which the keyboard may initiate a switch.
+- `fn_lock` — keyboards only: `true` makes the F-row send F1–F12 without
+  holding Fn, `false` keeps the printed media/shortcut functions. Absent
+  means the keyboard's own state is left alone. Re-applied on reconnect.
 
 The app-wide `[app_settings]` block holds `launch_at_login`,
 `check_for_updates`, and `auto_install_updates` (all off by default);
@@ -97,6 +100,18 @@ Back = "Undo"
 enabled = true
 color = "ff0000"
 brightness = 80
+
+# Keyboard F-row keys (Signature-series layout): a bound key is diverted
+# over HID++ and dispatches its action; an unbound key keeps its native
+# firmware function. Key names: KeySearch, KeyDictation, KeyEmoji,
+# KeyScreenCapture, KeyMicMute, KeyPlayPause, KeyMute, KeyVolumeDown,
+# KeyVolumeUp.
+[devices.2b372]
+fn_lock = false
+
+[devices.2b372.bindings]
+KeySearch = "MissionControl"
+KeyScreenCapture = "Sleep"
 ```
 
 Action names are the catalog's variant names (`LeftClick`, `MouseBack`,
