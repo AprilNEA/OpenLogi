@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.21](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.20...openlogi-core-v0.6.21) - 2026-07-19
+
+### Added
+
+- *(hid)* add native wheel resolution control
+
+### Fixed
+
+- *(hid)* make one-shot enumerate retry transport-agnostic so Unifying partial drains recover ([#287](https://github.com/AprilNEA/OpenLogi/pull/287))
+
+### Other
+
+- *(core)* add hires_wheel to the inventory equality test helper ([#417](https://github.com/AprilNEA/OpenLogi/pull/417))
+
 ## [0.6.20](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.19...openlogi-core-v0.6.20) - 2026-07-18
 
 ### Fixed
