@@ -1030,18 +1030,29 @@ impl AppState {
     }
 
     /// Set `key`'s per-device thumb-wheel sensitivity override (clamped to the
-    /// valid range) and persist it. The agent picks it up through the reloaded
-    /// capture plans. No-op when unchanged.
+    /// valid range) and persist it. Committing the app-wide default *clears*
+    /// the override — the slider is the device's only sensitivity control, so
+    /// landing on the default is the "no override" gesture, and the device
+    /// goes back to following Settings → General instead of pinning today's
+    /// default forever. The agent picks the change up through the reloaded
+    /// capture plans. No-op when the stored override would not change.
     pub fn set_device_thumbwheel_sensitivity(&mut self, key: &str, sensitivity: i32) {
         let sensitivity = sensitivity.clamp(
             openlogi_core::config::MIN_THUMBWHEEL_SENSITIVITY,
             openlogi_core::config::MAX_THUMBWHEEL_SENSITIVITY,
         );
-        if self.config.thumbwheel_sensitivity(key) == sensitivity {
+        let override_value =
+            (sensitivity != self.config.app_settings.thumbwheel_sensitivity).then_some(sensitivity);
+        let stored = self
+            .config
+            .devices
+            .get(key)
+            .and_then(|d| d.thumbwheel_sensitivity);
+        if stored == override_value {
             return;
         }
         self.config
-            .set_device_thumbwheel_sensitivity(key, Some(sensitivity));
+            .set_device_thumbwheel_sensitivity(key, override_value);
         self.persist_and_reload("device thumbwheel sensitivity");
     }
 
