@@ -404,11 +404,13 @@ impl Orchestrator {
         self.config.app_settings.launch_at_login
     }
 
-    /// Foreground-app change → re-overlay per-app bindings on the hook maps (DPI
-    /// and the dedicated HID++ gesture map are not app-scoped, so they're untouched).
-    /// Both hook maps are recomputed: a per-app override of the gesture owner
-    /// turns it into a single action for that app, dropping it from the OS-hook
-    /// gesture set — so the gesture map is app-scoped too.
+    /// Foreground-app change → re-overlay per-app bindings on the hook maps and
+    /// republish the capture plans, whose binding maps and divert sets are
+    /// per-app effective too (HID++ dispatch reads them at event time). Both
+    /// hook maps are recomputed: a per-app override of the gesture owner turns
+    /// it into a single action for that app, dropping it from the OS-hook
+    /// gesture set — so the gesture map is app-scoped too. The dedicated HID++
+    /// gesture map is not app-scoped and stays untouched.
     pub fn set_current_app(&mut self, bundle: Option<String>) {
         if bundle == self.current_app {
             return;
@@ -419,6 +421,7 @@ impl Orchestrator {
             self.hook_maps_for(self.current_key(), self.current_app.as_deref()),
             "hook_maps",
         );
+        self.publish_device_runtime();
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.
@@ -760,7 +763,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "capture-plan republish on app switch lands with the fix commit"]
     fn app_switch_republishes_capture_plans() {
         // HID++ dispatch reads `plan.bindings` at event time, so a
         // foreground-app change must republish the capture plans — their
