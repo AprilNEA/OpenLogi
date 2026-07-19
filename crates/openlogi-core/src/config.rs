@@ -280,10 +280,17 @@ impl Config {
     /// per-direction adapter.
     #[must_use]
     pub fn gesture_bindings_for(&self, device_key: &str) -> BTreeMap<GestureDirection, Action> {
+        // Read the *owner's* stored map: the gesture role can sit on the
+        // dedicated gesture button or the MX Master 4 haptic panel (or an
+        // OS-hook button — callers gate on the owner kind), and each button
+        // keeps its own per-direction map.
+        let Some(owner) = self.gesture_owner(device_key) else {
+            return BTreeMap::new();
+        };
         match self
             .devices
             .get(device_key)
-            .and_then(|d| d.bindings.get(&ButtonId::GestureButton))
+            .and_then(|d| d.bindings.get(&owner))
         {
             Some(Binding::Gesture(map)) => map.clone(),
             _ => BTreeMap::new(),

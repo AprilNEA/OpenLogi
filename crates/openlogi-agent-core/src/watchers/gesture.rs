@@ -115,7 +115,7 @@ fn thumbwheel_armed(plan: &DeviceCapturePlan) -> bool {
 fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
     CaptureSpec {
         capture_thumbwheel: thumbwheel_armed(plan),
-        divert_gesture_button: !plan.gesture_bindings.is_empty(),
+        divert_gesture_source: plan.gesture_source_cid,
         divert_buttons: plan.divert_buttons.clone(),
     }
 }

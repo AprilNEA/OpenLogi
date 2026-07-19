@@ -54,13 +54,14 @@ pub fn gesture_bindings_for(
     config: &Config,
     config_key: Option<&str>,
 ) -> BTreeMap<GestureDirection, Action> {
-    // The dedicated HID++ gesture button (CID 0x00c3) only gestures while it is the device's gesture
-    // owner. When the user moves the role to an OS-hook button (Middle/Back/
-    // Forward) or turns gestures off, return an empty map so the gesture watcher
+    // A HID++ gesture source (the dedicated gesture button, or the MX Master 4
+    // haptic panel) only gestures while it is the device's gesture owner. When
+    // the user moves the role to an OS-hook button (Middle/Back/Forward) or
+    // turns gestures off, return an empty map so the gesture watcher
     // dispatches nothing — otherwise the always-seeded defaults would keep the
-    // HID++ gesture button firing regardless of the selection.
+    // HID++ gesture control firing regardless of the selection.
     let owner = config_key.and_then(|key| config.gesture_owner(key));
-    if owner != Some(ButtonId::GestureButton) {
+    if !owner.is_some_and(ButtonId::is_hidpp_gesture_source) {
         return BTreeMap::new();
     }
     let stored = config_key

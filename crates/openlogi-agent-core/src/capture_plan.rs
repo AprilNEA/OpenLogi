@@ -14,8 +14,7 @@ use std::sync::{Arc, RwLock};
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 use openlogi_core::config::Config;
 use openlogi_hid::DeviceRoute;
-use openlogi_hid::gesture::DIVERTABLE_STANDARD_BUTTONS;
-use openlogi_hid::reprog_controls::GESTURE_BUTTON_CID;
+use openlogi_hid::gesture::{DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS};
 
 use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
 
@@ -29,9 +28,13 @@ pub struct DeviceCapturePlan {
     pub route: DeviceRoute,
     /// Per-button single actions for this device (per-app effective).
     pub bindings: BTreeMap<ButtonId, Action>,
-    /// Per-direction map when the dedicated HID++ gesture button owns the
-    /// gesture role on this device; empty otherwise.
+    /// Per-direction map when a HID++ gesture source (the dedicated gesture
+    /// button or the MX Master 4 haptic panel) owns the gesture role on this
+    /// device; empty otherwise.
     pub gesture_bindings: BTreeMap<GestureDirection, Action>,
+    /// The gesture owner's source CID to divert with raw-XY, `None` when no
+    /// HID++ control owns the gesture role.
+    pub gesture_source_cid: Option<u16>,
     /// Standard buttons whose binding leaves the default — divert over
     /// `0x1b04`. A button at its default keeps its native HID behavior, so no
     /// re-synthesis is ever needed.
@@ -65,18 +68,26 @@ pub fn plan_for_device(
     // needs to see its press to run hold+swipe detection, and diverting it
     // would starve the hook of events.
     let oshook = oshook_gestures_for(config, Some(config_key), app);
-    // The HID++ gesture control never reaches the OS hook, so a non-default
-    // single binding on it is deliverable only via a plain HID++ divert — but
+    // The HID++ gesture sources never reach the OS hook, so a non-default
+    // single binding on one is deliverable only via a plain HID++ divert — but
     // only while it does NOT own the gesture role (the raw-XY gesture divert
-    // owns its CIDs in that case, and `gesture_bindings` is how the watcher
-    // arms that divert). `GESTURE_BUTTON_CID` is a marker here: the capture
-    // session expands it to whichever gesture-source CIDs the device exposes.
-    let plain_gesture_button = gesture_bindings
-        .is_empty()
-        .then_some((GESTURE_BUTTON_CID, ButtonId::GestureButton));
+    // owns the owner's CID, and `gesture_source_cid` is how the watcher arms
+    // that divert).
+    let owner = config.gesture_owner(config_key);
+    let gesture_source_cid = owner
+        .filter(|o| o.is_hidpp_gesture_source())
+        .and_then(|o| {
+            GESTURE_SOURCE_BUTTONS
+                .into_iter()
+                .find(|&(_, button)| button == o)
+        })
+        .map(|(cid, _)| cid);
+    let plain_sources = GESTURE_SOURCE_BUTTONS
+        .into_iter()
+        .filter(|&(_, button)| owner != Some(button));
     let divert_buttons: Vec<(u16, ButtonId)> = DIVERTABLE_STANDARD_BUTTONS
         .into_iter()
-        .chain(plain_gesture_button)
+        .chain(plain_sources)
         .filter(|(_, button)| !oshook.contains_key(button))
         .filter(|(_, button)| {
             bindings
@@ -100,6 +111,7 @@ pub fn plan_for_device(
         route,
         bindings,
         gesture_bindings,
+        gesture_source_cid,
         divert_buttons,
         thumbwheel_bindings_nondefault,
         thumbwheel_sensitivity: config.thumbwheel_sensitivity(config_key),
@@ -122,7 +134,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "RED: the haptic panel as its own control is not implemented yet"]
     fn haptic_panel_can_own_the_gesture_role() {
         // The MX Master 4 haptic panel is a HID++ gesture source: selecting it
         // as the gesture owner must arm the raw-XY gesture divert, exactly
@@ -145,7 +156,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "RED: the haptic panel as its own control is not implemented yet"]
     fn single_bound_haptic_panel_is_plain_diverted_when_not_the_owner() {
         // While the dedicated button owns gestures (the default), a single
         // action bound to the panel is deliverable only via a plain HID++
@@ -166,7 +176,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "RED: the haptic panel as its own control is not implemented yet"]
     fn unbound_haptic_panel_stays_native() {
         // Default binding for the panel is Action::None — an untouched panel
         // must not be diverted, so its firmware behavior (haptics) survives.

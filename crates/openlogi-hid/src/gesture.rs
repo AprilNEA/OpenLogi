@@ -104,36 +104,43 @@ pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 3] = [
     (0x0056, ButtonId::Forward),
 ];
 
+/// HID++ gesture sources: the `0x1b04` control ID and the [`ButtonId`] it
+/// delivers — the dedicated gesture button on most MX mice, and the Haptic
+/// Sense Panel on MX Master 4 (two distinct physical controls). The one that
+/// owns the gesture role is diverted with raw-XY; either is plain-diverted
+/// like a standard button when its binding leaves the default without the
+/// role.
+pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 2] = [
+    (reprog_controls::GESTURE_BUTTON_CID, ButtonId::GestureButton),
+    (reprog_controls::HAPTIC_PANEL_CID, ButtonId::HapticPanel),
+];
+
 /// Which of one device's controls a capture session should divert.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CaptureSpec {
     /// Divert the thumb wheel over `0x2150` (rotation rebind / sensitivity /
     /// click bound).
     pub capture_thumbwheel: bool,
-    /// Divert the device's gesture sources — the
-    /// [`reprog_controls::GESTURE_SOURCE_CIDS`] members it exposes — with
-    /// raw-XY (the HID++ gesture control owns the gesture role).
-    pub divert_gesture_button: bool,
+    /// The gesture owner's source CID (a [`GESTURE_SOURCE_BUTTONS`] member) to
+    /// divert with raw-XY, or `None` when no HID++ control owns the gesture
+    /// role.
+    pub divert_gesture_source: Option<u16>,
     /// Buttons to divert as plain presses (no raw-XY): the
-    /// [`DIVERTABLE_STANDARD_BUTTONS`] whose binding leaves the default, plus
-    /// the gesture sources (marked by `GESTURE_BUTTON_CID`) when
-    /// [`ButtonId::GestureButton`] carries a non-default single binding
-    /// without owning the gesture role.
+    /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-owner [`GESTURE_SOURCE_BUTTONS`]
+    /// whose binding leaves the default.
     pub divert_buttons: Vec<(u16, ButtonId)>,
 }
 
 /// Capture the controls selected by `spec` on `route` until `shutdown`
 /// resolves, forwarding each event to `sink`.
 ///
-/// The device's gesture sources (raw-XY) are diverted only when
-/// `spec.divert_gesture_button` — i.e. the HID++ gesture control is the
-/// device's gesture owner. When the user moves the gesture role to an OS-hook
-/// button or turns gestures off, the gesture sources keep their native
-/// behavior — unless a non-default single binding puts them in
-/// `spec.divert_buttons`, in which case they are diverted as plain buttons
-/// (the OS hook never sees a gesture-source CID, so this is the binding's
-/// only delivery path). The DPI/ModeShift capture and the channel-reuse slot
-/// are independent of this.
+/// Only the gesture owner's source (`spec.divert_gesture_source`) is diverted
+/// with raw-XY. When the user moves the gesture role to an OS-hook button or
+/// turns gestures off, the gesture sources keep their native behavior —
+/// unless a non-default single binding puts them in `spec.divert_buttons`, in
+/// which case they are diverted as plain buttons (the OS hook never sees a
+/// gesture-source CID, so this is the binding's only delivery path). The
+/// DPI/ModeShift capture and the channel-reuse slot are independent of this.
 ///
 /// Opens and holds one HID++ channel, diverts whichever of those controls the
 /// device exposes, and listens. Returns once `shutdown` fires (or its sender is
@@ -160,7 +167,7 @@ pub async fn run_capture_session(
 
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
     let reprog_index = armed.reprog.as_ref().map(|(_, idx)| *idx);
-    let gesture_cids = armed.gesture_cids.clone();
+    let gesture_cid = armed.gesture_cid;
     let thumb_index = armed.thumb.as_ref().map(|(_, idx)| *idx);
     let dpi_set = armed.dpi_cids.clone();
     let button_set = armed.button_cids.clone();
@@ -178,7 +185,7 @@ pub async fn run_capture_session(
                 // Recover the guard even if a prior holder panicked — the
                 // critical section is panic-free, so the data is consistent.
                 let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
-                handle_reprog(&mut acc, event, &gesture_cids, &dpi_set, &button_set, &sink);
+                handle_reprog(&mut acc, event, gesture_cid, &dpi_set, &button_set, &sink);
                 return;
             }
             if let Some(idx) = thumb_index
@@ -196,7 +203,7 @@ pub async fn run_capture_session(
 
     info!(
         index = device_index,
-        gesture_sources = armed.gesture_cids.len(),
+        gesture = armed.gesture_cid.is_some(),
         dpi_buttons = armed.dpi_cids.len(),
         buttons = armed.button_cids.len(),
         thumbwheel = armed.thumb.is_some(),
@@ -238,7 +245,9 @@ pub async fn run_capture_session_with_stop_reason(
     });
     let spec = CaptureSpec {
         capture_thumbwheel,
-        divert_gesture_button,
+        // The bool-era API only ever meant the dedicated gesture button; the
+        // haptic panel is reachable through [`CaptureSpec`] itself.
+        divert_gesture_source: divert_gesture_button.then_some(reprog_controls::GESTURE_BUTTON_CID),
         divert_buttons: Vec::new(),
     };
     run_capture_session(route, spec, sink, rx, channel_slot).await
@@ -270,8 +279,9 @@ pub async fn run_capture_session_with_registry(
 struct ArmedControls {
     /// `0x1b04` accessor + feature index, present when the device exposes it.
     reprog: Option<(ReprogControlsV4, u8)>,
-    /// Gesture-source CIDs diverted with raw-XY reporting.
-    gesture_cids: Vec<u16>,
+    /// The gesture-source CID diverted with raw-XY reporting, when the spec
+    /// selected one and the device exposes it.
+    gesture_cid: Option<u16>,
     /// DPI/ModeShift CIDs diverted as plain buttons.
     dpi_cids: Vec<u16>,
     /// Standard-button CIDs diverted per the session's [`CaptureSpec`], with
@@ -286,7 +296,7 @@ impl ArmedControls {
     /// Restore every diverted control. Failures are logged, not propagated.
     async fn disarm(&self) {
         if let Some((rc, _)) = self.reprog.as_ref() {
-            for &cid in &self.gesture_cids {
+            if let Some(cid) = self.gesture_cid {
                 let r = rc.set_cid_reporting(cid, false, false).await;
                 restore(r, "gesture source");
             }
@@ -321,7 +331,7 @@ async fn arm_controls(
         .map_err(|_| GestureError::DeviceUnreachable(slot))?;
 
     let mut reprog: Option<(ReprogControlsV4, u8)> = None;
-    let mut gesture_cids: Vec<u16> = Vec::new();
+    let mut gesture_cid: Option<u16> = None;
     let mut dpi_cids: Vec<u16> = Vec::new();
     let mut button_cids: Vec<(u16, ButtonId)> = Vec::new();
     if let Some(info) = device
@@ -333,15 +343,16 @@ async fn arm_controls(
         let rc = ReprogControlsV4::new(Arc::clone(chan), slot, info.index);
         let controls = enumerate_controls(&rc).await?;
 
-        // Only divert a gesture source when it owns the gesture role; otherwise
-        // leave it native (a non-owner HID++ control must not be captured-and-dropped).
-        if spec.divert_gesture_button {
-            for cid in gesture_source_cids(&controls) {
-                rc.set_cid_reporting(cid, true, true)
-                    .await
-                    .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-                gesture_cids.push(cid);
-            }
+        // Only divert the gesture owner's source; every other gesture source
+        // stays native (a non-owner HID++ control must not be
+        // captured-and-dropped).
+        if let Some(cid) = spec.divert_gesture_source
+            && controls.iter().any(|c| c.cid == cid && c.supports_raw_xy())
+        {
+            rc.set_cid_reporting(cid, true, true)
+                .await
+                .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+            gesture_cid = Some(cid);
         }
         for &cid in &reprog_controls::DPI_MODE_SHIFT_CIDS {
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
@@ -352,28 +363,17 @@ async fn arm_controls(
             }
         }
         for &(cid, button) in &spec.divert_buttons {
-            // [`ButtonId::GestureButton`]'s physical control differs per
-            // device, so its marker CID expands to every gesture source the
-            // device exposes.
-            let targets: &[u16] = if cid == reprog_controls::GESTURE_BUTTON_CID {
-                &reprog_controls::GESTURE_SOURCE_CIDS
-            } else {
-                std::slice::from_ref(&cid)
-            };
-            for &cid in targets {
-                // The plan never lists a gesture-source CID while the raw-XY
-                // gesture divert owns it, but guard anyway: a plain (divert, no
-                // raw-XY) write here would strip the raw-XY reporting armed
-                // above.
-                if gesture_cids.contains(&cid) {
-                    continue;
-                }
-                if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-                    rc.set_cid_reporting(cid, true, false)
-                        .await
-                        .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-                    button_cids.push((cid, button));
-                }
+            // The plan never lists the raw-XY-diverted gesture source, but
+            // guard anyway: a plain (divert, no raw-XY) write here would strip
+            // the raw-XY reporting armed above.
+            if gesture_cid == Some(cid) {
+                continue;
+            }
+            if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
+                rc.set_cid_reporting(cid, true, false)
+                    .await
+                    .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+                button_cids.push((cid, button));
             }
         }
         reprog = Some((rc, info.index));
@@ -411,26 +411,16 @@ async fn arm_controls(
         thumb = Some((tw, info.index));
     }
 
-    if gesture_cids.is_empty() && dpi_cids.is_empty() && button_cids.is_empty() && thumb.is_none() {
+    if gesture_cid.is_none() && dpi_cids.is_empty() && button_cids.is_empty() && thumb.is_none() {
         debug!(slot, "no capturable controls — idle session");
     }
     Ok(ArmedControls {
         reprog,
-        gesture_cids,
+        gesture_cid,
         dpi_cids,
         button_cids,
         thumb,
     })
-}
-
-/// The gesture-source CIDs to divert with raw-XY on this device: the members
-/// of [`reprog_controls::GESTURE_SOURCE_CIDS`] its control table exposes with
-/// raw-XY support.
-fn gesture_source_cids(controls: &[reprog_controls::CtrlIdInfo]) -> Vec<u16> {
-    reprog_controls::GESTURE_SOURCE_CIDS
-        .into_iter()
-        .filter(|&cid| controls.iter().any(|c| c.cid == cid && c.supports_raw_xy()))
-        .collect()
 }
 
 /// Log (don't propagate) a failure to hand a control back to the firmware.
@@ -467,7 +457,7 @@ pub(crate) async fn enumerate_controls(
 fn handle_reprog(
     acc: &mut CaptureAccum,
     event: RawControlEvent,
-    gesture_cids: &[u16],
+    gesture_cid: Option<u16>,
     dpi_cids: &[u16],
     button_cids: &[(u16, ButtonId)],
     sink: &mpsc::UnboundedSender<CapturedInput>,
@@ -479,11 +469,11 @@ fn handle_reprog(
             // (it has a single binding but not the gesture role), its press
             // must flow through the `button_cids` loop only — not also emit a
             // click.
-            let held_source = gesture_cids.iter().find(|cid| cids.contains(cid));
-            if let Some(&cid) = held_source {
+            let owner_held = gesture_cid.is_some_and(|cid| cids.contains(&cid));
+            if owner_held {
                 if !acc.swipe.is_holding() {
                     acc.swipe.begin();
-                    acc.skip_first_raw_xy = cid == reprog_controls::HAPTIC_PANEL_CID;
+                    acc.skip_first_raw_xy = gesture_cid == Some(reprog_controls::HAPTIC_PANEL_CID);
                 }
             } else if acc.swipe.is_holding() {
                 // A press that never committed a direction is a plain click.
