@@ -302,8 +302,15 @@ fn main() -> Result<()> {
                         // silhouettes were resolved: the resolver was rebuilt
                         // when its outcome landed; force this merge through
                         // the unchanged-list early-return so the fresh records
-                        // become visible.
-                        let force_refresh = std::mem::take(&mut assets_dirty);
+                        // become visible. Only consume the flag on a `Ready`
+                        // snapshot that will actually run the merge below —
+                        // `refresh_inventories` is skipped while the agent is
+                        // still `Scanning`, so taking it there would drop the
+                        // repaint and strand the device on its silhouette until
+                        // the next inventory change or a restart (seen after an
+                        // update relaunches GUI and agent together: the agent's
+                        // Scanning window overlaps the first sync's completion).
+                        let force_refresh = inventory_ready && std::mem::take(&mut assets_dirty);
                         let (auto_download, asset_source, models) = cx.update(|cx| {
                             let (changed, auto_download, asset_source, models) = cx.update_global::<AppState, _>(|state, _| {
                                 // Merge only *completed* enumerations. A not-yet-ready
