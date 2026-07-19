@@ -587,6 +587,7 @@ mod tests {
         AgentDevice, InventoryHealth, Orchestrator, configured_wheel_mode, plan_reapply,
         reapply_targets,
     };
+    use openlogi_core::binding::{Action, ButtonId};
     use openlogi_core::config::{Config, ScrollResolution};
     use openlogi_core::device::Capabilities;
     use openlogi_hid::DeviceRoute;
@@ -749,6 +750,41 @@ mod tests {
     /// forwards completed enumerations, so "checked and found nothing" must not
     /// be reported as "still scanning" — that's the whole distinction the
     /// health exists to carry.
+    /// The published capture plan's Back binding for the first device, if any.
+    fn published_back_binding(orch: &Orchestrator) -> Option<Action> {
+        orch.shared.capture_plans.read().ok().and_then(|plans| {
+            plans
+                .first()
+                .and_then(|plan| plan.bindings.get(&ButtonId::Back).cloned())
+        })
+    }
+
+    #[test]
+    #[ignore = "capture-plan republish on app switch lands with the fix commit"]
+    fn app_switch_republishes_capture_plans() {
+        // HID++ dispatch reads `plan.bindings` at event time, so a
+        // foreground-app change must republish the capture plans — their
+        // binding maps and divert sets are per-app effective — or every
+        // diverted button keeps firing the previous app's actions.
+        let mut config = Config::default();
+        config.set_per_app_binding(
+            "a",
+            "com.example.editor",
+            ButtonId::Back,
+            Some(Action::Undo),
+        );
+        let mut orch = Orchestrator::new(config);
+        orch.devices = vec![dev("a", 1, true)];
+        orch.rebuild();
+        assert_ne!(
+            published_back_binding(&orch),
+            Some(Action::Undo),
+            "no per-app overlay while no app is in front"
+        );
+        orch.set_current_app(Some("com.example.editor".into()));
+        assert_eq!(published_back_binding(&orch), Some(Action::Undo));
+    }
+
     #[test]
     fn empty_refresh_marks_inventory_ready() {
         let mut orch = Orchestrator::new(Config::default());
