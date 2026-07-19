@@ -7,7 +7,7 @@ pub mod sync;
 
 #[derive(Debug, Subcommand)]
 pub enum AssetsCmd {
-    /// Download every device's bundle-required files from assets.openlogi.org.
+    /// Download every device's bundle-required files from the fastest available mirror.
     Sync(sync::SyncArgs),
 }
 

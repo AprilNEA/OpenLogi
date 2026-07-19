@@ -1,4 +1,4 @@
-//! Background HTTP sync against `assets.openlogi.org`.
+//! Background HTTP sync against OpenLogi's asset mirrors.
 //!
 //! Always fetches `index.json` first — even with no devices connected, so
 //! the registry is on disk before the first device needs resolving. Then,
@@ -15,13 +15,11 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use backon::{BackoffBuilder, ExponentialBuilder};
 use openlogi_assets::http;
-use openlogi_assets::{BUTTONS_RENDER_FILES, DepotManifest, DeviceEntry, FetchOutcome};
+use openlogi_assets::{
+    AssetRegistry, BUTTONS_RENDER_FILES, DepotManifest, DeviceEntry, FetchOutcome,
+};
 use openlogi_core::device::{DeviceInventory, DeviceModelInfo};
 use tracing::{debug, info, warn};
-
-/// Default origin for asset fetches. Overridable via `OPENLOGI_ASSETS`
-/// so dev / staging deployments can point elsewhere without a rebuild.
-pub const DEFAULT_BASE: &str = "https://assets.openlogi.org";
 
 /// Whether the startup HTTP sync should run on this launch.
 ///
@@ -43,7 +41,8 @@ pub fn should_run(has_bundle: bool) -> bool {
     !has_bundle
 }
 
-/// Refresh the local cache: the shared `index.json` unconditionally, then
+/// Refresh the local cache: probe the built-in mirrors (or use the explicit
+/// `server` override), persist the selected source's `index.json`, then sync
 /// the depots for every model in `models`. An empty `models` is a valid
 /// call — it prefetches just the index so device resolution works the
 /// moment a device first appears.
@@ -51,21 +50,19 @@ pub fn should_run(has_bundle: bool) -> bool {
 /// Each entry pairs a device's HID++ model info with its firmware `codename`,
 /// so the depot match can fall back to the registry `displayName` for devices
 /// whose live PID isn't in the registry (e.g. an MX Master 3S over BTLE).
-pub fn sync(server: &str, models: &[(DeviceModelInfo, Option<String>)]) -> Result<()> {
+pub fn sync(server: Option<&str>, models: &[(DeviceModelInfo, Option<String>)]) -> Result<()> {
     let cache_root = super::paths::user_cache_root();
     fs::create_dir_all(&cache_root)
         .with_context(|| format!("create cache root {}", cache_root.display()))?;
 
-    let client = http::AssetClient::new(server);
+    let registry = AssetRegistry::load(server, &cache_root).context("fetch asset index")?;
+    let client = registry.client();
+    let index = registry.index();
     // The index is the critical shared resource — if it can't be fetched
     // (after the HTTP layer's own retries) bail with an error so the caller
     // retries the whole sync on a later device snapshot, rather than latching
     // success off a run that downloaded nothing. Per-depot failures below stay
     // best-effort: an optional colour variant 404 shouldn't block everything.
-    let index = client
-        .fetch_index_to_dir(&cache_root)
-        .context("fetch asset index")?;
-
     // Each target carries the HID++ `extended_model_id` byte so the
     // depot sync can fetch the right colour variant. `OPENLOGI_FORCE_DEPOT`
     // doesn't correspond to a physical device, so we pass `ext = 0`
@@ -77,7 +74,7 @@ pub fn sync(server: &str, models: &[(DeviceModelInfo, Option<String>)]) -> Resul
         targets.push((forced, entry.clone(), 0));
     }
     for (model, codename) in models {
-        if let Some((depot, entry)) = super::resolve_in_index(&index, model, codename.as_deref()) {
+        if let Some((depot, entry)) = super::resolve_in_index(index, model, codename.as_deref()) {
             targets.push((depot.to_string(), entry.clone(), model.extended_model_id));
         }
     }
@@ -90,7 +87,7 @@ pub fn sync(server: &str, models: &[(DeviceModelInfo, Option<String>)]) -> Resul
     }
 
     for (depot, entry, ext) in &targets {
-        if let Err(e) = sync_depot(&client, &cache_root, depot, entry, *ext) {
+        if let Err(e) = sync_depot(client, &cache_root, depot, entry, *ext) {
             warn!(depot, error = %e, "depot sync failed");
         }
     }
@@ -258,8 +255,8 @@ pub(crate) fn sync_retry_delay(attempts: u32) -> Duration {
 /// actions always fetch, even in a release build that would otherwise serve
 /// only bundled art.)
 pub(crate) fn run_asset_sync(models: &[(DeviceModelInfo, Option<String>)]) -> bool {
-    let server = std::env::var("OPENLOGI_ASSETS").unwrap_or_else(|_| DEFAULT_BASE.to_string());
-    match sync(&server, models) {
+    let server = std::env::var("OPENLOGI_ASSETS").ok();
+    match sync(server.as_deref(), models) {
         Ok(()) => true,
         Err(e) => {
             warn!(error = ?e, "asset sync failed — will retry with backoff");

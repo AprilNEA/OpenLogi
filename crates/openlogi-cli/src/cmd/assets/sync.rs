@@ -1,10 +1,11 @@
 //! `openlogi assets sync` — pull every device's bundle-required files
 //! into the openlogi-gui crate so `cargo bundle` can pick them up.
 //!
-//! Fetches `index.json`, writes per-device files (skipping cache hits via
-//! sha256 compare), and prunes depots that no longer appear in the
-//! registry. Default `--out` matches the cargo-bundle resources path so
-//! the workflow is `openlogi assets sync && cargo bundle --release`.
+//! Probes OpenLogi's asset mirrors, fetches `index.json`, writes per-device
+//! files (skipping cache hits via sha256 compare), and prunes depots that no
+//! longer appear in the registry. Default `--out` matches the cargo-bundle
+//! resources path so the workflow is
+//! `openlogi assets sync && cargo bundle --release`.
 
 use std::collections::HashSet;
 use std::fs;
@@ -12,10 +13,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use clap::Args;
-use openlogi_assets::{FRONT_RENDER_FILES, FetchOutcome, METADATA_FILES, http};
-
-/// Default origin. Overridable via `--base` / `OPENLOGI_ASSETS`.
-const DEFAULT_BASE: &str = "https://assets.openlogi.org";
+use openlogi_assets::{AssetRegistry, FRONT_RENDER_FILES, FetchOutcome, METADATA_FILES, http};
 
 /// Returns true when `name` is an *optional* asset OpenLogi fetches when the
 /// registry lists it but never warns about when it's absent:
@@ -44,9 +42,9 @@ fn is_optional_asset(name: &str) -> bool {
 
 #[derive(Debug, Args)]
 pub struct SyncArgs {
-    /// Origin of the asset host.
-    #[arg(long, default_value = DEFAULT_BASE, env = "OPENLOGI_ASSETS")]
-    base: String,
+    /// Override automatic mirror discovery with one uniform asset origin.
+    #[arg(long, env = "OPENLOGI_ASSETS")]
+    base: Option<String>,
     /// Destination directory. Default matches the cargo-bundle
     /// resources path declared in openlogi-gui/Cargo.toml.
     #[arg(long, default_value = "crates/openlogi-gui/assets")]
@@ -57,8 +55,10 @@ pub fn run(args: SyncArgs) -> Result<()> {
     let SyncArgs { base, out } = args;
     fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
 
-    let client = http::AssetClient::new(&base);
-    let index = client.fetch_index_to_dir(&out)?;
+    let registry = AssetRegistry::load(base.as_deref(), &out)?;
+    let client = registry.client();
+    let index = registry.index();
+    println!("asset source: {}", registry.source());
     println!("index.json: {} devices", index.devices.len());
 
     // Prune orphans so the bundle stays in sync with the registry.
