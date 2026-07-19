@@ -156,6 +156,7 @@ fn probe_default_sources(dir: &Path) -> Result<AssetRegistry, AssetError> {
     while let Ok((source, result)) = receiver.recv() {
         match result {
             Ok(probe) => {
+                // A local persistence failure is independent of the selected mirror.
                 write_replace(&dir.join(INDEX_NAME), &probe.index_bytes)?;
                 info!(%source, "asset source selected");
                 return Ok(AssetRegistry {
@@ -170,7 +171,9 @@ fn probe_default_sources(dir: &Path) -> Result<AssetRegistry, AssetError> {
                     AssetSource::Production => production_error = Some(error),
                     AssetSource::Pages => pages_error = Some(error),
                     AssetSource::JsDelivr => jsdelivr_error = Some(error),
-                    AssetSource::Override(_) => return Err(AssetError::SourceProbeInterrupted),
+                    AssetSource::Override(_) => {
+                        unreachable!("override is not sent by source probes")
+                    }
                 }
             }
         }
