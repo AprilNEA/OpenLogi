@@ -124,15 +124,29 @@ struct RunningSession {
     epoch: u64,
 }
 
-/// Whether a finished capture session should make the manager re-arm its
-/// device.
+/// What the manager should do with one session-completion report.
+#[derive(Debug, PartialEq)]
+enum DoneAction {
+    /// A stale report from a session the manager no longer tracks — ignore it.
+    Ignore,
+    /// The tracked session's task has fully exited: drop its entry so the next
+    /// tick may arm a successor. `unexpected` is true when the exit wasn't a
+    /// deliberate stop and the drop deserves a warning.
+    Remove { unexpected: bool },
+}
+
+/// Decide the [`DoneAction`] for a completion report carrying `done_epoch`,
+/// given the session the manager currently tracks for that device (if any).
 ///
-/// `done_epoch` identifies the session that signalled completion; `live` is the
-/// session the manager currently tracks for that device. A completion only
-/// warrants a respawn when it is the *current* session (not a stale one already
-/// superseded by a deliberate restart, whose epoch no longer matches).
-fn should_rearm(done_epoch: u64, live: Option<&RunningSession>) -> bool {
-    live.is_some_and(|session| session.epoch == done_epoch)
+/// Only the *current* session's report settles anything; a stale epoch belongs
+/// to a session already superseded by a deliberate restart. Deliberately
+/// stopped sessions are dropped from the map at stop time, so any tracked
+/// session's completion is an unexpected exit.
+fn on_done(done_epoch: u64, live: Option<&RunningSession>) -> DoneAction {
+    match live {
+        Some(session) if session.epoch == done_epoch => DoneAction::Remove { unexpected: true },
+        _ => DoneAction::Ignore,
+    }
 }
 
 /// Keep one capture session alive per online device, restarting a session when
@@ -252,8 +266,10 @@ async fn manage(
                 // at most once per `TARGET_POLL`, which paces the respawn so a
                 // permanently failing device can't hot-loop. A stale epoch (an
                 // already-superseded session) is a no-op.
-                if should_rearm(done_epoch, sessions.get(&key)) {
-                    warn!(key, "capture session ended unexpectedly, re-arming");
+                if let DoneAction::Remove { unexpected } = on_done(done_epoch, sessions.get(&key)) {
+                    if unexpected {
+                        warn!(key, "capture session ended unexpectedly, re-arming");
+                    }
                     sessions.remove(&key);
                 }
             }
@@ -613,7 +629,8 @@ mod tests {
         );
     }
 
-    fn session_with_epoch(epoch: u64) -> RunningSession {
+    /// A session whose stop sender is already gone (taken by a deliberate stop).
+    fn stopped_session_with_epoch(epoch: u64) -> RunningSession {
         RunningSession {
             route: DeviceRoute::Direct {
                 vendor_id: 0x046d,
@@ -625,23 +642,38 @@ mod tests {
         }
     }
 
+    /// A session still holding its stop sender (never asked to stop).
+    fn live_session_with_epoch(epoch: u64) -> RunningSession {
+        let (stop, _rx) = oneshot::channel();
+        RunningSession {
+            stop: Some(stop),
+            ..stopped_session_with_epoch(epoch)
+        }
+    }
+
     #[test]
     fn rearms_when_the_current_session_dies() {
         // The live session for this device ended on its own.
-        assert!(should_rearm(7, Some(&session_with_epoch(7))));
+        assert_eq!(
+            on_done(7, Some(&live_session_with_epoch(7))),
+            DoneAction::Remove { unexpected: true }
+        );
     }
 
     #[test]
     fn ignores_a_stale_session_superseded_by_a_restart() {
         // An older session reports completion after a deliberate restart already
         // bumped the epoch; re-arming would needlessly cycle the live session.
-        assert!(!should_rearm(6, Some(&session_with_epoch(7))));
+        assert_eq!(
+            on_done(6, Some(&live_session_with_epoch(7))),
+            DoneAction::Ignore
+        );
     }
 
     #[test]
-    fn ignores_a_deliberate_stop_to_idle() {
-        // The session was stopped on purpose (pairing took the receiver, or the
-        // device went away): its entry is gone, so there is nothing to re-arm.
-        assert!(!should_rearm(7, None));
+    fn ignores_a_completion_for_an_untracked_device() {
+        // The session's entry is already gone (a deliberate stop to idle, or a
+        // device that went away): there is nothing to settle or re-arm.
+        assert_eq!(on_done(7, None), DoneAction::Ignore);
     }
 }
