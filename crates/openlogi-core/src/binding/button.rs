@@ -60,13 +60,20 @@ pub enum ButtonId {
     /// Keyboard "Volume Up" control (CID `0x00e9`) — F12 on the Signature
     /// series.
     KeyVolumeUp,
+    /// The MX Master 4 Haptic Sense Panel — the touch-sensitive thumb rest
+    /// (Logi metadata slot `ASSIGNMENT_NAME_SHOW_RADIAL_MENU`, HID++ CID
+    /// `0x01a0`). A separate physical control from [`ButtonId::GestureButton`];
+    /// captured over HID++ like it, and eligible as the gesture owner.
+    /// Declared last: the TOML config and any serialized form encode the
+    /// variant identifier / index, so new buttons are append-only.
+    HapticPanel,
 }
 
 impl ButtonId {
     /// Every rebindable button in declaration (physical front-to-side) order —
     /// the iteration source for default-binding seeding and the popover
     /// trigger list.
-    pub const ALL: [ButtonId; 10] = [
+    pub const ALL: [ButtonId; 11] = [
         ButtonId::LeftClick,
         ButtonId::RightClick,
         ButtonId::MiddleClick,
@@ -77,6 +84,7 @@ impl ButtonId {
         ButtonId::ThumbwheelScrollUp,
         ButtonId::ThumbwheelScrollDown,
         ButtonId::GestureButton,
+        ButtonId::HapticPanel,
     ];
 
     /// The divertable keyboard F-row controls, in F-row order. Kept out of
@@ -110,6 +118,16 @@ impl ButtonId {
         )
     }
 
+    /// Whether this button is a HID++ gesture source — a control that is
+    /// captured over HID++ raw-XY diversion (never the OS hook) and can
+    /// therefore own the gesture role with swipe directions: the dedicated
+    /// gesture button, or the MX Master 4 haptic panel. The capture layer maps
+    /// each to its control ID.
+    #[must_use]
+    pub fn is_hidpp_gesture_source(self) -> bool {
+        matches!(self, ButtonId::GestureButton | ButtonId::HapticPanel)
+    }
+
     /// Human-readable label for popovers and tooltips.
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -133,6 +151,7 @@ impl ButtonId {
             ButtonId::KeyMute => "Mute Key",
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
+            ButtonId::HapticPanel => "Haptic Panel",
         }
     }
 }
