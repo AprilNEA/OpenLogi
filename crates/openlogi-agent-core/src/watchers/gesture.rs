@@ -19,7 +19,7 @@
 //! the events arrive over HID++, and the bound action is synthesised the same
 //! way regardless.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -116,10 +116,13 @@ fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
     }
 }
 
-/// One live capture session tracked by the manager.
+/// One capture session tracked by the manager.
 struct RunningSession {
     route: DeviceRoute,
     spec: CaptureSpec,
+    /// Present while the session runs; taken to request a stop. `None` means
+    /// the session is draining — deliberately stopped, but its task (and the
+    /// control-restore writes in its teardown) may still be in flight.
     stop: Option<oneshot::Sender<()>>,
     epoch: u64,
 }
@@ -139,12 +142,15 @@ enum DoneAction {
 /// given the session the manager currently tracks for that device (if any).
 ///
 /// Only the *current* session's report settles anything; a stale epoch belongs
-/// to a session already superseded by a deliberate restart. Deliberately
-/// stopped sessions are dropped from the map at stop time, so any tracked
-/// session's completion is an unexpected exit.
+/// to a session already superseded. A tracked session whose stop sender is
+/// gone was stopped deliberately and is merely draining — its report frees the
+/// key quietly. One still holding its stop sender exited on its own and
+/// warrants a warning alongside the re-arm.
 fn on_done(done_epoch: u64, live: Option<&RunningSession>) -> DoneAction {
     match live {
-        Some(session) if session.epoch == done_epoch => DoneAction::Remove { unexpected: true },
+        Some(session) if session.epoch == done_epoch => DoneAction::Remove {
+            unexpected: session.stop.is_some(),
+        },
         _ => DoneAction::Ignore,
     }
 }
@@ -165,8 +171,10 @@ async fn manage(
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
     // HID++ read error, a sleep-wake glitch, brief radio loss) would otherwise go
     // unnoticed. Each session reports its completion here, tagged with its device
-    // key and the epoch it started under, so a dead *current* session re-arms on
-    // the next tick while stale completions are ignored.
+    // key and the epoch it started under: a dead *current* session re-arms on the
+    // next tick, a deliberately stopped one merely frees its key for the
+    // replacement once its teardown has drained, and stale completions are
+    // ignored (see `on_done`).
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<(String, u64)>();
     let mut epoch: u64 = 0;
     // The capture-vs-pairing arbiter hands out one exclusive lease. All session
@@ -211,27 +219,24 @@ async fn manage(
                     };
                 // Stop sessions whose device disappeared or whose plan changed.
                 // Sending on the oneshot lets the session restore its controls.
-                // A key stopped this tick restarts on the *next* tick, never
-                // this one: arming the replacement immediately could interleave
-                // its divert writes with the old session's restore writes on
-                // the same device, leaving a control un-diverted while the new
-                // session believes it owns it.
-                let mut stopping: HashSet<String> = HashSet::new();
-                sessions.retain(|key, session| {
+                // A stopped session stays tracked — stop sender taken — until
+                // its task reports completion below, and a tracked key is never
+                // re-armed: arming the replacement while the old task may still
+                // be mid-restore could interleave its divert writes with the
+                // restore writes on the same device, leaving a control
+                // un-diverted while the new session believes it owns it,
+                // however many ticks the restore takes.
+                for (key, session) in &mut sessions {
                     let keep = want
                         .get(key)
                         .is_some_and(|(route, spec)| *route == session.route && *spec == session.spec);
-                    if !keep {
-                        if let Some(stop) = session.stop.take() {
-                            let _ = stop.send(());
-                        }
-                        stopping.insert(key.clone());
+                    if !keep && let Some(stop) = session.stop.take() {
+                        let _ = stop.send(());
                     }
-                    keep
-                });
+                }
                 accumulators.retain(|key, _| want.contains_key(key));
                 for (key, (route, spec)) in want {
-                    if sessions.contains_key(&key) || stopping.contains(&key) {
+                    if sessions.contains_key(&key) {
                         continue;
                     }
                     // All sessions share one exclusive lease; acquire it with the
@@ -261,11 +266,12 @@ async fn manage(
                 }
             }
             Some((key, done_epoch)) = done_rx.recv() => {
-                // A capture session ended on its own. Dropping its entry lets the
-                // next tick start a fresh session for that device; the tick fires
-                // at most once per `TARGET_POLL`, which paces the respawn so a
-                // permanently failing device can't hot-loop. A stale epoch (an
-                // already-superseded session) is a no-op.
+                // A capture session's task has fully exited — its restore writes
+                // included — so dropping its entry lets the next tick start a
+                // fresh session for that device; the tick fires at most once per
+                // `TARGET_POLL`, which paces the respawn so a permanently failing
+                // device can't hot-loop. A stale epoch (an already-superseded
+                // session) is a no-op.
                 if let DoneAction::Remove { unexpected } = on_done(done_epoch, sessions.get(&key)) {
                     if unexpected {
                         warn!(key, "capture session ended unexpectedly, re-arming");
@@ -678,7 +684,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "drain-until-done lands with the fix commit"]
     fn settles_a_draining_session_quietly() {
         // A deliberately stopped session stays tracked until its task — the
         // control-restore writes included — actually exits, so its key cannot
