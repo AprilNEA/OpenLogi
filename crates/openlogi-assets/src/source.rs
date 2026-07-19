@@ -1,7 +1,7 @@
 //! Built-in asset mirror discovery and npm shard routing.
 //!
-//! A synchronization run races the production custom domain, its immutable
-//! Cloudflare Pages deployment, and the fixed jsDelivr npm release. The first
+//! A synchronization run races the production custom domain, its versioned
+//! Cloudflare Pages alias, and the fixed jsDelivr npm release. The first
 //! source with a complete valid catalog supplies both `index.json` and every
 //! subsequent file URL for that run, so caches never mix mirrors mid-sync.
 
@@ -23,8 +23,8 @@ const INDEX_NAME: &str = "index.json";
 /// Mutable production endpoint behind the OpenLogi custom domain.
 const PRODUCTION_BASE: &str = "https://assets.openlogi.org";
 
-/// Immutable Cloudflare Pages deployment for asset release 0.0.1.
-const PAGES_BASE: &str = "https://18259774.openlogi-assets.pages.dev";
+/// Stable Cloudflare Pages branch alias for asset release 0.0.1.
+const PAGES_BASE: &str = "https://v0-0-1.openlogi-assets.pages.dev";
 
 /// Exact jsDelivr catalog package for asset release 0.0.1.
 const JSDELIVR_CATALOG_BASE: &str = "https://cdn.jsdelivr.net/npm/@logi-assets/catalog@0.0.1";
@@ -44,7 +44,7 @@ const NPM_ROUTES_SCHEMA: u32 = 1;
 pub enum AssetSource {
     /// Mutable production custom domain.
     Production,
-    /// Immutable Cloudflare Pages deployment matching the npm release.
+    /// Versioned Cloudflare Pages branch alias matching the npm release.
     Pages,
     /// Versioned npm packages served through jsDelivr.
     JsDelivr,
@@ -74,7 +74,7 @@ impl AssetRegistry {
     /// Load a registry into `dir`.
     ///
     /// An explicit `base` uses that uniform origin. Without an override, the
-    /// production domain, immutable Pages deployment, and versioned jsDelivr
+    /// production domain, versioned Pages alias, and versioned jsDelivr
     /// mirror are probed concurrently; the first complete valid catalog wins.
     pub fn load(base: Option<&str>, dir: &Path) -> Result<Self, AssetError> {
         if let Some(base) = base {

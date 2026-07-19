@@ -72,7 +72,7 @@ pub enum AssetError {
     SourcesUnavailable {
         /// Failure from the production custom domain.
         production: Box<AssetError>,
-        /// Failure from the immutable Cloudflare Pages deployment.
+        /// Failure from the versioned Cloudflare Pages branch alias.
         pages: Box<AssetError>,
         /// Failure from the versioned jsDelivr npm mirror.
         jsdelivr: Box<AssetError>,
