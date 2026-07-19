@@ -44,6 +44,12 @@ pub const FEATURE_ID: u16 = 0x1b04;
 /// bindable/capturable input.
 pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 
+/// The controls that can act as a device's HID++ gesture source and deliver
+/// [`ButtonId::GestureButton`](openlogi_core::binding::ButtonId::GestureButton)
+/// — its swipes and click when it owns the gesture role, its plain press
+/// otherwise. Capture arms whichever members a device exposes.
+pub const GESTURE_SOURCE_CIDS: [u16; 1] = [GESTURE_BUTTON_CID];
+
 /// Control IDs of the "DPI / ModeShift" button family. Whichever a device
 /// exposes (and can divert) is captured and mapped to
 /// [`ButtonId::DpiToggle`](openlogi_core::binding::ButtonId::DpiToggle): the MX

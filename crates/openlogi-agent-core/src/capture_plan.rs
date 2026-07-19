@@ -65,11 +65,12 @@ pub fn plan_for_device(
     // needs to see its press to run hold+swipe detection, and diverting it
     // would starve the hook of events.
     let oshook = oshook_gestures_for(config, Some(config_key), app);
-    // The dedicated gesture button never reaches the OS hook, so a non-default
+    // The HID++ gesture control never reaches the OS hook, so a non-default
     // single binding on it is deliverable only via a plain HID++ divert — but
     // only while it does NOT own the gesture role (the raw-XY gesture divert
-    // owns CID 0x00c3 in that case, and `gesture_bindings` is how the watcher
-    // arms that divert).
+    // owns its CIDs in that case, and `gesture_bindings` is how the watcher
+    // arms that divert). `GESTURE_BUTTON_CID` is a marker here: the capture
+    // session expands it to whichever gesture-source CIDs the device exposes.
     let plain_gesture_button = gesture_bindings
         .is_empty()
         .then_some((GESTURE_BUTTON_CID, ButtonId::GestureButton));
