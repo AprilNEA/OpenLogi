@@ -110,7 +110,7 @@ pub fn plan_for_device(
 #[cfg(test)]
 mod tests {
     use openlogi_core::binding::Binding;
-    use openlogi_hid::reprog_controls::GESTURE_BUTTON_CID;
+    use openlogi_hid::reprog_controls::{GESTURE_BUTTON_CID, HAPTIC_PANEL_CID};
 
     use super::*;
 
@@ -119,6 +119,67 @@ mod tests {
             receiver_uid: "cafe".into(),
             slot: 2,
         }
+    }
+
+    #[test]
+    #[ignore = "RED: the haptic panel as its own control is not implemented yet"]
+    fn haptic_panel_can_own_the_gesture_role() {
+        // The MX Master 4 haptic panel is a HID++ gesture source: selecting it
+        // as the gesture owner must arm the raw-XY gesture divert, exactly
+        // like the dedicated gesture button.
+        let mut cfg = Config::default();
+        cfg.set_gesture_owner("2b042", ButtonId::HapticPanel);
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        assert!(
+            !plan.gesture_bindings.is_empty(),
+            "a panel gesture owner must arm the HID++ gesture divert"
+        );
+        assert!(
+            !plan
+                .divert_buttons
+                .iter()
+                .any(|&(cid, _)| cid == HAPTIC_PANEL_CID),
+            "the gesture owner is delivered via raw-XY divert, never a plain one"
+        );
+    }
+
+    #[test]
+    #[ignore = "RED: the haptic panel as its own control is not implemented yet"]
+    fn single_bound_haptic_panel_is_plain_diverted_when_not_the_owner() {
+        // While the dedicated button owns gestures (the default), a single
+        // action bound to the panel is deliverable only via a plain HID++
+        // divert dispatching ButtonId::HapticPanel.
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b042",
+            ButtonId::HapticPanel,
+            Binding::Single(Action::Copy),
+        );
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        assert!(
+            plan.divert_buttons
+                .contains(&(HAPTIC_PANEL_CID, ButtonId::HapticPanel)),
+            "a single-bound panel must be plain-diverted, or the binding can never fire"
+        );
+    }
+
+    #[test]
+    #[ignore = "RED: the haptic panel as its own control is not implemented yet"]
+    fn unbound_haptic_panel_stays_native() {
+        // Default binding for the panel is Action::None — an untouched panel
+        // must not be diverted, so its firmware behavior (haptics) survives.
+        let cfg = Config::default();
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        assert!(
+            !plan
+                .divert_buttons
+                .iter()
+                .any(|&(cid, _)| cid == HAPTIC_PANEL_CID),
+            "an unbound panel must keep its native behavior"
+        );
     }
 
     #[test]
