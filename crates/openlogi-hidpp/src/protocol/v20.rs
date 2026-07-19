@@ -159,15 +159,25 @@ impl HidppChannel {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum ErrorType {
+    /// No error.
     NoError = 0,
+    /// Unknown error.
     Unknown = 1,
+    /// Invalid argument.
     InvalidArgument = 2,
+    /// Argument out of range.
     OutOfRange = 3,
+    /// Hardware error.
     HwError = 4,
+    /// Logitech-internal firmware error.
     LogitechInternal = 5,
+    /// Invalid feature index.
     InvalidFeatureIndex = 6,
+    /// Invalid function ID.
     InvalidFunctionId = 7,
+    /// Device is busy.
     Busy = 8,
+    /// Operation is unsupported.
     Unsupported = 9,
 }
 

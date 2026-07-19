@@ -87,24 +87,44 @@ impl DeviceTypeAndNameFeature {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum DeviceType {
+    /// Keyboard device.
     Keyboard = 0,
+    /// Remote-control device.
     RemoteControl = 1,
+    /// Numeric keypad device.
     Numpad = 2,
+    /// Mouse device.
     Mouse = 3,
+    /// Trackpad device.
     Trackpad = 4,
+    /// Trackball device.
     Trackball = 5,
+    /// Presenter device.
     Presenter = 6,
+    /// Receiver device.
     Receiver = 7,
+    /// Headset device.
     Headset = 8,
+    /// Webcam device.
     Webcam = 9,
+    /// Steering wheel device.
     SteeringWheel = 10,
+    /// Joystick device.
     Joystick = 11,
+    /// Gamepad device.
     Gamepad = 12,
+    /// Dock device.
     Dock = 13,
+    /// Speaker device.
     Speaker = 14,
+    /// Microphone device.
     Microphone = 15,
+    /// Illumination light device.
     IlluminationLight = 16,
+    /// Programmable controller device.
     ProgrammableController = 17,
+    /// Car-simulator pedals device.
     CarSimPedals = 18,
+    /// Adapter device.
     Adapter = 19,
 }

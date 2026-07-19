@@ -156,13 +156,7 @@ pub fn labels_from_hotspots(hotspots: &[Hotspot], mouse_h: f32) -> Vec<Label> {
     let step = mouse_h / (hotspots.len() as f32 + 1.);
 
     let mut ranks: Vec<usize> = (0..hotspots.len()).collect();
-    ranks.sort_by(|&a, &b| {
-        hotspots[a]
-            .center()
-            .1
-            .partial_cmp(&hotspots[b].center().1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    ranks.sort_by(|&a, &b| hotspots[a].center().1.total_cmp(&hotspots[b].center().1));
     let mut slot_of: Vec<usize> = vec![0; hotspots.len()];
     for (rank, idx) in ranks.into_iter().enumerate() {
         slot_of[idx] = rank;
@@ -293,7 +287,7 @@ mod tests {
         assert_eq!(labels.len(), hotspots.len());
 
         let mut ys: Vec<f32> = labels.iter().map(|l| l.y).collect();
-        ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        ys.sort_by(f32::total_cmp);
         ys.dedup();
         assert_eq!(ys.len(), labels.len(), "each label gets a distinct slot");
     }

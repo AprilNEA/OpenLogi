@@ -78,12 +78,19 @@ pub struct LegacyBatteryInfo {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum LegacyBatteryStatus {
+    /// Running on battery (not connected to power).
     Discharging = 0,
+    /// Charging at the normal rate.
     Recharging = 1,
+    /// Charging and nearly full.
     AlmostFull = 2,
+    /// Fully charged while connected to power.
     Full = 3,
+    /// Charging at a reduced rate (e.g. from a weak power source).
     SlowRecharge = 4,
+    /// The device did not recognise the battery as valid.
     InvalidBattery = 5,
+    /// Charging halted because the battery is out of its safe temperature range.
     ThermalError = 6,
     /// "Other charging error" (Solaar lists value 7). Kept explicit so a device
     /// reporting it surfaces as Unknown instead of failing the parse and making

@@ -1,0 +1,46 @@
+# cargo-deny configuration — advisories, licenses, and source hygiene for the
+# whole dependency graph (including the git-pinned gpui/zed tree).
+# Run locally with: nix run nixpkgs#cargo-deny -- check
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+# Additions here need a conscious decision; keep the list to what the graph
+# actually pulls in.
+allow = [
+    "0BSD",
+    "CDLA-Permissive-2.0",
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+
+[bans]
+# The zed/gpui tree inevitably carries duplicate versions; keep this advisory
+# rather than blocking.
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# The two deliberate direct git deps, plus the git sources they pull in
+# transitively (zed's forks and the gpui-updater sibling crate) — everything
+# that appears as `git+…` in Cargo.lock must be listed here.
+allow-git = [
+    "https://github.com/zed-industries/zed",
+    "https://github.com/longbridge/gpui-component",
+    "https://github.com/AprilNEA/gpui-updater",
+    "https://github.com/zed-industries/font-kit",
+    "https://github.com/zed-industries/reqwest.git",
+    "https://github.com/zed-industries/scap",
+    "https://github.com/zed-industries/wgpu.git",
+    "https://github.com/zed-industries/xim-rs.git",
+]

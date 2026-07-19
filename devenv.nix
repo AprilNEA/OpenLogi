@@ -125,7 +125,7 @@ in
       exec = ''
         set -e
         ${requireXcodeMetal}
-        cargo run -p xtask -- bundle-macos
+        cargo run -p xtask -- macos bundle
       '';
     };
     "openlogi:dmg" = {
@@ -133,7 +133,7 @@ in
       exec = ''
         set -e
         ${requireXcodeMetal}
-        cargo run -p xtask -- package-macos
+        cargo run -p xtask -- macos package
       '';
     };
   };

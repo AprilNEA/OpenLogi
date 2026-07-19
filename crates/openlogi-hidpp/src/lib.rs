@@ -149,6 +149,10 @@
 //!     .expect("could not divert thumbwheel");
 //! ```
 
+#![deny(missing_docs)]
+#![deny(rustdoc::bare_urls)]
+#![deny(rustdoc::broken_intra_doc_links)]
+
 pub use async_trait::async_trait;
 
 mod bcd;

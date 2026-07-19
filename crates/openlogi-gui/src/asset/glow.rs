@@ -6,12 +6,12 @@
 //! because holes are interior to the silhouette, the colour can never wrap the
 //! outline or bleed into the background.
 //!
-//! Finding the holes is expensive (a full-image flood-fill), so the assets repo
-//! precomputes them once (`scripts/precompute_glow.py`) into each depot's
-//! `metadata.json` as a run-length-encoded mask. At runtime we decode that mask
-//! into normalized horizontal segments ([`GlowGeometry`]) once per resolve and
-//! paint them as scaled, tinted quads on the fly — no pre-rendered PNG and no
-//! per-colour texture, so a depot's whole lighting footprint is the segment list.
+//! Finding the holes is expensive (a full-image flood-fill), so the assets
+//! pipeline precomputes them once into each depot's `metadata.json` as a
+//! run-length-encoded mask. At runtime we decode that mask into normalized
+//! horizontal segments ([`GlowGeometry`]) once per resolve and paint them as
+//! scaled, tinted quads on the fly — no pre-rendered PNG and no per-colour
+//! texture, so a depot's whole lighting footprint is the segment list.
 
 use std::path::Path;
 

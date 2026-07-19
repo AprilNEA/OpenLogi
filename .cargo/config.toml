@@ -25,3 +25,6 @@ runner = "scripts/cargo-run-macos.sh"
 # already exported in the shell (devenv users, CI runners) wins.
 [env]
 DEVELOPER_DIR = { value = "/Applications/Xcode.app/Contents/Developer", force = false }
+
+[alias]
+xtask = "run -p xtask --"

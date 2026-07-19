@@ -17,7 +17,7 @@
 use gpui::{
     App, Context, FocusHandle, FontWeight, Global, InteractiveElement, IntoElement,
     ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, px, rgb,
+    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::v_flex;
 use openlogi_agent_core::ipc::{FoundDevice, PairingFailure, PairingUpdate};
@@ -183,15 +183,26 @@ impl Render for AddDeviceView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            .p_6()
-            .gap_5()
+            // Linux only: a client-side titlebar at the top of the window; the
+            // padded content sits in the flex-column below it. macOS / Windows
+            // keep their native titlebar.
+            .when(cfg!(target_os = "linux"), |this| {
+                this.child(windows::aux_title_bar(tr!("Add Device"), cx))
+            })
             .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(tr!("Add Device")),
+                v_flex()
+                    .flex_1()
+                    .w_full()
+                    .p_6()
+                    .gap_5()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(tr!("Add Device")),
+                    )
+                    .child(body(&state, pal)),
             )
-            .child(body(&state, pal))
     }
 }
 

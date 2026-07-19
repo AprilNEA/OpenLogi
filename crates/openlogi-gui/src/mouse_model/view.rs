@@ -132,7 +132,7 @@ impl Render for MouseModelView {
         let hotspots_outer = hotspots.clone();
         let labels_outer = labels.clone();
         // Resolve the gesture owner against the buttons this device actually has:
-        // a mouse with no thumb pad must not surface the default thumb-pad owner
+        // a mouse with no HID++ gesture button must not surface that default owner
         // (it has none) — the role then reads as "Off" until the user picks a
         // present button. Display-only; the stored config still infers as usual.
         let capable = gesture_capable_buttons(&labels_outer);
@@ -193,7 +193,7 @@ impl Render for MouseModelView {
             .child(hotspots_layer);
 
         // The gesture-button selector sits above the mouse: a single-select of
-        // the device's gesture-capable buttons (the dedicated thumb pad plus the
+        // the device's gesture-capable buttons (the HID++ gesture button plus the
         // OS-hook Middle/Back/Forward) makes the one-gesture-button-per-device
         // lock visible and obvious — pick one and its card opens the gesture
         // menu, the rest stay single-action.
@@ -250,7 +250,7 @@ fn scaled_model(
 }
 
 /// The gesture-capable buttons present on this device, in a stable display
-/// order: the dedicated thumb pad first, then the OS-hook Middle/Back/Forward.
+/// order: the HID++ gesture button first, then the OS-hook Middle/Back/Forward.
 fn gesture_capable_buttons(labels: &[Label]) -> Vec<ButtonId> {
     const ORDER: [ButtonId; 4] = [
         ButtonId::GestureButton,
@@ -264,12 +264,10 @@ fn gesture_capable_buttons(labels: &[Label]) -> Vec<ButtonId> {
         .collect()
 }
 
-/// Short, context-appropriate name for a gesture-button choice. In a selector
-/// *of* gesture buttons, calling the thumb pad "Gesture Button" would be
-/// circular, so it reads "Thumb pad" here.
+/// Short, context-appropriate name for a gesture-button choice.
 fn gesture_owner_label(btn: ButtonId) -> &'static str {
     match btn {
-        ButtonId::GestureButton => "Thumb pad",
+        ButtonId::GestureButton => "Gesture Button",
         ButtonId::MiddleClick => "Middle",
         ButtonId::Back => "Back",
         ButtonId::Forward => "Forward",
@@ -719,7 +717,7 @@ fn hotspot_popover(
     };
     // Open the gesture menu only for the button that currently OWNS gestures —
     // matching the side-label path — so a promoted Middle/Back/Forward opens it
-    // here too, a demoted thumb pad opens the plain picker, and (when gestures
+    // here too, a demoted gesture button opens the plain picker, and (when gestures
     // are off) no hotspot re-enters the gesture editor.
     let popover: AnyElement = if Some(hotspot.id) == gesture_owner {
         gesture_overview_popover(
@@ -812,5 +810,18 @@ impl RenderOnce for HotspotTrigger {
                     cx.notify();
                 });
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gesture_owner_selector_keeps_physical_gesture_button_name() {
+        assert_eq!(
+            gesture_owner_label(ButtonId::GestureButton),
+            "Gesture Button"
+        );
     }
 }

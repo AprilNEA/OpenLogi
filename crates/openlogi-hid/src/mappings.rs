@@ -105,10 +105,14 @@ pub(crate) fn map_battery_level(level: HidppBatteryLevel) -> BatteryLevel {
 pub(crate) fn map_battery_status(status: HidppBatteryStatus) -> BatteryStatus {
     match status {
         HidppBatteryStatus::Discharging => BatteryStatus::Discharging,
-        HidppBatteryStatus::Charging => BatteryStatus::Charging,
+        HidppBatteryStatus::Charging | HidppBatteryStatus::ChargingNearlyFull => {
+            BatteryStatus::Charging
+        }
         HidppBatteryStatus::ChargingSlow => BatteryStatus::ChargingSlow,
         HidppBatteryStatus::Full => BatteryStatus::Full,
-        HidppBatteryStatus::Error => BatteryStatus::Error,
+        HidppBatteryStatus::InvalidBattery
+        | HidppBatteryStatus::ThermalError
+        | HidppBatteryStatus::ChargingError => BatteryStatus::Error,
         _ => BatteryStatus::Unknown,
     }
 }

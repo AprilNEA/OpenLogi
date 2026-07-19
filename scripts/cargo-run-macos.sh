@@ -88,7 +88,7 @@ check_external_agent
 # App icon — generated from the master PNG on demand. Mirror it
 # into the bundle whenever the source is newer (or the bundle copy is missing).
 if [ ! -f "$ICON_SRC" ]; then
-  cargo run -p xtask --manifest-path "$ROOT/Cargo.toml" -- macos-icns
+  cargo run -p xtask --manifest-path "$ROOT/Cargo.toml" -- macos icns
 fi
 if [ "$ICON_SRC" -nt "$RES/AppIcon.icns" ]; then
   cp -f "$ICON_SRC" "$RES/AppIcon.icns"

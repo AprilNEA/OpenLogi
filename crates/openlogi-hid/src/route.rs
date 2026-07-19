@@ -39,15 +39,30 @@ pub const DIRECT_DEVICE_INDEX: u8 = 0xff;
 pub enum DeviceRoute {
     /// Paired to a Logi Bolt receiver. `receiver_uid` disambiguates multiple
     /// plugged-in receivers; `slot` is the device's pairing slot (1..=6).
-    Bolt { receiver_uid: String, slot: u8 },
+    Bolt {
+        /// Receiver unique ID used to select the physical Bolt receiver.
+        receiver_uid: String,
+        /// Pairing slot of the target device on that receiver.
+        slot: u8,
+    },
     /// Paired to a Logi Unifying receiver. Same addressing structure as Bolt
     /// (receiver channel + pairing slot) but the receiver speaks HID++ 1.0.
-    Unifying { receiver_uid: String, slot: u8 },
+    Unifying {
+        /// Receiver unique ID used to select the physical Unifying receiver.
+        receiver_uid: String,
+        /// Pairing slot of the target device on that receiver.
+        slot: u8,
+    },
     /// Attached straight to the host over USB cable or Bluetooth, addressed at
     /// the HID++ self-index. Re-found by matching the HID node's vendor/product
     /// id — two identical mice on one host are indistinguishable here, so the
     /// first match wins (acceptable for v0).
-    Direct { vendor_id: u16, product_id: u16 },
+    Direct {
+        /// USB/HID vendor ID of the direct device.
+        vendor_id: u16,
+        /// USB/HID product ID of the direct device.
+        product_id: u16,
+    },
 }
 
 /// USB product IDs that identify Logi Bolt receivers.
@@ -181,6 +196,8 @@ pub(crate) async fn open_route_channel(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use openlogi_core::device::{DeviceInventory, ReceiverInfo};
 
     use super::{DIRECT_DEVICE_INDEX, DeviceRoute, UNIFYING_PIDS};
@@ -213,22 +230,22 @@ mod tests {
         // 0xC548 is Bolt; anything not in UNIFYING_PIDS defaults to Bolt so
         // future Bolt variants with unknown PIDs still work.
         let route = DeviceRoute::device_route_for(&inv(0xc548, Some("UID")), 1);
-        assert!(matches!(
+        assert_matches!(
             route,
             Some(DeviceRoute::Bolt { ref receiver_uid, slot: 1 }) if receiver_uid == "UID"
-        ));
+        );
     }
 
     #[test]
     fn device_route_for_direct_when_no_uid_and_direct_slot() {
         let route = DeviceRoute::device_route_for(&inv(0xb025, None), DIRECT_DEVICE_INDEX);
-        assert!(matches!(
+        assert_matches!(
             route,
             Some(DeviceRoute::Direct {
                 vendor_id: 0x046d,
                 product_id: 0xb025
             })
-        ));
+        );
     }
 
     #[test]

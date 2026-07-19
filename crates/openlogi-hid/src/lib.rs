@@ -6,6 +6,10 @@
 //! - [`enumerate`] — one-shot inventory of receivers + paired devices.
 //! - [`set_dpi`] — write a new sensor DPI to a connected device.
 
+#![deny(missing_docs)]
+#![deny(rustdoc::bare_urls)]
+#![deny(rustdoc::broken_intra_doc_links)]
+
 mod mappings;
 mod node_ledger;
 mod route;
@@ -17,6 +21,7 @@ mod windows_hid;
 
 pub mod gesture;
 mod hires_wheel;
+pub mod hotplug;
 pub mod inventory;
 pub mod pairing;
 pub mod reprog_controls;
@@ -25,7 +30,12 @@ pub mod thumbwheel;
 pub mod write;
 
 pub use gesture::{CaptureChannel, CapturedInput, GestureError, run_capture_session};
-pub use hires_wheel::{set_scroll_inversion, set_scroll_inversion_on};
+pub use hires_wheel::{
+    ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode,
+    get_scroll_wheel_mode_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
+    set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on,
+};
+pub use hotplug::{HotplugEvent, watch_hotplug};
 pub use inventory::{Enumerator, InventoryError, enumerate};
 pub use pairing::{
     Click, DiscoveredDevice, PairingCommand, PairingError, PairingEvent, PairingReceiver,
@@ -35,8 +45,8 @@ pub use route::{BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, UNIFYING_PIDS};
 pub use smartshift::{AUTO_DISENGAGE_PERMANENT, SmartShiftMode, SmartShiftStatus};
 pub use write::{
     DpiCapabilities, DpiInfo, FeatureEntry, HidppFeatureErrorKind, HidppOperation, LightingMethod,
-    SharedChannel, WriteError, dump_features, get_dpi, get_dpi_info, get_smartshift_status,
-    read_battery_raw, set_dpi, set_dpi_on, set_keyboard_color, set_keyboard_color_with,
-    set_smartshift, set_smartshift_on, set_smartshift_sensitivity, toggle_smartshift,
-    toggle_smartshift_on,
+    ReprogControlEntry, SharedChannel, WriteError, dump_features, dump_reprog_controls, get_dpi,
+    get_dpi_info, get_smartshift_status, read_battery_raw, set_dpi, set_dpi_on, set_keyboard_color,
+    set_keyboard_color_with, set_smartshift, set_smartshift_on, set_smartshift_sensitivity,
+    toggle_smartshift, toggle_smartshift_on,
 };

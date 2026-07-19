@@ -211,7 +211,9 @@ pub struct WheelMode {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum WheelResolution {
+    /// Low-resolution wheel reporting.
     Low = 0,
+    /// High-resolution wheel reporting.
     High = 1,
 }
 
@@ -221,7 +223,9 @@ pub enum WheelResolution {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum WheelEventTarget {
+    /// Wheel reports go to the native HID path.
     Native = 0,
+    /// Wheel reports are diverted to HID++ events.
     Diverted = 1,
 }
 
@@ -231,7 +235,9 @@ pub enum WheelEventTarget {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum WheelRatchetState {
+    /// Wheel is in free-spin mode.
     Freespin = 0,
+    /// Wheel is in ratchet mode.
     Ratchet = 1,
 }
 

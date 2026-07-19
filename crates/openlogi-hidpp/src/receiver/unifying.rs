@@ -10,12 +10,12 @@
 
 use std::sync::Arc;
 
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 
 use crate::{
     channel::{HidppChannel, MessageListenerGuard},
     event::EventEmitter,
-    protocol::v10::{self, Hidpp10Error},
+    protocol::v10,
     receiver::{RECEIVER_DEVICE_INDEX, ReceiverError},
 };
 
@@ -29,6 +29,11 @@ pub const VPID_PAIRS: &[(u16, u16)] = &[(0x046d, 0xc52b), (0x046d, 0xc532)];
 #[non_exhaustive]
 #[repr(u8)]
 pub enum Register {
+    /// Controls which notifications the receiver emits. Wireless device-arrival
+    /// (`0x41`) events are only re-broadcast while wireless notifications are
+    /// enabled here; see [`Receiver::set_wireless_notifications`].
+    Notifications = 0x00,
+
     /// Enables or disables wireless device-connection notifications; also used
     /// to read the pairing count and to trigger device-arrival events.
     Connections = 0x02,
@@ -57,6 +62,11 @@ pub enum InfoSubRegister {
 
     /// Provides the codename of a specific paired device. The device index (4
     /// bits) must be added: `0x60 | (device_index & 0x0f)`.
+    ///
+    /// NOTE: `0x60` is the *Bolt* base. Wire-verified Unifying receivers store
+    /// names at base `0x40 + (n-1)` instead, so name reads go directly through
+    /// `read_codename_unifying` in `inventory.rs` rather than this constant —
+    /// don't reuse `DeviceCodename` for Unifying name reads.
     DeviceCodename = 0x60,
 }
 
@@ -97,13 +107,13 @@ impl Receiver {
                     return;
                 }
 
-                let Ok(kind) = DeviceKind::try_from(payload[1] & 0x0f) else {
-                    return;
-                };
-
+                // Kind is identity-only; an unrecognised nibble folds to
+                // `Unknown` — dropping the event would hide the device
+                // entirely (arrival notifications are the only device
+                // source on this path).
                 emitter.emit(Event::DeviceConnection(DeviceConnection {
                     index: header.device_index,
-                    kind,
+                    kind: DeviceKind::from(payload[1] & 0x0f),
                     encrypted: payload[1] & (1 << 4) != 0,
                     online: payload[1] & (1 << 6) == 0,
                     wpid: u16::from_le_bytes(payload[2..=3].try_into().unwrap()),
@@ -136,6 +146,41 @@ impl Receiver {
             .await?;
 
         Ok(response[1])
+    }
+
+    /// Enables or disables wireless device-connection notifications.
+    ///
+    /// The receiver only re-broadcasts `0x41` device-arrival events (the source
+    /// for [`Self::trigger_device_arrival`]) while this is on. With it off the
+    /// trigger write is ACK'd but emits nothing — which is why a paired, online
+    /// device can fail to enumerate. Solaar enables this before listing.
+    ///
+    /// Read-modify-write of just the `WIRELESS` bit so it can't clobber other
+    /// flags already set on register `0x00` — notably `SOFTWARE_PRESENT` (0x08),
+    /// which the pairing flow enables (`pairing.rs` writes `[0x00, 0x09, 0x00]`)
+    /// and a concurrent inventory poll would otherwise drop.
+    pub async fn set_wireless_notifications(&self, enabled: bool) -> Result<(), ReceiverError> {
+        // Notification flags are a 3-byte big-endian word; the receiver-reporting
+        // bits live in byte 1 (WIRELESS = 0x000100, SOFTWARE_PRESENT = 0x000800).
+        const WIRELESS: u8 = 0x01;
+        let mut flags = self
+            .chan
+            .read_register(
+                RECEIVER_DEVICE_INDEX,
+                Register::Notifications.into(),
+                [0; 3],
+            )
+            .await?;
+        if enabled {
+            flags[1] |= WIRELESS;
+        } else {
+            flags[1] &= !WIRELESS;
+        }
+        self.chan
+            .write_register(RECEIVER_DEVICE_INDEX, Register::Notifications.into(), flags)
+            .await?;
+
+        Ok(())
     }
 
     /// Triggers device-arrival notifications for all currently connected
@@ -191,8 +236,9 @@ impl Receiver {
 
         Ok(DevicePairingInformation {
             wpid: u16::from_le_bytes(response[2..=3].try_into().unwrap()),
-            kind: DeviceKind::try_from(response[1] & 0x0f)
-                .map_err(|_| Hidpp10Error::UnsupportedResponse)?,
+            // Kind is identity-only: an unrecognised nibble folds to
+            // `Unknown` instead of failing the whole pairing-info read.
+            kind: DeviceKind::from(response[1] & 0x0f),
             encrypted: response[1] & (1 << 4) != 0,
             online: response[1] & (1 << 6) == 0,
             unit_id: response[4..=7].try_into().unwrap(),
@@ -210,7 +256,9 @@ impl Receiver {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct ReceiverInfo {
+    /// Receiver serial number.
     pub serial_number: String,
+    /// Number of available pairing slots.
     pub pairing_slots: u8,
 }
 
@@ -220,10 +268,15 @@ pub struct ReceiverInfo {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct DevicePairingInformation {
+    /// Wireless product ID of the paired device.
     pub wpid: u16,
+    /// Device kind reported by the receiver.
     pub kind: DeviceKind,
+    /// Whether the link is encrypted.
     pub encrypted: bool,
+    /// Whether the device is currently online.
     pub online: bool,
+    /// Device unit ID.
     pub unit_id: [u8; 4],
 }
 
@@ -232,18 +285,28 @@ pub struct DevicePairingInformation {
 /// The encoding matches Bolt for values 1–4; from 5 onwards Unifying uses a
 /// shifted table (Remote=5, Trackball=6, Touchpad=7) while Bolt reserves those
 /// values and places them at 7–9.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, TryFromPrimitive)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum DeviceKind {
+    /// Unknown device kind — also the fold target for values this crate
+    /// does not model (kind is identity-only and must never drop an event).
+    #[num_enum(default)]
     Unknown = 0x00,
+    /// Keyboard device.
     Keyboard = 0x01,
+    /// Mouse device.
     Mouse = 0x02,
+    /// Numeric keypad device.
     Numpad = 0x03,
+    /// Presenter device.
     Presenter = 0x04,
+    /// Remote-control device.
     Remote = 0x05,
+    /// Trackball device.
     Trackball = 0x06,
+    /// Touchpad device.
     Touchpad = 0x07,
 }
 
@@ -255,8 +318,11 @@ pub enum DeviceKind {
 pub struct DeviceConnection {
     /// Slot index (1-based) of the device.
     pub index: u8,
+    /// Device kind reported by the receiver.
     pub kind: DeviceKind,
+    /// Whether the link is encrypted.
     pub encrypted: bool,
+    /// Whether the device is currently online.
     pub online: bool,
     /// Wireless product ID of the device.
     pub wpid: u16,

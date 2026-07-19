@@ -106,6 +106,8 @@ pub struct RatchetControlMode {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum WheelMode {
+    /// Free-spin wheel mode.
     Freespin = 1,
+    /// Ratchet wheel mode.
     Ratchet = 2,
 }

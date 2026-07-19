@@ -7,8 +7,10 @@
 //! IPC protocol on a version bump, sitting on its connecting screen with no way
 //! forward. Watching our own executable and replacing the process image once it
 //! changes keeps "the running agent is the installed binary" true within a few
-//! ticks, with no launchd or GUI involvement — remapping continues even in
-//! setups where nothing would respawn a plain exit (autostart off, GUI closed).
+//! ticks, with no launchd or GUI involvement. On macOS the replacement is a
+//! short delayed relaunch rather than an in-thread `exec`: the agent owns an
+//! AppKit status item, and the new AppKit process must start from the normal
+//! process main thread or the menu-bar item can render as an empty slot.
 //!
 //! Limitation: the path is resolved once via `current_exe`, which returns the
 //! fully-resolved target (`/proc/self/exe` on Linux). Installs that update by
@@ -98,16 +100,13 @@ pub fn spawn() {
     }
 }
 
-/// Replace this process with the new binary at `path`.
+/// Restart this process as the new binary at `path`.
 ///
-/// `exec` keeps the pid, so launchd's bookkeeping — including the
-/// `SuccessfulExit: false` semantics that make the tray's Quit final — is
-/// untouched, and no external respawner is needed. The singleton file lock and
-/// the IPC socket close with the old image (Rust opens fds `CLOEXEC`) and are
+/// The singleton file lock and the IPC socket close with the old image and are
 /// re-acquired by the new one; the listener unlinks the stale socket file on
-/// bind. If `exec` itself fails the process is still intact (`exec` does not
-/// fork), so return and let the watch loop retry once the file settles again.
-#[cfg(unix)]
+/// bind. If scheduling the restart fails the process is still intact, so return
+/// and let the watch loop retry once the file settles again.
+#[cfg(all(unix, not(target_os = "macos")))]
 fn restart(path: &Path) {
     use std::os::unix::process::CommandExt as _;
     info!(
@@ -119,6 +118,53 @@ fn restart(path: &Path) {
         .args(std::env::args_os().skip(1))
         .exec();
     warn!(error = %err, "exec of the updated agent failed — keeping the current image and retrying");
+}
+
+/// macOS cannot safely `exec` the replacement from this watcher thread: after
+/// `exec`, the new program continues on the calling thread, while AppKit expects
+/// the status item to be created from the process main thread. Relaunch the
+/// packaged helper through LaunchServices (preserving its TCC identity), or a
+/// bare dev binary directly, after this process has had time to exit and release
+/// the singleton lock.
+#[cfg(target_os = "macos")]
+fn restart(path: &Path) {
+    info!(
+        path = %path.display(),
+        "executable changed on disk — relaunching as the new macOS agent"
+    );
+    match schedule_macos_relaunch(path) {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            warn!(error = %e, "could not schedule updated agent relaunch — keeping the current image and retrying");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn schedule_macos_relaunch(path: &Path) -> std::io::Result<()> {
+    let mut command = std::process::Command::new("/bin/sh");
+    if let Some(bundle) = helper_bundle(path) {
+        command
+            .arg("-c")
+            .arg("sleep 0.5; exec /usr/bin/open -g -n \"$1\"")
+            .arg("openlogi-relaunch")
+            .arg(bundle);
+    } else {
+        command
+            .arg("-c")
+            .arg("path=$1; shift; sleep 0.5; exec \"$path\" \"$@\"")
+            .arg("openlogi-relaunch")
+            .arg(path)
+            .args(std::env::args_os().skip(1));
+    }
+    command.spawn().map(|_| ())
+}
+
+/// The `.app` root of a packaged helper binary, `None` for a bare dev binary.
+#[cfg(target_os = "macos")]
+fn helper_bundle(path: &Path) -> Option<&Path> {
+    let bundle = path.ancestors().nth(3)?;
+    (bundle.extension()? == "app").then_some(bundle)
 }
 
 /// Windows has no `exec`: exit cleanly and let the GUI's socket-down spawn
@@ -173,5 +219,20 @@ mod tests {
         assert_eq!(assess(baseline, Some(new), None), (None, false));
         // Back at the baseline (e.g. a rollback): disarm too.
         assert_eq!(assess(baseline, Some(new), Some(baseline)), (None, false));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_helper_bundle_is_detected_from_packaged_binary_path() {
+        use super::helper_bundle;
+        use std::path::Path;
+
+        let binary = Path::new(
+            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
+        );
+        let bundle =
+            Path::new("/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app");
+        assert_eq!(helper_bundle(binary), Some(bundle));
+        assert_eq!(helper_bundle(Path::new("/tmp/openlogi-agent")), None);
     }
 }

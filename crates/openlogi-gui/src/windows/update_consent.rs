@@ -8,7 +8,8 @@
 
 use gpui::{
     App, BorrowAppContext as _, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement,
-    ParentElement as _, Render, Size, Styled as _, Subscription, Window, div, px,
+    ParentElement as _, Render, Size, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -77,43 +78,54 @@ impl Render for UpdateConsentView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            .items_center()
-            .justify_center()
-            .gap_4()
-            .p_6()
+            // Linux only: a client-side titlebar at the top of the window; the
+            // centred content sits in the flex-column below it. macOS / Windows
+            // keep their native titlebar.
+            .when(cfg!(target_os = "linux"), |this| {
+                this.child(windows::aux_title_bar(tr!("OpenLogi"), cx))
+            })
             .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(tr!("Check for updates?")),
-            )
-            .child(
-                div()
-                    .max_w(px(320.))
-                    .text_sm()
-                    .text_center()
-                    .text_color(pal.text_muted)
-                    .child(tr!(
-                        "OpenLogi can check GitHub once per launch for a new version — query \
-                         only, no automatic download or telemetry. You can change this anytime \
-                         in Settings."
-                    )),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .pt_2()
+                v_flex()
+                    .flex_1()
+                    .w_full()
+                    .items_center()
+                    .justify_center()
+                    .gap_4()
+                    .p_6()
                     .child(
-                        Button::new("update-consent-decline")
-                            .outline()
-                            .label(tr!("Not now"))
-                            .on_click(|_, window, cx| answer(false, window, cx)),
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(tr!("Check for updates?")),
                     )
                     .child(
-                        Button::new("update-consent-accept")
-                            .primary()
-                            .label(tr!("Enable"))
-                            .on_click(|_, window, cx| answer(true, window, cx)),
+                        div()
+                            .max_w(px(320.))
+                            .text_sm()
+                            .text_center()
+                            .text_color(pal.text_muted)
+                            .child(tr!(
+                                "OpenLogi can check GitHub once per launch for a new version — query \
+                                 only, no automatic download or telemetry. You can change this anytime \
+                                 in Settings."
+                            )),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .pt_2()
+                            .child(
+                                Button::new("update-consent-decline")
+                                    .outline()
+                                    .label(tr!("Not now"))
+                                    .on_click(|_, window, cx| answer(false, window, cx)),
+                            )
+                            .child(
+                                Button::new("update-consent-accept")
+                                    .primary()
+                                    .label(tr!("Enable"))
+                                    .on_click(|_, window, cx| answer(true, window, cx)),
+                            ),
                     ),
             )
     }

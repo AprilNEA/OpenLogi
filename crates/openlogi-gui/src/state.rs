@@ -9,15 +9,10 @@
 //! target up front so views can switch instantly when the carousel selection
 //! changes — no synchronous I/O during the device switch.
 
-#![allow(
-    dead_code,
-    reason = "fields are read once their owning component lands in UI.md phases 2–4"
-)]
-
 use std::collections::BTreeMap;
 
 use gpui::{App, Global};
-use openlogi_core::config::{AppSettings, Config, DeviceIdentity, Lighting};
+use openlogi_core::config::{AppSettings, Appearance, Config, DeviceIdentity, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     DeviceRoute, DpiCapabilities, DpiInfo, SmartShiftMode, SmartShiftStatus, WriteError,
@@ -26,9 +21,12 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 mod devices;
+mod load;
 
 pub use devices::DeviceRecord;
-pub use openlogi_agent_core::DpiCycleState;
+pub use load::{DpiStatus, Load, SmartShiftLoad};
+
+use load::LazyDeviceData;
 
 use crate::asset::AssetResolver;
 use crate::data::mouse_buttons::{Action, Binding, ButtonId, GestureDirection};
@@ -69,190 +67,6 @@ pub enum AgentLink {
 /// disappear mid-interaction.
 const INVENTORY_MISS_GRACE: u8 = 2;
 
-/// How many times to retry a device read (DPI capability discovery or a
-/// SmartShift read) after a transient HID++ error (read timeout, busy device)
-/// before giving up. A genuine "feature not supported" reply is permanent and
-/// never retried.
-const LOAD_MAX_ATTEMPTS: u8 = 3;
-
-/// Lazy per-device load state for a background HID++ read: unqueried, in flight,
-/// resolved, transiently failed (retryable on re-select), or permanently
-/// unsupported. Shared by DPI capability discovery and SmartShift reads through
-/// [`LazyDeviceData`]; the two differ only in payload type `T` and in which
-/// errors count as permanent.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Load<T> {
-    /// The selected device has not been queried yet.
-    Unknown,
-    /// A background HID++ read is in flight.
-    Loading,
-    /// The device reported its value.
-    Ready(T),
-    /// Transient errors (read timeouts, busy device) exhausted the retry budget.
-    /// Distinct from [`Self::Unsupported`] because the device may well support
-    /// the feature — re-selecting it (see [`AppState::set_current_device`])
-    /// grants a fresh attempt.
-    Failed(String),
-    /// The device genuinely does not support the feature; never retried.
-    Unsupported(String),
-}
-
-/// Per-device DPI capability load state. See [`Load`].
-pub type DpiStatus = Load<DpiInfo>;
-
-/// Per-device SmartShift (`0x2111`) config load state. See [`Load`]. Unlike DPI
-/// presets, the resolved config is *not* persisted to `config.toml` — the device
-/// stores wheel mode / threshold / torque in its own non-volatile memory, so the
-/// GUI only ever reads and writes the device.
-pub type SmartShiftLoad = Load<SmartShiftStatus>;
-
-/// Per-device lazy-load cache for a background HID++ read, keyed by
-/// [`DeviceRecord::config_key`]. Holds each device's [`Load`] state plus its
-/// transient-retry counter, and carries the stale-route guard + retry-budget
-/// policy once, for both DPI and SmartShift.
-struct LazyDeviceData<T> {
-    by_device: BTreeMap<String, Load<T>>,
-    /// Consecutive transient read failures per device, capped by
-    /// [`LOAD_MAX_ATTEMPTS`] before the device settles on [`Load::Failed`].
-    attempts: BTreeMap<String, u8>,
-}
-
-// Manual `Default` (not derived): a derive would demand `T: Default`, but the
-// empty maps need nothing of `T`.
-impl<T> Default for LazyDeviceData<T> {
-    fn default() -> Self {
-        Self {
-            by_device: BTreeMap::new(),
-            attempts: BTreeMap::new(),
-        }
-    }
-}
-
-impl<T: Clone> LazyDeviceData<T> {
-    /// The recorded state for `key`, or [`Load::Unknown`] if never queried.
-    fn status(&self, key: &str) -> Load<T> {
-        self.by_device.get(key).cloned().unwrap_or(Load::Unknown)
-    }
-
-    /// The raw recorded entry for `key`, for callers that match on `Ready`
-    /// without cloning the payload.
-    fn get(&self, key: &str) -> Option<&Load<T>> {
-        self.by_device.get(key)
-    }
-
-    /// Whether `key` still needs a read (nothing recorded yet). Cheaper than
-    /// cloning [`status`](Self::status) on the per-frame render path.
-    fn unqueried(&self, key: &str) -> bool {
-        !self.by_device.contains_key(key)
-    }
-
-    /// Mark a read as in flight for `key`.
-    fn mark_loading(&mut self, key: &str) {
-        self.by_device.insert(key.to_string(), Load::Loading);
-    }
-
-    /// Reset a stuck `Loading` for `key` back to unqueried — the read worker
-    /// vanished (e.g. panicked) without delivering a result, so the next render
-    /// re-issues instead of wedging the device on "Reading…".
-    fn clear_loading(&mut self, key: &str) {
-        if matches!(self.by_device.get(key), Some(Load::Loading)) {
-            self.by_device.remove(key);
-        }
-    }
-
-    /// Drop `key`'s recorded state and retry budget so the next render re-reads.
-    /// Backs the "click to retry" affordance and the re-select-grants-a-retry
-    /// rule for a [`Load::Failed`] device.
-    fn retry(&mut self, key: &str) {
-        self.by_device.remove(key);
-        self.attempts.remove(key);
-    }
-
-    /// Forget `key` entirely — the device disappeared, or reconnected on a new
-    /// route, so its cached state (keyed to the dead route) is stale.
-    fn remove(&mut self, key: &str) {
-        self.by_device.remove(key);
-        self.attempts.remove(key);
-    }
-
-    /// Forget every device the `present` predicate rejects (not in the live set).
-    fn retain_present(&mut self, present: impl Fn(&str) -> bool) {
-        self.by_device.retain(|key, _| present(key.as_str()));
-        self.attempts.retain(|key, _| present(key.as_str()));
-    }
-
-    /// Optimistically record a resolved value with no read involved — e.g. a
-    /// just-written SmartShift config, shown until a confirming re-read replaces
-    /// it. Leaves the retry budget untouched.
-    fn set_ready(&mut self, key: String, value: T) {
-        self.by_device.insert(key, Load::Ready(value));
-    }
-
-    /// Store a read result under the stale-route guard and the transient-retry /
-    /// permanent-unsupported policy. `matches_route` is whether a live device
-    /// still holds `key` *on the route the read targeted*; `still_present` is
-    /// whether `key` exists at all. Returns the resolved value when the result
-    /// settled to [`Load::Ready`], so the caller can run a side effect (the DPI
-    /// panel seeds the shared current value). `label` tags the debug logs.
-    fn store(
-        &mut self,
-        key: String,
-        result: Result<T, WriteError>,
-        is_permanent: impl Fn(&WriteError) -> bool,
-        matches_route: bool,
-        still_present: bool,
-        label: &'static str,
-    ) -> Option<T> {
-        if !matches_route {
-            debug!(key, label, "stale device read result ignored");
-            // The device reconnected on a different route mid-read: drop the
-            // orphaned `Loading` marker so the next render re-reads against the
-            // live route instead of spinning on "Reading…" forever.
-            if still_present {
-                self.by_device.remove(&key);
-            }
-            return None;
-        }
-
-        let status = match result {
-            Ok(value) => {
-                self.attempts.remove(&key);
-                Load::Ready(value)
-            }
-            // A genuine "feature not supported" reply never changes — record it
-            // and stop probing.
-            Err(error) if is_permanent(&error) => {
-                self.attempts.remove(&key);
-                Load::Unsupported(error.to_string())
-            }
-            // Transient failures get a few more tries: clear the status so the
-            // next render re-reads, until the budget runs out, then settle on
-            // `Failed` (retryable on re-select) rather than `Unsupported`.
-            Err(error) => {
-                let attempts = self.attempts.entry(key.clone()).or_insert(0);
-                *attempts = attempts.saturating_add(1);
-                if *attempts < LOAD_MAX_ATTEMPTS {
-                    debug!(key, attempts = *attempts, error = %error, label, "transient device read error — will retry");
-                    self.by_device.remove(&key);
-                    return None;
-                }
-                self.attempts.remove(&key);
-                Load::Failed(error.to_string())
-            }
-        };
-
-        // Clone out the resolved value (cheap; once per completed read) before
-        // the status moves into the map, so the caller can seed derived state
-        // without re-borrowing `self`.
-        let resolved = match &status {
-            Load::Ready(value) => Some(value.clone()),
-            _ => None,
-        };
-        self.by_device.insert(key, status);
-        resolved
-    }
-}
-
 pub struct AppState {
     /// Index into [`Self::device_list`] of the currently visible device. May
     /// be out of bounds briefly while inventories re-enumerate; views must
@@ -275,7 +89,7 @@ pub struct AppState {
     pub button_bindings: BTreeMap<ButtonId, Action>,
     /// Per-direction sub-bindings for the current device's gesture owner. Edited
     /// via the gesture picker and persisted as a [`Binding::Gesture`] entry under
-    /// the owning button — the thumb pad ([`ButtonId::GestureButton`]) by default,
+    /// the owning button — the HID++ gesture button ([`ButtonId::GestureButton`]) by default,
     /// or a promoted Middle/Back/Forward — in the device's unified binding map
     /// ([`DeviceConfig::bindings`]). Rebuilt by the `gesture_bindings_for_current` helper.
     ///
@@ -319,6 +133,18 @@ pub struct AppState {
     /// snapshots, so an agent restart's empty pre-enumeration list never
     /// blanks a report copied during the reconnect window.
     last_inventory: Vec<DeviceInventory>,
+    /// Recent events streamed from the agent's hook for the debug live monitor
+    /// on the Diagnostics page. Bounded; only filled while the Settings window's
+    /// poll loop runs (debug macOS builds only).
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    monitor_events: std::collections::VecDeque<openlogi_agent_core::ipc::MonitorEvent>,
+    /// Cached event-tap snapshot for the Diagnostics page, refreshed on the same
+    /// ~300ms tick as [`Self::monitor_events`]. Lets that page's per-frame render
+    /// read this cache instead of issuing `CGGetEventTapList` syscalls on every
+    /// repaint. Debug-only: the release Diagnostics page enumerates taps live,
+    /// since it renders on interaction rather than on a 300ms monitor cadence.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    event_taps: Vec<openlogi_hook::EventTapInfo>,
 }
 
 impl AppState {
@@ -326,10 +152,6 @@ impl AppState {
     ///
     /// The initial selection prefers [`Config::selected_device`] if it still
     /// matches one of the paired devices; otherwise it falls back to index 0.
-    ///
-    /// A fresh `Arc<RwLock<…>>` is created for [`Self::hook_bindings`]. When
-    /// the OS event hook (P0.1) needs to share the same map, the caller
-    /// builds the `Arc` first and uses [`Self::with_runtime_shared`] instead.
     #[must_use]
     pub fn with_runtime(
         mut config: Config,
@@ -360,6 +182,10 @@ impl AppState {
             config,
             ipc_commands,
             last_inventory: Vec::new(),
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            monitor_events: std::collections::VecDeque::new(),
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            event_taps: Vec::new(),
         };
         state.button_bindings = state.bindings_for_current();
         state.gesture_bindings = state.gesture_bindings_for_current();
@@ -410,6 +236,39 @@ impl AppState {
         &self.last_inventory
     }
 
+    /// Append a batch of live-monitor events, capping the retained history so the
+    /// buffer can't grow without bound while the monitor is open.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    pub fn push_monitor_events(&mut self, events: Vec<openlogi_agent_core::ipc::MonitorEvent>) {
+        const MAX: usize = 200;
+        self.monitor_events.extend(events);
+        let overflow = self.monitor_events.len().saturating_sub(MAX);
+        self.monitor_events.drain(..overflow);
+    }
+
+    /// Recent live-monitor events, oldest first.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[must_use]
+    pub fn monitor_events(
+        &self,
+    ) -> &std::collections::VecDeque<openlogi_agent_core::ipc::MonitorEvent> {
+        &self.monitor_events
+    }
+
+    /// Replace the cached event-tap snapshot the Diagnostics page renders.
+    /// Refreshed on the live-monitor poll tick; see [`Self::event_taps`].
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    pub fn set_event_taps(&mut self, taps: Vec<openlogi_hook::EventTapInfo>) {
+        self.event_taps = taps;
+    }
+
+    /// The cached event-tap snapshot for the Diagnostics page.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[must_use]
+    pub fn event_taps(&self) -> &[openlogi_hook::EventTapInfo] {
+        &self.event_taps
+    }
+
     /// Config schema version and the number of devices with saved configuration.
     #[must_use]
     pub fn config_summary(&self) -> (u32, usize) {
@@ -428,56 +287,6 @@ impl AppState {
     /// grant the wrong binary and the hook would never install.
     pub fn request_accessibility_prompt(&self) {
         self.send_ipc(crate::ipc_client::Command::RequestAccessibilityPrompt);
-    }
-
-    /// Build the button-binding, gesture-binding, and DPI snapshots consumed by
-    /// the OS hook and gesture watcher before the GPUI global exists. Uses the
-    /// same device-selection and binding rules as [`Self::with_runtime_shared`].
-    #[must_use]
-    pub fn initial_hook_state(
-        config: &Config,
-        inventories: &[DeviceInventory],
-        cache: &AssetResolver,
-    ) -> (
-        BTreeMap<ButtonId, Action>,
-        BTreeMap<GestureDirection, Action>,
-        DpiCycleState,
-    ) {
-        let device_list = build_device_list(inventories, cache, config);
-        let current_device = pick_initial_device(&device_list, config.selected_device());
-        let record = device_list.get(current_device);
-        let config_key = record.map(|r| r.config_key.as_str());
-        let bindings = bindings_for(config, config_key, None);
-        let gesture_bindings = gesture_bindings_for(config, config_key);
-        let presets = record
-            .map(|r| config.dpi_presets(&r.config_key))
-            .unwrap_or_default();
-        let target = record.and_then(|r| r.route.clone());
-        (
-            bindings,
-            gesture_bindings,
-            DpiCycleState {
-                presets,
-                index: 0,
-                target,
-                capabilities: None,
-            },
-        )
-    }
-
-    /// Update the frontmost-app tracking + reload the binding map to overlay
-    /// any per-app overrides for the new app (P1.4). Hook-shared `Arc` gets
-    /// the same map so background button presses observe the new bindings
-    /// immediately.
-    ///
-    /// No-op when `bundle` matches the current value.
-    pub fn set_current_app(&mut self, bundle: Option<String>) {
-        if bundle == self.current_app_bundle {
-            return;
-        }
-        debug!(?bundle, "foreground app changed");
-        self.current_app_bundle = bundle;
-        self.button_bindings = self.bindings_for_current();
     }
 
     /// The active device, or `None` when [`Self::device_list`] is empty or
@@ -980,6 +789,47 @@ impl AppState {
         self.persist_and_reload("invert scroll");
     }
 
+    /// The active device's persisted wheel resolution, or `None` when OpenLogi
+    /// leaves the device default untouched.
+    #[must_use]
+    pub fn current_scroll_resolution(&self) -> Option<openlogi_core::config::ScrollResolution> {
+        self.current_record()
+            .and_then(|record| self.config.scroll_resolution(&record.config_key))
+    }
+
+    /// Whether the active device exposes HID++ `0x2121 HiResWheel`.
+    #[must_use]
+    pub fn current_hires_wheel_supported(&self) -> bool {
+        self.current_record()
+            .and_then(|record| record.capabilities)
+            .is_some_and(|capabilities| capabilities.hires_wheel)
+    }
+
+    /// Persist the active device's wheel resolution and ask the agent to reload
+    /// it. `None` removes OpenLogi's override. No-op without a selected,
+    /// HiResWheel-capable device.
+    pub fn commit_scroll_resolution(
+        &mut self,
+        resolution: Option<openlogi_core::config::ScrollResolution>,
+    ) {
+        let Some((key, supported)) = self.current_record().map(|record| {
+            (
+                record.config_key.clone(),
+                record
+                    .capabilities
+                    .is_some_and(|capabilities| capabilities.hires_wheel),
+            )
+        }) else {
+            debug!("no active device — wheel-resolution change ignored");
+            return;
+        };
+        if !set_scroll_resolution_if_supported(&mut self.config, &key, supported, resolution) {
+            debug!("active device does not support HiResWheel");
+            return;
+        }
+        self.persist_and_reload("wheel resolution");
+    }
+
     /// Take the active device's pending SmartShift confirm, if any. Returns the
     /// `(config_key, route)` for a one-shot re-read that replaces the optimistic
     /// value with the device's real state; consumed once so it doesn't re-fire.
@@ -1075,6 +925,11 @@ impl AppState {
     /// the next time the agent launches (a no-restart live toggle would need a
     /// main-thread hop from the agent's IPC reload). `ReloadConfig` keeps the
     /// agent's other config in sync meanwhile. No-op when unchanged.
+    ///
+    /// The callers are the menu-bar / notification-area toggle in Settings,
+    /// shown only where there's a tray (macOS + Windows), so the setter is
+    /// gated the same way to stay dead-code-clean on Linux.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn set_show_in_menu_bar(&mut self, enabled: bool) {
         if self.config.app_settings.show_in_menu_bar == enabled {
             return;
@@ -1093,6 +948,62 @@ impl AppState {
         self.config.app_settings.check_for_updates = enabled;
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist update-check setting");
+        }
+    }
+
+    /// Toggle opt-in automatic install and persist it. The launch-time updater
+    /// observer reads this live, so a newer version found after this is enabled
+    /// downloads and stages on its own; no immediate side effect here. No-op
+    /// when unchanged.
+    pub fn set_auto_install_updates(&mut self, enabled: bool) {
+        if self.config.app_settings.auto_install_updates == enabled {
+            return;
+        }
+        self.config.app_settings.auto_install_updates = enabled;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist auto-install setting");
+        }
+    }
+
+    /// Persist the light/dark appearance preference. The caller re-applies the
+    /// live theme via [`crate::theme::apply_from_settings`]; this only writes the
+    /// choice. No-op when unchanged.
+    pub fn set_appearance(&mut self, appearance: Appearance) {
+        if self.config.app_settings.appearance == appearance {
+            return;
+        }
+        self.config.app_settings.appearance = appearance;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist appearance setting");
+        }
+    }
+
+    /// Persist the chosen theme name for one mode (`None` = the OpenLogi brand
+    /// theme). No-op when unchanged.
+    pub fn set_theme(&mut self, dark: bool, name: Option<String>) {
+        let slot = if dark {
+            &mut self.config.app_settings.theme_dark
+        } else {
+            &mut self.config.app_settings.theme_light
+        };
+        if *slot == name {
+            return;
+        }
+        *slot = name;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist theme setting");
+        }
+    }
+
+    /// Persist the UI corner-radius override (`None` = each theme's own radius).
+    /// No-op when unchanged.
+    pub fn set_ui_radius(&mut self, radius: Option<u8>) {
+        if self.config.app_settings.ui_radius == radius {
+            return;
+        }
+        self.config.app_settings.ui_radius = radius;
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist UI radius setting");
         }
     }
 
@@ -1192,7 +1103,7 @@ impl AppState {
             return BTreeMap::new();
         };
         match self.config.gesture_owner(key) {
-            // The dedicated thumb pad seeds every direction from the defaults.
+            // The HID++ gesture button seeds every direction from the defaults.
             Some(ButtonId::GestureButton) => gesture_bindings_for(&self.config, Some(key)),
             // A promoted OS-hook button is shown from its raw stored map (which
             // `set_gesture_owner` seeds with full defaults), so the menu matches
@@ -1245,9 +1156,9 @@ impl AppState {
             );
             return;
         };
-        // Edit whichever button owns gestures — not always the thumb pad. When
+        // Edit whichever button owns gestures — not always the HID++ gesture button. When
         // gestures are off, a stray edit must NOT silently re-enable them on the
-        // thumb pad (the gesture editor shouldn't be reachable in that state):
+        // default owner (the gesture editor shouldn't be reachable in that state):
         // no-op instead.
         let Some(owner) = self.config.gesture_owner(&key) else {
             debug!(
@@ -1321,4 +1232,59 @@ fn smartshift_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
+fn set_scroll_resolution_if_supported(
+    config: &mut Config,
+    key: &str,
+    supported: bool,
+    resolution: Option<openlogi_core::config::ScrollResolution>,
+) -> bool {
+    if !supported {
+        return false;
+    }
+    config.set_scroll_resolution(key, resolution);
+    true
+}
+
 impl Global for AppState {}
+
+#[cfg(test)]
+mod scroll_resolution_tests {
+    use openlogi_core::config::{Config, ScrollResolution};
+
+    use super::set_scroll_resolution_if_supported;
+
+    #[test]
+    fn gui_state_saves_and_clears_supported_wheel_resolution() {
+        let mut config = Config::default();
+        assert!(set_scroll_resolution_if_supported(
+            &mut config,
+            "mouse",
+            true,
+            Some(ScrollResolution::Low),
+        ));
+        assert_eq!(
+            config.scroll_resolution("mouse"),
+            Some(ScrollResolution::Low)
+        );
+
+        assert!(set_scroll_resolution_if_supported(
+            &mut config,
+            "mouse",
+            true,
+            None,
+        ));
+        assert_eq!(config.scroll_resolution("mouse"), None);
+    }
+
+    #[test]
+    fn gui_state_ignores_unsupported_wheel_resolution() {
+        let mut config = Config::default();
+        assert!(!set_scroll_resolution_if_supported(
+            &mut config,
+            "mouse",
+            false,
+            Some(ScrollResolution::High),
+        ));
+        assert_eq!(config.scroll_resolution("mouse"), None);
+    }
+}

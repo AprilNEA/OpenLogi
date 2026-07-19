@@ -71,7 +71,9 @@ pub fn install(cx: &mut App) {
         }
     });
     cx.on_action(|_: &OpenSettings, cx| crate::windows::settings::open(cx));
-    cx.on_action(|_: &OpenAbout, cx| crate::windows::about::open(cx));
+    cx.on_action(|_: &OpenAbout, cx| {
+        crate::windows::settings::open_at(crate::windows::settings::SettingsPage::About, cx);
+    });
     cx.on_action(|_: &OpenAddDevice, cx| crate::windows::add_device::open(cx));
     cx.on_action(|_: &BringAllToFront, cx| cx.activate(true));
     cx.on_action(|_: &CheckForUpdates, cx| check_for_updates(cx));
@@ -113,13 +115,13 @@ pub fn rebuild(cx: &mut App) {
     cx.set_menus(menus(cx));
 }
 
-/// Run a manual update check and show the About window where update status is
+/// Run a manual update check and open Settings → Updates where its status is
 /// rendered. Shared by the app menu and agent tray IPC commands.
 pub fn check_for_updates(cx: &mut App) {
     if let Some(updater) = crate::platform::updater::shared(cx) {
         updater.update(cx, gpui_updater::Updater::check);
     }
-    crate::windows::about::open(cx);
+    crate::windows::settings::open_at(crate::windows::settings::SettingsPage::Updates, cx);
 }
 
 fn menus(cx: &App) -> Vec<Menu> {
@@ -233,6 +235,6 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
     items
 }
 
-fn file_url(path: &std::path::Path) -> Option<String> {
+pub(crate) fn file_url(path: &std::path::Path) -> Option<String> {
     Url::from_file_path(path).ok().map(Into::into)
 }

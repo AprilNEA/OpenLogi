@@ -20,474 +20,20 @@ env:
   DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
 
 jobs:
-  macos:
-    name: macOS DMG (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: macos-latest
-          - arch: x86_64
-            runner: macos-15-intel
+  # Build (and sign/notarize) every platform's installers. The build matrix
+  # lives in a reusable workflow so PRs / manual dispatches can build the same
+  # installers UNSIGNED for testing; here we pass sign: true for the signed,
+  # notarized artifacts the publish job ships.
+  build:
+    name: Build installers
+    uses: ./.github/workflows/build.yml
+    # Required so build.yml can read the 1Password / Azure / R2 signing secrets.
+    secrets: inherit
     permissions:
       contents: read
-    env:
-      OPENLOGI_BUNDLE_ASSETS: ${{ vars.OPENLOGI_BUNDLE_ASSETS }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Verify runner architecture
-        run: test "$(uname -m)" = "${{ matrix.arch }}"
-
-      - name: Load release secrets from 1Password
-        id: load_secrets
-        uses: 1password/load-secrets-action@v4
-        with:
-          export-env: false
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_SIGNING_IDENTITY
-          APPLE_CERTIFICATE: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_CERTIFICATE
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_CERTIFICATE_PASSWORD
-          APPLE_ID: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_ID
-          APPLE_PASSWORD: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_PASSWORD
-          APPLE_TEAM_ID: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_TEAM_ID
-          GITHUB_APP_ID: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_ID
-          GITHUB_APP_PRIVATE_KEY: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_PRIVATE_KEY
-          OPENLOGI_UPDATE_BASE_URL: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_BASE_URL
-          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY
-
-      - name: Install packaging tools
-        run: |
-          brew install librsvg
-          brew install create-dmg
-
-      - name: Validate release secrets
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ steps.load_secrets.outputs.APPLE_SIGNING_IDENTITY }}
-          APPLE_CERTIFICATE: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ steps.load_secrets.outputs.APPLE_ID }}
-          APPLE_PASSWORD: ${{ steps.load_secrets.outputs.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ steps.load_secrets.outputs.APPLE_TEAM_ID }}
-          GITHUB_APP_ID: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
-          GITHUB_APP_PRIVATE_KEY: ${{ steps.load_secrets.outputs.GITHUB_APP_PRIVATE_KEY }}
-          OPENLOGI_UPDATE_BASE_URL: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_BASE_URL }}
-          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
-        run: |
-          set -euo pipefail
-          : "${APPLE_SIGNING_IDENTITY:?Configure APPLE_SIGNING_IDENTITY in 1Password}"
-          : "${APPLE_CERTIFICATE:?Configure APPLE_CERTIFICATE in 1Password}"
-          : "${APPLE_CERTIFICATE_PASSWORD:?Configure APPLE_CERTIFICATE_PASSWORD in 1Password}"
-          : "${APPLE_ID:?Configure APPLE_ID in 1Password}"
-          : "${APPLE_PASSWORD:?Configure APPLE_PASSWORD in 1Password}"
-          : "${APPLE_TEAM_ID:?Configure APPLE_TEAM_ID in 1Password}"
-          : "${GITHUB_APP_ID:?Configure GITHUB_APP_ID in 1Password}"
-          : "${GITHUB_APP_PRIVATE_KEY:?Configure GITHUB_APP_PRIVATE_KEY in 1Password}"
-          : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in 1Password}"
-          : "${OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY in 1Password}"
-
-      - name: Import Apple signing certificate
-        uses: apple-actions/import-codesign-certs@v7
-        with:
-          p12-file-base64: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE }}
-          p12-password: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE_PASSWORD }}
-
-      - name: Build OpenLogi.app with cargo-bundle
-        env:
-          OPENLOGI_UPDATE_BASE_URL: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_BASE_URL }}
-          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
-        run: |
-          set -euo pipefail
-          export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
-          cargo run -p xtask -- bundle-macos
-
-      - name: Sign app bundle
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ steps.load_secrets.outputs.APPLE_SIGNING_IDENTITY }}
-        run: |
-          set -euo pipefail
-          app="target/release/bundle/osx/OpenLogi.app"
-          helper="$app/Contents/Library/LoginItems/OpenLogiAgent.app"
-          # Inside-out signing: seal the nested agent helper with its own
-          # signature first, then the outer app (which seals the signed helper).
-          # --deep is deprecated and can't give the helper an independent
-          # signature, which a stable per-helper TCC identity — so the agent's
-          # Accessibility grant survives app updates — requires.
-          if [ -d "$helper" ]; then
-            codesign --force --options runtime --timestamp \
-              --sign "$APPLE_SIGNING_IDENTITY" "$helper"
-          fi
-          codesign --force --options runtime --timestamp \
-            --sign "$APPLE_SIGNING_IDENTITY" "$app"
-          codesign --verify --strict --verbose=2 "$app"
-          [ -d "$helper" ] && codesign --verify --strict --verbose=2 "$helper"
-
-      - name: Create and sign DMG
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ steps.load_secrets.outputs.APPLE_SIGNING_IDENTITY }}
-        run: |
-          set -euo pipefail
-          cargo run -p xtask -- dmg-macos --sign-identity "$APPLE_SIGNING_IDENTITY"
-
-      - name: Notarize DMG
-        env:
-          APPLE_ID: ${{ steps.load_secrets.outputs.APPLE_ID }}
-          APPLE_PASSWORD: ${{ steps.load_secrets.outputs.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ steps.load_secrets.outputs.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          xcrun notarytool submit target/release/OpenLogi.dmg \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
-
-      - name: Staple DMG
-        run: |
-          set -euo pipefail
-          xcrun stapler staple target/release/OpenLogi.dmg
-          xcrun stapler validate target/release/OpenLogi.dmg
-
-      - name: Collect DMG artifact
-        run: |
-          mkdir -p dist
-          ref_name="${GITHUB_REF_NAME:-dev}"
-          ref_name="${ref_name//\//-}"
-          cp target/release/OpenLogi.dmg "dist/OpenLogi-${ref_name}-macos-${{ matrix.arch }}.dmg"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: OpenLogi-macos-dmg-${{ matrix.arch }}
-          path: dist/*.dmg
-
-  windows:
-    name: Windows EXE (${{ matrix.arch }})
-    # Both arches build on the x86_64 runner — arm64 as an MSVC cross-compile.
-    # Native Arm runners are not an option: artifact-signing-action refuses to
-    # run on them, while the signing itself is arch-agnostic over the PE file.
-    runs-on: windows-2025
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            target: x86_64-pc-windows-msvc
-          - arch: arm64
-            target: aarch64-pc-windows-msvc
-    # A hung signing/login call must become a normal failure (which publish
-    # tolerates), not a 6-hour stall: publish waits for this job to reach a
-    # terminal state before its own gate is even evaluated. The GUI release
-    # build (thin LTO, codegen-units=1, the whole GPUI stack) dominates the
-    # runtime on the 4-core runner, hence a looser budget than the ~8-minute
-    # CLI-only runs needed.
-    timeout-minutes: 60
-    env:
-      # Static CRT: a bare exe must not depend on the VC++ Redistributable —
-      # the v0.6.6 exe died on clean machines with "VCRUNTIME140.dll was not
-      # found". The explicit --target below keeps the flag off host build
-      # scripts, which RUSTFLAGS would otherwise also reach.
-      RUSTFLAGS: -C target-feature=+crt-static
-    permissions:
-      # Mint an OIDC token so azure/login can exchange it for an Azure access token
-      # via a federated credential — no client secret is stored in GitHub.
-      id-token: write
-      contents: read
-    # The federated credential's subject is bound to this GitHub environment, so the
-    # OIDC `sub` claim stays stable (repo:AprilNEA/OpenLogi:environment:release)
-    # instead of changing with every tag ref.
-    environment: release
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      # No rust-cache here: this workflow runs only on tag refs, whose saved
-      # caches no future tag can restore (and no default-branch job produces a
-      # matching key), so the save was pure overhead churning the cache quota.
-
-      # Azure signing config lives in 1Password, matching the macOS job's secret flow.
-      # load-secrets-action is a node action, so it runs on Windows runners too. The
-      # client/tenant/subscription IDs are not secrets under OIDC, but are centralised
-      # here so all release config has a single source of truth.
-      - name: Load Azure signing config from 1Password
-        id: azure_config
-        uses: 1password/load-secrets-action@v4
-        with:
-          export-env: false
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          AZURE_CLIENT_ID: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_CLIENT_ID
-          AZURE_TENANT_ID: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_TENANT_ID
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_SUBSCRIPTION_ID
-          AZURE_SIGNING_ENDPOINT: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_SIGNING_ENDPOINT
-          AZURE_SIGNING_ACCOUNT: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_SIGNING_ACCOUNT
-          AZURE_CERT_PROFILE: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_CERT_PROFILE
-
-      # load-secrets-action silently skips values that aren't op:// references
-      # (e.g. when OP_AZURE_SECRET_ITEM is unset) and emits empty outputs for
-      # empty fields — without this gate the job only fails minutes later, in
-      # azure/login, with an error that never names the real cause.
-      - name: Validate Azure signing config
-        shell: bash
-        env:
-          AZURE_CLIENT_ID: ${{ steps.azure_config.outputs.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ steps.azure_config.outputs.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ steps.azure_config.outputs.AZURE_SUBSCRIPTION_ID }}
-          AZURE_SIGNING_ENDPOINT: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
-          AZURE_SIGNING_ACCOUNT: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
-          AZURE_CERT_PROFILE: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
-        run: |
-          set -euo pipefail
-          : "${AZURE_CLIENT_ID:?Configure AZURE_CLIENT_ID in the Azure 1Password item}"
-          : "${AZURE_TENANT_ID:?Configure AZURE_TENANT_ID in the Azure 1Password item}"
-          : "${AZURE_SUBSCRIPTION_ID:?Configure AZURE_SUBSCRIPTION_ID in the Azure 1Password item}"
-          : "${AZURE_SIGNING_ENDPOINT:?Configure AZURE_SIGNING_ENDPOINT in the Azure 1Password item}"
-          : "${AZURE_SIGNING_ACCOUNT:?Configure AZURE_SIGNING_ACCOUNT in the Azure 1Password item}"
-          : "${AZURE_CERT_PROFILE:?Configure AZURE_CERT_PROFILE in the Azure 1Password item}"
-
-      # The exe IS the product on Windows — no separate CLI artifact will ever
-      # ship there (cargo install covers that audience), so job and artifact
-      # names carry no GUI qualifier. The headless agent (ported in #167)
-      # joins the artifact set once it has been runtime-tested on a real
-      # Windows box.
-      - name: Build OpenLogi
-        run: cargo build --release -p openlogi-gui --target ${{ matrix.target }}
-
-      # Federated (passwordless) login. Requires an app registration whose federated
-      # credential subject is `repo:AprilNEA/OpenLogi:environment:release`, granted the
-      # "Artifact Signing Certificate Profile Signer" role on the signing account.
-      - name: Azure login (OIDC)
-        uses: azure/login@v3
-        with:
-          client-id: ${{ steps.azure_config.outputs.AZURE_CLIENT_ID }}
-          tenant-id: ${{ steps.azure_config.outputs.AZURE_TENANT_ID }}
-          subscription-id: ${{ steps.azure_config.outputs.AZURE_SUBSCRIPTION_ID }}
-
-      # artifact-signing-action installs its ArtifactSigning module from PSGallery,
-      # which is intermittently missing on hosted windows runners (the action then
-      # dies with "Unable to find repository 'PSGallery'" — actions/runner-images#13758).
-      # That flake silently dropped the arm64 exe + msi from v0.6.14. Re-register the
-      # default PSGallery so a mis-provisioned runner can't lose an artifact again.
-      - name: Ensure PSGallery is registered
-        shell: pwsh
-        run: |
-          if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
-            Register-PSRepository -Default
-          }
-
-      # Authenticode-signs via Artifact Signing (ex-Trusted Signing). The action only
-      # runs on Windows runners. azure/login leaves an az CLI session that the action's
-      # default AzureCliCredential picks up, so no azure-* secret inputs are needed.
-      - name: Sign openlogi-gui.exe with Artifact Signing
-        uses: azure/artifact-signing-action@v2
-        with:
-          endpoint: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
-          files: ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-gui.exe
-          # Timestamping is mandatory: without it the signature expires after
-          # 3 days. The URL must stay http — SignTool rejects an https /tr up
-          # front ("SignTool Error: Invalid Timestamp URL", v0.6.5) before
-          # even contacting Azure. The RFC3161 response is itself signed, so
-          # http transport does not weaken it. The file/timestamp digests stay
-          # on the action's SHA256 defaults.
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          # Tag-only workflow: the action's four dependency caches save to
-          # per-tag refs no future run can restore, so skip them.
-          cache-dependencies: false
-
-      - name: Verify the binary is signed
-        shell: pwsh
-        run: |
-          $sig = Get-AuthenticodeSignature target\${{ matrix.target }}\release\openlogi-gui.exe
-          $sig | Format-List
-          # The signing step above already fails on error; this guards against it
-          # silently producing an unsigned or corrupted binary. NotSigned and
-          # HashMismatch (bytes no longer match the signature) are trust-store
-          # independent and always ship-blockers; NotTrusted/UnknownError depend
-          # on the runner's trust store, so they stay log-only.
-          if ($null -eq $sig.SignerCertificate -or
-              "$($sig.Status)" -in 'NotSigned', 'HashMismatch') {
-            Write-Error "openlogi-gui.exe Authenticode signature is invalid: $($sig.Status)"
-            exit 1
-          }
-
-      - name: Collect signed exe artifact
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          # Renaming after signing is safe: Authenticode lives in the PE file.
-          $ref = $env:GITHUB_REF_NAME -replace '/', '-'
-          Copy-Item target\${{ matrix.target }}\release\openlogi-gui.exe "dist\OpenLogi-$ref-windows-${{ matrix.arch }}.exe"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: OpenLogi-windows-${{ matrix.arch }}
-          path: dist/*.exe
-          # 'warn' (the default) would let a no-exe job stay green, and publish
-          # would then die at the by-name download instead of shipping DMG-only.
-          if-no-files-found: error
-
-  windows-msi:
-    name: Windows MSI (${{ matrix.arch }})
-    runs-on: windows-2025
-    needs: windows
-    # `needs` only orders the jobs; this gate runs the MSI legs even when the
-    # windows matrix AGGREGATE failed. The by-name artifact download below
-    # then fails exactly the leg whose exe never shipped, and the other arch
-    # keeps going.
-    if: ${{ !cancelled() }}
-    # No Rust build here — dotnet tool install + wix build + signing.
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            msi_platform: x64
-          - arch: arm64
-            msi_platform: arm64
-    permissions:
-      # Same OIDC setup as the windows job — the MSI is signed with the same
-      # Artifact Signing profile as the exe it wraps.
-      id-token: write
-      contents: read
-    environment: release
-    steps:
-      # Needed for packaging/windows/OpenLogi.wxs.
-      - uses: actions/checkout@v6
-
-      # The already-signed exe from this arch's windows leg.
-      - uses: actions/download-artifact@v8
-        with:
-          name: OpenLogi-windows-${{ matrix.arch }}
-          path: signed-exe
-
-      - name: Load Azure signing config from 1Password
-        id: azure_config
-        uses: 1password/load-secrets-action@v4
-        with:
-          export-env: false
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          AZURE_CLIENT_ID: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_CLIENT_ID
-          AZURE_TENANT_ID: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_TENANT_ID
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_SUBSCRIPTION_ID
-          AZURE_SIGNING_ENDPOINT: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_SIGNING_ENDPOINT
-          AZURE_SIGNING_ACCOUNT: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_SIGNING_ACCOUNT
-          AZURE_CERT_PROFILE: ${{ secrets.OP_AZURE_SECRET_ITEM }}/AZURE_CERT_PROFILE
-
-      - name: Validate Azure signing config
-        shell: bash
-        env:
-          AZURE_CLIENT_ID: ${{ steps.azure_config.outputs.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ steps.azure_config.outputs.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ steps.azure_config.outputs.AZURE_SUBSCRIPTION_ID }}
-          AZURE_SIGNING_ENDPOINT: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
-          AZURE_SIGNING_ACCOUNT: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
-          AZURE_CERT_PROFILE: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
-        run: |
-          set -euo pipefail
-          : "${AZURE_CLIENT_ID:?Configure AZURE_CLIENT_ID in the Azure 1Password item}"
-          : "${AZURE_TENANT_ID:?Configure AZURE_TENANT_ID in the Azure 1Password item}"
-          : "${AZURE_SUBSCRIPTION_ID:?Configure AZURE_SUBSCRIPTION_ID in the Azure 1Password item}"
-          : "${AZURE_SIGNING_ENDPOINT:?Configure AZURE_SIGNING_ENDPOINT in the Azure 1Password item}"
-          : "${AZURE_SIGNING_ACCOUNT:?Configure AZURE_SIGNING_ACCOUNT in the Azure 1Password item}"
-          : "${AZURE_CERT_PROFILE:?Configure AZURE_CERT_PROFILE in the Azure 1Password item}"
-
-      - name: Install the WiX toolset
-        # Pinned exactly: a WiX point release can silently change the produced
-        # MSI (validation, cab layout), and nothing in CI installs the MSI, so
-        # drift would only surface on end-user machines. Bump deliberately.
-        run: dotnet tool install --global wix --version 6.0.2
-
-      - name: Build the MSI
-        shell: pwsh
-        run: |
-          # ProductVersion must be a numeric x.y.z; non-tag dispatches build a
-          # throwaway 0.0.0 package.
-          if ($env:GITHUB_REF_NAME -match '^v(\d+\.\d+\.\d+)$') {
-            $version = $Matches[1]
-          } else {
-            $version = '0.0.0'
-          }
-          $exe = Get-ChildItem signed-exe\*.exe | Select-Object -First 1
-          # Upstream invariants (upload's if-no-files-found: error, the
-          # by-name download) should make this unreachable; the guard turns a
-          # confusing "$null.FullName -> empty -d ExeFile" wix error into a
-          # named cause if those invariants ever shift.
-          if ($null -eq $exe) {
-            Write-Error "No signed exe found in signed-exe\ — nothing to package"
-            exit 1
-          }
-          New-Item -ItemType Directory -Force -Path out | Out-Null
-          wix build packaging\windows\OpenLogi.wxs `
-            -arch ${{ matrix.msi_platform }} `
-            -d Version=$version `
-            -d ExeFile="$($exe.FullName)" `
-            -o out\OpenLogi.msi
-
-      - name: Azure login (OIDC)
-        uses: azure/login@v3
-        with:
-          client-id: ${{ steps.azure_config.outputs.AZURE_CLIENT_ID }}
-          tenant-id: ${{ steps.azure_config.outputs.AZURE_TENANT_ID }}
-          subscription-id: ${{ steps.azure_config.outputs.AZURE_SUBSCRIPTION_ID }}
-
-      # Same PSGallery flake guard as the exe job — see that step's comment.
-      - name: Ensure PSGallery is registered
-        shell: pwsh
-        run: |
-          if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
-            Register-PSRepository -Default
-          }
-
-      - name: Sign OpenLogi.msi with Artifact Signing
-        uses: azure/artifact-signing-action@v2
-        with:
-          endpoint: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
-          files: ${{ github.workspace }}\out\OpenLogi.msi
-          # http on purpose — see the exe signing step.
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          cache-dependencies: false
-
-      - name: Verify the MSI is signed
-        shell: pwsh
-        run: |
-          $sig = Get-AuthenticodeSignature out\OpenLogi.msi
-          $sig | Format-List
-          # Same gate as the exe: NotSigned/HashMismatch are trust-store
-          # independent ship-blockers; NotTrusted/UnknownError stay log-only.
-          if ($null -eq $sig.SignerCertificate -or
-              "$($sig.Status)" -in 'NotSigned', 'HashMismatch') {
-            Write-Error "OpenLogi.msi Authenticode signature is invalid: $($sig.Status)"
-            exit 1
-          }
-
-      - name: Collect signed MSI artifact
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          # Renaming after signing is safe: the signature lives in the MSI.
-          $ref = $env:GITHUB_REF_NAME -replace '/', '-'
-          Copy-Item out\OpenLogi.msi "dist\OpenLogi-$ref-windows-${{ matrix.arch }}.msi"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: OpenLogi-windows-msi-${{ matrix.arch }}
-          path: dist/*.msi
-          if-no-files-found: error
+      id-token: write # build.yml mints an OIDC token for Azure Artifact Signing.
+    with:
+      sign: true
 
   release-notes:
     name: Generate release notes
@@ -553,104 +99,24 @@ jobs:
           name: OpenLogi-release-notes
           path: .release/RELEASE_NOTES.md
 
-  linux-packages:
-    name: Linux packages (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-latest
-            nfpm_sha256: "d6417f99d5fa32bba7a4e007084615d3897651498c2e443118c26b9ec3b698a8"
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            nfpm_sha256: "dc63aa7228ec70490bae67ad3146883055a055639dcf0dffc82fa965bac75a31"
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      # The nfpm `arch` and the runner's native arch must agree — the packages
-      # are built natively, not cross-compiled, so a mismatched runner would
-      # silently ship a wrongly-labelled binary.
-      - name: Verify runner architecture
-        env:
-          EXPECTED_ARCH: ${{ matrix.arch }}
-        run: |
-          case "$(uname -m)" in
-            x86_64) got=amd64 ;;
-            aarch64) got=arm64 ;;
-            *) echo "unexpected machine $(uname -m)" >&2; exit 1 ;;
-          esac
-          test "$got" = "$EXPECTED_ARCH"
-
-      - name: Install system dependencies and nfpm
-        env:
-          NFPM_VERSION: "2.46.3"
-          NFPM_ARCH: ${{ matrix.arch }}
-          NFPM_SHA256: ${{ matrix.nfpm_sha256 }}
-        run: |
-          sudo apt-get update
-          # package-linux builds openlogi-gui, which links GPUI's full
-          # wayland / x11 stack — keep this in sync with ci.yml's Linux deps
-          # (the proven set). The previous short list was missing
-          # libxkbcommon-x11-dev / libwayland-dev / libx11-xcb-dev, so every
-          # tagged Linux build failed to link (`-lxkbcommon-x11`) and took the
-          # whole GitHub Release down with it.
-          sudo apt-get install -y \
-            libudev-dev \
-            gcc g++ clang libfontconfig-dev libwayland-dev \
-            libxkbcommon-x11-dev libx11-xcb-dev \
-            libssl-dev libzstd-dev pkg-config
-          curl -fsSLo /tmp/nfpm.deb \
-            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_${NFPM_ARCH}.deb"
-          echo "${NFPM_SHA256}  /tmp/nfpm.deb" | sha256sum -c
-          sudo dpkg -i /tmp/nfpm.deb
-
-      - name: Build and package
-        run: cargo run -p xtask -- package-linux
-
-      - name: Collect packages
-        env:
-          PKG_ARCH: ${{ matrix.arch }}
-        run: |
-          mkdir -p dist
-          ref_name="${GITHUB_REF_NAME:-dev}"
-          ref_name="${ref_name//\//-}"
-          for pkg in target/release/*.deb target/release/*.rpm; do
-            [ -f "$pkg" ] || continue
-            ext="${pkg##*.}"
-            cp "$pkg" "dist/openlogi-${ref_name}-linux-${PKG_ARCH}.${ext}"
-          done
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: OpenLogi-linux-packages-${{ matrix.arch }}
-          path: dist/*
-
-  # Single owner of the GitHub Release. softprops/action-gh-release@v3 creates the
-  # release as a draft, uploads every asset to that (mutable) draft, then publishes
-  # it as its final step — so the release only becomes immutable once all DMGs and
-  # checksums are attached. The static updater assets are pushed to R2 *before* that
-  # softprops call, so the GitHub Release is the last thing published.
   publish:
     name: Publish release
     runs-on: ubuntu-latest
-    needs: [macos, windows, windows-msi, linux-packages, release-notes]
-    # Wait for the Windows jobs (so the successful .exe/.msi set can be attached)
+    needs: [build, release-notes]
+    # Wait for the Windows jobs (so the successful .zip/.msi set can be attached)
     # but do NOT let their failure block the macOS release. `!cancelled()` removes
     # the implicit "all needs succeeded" gate, so the required deps are checked
     # explicitly here — the windows jobs are deliberately absent from this condition.
     # NOTE: after such a partial publish, do NOT "re-run failed jobs" — publish
-    # re-runs as windows' dependent and fails against the now-immutable release
-    # (and would overwrite immutable-cached R2 objects). A missed .exe ships
+    # re-runs as build's dependent and fails against the now-immutable release
+    # (and would overwrite immutable-cached R2 objects). A missed .zip ships
     # with the next tag instead.
-    if: ${{ github.ref_type == 'tag' && !cancelled() && needs.macos.result == 'success' && needs.release-notes.result == 'success' }}
+    #
+    # `needs.build.outputs.macos_result` is the macOS leg's own result, surfaced
+    # by build.yml's `results` job — the reusable-workflow job result aggregates
+    # all legs, so gating on it would let a failed Windows/Linux leg block the
+    # macOS release. The Windows/Linux legs stay best-effort (pattern download).
+    if: ${{ github.ref_type == 'tag' && !cancelled() && needs.build.outputs.macos_result == 'success' && needs.release-notes.result == 'success' }}
     permissions:
       contents: write
     steps:
@@ -667,12 +133,12 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # Best-effort per arch — deliberately NOT gated on needs.windows.result:
-      # that is the matrix aggregate, and the proven x86_64 exe must not be
-      # held hostage by the experimental arm64 leg (or vice versa). Each leg
-      # uploads its artifact only after its exe is built, signed, and verified,
-      # so whatever arrived is safe to ship. A pattern download that matches
-      # nothing succeeds with an empty dist (unlike by-name, which fails).
+      # Best-effort per arch — deliberately NOT gated on the Windows leg's
+      # result: the proven x86_64 zip must not be held hostage by the
+      # experimental arm64 leg (or vice versa). Each leg uploads its artifact
+      # only after both exes are built, signed, and verified, so whatever
+      # arrived is safe to ship. A pattern download that matches nothing
+      # succeeds with an empty dist (unlike by-name, which fails).
       - uses: actions/download-artifact@v8
         with:
           pattern: OpenLogi-windows-*
@@ -696,14 +162,15 @@ jobs:
           # The DMGs are the release gate — fail loudly if none arrived (with
           # nullglob alone, sha256sum with zero args would silently hash stdin).
           compgen -G '*.dmg' > /dev/null
-          # nullglob: when the Windows job didn't ship an .exe, *.exe drops to
+          # nullglob: when the Windows job didn't ship a .zip, *.zip drops to
           # nothing instead of erroring on a literal pattern, so the DMGs are
-          # hashed alone.
+          # hashed alone. The Windows portable artifact is a zip of the GUI +
+          # agent exes (#347); no bare .exe ships anymore.
           shopt -s nullglob
-          sha256sum *.dmg *.exe *.msi *.deb *.rpm > SHA256SUMS
+          sha256sum -- *.dmg *.zip *.msi *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
 
       # softprops' `files` can't list a glob that matches nothing without
-      # tripping fail_on_unmatched_files. The Windows exe/msi (per arch leg)
+      # tripping fail_on_unmatched_files. The Windows zip/msi (per arch leg)
       # and the Linux deb/rpm are all best-effort — only the DMGs, SHA256SUMS
       # and the .minisig set are guaranteed by the publish gate — so record
       # what actually arrived. This is what lets a failing Windows or Linux
@@ -711,13 +178,18 @@ jobs:
       - name: Detect best-effort artifacts
         id: artifacts
         run: |
-          for ext in exe msi deb rpm; do
+          for ext in zip msi deb rpm; do
             if compgen -G "dist/*.$ext" > /dev/null; then
               echo "$ext=true" >> "$GITHUB_OUTPUT"
             else
               echo "$ext=false" >> "$GITHUB_OUTPUT"
             fi
           done
+          if compgen -G "dist/*.pkg.tar.zst" > /dev/null; then
+            echo "pacman=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pacman=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Load static updater publishing config from 1Password
         id: r2_config
@@ -776,11 +248,11 @@ jobs:
           # treatment as the DMGs: manual verification today, and the future
           # auto-updaters need the detached signatures to exist for every
           # shipped version.
-          # nullglob: the exe/msi/deb/rpm sets are best-effort per arch leg, so
+          # nullglob: the zip/msi/deb/rpm sets are best-effort per arch leg, so
           # the globs may match nothing; the DMGs are guaranteed by the publish
           # gate.
           shopt -s nullglob
-          for artifact in dist/*.dmg dist/*.exe dist/*.msi dist/*.deb dist/*.rpm; do
+          for artifact in dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst; do
             minisign -S -m "$artifact" -s "$key_file" -x "$artifact.minisig" -W
             minisign -V -m "$artifact" -P "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" -x "$artifact.minisig"
           done
@@ -790,7 +262,7 @@ jobs:
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
         run: |
           set -euo pipefail
-          cargo run -p xtask -- generate-updater-manifest \
+          cargo run -p xtask -- release latest-json \
             --dist dist \
             --tag "$GITHUB_REF_NAME" \
             --base-url "$OPENLOGI_UPDATE_BASE_URL" \
@@ -812,15 +284,18 @@ jobs:
 
           # The Windows binaries' distribution channel is the GitHub Release;
           # latest.json is still dmg-only, so nothing in the updater bucket
-          # references the exe/msi or their minisigs — keep them all out of
+          # references the zip/msi or their minisigs — keep them all out of
           # the immutable releases/ prefix until the Windows auto-updater
-          # lands. SHA256SUMS still lists them — it describes the GitHub
-          # Release's asset set.
+          # lands (#347 PR 4). SHA256SUMS still lists them — it describes the
+          # GitHub Release's asset set. *.exe stays excluded defensively even
+          # though no bare exe ships anymore.
           aws s3 cp dist/ "$release_prefix/" \
             --recursive \
             --exclude latest.json \
             --exclude "*.exe" \
             --exclude "*.exe.minisig" \
+            --exclude "*.zip" \
+            --exclude "*.zip.minisig" \
             --exclude "*.msi" \
             --exclude "*.msi.minisig" \
             --cache-control "public, max-age=31536000, immutable" \
@@ -845,10 +320,11 @@ jobs:
             dist/*.dmg
             dist/*.minisig
             dist/SHA256SUMS
-            ${{ steps.artifacts.outputs.exe == 'true' && 'dist/*.exe' || '' }}
+            ${{ steps.artifacts.outputs.zip == 'true' && 'dist/*.zip' || '' }}
             ${{ steps.artifacts.outputs.msi == 'true' && 'dist/*.msi' || '' }}
             ${{ steps.artifacts.outputs.deb == 'true' && 'dist/*.deb' || '' }}
             ${{ steps.artifacts.outputs.rpm == 'true' && 'dist/*.rpm' || '' }}
+            ${{ steps.artifacts.outputs.pacman == 'true' && 'dist/*.pkg.tar.zst' || '' }}
           fail_on_unmatched_files: true
 
   homebrew-tap:
