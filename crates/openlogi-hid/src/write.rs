@@ -20,7 +20,9 @@ mod lighting;
 mod shared;
 mod smartshift;
 
-pub use diagnostics::{FeatureEntry, ReprogControlEntry, dump_features, dump_reprog_controls};
+pub use diagnostics::{
+    FeatureEntry, ReprogControlEntry, dump_features, dump_reprog_controls, read_battery_raw,
+};
 pub use dpi::{DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, set_dpi};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use lighting::{LightingMethod, set_keyboard_color, set_keyboard_color_with};

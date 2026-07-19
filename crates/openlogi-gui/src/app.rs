@@ -5,7 +5,9 @@ use gpui::{
     prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{Icon, IconName, TitleBar, h_flex, v_flex};
-use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
+use openlogi_core::device::{
+    BatteryInfo, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
+};
 use tracing::info;
 
 use openlogi_agent_core::ipc::InventoryHealth;
@@ -28,6 +30,18 @@ mod widgets;
 // gallery card, so it reaches these through the crate-stable `crate::app::…`
 // path rather than the internal `app::home` submodule.
 pub(crate) use home::{glow_canvas, keyboard_glow};
+
+/// True when the device is charging but still reports 0% — the MX2S `0x1000`
+/// firmware can't gauge charge under load, and on a cold start there's no
+/// pre-charge % cached to carry forward. Callers show "Charging" without the
+/// bogus 0%. Cold-start only: once any discharge read is cached, the
+/// carry-forward in the inventory holds it and `percentage` is non-zero.
+pub(crate) fn battery_charging_no_reading(b: &BatteryInfo) -> bool {
+    matches!(
+        b.status,
+        BatteryStatus::Charging | BatteryStatus::ChargingSlow
+    ) && b.percentage == 0
+}
 
 /// Which screen the root view is showing.
 ///

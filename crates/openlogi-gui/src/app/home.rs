@@ -317,14 +317,19 @@ fn status_dot(online: bool) -> AnyElement {
 /// Battery readout for a gallery card: a charge/level glyph plus the
 /// percentage, in the muted metadata style.
 fn battery_view(b: &BatteryInfo, pal: Palette) -> AnyElement {
-    h_flex()
+    let row = h_flex()
         .gap_1()
         .items_center()
         .text_xs()
         .text_color(pal.text_muted)
-        .child(Icon::new(battery_icon(b)).size_3())
-        .child(format!("{}%", b.percentage))
-        .into_any_element()
+        .child(Icon::new(battery_icon(b)).size_3());
+    // Legacy 0x1000 reports 0% while charging with no cached prior — show
+    // "Charging" rather than a misleading "0%". See `battery_charging_no_reading`.
+    if super::battery_charging_no_reading(b) {
+        row.child(tr!("Charging")).into_any_element()
+    } else {
+        row.child(format!("{}%", b.percentage)).into_any_element()
+    }
 }
 
 /// Pick the battery glyph from charge state first (charging / full / error),
