@@ -180,15 +180,14 @@ fn print_usage() {
                   PlayPause NextTrack PrevTrack VolumeUp VolumeDown MuteVolume\n\
                   CycleDpiPresets ToggleSmartShift\n\
                   ScrollUp ScrollDown HorizontalScrollLeft HorizontalScrollRight\n\
-                  CustomShortcut:<mod_hex>:<key_hex>\n\
+                  CustomShortcut:<chord>\n\
          \n\
-         CustomShortcut modifier bits: 0x01=Cmd/Ctrl 0x02=Shift 0x04=Ctrl 0x08=Option/Alt\n\
-         CustomShortcut key_hex: macOS kVK_* code (e.g. 0x08=C, 0x09=V, 0x7E=Up)\n\
+         CustomShortcut chord examples: Cmd+C, Ctrl+Shift+P, Fn+Down (macOS)\n\
          \n\
          Examples:\n\
            inject_action --delay 3 Copy\n\
            inject_action --delay 2 --between 500 VolumeUp VolumeDown PlayPause\n\
            inject_action ScrollDown ScrollDown ScrollDown\n\
-           inject_action CustomShortcut:0x01:0x08   # Ctrl+C"
+           inject_action CustomShortcut:Fn+Down"
     );
 }
