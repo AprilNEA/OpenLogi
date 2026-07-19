@@ -77,7 +77,6 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
 }
 
 #[test]
-#[ignore = "RED: MX Master 4 haptic panel capture not implemented yet"]
 fn the_haptic_panel_gestures_like_the_dedicated_button() {
     // On MX Master 4 the gesture role is delivered by the haptic panel (CID
     // 0x01a0): its press must begin a hold and its raw-XY must commit a swipe,
@@ -119,7 +118,6 @@ fn the_haptic_panel_gestures_like_the_dedicated_button() {
 }
 
 #[test]
-#[ignore = "RED: MX Master 4 haptic panel capture not implemented yet"]
 fn a_quick_panel_tap_is_a_click() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
@@ -138,7 +136,6 @@ fn a_quick_panel_tap_is_a_click() {
 }
 
 #[test]
-#[ignore = "RED: MX Master 4 haptic panel capture not implemented yet"]
 fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
     // Real-hardware probe finding: the panel's first raw-XY sample after
     // contact is a large position jump (up to thousands of units), not a
@@ -178,7 +175,6 @@ fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
 }
 
 #[test]
-#[ignore = "RED: MX Master 4 haptic panel capture not implemented yet"]
 fn the_dedicated_buttons_first_sample_is_not_discarded() {
     // The discard is a panel quirk: the dedicated button's raw-XY stream is
     // relative from the first sample, which must keep committing as-is.
@@ -204,7 +200,6 @@ fn the_dedicated_buttons_first_sample_is_not_discarded() {
 }
 
 #[test]
-#[ignore = "RED: MX Master 4 haptic panel capture not implemented yet"]
 fn a_plain_diverted_haptic_panel_presses_as_the_gesture_button() {
     // With gestures off and a single binding on [`ButtonId::GestureButton`],
     // the MX Master 4 panel is plain-diverted and its press must deliver that
@@ -227,7 +222,6 @@ fn a_plain_diverted_haptic_panel_presses_as_the_gesture_button() {
 }
 
 #[test]
-#[ignore = "RED: MX Master 4 haptic panel capture not implemented yet"]
 fn gesture_source_discovery_arms_whatever_the_device_exposes() {
     let raw_xy_flags =
         (reprog_controls::CidFlags::RAW_XY | reprog_controls::CidFlags::DIVERTABLE).bits();

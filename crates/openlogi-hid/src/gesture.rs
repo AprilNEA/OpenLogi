@@ -1,6 +1,7 @@
-//! Live control capture for one device: divert the device's gesture source,
-//! the DPI/ModeShift button, and the thumb wheel over HID++ and turn their
-//! events into [`CapturedInput`] the GUI can dispatch.
+//! Live control capture for one device: divert the device's gesture source
+//! (the MX dedicated gesture button, or the MX Master 4 haptic panel), the
+//! DPI/ModeShift button, and the thumb wheel over HID++ and turn their events
+//! into [`CapturedInput`] the GUI can dispatch.
 //!
 //! [`run_capture_session`] holds a single HID++ channel open for one device,
 //! enables diversion on whichever of those controls it exposes, registers one
@@ -82,6 +83,10 @@ pub enum GestureError {
 struct CaptureAccum {
     /// Mid-swipe state for the diverted gesture source (raw-XY).
     swipe: SwipeAccumulator,
+    /// Whether the current hold's next raw-XY sample must be dropped: the
+    /// haptic panel's first sample after contact is an absolute position
+    /// jump, not a delta (see [`reprog_controls::HAPTIC_PANEL_CID`]).
+    skip_first_raw_xy: bool,
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
     dpi_down: bool,
@@ -475,9 +480,10 @@ fn handle_reprog(
             // must flow through the `button_cids` loop only — not also emit a
             // click.
             let held_source = gesture_cids.iter().find(|cid| cids.contains(cid));
-            if held_source.is_some() {
+            if let Some(&cid) = held_source {
                 if !acc.swipe.is_holding() {
                     acc.swipe.begin();
+                    acc.skip_first_raw_xy = cid == reprog_controls::HAPTIC_PANEL_CID;
                 }
             } else if acc.swipe.is_holding() {
                 // A press that never committed a direction is a plain click.
@@ -505,6 +511,12 @@ fn handle_reprog(
             }
         }
         RawControlEvent::RawXy { dx, dy } => {
+            // The haptic panel's first sample after contact is a position
+            // jump; summing it would commit a bogus direction instantly.
+            if acc.skip_first_raw_xy {
+                acc.skip_first_raw_xy = false;
+                return;
+            }
             // Commit the instant a clean direction emerges (mid-swipe, once per
             // hold); the accumulator gates on hold duration internally and drops
             // travel that arrives outside a hold.
