@@ -210,7 +210,7 @@ fn print_usage() {
                   ScrollUp ScrollDown HorizontalScrollLeft HorizontalScrollRight\n\
                   CustomShortcut:<mod_hex>:<key_hex>\n\
          \n\
-         CustomShortcut modifier bits: 0x01=Cmd/Ctrl 0x02=Shift 0x04=Ctrl 0x08=Option/Alt\n\
+         CustomShortcut modifier bits: 0x01=Cmd/Ctrl 0x02=Shift 0x04=Ctrl 0x08=Option/Alt 0x10=Fn (macOS)\n\
          CustomShortcut key_hex: macOS kVK_* code (e.g. 0x08=C, 0x09=V, 0x7E=Up)\n\
          \n\
          Examples:\n\
