@@ -15,7 +15,7 @@ use gpui::{App, Global};
 use openlogi_core::config::{
     AppSettings, Appearance, AssetSourcePreference, Config, DeviceIdentity, Lighting,
 };
-use openlogi_core::device::DeviceInventory;
+use openlogi_core::device::{DeviceInventory, DeviceModelInfo};
 use openlogi_hid::{
     DeviceRoute, DpiCapabilities, DpiInfo, SmartShiftMode, SmartShiftStatus, WriteError,
 };
@@ -296,6 +296,23 @@ impl AppState {
     #[must_use]
     pub fn current_record(&self) -> Option<&DeviceRecord> {
         self.device_list.get(self.current_device)
+    }
+
+    /// Every known device model that can be resolved to an asset depot.
+    ///
+    /// This reads the UI's merged device list rather than only the latest live
+    /// inventory, so a temporarily incomplete probe can still download art for
+    /// a device restored from its persisted identity.
+    pub(crate) fn asset_models(&self) -> Vec<(DeviceModelInfo, Option<String>)> {
+        self.device_list
+            .iter()
+            .filter_map(|record| {
+                record
+                    .model_info
+                    .clone()
+                    .map(|model| (model, record.codename.clone()))
+            })
+            .collect()
     }
 
     /// The agent connection state the render path branches on.
@@ -1263,10 +1280,43 @@ fn set_scroll_resolution_if_supported(
 impl Global for AppState {}
 
 #[cfg(test)]
-mod scroll_resolution_tests {
-    use openlogi_core::config::{Config, ScrollResolution};
+mod tests {
+    use openlogi_core::config::{Config, DeviceIdentity, ScrollResolution};
+    use openlogi_core::device::{Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports};
 
-    use super::set_scroll_resolution_if_supported;
+    use crate::asset::AssetResolver;
+
+    use super::{AppState, set_scroll_resolution_if_supported};
+
+    #[test]
+    fn known_offline_device_is_an_asset_sync_target() {
+        let model = DeviceModelInfo {
+            entity_count: 0,
+            serial_number: None,
+            unit_id: [0; 4],
+            transports: DeviceTransports::default(),
+            model_ids: [0xb034, 0, 0],
+            extended_model_id: 2,
+        };
+        let mut config = Config::default();
+        config.set_device_identity(
+            "2b034",
+            DeviceIdentity {
+                display_name: "MX Anywhere 3S".to_string(),
+                kind: DeviceKind::Mouse,
+                capabilities: Capabilities::presumed_from_kind(DeviceKind::Mouse),
+                model_info: Some(model.clone()),
+                codename: Some("MX Anywhere 3S".to_string()),
+            },
+        );
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState::with_runtime(config, &[], &AssetResolver::new(), commands);
+
+        assert_eq!(
+            state.asset_models(),
+            vec![(model, Some("MX Anywhere 3S".to_string()))]
+        );
+    }
 
     #[test]
     fn gui_state_saves_and_clears_supported_wheel_resolution() {

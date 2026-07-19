@@ -19,7 +19,7 @@ use openlogi_assets::{
     AssetRegistry, AssetSource, BUTTONS_RENDER_FILES, DepotManifest, DeviceEntry, FetchOutcome,
 };
 use openlogi_core::config::AssetSourcePreference;
-use openlogi_core::device::{DeviceInventory, DeviceModelInfo};
+use openlogi_core::device::DeviceModelInfo;
 use tracing::{debug, info, warn};
 
 /// Whether the startup HTTP sync should run on this launch.
@@ -86,7 +86,7 @@ pub fn sync(
     targets.dedup_by(|a, b| a.0 == b.0);
 
     if targets.is_empty() {
-        debug!("sync: no matching depots for connected devices");
+        debug!("sync: no matching depots for known devices");
         return Ok(());
     }
 
@@ -224,7 +224,7 @@ pub(crate) fn model_key((model, codename): &(DeviceModelInfo, Option<String>)) -
 /// A manual asset action requested from the Settings → Assets tab, pushed to
 /// the main event loop via [`AssetControl`].
 pub enum AssetCommand {
-    /// Force-fetch assets for the connected devices now, bypassing the
+    /// Force-fetch assets for known devices now, bypassing the
     /// automatic download policy.
     Refresh,
     /// Delete the per-user cache, then re-fetch.
@@ -286,18 +286,6 @@ fn source_for_sync(
         AssetSourcePreference::Cloudflare => Some(AssetSource::Pages),
         AssetSourcePreference::Fastly => Some(AssetSource::JsDelivr),
     }
-}
-
-/// Flatten every paired device's HID++ model snapshot — that's what the
-/// asset sync feeds into the registry lookup.
-pub(crate) fn collect_models(
-    inventories: &[DeviceInventory],
-) -> Vec<(DeviceModelInfo, Option<String>)> {
-    inventories
-        .iter()
-        .flat_map(|inv| inv.paired.iter())
-        .filter_map(|p| p.model_info.clone().map(|m| (m, p.codename.clone())))
-        .collect()
 }
 
 #[cfg(test)]

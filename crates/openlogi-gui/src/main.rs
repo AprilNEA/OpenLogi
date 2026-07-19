@@ -59,15 +59,14 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme, Root};
 use openlogi_core::brand::DeeplinkCommand;
-use openlogi_core::config::{AssetSourcePreference, Config};
+use openlogi_core::config::Config;
 use openlogi_core::device::DeviceInventory;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::app::AppView;
 use crate::asset::sync::{
-    AssetCommand, AssetControl, SyncOutcome, collect_models, model_key, run_asset_sync,
-    sync_retry_delay,
+    AssetCommand, AssetControl, SyncOutcome, model_key, run_asset_sync, sync_retry_delay,
 };
 use crate::state::AppState;
 
@@ -291,26 +290,66 @@ fn main() -> Result<()> {
                 tokio::select! {
                     update = ipc_updates.recv(), if ipc_open => match update {
                         Some(ipc_client::GuiUpdate::Snapshot(update)) => {
+                        // Keep the latest completed enumeration for the manual
+                        // Refresh / Clear arm — a not-yet-ready agent's empty
+                        // pre-enumeration list must not shrink it.
+                        let inventory_ready = update.status.inventory
+                            == openlogi_agent_core::ipc::InventoryHealth::Ready;
+                        if inventory_ready {
+                            latest_inv.clone_from(&update.inventory);
+                        }
+                        // A completed sync may have put real photos where
+                        // silhouettes were resolved: the resolver was rebuilt
+                        // when its outcome landed; force this merge through
+                        // the unchanged-list early-return so the fresh records
+                        // become visible.
+                        let force_refresh = std::mem::take(&mut assets_dirty);
+                        let (auto_download, asset_source, models) = cx.update(|cx| {
+                            let (changed, auto_download, asset_source, models) = cx.update_global::<AppState, _>(|state, _| {
+                                // Merge only *completed* enumerations. A not-yet-ready
+                                // agent can only serve an empty pre-enumeration list, and
+                                // counting those as misses would wipe the device list (and
+                                // pop an open detail page) on every agent restart: at the
+                                // 250 ms reconnect cadence the miss grace burns in ~750 ms
+                                // while a fresh enumeration takes 1.5–5 s. The diagnostics
+                                // snapshot shares the gate so a report copied during that
+                                // window keeps the receivers the UI is still showing; the
+                                // manual-sync arm reuses `inventory_ready` above.
+                                let merged = inventory_ready
+                                    && state.refresh_inventories(&update.inventory, &cache, force_refresh);
+                                if inventory_ready {
+                                    state.store_inventory_snapshot(&update.inventory);
+                                }
+                                // Bitwise `|`: the link must be set even when the
+                                // merge already reported a change.
+                                let changed = merged
+                                    | state.set_agent_link(state::AgentLink::Ready(update.status));
+                                let settings = state.app_settings();
+                                (
+                                    changed,
+                                    settings.auto_download_assets,
+                                    settings.asset_source,
+                                    state.asset_models(),
+                                )
+                            });
+                            // The steady poll mostly repeats an identical snapshot;
+                            // skip the full-window invalidation for those.
+                            if changed {
+                                cx.refresh_windows();
+                            }
+                            (auto_download, asset_source, models)
+                        });
                         // Kick off (or re-arm) the background asset sync. The
                         // index prefetch needs no devices; depot fetches fire
-                        // only for models not already synced this session. The
-                        // whole automatic path is skipped when the user turned
-                        // auto-download off — a manual Refresh still works via
-                        // the AssetControl arm below.
-                        let (auto_download, asset_source) = cx.update(|cx| {
-                            cx.try_global::<AppState>().map_or_else(
-                                || (true, AssetSourcePreference::Automatic),
-                                |s| {
-                                    (
-                                        s.app_settings().auto_download_assets,
-                                        s.app_settings().asset_source,
-                                    )
-                                },
-                            )
-                        });
+                        // only for models not already synced this session. Use
+                        // the UI's merged device set so persisted identities are
+                        // covered when a live probe temporarily lacks model info.
+                        // The whole automatic path is skipped when the user
+                        // turned auto-download off — a manual Refresh still
+                        // works via the AssetControl arm below.
                         let backoff_passed = last_sync_at
                             .is_none_or(|t| t.elapsed() >= sync_retry_delay(sync_attempts));
-                        let pending: Vec<_> = collect_models(&update.inventory)
+                        let pending: Vec<_> = models
                             .into_iter()
                             .filter(|m| !synced_keys.contains(&model_key(m)))
                             .collect();
@@ -330,46 +369,6 @@ fn main() -> Result<()> {
                                 let _ = tx.send(SyncOutcome { ok, keys });
                             });
                         }
-                        // Keep the latest completed enumeration for the manual
-                        // Refresh / Clear arm — a not-yet-ready agent's empty
-                        // pre-enumeration list must not shrink it.
-                        let inventory_ready = update.status.inventory
-                            == openlogi_agent_core::ipc::InventoryHealth::Ready;
-                        if inventory_ready {
-                            latest_inv.clone_from(&update.inventory);
-                        }
-                        // A completed sync may have put real photos where
-                        // silhouettes were resolved: the resolver was rebuilt
-                        // when its outcome landed; force this merge through
-                        // the unchanged-list early-return so the fresh records
-                        // become visible.
-                        let force_refresh = std::mem::take(&mut assets_dirty);
-                        cx.update(|cx| {
-                            let changed = cx.update_global::<AppState, _>(|state, _| {
-                                // Merge only *completed* enumerations. A not-yet-ready
-                                // agent can only serve an empty pre-enumeration list, and
-                                // counting those as misses would wipe the device list (and
-                                // pop an open detail page) on every agent restart: at the
-                                // 250 ms reconnect cadence the miss grace burns in ~750 ms
-                                // while a fresh enumeration takes 1.5–5 s. The diagnostics
-                                // snapshot shares the gate so a report copied during that
-                                // window keeps the receivers the UI is still showing; the
-                                // manual-sync arm reuses `inventory_ready` above.
-                                let merged = inventory_ready
-                                    && state.refresh_inventories(&update.inventory, &cache, force_refresh);
-                                if inventory_ready {
-                                    state.store_inventory_snapshot(&update.inventory);
-                                }
-                                // Bitwise `|`: the link must be set even when the
-                                // merge already reported a change.
-                                merged | state.set_agent_link(state::AgentLink::Ready(update.status))
-                            });
-                            // The steady poll mostly repeats an identical snapshot;
-                            // skip the full-window invalidation for those.
-                            if changed {
-                                cx.refresh_windows();
-                            }
-                        });
                         }
                         Some(ipc_client::GuiUpdate::Unreachable) => {
                             cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
@@ -433,11 +432,9 @@ fn main() -> Result<()> {
                             sync_running = true;
                             sync_attempts = 0;
                             last_sync_at = None;
-                            let models = collect_models(&latest_inv);
-                            let asset_source = cx.update(|cx| {
-                                cx.try_global::<AppState>()
-                                    .map(|s| s.app_settings().asset_source)
-                                    .unwrap_or_default()
+                            let (models, asset_source) = cx.update(|cx| {
+                                let state = cx.global::<AppState>();
+                                (state.asset_models(), state.app_settings().asset_source)
                             });
                             let tx = sync_tx.clone();
                             std::thread::spawn(move || {
