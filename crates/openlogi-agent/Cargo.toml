@@ -28,6 +28,12 @@ tracing-subscriber = { workspace = true }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 opener = { workspace = true }
 
+# Windows exe resources (app icon + VERSIONINFO) — see build.rs. The exact
+# version already in Cargo.lock as gpui's own build-dependency, so the resolve
+# adds an edge, not a crate, and the pinned gpui rev cannot move.
+[build-dependencies]
+embed-resource = "3.0.9"
+
 # Menu-bar status item (NSStatusItem) — the agent hosts the tray now. objc2
 # gives Retained<T>-owned AppKit bindings (no #99-style leaks); versions match
 # the GUI's so the resolve doesn't move the gpui Cargo.lock pin.

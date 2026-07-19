@@ -368,8 +368,14 @@ fn theme_picker(
                 .justify_between()
                 .gap_3()
                 .child(
+                    // Translated chip labels vary in width; let the chip row
+                    // yield (wrapping onto a second line if it must) so the
+                    // fixed-width search input is never pushed out of view.
                     h_flex()
                         .gap_2()
+                        .flex_1()
+                        .min_w_0()
+                        .flex_wrap()
                         .child(filter_chip(
                             view,
                             "filter-all",
@@ -396,7 +402,7 @@ fn theme_picker(
                         )),
                 )
                 .child(
-                    div().w(px(200.)).child(
+                    div().w(px(200.)).flex_shrink_0().child(
                         Input::new(theme_search)
                             .small()
                             .cleanable(true)

@@ -12,6 +12,9 @@
       Version       numeric x.y.z ProductVersion (0.0.0 on non-tag dispatches)
       ExeFile       path to the signed openlogi-gui exe to package
       AgentExeFile  path to the signed openlogi-agent exe to package
+      IconFile      optional override for the app .ico (Add/Remove Programs
+                    entry); defaults to the committed design/icon/openlogi.ico
+                    below, so the release workflow needs no extra define
 
   - Requires WixToolset.Util.wixext (util:CloseApplication below); the
     windows-msi job installs it pinned to the same version as wix itself.
@@ -26,6 +29,12 @@
   <?define UpgradeCode = "2A989A66-36FE-4999-ACE2-3E79AE02D12A" ?>
 <?else?>
   <?define UpgradeCode = "981D0C70-179E-4EE8-8F1E-0EB6877EAE94" ?>
+<?endif?>
+
+<!-- Resolved relative to this .wxs, so a plain
+     `wix build packaging\windows\OpenLogi.wxs` finds it from any cwd. -->
+<?ifndef IconFile ?>
+  <?define IconFile = "$(sys.SOURCEFILEDIR)..\..\design\icon\openlogi.ico" ?>
 <?endif?>
 
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
@@ -118,6 +127,11 @@
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>
 
+    <!-- Add/Remove Programs icon. The Start Menu shortcut needs no Icon of
+         its own: it targets OpenLogi.exe, whose embedded icon resource (see
+         crates/openlogi-gui/build.rs) the shell picks up automatically. -->
+    <Icon Id="OpenLogiIco" SourceFile="$(var.IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="OpenLogiIco" />
     <Property Id="ARPURLINFOABOUT" Value="https://openlogi.org" />
     <Property Id="ARPHELPLINK" Value="https://github.com/AprilNEA/OpenLogi" />
   </Package>

@@ -58,6 +58,10 @@ mod assets;
 mod diagnostics;
 mod general;
 mod language;
+// Windows needs no privacy grants — the WH_MOUSE_LL hook and raw HID access
+// work without one — so there the page would render empty; register it only
+// where it has content. `SettingsPage::index` tracks the shift.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod permissions;
 mod updates;
 
@@ -77,7 +81,15 @@ impl SettingsPage {
         match self {
             Self::General => 0,
             Self::Updates => 1,
-            Self::About => 5,
+            // One lower on Windows: the Permissions page isn't registered
+            // there (see the `mod permissions` cfg).
+            Self::About => {
+                if cfg!(any(target_os = "macos", target_os = "linux")) {
+                    5
+                } else {
+                    4
+                }
+            }
         }
     }
 }
@@ -292,7 +304,10 @@ pub fn open_at(page: SettingsPage, cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.settings,
         tr!("Settings"),
-        Size::new(px(840.), px(600.)),
+        // Wide enough that the pages' custom rows keep slack under fonts wider
+        // than the macOS system font (Segoe UI tipped the old 840 into
+        // clipping the hero rows' trailing buttons on Windows).
+        Size::new(px(920.), px(640.)),
         move |window, cx| SettingsView::new(page, window, cx),
         cx,
     );
@@ -314,8 +329,12 @@ impl Render for SettingsView {
                 group_ix: None,
             })
             .page(general::general_page(self.sensitivity_slider.clone()))
-            .page(updates::updates_page(self.updater.clone(), pal))
-            .page(permissions::permissions_page(pal))
+            .page(updates::updates_page(self.updater.clone(), pal));
+        // Registered only where grants exist to manage — see the `mod
+        // permissions` cfg for why Windows skips it.
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let settings = settings.page(permissions::permissions_page(pal));
+        let settings = settings
             .page(appearance::appearance_page(
                 view.clone(),
                 self.theme_filter,
@@ -323,7 +342,11 @@ impl Render for SettingsView {
                 self.language_select.clone(),
                 pal,
             ))
-            .page(assets::assets_page(pal, self.asset_cache_desc.clone()))
+            .page(assets::assets_page(
+                view.clone(),
+                pal,
+                self.asset_cache_desc.clone(),
+            ))
             .page(about::about_page(view, self.copied, pal));
         // Surfaces competing macOS event taps (a pointer-lag cause) and, in debug
         // builds, the full tap list and a live event monitor. Appended after

@@ -77,6 +77,15 @@ fn minisign_public_key() -> Option<&'static str> {
         .filter(|key| !key.is_empty())
 }
 
+/// Whether this platform's install flow is wired end to end. gpui-updater's
+/// Windows strategy is rename-in-place for a bare `.exe`; handing it the MSI
+/// the manifest serves would clobber `OpenLogi.exe` with installer bytes.
+/// Until an msiexec flow lands upstream, Windows checks are notify-only: a
+/// check still resolves and surfaces "update available", but nothing
+/// downloads or installs — the Updates page routes the user to the release
+/// instead.
+pub const INSTALL_SUPPORTED: bool = !cfg!(target_os = "windows");
+
 fn release_arch() -> &'static str {
     match std::env::consts::ARCH {
         "aarch64" => "arm64",
@@ -87,7 +96,11 @@ fn release_arch() -> &'static str {
 fn release_format() -> &'static str {
     match std::env::consts::OS {
         "macos" => "dmg",
-        "windows" => "exe",
+        // Matches the `format` field `xtask release latest-json` emits for the
+        // per-arch MSIs. No bare exe ships anymore, so "exe" could never
+        // match; with [`INSTALL_SUPPORTED`] false the format only has to let a
+        // *check* resolve.
+        "windows" => "msi",
         _ => "tar.gz",
     }
 }
@@ -103,9 +116,10 @@ pub fn install(cx: &mut App, settings: &AppSettings) {
     // later manual check — is honoured. Installed unconditionally; it's inert
     // until both the flag is on and a check resolves to `Available`.
     let auto_install = cx.observe(&updater, |updater, cx| {
-        let opted_in = cx
-            .try_global::<AppState>()
-            .is_some_and(|s| s.app_settings().auto_install_updates);
+        let opted_in = INSTALL_SUPPORTED
+            && cx
+                .try_global::<AppState>()
+                .is_some_and(|s| s.app_settings().auto_install_updates);
         if opted_in && matches!(updater.read(cx).status(), UpdateStatus::Available(_)) {
             updater.update(cx, Updater::download_and_install);
         }

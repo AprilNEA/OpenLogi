@@ -112,6 +112,10 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
     let bounds = Bounds::centered(None, size, cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
+        // Aux windows are fixed-content dialogs authored for `size`; that
+        // makes it the floor too, the way the main window sets one in
+        // `main_window_options` — below it rows clip their trailing controls.
+        window_min_size: Some(size),
         app_id: Some("openlogi".to_string()),
         titlebar: Some(titlebar_options(title.clone())),
         ..WindowOptions::default()

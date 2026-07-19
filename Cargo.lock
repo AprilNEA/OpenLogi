@@ -4988,6 +4988,7 @@ dependencies = [
 name = "openlogi-agent"
 version = "0.6.20"
 dependencies = [
+ "embed-resource",
  "futures",
  "interprocess",
  "objc2 0.6.4",
@@ -5076,6 +5077,7 @@ dependencies = [
  "anyhow",
  "backon",
  "disclaim",
+ "embed-resource",
  "fluent-langneg",
  "gpui",
  "gpui-component",

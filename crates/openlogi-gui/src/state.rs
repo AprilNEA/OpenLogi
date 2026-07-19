@@ -926,9 +926,10 @@ impl AppState {
     /// main-thread hop from the agent's IPC reload). `ReloadConfig` keeps the
     /// agent's other config in sync meanwhile. No-op when unchanged.
     ///
-    /// The only caller is the macOS-gated menu-bar toggle in Settings, so the
-    /// setter is gated the same way to stay dead-code-clean on other targets.
-    #[cfg(target_os = "macos")]
+    /// The callers are the menu-bar / notification-area toggle in Settings,
+    /// shown only where there's a tray (macOS + Windows), so the setter is
+    /// gated the same way to stay dead-code-clean on Linux.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn set_show_in_menu_bar(&mut self, enabled: bool) {
         if self.config.app_settings.show_in_menu_bar == enabled {
             return;

@@ -148,22 +148,35 @@ fn about_config(pal: Palette) -> AnyElement {
         .justify_between()
         .gap_3()
         .child(
+            // The absolute path can be arbitrarily long (deep home dirs,
+            // Windows profiles) — ellipsize it rather than letting it shove
+            // the reveal button past the window edge.
             v_flex()
                 .gap_1()
+                .flex_1()
+                .min_w_0()
                 .child(div().font_weight(FontWeight::MEDIUM).child("config.toml"))
-                .child(div().text_xs().text_color(pal.text_muted).child(path)),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(pal.text_muted)
+                        .truncate()
+                        .child(path),
+                ),
         )
         .child(
-            Button::new("about-reveal-config")
-                .outline()
-                .label(tr!("Show in file manager"))
-                .on_click(|_, _, cx| {
-                    if let Ok(dir) = openlogi_core::paths::config_dir()
-                        && let Ok(url) = url::Url::from_file_path(&dir)
-                    {
-                        cx.open_url(url.as_str());
-                    }
-                }),
+            div().flex_shrink_0().child(
+                Button::new("about-reveal-config")
+                    .outline()
+                    .label(tr!("Show in file manager"))
+                    .on_click(|_, _, cx| {
+                        if let Ok(dir) = openlogi_core::paths::config_dir()
+                            && let Ok(url) = url::Url::from_file_path(&dir)
+                        {
+                            cx.open_url(url.as_str());
+                        }
+                    }),
+            ),
         )
         .into_any_element()
 }

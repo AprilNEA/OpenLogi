@@ -91,18 +91,14 @@ pub fn reveal_cache_in_file_manager() {
     open_in_file_manager(&root);
 }
 
-/// Open `path` in the platform file manager. Only macOS has a reveal command
-/// wired up today; elsewhere this is a no-op. (Split out so the early return
-/// above isn't the function's last statement on non-macOS — `needless_return`.)
-#[cfg(target_os = "macos")]
+/// Open `path` in the platform file manager. `opener` dispatches per OS
+/// (Finder / Explorer / xdg-open), so no `#[cfg]` split — the old macOS-only
+/// gating left the Settings → Assets "Open" button silently dead elsewhere.
 fn open_in_file_manager(path: &Path) {
     if let Err(e) = opener::open(path) {
-        warn!(error = %e, "could not open cache dir in Finder");
+        warn!(error = %e, "could not open cache dir in the file manager");
     }
 }
-
-#[cfg(not(target_os = "macos"))]
-fn open_in_file_manager(_path: &Path) {}
 
 #[derive(Debug, Clone)]
 pub struct ResolvedAsset {
