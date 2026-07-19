@@ -676,4 +676,17 @@ mod tests {
         // device that went away): there is nothing to settle or re-arm.
         assert_eq!(on_done(7, None), DoneAction::Ignore);
     }
+
+    #[test]
+    #[ignore = "drain-until-done lands with the fix commit"]
+    fn settles_a_draining_session_quietly() {
+        // A deliberately stopped session stays tracked until its task — the
+        // control-restore writes included — actually exits, so its key cannot
+        // re-arm mid-restore. Its completion report frees the key without the
+        // unexpected-exit warning.
+        assert_eq!(
+            on_done(7, Some(&stopped_session_with_epoch(7))),
+            DoneAction::Remove { unexpected: false }
+        );
+    }
 }
