@@ -269,6 +269,24 @@ fn post_unicode(text: &str) {
 /// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
 /// keycode. Used by the workflow sequencer's `PressKey` step.
 fn post_keycombo(combo: &KeyCombo) {
+    let Some((vk, flags)) = keycombo_event(combo) else {
+        tracing::warn!(
+            usage = combo.key().code(),
+            "shortcut usage has no macOS mapping"
+        );
+        return;
+    };
+    post_key(vk, flags);
+}
+
+/// Translate a platform-neutral chord into the virtual key and flags macOS
+/// reports for the corresponding physical key press.
+///
+/// Fn+Arrow is not represented as an arrow with the Fn flag: macOS changes
+/// the virtual key to Home/End/Page Up/Page Down and preserves SecondaryFn.
+/// Direct Page Up/Page Down keys use that flag as well. Matching both pieces
+/// avoids the short-scroll behavior applications give flagged arrow events.
+fn keycombo_event(combo: &KeyCombo) -> Option<(u16, CGEventFlags)> {
     let mut flags = CGEventFlags::CGEventFlagNull;
     if combo.has_command() {
         flags |= CGEventFlags::CGEventFlagCommand;
@@ -282,14 +300,22 @@ fn post_keycombo(combo: &KeyCombo) {
     if combo.has_option() {
         flags |= CGEventFlags::CGEventFlagAlternate;
     }
-    if let Some(vk) = hid_usage_to_macos(combo.key().code()) {
-        post_key(vk, flags);
-    } else {
-        tracing::warn!(
-            usage = combo.key().code(),
-            "shortcut usage has no macOS mapping"
-        );
+    let usage = combo.key().code();
+    if combo.has_function() || matches!(usage, 0x4b | 0x4e) {
+        flags |= CGEventFlags::CGEventFlagSecondaryFn;
     }
+    let vk = if combo.has_function() {
+        match usage {
+            0x50 => 0x73, // Fn+Left -> Home
+            0x4f => 0x77, // Fn+Right -> End
+            0x52 => 0x74, // Fn+Up -> Page Up
+            0x51 => 0x79, // Fn+Down -> Page Down
+            _ => hid_usage_to_macos(usage)?,
+        }
+    } else {
+        hid_usage_to_macos(usage)?
+    };
+    Some((vk, flags))
 }
 
 /// Map a platform-neutral USB HID keyboard usage to a macOS virtual key.
@@ -338,10 +364,12 @@ fn hid_usage_to_macos(usage: u8) -> Option<u16> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect is idiomatic in tests")]
 mod tests {
-    use openlogi_core::binding::Shortcut;
+    use core_graphics::event::CGEventFlags;
+    use openlogi_core::binding::{KeyCombo, Shortcut};
 
-    use super::{combo, hid_usage_to_macos};
+    use super::{combo, hid_usage_to_macos, keycombo_event};
 
     #[test]
     fn hid_usages_map_to_macos_virtual_keys() {
@@ -351,6 +379,30 @@ mod tests {
         assert_eq!(hid_usage_to_macos(0x3a), Some(0x7a));
         assert_eq!(hid_usage_to_macos(0x6f), Some(0x5a));
         assert_eq!(hid_usage_to_macos(0xff), None);
+    }
+
+    #[test]
+    fn function_arrows_use_native_navigation_events() {
+        for (chord, expected_vk) in [
+            ("Fn+Left", 0x73),
+            ("Fn+Right", 0x77),
+            ("Fn+Up", 0x74),
+            ("Fn+Down", 0x79),
+        ] {
+            let combo = chord.parse::<KeyCombo>().expect("valid Fn chord");
+            let (vk, flags) = keycombo_event(&combo).expect("mapped Fn chord");
+            assert_eq!(vk, expected_vk, "wrong virtual key for {chord}");
+            assert!(flags.contains(CGEventFlags::CGEventFlagSecondaryFn));
+        }
+    }
+
+    #[test]
+    fn page_keys_preserve_the_secondary_function_flag() {
+        for chord in ["PageUp", "PageDown"] {
+            let combo = chord.parse::<KeyCombo>().expect("valid page chord");
+            let (_, flags) = keycombo_event(&combo).expect("mapped page chord");
+            assert!(flags.contains(CGEventFlags::CGEventFlagSecondaryFn));
+        }
     }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an

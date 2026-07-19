@@ -9,7 +9,8 @@ const MOD_COMMAND: u8 = 1 << 0;
 const MOD_SHIFT: u8 = 1 << 1;
 const MOD_CONTROL: u8 = 1 << 2;
 const MOD_OPTION: u8 = 1 << 3;
-const ALL_MODIFIERS: u8 = MOD_COMMAND | MOD_SHIFT | MOD_CONTROL | MOD_OPTION;
+const MOD_FUNCTION: u8 = 1 << 4;
+const ALL_MODIFIERS: u8 = MOD_COMMAND | MOD_SHIFT | MOD_CONTROL | MOD_OPTION | MOD_FUNCTION;
 
 /// USB HID keyboard usage supported by custom shortcuts.
 ///
@@ -196,10 +197,22 @@ impl KeyCombo {
         self.modifiers & MOD_OPTION != 0
     }
 
+    /// Whether the chord includes the macOS Fn/Globe modifier.
+    ///
+    /// Other injection backends currently ignore this platform-specific
+    /// modifier while still posting the ordinary key.
+    #[must_use]
+    pub const fn has_function(&self) -> bool {
+        self.modifiers & MOD_FUNCTION != 0
+    }
+
     /// Canonical user-facing chord label.
     #[must_use]
     pub fn rendered_label(&self) -> String {
         let mut parts = Vec::new();
+        if self.has_function() {
+            parts.push("Fn".to_string());
+        }
         if self.has_command() {
             parts.push("Cmd".to_string());
         }
@@ -275,6 +288,7 @@ fn parse_modifier(token: &str) -> Option<u8> {
         "shift" => Some(MOD_SHIFT),
         "ctrl" | "control" => Some(MOD_CONTROL),
         "alt" | "option" => Some(MOD_OPTION),
+        "fn" | "function" | "globe" => Some(MOD_FUNCTION),
         _ => None,
     }
 }
@@ -360,6 +374,35 @@ mod tests {
         let combo = "Cmd+A".parse::<KeyCombo>().expect("valid shortcut failed");
         assert_eq!(combo.key().code(), 0x04);
         assert_eq!(combo.rendered_label(), "Cmd+A");
+    }
+
+    #[test]
+    fn parses_and_renders_function_before_standard_modifiers() {
+        let combo = "Globe+Ctrl+Alt+Shift+Cmd+Down"
+            .parse::<KeyCombo>()
+            .expect("valid Fn shortcut failed");
+        assert!(combo.has_function());
+        assert!(combo.has_command());
+        assert!(combo.has_control());
+        assert!(combo.has_option());
+        assert!(combo.has_shift());
+        assert_eq!(combo.key().code(), 0x51);
+        assert_eq!(combo.rendered_label(), "Fn+Cmd+Ctrl+Alt+Shift+Down");
+    }
+
+    #[test]
+    fn function_shortcut_roundtrips_human_readable_toml() {
+        #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+        struct Wrapper {
+            shortcut: KeyCombo,
+        }
+
+        let wrapper = Wrapper {
+            shortcut: "Fn+Up".parse().expect("valid Fn shortcut failed"),
+        };
+        let encoded = toml::to_string(&wrapper).expect("shortcut serialization failed");
+        assert_eq!(encoded, "shortcut = \"Fn+Up\"\n");
+        assert_eq!(toml::from_str::<Wrapper>(&encoded), Ok(wrapper));
     }
 
     #[test]
