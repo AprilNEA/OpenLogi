@@ -184,6 +184,10 @@ fn map_slot_name(name: &str) -> Option<MouseControlId> {
         "SLOT_NAME_MODESHIFT_BUTTON" => Some(MouseControlId::Button(ButtonId::DpiToggle)),
         "SLOT_NAME_THUMBWHEEL" => Some(MouseControlId::ThumbwheelRotation),
         "SLOT_NAME_GESTURE_BUTTON" => Some(MouseControlId::Button(ButtonId::GestureButton)),
+        // The MX Master 4 Haptic Sense Panel. Logi names the slot after its
+        // Options+ default assignment (the radial Actions Ring menu), but the
+        // marker is the panel itself.
+        "ASSIGNMENT_NAME_SHOW_RADIAL_MENU" => Some(MouseControlId::Button(ButtonId::HapticPanel)),
         _ => None,
     }
 }
