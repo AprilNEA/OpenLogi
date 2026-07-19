@@ -195,7 +195,16 @@ pub async fn run_capture_session(
     let _ = shutdown.await;
 
     drop(listener);
-    if let Ok(mut slot) = channel_slot.write() {
+    // The slot is one last-writer-wins cell shared by every session, so a
+    // sibling may have published its own channel after ours. Clear it only
+    // while it still holds *this* session's channel — evicting the sibling's
+    // would silently demote its DPI/SmartShift writes to the fresh-open slow
+    // path.
+    if let Ok(mut slot) = channel_slot.write()
+        && slot
+            .as_ref()
+            .is_some_and(|shared| Arc::ptr_eq(shared.channel(), &chan))
+    {
         *slot = None;
     }
     armed.disarm().await;
