@@ -133,9 +133,16 @@ fn create_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
+/// USB/Bluetooth vendor id of Logitech devices.
+const LOGITECH_VENDOR_ID: u16 = 0x046d;
+
 fn find_mouse_devices() -> Vec<(std::path::PathBuf, Device)> {
     evdev::enumerate()
         .filter(|(_, d)| d.name().unwrap_or("") != VIRTUAL_DEVICE_NAME)
+        // Only Logitech mice: the hook exists to remap devices OpenLogi
+        // manages, and grabbing an unrelated vendor's mouse would route its
+        // events through the virtual device and apply foreign remaps to it.
+        .filter(|(_, d)| d.input_id().vendor() == LOGITECH_VENDOR_ID)
         .filter(|(_, d)| {
             d.supported_keys()
                 .is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT))

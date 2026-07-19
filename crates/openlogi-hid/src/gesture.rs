@@ -13,7 +13,8 @@
 //! it, mirroring how the CGEventTap hook handles the side buttons. The thumb
 //! wheel is special: diverting it stops native horizontal scroll, so the GUI
 //! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas — the wheel
-//! is therefore only diverted when its click is actually bound.
+//! is therefore only diverted when the user's thumbwheel config leaves its
+//! defaults (click bound, rotation rebound, or sensitivity changed).
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
@@ -44,8 +45,8 @@ pub enum CapturedInput {
     /// ([`ButtonId::Thumbwheel`]).
     ButtonPressed(ButtonId),
     /// Thumb-wheel rotation to re-synthesise as horizontal scroll, in the
-    /// wheel's `diverted_res` increments. Emitted only while the wheel is
-    /// diverted to capture its click.
+    /// wheel's `diverted_res` increments. Emitted while the wheel is diverted
+    /// (click bound, rotation rebound, or sensitivity changed).
     Scroll(i16),
 }
 
@@ -75,18 +76,47 @@ struct CaptureAccum {
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
     dpi_down: bool,
+    /// Diverted standard-button CIDs held in the last event.
+    buttons_down: Vec<u16>,
 }
 
-/// Capture the gesture button, DPI/ModeShift button, and (when
-/// `capture_thumbwheel`) the thumb wheel on `route` until `shutdown` resolves,
-/// forwarding each event to `sink`.
+/// HID++-divertable standard buttons: the `0x1b04` control ID and the
+/// [`ButtonId`] its press dispatches as. A button is diverted per device only
+/// when its binding leaves the default, so an unbound button keeps its native
+/// HID behavior (no re-synthesis needed).
+pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 3] = [
+    (0x0052, ButtonId::MiddleClick),
+    (0x0053, ButtonId::Back),
+    (0x0056, ButtonId::Forward),
+];
+
+/// Which of one device's controls a capture session should divert.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CaptureSpec {
+    /// Divert the thumb wheel over `0x2150` (rotation rebind / sensitivity /
+    /// click bound).
+    pub capture_thumbwheel: bool,
+    /// Divert the dedicated gesture button with raw-XY (it owns the gesture
+    /// role).
+    pub divert_gesture_button: bool,
+    /// Buttons to divert as plain presses (no raw-XY): the
+    /// [`DIVERTABLE_STANDARD_BUTTONS`] whose binding leaves the default, plus
+    /// the dedicated gesture button when it carries a non-default single
+    /// binding without owning the gesture role.
+    pub divert_buttons: Vec<(u16, ButtonId)>,
+}
+
+/// Capture the controls selected by `spec` on `route` until `shutdown`
+/// resolves, forwarding each event to `sink`.
 ///
-/// The dedicated gesture button (raw-XY) is diverted only when `divert_gesture_button` —
-/// i.e. it is the device's gesture owner. When the user moves the gesture role
-/// to an OS-hook button or turns gestures off, the HID++ gesture control is
-/// left undiverted so it keeps its native behavior instead of being
-/// captured-and-swallowed. The DPI/ModeShift capture and the channel-reuse slot
-/// are independent of this.
+/// The dedicated gesture button (raw-XY) is diverted only when
+/// `spec.divert_gesture_button` — i.e. it is the device's gesture owner. When
+/// the user moves the gesture role to an OS-hook button or turns gestures off,
+/// the HID++ gesture control keeps its native behavior — unless a non-default
+/// single binding puts it in `spec.divert_buttons`, in which case it is
+/// diverted as a plain button (the OS hook never sees CID `0x00c3`, so this is
+/// the binding's only delivery path). The DPI/ModeShift capture and the
+/// channel-reuse slot are independent of this.
 ///
 /// Opens and holds one HID++ channel, diverts whichever of those controls the
 /// device exposes, and listens. Returns once `shutdown` fires (or its sender is
@@ -94,8 +124,7 @@ struct CaptureAccum {
 /// failures to restore on the way out are logged, not propagated.
 pub async fn run_capture_session(
     route: DeviceRoute,
-    capture_thumbwheel: bool,
-    divert_gesture_button: bool,
+    spec: CaptureSpec,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
@@ -104,13 +133,7 @@ pub async fn run_capture_session(
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
     let device_index = route.device_index();
-    let armed = arm_controls(
-        &chan,
-        device_index,
-        capture_thumbwheel,
-        divert_gesture_button,
-    )
-    .await?;
+    let armed = arm_controls(&chan, device_index, &spec).await?;
 
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
@@ -120,8 +143,10 @@ pub async fn run_capture_session(
 
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
     let reprog_index = armed.reprog.as_ref().map(|(_, idx)| *idx);
+    let gesture_diverted = armed.gesture_diverted;
     let thumb_index = armed.thumb.as_ref().map(|(_, idx)| *idx);
     let dpi_set = armed.dpi_cids.clone();
+    let button_set = armed.button_cids.clone();
     let listener = chan.add_msg_listener_guarded({
         let accum = Arc::clone(&accum);
         let sink = sink.clone();
@@ -136,7 +161,14 @@ pub async fn run_capture_session(
                 // Recover the guard even if a prior holder panicked — the
                 // critical section is panic-free, so the data is consistent.
                 let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
-                handle_reprog(&mut acc, event, &dpi_set, &sink);
+                handle_reprog(
+                    &mut acc,
+                    event,
+                    gesture_diverted,
+                    &dpi_set,
+                    &button_set,
+                    &sink,
+                );
                 return;
             }
             if let Some(idx) = thumb_index
@@ -156,13 +188,23 @@ pub async fn run_capture_session(
         index = device_index,
         gesture = armed.gesture_diverted,
         dpi_buttons = armed.dpi_cids.len(),
+        buttons = armed.button_cids.len(),
         thumbwheel = armed.thumb.is_some(),
         "control capture active"
     );
     let _ = shutdown.await;
 
     drop(listener);
-    if let Ok(mut slot) = channel_slot.write() {
+    // The slot is one last-writer-wins cell shared by every session, so a
+    // sibling may have published its own channel after ours. Clear it only
+    // while it still holds *this* session's channel — evicting the sibling's
+    // would silently demote its DPI/SmartShift writes to the fresh-open slow
+    // path.
+    if let Ok(mut slot) = channel_slot.write()
+        && slot
+            .as_ref()
+            .is_some_and(|shared| Arc::ptr_eq(shared.channel(), &chan))
+    {
         *slot = None;
     }
     armed.disarm().await;
@@ -179,6 +221,9 @@ struct ArmedControls {
     gesture_diverted: bool,
     /// DPI/ModeShift CIDs diverted as plain buttons.
     dpi_cids: Vec<u16>,
+    /// Standard-button CIDs diverted per the session's [`CaptureSpec`], with
+    /// the [`ButtonId`] each dispatches as.
+    button_cids: Vec<(u16, ButtonId)>,
     /// `0x2150` accessor + feature index, present when the thumb wheel is
     /// diverted.
     thumb: Option<(Thumbwheel, u8)>,
@@ -197,6 +242,12 @@ impl ArmedControls {
             for &cid in &self.dpi_cids {
                 restore(rc.set_cid_reporting(cid, false, false).await, "DPI button");
             }
+            for &(cid, _) in &self.button_cids {
+                restore(
+                    rc.set_cid_reporting(cid, false, false).await,
+                    "standard button",
+                );
+            }
         }
         if let Some((tw, _)) = self.thumb.as_ref() {
             restore(tw.set_reporting(false, false).await, "thumb wheel");
@@ -204,16 +255,15 @@ impl ArmedControls {
     }
 }
 
-/// Resolve features off the device's root and divert the controls we capture:
-/// the gesture button (raw-XY) and DPI/ModeShift buttons over `0x1b04`, and —
-/// when `capture_thumbwheel` and the wheel reports a single tap — the thumb
-/// wheel over `0x2150`. The root-feature lookup mirrors `write::open_feature`,
+/// Resolve features off the device's root and divert the controls `spec`
+/// selects: the gesture button (raw-XY), DPI/ModeShift buttons and rebindable
+/// standard buttons over `0x1b04`, and the thumb wheel over `0x2150`. The
+/// root-feature lookup mirrors `write::open_feature`,
 /// since hidpp 0.2's registry doesn't carry the features OpenLogi reimplements.
 async fn arm_controls(
     chan: &Arc<HidppChannel>,
     slot: u8,
-    capture_thumbwheel: bool,
-    divert_gesture_button: bool,
+    spec: &CaptureSpec,
 ) -> Result<ArmedControls, GestureError> {
     let device = Device::new(Arc::clone(chan), slot)
         .await
@@ -222,6 +272,7 @@ async fn arm_controls(
     let mut reprog: Option<(ReprogControlsV4, u8)> = None;
     let mut gesture_diverted = false;
     let mut dpi_cids: Vec<u16> = Vec::new();
+    let mut button_cids: Vec<(u16, ButtonId)> = Vec::new();
     if let Some(info) = device
         .root()
         .get_feature(reprog_controls::FEATURE_ID)
@@ -233,7 +284,7 @@ async fn arm_controls(
 
         // Only divert the gesture button when it owns the gesture role; otherwise
         // leave it native (a non-owner HID++ control must not be captured-and-dropped).
-        if divert_gesture_button
+        if spec.divert_gesture_button
             && controls
                 .iter()
                 .any(|c| c.cid == reprog_controls::GESTURE_BUTTON_CID && c.supports_raw_xy())
@@ -251,11 +302,25 @@ async fn arm_controls(
                 dpi_cids.push(cid);
             }
         }
+        for &(cid, button) in &spec.divert_buttons {
+            // The plan never lists CID 0x00c3 while the raw-XY gesture divert
+            // owns it, but guard anyway: a plain (divert, no raw-XY) write here
+            // would strip the raw-XY reporting armed above.
+            if gesture_diverted && cid == reprog_controls::GESTURE_BUTTON_CID {
+                continue;
+            }
+            if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
+                rc.set_cid_reporting(cid, true, false)
+                    .await
+                    .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+                button_cids.push((cid, button));
+            }
+        }
         reprog = Some((rc, info.index));
     }
 
     let mut thumb: Option<(Thumbwheel, u8)> = None;
-    if capture_thumbwheel
+    if spec.capture_thumbwheel
         && let Some(info) = device
             .root()
             .get_feature(thumbwheel::FEATURE_ID)
@@ -273,23 +338,27 @@ async fn arm_controls(
                 false
             }
         };
-        if supports_single_tap {
-            tw.set_reporting(true, false)
-                .await
-                .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-            thumb = Some((tw, info.index));
-        } else {
+        // Divert whenever capture was requested: rotation rebinds and the
+        // sensitivity multiplier need the diverted event stream even on wheels
+        // that report no single-tap capability (e.g. MX Master 4) — lacking the
+        // tap only means a bound click can never fire.
+        if !supports_single_tap {
             debug!("thumb wheel reports no single tap — click not capturable");
         }
+        tw.set_reporting(true, false)
+            .await
+            .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+        thumb = Some((tw, info.index));
     }
 
-    if !gesture_diverted && dpi_cids.is_empty() && thumb.is_none() {
+    if !gesture_diverted && dpi_cids.is_empty() && button_cids.is_empty() && thumb.is_none() {
         debug!(slot, "no capturable controls — idle session");
     }
     Ok(ArmedControls {
         reprog,
         gesture_diverted,
         dpi_cids,
+        button_cids,
         thumb,
     })
 }
@@ -328,19 +397,27 @@ async fn enumerate_controls(
 fn handle_reprog(
     acc: &mut CaptureAccum,
     event: RawControlEvent,
+    gesture_diverted: bool,
     dpi_cids: &[u16],
+    button_cids: &[(u16, ButtonId)],
     sink: &mpsc::UnboundedSender<CapturedInput>,
 ) {
     match event {
         RawControlEvent::DivertedButtons(cids) => {
-            let gesture_held = cids.contains(&reprog_controls::GESTURE_BUTTON_CID);
-            if gesture_held && !acc.swipe.is_holding() {
-                acc.swipe.begin();
-            } else if !gesture_held && acc.swipe.is_holding() {
-                // A press that never committed a direction is a plain click.
-                if acc.swipe.end() {
-                    debug!("gesture click");
-                    let _ = sink.send(CapturedInput::Gesture(GestureDirection::Click));
+            // The swipe accumulator belongs to the raw-XY gesture divert. When
+            // the gesture button is instead diverted as a plain button (it has
+            // a single binding but not the gesture role), its press must flow
+            // through the `button_cids` loop only — not also emit a click.
+            if gesture_diverted {
+                let gesture_held = cids.contains(&reprog_controls::GESTURE_BUTTON_CID);
+                if gesture_held && !acc.swipe.is_holding() {
+                    acc.swipe.begin();
+                } else if !gesture_held && acc.swipe.is_holding() {
+                    // A press that never committed a direction is a plain click.
+                    if acc.swipe.end() {
+                        debug!("gesture click");
+                        let _ = sink.send(CapturedInput::Gesture(GestureDirection::Click));
+                    }
                 }
             }
 
@@ -349,6 +426,17 @@ fn handle_reprog(
                 let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::DpiToggle));
             }
             acc.dpi_down = dpi_down;
+
+            for &(cid, button) in button_cids {
+                let down = cids.contains(&cid);
+                let was_down = acc.buttons_down.contains(&cid);
+                if down && !was_down {
+                    let _ = sink.send(CapturedInput::ButtonPressed(button));
+                    acc.buttons_down.push(cid);
+                } else if !down && was_down {
+                    acc.buttons_down.retain(|&c| c != cid);
+                }
+            }
         }
         RawControlEvent::RawXy { dx, dy } => {
             // Commit the instant a clean direction emerges (mid-swipe, once per

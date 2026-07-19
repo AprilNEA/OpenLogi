@@ -26,6 +26,8 @@ pub const ACCENT_BLUE: u32 = 0x003b_82f6;
 pub const STATUS_CONNECTED: u32 = 0x0022_c55e;
 pub const STATUS_CONNECTING: u32 = 0x00ea_b308;
 pub const STATUS_OFFLINE: u32 = 0x006b_7280;
+/// Ring color for a device the user disabled ("Manage this device" off).
+pub const STATUS_DISABLED: u32 = 0x00ef_4444;
 
 /// Sizes that several components need to agree on.
 pub const HEADER_H: f32 = 80.;

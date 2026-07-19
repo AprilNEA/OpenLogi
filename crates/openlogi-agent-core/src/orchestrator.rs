@@ -11,7 +11,6 @@
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::config::{Config, ScrollResolution};
@@ -19,13 +18,14 @@ use openlogi_core::device::{Capabilities, DeviceInventory};
 use openlogi_hid::{CaptureChannel, DeviceRoute};
 use tracing::warn;
 
-use crate::DpiCycleState;
 use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
+use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
 use crate::device_order::DeviceStableId;
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::ipc::InventoryHealth;
 use crate::receiver_access::ReceiverAccess;
 use crate::watchers::gesture::GestureBindings;
+use crate::{DpiCycleState, DpiCycles};
 
 /// The minimal per-device facts the agent needs: the config key (binding /
 /// preset lookup), the HID++ route (DPI/SmartShift writes + capture target), and
@@ -55,8 +55,11 @@ pub struct SharedRuntime {
     /// gesture watcher for the thumb-wheel/DPI-button single actions.
     pub hook_maps: SharedHookMaps,
     pub gesture_bindings: GestureBindings,
-    pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
-    pub thumbwheel_sensitivity: Arc<AtomicI32>,
+    pub dpi_cycle: Arc<RwLock<DpiCycles>>,
+    /// One capture plan per online device — what to divert and how to
+    /// dispatch, keyed by the device the events arrive on. Carries each
+    /// device's effective thumb-wheel sensitivity.
+    pub capture_plans: SharedCapturePlans,
     pub capture_channel: CaptureChannel,
     /// Exclusive receiver access shared by HID++ capture and pairing. Capture
     /// and pairing must never open the same receiver HID node concurrently.
@@ -106,10 +109,8 @@ impl Orchestrator {
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
-            dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
-            thumbwheel_sensitivity: Arc::new(AtomicI32::new(
-                config.app_settings.thumbwheel_sensitivity,
-            )),
+            dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
+            capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),
             receiver_access: ReceiverAccess::default(),
         };
@@ -139,15 +140,17 @@ impl Orchestrator {
             .map(|d| d.config_key.as_str())
     }
 
-    fn current_route(&self) -> Option<DeviceRoute> {
-        self.devices.get(self.current).and_then(|d| d.route.clone())
-    }
-
     /// Build the OS-hook callback's maps for `key` + foreground `app`. Both hook
     /// sub-maps are app-scoped (a per-app override can demote the gesture owner),
     /// so they're built together here and published under one lock — keeping
     /// `rebuild` and `set_current_app` from drifting into a half-populated write.
     fn hook_maps_for(&self, key: Option<&str>, app: Option<&str>) -> HookMaps {
+        // A disabled selected device gets empty maps: the OS hook then passes
+        // its events through untouched instead of applying remaps to a device
+        // the user asked OpenLogi to leave alone.
+        if key.is_some_and(|k| !self.config.device_enabled(k)) {
+            return HookMaps::default();
+        }
         HookMaps {
             bindings: bindings_for(&self.config, key, app),
             gestures: oshook_gestures_for(&self.config, key, app),
@@ -169,20 +172,75 @@ impl Orchestrator {
             gesture_bindings_for(&self.config, key),
             "gesture_bindings",
         );
+        self.publish_device_runtime();
+    }
+
+    /// Republish the runtime views derived from the device set + config: the
+    /// capture plans and the per-device DPI-cycle map. One method so the
+    /// inventory fast path (same set, fresh online flags) can't update one and
+    /// forget the other — a waking device needs both its capture session and
+    /// its DPI-cycle slot.
+    fn publish_device_runtime(&self) {
         write_value(
-            &self.shared.dpi_cycle,
-            DpiCycleState {
-                presets: key.map(|k| self.config.dpi_presets(k)).unwrap_or_default(),
-                index: 0,
-                target: self.current_route(),
-                capabilities: None,
-            },
-            "dpi_cycle",
+            &self.shared.capture_plans,
+            self.capture_plans_for(),
+            "capture_plans",
         );
-        self.shared.thumbwheel_sensitivity.store(
-            self.config.app_settings.thumbwheel_sensitivity,
-            Ordering::Relaxed,
-        );
+        self.rebuild_dpi_cycles(self.current_key());
+    }
+
+    /// Rewrite the per-device DPI-cycle map for every online device,
+    /// preserving a device's live cycle index (and lazily discovered
+    /// capabilities) across rebuilds whose presets did not change — a config
+    /// reload must not snap DPI back to `preset[0]`.
+    fn rebuild_dpi_cycles(&self, selected: Option<&str>) {
+        let Ok(mut guard) = self.shared.dpi_cycle.write() else {
+            warn!("dpi_cycle lock poisoned — rebuild skipped");
+            return;
+        };
+        let mut by_key = std::collections::HashMap::new();
+        for dev in self
+            .devices
+            .iter()
+            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+        {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
+            let presets = self.config.dpi_presets(&dev.config_key);
+            let previous = guard
+                .by_key
+                .get(&dev.config_key)
+                .filter(|state| state.presets == presets);
+            by_key.insert(
+                dev.config_key.clone(),
+                DpiCycleState {
+                    index: previous.map_or(0, |state| state.index),
+                    capabilities: previous.and_then(|state| state.capabilities.clone()),
+                    presets,
+                    target: Some(route),
+                },
+            );
+        }
+        guard.selected = selected.map(str::to_owned);
+        guard.by_key = by_key;
+    }
+
+    /// One capture plan per online device, from the current config + app.
+    fn capture_plans_for(&self) -> Vec<DeviceCapturePlan> {
+        self.devices
+            .iter()
+            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+            .filter_map(|dev| {
+                let route = dev.route.clone()?;
+                Some(plan_for_device(
+                    &self.config,
+                    &dev.config_key,
+                    route,
+                    self.current_app.as_deref(),
+                ))
+            })
+            .collect()
     }
 
     /// Apply a fresh inventory snapshot. Always refreshes the snapshot the IPC
@@ -221,7 +279,11 @@ impl Orchestrator {
         if !changed {
             // Same set and routes — but keep the fresh `online` flags, or a
             // device that woke this tick would read as a transition forever.
+            // The runtime views key on `online`, so republish them even here or
+            // a woken device would get neither its capture session nor its
+            // DPI-cycle slot.
             self.devices = devices;
+            self.publish_device_runtime();
             return;
         }
         self.devices = devices;
@@ -243,6 +305,10 @@ impl Orchestrator {
     /// Reuses the capture session's channel when it already points at the
     /// device, like every other hardware write.
     fn reapply_volatile_settings(&self, dev: &AgentDevice) {
+        // A disabled device is left fully native — no writes of any kind.
+        if !self.config.device_enabled(&dev.config_key) {
+            return;
+        }
         let Some(route) = dev.route.clone() else {
             return;
         };
@@ -338,11 +404,13 @@ impl Orchestrator {
         self.config.app_settings.launch_at_login
     }
 
-    /// Foreground-app change → re-overlay per-app bindings on the hook maps (DPI
-    /// and the dedicated HID++ gesture map are not app-scoped, so they're untouched).
-    /// Both hook maps are recomputed: a per-app override of the gesture owner
-    /// turns it into a single action for that app, dropping it from the OS-hook
-    /// gesture set — so the gesture map is app-scoped too.
+    /// Foreground-app change → re-overlay per-app bindings on the hook maps and
+    /// republish the capture plans, whose binding maps and divert sets are
+    /// per-app effective too (HID++ dispatch reads them at event time). Both
+    /// hook maps are recomputed: a per-app override of the gesture owner turns
+    /// it into a single action for that app, dropping it from the OS-hook
+    /// gesture set — so the gesture map is app-scoped too. The dedicated HID++
+    /// gesture map is not app-scoped and stays untouched.
     pub fn set_current_app(&mut self, bundle: Option<String>) {
         if bundle == self.current_app {
             return;
@@ -353,6 +421,7 @@ impl Orchestrator {
             self.hook_maps_for(self.current_key(), self.current_app.as_deref()),
             "hook_maps",
         );
+        self.publish_device_runtime();
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.
@@ -521,6 +590,7 @@ mod tests {
         AgentDevice, InventoryHealth, Orchestrator, configured_wheel_mode, plan_reapply,
         reapply_targets,
     };
+    use openlogi_core::binding::{Action, ButtonId};
     use openlogi_core::config::{Config, ScrollResolution};
     use openlogi_core::device::Capabilities;
     use openlogi_hid::DeviceRoute;
@@ -683,6 +753,40 @@ mod tests {
     /// forwards completed enumerations, so "checked and found nothing" must not
     /// be reported as "still scanning" — that's the whole distinction the
     /// health exists to carry.
+    /// The published capture plan's Back binding for the first device, if any.
+    fn published_back_binding(orch: &Orchestrator) -> Option<Action> {
+        orch.shared.capture_plans.read().ok().and_then(|plans| {
+            plans
+                .first()
+                .and_then(|plan| plan.bindings.get(&ButtonId::Back).cloned())
+        })
+    }
+
+    #[test]
+    fn app_switch_republishes_capture_plans() {
+        // HID++ dispatch reads `plan.bindings` at event time, so a
+        // foreground-app change must republish the capture plans — their
+        // binding maps and divert sets are per-app effective — or every
+        // diverted button keeps firing the previous app's actions.
+        let mut config = Config::default();
+        config.set_per_app_binding(
+            "a",
+            "com.example.editor",
+            ButtonId::Back,
+            Some(Action::Undo),
+        );
+        let mut orch = Orchestrator::new(config);
+        orch.devices = vec![dev("a", 1, true)];
+        orch.rebuild();
+        assert_ne!(
+            published_back_binding(&orch),
+            Some(Action::Undo),
+            "no per-app overlay while no app is in front"
+        );
+        orch.set_current_app(Some("com.example.editor".into()));
+        assert_eq!(published_back_binding(&orch), Some(Action::Undo));
+    }
+
     #[test]
     fn empty_refresh_marks_inventory_ready() {
         let mut orch = Orchestrator::new(Config::default());

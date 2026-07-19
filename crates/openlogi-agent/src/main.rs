@@ -156,11 +156,9 @@ async fn run(config: Config) {
     // shared maps and dispatches bound actions itself; the two pairing flags let
     // it release its capture session while a pairing session owns the receiver.
     watchers::gesture::spawn(
-        shared.hook_maps.clone(),
-        shared.gesture_bindings.clone(),
+        shared.capture_plans.clone(),
         shared.dpi_cycle.clone(),
         shared.capture_channel.clone(),
-        shared.thumbwheel_sensitivity.clone(),
         shared.receiver_access.clone(),
     );
 
