@@ -23,17 +23,17 @@ const INDEX_NAME: &str = "index.json";
 /// Mutable production endpoint behind the OpenLogi custom domain.
 const PRODUCTION_BASE: &str = "https://assets.openlogi.org";
 
-/// Stable Cloudflare Pages branch alias for asset release 0.0.1.
-const PAGES_BASE: &str = "https://v0-0-1.openlogi-assets.pages.dev";
+/// Stable Cloudflare Pages branch alias for asset release 0.1.0.
+const PAGES_BASE: &str = "https://v0-1-0.openlogi-assets.pages.dev";
 
-/// Exact jsDelivr catalog package for asset release 0.0.1.
-const JSDELIVR_CATALOG_BASE: &str = "https://cdn.jsdelivr.net/npm/@logi-assets/catalog@0.0.1";
+/// Exact jsDelivr catalog package for asset release 0.1.0.
+const JSDELIVR_CATALOG_BASE: &str = "https://cdn.jsdelivr.net/npm/@logi-assets/catalog@0.1.0";
 
 /// jsDelivr prefix shared by every npm asset shard.
 const JSDELIVR_PACKAGE_ROOT: &str = "https://cdn.jsdelivr.net/npm";
 
 /// npm asset release this OpenLogi build understands.
-const ASSET_VERSION: &str = "0.0.1";
+const ASSET_VERSION: &str = "0.1.0";
 
 /// Filename and schema of the depot-to-package routing catalog.
 const NPM_ROUTES_NAME: &str = "npm-routes.json";
@@ -302,7 +302,7 @@ mod tests {
         assert_eq!(
             url.as_deref(),
             Some(
-                "https://cdn.jsdelivr.net/npm/@logi-assets/pointing@0.0.1/v1/devices/mx_master_3s/front_core.png"
+                "https://cdn.jsdelivr.net/npm/@logi-assets/pointing@0.1.0/v1/devices/mx_master_3s/front_core.png"
             )
         );
     }
