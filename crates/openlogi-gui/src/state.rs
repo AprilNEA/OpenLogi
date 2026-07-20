@@ -1204,6 +1204,18 @@ impl AppState {
 
     /// Update a single gesture-button sub-binding in memory, on disk, and in the
     /// shared gesture map the watcher thread reads.
+    /// Persist one Action Ring slot for the selected device and have the
+    /// agent reload. The overlay reads its slots from this config on every
+    /// open, so the next ring already shows the change.
+    pub fn commit_ring_binding(&mut self, slot: openlogi_core::binding::RingSlot, action: Action) {
+        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
+            debug!(?slot, "no active device key — ring binding edit ignored");
+            return;
+        };
+        self.config.set_ring_slot(&key, slot, action);
+        self.persist_and_reload("ring binding");
+    }
+
     pub fn commit_gesture_binding(&mut self, direction: GestureDirection, action: Action) {
         let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
             debug!(

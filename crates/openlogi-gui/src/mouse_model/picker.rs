@@ -34,6 +34,7 @@ use crate::data::mouse_buttons::{
 use crate::mouse_model::view::MouseModelView;
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
+use openlogi_core::binding::{RingSlot, default_ring_binding};
 
 /// Floor width for the [`action_picker`] popover. The action labels drive the
 /// actual width; this only stops the list from collapsing too narrow. Matches
@@ -104,6 +105,164 @@ pub fn gesture_overview(
         .child(plus_card(view, active, pal, cx))
         // The flyout card only appears once a direction is activated.
         .when_some(active, |row, dir| row.child(flyout_card(dir, view, pal, cx)))
+        .into_any_element()
+}
+
+/// Build the Action Ring's customization menu: a compass-grid navigator card
+/// (level 1) showing all eight [`RingSlot`]s with their bound actions, and —
+/// once a slot is activated — its action-list card (level 2) flown out beside
+/// it. Mirrors [`gesture_overview`]'s two-card structure; the active slot is
+/// scratch state on the [`MouseModelView`].
+pub fn ring_overview(view: &Entity<MouseModelView>, cx: &mut Context<PopoverState>) -> AnyElement {
+    let pal = theme::palette(cx);
+    let active = view.read(cx).ring_selected_slot();
+    h_flex()
+        .items_start()
+        .gap_2()
+        .child(ring_grid_card(view, active, pal, cx))
+        .when_some(active, |row, slot| {
+            row.child(ring_flyout_card(slot, view, pal, cx))
+        })
+        .into_any_element()
+}
+
+/// Level 1: the compass grid — three rows matching the ring's on-screen
+/// layout, with the centre cell left empty (that's the popup's ✕).
+fn ring_grid_card(
+    view: &Entity<MouseModelView>,
+    active: Option<RingSlot>,
+    pal: Palette,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
+    let actions: BTreeMap<RingSlot, Action> = cx
+        .try_global::<AppState>()
+        .map(|s| s.ring_slots_for_current().into_iter().collect())
+        .unwrap_or_default();
+
+    let cell = |slot: RingSlot| {
+        let action = actions
+            .get(&slot)
+            .cloned()
+            .unwrap_or_else(|| default_ring_binding(slot));
+        ring_cell(slot, &action, active == Some(slot), view, pal)
+    };
+
+    menu_card(pal)
+        .gap_1p5()
+        .child(
+            h_flex()
+                .w_full()
+                .justify_center()
+                .gap_1p5()
+                .child(cell(RingSlot::NorthWest))
+                .child(cell(RingSlot::North))
+                .child(cell(RingSlot::NorthEast)),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .justify_center()
+                .gap_1p5()
+                .child(cell(RingSlot::West))
+                .child(div().w(px(GESTURE_CELL_W)))
+                .child(cell(RingSlot::East)),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .justify_center()
+                .gap_1p5()
+                .child(cell(RingSlot::SouthWest))
+                .child(cell(RingSlot::South))
+                .child(cell(RingSlot::SouthEast)),
+        )
+        .into_any_element()
+}
+
+/// One slot's cell in the compass grid — the ring counterpart of
+/// [`direction_cell`].
+fn ring_cell(
+    slot: RingSlot,
+    current: &Action,
+    active: bool,
+    view: &Entity<MouseModelView>,
+    pal: Palette,
+) -> AnyElement {
+    let idx = RingSlot::ALL
+        .iter()
+        .position(|s| *s == slot)
+        .unwrap_or_default();
+    let header = format!("{}  {}", slot.glyph(), tr!(slot.label()));
+    let action_label = tr!(current.label());
+    let is_default = *current == default_ring_binding(slot);
+    let view = view.clone();
+    v_flex()
+        .id(("ring-cell", idx))
+        .w(px(GESTURE_CELL_W))
+        .gap(px(2.))
+        .px_2()
+        .py_1p5()
+        .rounded_md()
+        .selected_border(active, pal)
+        .selected_fill(active)
+        .hover(move |s| s.bg(pal.surface_hover))
+        .child(div().text_xs().text_color(pal.text_muted).child(header))
+        .child(
+            div()
+                .text_sm()
+                .text_color(if is_default {
+                    pal.text_muted
+                } else {
+                    pal.text_primary
+                })
+                .child(action_label),
+        )
+        .on_click(move |_event, _window, cx| {
+            view.update(cx, |v, vcx| {
+                let next = (v.ring_selected_slot() != Some(slot)).then_some(slot);
+                v.set_ring_selected_slot(next);
+                vcx.notify();
+            });
+        })
+        .into_any_element()
+}
+
+/// Level 2: the `slot`'s action picker, flown out as its own card. Picking
+/// commits (persist + agent reload — the next ring open shows it) and stays
+/// open for further edits.
+fn ring_flyout_card(
+    slot: RingSlot,
+    view: &Entity<MouseModelView>,
+    pal: Palette,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
+    let current = cx
+        .try_global::<AppState>()
+        .and_then(|s| {
+            s.ring_slots_for_current()
+                .into_iter()
+                .find(|(candidate, _)| *candidate == slot)
+                .map(|(_, action)| action)
+        })
+        .unwrap_or_else(|| default_ring_binding(slot));
+
+    let view_pick = view.clone();
+    let on_pick: PickFn = Rc::new(move |action, _window, cx| {
+        cx.update_global::<AppState, _>(|state, _| state.commit_ring_binding(slot, action));
+        view_pick.update(cx, |_, vcx| vcx.notify());
+    });
+
+    menu_card(pal)
+        .min_w(px(POPOVER_W))
+        .child(title(
+            format!("{}  {}", slot.glyph(), tr!(slot.label())),
+            pal,
+        ))
+        .child(divider(pal))
+        .child(scroll_list(
+            "ring-slot-scroll",
+            action_rows("ring-action", Some(&current), &on_pick, pal),
+        ))
         .into_any_element()
 }
 
@@ -289,6 +448,10 @@ fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
 /// cross), standing in for its five swipe directions since it has no single
 /// bound action.
 pub(crate) const GESTURE_BUTTON_ICON: &str = "action-icons/move.svg";
+
+/// Icon for the Action Ring's label card — the dots grid echoes the pad's
+/// eight-dot ring marking; the ring has no single bound action either.
+pub(crate) const RING_BUTTON_ICON: &str = "action-icons/grid-3x3.svg";
 
 /// Asset path (served by [`crate::app_assets`]) of the vendored lucide glyph for
 /// an action — the leading icon in each action row and in the leader-line label

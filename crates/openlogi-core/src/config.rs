@@ -257,6 +257,33 @@ impl Config {
         }
     }
 
+    /// Records `action` for one `slot` of the Action Ring, creating the
+    /// device entry if needed. A missing — or single-action — `ActionRing`
+    /// binding is replaced by the canonical default ring first and any
+    /// unbound slots are seeded, so the edited map is always complete
+    /// (guarded by `set_ring_slot_seeds_a_complete_map`).
+    pub fn set_ring_slot(
+        &mut self,
+        device_key: &str,
+        slot: crate::binding::RingSlot,
+        action: Action,
+    ) {
+        let entry = self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .bindings
+            .entry(ButtonId::ActionRing)
+            .or_insert_with(|| default_binding_for(ButtonId::ActionRing));
+        if !entry.is_ring() {
+            *entry = default_binding_for(ButtonId::ActionRing);
+        }
+        entry.fill_ring_defaults();
+        if let Binding::Ring(map) = entry {
+            map.insert(slot, action);
+        }
+    }
+
     /// Ensure `button` on `device_key` is a [`Binding::Gesture`], creating the
     /// device + a default binding if needed and upgrading a [`Binding::Single`]
     /// in place (its action kept as the [`GestureDirection::Click`]). Returns the
@@ -607,6 +634,34 @@ mod tests {
         let cfg = Config::load_from_path(&path).expect("load");
         assert_eq!(cfg.schema_version, SCHEMA_VERSION);
         assert!(cfg.devices.is_empty());
+    }
+
+    #[test]
+    fn set_ring_slot_seeds_a_complete_map() {
+        use crate::binding::{RingSlot, default_ring_binding};
+
+        // Fresh device: one edit yields a full eight-slot ring around it.
+        let mut cfg = Config::default();
+        cfg.set_ring_slot("2b042", RingSlot::SouthWest, Action::CaptureRegion);
+        let Some(Binding::Ring(map)) = cfg.bindings_for("2b042").remove(&ButtonId::ActionRing)
+        else {
+            panic!("ActionRing must be ring-shaped after a slot edit");
+        };
+        assert_eq!(map.len(), RingSlot::ALL.len(), "all slots seeded");
+        assert_eq!(map[&RingSlot::SouthWest], Action::CaptureRegion);
+        assert_eq!(map[&RingSlot::North], default_ring_binding(RingSlot::North));
+
+        // A pad demoted to a single action is promoted back to a ring, and
+        // the whole map survives a save/load roundtrip.
+        cfg.set_binding("2b042", ButtonId::ActionRing, Action::Copy.into());
+        cfg.set_ring_slot("2b042", RingSlot::East, Action::LockScreen);
+        let back = write_and_read(&cfg);
+        let Some(Binding::Ring(map)) = back.bindings_for("2b042").remove(&ButtonId::ActionRing)
+        else {
+            panic!("ring must survive the roundtrip");
+        };
+        assert_eq!(map[&RingSlot::East], Action::LockScreen);
+        assert_eq!(map.len(), RingSlot::ALL.len());
     }
 
     #[test]
