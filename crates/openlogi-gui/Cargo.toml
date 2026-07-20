@@ -63,6 +63,10 @@ embed-resource = "3.0.9"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    # MonitorFromPoint / GetMonitorInfoW for the ring's work-area clamp.
+    "Win32_Graphics_Gdi",
+    # GetProcAddress for the undocumented SetWindowCompositionAttribute.
+    "Win32_System_LibraryLoader",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
