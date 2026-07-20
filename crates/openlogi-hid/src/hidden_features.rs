@@ -22,17 +22,7 @@ use crate::reprog_controls::{FEATURE_ID as REPROG_FEATURE_ID, ReprogControlsV4};
 use crate::route::{DeviceRoute, open_route_channel};
 use crate::write::open_feature;
 
-/// Control IDs the MX Master 4 Action Ring panel reports through, confirmed on
-/// real hardware 2026-07-20: with analytics reporting enabled the panel emits
-/// `0x1b04` `analyticsKeyEvents` (`event` `0x01` = press, `0x00` = release).
-///
-/// **`0x01a0` is the Action Ring pad itself** — it is the only control in the
-/// device's `0x1b04` table advertising `analytics-events`, and it carries the
-/// tap. `0x0050`/`0x0051` are companion controls Options+ also arms (observed
-/// firing on firm/held presses). `0x00d7` ("Virtual Gesture Button",
-/// `force-raw-xy`) is NOT involved — diverting it only steals the sensor
-/// stream and freezes the cursor.
-pub const PANEL_ANALYTICS_CIDS: [u16; 3] = [0x01a0, 0x0050, 0x0051];
+pub use crate::reprog_controls::ACTION_RING_ANALYTICS_CIDS as PANEL_ANALYTICS_CIDS;
 
 /// Hard wall-clock budget for one whole diagnostic (open + calls). A cold
 /// BTLE link can swallow a request without ever answering, and the underlying
