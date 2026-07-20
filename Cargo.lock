@@ -5222,7 +5222,9 @@ name = "openlogi-cli"
 version = "0.7.4"
 dependencies = [
  "anyhow",
+ "async-hid",
  "clap",
+ "futures-lite",
  "openlogi-assets",
  "openlogi-camera",
  "openlogi-core",
@@ -5231,6 +5233,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
