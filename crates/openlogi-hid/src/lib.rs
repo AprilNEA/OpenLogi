@@ -13,6 +13,7 @@
 mod channel;
 
 pub mod backlight;
+pub mod hidden_features;
 pub mod inventory;
 pub mod pairing;
 pub mod permissions;
