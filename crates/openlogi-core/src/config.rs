@@ -424,6 +424,46 @@ impl Config {
             .gesture_owner = Some(GestureOwner::Off);
     }
 
+    /// Whether `button` on `device_key` is in gesture mode — a per-button fact
+    /// read straight from the binding shape: a stored [`Binding::Gesture`], or
+    /// no stored binding on a button whose canonical default
+    /// ([`default_binding_for`]) is gesture-shaped (the dedicated HID++ gesture
+    /// button starts in gesture mode).
+    ///
+    /// Gesture mode is not exclusive: any number of buttons may gesture at
+    /// once, each with its own direction map. This replaces the former
+    /// one-gesture-button-per-device owner lock — see [`Self::set_gesture_mode`].
+    #[must_use]
+    pub fn is_gesture_mode(&self, device_key: &str, button: ButtonId) -> bool {
+        let _ = (device_key, button);
+        false
+    }
+
+    /// Every button of `device_key` currently in gesture mode, in [`ButtonId`]
+    /// declaration order. Purely config-derived: callers cross it with the
+    /// device's actual controls (a model without the dedicated gesture button
+    /// simply never captures it).
+    #[must_use]
+    pub fn gesture_mode_buttons(&self, device_key: &str) -> Vec<ButtonId> {
+        let _ = device_key;
+        Vec::new()
+    }
+
+    /// Turn gesture mode on or off for one button, independently of every
+    /// other button.
+    ///
+    /// On: promote the stored binding in place ([`Binding::upgrade_to_gesture`]
+    /// keeps a prior single action as the [`GestureDirection::Click`] entry)
+    /// and seed unbound directions from
+    /// [`default_gesture_binding`](crate::binding::default_gesture_binding).
+    /// Off: demote to a [`Binding::Single`] of the map's `Click` action,
+    /// falling back to the button's canonical
+    /// [`default_binding`](crate::binding::default_binding) when the map has no
+    /// explicit `Click` — a demoted button always keeps a meaningful press.
+    pub fn set_gesture_mode(&mut self, device_key: &str, button: ButtonId, enabled: bool) {
+        let _ = (device_key, button, enabled);
+    }
+
     /// Resolve the effective binding map for `device_key`, overlaying the
     /// per-app entry for `bundle_id` (if any) on top of the global per-device
     /// `bindings`. A per-app override replaces the whole button with a
