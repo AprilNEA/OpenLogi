@@ -1,0 +1,14 @@
+2026-07-20T08:13:11.228787Z  WARN openlogi_hid::inventory: node probe keeps failing — dropping its channel to reopen next tick
+2026-07-20T08:13:14.270630Z  WARN openlogi_hid::inventory: node probe keeps failing — dropping its channel to reopen next tick
+2026-07-20T08:13:17.287740Z  WARN openlogi_hid::inventory: node probe keeps failing — dropping its channel to reopen next tick
+device: MX Master 4 (slot 2 on receiver 97B76948A846C55A)
+arming Action Ring panel (analytics on CIDs 0x0050/0x0051) — press it now, 75s window
+
+[watch_panel] 0x1b04 feature index = 13
+[watch_panel] force-sensing feature present = true
+[watch_panel] force threshold set -> [00, 15, a3, 00]
+[watch_panel] analytics armed on 0x0050
+[watch_panel] analytics armed on 0x0051
+
+0 panel event(s) captured.
+none seen — was the mouse moving while arming? is Options+ holding the device?
