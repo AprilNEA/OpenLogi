@@ -237,6 +237,22 @@ impl RingSlot {
         }
     }
 
+    /// Arrow glyph for compact list rendering, pointing at the slot's
+    /// position on the ring.
+    #[must_use]
+    pub fn glyph(self) -> &'static str {
+        match self {
+            RingSlot::North => "↑",
+            RingSlot::NorthEast => "↗",
+            RingSlot::East => "→",
+            RingSlot::SouthEast => "↘",
+            RingSlot::South => "↓",
+            RingSlot::SouthWest => "↙",
+            RingSlot::West => "←",
+            RingSlot::NorthWest => "↖",
+        }
+    }
+
     /// The slot's centre angle in degrees, measured clockwise from straight
     /// up — the overlay's sector geometry (each sector spans ±22.5° around
     /// this).
