@@ -33,8 +33,9 @@ pub enum RgbEffectsEvent {
         params: [u8; CLUSTER_EFFECT_PARAM_COUNT],
         /// Persistence the effect was applied with.
         persistence: RgbPersistence,
-        /// Power-mode target the effect applies to.
-        power_mode: PowerModeTarget,
+        /// Power-mode target the effect applies to, or `None` when the device
+        /// reported a value this crate does not model.
+        power_mode: Option<PowerModeTarget>,
     },
 }
 
@@ -59,7 +60,10 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<RgbEffectsE
                 cluster_effect_index: payload[1],
                 params,
                 persistence: RgbPersistence::from_bits_retain(flags & FLAGS_FIELD_MASK),
-                power_mode: PowerModeTarget::from((flags >> POWER_TARGET_SHIFT) & FLAGS_FIELD_MASK),
+                power_mode: PowerModeTarget::try_from(
+                    (flags >> POWER_TARGET_SHIFT) & FLAGS_FIELD_MASK,
+                )
+                .ok(),
             })
         }
         _ => None,

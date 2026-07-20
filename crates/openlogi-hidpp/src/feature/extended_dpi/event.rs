@@ -37,8 +37,9 @@ pub struct DpiParametersChanged {
 pub struct DpiCalibrationCompleted {
     /// Index of the sensor.
     pub sensor_index: u8,
-    /// Axis that was calibrated.
-    pub direction: DpiDirection,
+    /// Axis that was calibrated, or `None` when the device reported a value
+    /// this crate does not model (the rest of the event is still delivered).
+    pub direction: Option<DpiDirection>,
     /// Calibration correction value; [`i16::MIN`] (`0x8000`) signals a
     /// sensor-level calibration failure (see [`Self::failed`]).
     pub correction: i16,
@@ -71,7 +72,7 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<ExtendedDpi
         1 => Some(ExtendedDpiEvent::CalibrationCompleted(
             DpiCalibrationCompleted {
                 sensor_index: payload[0],
-                direction: DpiDirection::from(payload[1]),
+                direction: DpiDirection::try_from(payload[1]).ok(),
                 correction: i16::from_be_bytes([payload[2], payload[3]]),
                 delta: i16::from_be_bytes([payload[4], payload[5]]),
             },

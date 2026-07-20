@@ -1,11 +1,11 @@
 //! Domain types and payload parsers for `ExtendedAdjustableDpi` (`0x2202`).
 
-use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::protocol::v20::{ErrorType, Hidpp20Error};
 
 /// The axis a DPI value or calibration applies to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -14,9 +14,6 @@ pub enum DpiDirection {
     X = 0,
     /// Vertical (Y) axis.
     Y = 1,
-    /// A direction this crate does not model; carries the raw byte.
-    #[num_enum(catch_all)]
-    Other(u8),
 }
 
 /// A sensor's lift-off distance setting.

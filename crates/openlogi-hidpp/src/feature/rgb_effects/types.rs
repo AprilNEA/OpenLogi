@@ -64,7 +64,7 @@ pub enum RgbPowerMode {
 }
 
 /// The power-mode target an effect applies to, packed into `setRgbClusterEffect`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -73,9 +73,6 @@ pub enum PowerModeTarget {
     FullPower = 0,
     /// Power-save mode.
     PowerSave = 1,
-    /// A target this crate does not model; carries the raw byte.
-    #[num_enum(catch_all)]
-    Other(u8),
 }
 
 /// Selects which LED bin parameter a LED-bin call addresses.

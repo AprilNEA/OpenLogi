@@ -130,7 +130,7 @@ fn decodes_cluster_changed_event() {
             cluster_effect_index: 2,
             params: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             persistence: RgbPersistence::VOLATILE,
-            power_mode: PowerModeTarget::PowerSave,
+            power_mode: Some(PowerModeTarget::PowerSave),
         })
     );
 }
@@ -168,5 +168,23 @@ fn keeps_user_activity_event_with_unknown_type() {
             Some(RgbEffectsEvent::UserActivity(ActivityEventType::from(byte))),
             "dropped user-activity event for byte {byte:#04x}"
         );
+    }
+}
+
+/// Totality: the cluster-changed event must decode for any flags byte. The
+/// 2-bit power-mode nibble can hold values 2 and 3 that the enum does not
+/// model; those must surface as `None` without dropping the event.
+#[test]
+fn keeps_cluster_changed_event_with_unknown_power_mode() {
+    for flags in 0..=u8::MAX {
+        let mut payload = [0; 16];
+        payload[0] = 1; // cluster_index sibling that must survive
+        payload[12] = flags;
+        let event = decode_event(2, &payload)
+            .unwrap_or_else(|| panic!("dropped cluster-changed event for flags {flags:#04x}"));
+        let RgbEffectsEvent::ClusterChanged { cluster_index, .. } = event else {
+            panic!("expected ClusterChanged");
+        };
+        assert_eq!(cluster_index, 1);
     }
 }

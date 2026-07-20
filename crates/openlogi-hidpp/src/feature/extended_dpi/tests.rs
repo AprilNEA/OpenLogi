@@ -242,7 +242,7 @@ fn decodes_calibration_completed_event() {
     let ExtendedDpiEvent::CalibrationCompleted(event) = decode_event(1, &payload).unwrap() else {
         panic!("expected a calibration-completed event");
     };
-    assert_eq!(event.direction, DpiDirection::Y);
+    assert_eq!(event.direction, Some(DpiDirection::Y));
     assert_eq!(event.correction, 100);
     assert_eq!(event.delta, -1);
     assert!(!event.failed());
