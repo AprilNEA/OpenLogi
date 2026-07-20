@@ -80,7 +80,7 @@ mod windows_impl {
             wc.lpszClassName = class_name.as_ptr();
             // Re-registration in one process returns 0 with
             // ERROR_CLASS_ALREADY_EXISTS — harmless for this tool's lifetime.
-            RegisterClassW(&wc);
+            RegisterClassW(&raw const wc);
 
             CreateWindowExW(
                 0,
@@ -113,6 +113,10 @@ mod windows_impl {
             rid(0xff43, flags, hwnd),
         ];
         // SAFETY: registrations array outlives the call; cbSize matches.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a four-element array length and a fixed struct size are far below u32::MAX"
+        )]
         let ok = unsafe {
             RegisterRawInputDevices(
                 registrations.as_ptr(),
@@ -141,9 +145,9 @@ mod windows_impl {
                 None,
             );
             let mut msg: MSG = zeroed();
-            while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+            while GetMessageW(&raw mut msg, null_mut(), 0, 0) > 0 {
+                TranslateMessage(&raw const msg);
+                DispatchMessageW(&raw const msg);
             }
         }
         println!("raw-input tap closed");
@@ -183,35 +187,37 @@ mod windows_impl {
     }
 
     fn dump_input(handle: HRAWINPUT) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a fixed struct size is far below u32::MAX"
+        )]
         let header_size = size_of::<RAWINPUTHEADER>() as u32;
         let mut size = 0u32;
         // SAFETY: sizing call per RawInput protocol (null buffer, then fetch).
         unsafe {
-            GetRawInputData(handle, RID_INPUT, null_mut(), &mut size, header_size);
+            GetRawInputData(handle, RID_INPUT, null_mut(), &raw mut size, header_size);
         }
         if size == 0 {
             return;
         }
-        let mut buf = vec![0u8; size as usize];
-        // SAFETY: buffer is exactly the size Windows requested.
+        // Backed by u64 words so the buffer meets RAWINPUT's 8-byte alignment
+        // — a Vec<u8> only guarantees 1.
+        let mut buf = vec![0u64; (size as usize).div_ceil(size_of::<u64>())];
+        // SAFETY: buffer is at least the size Windows requested.
         let got = unsafe {
             GetRawInputData(
                 handle,
                 RID_INPUT,
                 buf.as_mut_ptr().cast(),
-                &mut size,
+                &raw mut size,
                 header_size,
             )
         };
         if got == 0 || got == u32::MAX {
             return;
         }
-        // SAFETY: Windows filled `buf` with a RAWINPUT structure of at least
-        // `got` bytes; the buffer is aligned by Vec<u8> only to 1, so read
-        // fields via raw pointer without constructing a reference... a u8 Vec
-        // is sufficiently aligned in practice for RAWINPUT on x86-64 heap
-        // allocations (16-byte aligned), and this mirrors the canonical
-        // RawInput usage pattern.
+        // SAFETY: Windows filled the buffer with a RAWINPUT structure of at
+        // least `got` bytes; the u64 backing guarantees its alignment.
         let raw = buf.as_ptr().cast::<RAWINPUT>();
         // SAFETY: header fields are plain integers within the filled buffer.
         let (dw_type, h_device) = unsafe { ((*raw).header.dwType, (*raw).header.hDevice) };
@@ -233,7 +239,7 @@ mod windows_impl {
             // SAFETY: bRawData holds dwCount packed reports of dwSizeHid bytes
             // inside the buffer Windows sized for us.
             let report = unsafe { std::slice::from_raw_parts(data_ptr.add(i * each), each) };
-            let hex: String = report.iter().map(|b| format!("{b:02x} ")).collect();
+            let hex = crate::cmd::diag::hex_dump(report);
             println!("[{ms:>7}ms] {name} len={each}: {hex}");
         }
     }
@@ -249,13 +255,13 @@ mod windows_impl {
         let mut len = 0u32;
         // SAFETY: sizing call, then bounded fetch into a matching buffer.
         let name = unsafe {
-            GetRawInputDeviceInfoW(handle as _, RIDI_DEVICENAME, null_mut(), &mut len);
+            GetRawInputDeviceInfoW(handle as _, RIDI_DEVICENAME, null_mut(), &raw mut len);
             let mut buf = vec![0u16; len as usize];
             let got = GetRawInputDeviceInfoW(
                 handle as _,
                 RIDI_DEVICENAME,
                 buf.as_mut_ptr().cast(),
-                &mut len,
+                &raw mut len,
             );
             if got == u32::MAX || got == 0 {
                 format!("hdev={handle:x}")
