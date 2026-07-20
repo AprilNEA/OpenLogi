@@ -22,7 +22,7 @@ use crate::reprog_controls::{FEATURE_ID as REPROG_FEATURE_ID, ReprogControlsV4};
 use crate::route::{DeviceRoute, open_route_channel};
 use crate::write::open_feature;
 
-pub use crate::reprog_controls::ACTION_RING_ANALYTICS_CIDS as PANEL_ANALYTICS_CIDS;
+pub use crate::reprog_controls::PANEL_DIAG_ANALYTICS_CIDS as PANEL_ANALYTICS_CIDS;
 
 /// Hard wall-clock budget for one whole diagnostic (open + calls). A cold
 /// BTLE link can swallow a request without ever answering, and the underlying
