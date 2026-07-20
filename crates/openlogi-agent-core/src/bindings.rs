@@ -194,6 +194,23 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "RED: multi-button gesture dispatch not implemented yet"]
+    fn oshook_gestures_includes_every_gesture_mode_button() {
+        // The owner lock is gone: every OS-hook button in gesture mode
+        // dispatches, each through its own direction map.
+        let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::Back, true);
+        cfg.set_gesture_mode("2b042", ButtonId::MiddleClick, true);
+
+        let oshook = oshook_gestures_for(&cfg, Some("2b042"), None);
+        assert!(oshook.contains_key(&ButtonId::Back), "got: {oshook:?}");
+        assert!(
+            oshook.contains_key(&ButtonId::MiddleClick),
+            "got: {oshook:?}"
+        );
+    }
+
+    #[test]
     fn per_app_override_drops_the_owner_from_the_oshook_gesture_set() {
         // Back is the gesture owner globally...
         let mut cfg = Config::default();

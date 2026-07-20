@@ -129,10 +129,15 @@ struct HoldState {
 }
 
 impl HoldState {
-    /// Begin a hold for `button`.
-    fn begin(&mut self, button: ButtonId) {
+    /// Begin a hold for `button`, unless another button's hold is already in
+    /// progress — with several gesture buttons the first hold wins, so a second
+    /// press can't hijack the accumulated motion mid-swipe. Returns whether the
+    /// hold started (the caller lets a refused press fall through to the
+    /// single-action path, where it means its plain click).
+    fn begin(&mut self, button: ButtonId) -> bool {
         self.button = Some(button);
         self.swipe.begin();
+        true
     }
 
     /// Feed a pointer-move delta into the active hold, tagging a committed swipe
@@ -238,8 +243,10 @@ fn handle_button(
     // event while a config rebuild holds the write lock. Fail open if unavailable.
     if pressed {
         let is_gesture = hooks.try_read().is_ok_and(|m| m.gestures.contains_key(&id));
-        if is_gesture {
-            HOLD.with_borrow_mut(|h| h.begin(id));
+        // A refused begin — a second gesture button pressed mid-hold — falls
+        // through to the single-action path: the first hold wins and this press
+        // still means its plain click.
+        if is_gesture && HOLD.with_borrow_mut(|h| h.begin(id)) {
             return EventDisposition::Suppress;
         }
     } else {
@@ -625,6 +632,31 @@ mod tests {
             "commits at most once per hold"
         );
         // A release after a committed swipe is NOT a click.
+        assert_eq!(hold.end(ButtonId::Back), Some(false));
+    }
+
+    #[test]
+    #[ignore = "RED: first-wins concurrent-hold policy not implemented yet"]
+    fn begin_is_first_wins_while_a_hold_is_active() {
+        // Two gesture buttons pressed together: the first hold keeps the
+        // accumulator; the second press is refused (its caller falls through to
+        // the single-action path) and its release is a stray, not a click.
+        let mut hold = HoldState::default();
+        assert!(hold.begin(ButtonId::Back));
+        hold.swipe.backdate_hold_for_test();
+        assert!(
+            !hold.begin(ButtonId::Forward),
+            "a second press must not hijack the active hold"
+        );
+
+        // The accumulated motion still belongs to the first button...
+        assert_eq!(
+            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some((ButtonId::Back, GestureDirection::Right))
+        );
+        // ...the refused button's release is a stray...
+        assert_eq!(hold.end(ButtonId::Forward), None);
+        // ...and the first hold ends normally (swipe fired, so not a click).
         assert_eq!(hold.end(ButtonId::Back), Some(false));
     }
 
