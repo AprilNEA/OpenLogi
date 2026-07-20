@@ -23,7 +23,9 @@ use crate::route::DIRECT_DEVICE_INDEX;
 
 use super::cache::{CacheKey, CacheOutcome, Cached, probe_or_reuse, seen};
 use super::features::ProbedFeatures;
-use super::{ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_SLOT_PROBE};
+use super::{
+    ARRIVAL_DRAIN, BOLT_FIRST_CONTACT_PROBE, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_SLOT_PROBE,
+};
 
 /// One probed node's contribution this tick: its inventory (if any), whether
 /// the node actually answered — the ledger replays the last snapshot when it
@@ -281,17 +283,26 @@ async fn probe_bolt_slot(
     // burn the whole receiver's `PROBE_BUDGET` and time out `probe_one` — which
     // would drop *every* device on the receiver. A timed-out slot falls back to
     // its cached probe (its pairing-register identity above already read fine),
-    // mirroring the Unifying path (#218).
+    // mirroring the Unifying path (#218). A slot with no cached walk yet gets
+    // the longer first-contact budget — see [`BOLT_FIRST_CONTACT_PROBE`].
+    let budget = if cached.is_none() {
+        BOLT_FIRST_CONTACT_PROBE
+    } else {
+        BOLT_SLOT_PROBE
+    };
     let probe_result = timeout(
-        BOLT_SLOT_PROBE,
+        budget,
         probe_or_reuse(channel, slot, id.clone(), cached, online, tick),
     )
     .await;
     let (probe, outcome) = if let Ok(r) = probe_result {
         r
     } else {
-        debug!(slot, budget = ?BOLT_SLOT_PROBE,
-            "Bolt slot probe timed out; using cached data if available");
+        debug!(
+            slot,
+            ?budget,
+            "Bolt slot probe timed out; using cached data if available"
+        );
         let probe = cached.map_or_else(ProbedFeatures::default, |c| c.probe.clone());
         (probe, seen(id))
     };

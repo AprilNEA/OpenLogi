@@ -72,6 +72,21 @@ const UNIFYING_SLOT_PROBE: Duration = Duration::from_millis(3500);
 /// arrival drain (1.5 + 3×1 = 4.5 s).
 const BOLT_SLOT_PROBE: Duration = Duration::from_secs(1);
 
+/// First-contact budget for a Bolt slot with no cached feature walk yet.
+///
+/// [`BOLT_SLOT_PROBE`]'s "a healthy walk is well under a second" holds for a
+/// hot link, but not universally: on the Windows BLE stack an MX Master 4's
+/// *first* walk takes 1–3 s even while the mouse is in active use, so the 1 s
+/// cap can starve it forever — every tick times out, the cache never fills,
+/// and the device never enters the inventory with capabilities (so nothing
+/// that keys off the device list — capture, DPI, the Action Ring — ever sees
+/// it). The first walk is the gateway to the device being usable at all, so
+/// it gets more room; once cached, the tight cap returns (re-walks are rare
+/// and a hung device falls back to its cache, keeping the #218 protection).
+/// Slots probe concurrently, so the worst case against [`PROBE_BUDGET`] is
+/// `max`, not sum: 1.5 s arrival drain + 3 s = 4.5 s still fits.
+const BOLT_FIRST_CONTACT_PROBE: Duration = Duration::from_secs(3);
+
 /// Errors raised while enumerating HID++ devices.
 #[derive(Debug, Error)]
 pub enum InventoryError {
