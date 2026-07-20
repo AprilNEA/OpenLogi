@@ -156,3 +156,17 @@ fn maps_stable_enum_wire_values() {
     );
     assert!(SlotInfoType::try_from(7u8).is_err());
 }
+
+/// Totality: the user-activity event must decode for any activity byte.
+#[test]
+fn keeps_user_activity_event_with_unknown_type() {
+    for byte in 0..=u8::MAX {
+        let mut payload = [0; 16];
+        payload[0] = byte;
+        assert_eq!(
+            decode_event(1, &payload),
+            Some(RgbEffectsEvent::UserActivity(ActivityEventType::from(byte))),
+            "dropped user-activity event for byte {byte:#04x}"
+        );
+    }
+}

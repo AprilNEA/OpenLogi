@@ -1,6 +1,6 @@
 //! Domain types for the `RgbEffects` feature (`0x8071`).
 
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 
 /// Number of effect parameters carried by `setRgbClusterEffect`.
 pub const CLUSTER_EFFECT_PARAM_COUNT: usize = 10;
@@ -64,7 +64,7 @@ pub enum RgbPowerMode {
 }
 
 /// The power-mode target an effect applies to, packed into `setRgbClusterEffect`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -73,6 +73,9 @@ pub enum PowerModeTarget {
     FullPower = 0,
     /// Power-save mode.
     PowerSave = 1,
+    /// A target this crate does not model; carries the raw byte.
+    #[num_enum(catch_all)]
+    Other(u8),
 }
 
 /// Selects which LED bin parameter a LED-bin call addresses.
@@ -96,7 +99,7 @@ pub enum LedBinIndex {
 }
 
 /// The kind of user-activity event.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -105,6 +108,9 @@ pub enum ActivityEventType {
     NoActivityTimeoutReached = 0,
     /// User activity was detected.
     UserActivityDetected = 1,
+    /// A type this crate does not model; carries the raw byte.
+    #[num_enum(catch_all)]
+    Other(u8),
 }
 
 bitflags::bitflags! {

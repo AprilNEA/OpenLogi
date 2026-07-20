@@ -25,8 +25,9 @@ pub struct DpiParametersChanged {
     pub dpi_x: u16,
     /// New Y-axis DPI, or `0` when the sensor has no independent Y axis.
     pub dpi_y: u16,
-    /// New lift-off distance.
-    pub lod: Lod,
+    /// New lift-off distance, or `None` when the device reported a value this
+    /// crate does not model (the rest of the event is still delivered).
+    pub lod: Option<Lod>,
 }
 
 /// Payload of [`ExtendedDpiEvent::CalibrationCompleted`].
@@ -65,12 +66,12 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<ExtendedDpi
             sensor_index: payload[0],
             dpi_x: u16::from_be_bytes([payload[1], payload[2]]),
             dpi_y: u16::from_be_bytes([payload[3], payload[4]]),
-            lod: Lod::try_from(payload[5]).ok()?,
+            lod: Lod::try_from(payload[5]).ok(),
         })),
         1 => Some(ExtendedDpiEvent::CalibrationCompleted(
             DpiCalibrationCompleted {
                 sensor_index: payload[0],
-                direction: DpiDirection::try_from(payload[1]).ok()?,
+                direction: DpiDirection::from(payload[1]),
                 correction: i16::from_be_bytes([payload[2], payload[3]]),
                 delta: i16::from_be_bytes([payload[4], payload[5]]),
             },
