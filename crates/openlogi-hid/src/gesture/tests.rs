@@ -100,9 +100,6 @@ fn a_ring_tap_is_one_rising_edge_and_one_press() {
         &tx,
     );
     assert!(acc.panel_down, "a press entry arms the edge");
-    // A companion CID firing while the pad is held is the same physical press.
-    handle_reprog(&mut acc, ring(0x0050, 0x01), &[], &tx);
-    assert!(acc.panel_down, "a companion press is not a second edge");
     handle_reprog(
         &mut acc,
         ring(reprog_controls::ACTION_RING_CID, 0x00),
@@ -125,11 +122,19 @@ fn a_ring_tap_re_arms_after_release() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
 
-    handle_reprog(&mut acc, ring(0x0050, 0x01), &[], &tx);
-    handle_reprog(&mut acc, ring(0x0050, 0x00), &[], &tx);
+    handle_reprog(
+        &mut acc,
+        ring(reprog_controls::ACTION_RING_CID, 0x01),
+        &[],
+        &tx,
+    );
+    handle_reprog(
+        &mut acc,
+        ring(reprog_controls::ACTION_RING_CID, 0x00),
+        &[],
+        &tx,
+    );
     assert!(!acc.panel_down);
-    // Taps arrive on either ring CID (both observed on hardware) — the edge
-    // logic must not care which one carried the previous tap.
     handle_reprog(
         &mut acc,
         ring(reprog_controls::ACTION_RING_CID, 0x01),
@@ -147,6 +152,26 @@ fn a_ring_tap_re_arms_after_release() {
         "a release re-arms: the second tap presses again"
     );
     assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn click_telemetry_cids_never_open_the_ring() {
+    // 0x0050/0x0051 are the LEFT/RIGHT mouse buttons' analytics CIDs, not the
+    // pad. If anything arms them (Options+ does, for telemetry), every
+    // physical click would arrive here — and must be ignored, or clicking
+    // anywhere opens the ring (hardware-confirmed failure, 2026-07-20).
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    for cid in [
+        reprog_controls::LEFT_BUTTON_CID,
+        reprog_controls::RIGHT_BUTTON_CID,
+    ] {
+        handle_reprog(&mut acc, ring(cid, 0x01), &[], &tx);
+        assert!(!acc.panel_down, "a click press must not arm the ring edge");
+        handle_reprog(&mut acc, ring(cid, 0x00), &[], &tx);
+    }
+    assert!(rx.try_recv().is_err(), "clicks must emit nothing");
 }
 
 #[test]
@@ -173,9 +198,9 @@ fn analytics_from_foreign_controls_do_not_touch_the_ring_edge() {
 
 #[test]
 fn a_batch_with_press_and_release_entries_arms_the_edge() {
-    // The wire format carries five entries per message; if a press and a
-    // (stale) release arrive together, the press wins — dropping a tap is
-    // worse than clearing the edge a message late.
+    // The wire format carries five entries per message: a pad press plus an
+    // unrelated click-CID entry in the same batch must arm the edge off the
+    // pad entry alone, with the click entry ignored.
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
 
@@ -185,7 +210,7 @@ fn a_batch_with_press_and_release_entries_arms_the_edge() {
         event: 0x01,
     };
     entries[1] = AnalyticsKeyEvent {
-        cid: ControlId(0x0050),
+        cid: ControlId(reprog_controls::LEFT_BUTTON_CID),
         event: 0x00,
     };
     handle_reprog(&mut acc, RawControlEvent::AnalyticsKeys(entries), &[], &tx);

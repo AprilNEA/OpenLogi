@@ -102,8 +102,8 @@ struct CaptureAccum {
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
     dpi_down: bool,
-    /// Whether any Action Ring CID was down in the last analytics event — for
-    /// rising-edge press detection across the pad's multiple CIDs.
+    /// Whether the Action Ring pad was down in the last analytics event — for
+    /// rising-edge press detection.
     panel_down: bool,
 }
 
@@ -261,10 +261,11 @@ impl ArmedControls {
                     analytics_key_events: Some(false),
                     ..CidReportingChange::default()
                 };
-                for cid in reprog_controls::ACTION_RING_ANALYTICS_CIDS {
-                    let r = rc.set_cid_reporting_full(cid, off).await.map(|_| ());
-                    restore(r, "action ring pad");
-                }
+                let r = rc
+                    .set_cid_reporting_full(reprog_controls::ACTION_RING_CID, off)
+                    .await
+                    .map(|_| ());
+                restore(r, "action ring pad");
             }
             for &cid in &self.dpi_cids {
                 restore(rc.set_cid_reporting(cid, false, false).await, "DPI button");
@@ -276,11 +277,13 @@ impl ArmedControls {
     }
 }
 
-/// The Action Ring pad's arming recipe, mirroring what Options+ does at
-/// startup: write the pad's force threshold (the pad is physically dormant
-/// without one), then enable `analyticsKeyEvents` reporting on its CIDs — no
-/// diversion, no raw-XY. Re-applied on [`PANEL_REARM_PERIOD`] because neither
-/// write survives the device sleeping.
+/// The Action Ring pad's arming recipe: write the pad's force threshold (the
+/// pad is physically dormant without one), then enable `analyticsKeyEvents`
+/// reporting on [`reprog_controls::ACTION_RING_CID`] **only** — no diversion,
+/// no raw-XY, and deliberately NOT the click-telemetry CIDs Options+ also
+/// arms (see [`reprog_controls::LEFT_BUTTON_CID`]: arming those turns every
+/// physical click into a ring press). Re-applied on [`PANEL_REARM_PERIOD`]
+/// because neither write survives the device sleeping.
 struct PanelArming {
     /// `0x19c0` accessor for the force-threshold write; `None` when the device
     /// does not expose it (analytics reporting is still armed).
@@ -303,10 +306,11 @@ impl PanelArming {
             analytics_key_events: Some(true),
             ..CidReportingChange::default()
         };
-        for cid in reprog_controls::ACTION_RING_ANALYTICS_CIDS {
-            if let Err(e) = rc.set_cid_reporting_full(cid, on).await {
-                debug!(cid, error = ?e, "action ring analytics arm failed");
-            }
+        if let Err(e) = rc
+            .set_cid_reporting_full(reprog_controls::ACTION_RING_CID, on)
+            .await
+        {
+            debug!(error = ?e, "action ring analytics arm failed");
         }
     }
 }
@@ -495,12 +499,15 @@ fn handle_reprog(
             }
         }
         RawControlEvent::AnalyticsKeys(entries) => {
-            // The Action Ring pad reports each tap as a press/release pair on
-            // ONE of its CIDs (0x01a0 or 0x0050, varying with the press), and
-            // a firm press can hold several CIDs at once — so track "any ring
-            // CID down" and emit on its rising edge: one physical tap, one
-            // press. The release is deliberately unused: the ring UI is a
-            // toggle (tap to open, tap to select), not press-and-hold.
+            // The Action Ring pad reports each tap as an analytics
+            // press/release pair on ACTION_RING_CID — and ONLY that CID may
+            // drive the ring. Analytics for any other control (notably the
+            // left/right click-telemetry CIDs, if something else armed them)
+            // must be ignored, or every physical click opens the ring
+            // (hardware-confirmed failure mode, 2026-07-20). Rising-edge
+            // tracking makes one physical tap exactly one press; the release
+            // is deliberately unused (the ring UI is a toggle, not
+            // press-and-hold).
             let mut pressed = false;
             let mut released = false;
             for entry in entries {
@@ -508,7 +515,7 @@ fn handle_reprog(
                 if cid == 0 {
                     continue;
                 }
-                if reprog_controls::ACTION_RING_ANALYTICS_CIDS.contains(&cid) {
+                if cid == reprog_controls::ACTION_RING_CID {
                     if entry.event == 0 {
                         released = true;
                     } else {
@@ -517,7 +524,7 @@ fn handle_reprog(
                 } else {
                     debug!(
                         cid,
-                        entry.event, "analytics event from an unhandled control"
+                        entry.event, "analytics event from a non-ring control — ignored"
                     );
                 }
             }
