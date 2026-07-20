@@ -49,7 +49,7 @@ pub async fn run(args: CallArgs) -> Result<()> {
         .await
     {
         Ok(Some(payload)) => {
-            let hex: String = payload.iter().map(|b| format!("{b:02x} ")).collect();
+            let hex = super::hex_dump(&payload);
             println!("response: {hex}");
         }
         Ok(None) => println!("feature not exposed by this device"),

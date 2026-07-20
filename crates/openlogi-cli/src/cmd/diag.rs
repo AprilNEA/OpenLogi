@@ -10,6 +10,8 @@ use anyhow::{Result, anyhow};
 use clap::Subcommand;
 use openlogi_hid::{DeviceRoute, dump_features};
 
+use std::fmt::Write as _;
+
 pub mod call;
 pub mod controls;
 pub mod dpi;
@@ -68,6 +70,14 @@ impl DiagCmd {
             Self::Panel(args) => panel::run(args).await,
         }
     }
+}
+
+/// Space-separated lowercase hex (`"0a 1b "` style) for diag report dumps.
+pub(crate) fn hex_dump(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x} ");
+        s
+    })
 }
 
 /// One online, paired device discovered during enumeration, already resolved to
