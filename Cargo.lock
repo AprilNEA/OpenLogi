@@ -5047,13 +5047,16 @@ name = "openlogi-cli"
 version = "0.6.21"
 dependencies = [
  "anyhow",
+ "async-hid",
  "clap",
+ "futures-lite",
  "openlogi-assets",
  "openlogi-core",
  "openlogi-hid",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
