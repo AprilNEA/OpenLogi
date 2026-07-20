@@ -28,13 +28,14 @@ pub struct DeviceCapturePlan {
     pub route: DeviceRoute,
     /// Per-button single actions for this device (per-app effective).
     pub bindings: BTreeMap<ButtonId, Action>,
-    /// Per-direction map when a HID++ gesture source (the dedicated gesture
-    /// button or the MX Master 4 haptic panel) owns the gesture role on this
-    /// device; empty otherwise.
-    pub gesture_bindings: BTreeMap<GestureDirection, Action>,
-    /// The gesture owner's source CID to divert with raw-XY, `None` when no
-    /// HID++ control owns the gesture role.
-    pub gesture_source_cid: Option<u16>,
+    /// Per-direction map for each HID++ gesture source (the dedicated gesture
+    /// button, the MX Master 4 haptic panel) in gesture mode on this device,
+    /// keyed by the button its captured swipes dispatch as; empty when none
+    /// gestures.
+    pub gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// The gesture sources' CIDs to divert with raw-XY — one per
+    /// `gesture_bindings` entry the source table knows.
+    pub gesture_source_cids: Vec<u16>,
     /// Standard buttons whose binding leaves the default — divert over
     /// `0x1b04`. A button at its default keeps its native HID behavior, so no
     /// re-synthesis is ever needed.
@@ -63,28 +64,32 @@ pub fn plan_for_device(
     rearm_generation: u64,
 ) -> DeviceCapturePlan {
     let bindings = bindings_for(config, Some(config_key), app);
-    let gesture_bindings = gesture_bindings_for(config, Some(config_key));
-    // A button acting as the OS-hook gesture owner must stay native: the hook
-    // needs to see its press to run hold+swipe detection, and diverting it
-    // would starve the hook of events.
+    // A gesture-mode OS-hook button must stay native: the hook needs to see
+    // its press to run hold+swipe detection, and diverting it would starve the
+    // hook of events.
     let oshook = oshook_gestures_for(config, Some(config_key), app);
+    // The transition shim still resolves a single gesture button; the plan
+    // shape already carries one direction map per source.
+    let owner = config.gesture_owner(config_key);
+    let hidpp_gestures = gesture_bindings_for(config, Some(config_key));
+    let gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> = owner
+        .filter(|o| o.is_hidpp_gesture_source())
+        .filter(|_| !hidpp_gestures.is_empty())
+        .map(|o| BTreeMap::from([(o, hidpp_gestures)]))
+        .unwrap_or_default();
+    let gesture_source_cids: Vec<u16> = GESTURE_SOURCE_BUTTONS
+        .into_iter()
+        .filter(|(_, button)| gesture_bindings.contains_key(button))
+        .map(|(cid, _)| cid)
+        .collect();
     // The HID++ gesture sources never reach the OS hook, so a non-default
     // single binding on one is deliverable only via a plain HID++ divert — but
-    // only while it does NOT own the gesture role (the raw-XY gesture divert
-    // owns the owner's CID, and `gesture_source_cid` is how the watcher arms
-    // that divert).
-    let owner = config.gesture_owner(config_key);
-    let gesture_source_cid = owner
-        .filter(|o| o.is_hidpp_gesture_source())
-        .and_then(|o| {
-            GESTURE_SOURCE_BUTTONS
-                .into_iter()
-                .find(|&(_, button)| button == o)
-        })
-        .map(|(cid, _)| cid);
+    // only while the source is NOT in gesture mode (the raw-XY gesture divert
+    // owns a gesturing source's CID, and `gesture_source_cids` is how the
+    // watcher arms those diverts).
     let plain_sources = GESTURE_SOURCE_BUTTONS
         .into_iter()
-        .filter(|&(_, button)| owner != Some(button));
+        .filter(|(_, button)| !gesture_bindings.contains_key(button));
     let divert_buttons: Vec<(u16, ButtonId)> = DIVERTABLE_STANDARD_BUTTONS
         .into_iter()
         .chain(plain_sources)
@@ -118,7 +123,7 @@ pub fn plan_for_device(
         route,
         bindings,
         gesture_bindings,
-        gesture_source_cid,
+        gesture_source_cids,
         divert_buttons,
         thumbwheel_bindings_nondefault,
         thumbwheel_sensitivity: config.thumbwheel_sensitivity(config_key),

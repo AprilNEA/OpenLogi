@@ -1,7 +1,7 @@
 use super::*;
 
-const GESTURE: Option<u16> = Some(reprog_controls::GESTURE_BUTTON_CID);
-const PANEL: Option<u16> = Some(reprog_controls::HAPTIC_PANEL_CID);
+const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
+const PANEL: &[u16] = &[reprog_controls::HAPTIC_PANEL_CID];
 
 #[test]
 fn reporting_restore_preserves_every_mutable_field() {
@@ -61,7 +61,10 @@ fn quick_tap_is_a_click_even_while_the_cursor_moves() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::Gesture(GestureDirection::Click))
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Click
+        ))
     );
     assert!(
         rx.try_recv().is_err(),
@@ -88,7 +91,10 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::Gesture(GestureDirection::Right))
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Right
+        ))
     );
 
     handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
@@ -99,10 +105,10 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
 }
 
 #[test]
-fn the_haptic_panel_gestures_when_it_owns_the_role() {
-    // On MX Master 4 the panel (CID 0x01a0) can own the gesture role: its
-    // press begins a hold, its contact jump is discarded, and the raw-XY that
-    // follows commits a swipe.
+fn the_haptic_panel_gestures_when_diverted_for_gestures() {
+    // On MX Master 4 the panel (CID 0x01a0) can gesture: its press begins a
+    // hold, its contact jump is discarded, and the raw-XY that follows
+    // commits a swipe.
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
 
@@ -129,7 +135,10 @@ fn the_haptic_panel_gestures_when_it_owns_the_role() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::Gesture(GestureDirection::Up))
+        Ok(CapturedInput::Gesture(
+            ButtonId::HapticPanel,
+            GestureDirection::Up
+        ))
     );
 
     handle_reprog(&mut acc, release(), PANEL, &[], &[], &tx);
@@ -149,7 +158,10 @@ fn a_quick_panel_tap_is_a_click() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::Gesture(GestureDirection::Click))
+        Ok(CapturedInput::Gesture(
+            ButtonId::HapticPanel,
+            GestureDirection::Click
+        ))
     );
     assert!(
         rx.try_recv().is_err(),
@@ -192,7 +204,10 @@ fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
     );
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::Gesture(GestureDirection::Right))
+        Ok(CapturedInput::Gesture(
+            ButtonId::HapticPanel,
+            GestureDirection::Right
+        ))
     );
 }
 
@@ -216,15 +231,18 @@ fn the_dedicated_buttons_first_sample_is_not_discarded() {
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::Gesture(GestureDirection::Right)),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Right
+        )),
         "the dedicated button's very first sample still counts"
     );
 }
 
 #[test]
-fn a_non_owner_gesture_source_does_not_gesture() {
-    // The panel owns the gesture role; a dedicated-button press must not
-    // begin a hold, emit a click, or feed the swipe accumulator — the two
+fn an_undiverted_gesture_source_does_not_gesture() {
+    // Only the panel is diverted for gestures; a dedicated-button press must
+    // not begin a hold, emit a click, or feed the swipe accumulator — the two
     // sources are distinct physical controls.
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
@@ -249,16 +267,16 @@ fn a_non_owner_gesture_source_does_not_gesture() {
 
 #[test]
 fn a_plain_diverted_gesture_button_presses_without_gesturing() {
-    // A gesture button diverted as a plain button (it does NOT own the gesture
-    // role; its single binding needs delivery) must dispatch as a button press
-    // only — the swipe accumulator belongs to the raw-XY gesture divert and
-    // must not also emit a gesture click on release.
+    // A gesture button diverted as a plain button (not in gesture mode; its
+    // single binding needs delivery) must dispatch as a button press only —
+    // the swipe accumulator belongs to the raw-XY gesture diverts and must
+    // not also emit a gesture click on release.
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
     let buttons = [(reprog_controls::GESTURE_BUTTON_CID, ButtonId::GestureButton)];
 
-    handle_reprog(&mut acc, press(), None, &[], &buttons, &tx);
-    handle_reprog(&mut acc, release(), None, &[], &buttons, &tx);
+    handle_reprog(&mut acc, press(), &[], &[], &buttons, &tx);
+    handle_reprog(&mut acc, release(), &[], &[], &buttons, &tx);
 
     assert_eq!(
         rx.try_recv(),
@@ -272,15 +290,15 @@ fn a_plain_diverted_gesture_button_presses_without_gesturing() {
 
 #[test]
 fn a_plain_diverted_haptic_panel_presses_as_its_own_button() {
-    // A single action bound to the panel (which does not own the gesture
-    // role) is delivered as ButtonId::HapticPanel — its own control, never
-    // conflated with the dedicated gesture button.
+    // A single action bound to the panel (which is not in gesture mode) is
+    // delivered as ButtonId::HapticPanel — its own control, never conflated
+    // with the dedicated gesture button.
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
     let buttons = [(reprog_controls::HAPTIC_PANEL_CID, ButtonId::HapticPanel)];
 
-    handle_reprog(&mut acc, panel_press(), None, &[], &buttons, &tx);
-    handle_reprog(&mut acc, release(), None, &[], &buttons, &tx);
+    handle_reprog(&mut acc, panel_press(), &[], &[], &buttons, &tx);
+    handle_reprog(&mut acc, release(), &[], &[], &buttons, &tx);
 
     assert_eq!(
         rx.try_recv(),
