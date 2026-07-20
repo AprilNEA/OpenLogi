@@ -217,6 +217,10 @@ fn map_slot_name(name: &str) -> Option<ButtonId> {
         "SLOT_NAME_MODESHIFT_BUTTON" => Some(ButtonId::DpiToggle),
         "SLOT_NAME_THUMBWHEEL" => Some(ButtonId::Thumbwheel),
         "SLOT_NAME_GESTURE_BUTTON" => Some(ButtonId::GestureButton),
+        // The MX Master 4 Action Ring pad. Logi's own marker for it: the
+        // slotId suffix is `_c416` = CID 0x01a0, the control the capture
+        // session arms for analytics events.
+        "ASSIGNMENT_NAME_SHOW_RADIAL_MENU" => Some(ButtonId::ActionRing),
         _ => None,
     }
 }
