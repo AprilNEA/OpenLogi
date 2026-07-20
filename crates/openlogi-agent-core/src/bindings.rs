@@ -78,21 +78,24 @@ pub fn gesture_bindings_for(
     bindings
 }
 
-/// Per-direction maps for the OS-hook gesture buttons (Middle/Back/Forward in
-/// gesture mode) on `config_key`, with `app_bundle`'s per-app overlay applied,
-/// for the OS hook to resolve a hold+swipe.
+/// Per-direction maps for every OS-hook button (Middle/Back/Forward) in
+/// gesture mode on `config_key`, with `app_bundle`'s per-app overlay applied,
+/// for the OS hook to resolve a hold+swipe. Gesture mode is per-button (see
+/// [`Config::is_gesture_mode`]), so any number of entries may be live at once —
+/// concurrency between them is the hook's first-hold-wins policy, not a config
+/// concern.
 ///
 /// Unlike [`gesture_bindings_for`] (the dedicated HID++ gesture button, which
 /// seeds every direction from [`default_gesture_binding`] at projection time),
-/// this returns the owner's raw stored map. In practice that map is already
-/// fully populated — [`Config::set_gesture_owner`] seeds all five directions via
-/// [`Binding::fill_gesture_defaults`] when a button is promoted — so only a
-/// hand-edited sparse map leaves a direction unbound, in which case that swipe
-/// simply does nothing. The dedicated gesture button is intentionally excluded:
-/// it never reaches the OS hook (it's captured over HID++), so it has no entry
-/// here.
+/// this returns each button's raw stored map. In practice those maps are
+/// already fully populated — [`Config::set_gesture_mode`] seeds all five
+/// directions via [`Binding::fill_gesture_defaults`] when a button is
+/// promoted — so only a hand-edited sparse map leaves a direction unbound, in
+/// which case that swipe simply does nothing. The dedicated gesture button is
+/// intentionally excluded: it never reaches the OS hook (it's captured over
+/// HID++), so it has no entry here.
 ///
-/// A per-app override of the owner button turns it into a [`Binding::Single`]
+/// A per-app override of a gesture button turns it into a [`Binding::Single`]
 /// for that app, so it stops being a gesture button there and falls through to
 /// the single-action path (which applies the override) — mirroring how a single
 /// binding is overridden per app.
@@ -105,23 +108,17 @@ pub fn oshook_gestures_for(
     let Some(key) = config_key else {
         return BTreeMap::new();
     };
-    // Only an OS-hook button (Middle/Back/Forward) as the device's gesture owner
-    // feeds the OS hook: the dedicated HID++ gesture button is captured over HID++, and a non-owner
-    // button is dispatched as its single click action. Returning *only* the owner
-    // keeps the runtime in lockstep with `gesture_owner` and the GUI, so a stray
-    // second gesture map (e.g. a hand-edited config) can't make two buttons fire.
-    let Some(owner) = config
-        .gesture_owner(key)
-        .filter(|id| id.is_os_hook_button())
-    else {
-        return BTreeMap::new();
-    };
-    // Read the per-app *effective* map: a per-app override replaces the owner with
-    // a `Single`, dropping it from the gesture set for that app.
-    match config.effective_bindings(key, app_bundle).remove(&owner) {
-        Some(Binding::Gesture(map)) => BTreeMap::from([(owner, map)]),
-        _ => BTreeMap::new(),
-    }
+    // Read the per-app *effective* map: a per-app override replaces a gesture
+    // button with a `Single`, dropping it from the gesture set for that app.
+    config
+        .effective_bindings(key, app_bundle)
+        .into_iter()
+        .filter(|(id, _)| id.is_os_hook_button())
+        .filter_map(|(id, binding)| match binding {
+            Binding::Gesture(map) => Some((id, map)),
+            Binding::Single(_) => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -194,7 +191,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "RED: multi-button gesture dispatch not implemented yet"]
     fn oshook_gestures_includes_every_gesture_mode_button() {
         // The owner lock is gone: every OS-hook button in gesture mode
         // dispatches, each through its own direction map.

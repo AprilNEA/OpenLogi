@@ -135,6 +135,9 @@ impl HoldState {
     /// hold started (the caller lets a refused press fall through to the
     /// single-action path, where it means its plain click).
     fn begin(&mut self, button: ButtonId) -> bool {
+        if self.button.is_some() {
+            return false;
+        }
         self.button = Some(button);
         self.swipe.begin();
         true
@@ -636,7 +639,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "RED: first-wins concurrent-hold policy not implemented yet"]
     fn begin_is_first_wins_while_a_hold_is_active() {
         // Two gesture buttons pressed together: the first hold keeps the
         // accumulator; the second press is refused (its caller falls through to
