@@ -108,6 +108,21 @@ impl AppState {
             self.current_app_bundle.as_deref(),
         )
     }
+    /// Per-direction display maps for every gesture-mode button of the current
+    /// device, keyed by button — what each button's gesture menu edits and what
+    /// the runtime dispatches for it. HID++ sources come fully seeded (matching
+    /// the gesture watcher's projection); OS-hook buttons show their raw stored
+    /// map (matching the OS hook's dispatch). Empty when no device is selected.
+    #[must_use]
+    #[allow(
+        dead_code,
+        clippy::unused_self,
+        reason = "RED stub — wired into the views by the GREEN change"
+    )]
+    pub fn current_gesture_maps(&self) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
+        BTreeMap::new()
+    }
+
     pub(crate) fn gesture_bindings_for_current(&self) -> BTreeMap<GestureDirection, Action> {
         let Some(key) = self
             .current_record()

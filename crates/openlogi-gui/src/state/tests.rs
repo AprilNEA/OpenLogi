@@ -912,3 +912,51 @@ fn enabling_camera_automation_queues_effective_camera_power() {
     assert!(!state.light().enabled);
     assert!(state.light_enabled());
 }
+
+#[test]
+#[ignore = "RED: per-button gesture maps not implemented yet"]
+fn gesture_maps_cover_every_gesture_mode_button() {
+    // With per-button gesture mode, the GUI's display maps carry one entry
+    // per gesture-mode button: the dedicated button's seeded default map
+    // plus a promoted OS-hook button's stored map — simultaneously.
+    use openlogi_core::binding::{ButtonId, GestureDirection};
+
+    let mut config = Config::default();
+    config.set_device_identity(
+        "2b042",
+        DeviceIdentity {
+            display_name: "MX Master 4".to_string(),
+            kind: DeviceKind::Mouse,
+            capabilities: Capabilities::presumed_from_kind(DeviceKind::Mouse),
+            light_capabilities: None,
+            model_info: None,
+            codename: None,
+            driver_id: None,
+            registry_model_id: None,
+        },
+    );
+    config.set_gesture_mode("2b042", ButtonId::Back, true);
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::with_runtime(
+        config,
+        &[],
+        &[],
+        &AssetResolver::new(),
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+
+    let maps = state.current_gesture_maps();
+    let dedicated = maps
+        .get(&ButtonId::GestureButton)
+        .expect("the dedicated button's default gesture mode must be shown");
+    assert!(
+        dedicated.contains_key(&GestureDirection::Up),
+        "HID++ maps are shown seeded, matching watcher dispatch"
+    );
+    assert!(
+        maps.contains_key(&ButtonId::Back),
+        "a promoted OS-hook button gets its own menu simultaneously"
+    );
+}
