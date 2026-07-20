@@ -5,7 +5,7 @@ use super::{
     any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
     pick_current, plan_reapply, reapply_targets,
 };
-use openlogi_core::binding::{Action, ButtonId};
+use openlogi_core::binding::{Action, ButtonId, GestureDirection};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -745,6 +745,18 @@ fn published_back_binding(orch: &Orchestrator) -> Option<Action> {
     })
 }
 
+/// The published dedicated HID++ gesture button's plain-click action.
+fn published_gesture_click(orch: &Orchestrator) -> Option<Action> {
+    orch.shared.capture_plans.read().ok().and_then(|plans| {
+        plans.first().and_then(|plan| {
+            plan.gesture_bindings
+                .get(&ButtonId::GestureButton)
+                .and_then(|map| map.get(&GestureDirection::Click))
+                .cloned()
+        })
+    })
+}
+
 #[test]
 fn app_switch_republishes_capture_plans() {
     // HID++ dispatch reads `plan.bindings` at event time, so a
@@ -758,6 +770,12 @@ fn app_switch_republishes_capture_plans() {
         ButtonId::Back,
         Some(Action::Undo),
     );
+    config.set_per_app_binding(
+        "a",
+        "com.example.editor",
+        ButtonId::GestureButton,
+        Some(Action::BrowserBack),
+    );
     let mut orch = orchestrator(config);
     orch.devices = vec![dev("a", 1, true)];
     orch.rebuild();
@@ -766,6 +784,8 @@ fn app_switch_republishes_capture_plans() {
         Some(Action::Undo),
         "no per-app overlay while no app is in front"
     );
+    assert_ne!(published_gesture_click(&orch), Some(Action::BrowserBack));
     orch.set_current_app(Some("com.example.editor".into()));
     assert_eq!(published_back_binding(&orch), Some(Action::Undo));
+    assert_eq!(published_gesture_click(&orch), Some(Action::BrowserBack));
 }
