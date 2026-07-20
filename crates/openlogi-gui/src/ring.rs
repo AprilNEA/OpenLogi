@@ -25,8 +25,7 @@ use std::time::Duration;
 use gpui::{
     App, AppContext as _, Bounds, Context, InteractiveElement as _, IntoElement,
     ParentElement as _, Point, Render, StatefulInteractiveElement as _, Styled as _, Window,
-    WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point, prelude::FluentBuilder as _,
-    px, size,
+    WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point, px, size,
 };
 use gpui_component::{ActiveTheme as _, Icon};
 use openlogi_core::binding::{Action, RingSlot};
@@ -37,21 +36,17 @@ use crate::ipc_client::Command;
 use crate::mouse_model::picker::action_icon_path;
 use crate::state::AppState;
 
-/// Logical size of the overlay window: wider than tall because side-sector
-/// labels sit *beside* the ring (the Options+ layout). Compact enough to fit
-/// near screen edges in most positions; when it can't,
-/// [`platform_win::show_at`] clamps it into the work area.
-const RING_W: f32 = 480.;
-/// See [`RING_W`].
-const RING_H: f32 = 312.;
+/// Logical size of the (square) overlay window — just big enough for the
+/// button circle plus shadows. The popup carries no labels, so it stays
+/// tight; near a screen edge [`platform_win::show_at`] clamps it into the
+/// work area.
+const RING_WINDOW: f32 = 288.;
 /// Radius of the circle the eight sector buttons sit on, from the centre.
 const SECTOR_RADIUS: f32 = 96.;
 /// Diameter of one sector's circular icon button.
 const SECTOR_BUTTON: f32 = 44.;
 /// Diameter of the centre ✕ cancel button.
 const CENTER_BUTTON: f32 = 30.;
-/// Gap between a sector button's outer edge and its label pill.
-const LABEL_GAP: f32 = 8.;
 /// Cursor distance (logical px) below which a confirm means "cancel" — the
 /// dead zone around the centre ✕.
 const DEADZONE: f32 = 38.;
@@ -64,12 +59,10 @@ const WATCH_TICK: Duration = Duration::from_millis(33);
 // over a desktop that lives in dark mode: bright circles, dark label pills.
 /// Sector button fill.
 const PLATE: u32 = 0x00f7_f7f9;
-/// Icon strokes on an unaimed button; label pill fill.
+/// Icon strokes on an unaimed button.
 const INK: u32 = 0x001c_1c1e;
-/// Aimed icon strokes and aimed-pill text.
+/// Aimed icon strokes.
 const WHITE: u32 = 0x00ff_ffff;
-/// Label pill text.
-const PILL_TEXT: u32 = 0x00f2_f2f4;
 /// Centre ✕ fill.
 const CROSS_BG: u32 = 0x002c_2c2e;
 /// Centre ✕ fill while the cursor aims at the dead zone.
@@ -187,10 +180,21 @@ fn open(cx: &mut App) {
         warn!("action ring window has no HWND — cannot show the overlay");
         return;
     };
+    // The app's theme plumbing re-stamps window background appearance across
+    // every window when a theme applies, flipping this overlay back to Opaque
+    // — whose clear colour is solid white, i.e. the "box behind the ring".
+    // Re-assert transparency on every open, then strip the DWM accent veil
+    // the Transparent path re-enables (see [`platform_win::clear_accent`]).
+    let _ = window.update(cx, |_, window, _| {
+        window.set_background_appearance(gpui::WindowBackgroundAppearance::Transparent);
+    });
+    platform_win::clear_accent(hwnd);
+
     let scale = platform_win::window_scale(hwnd);
+    platform_win::apply_ring_region(hwnd, scale);
     // The centre can differ from the cursor near a screen edge (work-area
     // clamp) — the hit-test must aim from the ring's real centre.
-    let center = platform_win::show_at(hwnd, cursor, RING_W * scale, RING_H * scale);
+    let center = platform_win::show_at(hwnd, cursor, RING_WINDOW * scale, RING_WINDOW * scale);
 
     let overlay = cx.global_mut::<RingOverlay>();
     overlay.window = Some(window);
@@ -303,7 +307,7 @@ fn close(cx: &mut App) {
 fn create_window(slots: Vec<(RingSlot, Action)>, cx: &mut App) -> Option<WindowHandle<RingView>> {
     let bounds = Bounds {
         origin: point(px(0.), px(0.)),
-        size: size(px(RING_W), px(RING_H)),
+        size: size(px(RING_WINDOW), px(RING_WINDOW)),
     };
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -368,20 +372,20 @@ impl RingView {
 
 impl Render for RingView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Fixed Options+-style identity in both themes: floating black circle
-        // buttons, white pill labels, no panel behind anything. The theme's
+        // The popup is just the eight circles and the centre ✕ — no labels
+        // (those belong to the customization page) and no panel behind
+        // anything. Fixed bright-on-dark identity in both themes; the theme's
         // primary marks the aimed sector.
         let accent = cx.theme().primary;
-        let (cx0, cy0) = (RING_W / 2., RING_H / 2.);
+        let (cx0, cy0) = (RING_WINDOW / 2., RING_WINDOW / 2.);
 
-        let sectors = self.slots.iter().flat_map(|(slot, action)| {
+        let sectors = self.slots.iter().map(|(slot, action)| {
             let angle = slot.angle_degrees().to_radians();
-            let sin = angle.sin();
-            let bx = cx0 + SECTOR_RADIUS * sin - SECTOR_BUTTON / 2.;
+            let bx = cx0 + SECTOR_RADIUS * angle.sin() - SECTOR_BUTTON / 2.;
             let by = cy0 - SECTOR_RADIUS * angle.cos() - SECTOR_BUTTON / 2.;
             let aimed = self.aim == Aim::Sector(*slot);
             let slot_for_click = *slot;
-            let button = div().absolute().left(px(bx)).top(px(by)).child(
+            div().absolute().left(px(bx)).top(px(by)).child(
                 div()
                     .id(SharedStringId(slot.label()))
                     .size(px(SECTOR_BUTTON))
@@ -411,38 +415,7 @@ impl Render for RingView {
                             close(cx);
                         });
                     })),
-            );
-            // The label pill floats just outside the button along its angle:
-            // above the top sectors, beside the side ones (the Options+
-            // layout). Anchored by direction so long labels grow outward.
-            let anchor_r = SECTOR_RADIUS + SECTOR_BUTTON / 2. + LABEL_GAP;
-            let ax = cx0 + anchor_r * sin;
-            let ay = cy0 - anchor_r * angle.cos();
-            let pill = div()
-                .px_2()
-                .py_0p5()
-                .rounded_md()
-                .bg(gpui::rgb(INK))
-                .shadow_md()
-                .text_xs()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(gpui::rgb(PILL_TEXT))
-                .when(aimed, |pill| pill.bg(accent).text_color(gpui::rgb(WHITE)))
-                .child(tr!(action.label()));
-            let row = div()
-                .absolute()
-                .top(px(ay - 11.))
-                .left(px(0.))
-                .w(px(RING_W))
-                .flex();
-            let label = if sin > 0.35 {
-                row.justify_start().pl(px(ax)).child(pill)
-            } else if sin < -0.35 {
-                row.justify_end().pr(px(RING_W - ax)).child(pill)
-            } else {
-                row.justify_center().child(pill)
-            };
-            [button, label]
+            )
         });
 
         div().size_full().relative().children(sectors).child(
@@ -497,7 +470,8 @@ mod platform_win {
     use gpui::point;
     use windows_sys::Win32::Foundation::{POINT, RECT};
     use windows_sys::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+        CombineRgn, CreateEllipticRgn, DeleteObject, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST,
+        MONITORINFO, MonitorFromPoint, RGN_OR, SetWindowRgn,
     };
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
@@ -592,6 +566,59 @@ mod platform_win {
             reason = "screen coordinates are far inside f32's exact-integer range"
         )]
         point((x + w / 2) as f32, (y + h / 2) as f32)
+    }
+
+    /// Clip the window to just the ring's circles — the eight sector buttons
+    /// and the centre ✕. Whatever the compositor decides about the surface's
+    /// alpha, no window rectangle exists to show a backdrop (the same region
+    /// trick other overlay apps use on Windows), and clicks between the
+    /// circles fall through to whatever is underneath. Coordinates are
+    /// physical pixels; rebuilt per open because the display scale can change
+    /// between monitors.
+    pub fn apply_ring_region(hwnd: isize, scale: f32) {
+        use openlogi_core::binding::RingSlot;
+
+        let c = super::RING_WINDOW / 2.;
+        // A little margin keeps each button's shadow from clipping flat.
+        let sector_r = super::SECTOR_BUTTON / 2. + 4.;
+        let center_r = super::CENTER_BUTTON / 2. + 3.;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "window-local coordinates are far inside i32 range"
+        )]
+        let p = |v: f32| (v * scale).round() as i32;
+        // SAFETY: plain GDI region construction on a window this process
+        // owns; SetWindowRgn takes ownership of the combined region on
+        // success, and each per-circle scratch region is deleted after it is
+        // OR-ed in.
+        unsafe {
+            let region = CreateEllipticRgn(
+                p(c - center_r),
+                p(c - center_r),
+                p(c + center_r),
+                p(c + center_r),
+            );
+            if region.is_null() {
+                return;
+            }
+            for slot in RingSlot::ALL {
+                let angle = slot.angle_degrees().to_radians();
+                let bx = c + super::SECTOR_RADIUS * angle.sin();
+                let by = c - super::SECTOR_RADIUS * angle.cos();
+                let circle = CreateEllipticRgn(
+                    p(bx - sector_r),
+                    p(by - sector_r),
+                    p(bx + sector_r),
+                    p(by + sector_r),
+                );
+                if circle.is_null() {
+                    continue;
+                }
+                CombineRgn(region, region, circle, RGN_OR);
+                DeleteObject(circle.cast());
+            }
+            SetWindowRgn(hwnd as _, region, 1);
+        }
     }
 
     /// Disable the window's DWM "accent" effect. gpui's `Transparent`
@@ -722,6 +749,7 @@ mod platform_win {
     pub fn show_at(_hwnd: isize, cursor: Point<f32>, _w: f32, _h: f32) -> Point<f32> {
         cursor
     }
+    pub fn apply_ring_region(_hwnd: isize, _scale: f32) {}
     pub fn clear_accent(_hwnd: isize) {}
     pub fn hide(_hwnd: isize) {}
     pub fn cursor_pos() -> Option<Point<f32>> {
