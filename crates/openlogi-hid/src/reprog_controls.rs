@@ -86,6 +86,17 @@ pub const RIGHT_BUTTON_CID: u16 = 0x0051;
 pub const PANEL_DIAG_ANALYTICS_CIDS: [u16; 3] =
     [ACTION_RING_CID, LEFT_BUTTON_CID, RIGHT_BUTTON_CID];
 
+/// Control ID of the thumb-side "back" button (Logi's decimal `_c83` in the
+/// asset metadata). On the MX Master 4 the side buttons emit **no native
+/// HID button events at all** — hardware-confirmed 2026-07-20: with no
+/// Logitech software running they do nothing in any app — so the capture
+/// session diverts them and dispatches their bindings, the same job
+/// Options+ quietly does on this device.
+pub const BACK_CID: u16 = 0x0053;
+
+/// Control ID of the thumb-side "forward" button (`_c86`) — see [`BACK_CID`].
+pub const FORWARD_CID: u16 = 0x0056;
+
 /// Control IDs of the "DPI / ModeShift" button family. Whichever a device
 /// exposes (and can divert) is captured and mapped to
 /// [`ButtonId::DpiToggle`](openlogi_core::binding::ButtonId::DpiToggle): the MX
