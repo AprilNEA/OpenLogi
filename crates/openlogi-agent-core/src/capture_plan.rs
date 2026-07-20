@@ -16,7 +16,7 @@ use openlogi_core::config::Config;
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::gesture::{DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS};
 
-use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
+use crate::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 
 /// Everything the capture watcher needs to run one device's session and
 /// dispatch its events.
@@ -68,15 +68,9 @@ pub fn plan_for_device(
     // its press to run hold+swipe detection, and diverting it would starve the
     // hook of events.
     let oshook = oshook_gestures_for(config, Some(config_key), app);
-    // The transition shim still resolves a single gesture button; the plan
-    // shape already carries one direction map per source.
-    let owner = config.gesture_owner(config_key);
-    let hidpp_gestures = gesture_bindings_for(config, Some(config_key));
-    let gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> = owner
-        .filter(|o| o.is_hidpp_gesture_source())
-        .filter(|_| !hidpp_gestures.is_empty())
-        .map(|o| BTreeMap::from([(o, hidpp_gestures)]))
-        .unwrap_or_default();
+    // One direction map per HID++ source in gesture mode — several may
+    // gesture at once, each armed with its own raw-XY divert.
+    let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
     let gesture_source_cids: Vec<u16> = GESTURE_SOURCE_BUTTONS
         .into_iter()
         .filter(|(_, button)| gesture_bindings.contains_key(button))
@@ -146,7 +140,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "RED: multi-source HID++ gesture plans not implemented yet"]
     fn both_hidpp_sources_gesture_when_both_are_in_gesture_mode() {
         // On MX Master 4 the dedicated button and the haptic panel can gesture
         // at the same time: the plan arms a raw-XY divert for each and keeps

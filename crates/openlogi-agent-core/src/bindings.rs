@@ -92,16 +92,26 @@ pub fn hidpp_gesture_maps_for(
     let Some(key) = config_key else {
         return BTreeMap::new();
     };
-    let mut maps = BTreeMap::new();
-    let seeded = gesture_bindings_for(config, Some(key));
-    if let Some(owner) = config
-        .gesture_owner(key)
-        .filter(|id| id.is_hidpp_gesture_source())
-        && !seeded.is_empty()
-    {
-        maps.insert(owner, seeded);
-    }
-    maps
+    let stored = config.bindings_for(key);
+    ButtonId::ALL
+        .iter()
+        .copied()
+        .filter(|button| button.is_hidpp_gesture_source())
+        .filter(|button| config.is_gesture_mode(key, *button))
+        .map(|button| {
+            let mut map: BTreeMap<GestureDirection, Action> = GestureDirection::ALL
+                .iter()
+                .copied()
+                .map(|d| (d, default_gesture_binding(d)))
+                .collect();
+            if let Some(Binding::Gesture(dirs)) = stored.get(&button) {
+                for (dir, action) in dirs {
+                    map.insert(*dir, action.clone());
+                }
+            }
+            (button, map)
+        })
+        .collect()
 }
 
 /// Per-direction maps for every OS-hook button (Middle/Back/Forward) in
@@ -234,7 +244,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "RED: multi-source HID++ gesture maps not implemented yet"]
     fn hidpp_gesture_maps_includes_every_gesture_mode_source() {
         // Both HID++ sources in gesture mode dispatch simultaneously, each
         // through its own seeded direction map.
