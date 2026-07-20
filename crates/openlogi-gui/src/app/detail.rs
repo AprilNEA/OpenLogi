@@ -607,7 +607,11 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
         .map_or((0, 0, 0, tr!("Default profile").to_string()), |state| {
             (
                 state.button_bindings.len(),
-                state.gesture_bindings.len(),
+                state
+                    .gesture_bindings
+                    .values()
+                    .map(std::collections::BTreeMap::len)
+                    .sum::<usize>(),
                 state.dpi_presets().len(),
                 state
                     .current_app_bundle

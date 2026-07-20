@@ -914,7 +914,6 @@ fn enabling_camera_automation_queues_effective_camera_power() {
 }
 
 #[test]
-#[ignore = "RED: per-button gesture maps not implemented yet"]
 fn gesture_maps_cover_every_gesture_mode_button() {
     // With per-button gesture mode, the GUI's display maps carry one entry
     // per gesture-mode button: the dedicated button's seeded default map

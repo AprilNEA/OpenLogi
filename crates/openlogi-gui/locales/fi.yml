@@ -169,6 +169,8 @@ _version: 1
 "Horizontal Scroll": "Vaakavieritys"
 "Custom": "Mukautettu"
 "Gesture Button": "Eletoiminto"
+"Gestures": "Eleet"
+"Turn off gestures": "Poista eleet käytöstä"
 "Haptic Panel": "Haptinen paneeli"
 "Up": "Ylös"
 "Down": "Alas"

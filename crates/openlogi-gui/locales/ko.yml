@@ -169,6 +169,8 @@ _version: 1
 "Horizontal Scroll": "가로 스크롤"
 "Custom": "사용자 지정"
 "Gesture Button": "제스처 버튼"
+"Gestures": "제스처"
+"Turn off gestures": "제스처 끄기"
 "Haptic Panel": "햅틱 패널"
 "Up": "위"
 "Down": "아래"

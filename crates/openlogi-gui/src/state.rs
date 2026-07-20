@@ -143,14 +143,14 @@ pub struct AppState {
     /// Bindings for the *currently selected* device. Reloaded whenever the
     /// carousel selection changes.
     pub button_bindings: BTreeMap<ButtonId, Action>,
-    /// Per-direction sub-bindings for the current device's gesture owner. Edited
-    /// via the gesture picker and persisted as a [`Binding::Gesture`] entry under
-    /// the owning button — the HID++ gesture button ([`ButtonId::GestureButton`]) by default,
-    /// or a promoted Middle/Back/Forward — in the device's unified binding map
-    /// ([`DeviceConfig::bindings`]). Rebuilt by the `gesture_bindings_for_current` helper.
+    /// Per-direction sub-bindings for every gesture-mode button of the current
+    /// device, keyed by button. Edited via each button's gesture menu and
+    /// persisted as that button's [`Binding::Gesture`] entry in the device's
+    /// unified binding map ([`DeviceConfig::bindings`]). Rebuilt by
+    /// [`Self::current_gesture_maps`].
     ///
     /// [`DeviceConfig::bindings`]: openlogi_core::config::DeviceConfig::bindings
-    pub gesture_bindings: BTreeMap<GestureDirection, Action>,
+    pub gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Global keyboard F-key bindings (Esc + F1-F19). Device-agnostic — one
     /// map applies across all keyboards — so, unlike [`Self::button_bindings`],
     /// this is *not* reloaded on device switch. Seeded once from
@@ -272,7 +272,7 @@ impl AppState {
             state.persist_config("device identity");
         }
         state.button_bindings = state.bindings_for_current();
-        state.gesture_bindings = state.gesture_bindings_for_current();
+        state.gesture_bindings = state.current_gesture_maps();
         // Keyboard bindings are global, so they seed straight from the config
         // map — no per-device resolution like mouse bindings above.
         state.keyboard_bindings = state
