@@ -1,0 +1,662 @@
+//! The on-screen Action Ring overlay.
+//!
+//! Interaction model (specified, not guessed): a pad tap opens the ring
+//! centred at the cursor; the pointer then moves normally (never captured);
+//! a second tap fires the sector the cursor points toward and closes the
+//! ring. Cancel: the centre ✕ (click or second tap in the dead zone), `Esc`,
+//! or a click outside the ring.
+//!
+//! The window is a borderless, transparent, always-on-top popup that never
+//! takes focus — the action must land in the app the user was using, so
+//! focus must not move. GPUI's `WindowKind::PopUp` provides the borderless
+//! toolwindow; the no-activate + topmost bits and all show/hide/positioning
+//! go through the raw HWND (see [`platform_win`]), because the pinned gpui
+//! Windows backend exposes neither. The window is created once on first use
+//! and then re-positioned and re-shown per open — no per-tap surface setup.
+//!
+//! Sector *selection* is plain cursor geometry: the angle from the ring's
+//! centre to the global cursor picks the sector, the centre dead zone
+//! cancels. The cursor may leave the little overlay window entirely ("move
+//! toward" can overshoot) — that changes nothing, since the watcher reads the
+//! global cursor, not window-local hover.
+
+use std::time::Duration;
+
+use gpui::{
+    App, AppContext as _, Bounds, Context, InteractiveElement as _, IntoElement,
+    ParentElement as _, Point, Render, StatefulInteractiveElement as _, Styled as _, Window,
+    WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point, px, size,
+};
+use gpui_component::{ActiveTheme as _, Icon};
+use openlogi_core::binding::{Action, RingSlot};
+use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
+
+use crate::ipc_client::Command;
+use crate::mouse_model::picker::action_icon_path;
+use crate::state::AppState;
+use crate::theme;
+
+/// Logical size of the (square) overlay window.
+const RING_WINDOW: f32 = 460.;
+/// Radius of the circle the eight sector buttons sit on, from the centre.
+const SECTOR_RADIUS: f32 = 150.;
+/// Diameter of one sector's circular icon button.
+const SECTOR_BUTTON: f32 = 52.;
+/// Diameter of the centre ✕ cancel button.
+const CENTER_BUTTON: f32 = 36.;
+/// Cursor distance (logical px) below which a confirm means "cancel" — the
+/// dead zone around the centre ✕.
+const DEADZONE: f32 = 46.;
+/// How often the open-ring watcher samples the global cursor (highlight) and
+/// the Esc / outside-click cancel signals.
+const WATCH_TICK: Duration = Duration::from_millis(33);
+
+/// What the cursor currently points at, driven from the global cursor by the
+/// watcher so it works even when the pointer is outside the overlay window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum Aim {
+    /// Inside the dead zone (or no cursor data): a confirm cancels.
+    #[default]
+    Center,
+    /// Toward a sector: a confirm fires its action.
+    Sector(RingSlot),
+}
+
+/// Pick the aim for a cursor at `cursor` when the ring is centred at
+/// `center`, both in the same (physical) coordinate space, with the dead
+/// zone scaled by `scale`. Pure, so the sector math is unit-testable.
+fn aim_for(center: Point<f32>, cursor: Point<f32>, scale: f32) -> Aim {
+    let dx = cursor.x - center.x;
+    let dy = cursor.y - center.y;
+    if (dx * dx + dy * dy).sqrt() < DEADZONE * scale {
+        return Aim::Center;
+    }
+    // Angle clockwise from straight up, matching `RingSlot::angle_degrees`.
+    let degrees = dx.atan2(-dy).to_degrees().rem_euclid(360.);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "degrees is in [0, 360), so the sector index is in 0..=8"
+    )]
+    let index = (((degrees + 22.5) / 45.).floor() as usize) % 8;
+    Aim::Sector(RingSlot::ALL[index])
+}
+
+/// The overlay's app-global controller: the singleton window, whether it is
+/// currently shown, and the plumbing to fire the selected action.
+pub struct RingOverlay {
+    commands: mpsc::UnboundedSender<Command>,
+    window: Option<WindowHandle<RingView>>,
+    open: bool,
+    /// Physical-pixel centre of the open ring, for global-cursor hit tests.
+    center: Point<f32>,
+    /// Physical-per-logical scale of the display the ring opened on.
+    scale: f32,
+    /// Generation counter; bumping it retires the previous open's watcher.
+    epoch: u64,
+}
+
+impl gpui::Global for RingOverlay {}
+
+/// Install the controller. Call once at startup, before the first press can
+/// arrive.
+pub fn init(commands: mpsc::UnboundedSender<Command>, cx: &mut App) {
+    cx.set_global(RingOverlay {
+        commands,
+        window: None,
+        open: false,
+        center: point(0., 0.),
+        scale: 1.,
+        epoch: 0,
+    });
+}
+
+/// Handle one Action Ring pad press from the agent: open the ring when it is
+/// closed, confirm the aimed selection when it is open.
+pub fn on_pad_press(cx: &mut App) {
+    if cx.global::<RingOverlay>().open {
+        confirm(cx);
+    } else {
+        open(cx);
+    }
+}
+
+/// Open the ring centred at the cursor.
+fn open(cx: &mut App) {
+    let Some(cursor) = platform_win::cursor_pos() else {
+        // Non-Windows builds have no overlay plumbing yet; the press is
+        // captured and bindable, the on-screen ring is Windows-first.
+        info!("action ring press ignored — no overlay support on this platform yet");
+        return;
+    };
+
+    let slots = cx.global::<AppState>().ring_slots_for_current();
+    let window = match cx.global::<RingOverlay>().window {
+        Some(window) => {
+            let refreshed = window.update(cx, |view, _, cx| {
+                view.slots.clone_from(&slots);
+                view.aim = Aim::Center;
+                cx.notify();
+            });
+            if refreshed.is_err() {
+                // The window was closed out from under us (display change,
+                // gpui teardown) — recreate below.
+                cx.global_mut::<RingOverlay>().window = None;
+            }
+            match cx.global::<RingOverlay>().window {
+                Some(window) => window,
+                None => match create_window(slots, cx) {
+                    Some(window) => window,
+                    None => return,
+                },
+            }
+        }
+        None => match create_window(slots, cx) {
+            Some(window) => window,
+            None => return,
+        },
+    };
+
+    let Some(hwnd) = window_hwnd(&window, cx) else {
+        warn!("action ring window has no HWND — cannot show the overlay");
+        return;
+    };
+    let scale = platform_win::window_scale(hwnd);
+    platform_win::show_at(hwnd, cursor, RING_WINDOW * scale);
+
+    let overlay = cx.global_mut::<RingOverlay>();
+    overlay.window = Some(window);
+    overlay.open = true;
+    overlay.center = cursor;
+    overlay.scale = scale;
+    overlay.epoch += 1;
+    let epoch = overlay.epoch;
+    debug!(x = cursor.x, y = cursor.y, "action ring opened");
+
+    // While open: track the global cursor for the sector highlight, and close
+    // on Esc or a click outside the window — inputs a no-activate window
+    // never receives as messages.
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(WATCH_TICK).await;
+            if cx.update(|cx| watch_tick(epoch, hwnd, cx)) {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
+/// One watcher pass. Returns `true` when this watcher is done (ring closed or
+/// superseded by a newer open).
+fn watch_tick(epoch: u64, hwnd: isize, cx: &mut App) -> bool {
+    {
+        let overlay = cx.global::<RingOverlay>();
+        if !overlay.open || overlay.epoch != epoch {
+            return true;
+        }
+    }
+    if platform_win::escape_pressed() || platform_win::clicked_outside(hwnd) {
+        debug!("action ring cancelled (esc / outside click)");
+        close(cx);
+        return true;
+    }
+    let (center, scale) = {
+        let overlay = cx.global::<RingOverlay>();
+        (overlay.center, overlay.scale)
+    };
+    let aim =
+        platform_win::cursor_pos().map_or(Aim::Center, |cursor| aim_for(center, cursor, scale));
+    let window = cx.global::<RingOverlay>().window;
+    if let Some(window) = window {
+        let _ = window.update(cx, |view, _, cx| {
+            if view.aim != aim {
+                view.aim = aim;
+                cx.notify();
+            }
+        });
+    }
+    false
+}
+
+/// Confirm the current aim: fire the aimed sector's action, or cancel from
+/// the dead zone.
+fn confirm(cx: &mut App) {
+    let (center, scale) = {
+        let overlay = cx.global::<RingOverlay>();
+        (overlay.center, overlay.scale)
+    };
+    let aim =
+        platform_win::cursor_pos().map_or(Aim::Center, |cursor| aim_for(center, cursor, scale));
+    match aim {
+        Aim::Center => debug!("action ring cancelled (centre tap)"),
+        Aim::Sector(slot) => fire(slot, cx),
+    }
+    close(cx);
+}
+
+/// Fire `slot`'s bound action through the agent.
+fn fire(slot: RingSlot, cx: &mut App) {
+    let window = cx.global::<RingOverlay>().window;
+    let action = window.and_then(|window| {
+        window
+            .update(cx, |view, _, _| view.action_for(slot))
+            .ok()
+            .flatten()
+    });
+    let Some(action) = action else {
+        return;
+    };
+    info!(slot = %slot, action = %action.label(), "action ring → action");
+    if cx
+        .global::<RingOverlay>()
+        .commands
+        .send(Command::ExecuteAction(action))
+        .is_err()
+    {
+        warn!("IPC client is gone — ring action dropped");
+    }
+}
+
+/// Hide the ring.
+fn close(cx: &mut App) {
+    let overlay = cx.global_mut::<RingOverlay>();
+    overlay.open = false;
+    overlay.epoch += 1;
+    let window = overlay.window;
+    if let Some(window) = window
+        && let Some(hwnd) = window_hwnd(&window, cx)
+    {
+        platform_win::hide(hwnd);
+    }
+}
+
+/// Create the overlay window (hidden — [`platform_win::show_at`] reveals it).
+fn create_window(slots: Vec<(RingSlot, Action)>, cx: &mut App) -> Option<WindowHandle<RingView>> {
+    let bounds = Bounds {
+        origin: point(px(0.), px(0.)),
+        size: size(px(RING_WINDOW), px(RING_WINDOW)),
+    };
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: None,
+        app_id: Some("openlogi".to_string()),
+        kind: WindowKind::PopUp,
+        is_movable: false,
+        focus: false,
+        show: false,
+        window_background: gpui::WindowBackgroundAppearance::Transparent,
+        ..WindowOptions::default()
+    };
+    let opened = cx.open_window(options, |_, cx| {
+        cx.new(|_| RingView {
+            slots,
+            aim: Aim::Center,
+        })
+    });
+    match opened {
+        Ok(window) => {
+            if let Some(hwnd) = window_hwnd(&window, cx) {
+                platform_win::apply_overlay_style(hwnd);
+            }
+            Some(window)
+        }
+        Err(e) => {
+            warn!(error = %e, "could not open the action ring window");
+            None
+        }
+    }
+}
+
+/// The raw Win32 handle of a gpui window (`None` off Windows).
+fn window_hwnd(window: &WindowHandle<RingView>, cx: &mut App) -> Option<isize> {
+    window
+        .update(cx, |_, window, _| {
+            use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+            match window.window_handle().ok()?.as_raw() {
+                RawWindowHandle::Win32(handle) => Some(isize::from(handle.hwnd)),
+                _ => None,
+            }
+        })
+        .ok()
+        .flatten()
+}
+
+/// The ring's root view: eight sector buttons on a circle and the centre ✕.
+pub struct RingView {
+    slots: Vec<(RingSlot, Action)>,
+    aim: Aim,
+}
+
+impl RingView {
+    fn action_for(&self, slot: RingSlot) -> Option<Action> {
+        self.slots
+            .iter()
+            .find(|(s, _)| *s == slot)
+            .map(|(_, action)| action.clone())
+    }
+}
+
+impl Render for RingView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = theme::palette(cx);
+        let accent = cx.theme().primary;
+        let center = RING_WINDOW / 2.;
+
+        let sectors = self.slots.iter().map(|(slot, action)| {
+            let angle = slot.angle_degrees().to_radians();
+            let x = center + SECTOR_RADIUS * angle.sin() - SECTOR_BUTTON / 2.;
+            let y = center - SECTOR_RADIUS * angle.cos() - SECTOR_BUTTON / 2.;
+            let aimed = self.aim == Aim::Sector(*slot);
+            let slot_for_click = *slot;
+            div()
+                .absolute()
+                .left(px(x))
+                .top(px(y))
+                .w(px(SECTOR_BUTTON))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .id(SharedStringId(slot.label()))
+                        .size(px(SECTOR_BUTTON))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(if aimed { accent } else { pal.surface })
+                        .border_1()
+                        .border_color(if aimed { accent } else { pal.border })
+                        .child(
+                            Icon::empty()
+                                .path(action_icon_path(action))
+                                .size_5()
+                                .text_color(if aimed {
+                                    cx.theme().primary_foreground
+                                } else {
+                                    pal.text_primary
+                                }),
+                        )
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.defer(move |cx| {
+                                fire(slot_for_click, cx);
+                                close(cx);
+                            });
+                        })),
+                )
+                .child(
+                    div()
+                        .max_w(px(96.))
+                        .text_xs()
+                        .text_color(if aimed {
+                            pal.text_primary
+                        } else {
+                            pal.text_muted
+                        })
+                        .child(tr!(action.label())),
+                )
+        });
+
+        div().size_full().relative().children(sectors).child(
+            // Centre ✕ — click (or a second pad tap in the dead zone) cancels.
+            div()
+                .id("ring-cancel")
+                .absolute()
+                .left(px(center - CENTER_BUTTON / 2.))
+                .top(px(center - CENTER_BUTTON / 2.))
+                .size(px(CENTER_BUTTON))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(if self.aim == Aim::Center {
+                    pal.surface_hover
+                } else {
+                    pal.surface
+                })
+                .border_1()
+                .border_color(pal.border)
+                .text_color(pal.text_muted)
+                .child("✕")
+                .on_click(cx.listener(|_, _, _, cx| {
+                    cx.defer(close);
+                })),
+        )
+    }
+}
+
+/// Ad-hoc `ElementId` source for per-slot stateful divs.
+#[derive(Clone)]
+struct SharedStringId(&'static str);
+
+impl From<SharedStringId> for gpui::ElementId {
+    fn from(id: SharedStringId) -> Self {
+        gpui::ElementId::Name(id.0.into())
+    }
+}
+
+/// Raw Win32 plumbing for the overlay: the style bits gpui doesn't expose
+/// (no-activate, topmost), show/hide without activation, physical-pixel
+/// positioning, the global cursor, and the Esc / outside-click cancel
+/// signals a focusless window can't observe as messages.
+#[cfg(target_os = "windows")]
+#[expect(
+    unsafe_code,
+    reason = "raw Win32 window-style and cursor FFI — the pinned gpui backend exposes none of it"
+)]
+mod platform_win {
+    use gpui::Point;
+    use gpui::point;
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetCursorPos, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, SW_HIDE,
+        SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos, ShowWindow, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW,
+    };
+
+    /// Add the no-activate + toolwindow ex-style bits. Topmost is applied on
+    /// every [`show_at`] (a style bit alone does not raise the window).
+    pub fn apply_overlay_style(hwnd: isize) {
+        // SAFETY: plain style read-modify-write on a window this process owns.
+        unsafe {
+            let hwnd = hwnd as _;
+            let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(
+                hwnd,
+                GWL_EXSTYLE,
+                ex | isize::from_ne_bytes(
+                    ((WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) as usize).to_ne_bytes(),
+                ),
+            );
+        }
+    }
+
+    /// Physical-per-logical scale of the display the window is on.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "display DPI values are small integers — exact in f32"
+    )]
+    pub fn window_scale(hwnd: isize) -> f32 {
+        // SAFETY: DPI read on a window this process owns.
+        let dpi = unsafe { GetDpiForWindow(hwnd as _) };
+        if dpi == 0 { 1. } else { dpi as f32 / 96. }
+    }
+
+    /// Centre the window (of physical size `side`) at `cursor` (physical) and
+    /// show it topmost without activating it.
+    pub fn show_at(hwnd: isize, cursor: Point<f32>, side: f32) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "screen coordinates are far inside i32 range"
+        )]
+        let (x, y, side) = (
+            (cursor.x - side / 2.) as i32,
+            (cursor.y - side / 2.) as i32,
+            side as i32,
+        );
+        // SAFETY: position + show of a window this process owns; SWP_NOACTIVATE
+        // keeps focus where the user is working.
+        unsafe {
+            SetWindowPos(
+                hwnd as _,
+                HWND_TOPMOST,
+                x,
+                y,
+                side,
+                side,
+                SWP_NOACTIVATE | windows_sys::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW,
+            );
+        }
+    }
+
+    /// Hide the window (kept alive for the next open).
+    pub fn hide(hwnd: isize) {
+        // SAFETY: hide of a window this process owns.
+        unsafe {
+            ShowWindow(hwnd as _, SW_HIDE);
+        }
+    }
+
+    /// Global cursor position in physical pixels.
+    pub fn cursor_pos() -> Option<Point<f32>> {
+        let mut p = POINT { x: 0, y: 0 };
+        // SAFETY: out-pointer to a stack POINT.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "screen coordinates are far inside f32's exact-integer range"
+        )]
+        if unsafe { GetCursorPos(&raw mut p) } != 0 {
+            Some(point(p.x as f32, p.y as f32))
+        } else {
+            None
+        }
+    }
+
+    /// Whether Esc is down right now (edge behaviour handled by the caller's
+    /// close-once state machine — the ring is gone before a repeat matters).
+    pub fn escape_pressed() -> bool {
+        // SAFETY: stateless key query.
+        unsafe { GetAsyncKeyState(i32::from(VK_ESCAPE)).cast_unsigned() & 0x8000 != 0 }
+    }
+
+    /// Whether the left button is down with the cursor outside the window —
+    /// the "click outside cancels" signal, observed by polling because a
+    /// no-activate window receives no messages for clicks elsewhere.
+    pub fn clicked_outside(hwnd: isize) -> bool {
+        // SAFETY: stateless key query + window-rect read on an owned window.
+        unsafe {
+            if GetAsyncKeyState(i32::from(VK_LBUTTON)).cast_unsigned() & 0x8000 == 0 {
+                return false;
+            }
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            if GetWindowRect(hwnd as _, &raw mut rect) == 0 {
+                return false;
+            }
+            let mut p = POINT { x: 0, y: 0 };
+            if GetCursorPos(&raw mut p) == 0 {
+                return false;
+            }
+            p.x < rect.left || p.x > rect.right || p.y < rect.top || p.y > rect.bottom
+        }
+    }
+}
+
+/// Non-Windows stubs: the ring is captured and bindable everywhere, but the
+/// overlay window itself is Windows-first (macOS/Linux land with their own
+/// platform plumbing).
+#[cfg(not(target_os = "windows"))]
+mod platform_win {
+    use gpui::Point;
+
+    pub fn apply_overlay_style(_hwnd: isize) {}
+    pub fn window_scale(_hwnd: isize) -> f32 {
+        1.
+    }
+    pub fn show_at(_hwnd: isize, _cursor: Point<f32>, _side: f32) {}
+    pub fn hide(_hwnd: isize) {}
+    pub fn cursor_pos() -> Option<Point<f32>> {
+        None
+    }
+    pub fn escape_pressed() -> bool {
+        false
+    }
+    pub fn clicked_outside(_hwnd: isize) -> bool {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sector(center: Point<f32>, dx: f32, dy: f32) -> Aim {
+        aim_for(center, point(center.x + dx, center.y + dy), 1.)
+    }
+
+    #[test]
+    fn dead_zone_aims_center() {
+        let c = point(500., 500.);
+        assert_eq!(sector(c, 0., 0.), Aim::Center);
+        assert_eq!(sector(c, 30., -20.), Aim::Center, "inside the dead zone");
+    }
+
+    #[test]
+    fn cardinal_directions_pick_their_slots() {
+        let c = point(500., 500.);
+        assert_eq!(sector(c, 0., -200.), Aim::Sector(RingSlot::North));
+        assert_eq!(sector(c, 200., 0.), Aim::Sector(RingSlot::East));
+        assert_eq!(sector(c, 0., 200.), Aim::Sector(RingSlot::South));
+        assert_eq!(sector(c, -200., 0.), Aim::Sector(RingSlot::West));
+    }
+
+    #[test]
+    fn diagonals_and_sector_boundaries_route_clockwise() {
+        let c = point(0., 0.);
+        assert_eq!(sector(c, 100., -100.), Aim::Sector(RingSlot::NorthEast));
+        assert_eq!(sector(c, 100., 100.), Aim::Sector(RingSlot::SouthEast));
+        assert_eq!(sector(c, -100., 100.), Aim::Sector(RingSlot::SouthWest));
+        assert_eq!(sector(c, -100., -100.), Aim::Sector(RingSlot::NorthWest));
+        // 22.4° off vertical still rounds to North; 22.6° tips into NorthEast.
+        let west_of_boundary = (22.4_f32).to_radians();
+        let east_of_boundary = (22.6_f32).to_radians();
+        assert_eq!(
+            sector(
+                c,
+                200. * west_of_boundary.sin(),
+                -200. * west_of_boundary.cos()
+            ),
+            Aim::Sector(RingSlot::North)
+        );
+        assert_eq!(
+            sector(
+                c,
+                200. * east_of_boundary.sin(),
+                -200. * east_of_boundary.cos()
+            ),
+            Aim::Sector(RingSlot::NorthEast)
+        );
+    }
+
+    #[test]
+    fn scale_grows_the_dead_zone() {
+        let c = point(0., 0.);
+        // 60 px out: a sector at 1×, still the dead zone at 2×.
+        assert_eq!(
+            aim_for(c, point(0., -60.), 1.),
+            Aim::Sector(RingSlot::North)
+        );
+        assert_eq!(aim_for(c, point(0., -60.), 2.), Aim::Center);
+    }
+}
