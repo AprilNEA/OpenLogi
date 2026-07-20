@@ -16,9 +16,9 @@ use openlogi_core::config::Config;
 /// [`default_binding`].
 ///
 /// This is the map the OS hook and the HID++ button-press path consume, so a
-/// `Binding::Gesture` is projected to its `click_action()` — the gesture
+/// `Binding::Gesture` is projected to its `click_action()` — a gesture-mode
 /// button's per-direction swipes are dispatched via the separate
-/// [`gesture_bindings_for`] map, not here.
+/// [`hidpp_gesture_maps_for`] / [`oshook_gestures_for`] maps, not here.
 #[must_use]
 pub fn bindings_for(
     config: &Config,
@@ -43,37 +43,6 @@ pub fn bindings_for(
             continue;
         }
         bindings.insert(k, binding.click_action());
-    }
-    bindings
-}
-
-/// Effective gesture bindings for the device `config_key`. Unset directions
-/// fall back to [`default_gesture_binding`].
-#[must_use]
-pub fn gesture_bindings_for(
-    config: &Config,
-    config_key: Option<&str>,
-) -> BTreeMap<GestureDirection, Action> {
-    // A HID++ gesture source (the dedicated gesture button, or the MX Master 4
-    // haptic panel) only gestures while it is the device's gesture owner. When
-    // the user moves the role to an OS-hook button (Middle/Back/Forward) or
-    // turns gestures off, return an empty map so the gesture watcher
-    // dispatches nothing — otherwise the always-seeded defaults would keep the
-    // HID++ gesture control firing regardless of the selection.
-    let owner = config_key.and_then(|key| config.gesture_owner(key));
-    if !owner.is_some_and(ButtonId::is_hidpp_gesture_source) {
-        return BTreeMap::new();
-    }
-    let stored = config_key
-        .map(|key| config.gesture_bindings_for(key))
-        .unwrap_or_default();
-    let mut bindings: BTreeMap<GestureDirection, Action> = GestureDirection::ALL
-        .iter()
-        .copied()
-        .map(|d| (d, default_gesture_binding(d)))
-        .collect();
-    for (k, v) in stored {
-        bindings.insert(k, v);
     }
     bindings
 }
@@ -121,8 +90,8 @@ pub fn hidpp_gesture_maps_for(
 /// concurrency between them is the hook's first-hold-wins policy, not a config
 /// concern.
 ///
-/// Unlike [`gesture_bindings_for`] (the dedicated HID++ gesture button, which
-/// seeds every direction from [`default_gesture_binding`] at projection time),
+/// Unlike [`hidpp_gesture_maps_for`] (whose maps seed every direction from
+/// [`default_gesture_binding`] at projection time),
 /// this returns each button's raw stored map. In practice those maps are
 /// already fully populated — [`Config::set_gesture_mode`] seeds all five
 /// directions via [`Binding::fill_gesture_defaults`] when a button is
@@ -272,7 +241,7 @@ mod tests {
     fn per_app_override_drops_the_owner_from_the_oshook_gesture_set() {
         // Back is the gesture owner globally...
         let mut cfg = Config::default();
-        cfg.set_gesture_owner("2b042", ButtonId::Back);
+        cfg.set_gesture_mode("2b042", ButtonId::Back, true);
         assert!(
             oshook_gestures_for(&cfg, Some("2b042"), None).contains_key(&ButtonId::Back),
             "Back gestures globally"
@@ -299,22 +268,25 @@ mod tests {
     }
 
     #[test]
-    fn gesture_bindings_silent_when_hidpp_button_is_not_the_owner() {
+    fn hidpp_maps_silent_for_a_demoted_dedicated_button() {
+        // Default device: the dedicated HID++ gesture button gestures, with its
+        // defaults seeded.
         let mut cfg = Config::default();
-        // Default device: the dedicated HID++ gesture button owns gestures, so its defaults are seeded.
-        let defaults = gesture_bindings_for(&cfg, Some("2b042"));
+        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
         assert_eq!(
-            defaults.get(&GestureDirection::Up),
+            maps.get(&ButtonId::GestureButton)
+                .and_then(|m| m.get(&GestureDirection::Up)),
             Some(&default_gesture_binding(GestureDirection::Up)),
-            "the default gesture owner is the dedicated HID++ gesture button"
+            "the dedicated button gestures by default, seeded"
         );
 
-        // Move the gesture role to an OS-hook button: the HID++ gesture button goes silent,
-        // so the watcher dispatches nothing for 0x00c3.
-        cfg.set_gesture_owner("2b042", ButtonId::Back);
+        // Demoting it silences the watcher for 0x00c3 — and promoting an
+        // OS-hook button never resurrects it.
+        cfg.set_gesture_mode("2b042", ButtonId::GestureButton, false);
+        cfg.set_gesture_mode("2b042", ButtonId::Back, true);
         assert!(
-            gesture_bindings_for(&cfg, Some("2b042")).is_empty(),
-            "HID++ gesture button must dispatch nothing once another button owns gestures"
+            hidpp_gesture_maps_for(&cfg, Some("2b042")).is_empty(),
+            "a demoted dedicated button must dispatch nothing over HID++"
         );
     }
 }

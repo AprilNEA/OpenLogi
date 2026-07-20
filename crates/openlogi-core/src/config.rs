@@ -301,29 +301,6 @@ impl Config {
         &self.keyboard.bindings
     }
 
-    /// Returns the gesture sub-bindings for `device_key`'s gesture button, or an
-    /// empty map if it isn't in gesture mode. Derived from the unified
-    /// [`DeviceConfig::bindings`]; kept as a convenience for the agent-side
-    /// per-direction adapter.
-    #[must_use]
-    pub fn gesture_bindings_for(&self, device_key: &str) -> BTreeMap<GestureDirection, Action> {
-        // Read the *owner's* stored map: the gesture role can sit on the
-        // dedicated gesture button or the MX Master 4 haptic panel (or an
-        // OS-hook button — callers gate on the owner kind), and each button
-        // keeps its own per-direction map.
-        let Some(owner) = self.gesture_owner(device_key) else {
-            return BTreeMap::new();
-        };
-        match self
-            .devices
-            .get(device_key)
-            .and_then(|d| d.bindings.get(&owner))
-        {
-            Some(Binding::Gesture(map)) => map.clone(),
-            _ => BTreeMap::new(),
-        }
-    }
-
     /// Records `action` for one `direction` of `button`'s gesture binding,
     /// creating the device entry if needed.
     ///
@@ -377,8 +354,8 @@ impl Config {
 
     /// The single button the pre-v4 owner-locked runtime would have dispatched
     /// gestures from, inferred from the binding shapes — the owner-lock-era
-    /// resolution rule, retained for [`Self::migrate_owner_locked_gestures`]
-    /// and the transition shims. `None` means gestures were off.
+    /// resolution rule, retained solely for
+    /// [`Self::migrate_owner_locked_gestures`]. `None` means gestures were off.
     fn infer_gesture_owner(bindings: &BTreeMap<ButtonId, Binding>) -> Option<ButtonId> {
         // An OS-hook button left in gesture mode took the role over.
         if let Some((id, _)) = bindings
@@ -396,48 +373,6 @@ impl Config {
         }
         // Default: the dedicated HID++ gesture button owns the gesture role.
         Some(ButtonId::GestureButton)
-    }
-
-    /// One gesture-mode button of `device_key`, `None` when nothing gestures.
-    ///
-    /// Transition shim over the shape-driven model for callers still built
-    /// around the retired one-owner lock: when several buttons gesture at once
-    /// (representable since v4) it reports just one, by the owner-lock-era
-    /// preference order. New code reads [`Self::gesture_mode_buttons`].
-    #[must_use]
-    pub fn gesture_owner(&self, device_key: &str) -> Option<ButtonId> {
-        self.devices.get(device_key).map_or(
-            // No config yet → the dedicated HID++ gesture button gestures by default.
-            Some(ButtonId::GestureButton),
-            |device| Self::infer_gesture_owner(&device.bindings),
-        )
-    }
-
-    /// Make `button` the device's sole gesture button.
-    ///
-    /// Transition shim over the shape-driven model preserving the retired
-    /// selector's exclusive semantics: promotes `button` (see
-    /// [`Self::set_gesture_mode`]) and demotes every other gesture-mode button
-    /// to a [`Binding::Single`] of its `Click`. New code sets each button's
-    /// mode independently with [`Self::set_gesture_mode`].
-    pub fn set_gesture_owner(&mut self, device_key: &str, button: ButtonId) {
-        for other in self.gesture_mode_buttons(device_key) {
-            if other != button {
-                self.set_gesture_mode(device_key, other, false);
-            }
-        }
-        self.set_gesture_mode(device_key, button, true);
-    }
-
-    /// Turn every gesture-mode button of `device_key` off.
-    ///
-    /// Transition shim over the shape-driven model: demotes each one via
-    /// [`Self::set_gesture_mode`], which pins the gesture-shaped-by-default
-    /// dedicated button with an explicit `Single`.
-    pub fn disable_gestures(&mut self, device_key: &str) {
-        for button in self.gesture_mode_buttons(device_key) {
-            self.set_gesture_mode(device_key, button, false);
-        }
     }
 
     /// Whether `button` on `device_key` is in gesture mode — a per-button fact
