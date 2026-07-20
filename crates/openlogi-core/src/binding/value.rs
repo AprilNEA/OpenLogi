@@ -90,6 +90,21 @@ impl Binding {
         }
     }
 
+    /// Demote a [`Gesture`](Binding::Gesture) binding in place to a
+    /// [`Single`](Binding::Single) of its [`Click`](GestureDirection::Click)
+    /// entry, falling back to `fallback` when the map has no explicit `Click` —
+    /// the inverse of [`Self::upgrade_to_gesture`]. A no-op on a
+    /// [`Single`](Binding::Single).
+    pub fn demote_to_single(&mut self, fallback: Action) {
+        if let Binding::Gesture(map) = self {
+            let click = map
+                .get(&GestureDirection::Click)
+                .cloned()
+                .unwrap_or(fallback);
+            *self = Binding::Single(click);
+        }
+    }
+
     /// Fill any unbound directions of a [`Gesture`](Binding::Gesture) binding
     /// with their canonical [`default_gesture_binding`], so a button promoted to
     /// the gesture role always exposes the full five-direction set — rather than

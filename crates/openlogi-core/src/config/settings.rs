@@ -437,31 +437,17 @@ pub struct SmartShift {
     pub tunable_torque: u8,
 }
 
-/// Which control owns a device's single gesture role.
-///
-/// Stored explicitly — rather than inferred from which button happens to carry a
-/// [`Binding::Gesture`](crate::binding::Binding::Gesture) — so switching the
-/// gesture button never has to collapse a button's gesture map to encode the
-/// choice: every gesture-capable button keeps its full direction map, and only
-/// the owner is dispatched. Serialized as a bare string (`"Off"` or a
-/// [`ButtonId`] name) so it stays a TOML scalar.
+/// The v3-and-older owner-lock choice: which control owned a device's single
+/// gesture role. Deserialize-only since v4 — the load migration
+/// (`Config::migrate_owner_locked_gestures`) consumes it and rewrites the
+/// binding shapes, which are the whole truth from then on. Read as a bare TOML
+/// scalar (`"Off"` or a [`ButtonId`] name).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GestureOwner {
-    /// Gestures are explicitly turned off for this device.
+    /// Gestures were explicitly turned off for this device.
     Off,
-    /// The named button owns the gesture role.
+    /// The named button owned the gesture role.
     Button(ButtonId),
-}
-
-impl Serialize for GestureOwner {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            // "Off" can't collide with a ButtonId variant name (all CamelCase
-            // control names), so the string space is unambiguous.
-            GestureOwner::Off => serializer.serialize_str("Off"),
-            GestureOwner::Button(id) => id.serialize(serializer),
-        }
-    }
 }
 
 /// Lenient field deserializer for `RawDeviceConfig::gesture_owner`

@@ -74,12 +74,13 @@ pub struct DeviceConfig {
     /// is only serialized when disabled.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
-    /// Which button owns the device's single gesture role, once the user has
-    /// chosen explicitly. Absent means "infer" (the dedicated HID++ gesture
-    /// button owns gestures if present) — see
-    /// [`Config::gesture_owner`](crate::config::Config::gesture_owner). Listed
-    /// first so it serializes as a scalar ahead of the `bindings` sub-table.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Legacy owner-lock carrier, deserialize-only: the v3-and-older
+    /// `gesture_owner` field, held here just long enough for the version-gated
+    /// load migration (`Config::migrate_owner_locked_gestures`) to consume it.
+    /// Never serialized — since v4 the binding shape is the whole truth
+    /// (gesture mode is per-button; see
+    /// [`Config::set_gesture_mode`](crate::config::Config::set_gesture_mode)).
+    #[serde(skip_serializing)]
     pub gesture_owner: Option<GestureOwner>,
     /// Last-known identity (name / kind / capabilities), captured while the
     /// device was online. Lets the UI render this device — with the right
