@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::{
     channel::{ChannelError, HidppChannel},
     feature::{
-        self, CreatableFeature, Feature,
+        self, CreatableFeature, Feature, FeatureEndpoint,
         feature_set::{FeatureInformation, FeatureSetFeature},
         root::RootFeature,
     },
@@ -119,6 +119,26 @@ impl Device {
             .get(&TypeId::of::<F>())
             .cloned()
             .and_then(|feat| Arc::downcast::<F>(feat).ok())
+    }
+
+    /// Resolves `feature_id` at runtime and sends one short-form call to it,
+    /// returning the 16-byte response payload, or `Ok(None)` if the device
+    /// does not expose the feature.
+    ///
+    /// Reverse-engineering aid for features without typed wrappers — the
+    /// caller owns interpretation of the payload. Typed wrappers remain the
+    /// path for anything shipping.
+    pub async fn raw_feature_call(
+        &self,
+        feature_id: u16,
+        function: u8,
+        args: [u8; 3],
+    ) -> Result<Option<[u8; 16]>, Hidpp20Error> {
+        let Some(info) = self.root().get_feature(feature_id).await? else {
+            return Ok(None);
+        };
+        let endpoint = FeatureEndpoint::new(Arc::clone(&self.chan), self.device_index, info.index);
+        Ok(Some(endpoint.call(function, args).await?.extend_payload()))
     }
 
     /// Tries to detect all features supported by the device and add
