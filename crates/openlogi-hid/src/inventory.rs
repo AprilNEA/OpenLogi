@@ -21,6 +21,7 @@ use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
 mod cache;
 mod features;
+mod persist;
 mod probe;
 
 use cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached};
@@ -597,4 +598,5 @@ impl Enumerator {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests;

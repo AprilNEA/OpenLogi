@@ -45,3 +45,6 @@ objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "NSRunningApplic
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3"
