@@ -146,6 +146,38 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "RED: multi-source HID++ gesture plans not implemented yet"]
+    fn both_hidpp_sources_gesture_when_both_are_in_gesture_mode() {
+        // On MX Master 4 the dedicated button and the haptic panel can gesture
+        // at the same time: the plan arms a raw-XY divert for each and keeps
+        // both out of the plain-divert list.
+        let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::GestureButton, true);
+        cfg.set_gesture_mode("2b042", ButtonId::HapticPanel, true);
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        assert!(
+            plan.gesture_bindings.contains_key(&ButtonId::GestureButton)
+                && plan.gesture_bindings.contains_key(&ButtonId::HapticPanel),
+            "both sources need their own dispatch map, got: {:?}",
+            plan.gesture_bindings.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            plan.gesture_source_cids.contains(&GESTURE_BUTTON_CID)
+                && plan.gesture_source_cids.contains(&HAPTIC_PANEL_CID),
+            "both source CIDs must be raw-XY diverted, got: {:?}",
+            plan.gesture_source_cids
+        );
+        assert!(
+            !plan
+                .divert_buttons
+                .iter()
+                .any(|&(cid, _)| cid == GESTURE_BUTTON_CID || cid == HAPTIC_PANEL_CID),
+            "a raw-XY-diverted source must never also be plain-diverted"
+        );
+    }
+
+    #[test]
     fn haptic_panel_can_own_the_gesture_role() {
         // The MX Master 4 haptic panel is a HID++ gesture source: selecting it
         // as the gesture owner must arm the raw-XY gesture divert, exactly

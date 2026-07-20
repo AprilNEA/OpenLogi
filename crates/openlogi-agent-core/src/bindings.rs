@@ -78,6 +78,32 @@ pub fn gesture_bindings_for(
     bindings
 }
 
+/// Per-direction maps for every HID++ gesture source (the dedicated gesture
+/// button, the MX Master 4 haptic panel) in gesture mode on `config_key`,
+/// keyed by the button its captured swipes dispatch as. Each map is seeded
+/// from [`default_gesture_binding`] with the stored directions overlaid, so
+/// the watcher always dispatches the full five-direction set the GUI shows.
+/// Empty when no HID++ source gestures (or `config_key` is `None`).
+#[must_use]
+pub fn hidpp_gesture_maps_for(
+    config: &Config,
+    config_key: Option<&str>,
+) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
+    let Some(key) = config_key else {
+        return BTreeMap::new();
+    };
+    let mut maps = BTreeMap::new();
+    let seeded = gesture_bindings_for(config, Some(key));
+    if let Some(owner) = config
+        .gesture_owner(key)
+        .filter(|id| id.is_hidpp_gesture_source())
+        && !seeded.is_empty()
+    {
+        maps.insert(owner, seeded);
+    }
+    maps
+}
+
 /// Per-direction maps for every OS-hook button (Middle/Back/Forward) in
 /// gesture mode on `config_key`, with `app_bundle`'s per-app overlay applied,
 /// for the OS hook to resolve a hold+swipe. Gesture mode is per-button (see
@@ -122,6 +148,7 @@ pub fn oshook_gestures_for(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 
@@ -204,6 +231,32 @@ mod tests {
             oshook.contains_key(&ButtonId::MiddleClick),
             "got: {oshook:?}"
         );
+    }
+
+    #[test]
+    #[ignore = "RED: multi-source HID++ gesture maps not implemented yet"]
+    fn hidpp_gesture_maps_includes_every_gesture_mode_source() {
+        // Both HID++ sources in gesture mode dispatch simultaneously, each
+        // through its own seeded direction map.
+        let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::HapticPanel, true);
+
+        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
+        // The dedicated button gestures by default...
+        let dedicated = maps
+            .get(&ButtonId::GestureButton)
+            .expect("the dedicated button's default gesture mode must survive");
+        assert_eq!(
+            dedicated.get(&GestureDirection::Up),
+            Some(&default_gesture_binding(GestureDirection::Up))
+        );
+        // ...and the panel's promotion adds a second, fully-seeded map.
+        let panel = maps
+            .get(&ButtonId::HapticPanel)
+            .expect("a gesture-mode panel must dispatch");
+        for dir in GestureDirection::ALL {
+            assert!(panel.contains_key(&dir), "unseeded panel arm {dir:?}");
+        }
     }
 
     #[test]
