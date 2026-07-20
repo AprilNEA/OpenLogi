@@ -20,11 +20,12 @@ use openlogi_hid::{CaptureChannel, DeviceRoute};
 use tracing::warn;
 
 use crate::DpiCycleState;
-use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
+use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for, ring_armed_for};
 use crate::device_order::DeviceStableId;
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::ipc::InventoryHealth;
 use crate::receiver_access::ReceiverAccess;
+use crate::ring::RingChannel;
 use crate::watchers::gesture::GestureBindings;
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -61,6 +62,10 @@ pub struct SharedRuntime {
     /// Exclusive receiver access shared by HID++ capture and pairing. Capture
     /// and pairing must never open the same receiver HID node concurrently.
     pub receiver_access: ReceiverAccess,
+    /// Action Ring press channel: the gesture watcher pushes pad presses here
+    /// while the pad's effective binding is ring-shaped, and the IPC server's
+    /// `next_ring_press` long-poll drains them for the GUI overlay.
+    pub ring: RingChannel,
 }
 
 /// Owns the config + device selection and keeps [`SharedRuntime`] in sync.
@@ -112,6 +117,7 @@ impl Orchestrator {
             )),
             capture_channel: Arc::new(RwLock::new(None)),
             receiver_access: ReceiverAccess::default(),
+            ring: RingChannel::default(),
         };
         let orch = Self {
             config,
@@ -183,6 +189,11 @@ impl Orchestrator {
             self.config.app_settings.thumbwheel_sensitivity,
             Ordering::Relaxed,
         );
+        self.shared.ring.set_armed(ring_armed_for(
+            &self.config,
+            key,
+            self.current_app.as_deref(),
+        ));
     }
 
     /// Apply a fresh inventory snapshot. Always refreshes the snapshot the IPC
