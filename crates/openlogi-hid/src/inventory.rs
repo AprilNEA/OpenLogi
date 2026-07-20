@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -121,6 +122,12 @@ pub struct Enumerator {
     /// callers keep this `None` and retain the route-opening library behavior.
     registry: Option<ChannelRegistry>,
     tick: u64,
+    /// Where the immutable probe cache is persisted across restarts, `None`
+    /// for a memory-only enumerator (one-shot CLI calls, tests).
+    persist_path: Option<PathBuf>,
+    /// Whether the persistable cache content changed since the last save —
+    /// fresh full probes and evictions, not per-tick battery refreshes.
+    cache_dirty: bool,
 }
 
 /// An open channel to a receiver / direct-device HID node, held across
@@ -370,6 +377,34 @@ impl Enumerator {
         }
     }
 
+    /// Warm-start this enumerator's immutable probe cache from (and write it
+    /// back to) the on-disk cache under the app data dir, so a device fully
+    /// probed once keeps its identity across restarts. Falls back to
+    /// memory-only when no data dir is resolvable.
+    ///
+    /// A modifier rather than a constructor: persistence is orthogonal to the
+    /// channel registry, so the agent's enumerator carries both.
+    #[must_use]
+    pub fn persisted(mut self) -> Self {
+        self.persist_path = match openlogi_core::paths::data_dir() {
+            Ok(dir) => Some(dir.join("probe-cache.json")),
+            Err(e) => {
+                warn!(error = %e, "no data dir — probe cache is memory-only");
+                None
+            }
+        };
+        let cache = self
+            .persist_path
+            .as_deref()
+            .map(persist::load)
+            .unwrap_or_default();
+        if !cache.is_empty() {
+            debug!(entries = cache.len(), "probe cache warm-started from disk");
+        }
+        self.cache.extend(cache);
+        self
+    }
+
     async fn prepare_nodes(&mut self, candidates: Vec<async_hid::Device>) -> PreparedNodes {
         let mut active = Vec::new();
         let mut seen_nodes = HashSet::new();
@@ -427,6 +462,22 @@ impl Enumerator {
             active,
             open_failures,
             retiring,
+        }
+    }
+
+    /// Write the cache through to disk when its persistable content changed
+    /// this tick. Best-effort: a failed write is logged and retried on the
+    /// next dirty tick.
+    fn flush_cache(&mut self) {
+        if !self.cache_dirty {
+            return;
+        }
+        let Some(path) = self.persist_path.as_deref() else {
+            return;
+        };
+        match persist::save(path, &self.cache) {
+            Ok(()) => self.cache_dirty = false,
+            Err(e) => warn!(error = %e, ?path, "failed to persist probe cache"),
         }
     }
 
@@ -556,11 +607,27 @@ impl Enumerator {
             ));
         }
 
-        // Apply fresh probes and record which devices were seen this tick.
+        let seen_keys = self.apply_outcomes(outcomes);
+        self.evict_unseen(&seen_keys);
+        self.flush_cache();
+        Ok((inventories, all_complete, all_healthy))
+    }
+
+    /// Fold this tick's probe outcomes into the cache, returning the keys seen
+    /// so [`Self::evict_unseen`] can age out the rest.
+    fn apply_outcomes(&mut self, outcomes: Vec<CacheOutcome>) -> HashSet<CacheKey> {
         let mut seen_keys = HashSet::new();
         for outcome in outcomes {
             match outcome {
-                CacheOutcome::Fresh(key, cached) | CacheOutcome::Update(key, cached) => {
+                CacheOutcome::Fresh(key, cached) => {
+                    seen_keys.insert(key.clone());
+                    self.cache.insert(key, cached);
+                    // A completed full probe is worth writing through; battery
+                    // `Update`s are not (they would rewrite the file every
+                    // tick for a value that is re-read live anyway).
+                    self.cache_dirty = true;
+                }
+                CacheOutcome::Update(key, cached) => {
                     seen_keys.insert(key.clone());
                     self.cache.insert(key, cached);
                 }
@@ -570,8 +637,7 @@ impl Enumerator {
                 CacheOutcome::Unkeyed => {}
             }
         }
-        self.evict_unseen(&seen_keys);
-        Ok((inventories, all_complete, all_healthy))
+        seen_keys
     }
 
     /// Drop cache entries for devices not seen this tick, after a short grace so
@@ -592,6 +658,7 @@ impl Enumerator {
             if *misses > CACHE_MISS_GRACE {
                 self.cache.remove(&key);
                 self.misses.remove(&key);
+                self.cache_dirty = true;
             }
         }
     }

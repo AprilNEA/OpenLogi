@@ -251,10 +251,14 @@ fn spawn_inner(
             // A persistent enumerator so its per-device probe cache survives
             // across ticks — a known device's immutable data (model, features)
             // is reused instead of being re-handshaked every poll.
-            let mut enumerator = registry.map_or_else(
-                openlogi_hid::Enumerator::default,
-                openlogi_hid::Enumerator::with_registry,
-            );
+            // Warm-start from the persisted probe cache too, so devices keep
+            // their identity across agent restarts without a fresh interview.
+            let mut enumerator = registry
+                .map_or_else(
+                    openlogi_hid::Enumerator::default,
+                    openlogi_hid::Enumerator::with_registry,
+                )
+                .persisted();
             let mut state = WatchState::default();
             let mut last_tick = SystemTime::now();
             // `block_on` installs runtime context so a backend that registers an

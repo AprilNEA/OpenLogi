@@ -22,6 +22,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 num_enum = { workspace = true }
 futures-concurrency = "7"
+serde_json.workspace = true
 
 # Native Win32 HID report writes (windows_hid.rs) — a fallback for async-hid's
 # write path on Windows, plus the composite short/long endpoint handling in

@@ -14,6 +14,7 @@ use hidpp::{
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
 };
+use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::mappings::{
@@ -24,7 +25,7 @@ use crate::mappings::{
 
 /// Everything a single device probe yields. Any field is `None` when the
 /// device doesn't expose that feature or the read failed.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub(super) struct ProbedFeatures {
     pub(super) battery: Option<BatteryInfo>,
     pub(super) model_info: Option<DeviceModelInfo>,
@@ -45,7 +46,7 @@ pub(super) struct ProbedFeatures {
 /// — the same enhanced-then-legacy split SmartShift has with `0x2111`/`0x2110`.
 /// G-series wireless gaming devices (G915, G903 LS) expose neither and report
 /// battery only as a voltage via `0x1001`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum BatteryProbe {
     Unified(u8),
     Legacy(u8),
