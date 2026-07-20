@@ -77,8 +77,7 @@ pub async fn run(args: HidSniffArgs) -> Result<()> {
                                 let seen = task_count.fetch_add(1, Ordering::Relaxed) + 1;
                                 if seen <= PRINT_CAP {
                                     let ms = started.elapsed().as_millis();
-                                    let hex: String =
-                                        buf[..len].iter().map(|b| format!("{b:02x} ")).collect();
+                                    let hex = super::hex_dump(&buf[..len]);
                                     println!("[{ms:>7}ms] {label} len={len}: {hex}");
                                 } else if seen == PRINT_CAP + 1 {
                                     println!("[{label}] print cap reached — counting silently");

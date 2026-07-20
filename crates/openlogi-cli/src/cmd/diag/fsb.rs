@@ -44,7 +44,7 @@ pub async fn run(args: FsbArgs) -> Result<()> {
         .await
     {
         Ok(payload) => {
-            let hex: String = payload.iter().map(|b| format!("{b:02x} ")).collect();
+            let hex = super::hex_dump(&payload);
             println!("response: {hex}");
         }
         Err(e) => println!("error: {e}"),
