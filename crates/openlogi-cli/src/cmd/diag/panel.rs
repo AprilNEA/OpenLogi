@@ -30,7 +30,7 @@ pub async fn run(args: PanelArgs) -> Result<()> {
     let (route, name) = select_device(args.device.as_deref(), &[0x1b04]).await?;
     println!("device: {name} ({route})");
     println!(
-        "arming Action Ring panel (analytics on CIDs 0x0050/0x0051) — press it now, {}s window\n",
+        "arming Action Ring panel (analytics on CIDs 0x01a0/0x0050/0x0051) — press it now, {}s window\n",
         args.seconds
     );
 
