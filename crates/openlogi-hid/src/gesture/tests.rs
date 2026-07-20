@@ -89,7 +89,7 @@ fn a_held_dpi_button_presses_once_on_the_rising_edge() {
 }
 
 #[test]
-fn a_ring_tap_is_one_rising_edge_and_emits_nothing_until_bindable() {
+fn a_ring_tap_is_one_rising_edge_and_one_press() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
 
@@ -110,9 +110,13 @@ fn a_ring_tap_is_one_rising_edge_and_emits_nothing_until_bindable() {
         &tx,
     );
     assert!(!acc.panel_down, "a release entry clears the edge");
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(ButtonId::ActionRing))
+    );
     assert!(
         rx.try_recv().is_err(),
-        "analytics events carry no CapturedInput until the ring is a bindable control"
+        "one physical tap must emit exactly one press"
     );
 }
 
@@ -133,6 +137,15 @@ fn a_ring_tap_re_arms_after_release() {
         &tx,
     );
     assert!(acc.panel_down, "a release re-arms the rising edge");
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(ButtonId::ActionRing))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(ButtonId::ActionRing)),
+        "a release re-arms: the second tap presses again"
+    );
     assert!(rx.try_recv().is_err());
 }
 
@@ -180,7 +193,11 @@ fn a_batch_with_press_and_release_entries_arms_the_edge() {
         acc.panel_down,
         "the press entry wins over the release entry"
     );
-    assert!(rx.try_recv().is_err());
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(ButtonId::ActionRing))
+    );
+    assert!(rx.try_recv().is_err(), "exactly one press for the batch");
 }
 
 #[test]

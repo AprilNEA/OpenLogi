@@ -523,10 +523,8 @@ fn handle_reprog(
             }
             if pressed && !acc.panel_down {
                 acc.panel_down = true;
-                // Log-only until the Action Ring is a bindable control: turning
-                // this into a CapturedInput needs a ButtonId variant, which
-                // crosses the IPC wire (append-only, protocol version bump).
                 debug!("action ring pressed");
+                let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::ActionRing));
             } else if released && !pressed {
                 acc.panel_down = false;
             }
