@@ -155,6 +155,63 @@ fn a_ring_tap_re_arms_after_release() {
 }
 
 #[test]
+fn diverted_side_buttons_press_on_the_rising_edge() {
+    // The MX Master 4's Back/Forward emit no native HID events; the session
+    // diverts them, so each hold must dispatch exactly one press.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let back = RawControlEvent::DivertedButtons([reprog_controls::BACK_CID, 0, 0, 0]);
+    let up = RawControlEvent::DivertedButtons([0, 0, 0, 0]);
+
+    handle_reprog(&mut acc, back, &[], &tx);
+    handle_reprog(&mut acc, back, &[], &tx); // still held — no repeat
+    handle_reprog(&mut acc, up, &[], &tx);
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::DivertedButtons([reprog_controls::FORWARD_CID, 0, 0, 0]),
+        &[],
+        &tx,
+    );
+
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(ButtonId::Back))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(ButtonId::Forward)),
+        "a release re-arms; the other button has its own edge"
+    );
+    assert!(rx.try_recv().is_err(), "a held button presses once");
+}
+
+#[test]
+fn both_side_buttons_in_one_frame_press_both() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::DivertedButtons([
+            reprog_controls::BACK_CID,
+            reprog_controls::FORWARD_CID,
+            0,
+            0,
+        ]),
+        &[],
+        &tx,
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(ButtonId::Back))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(ButtonId::Forward))
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
 fn click_telemetry_cids_never_open_the_ring() {
     // 0x0050/0x0051 are the LEFT/RIGHT mouse buttons' analytics CIDs, not the
     // pad. If anything arms them (Options+ does, for telemetry), every

@@ -96,6 +96,10 @@ pub enum GestureError {
 /// Movement + button state accumulated across messages. Lives behind a `Mutex`
 /// because the channel's read thread invokes the listener by shared reference.
 #[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent rising-edge latches, one per captured control — not a state machine"
+)]
 struct CaptureAccum {
     /// Mid-swipe state for the diverted dedicated gesture button (raw-XY).
     swipe: SwipeAccumulator,
@@ -105,6 +109,11 @@ struct CaptureAccum {
     /// Whether the Action Ring pad was down in the last analytics event — for
     /// rising-edge press detection.
     panel_down: bool,
+    /// Whether the diverted side "back" button was held in the last event —
+    /// rising-edge press detection, like [`Self::dpi_down`].
+    back_down: bool,
+    /// Whether the diverted side "forward" button was held in the last event.
+    forward_down: bool,
 }
 
 /// Capture the gesture button, DPI/ModeShift button, and (when
@@ -187,6 +196,7 @@ pub async fn run_capture_session(
         gesture = armed.gesture_diverted,
         action_ring = armed.panel.is_some(),
         dpi_buttons = armed.dpi_cids.len(),
+        nav_buttons = armed.nav_cids.len(),
         thumbwheel = armed.thumb.is_some(),
         "control capture active"
     );
@@ -241,6 +251,8 @@ struct ArmedControls {
     panel: Option<PanelArming>,
     /// DPI/ModeShift CIDs diverted as plain buttons.
     dpi_cids: Vec<u16>,
+    /// Side Back/Forward CIDs diverted as plain buttons.
+    nav_cids: Vec<u16>,
     /// `0x2150` accessor + feature index, present when the thumb wheel is
     /// diverted.
     thumb: Option<(Thumbwheel, u8)>,
@@ -269,6 +281,12 @@ impl ArmedControls {
             }
             for &cid in &self.dpi_cids {
                 restore(rc.set_cid_reporting(cid, false, false).await, "DPI button");
+            }
+            for &cid in &self.nav_cids {
+                restore(
+                    rc.set_cid_reporting(cid, false, false).await,
+                    "side nav button",
+                );
             }
         }
         if let Some((tw, _)) = self.thumb.as_ref() {
@@ -336,6 +354,7 @@ async fn arm_controls(
     let mut gesture_diverted = false;
     let mut panel: Option<PanelArming> = None;
     let mut dpi_cids: Vec<u16> = Vec::new();
+    let mut nav_cids: Vec<u16> = Vec::new();
     if let Some(info) = device
         .root()
         .get_feature(reprog_controls::FEATURE_ID)
@@ -380,14 +399,18 @@ async fn arm_controls(
             panel = Some(PanelArming { fsb });
             info!("action ring pad present — analytics capture arming on cadence");
         }
-        for &cid in &reprog_controls::DPI_MODE_SHIFT_CIDS {
-            if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-                rc.set_cid_reporting(cid, true, false)
-                    .await
-                    .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-                dpi_cids.push(cid);
-            }
-        }
+        dpi_cids =
+            divert_plain_buttons(&rc, &controls, &reprog_controls::DPI_MODE_SHIFT_CIDS).await?;
+        // The side Back/Forward buttons are diverted like the DPI button and
+        // dispatched through their bindings. On the MX Master 4 they emit no
+        // native HID events at all, so without this they are dead buttons —
+        // the job Options+ quietly does on this device.
+        nav_cids = divert_plain_buttons(
+            &rc,
+            &controls,
+            &[reprog_controls::BACK_CID, reprog_controls::FORWARD_CID],
+        )
+        .await?;
         reprog = Some((rc, info.index));
     }
 
@@ -420,7 +443,12 @@ async fn arm_controls(
         }
     }
 
-    if !gesture_diverted && panel.is_none() && dpi_cids.is_empty() && thumb.is_none() {
+    if !gesture_diverted
+        && panel.is_none()
+        && dpi_cids.is_empty()
+        && nav_cids.is_empty()
+        && thumb.is_none()
+    {
         debug!(slot, "no capturable controls — idle session");
     }
     Ok(ArmedControls {
@@ -428,8 +456,28 @@ async fn arm_controls(
         gesture_diverted,
         panel,
         dpi_cids,
+        nav_cids,
         thumb,
     })
+}
+
+/// Divert each of `candidates` that the control table lists as divertable,
+/// as a plain button (no raw-XY); returns the CIDs actually diverted.
+async fn divert_plain_buttons(
+    rc: &ReprogControlsV4,
+    controls: &[reprog_controls::CtrlIdInfo],
+    candidates: &[u16],
+) -> Result<Vec<u16>, GestureError> {
+    let mut diverted = Vec::new();
+    for &cid in candidates {
+        if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
+            rc.set_cid_reporting(cid, true, false)
+                .await
+                .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+            diverted.push(cid);
+        }
+    }
+    Ok(diverted)
 }
 
 /// Log (don't propagate) a failure to hand a control back to the firmware.
@@ -488,6 +536,19 @@ fn handle_reprog(
                 let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::DpiToggle));
             }
             acc.dpi_down = dpi_down;
+
+            // The diverted side buttons dispatch through their bindings on
+            // the rising edge, like the DPI button.
+            let back_down = cids.contains(&reprog_controls::BACK_CID);
+            if back_down && !acc.back_down {
+                let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::Back));
+            }
+            acc.back_down = back_down;
+            let forward_down = cids.contains(&reprog_controls::FORWARD_CID);
+            if forward_down && !acc.forward_down {
+                let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::Forward));
+            }
+            acc.forward_down = forward_down;
         }
         RawControlEvent::RawXy { dx, dy } => {
             // Commit the instant a clean direction emerges (mid-swipe, once per
