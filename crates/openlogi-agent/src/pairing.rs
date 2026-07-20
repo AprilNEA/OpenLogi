@@ -258,7 +258,6 @@ async fn translate(
 mod tests {
     use super::*;
 
-    use std::collections::BTreeMap;
     use std::sync::RwLock;
 
     use openlogi_agent_core::DpiCycles;
@@ -269,7 +268,6 @@ mod tests {
         SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),

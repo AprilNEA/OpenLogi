@@ -19,12 +19,12 @@
 //! the events arrive over HID++, and the bound action is synthesised the same
 //! way regardless.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{Action, ButtonId, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
 use openlogi_hid::gesture::CaptureSpec;
 use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
@@ -34,10 +34,6 @@ use tracing::{debug, warn};
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
 use crate::hook_runtime::ActionDispatcher;
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
-
-/// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
-/// direction). The watcher reads it to map a captured swipe to a bound action.
-pub type GestureBindings = Arc<RwLock<BTreeMap<GestureDirection, Action>>>;
 
 /// How often to re-read the active device target + thumb-wheel arming so a
 /// carousel switch or a binding/sensitivity edit re-points / re-arms capture.
