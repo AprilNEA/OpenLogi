@@ -25,7 +25,8 @@ use std::time::Duration;
 use gpui::{
     App, AppContext as _, Bounds, Context, InteractiveElement as _, IntoElement,
     ParentElement as _, Point, Render, StatefulInteractiveElement as _, Styled as _, Window,
-    WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point, px, size,
+    WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point, prelude::FluentBuilder as _,
+    px, size,
 };
 use gpui_component::{ActiveTheme as _, Icon};
 use openlogi_core::binding::{Action, RingSlot};
@@ -35,22 +36,46 @@ use tracing::{debug, info, warn};
 use crate::ipc_client::Command;
 use crate::mouse_model::picker::action_icon_path;
 use crate::state::AppState;
-use crate::theme;
 
-/// Logical size of the (square) overlay window.
-const RING_WINDOW: f32 = 460.;
+/// Logical size of the overlay window: wider than tall because side-sector
+/// labels sit *beside* the ring (the Options+ layout). Compact enough to fit
+/// near screen edges in most positions; when it can't,
+/// [`platform_win::show_at`] clamps it into the work area.
+const RING_W: f32 = 480.;
+/// See [`RING_W`].
+const RING_H: f32 = 312.;
 /// Radius of the circle the eight sector buttons sit on, from the centre.
-const SECTOR_RADIUS: f32 = 150.;
+const SECTOR_RADIUS: f32 = 96.;
 /// Diameter of one sector's circular icon button.
-const SECTOR_BUTTON: f32 = 52.;
+const SECTOR_BUTTON: f32 = 44.;
 /// Diameter of the centre ✕ cancel button.
-const CENTER_BUTTON: f32 = 36.;
+const CENTER_BUTTON: f32 = 30.;
+/// Gap between a sector button's outer edge and its label pill.
+const LABEL_GAP: f32 = 8.;
 /// Cursor distance (logical px) below which a confirm means "cancel" — the
 /// dead zone around the centre ✕.
-const DEADZONE: f32 = 46.;
+const DEADZONE: f32 = 38.;
 /// How often the open-ring watcher samples the global cursor (highlight) and
 /// the Esc / outside-click cancel signals.
 const WATCH_TICK: Duration = Duration::from_millis(33);
+
+// The ring's fixed palette, deliberately theme-independent and light-on-dark
+// — the inverse of the Options+ light-mode reference, because the ring floats
+// over a desktop that lives in dark mode: bright circles, dark label pills.
+/// Sector button fill.
+const PLATE: u32 = 0x00f7_f7f9;
+/// Icon strokes on an unaimed button; label pill fill.
+const INK: u32 = 0x001c_1c1e;
+/// Aimed icon strokes and aimed-pill text.
+const WHITE: u32 = 0x00ff_ffff;
+/// Label pill text.
+const PILL_TEXT: u32 = 0x00f2_f2f4;
+/// Centre ✕ fill.
+const CROSS_BG: u32 = 0x002c_2c2e;
+/// Centre ✕ fill while the cursor aims at the dead zone.
+const CROSS_BG_AIMED: u32 = 0x0045_4549;
+/// Centre ✕ glyph.
+const CROSS_TEXT: u32 = 0x00c9_c9ce;
 
 /// What the cursor currently points at, driven from the global cursor by the
 /// watcher so it works even when the pointer is outside the overlay window.
@@ -163,16 +188,18 @@ fn open(cx: &mut App) {
         return;
     };
     let scale = platform_win::window_scale(hwnd);
-    platform_win::show_at(hwnd, cursor, RING_WINDOW * scale);
+    // The centre can differ from the cursor near a screen edge (work-area
+    // clamp) — the hit-test must aim from the ring's real centre.
+    let center = platform_win::show_at(hwnd, cursor, RING_W * scale, RING_H * scale);
 
     let overlay = cx.global_mut::<RingOverlay>();
     overlay.window = Some(window);
     overlay.open = true;
-    overlay.center = cursor;
+    overlay.center = center;
     overlay.scale = scale;
     overlay.epoch += 1;
     let epoch = overlay.epoch;
-    debug!(x = cursor.x, y = cursor.y, "action ring opened");
+    debug!(x = center.x, y = center.y, "action ring opened");
 
     // While open: track the global cursor for the sector highlight, and close
     // on Esc or a click outside the window — inputs a no-activate window
@@ -276,7 +303,7 @@ fn close(cx: &mut App) {
 fn create_window(slots: Vec<(RingSlot, Action)>, cx: &mut App) -> Option<WindowHandle<RingView>> {
     let bounds = Bounds {
         origin: point(px(0.), px(0.)),
-        size: size(px(RING_WINDOW), px(RING_WINDOW)),
+        size: size(px(RING_W), px(RING_H)),
     };
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -299,6 +326,7 @@ fn create_window(slots: Vec<(RingSlot, Action)>, cx: &mut App) -> Option<WindowH
         Ok(window) => {
             if let Some(hwnd) = window_hwnd(&window, cx) {
                 platform_win::apply_overlay_style(hwnd);
+                platform_win::clear_accent(hwnd);
             }
             Some(window)
         }
@@ -340,64 +368,81 @@ impl RingView {
 
 impl Render for RingView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let pal = theme::palette(cx);
+        // Fixed Options+-style identity in both themes: floating black circle
+        // buttons, white pill labels, no panel behind anything. The theme's
+        // primary marks the aimed sector.
         let accent = cx.theme().primary;
-        let center = RING_WINDOW / 2.;
+        let (cx0, cy0) = (RING_W / 2., RING_H / 2.);
 
-        let sectors = self.slots.iter().map(|(slot, action)| {
+        let sectors = self.slots.iter().flat_map(|(slot, action)| {
             let angle = slot.angle_degrees().to_radians();
-            let x = center + SECTOR_RADIUS * angle.sin() - SECTOR_BUTTON / 2.;
-            let y = center - SECTOR_RADIUS * angle.cos() - SECTOR_BUTTON / 2.;
+            let sin = angle.sin();
+            let bx = cx0 + SECTOR_RADIUS * sin - SECTOR_BUTTON / 2.;
+            let by = cy0 - SECTOR_RADIUS * angle.cos() - SECTOR_BUTTON / 2.;
             let aimed = self.aim == Aim::Sector(*slot);
             let slot_for_click = *slot;
-            div()
+            let button = div().absolute().left(px(bx)).top(px(by)).child(
+                div()
+                    .id(SharedStringId(slot.label()))
+                    .size(px(SECTOR_BUTTON))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(if aimed {
+                        accent
+                    } else {
+                        gpui::rgb(PLATE).into()
+                    })
+                    .shadow_md()
+                    .child(
+                        Icon::empty()
+                            .path(action_icon_path(action))
+                            .size_5()
+                            .text_color(if aimed {
+                                gpui::rgb(WHITE)
+                            } else {
+                                gpui::rgb(INK)
+                            }),
+                    )
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.defer(move |cx| {
+                            fire(slot_for_click, cx);
+                            close(cx);
+                        });
+                    })),
+            );
+            // The label pill floats just outside the button along its angle:
+            // above the top sectors, beside the side ones (the Options+
+            // layout). Anchored by direction so long labels grow outward.
+            let anchor_r = SECTOR_RADIUS + SECTOR_BUTTON / 2. + LABEL_GAP;
+            let ax = cx0 + anchor_r * sin;
+            let ay = cy0 - anchor_r * angle.cos();
+            let pill = div()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(gpui::rgb(INK))
+                .shadow_md()
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(gpui::rgb(PILL_TEXT))
+                .when(aimed, |pill| pill.bg(accent).text_color(gpui::rgb(WHITE)))
+                .child(tr!(action.label()));
+            let row = div()
                 .absolute()
-                .left(px(x))
-                .top(px(y))
-                .w(px(SECTOR_BUTTON))
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_1()
-                .child(
-                    div()
-                        .id(SharedStringId(slot.label()))
-                        .size(px(SECTOR_BUTTON))
-                        .rounded_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(if aimed { accent } else { pal.surface })
-                        .border_1()
-                        .border_color(if aimed { accent } else { pal.border })
-                        .child(
-                            Icon::empty()
-                                .path(action_icon_path(action))
-                                .size_5()
-                                .text_color(if aimed {
-                                    cx.theme().primary_foreground
-                                } else {
-                                    pal.text_primary
-                                }),
-                        )
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.defer(move |cx| {
-                                fire(slot_for_click, cx);
-                                close(cx);
-                            });
-                        })),
-                )
-                .child(
-                    div()
-                        .max_w(px(96.))
-                        .text_xs()
-                        .text_color(if aimed {
-                            pal.text_primary
-                        } else {
-                            pal.text_muted
-                        })
-                        .child(tr!(action.label())),
-                )
+                .top(px(ay - 11.))
+                .left(px(0.))
+                .w(px(RING_W))
+                .flex();
+            let label = if sin > 0.35 {
+                row.justify_start().pl(px(ax)).child(pill)
+            } else if sin < -0.35 {
+                row.justify_end().pr(px(RING_W - ax)).child(pill)
+            } else {
+                row.justify_center().child(pill)
+            };
+            [button, label]
         });
 
         div().size_full().relative().children(sectors).child(
@@ -405,21 +450,21 @@ impl Render for RingView {
             div()
                 .id("ring-cancel")
                 .absolute()
-                .left(px(center - CENTER_BUTTON / 2.))
-                .top(px(center - CENTER_BUTTON / 2.))
+                .left(px(cx0 - CENTER_BUTTON / 2.))
+                .top(px(cy0 - CENTER_BUTTON / 2.))
                 .size(px(CENTER_BUTTON))
                 .rounded_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .bg(if self.aim == Aim::Center {
-                    pal.surface_hover
+                    gpui::rgb(CROSS_BG_AIMED)
                 } else {
-                    pal.surface
+                    gpui::rgb(CROSS_BG)
                 })
-                .border_1()
-                .border_color(pal.border)
-                .text_color(pal.text_muted)
+                .shadow_sm()
+                .text_xs()
+                .text_color(gpui::rgb(CROSS_TEXT))
                 .child("✕")
                 .on_click(cx.listener(|_, _, _, cx| {
                     cx.defer(close);
@@ -451,6 +496,10 @@ mod platform_win {
     use gpui::Point;
     use gpui::point;
     use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    };
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON,
@@ -489,30 +538,116 @@ mod platform_win {
         if dpi == 0 { 1. } else { dpi as f32 / 96. }
     }
 
-    /// Centre the window (of physical size `side`) at `cursor` (physical) and
-    /// show it topmost without activating it.
-    pub fn show_at(hwnd: isize, cursor: Point<f32>, side: f32) {
+    /// Centre the window (physical size `w`×`h`) at `cursor` (physical),
+    /// clamped into the cursor's monitor **work area** so the ring never
+    /// hangs off a screen edge, and show it topmost without activating it.
+    /// Returns the window's actual centre — near an edge it differs from the
+    /// cursor, and the sector hit-test must aim from where the ring really is.
+    pub fn show_at(hwnd: isize, cursor: Point<f32>, w: f32, h: f32) -> Point<f32> {
         #[expect(
             clippy::cast_possible_truncation,
             reason = "screen coordinates are far inside i32 range"
         )]
-        let (x, y, side) = (
-            (cursor.x - side / 2.) as i32,
-            (cursor.y - side / 2.) as i32,
-            side as i32,
-        );
-        // SAFETY: position + show of a window this process owns; SWP_NOACTIVATE
-        // keeps focus where the user is working.
+        let (cx, cy, w, h) = (cursor.x as i32, cursor.y as i32, w as i32, h as i32);
+        let mut x = cx - w / 2;
+        let mut y = cy - h / 2;
+        // SAFETY: monitor lookup for the cursor's point, then position + show
+        // of a window this process owns; SWP_NOACTIVATE keeps focus where the
+        // user is working.
         unsafe {
+            let monitor = MonitorFromPoint(POINT { x: cx, y: cy }, MONITOR_DEFAULTTONEAREST);
+            let zero = RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a fixed struct size is far below u32::MAX"
+            )]
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                rcMonitor: zero,
+                rcWork: zero,
+                dwFlags: 0,
+            };
+            if GetMonitorInfoW(monitor, &raw mut info) != 0 {
+                let work = info.rcWork;
+                x = x.max(work.left).min(work.right - w);
+                y = y.max(work.top).min(work.bottom - h);
+            }
             SetWindowPos(
                 hwnd as _,
                 HWND_TOPMOST,
                 x,
                 y,
-                side,
-                side,
+                w,
+                h,
                 SWP_NOACTIVATE | windows_sys::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW,
             );
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "screen coordinates are far inside f32's exact-integer range"
+        )]
+        point((x + w / 2) as f32, (y + h / 2) as f32)
+    }
+
+    /// Disable the window's DWM "accent" effect. gpui's `Transparent`
+    /// background enables `ACCENT_ENABLE_TRANSPARENTGRADIENT`, which paints a
+    /// faint veil over the whole window rect; DirectComposition already
+    /// composites the surface with per-pixel alpha, so the veil is pure
+    /// artifact — the visible "box" behind the floating ring. This calls the
+    /// same undocumented user32 API gpui itself uses, with the accent off.
+    pub fn clear_accent(hwnd: isize) {
+        #[repr(C)]
+        struct AccentPolicy {
+            state: u32,
+            flags: u32,
+            gradient_color: u32,
+            animation_id: u32,
+        }
+        #[repr(C)]
+        struct CompositionAttribData {
+            attrib: u32,
+            data: *mut core::ffi::c_void,
+            size: u32,
+        }
+        const WCA_ACCENT_POLICY: u32 = 19;
+        type SetWca =
+            unsafe extern "system" fn(hwnd: isize, data: *mut CompositionAttribData) -> i32;
+
+        // SAFETY: resolve the export from user32 (it is not in the import
+        // library), then call it with a stack-valid attribute payload.
+        unsafe {
+            let user32: Vec<u16> = "user32.dll\0".encode_utf16().collect();
+            let module = GetModuleHandleW(user32.as_ptr());
+            if module.is_null() {
+                return;
+            }
+            let Some(addr) =
+                GetProcAddress(module, c"SetWindowCompositionAttribute".as_ptr().cast())
+            else {
+                return;
+            };
+            let set_wca: SetWca = core::mem::transmute(addr);
+            let mut policy = AccentPolicy {
+                state: 0, // ACCENT_DISABLED
+                flags: 0,
+                gradient_color: 0,
+                animation_id: 0,
+            };
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a fixed struct size is far below u32::MAX"
+            )]
+            let mut data = CompositionAttribData {
+                attrib: WCA_ACCENT_POLICY,
+                data: (&raw mut policy).cast(),
+                size: size_of::<AccentPolicy>() as u32,
+            };
+            set_wca(hwnd, &raw mut data);
         }
     }
 
@@ -584,7 +719,10 @@ mod platform_win {
     pub fn window_scale(_hwnd: isize) -> f32 {
         1.
     }
-    pub fn show_at(_hwnd: isize, _cursor: Point<f32>, _side: f32) {}
+    pub fn show_at(_hwnd: isize, cursor: Point<f32>, _w: f32, _h: f32) -> Point<f32> {
+        cursor
+    }
+    pub fn clear_accent(_hwnd: isize) {}
     pub fn hide(_hwnd: isize) {}
     pub fn cursor_pos() -> Option<Point<f32>> {
         None
