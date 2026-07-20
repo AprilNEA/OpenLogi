@@ -51,13 +51,18 @@ pub enum ButtonId {
     /// The HID++ gesture button on MX-line devices. The press itself
     /// fires the bound action; swipe directions are P1.5 territory.
     GestureButton,
+    /// The MX Master 4 Action Ring pad — the force-sensitive ridged thumb pad,
+    /// captured over HID++ analytics events. With the default [`Binding::Ring`]
+    /// a tap opens the on-screen ring; bound to a [`Binding::Single`] action, a
+    /// tap fires that action directly instead.
+    ActionRing,
 }
 
 impl ButtonId {
     /// Every rebindable button in declaration (physical front-to-side) order —
     /// the iteration source for default-binding seeding and the popover
     /// trigger list.
-    pub const ALL: [ButtonId; 10] = [
+    pub const ALL: [ButtonId; 11] = [
         ButtonId::LeftClick,
         ButtonId::RightClick,
         ButtonId::MiddleClick,
@@ -68,6 +73,7 @@ impl ButtonId {
         ButtonId::ThumbwheelScrollUp,
         ButtonId::ThumbwheelScrollDown,
         ButtonId::GestureButton,
+        ButtonId::ActionRing,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -99,6 +105,7 @@ impl ButtonId {
             ButtonId::ThumbwheelScrollUp => "Thumb Wheel Up",
             ButtonId::ThumbwheelScrollDown => "Thumb Wheel Down",
             ButtonId::GestureButton => "Gesture Button",
+            ButtonId::ActionRing => "Action Ring",
         }
     }
 }
@@ -169,6 +176,102 @@ impl GestureDirection {
 }
 
 impl fmt::Display for GestureDirection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// One of the eight sectors of the on-screen Action Ring, clockwise from the
+/// top. The names are compass points — deliberately disjoint from every
+/// [`Action`] variant name *and* every [`GestureDirection`] name, because the
+/// untagged [`Binding`] routing distinguishes its arms purely by key names
+/// (see the [`Binding`] serialization notes).
+///
+/// Variant identifiers are TOML-stable: renames are migration events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RingSlot {
+    /// Straight up (12 o'clock).
+    North,
+    /// Up-right (1:30).
+    NorthEast,
+    /// Right (3 o'clock).
+    East,
+    /// Down-right (4:30).
+    SouthEast,
+    /// Straight down (6 o'clock).
+    South,
+    /// Down-left (7:30).
+    SouthWest,
+    /// Left (9 o'clock).
+    West,
+    /// Up-left (10:30).
+    NorthWest,
+}
+
+impl RingSlot {
+    /// All eight slots, clockwise from the top — the iteration source for
+    /// default seeding and the overlay's sector layout.
+    pub const ALL: [RingSlot; 8] = [
+        RingSlot::North,
+        RingSlot::NorthEast,
+        RingSlot::East,
+        RingSlot::SouthEast,
+        RingSlot::South,
+        RingSlot::SouthWest,
+        RingSlot::West,
+        RingSlot::NorthWest,
+    ];
+
+    /// Human-readable label for tooltips and the binding UI.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            RingSlot::North => "Top",
+            RingSlot::NorthEast => "Top Right",
+            RingSlot::East => "Right",
+            RingSlot::SouthEast => "Bottom Right",
+            RingSlot::South => "Bottom",
+            RingSlot::SouthWest => "Bottom Left",
+            RingSlot::West => "Left",
+            RingSlot::NorthWest => "Top Left",
+        }
+    }
+
+    /// Arrow glyph for compact list rendering, pointing at the slot's
+    /// position on the ring.
+    #[must_use]
+    pub fn glyph(self) -> &'static str {
+        match self {
+            RingSlot::North => "↑",
+            RingSlot::NorthEast => "↗",
+            RingSlot::East => "→",
+            RingSlot::SouthEast => "↘",
+            RingSlot::South => "↓",
+            RingSlot::SouthWest => "↙",
+            RingSlot::West => "←",
+            RingSlot::NorthWest => "↖",
+        }
+    }
+
+    /// The slot's centre angle in degrees, measured clockwise from straight
+    /// up — the overlay's sector geometry (each sector spans ±22.5° around
+    /// this).
+    #[must_use]
+    pub fn angle_degrees(self) -> f32 {
+        match self {
+            RingSlot::North => 0.0,
+            RingSlot::NorthEast => 45.0,
+            RingSlot::East => 90.0,
+            RingSlot::SouthEast => 135.0,
+            RingSlot::South => 180.0,
+            RingSlot::SouthWest => 225.0,
+            RingSlot::West => 270.0,
+            RingSlot::NorthWest => 315.0,
+        }
+    }
+}
+
+impl fmt::Display for RingSlot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.label())
     }
@@ -466,15 +569,18 @@ impl KeyCombo {
 /// table keyed by [`GestureDirection`] names (`Up`/`Down`/`Left`/`Right`/
 /// `Click`).
 ///
-/// The two arms are disambiguated by the **zero overlap** between [`Action`]
-/// variant names and [`GestureDirection`] variant names — untagged tries
-/// `Single(Action)` first, and a table keyed by `Up` etc. cannot parse as an
-/// externally-tagged `Action`, so it falls through to `Gesture`. A payload
-/// action like `{ SetDpiPreset = 2 }` is a valid externally-tagged `Action`, so
-/// it stays `Single` and never reaches the `Gesture` arm. This invariant is the
-/// entire safety basis for untagged routing; the `binding_untagged_*` tests
-/// guard it (a future `Action` named `Up`/`Down`/`Left`/`Right`/`Click` would
-/// silently mis-route, and those tests would fail).
+/// The arms are disambiguated by the **zero overlap** between [`Action`]
+/// variant names, [`GestureDirection`] variant names, and [`RingSlot`] variant
+/// names — untagged tries `Single(Action)` first; a table keyed by `Up` etc.
+/// cannot parse as an externally-tagged `Action`, so it falls through to
+/// `Gesture`; a table keyed by compass names (`North` etc.) fails both and
+/// lands on `Ring`. A payload action like `{ SetDpiPreset = 2 }` is a valid
+/// externally-tagged `Action`, so it stays `Single` and never reaches the map
+/// arms. This invariant is the entire safety basis for untagged routing; the
+/// `binding_*_routes_*` tests guard it (a future `Action` named after a
+/// direction or compass point — or a [`RingSlot`] named like a
+/// [`GestureDirection`] — would silently mis-route, and those tests would
+/// fail).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Binding {
@@ -484,6 +590,12 @@ pub enum Binding {
     /// committed swipe direction, with [`GestureDirection::Click`] holding the
     /// plain-click (no-swipe) action.
     Gesture(BTreeMap<GestureDirection, Action>),
+    /// Per-sector sub-bindings for the Action Ring pad: a tap opens the
+    /// on-screen ring and the second tap fires the hovered sector's action.
+    /// Appended after [`Gesture`](Binding::Gesture) — untagged tries arms in
+    /// order, so an **empty** table keeps routing to `Gesture` as it always
+    /// has (ring maps are seeded with all eight slots and are never empty).
+    Ring(BTreeMap<RingSlot, Action>),
 }
 
 impl Binding {
@@ -493,6 +605,10 @@ impl Binding {
     /// when a gesture binding has no explicit `Click`.
     ///
     /// Lets the click-dispatch path stay binding-shape-agnostic.
+    ///
+    /// A [`Ring`](Binding::Ring) binding has no click action: the tap's job is
+    /// opening the on-screen ring (driven off the binding shape, not an
+    /// [`Action`]), so the single-action projection is [`Action::None`].
     #[must_use]
     pub fn click_action(&self) -> Action {
         match self {
@@ -501,16 +617,27 @@ impl Binding {
                 .get(&GestureDirection::Click)
                 .cloned()
                 .unwrap_or(Action::None),
+            Binding::Ring(_) => Action::None,
         }
     }
 
     /// The action bound to `direction`, if this is a gesture binding.
-    /// [`Single`](Binding::Single) has no directions and returns `None`.
+    /// The other arms have no directions and return `None`.
     #[must_use]
     pub fn direction_action(&self, direction: GestureDirection) -> Option<&Action> {
         match self {
-            Binding::Single(_) => None,
+            Binding::Single(_) | Binding::Ring(_) => None,
             Binding::Gesture(map) => map.get(&direction),
+        }
+    }
+
+    /// The action bound to `slot`, if this is a ring binding. The other arms
+    /// have no slots and return `None`.
+    #[must_use]
+    pub fn ring_action(&self, slot: RingSlot) -> Option<&Action> {
+        match self {
+            Binding::Single(_) | Binding::Gesture(_) => None,
+            Binding::Ring(map) => map.get(&slot),
         }
     }
 
@@ -519,6 +646,13 @@ impl Binding {
     #[must_use]
     pub fn is_gesture(&self) -> bool {
         matches!(self, Binding::Gesture(_))
+    }
+
+    /// Whether a tap on this binding's button opens the on-screen ring (the
+    /// [`Ring`](Binding::Ring) arm).
+    #[must_use]
+    pub fn is_ring(&self) -> bool {
+        matches!(self, Binding::Ring(_))
     }
 
     /// Promote a [`Single`](Binding::Single) binding in place to a
@@ -544,6 +678,19 @@ impl Binding {
             for dir in GestureDirection::ALL {
                 map.entry(dir)
                     .or_insert_with(|| default_gesture_binding(dir));
+            }
+        }
+    }
+
+    /// Fill any unbound slots of a [`Ring`](Binding::Ring) binding with their
+    /// canonical [`default_ring_binding`], so the overlay always renders a full
+    /// eight-sector ring even from a hand-edited sparse config. A no-op on the
+    /// other arms and on slots already bound.
+    pub fn fill_ring_defaults(&mut self) {
+        if let Binding::Ring(map) = self {
+            for slot in RingSlot::ALL {
+                map.entry(slot)
+                    .or_insert_with(|| default_ring_binding(slot));
             }
         }
     }
@@ -758,6 +905,10 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollRight,
         ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
         ButtonId::GestureButton => Action::MissionControl,
+        // Vestigial like GestureButton's entry: the Action Ring defaults to
+        // Binding::Ring (see default_binding_for), whose tap opens the ring
+        // rather than firing a single action.
+        ButtonId::ActionRing => Action::None,
     }
 }
 
@@ -772,6 +923,24 @@ pub fn default_gesture_binding(direction: GestureDirection) -> Action {
         GestureDirection::Left => Action::PrevTab,
         GestureDirection::Right => Action::NextTab,
         GestureDirection::Click => Action::AppExpose,
+    }
+}
+
+/// Per-sector defaults for the Action Ring: opposing pairs (copy/paste,
+/// undo/redo) on the cardinal slots, with capture, media, and window controls
+/// on the diagonals — a productivity set in the spirit of the Options+ ring,
+/// shown on first run until the user rebinds the slots.
+#[must_use]
+pub fn default_ring_binding(slot: RingSlot) -> Action {
+    match slot {
+        RingSlot::North => Action::Copy,
+        RingSlot::NorthEast => Action::CaptureRegion,
+        RingSlot::East => Action::Redo,
+        RingSlot::SouthEast => Action::PlayPause,
+        RingSlot::South => Action::Paste,
+        RingSlot::SouthWest => Action::ShowDesktop,
+        RingSlot::West => Action::Undo,
+        RingSlot::NorthWest => Action::MissionControl,
     }
 }
 
@@ -795,6 +964,12 @@ pub fn default_binding_for(button: ButtonId) -> Binding {
             GestureDirection::ALL
                 .into_iter()
                 .map(|d| (d, default_gesture_binding(d)))
+                .collect(),
+        ),
+        ButtonId::ActionRing => Binding::Ring(
+            RingSlot::ALL
+                .into_iter()
+                .map(|s| (s, default_ring_binding(s)))
                 .collect(),
         ),
         other => Binding::Single(default_binding(other)),
@@ -917,6 +1092,67 @@ mod tests {
                 "a {dir}-keyed table must route to Gesture, not Single"
             );
         }
+    }
+
+    #[test]
+    fn binding_ring_roundtrips() {
+        let map: BTreeMap<RingSlot, Action> = RingSlot::ALL
+            .into_iter()
+            .map(|s| (s, default_ring_binding(s)))
+            .collect();
+        let mut bindings = BTreeMap::new();
+        bindings.insert(ButtonId::ActionRing, Binding::Ring(map.clone()));
+        let back = binding_roundtrip(bindings);
+        assert_eq!(back[&ButtonId::ActionRing], Binding::Ring(map));
+    }
+
+    /// The ring-side untagged-routing guard, including the sparse case: a table
+    /// keyed by ANY single [`RingSlot`] name must land on [`Binding::Ring`] —
+    /// never parse as a valid externally-tagged [`Action`] (which would route
+    /// `Single`) and never satisfy the [`GestureDirection`]-keyed map (which
+    /// would route `Gesture`). A collision in either namespace fails here.
+    #[test]
+    fn binding_ring_slot_keyed_table_routes_to_ring() {
+        for slot in RingSlot::ALL {
+            let toml = format!("bindings.ActionRing.{slot:?} = \"None\"");
+            let parsed = toml::from_str::<BindingWrapper>(&toml).expect("deserialize");
+            assert!(
+                matches!(parsed.bindings[&ButtonId::ActionRing], Binding::Ring(_)),
+                "a {slot:?}-keyed table must route to Ring, not Single/Gesture"
+            );
+        }
+    }
+
+    #[test]
+    fn ring_default_covers_every_slot_and_projects_no_click_action() {
+        let binding = default_binding_for(ButtonId::ActionRing);
+        let Binding::Ring(map) = &binding else {
+            panic!("ActionRing must default to a Ring binding, got {binding:?}");
+        };
+        assert_eq!(map.len(), RingSlot::ALL.len(), "all eight slots seeded");
+        // The pad's tap opens the ring — the single-action projection the
+        // agent-side dispatch reads must be a no-op, or a tap would both open
+        // the ring and fire an action.
+        assert_eq!(binding.click_action(), Action::None);
+        assert!(binding.is_ring());
+        assert_eq!(
+            binding.ring_action(RingSlot::North),
+            Some(&default_ring_binding(RingSlot::North))
+        );
+    }
+
+    #[test]
+    fn fill_ring_defaults_completes_a_sparse_map_preserving_user_choices() {
+        let mut sparse = BTreeMap::new();
+        sparse.insert(RingSlot::East, Action::LockScreen);
+        let mut binding = Binding::Ring(sparse);
+        binding.fill_ring_defaults();
+        let Binding::Ring(map) = &binding else {
+            panic!("fill_ring_defaults must not change the arm");
+        };
+        assert_eq!(map.len(), RingSlot::ALL.len());
+        assert_eq!(map[&RingSlot::East], Action::LockScreen, "user choice kept");
+        assert_eq!(map[&RingSlot::North], default_ring_binding(RingSlot::North));
     }
 
     /// The collision case: a payload [`Action`] also serializes as a single-key

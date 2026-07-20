@@ -271,6 +271,7 @@ mod tests {
             thumbwheel_sensitivity: Arc::new(0.into()),
             capture_channel: Arc::new(RwLock::new(None)),
             receiver_access: ReceiverAccess::default(),
+            ring: openlogi_agent_core::ring::RingChannel::default(),
         }
     }
 

@@ -40,6 +40,7 @@ mod i18n;
 mod ipc_client;
 mod mouse_model;
 mod platform;
+mod ring;
 mod state;
 mod theme;
 mod windows;
@@ -156,6 +157,7 @@ fn main() -> Result<()> {
         updates: mut ipc_updates,
         commands: ipc_commands,
         pairing: mut ipc_pairing,
+        ring: mut ipc_ring,
     } = ipc_client::spawn(std::time::Duration::from_secs(2));
 
     // Manual asset actions (Settings → Assets): Refresh / Clear cache. The
@@ -200,6 +202,11 @@ fn main() -> Result<()> {
         // through the agent over IPC; the agent's pairing long-poll feeds events
         // back into this global via the select loop below.
         cx.set_global(windows::add_device::PairingUi::Idle);
+
+        // The Action Ring overlay controller: pad presses from the agent's
+        // ring long-poll (select loop below) open it / confirm a selection,
+        // and it fires the chosen action back through the command channel.
+        ring::init(ipc_commands.clone(), cx);
 
         // The Settings → Assets buttons drive the asset sync (which lives on
         // the select loop below) through this global.
@@ -481,6 +488,10 @@ fn main() -> Result<()> {
                         cx.update(|cx| {
                             windows::add_device::apply_update(cx, update);
                         });
+                    }
+                    Some(press) = ipc_ring.recv() => {
+                        tracing::debug!(seq = press.seq, "action ring press received");
+                        cx.update(ring::on_pad_press);
                     }
                     Some(cmd) = gui_cmd_rx.recv() => {
                         cx.update(|cx| dispatch_gui_command(cmd, cx));

@@ -1130,6 +1130,30 @@ impl AppState {
         )
     }
 
+    /// The eight Action Ring sector actions for the selected device, defaults
+    /// filled — what the ring overlay renders and fires. A non-ring stored
+    /// binding (the pad demoted to a single action) still yields the default
+    /// map: the agent only routes presses to the overlay while the binding is
+    /// ring-shaped, so this is display data, never dispatch policy.
+    #[must_use]
+    pub fn ring_slots_for_current(&self) -> Vec<(openlogi_core::binding::RingSlot, Action)> {
+        use openlogi_core::binding::{RingSlot, default_binding_for};
+        let stored = self
+            .current_record()
+            .map(|r| r.config_key.clone())
+            .and_then(|key| self.config.bindings_for(&key).remove(&ButtonId::ActionRing))
+            .filter(Binding::is_ring);
+        let mut binding = stored.unwrap_or_else(|| default_binding_for(ButtonId::ActionRing));
+        binding.fill_ring_defaults();
+        RingSlot::ALL
+            .into_iter()
+            .map(|slot| {
+                let action = binding.ring_action(slot).cloned().unwrap_or(Action::None);
+                (slot, action)
+            })
+            .collect()
+    }
+
     fn gesture_bindings_for_current(&self) -> BTreeMap<GestureDirection, Action> {
         let Some(key) = self.current_record().map(|r| r.config_key.as_str()) else {
             return BTreeMap::new();
@@ -1180,6 +1204,18 @@ impl AppState {
 
     /// Update a single gesture-button sub-binding in memory, on disk, and in the
     /// shared gesture map the watcher thread reads.
+    /// Persist one Action Ring slot for the selected device and have the
+    /// agent reload. The overlay reads its slots from this config on every
+    /// open, so the next ring already shows the change.
+    pub fn commit_ring_binding(&mut self, slot: openlogi_core::binding::RingSlot, action: Action) {
+        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
+            debug!(?slot, "no active device key — ring binding edit ignored");
+            return;
+        };
+        self.config.set_ring_slot(&key, slot, action);
+        self.persist_and_reload("ring binding");
+    }
+
     pub fn commit_gesture_binding(&mut self, direction: GestureDirection, action: Action) {
         let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
             debug!(

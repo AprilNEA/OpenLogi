@@ -1,6 +1,6 @@
 use hidpp::protocol::v20;
 
-use super::{ControlId, ReprogControlsEvent, decode_full_event};
+use super::{AnalyticsKeyEvent, ControlId, ReprogControlsEvent, decode_full_event};
 
 /// An unsolicited `0x1b04` event decoded for OpenLogi's gesture pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +17,11 @@ pub enum RawControlEvent {
         /// Vertical delta (`+` = down, in the device's raw units).
         dy: i16,
     },
+    /// `analyticsKeyEvents`: up to five `(cid, event)` entries from controls
+    /// armed for analytics reporting — the MX Master 4 Action Ring pad's event
+    /// path (`event` `0x01` = press, `0x00` = release). A zero CID is an empty
+    /// slot.
+    AnalyticsKeys([AnalyticsKeyEvent; 5]),
 }
 
 impl RawControlEvent {
@@ -36,8 +41,8 @@ impl TryFrom<ReprogControlsEvent> for RawControlEvent {
                 Ok(Self::DivertedButtons(cids.map(ControlId::into)))
             }
             ReprogControlsEvent::DivertedRawMouseXy { dx, dy } => Ok(Self::RawXy { dx, dy }),
-            ReprogControlsEvent::AnalyticsKeyEvents(_)
-            | ReprogControlsEvent::DivertedRawWheel { .. } => Err(event),
+            ReprogControlsEvent::AnalyticsKeyEvents(entries) => Ok(Self::AnalyticsKeys(entries)),
+            ReprogControlsEvent::DivertedRawWheel { .. } => Err(event),
         }
     }
 }
@@ -107,12 +112,48 @@ mod tests {
     }
 
     #[test]
+    fn decodes_analytics_press_and_release_entries() {
+        let mut p = [0u8; 16];
+        // Entry 0: Action Ring pad press; entry 1: companion CID release.
+        p[0..2].copy_from_slice(&crate::reprog_controls::ACTION_RING_CID.to_be_bytes());
+        p[2] = 0x01;
+        p[3..5].copy_from_slice(&0x0050u16.to_be_bytes());
+        p[5] = 0x00;
+        let decoded = decode_event(&event(2, 0, p), 2, 7);
+        let Some(RawControlEvent::AnalyticsKeys(entries)) = decoded else {
+            panic!("analytics key events should decode, got {decoded:?}");
+        };
+        assert_eq!(
+            entries[0],
+            AnalyticsKeyEvent {
+                cid: ControlId(crate::reprog_controls::ACTION_RING_CID),
+                event: 0x01,
+            },
+            "press entries carry event 0x01"
+        );
+        assert_eq!(
+            entries[1],
+            AnalyticsKeyEvent {
+                cid: ControlId(0x0050),
+                event: 0x00,
+            },
+            "release entries carry event 0x00"
+        );
+        assert_eq!(
+            entries[2],
+            AnalyticsKeyEvent::default(),
+            "unused slots decode as zero CIDs"
+        );
+    }
+
+    #[test]
     fn ignores_responses_and_foreign_messages() {
         let p = [0u8; 16];
         // software_id != 0 marks a request response, not an event.
         assert_eq!(decode_event(&event(0, 5, p), 2, 7), None);
-        // Right device + feature, but an event outside the gesture-control path.
-        assert_eq!(decode_event(&event(2, 0, p), 2, 7), None);
+        // Right device + feature, but an event outside the gesture-control
+        // path (function 4 = raw wheel, which OpenLogi discards).
+        assert_eq!(decode_event(&event(4, 0, p), 2, 7), None);
         // Wrong feature index.
         assert_eq!(decode_event(&event(0, 0, p), 2, 9), None);
     }

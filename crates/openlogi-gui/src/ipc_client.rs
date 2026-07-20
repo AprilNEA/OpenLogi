@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 
 use openlogi_agent_core::ipc::{
     AgentClient, AgentStatus, InventoryHealth, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingUpdate,
+    PairingFailure, PairingUpdate, RingPress,
 };
+use openlogi_core::binding::Action;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
@@ -101,15 +102,21 @@ pub enum Command {
     /// auto-disables it once polls stop.
     #[cfg(all(target_os = "macos", debug_assertions))]
     PollEventMonitor(oneshot::Sender<Vec<openlogi_agent_core::ipc::MonitorEvent>>),
+    /// Fire one bound action through the agent's dispatch path — the ring
+    /// overlay's selected sector. Fire-and-forget like the other "apply now"
+    /// writes.
+    ExecuteAction(Action),
 }
 
 /// Handle the GUI holds to talk to the agent: a stream of poll updates, a
-/// sender for device commands, and a stream of pairing events (long-polled on a
-/// separate connection so a held pairing poll never stalls inventory).
+/// sender for device commands, and streams of pairing events and Action Ring
+/// presses (each long-polled on its own connection so a held poll never stalls
+/// inventory — and a held pairing poll never delays a ring press).
 pub struct IpcClient {
     pub updates: mpsc::UnboundedReceiver<GuiUpdate>,
     pub commands: mpsc::UnboundedSender<Command>,
     pub pairing: mpsc::UnboundedReceiver<PairingUpdate>,
+    pub ring: mpsc::UnboundedReceiver<RingPress>,
 }
 
 /// Spawn the IPC client thread. Returns immediately; the thread connects (and
@@ -119,6 +126,7 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
     let (update_tx, updates) = mpsc::unbounded_channel();
     let (commands, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
     let (pairing_tx, pairing) = mpsc::unbounded_channel();
+    let (ring_tx, ring) = mpsc::unbounded_channel();
 
     let spawn_result = std::thread::Builder::new()
         .name("openlogi-ipc-client".into())
@@ -134,9 +142,11 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
                 }
             };
             rt.block_on(async move {
-                // Pairing events stream on their own connection + long-poll so
-                // a held next_pairing never delays the snapshot poll.
+                // Pairing events and ring presses stream on their own
+                // connections + long-polls so a held poll never delays the
+                // snapshot poll (or each other).
                 tokio::spawn(pairing_poll(pairing_tx.clone()));
+                tokio::spawn(ring_poll(ring_tx));
                 poll_loop(poll_period, &update_tx, &pairing_tx, &mut cmd_rx).await;
             });
         });
@@ -148,6 +158,7 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
         updates,
         commands,
         pairing,
+        ring,
     }
 }
 
@@ -293,6 +304,37 @@ async fn pairing_poll(tx: mpsc::UnboundedSender<PairingUpdate>) {
                     session_active = false;
                     let _ = tx.send(PairingUpdate::Failed(PairingFailure::AgentRestarted));
                 }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+/// Long-poll the agent's Action Ring press stream on a dedicated connection.
+/// A press opens (or confirms a selection in) the overlay, so latency is the
+/// whole point — the poll sits held at the agent and answers the instant the
+/// pad is tapped. When the pad is idle the agent returns `None` at its hold
+/// window and we re-poll. Runs for the client's lifetime.
+async fn ring_poll(tx: mpsc::UnboundedSender<RingPress>) {
+    let mut client: Option<AgentClient> = None;
+    loop {
+        let Ok(live) = ensure(&mut client).await else {
+            tokio::time::sleep(Duration::from_secs(1)).await; // agent not up yet
+            continue;
+        };
+        // The agent holds the poll ~20s; give the request a bit longer so the
+        // agent answers (with a press or None) before the client deadline.
+        let mut ctx = context::current();
+        ctx.deadline = Instant::now() + Duration::from_secs(25);
+        match live.next_ring_press(ctx).await {
+            Ok(Some(press)) => {
+                if tx.send(press).is_err() {
+                    return; // GUI dropped the receiver → stop
+                }
+            }
+            Ok(None) => {}
+            Err(_) => {
+                client = None; // connection dropped (agent restart) — reconnect
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
@@ -576,6 +618,9 @@ async fn handle(
         #[cfg(all(target_os = "macos", debug_assertions))]
         Command::PollEventMonitor(reply) => {
             let _ = reply.send(rpc_result(client.poll_event_monitor(ctx).await)?);
+        }
+        Command::ExecuteAction(action) => {
+            client.execute_action(ctx, action).await.map_err(|_| ())?;
         }
     }
     Ok(())

@@ -22,10 +22,12 @@ use crate::mouse_model::leader_lines::{
     Geometry as LeaderGeometry, Label, Side, paint as paint_leader_lines,
 };
 use crate::mouse_model::picker::{
-    GESTURE_BUTTON_ICON, action_icon_path, action_picker, gesture_overview,
+    GESTURE_BUTTON_ICON, RING_BUTTON_ICON, action_icon_path, action_picker, gesture_overview,
+    ring_overview,
 };
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
+use openlogi_core::binding::RingSlot;
 
 const SIDE_W: f32 = 180.;
 const SIDE_GAP: f32 = 24.;
@@ -62,6 +64,10 @@ pub struct MouseModelView {
     /// state, so the popover's `on_open_change` — which runs outside paint — can
     /// reset it without tripping gpui's render-only guard.
     gesture_active_dir: Option<GestureDirection>,
+    /// Which ring slot the open Action Ring menu has activated (so its level-2
+    /// flyout card shows) — the ring counterpart of
+    /// [`Self::gesture_active_dir`].
+    ring_active_slot: Option<RingSlot>,
     _state_obs: Subscription,
 }
 
@@ -72,6 +78,7 @@ impl MouseModelView {
         Self {
             hovered: None,
             gesture_active_dir: None,
+            ring_active_slot: None,
             _state_obs: state_obs,
         }
     }
@@ -85,6 +92,17 @@ impl MouseModelView {
     /// `cx.notify()` to re-render.
     pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
         self.gesture_active_dir = dir;
+    }
+
+    /// The ring slot whose level-2 flyout is open, if any.
+    pub(crate) fn ring_selected_slot(&self) -> Option<RingSlot> {
+        self.ring_active_slot
+    }
+
+    /// Set (or clear, with `None`) the activated ring slot. Callers must
+    /// `cx.notify()` to re-render.
+    pub(crate) fn set_ring_selected_slot(&mut self, slot: Option<RingSlot>) {
+        self.ring_active_slot = slot;
     }
 }
 
@@ -161,6 +179,15 @@ impl Render for MouseModelView {
                         text: tr!("5 directions"),
                         is_default: false,
                         icon: Some(GESTURE_BUTTON_ICON),
+                    }
+                } else if label.id == ButtonId::ActionRing {
+                    // The ring's card summarizes its slot map — its single-
+                    // action projection is deliberately `None` and would
+                    // mislabel the pad as "Do Nothing".
+                    BindingLabel {
+                        text: tr!("8 actions"),
+                        is_default: false,
+                        icon: Some(RING_BUTTON_ICON),
                     }
                 } else {
                     // `bindings` is seeded for every `ButtonId::ALL` (agent-core
@@ -456,6 +483,36 @@ where
         .content(move |_state, _window, cx| gesture_overview(&view, cx))
 }
 
+/// Wrap `trigger` in a left-click [`Popover`] hosting the Action Ring's
+/// customization menu (see [`ring_overview`]) — the ring counterpart of
+/// [`gesture_overview_popover`], resetting the activated slot on close so the
+/// next open starts on the compass grid.
+fn ring_overview_popover<Tr>(
+    popover_id: impl Into<ElementId>,
+    anchor: Anchor,
+    trigger: Tr,
+    view: Entity<MouseModelView>,
+) -> impl IntoElement
+where
+    Tr: Selectable + IntoElement + 'static,
+{
+    let view_reset = view.clone();
+    Popover::new(popover_id)
+        .appearance(false)
+        .mouse_button(MouseButton::Left)
+        .anchor(anchor)
+        .trigger(trigger)
+        .on_open_change(move |open, _window, cx| {
+            if !*open {
+                view_reset.update(cx, |v, vcx| {
+                    v.set_ring_selected_slot(None);
+                    vcx.notify();
+                });
+            }
+        })
+        .content(move |_state, _window, cx| ring_overview(&view, cx))
+}
+
 /// Position the popover wrapper at the label's slot in the side gutter and
 /// host a Popover whose trigger is the label card itself. Same picker
 /// content as the hotspot dot — clicking either entry point lands on the
@@ -492,6 +549,14 @@ fn label_popover(
     };
     let popover: AnyElement = if Some(label.id) == gesture_owner {
         gesture_overview_popover(
+            ("label-popover", idx),
+            Anchor::TopLeft,
+            trigger,
+            view.clone(),
+        )
+        .into_any_element()
+    } else if label.id == ButtonId::ActionRing {
+        ring_overview_popover(
             ("label-popover", idx),
             Anchor::TopLeft,
             trigger,
@@ -721,6 +786,14 @@ fn hotspot_popover(
     // are off) no hotspot re-enters the gesture editor.
     let popover: AnyElement = if Some(hotspot.id) == gesture_owner {
         gesture_overview_popover(
+            ("hotspot-popover", idx),
+            Anchor::TopRight,
+            trigger,
+            view.clone(),
+        )
+        .into_any_element()
+    } else if hotspot.id == ButtonId::ActionRing {
+        ring_overview_popover(
             ("hotspot-popover", idx),
             Anchor::TopRight,
             trigger,

@@ -37,11 +37,65 @@ pub const FEATURE_ID: u16 = 0x1b04;
 /// Control ID of the MX-line dedicated gesture button (`Mouse_Gesture_Button`,
 /// Logitech "App_Switch_Gesture").
 ///
-/// MX Master 4 also has a separate Haptic Sense Panel in the thumb area. That
-/// panel is not this CID; it must be discovered from the device's `0x1b04`
-/// control table and supported explicitly before OpenLogi treats it as a
-/// bindable/capturable input.
+/// The MX Master 4's force-sensitive thumb pad (the Action Ring) is a separate
+/// control — see [`ACTION_RING_CID`].
 pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
+
+/// Control ID `0x00d7` ("Virtual Gesture Button") on the MX Master 4 —
+/// historically mistaken for the Action Ring pad's event path. **Do not divert
+/// it.**
+///
+/// It is the only control on the device advertising `force-raw-xy`, which made
+/// it look like the force pad. On real hardware (`wpid=b042`), diverting it
+/// with `force_raw_xy` hijacks the mouse's entire sensor stream and freezes
+/// the cursor, and a plain divert + raw-XY produces no pad events at all. The
+/// pad's real event path is `analyticsKeyEvents` on
+/// [`ACTION_RING_CID`]. Kept documented so the dead end is not
+/// rediscovered.
+pub const HAPTIC_PANEL_CID: u16 = 0x00d7;
+
+/// Control ID of the MX Master 4 Action Ring pad — the force-sensitive ridged
+/// thumb pad (eight dots in a ring) that drives the Actions Ring in Options+.
+///
+/// The only control in the device's `0x1b04` table advertising
+/// `analytics-events`; its presence there is how a capture session detects the
+/// pad. The pad is dormant until its `0x19c0` force threshold is written and
+/// silent until `analyticsKeyEvents` reporting is enabled — see
+/// `gesture::arm_controls`. Pad taps arrive on **this CID only**; see
+/// [`LEFT_BUTTON_CID`] for why the "companion" CIDs must never be armed in
+/// production.
+pub const ACTION_RING_CID: u16 = 0x01a0;
+
+/// Left mouse button control ID. With `analyticsKeyEvents` reporting enabled
+/// it reports **every physical left click** as a press/release pair — which is
+/// why Options+ arms it (click telemetry) and why OpenLogi's ring arming must
+/// not: with it armed, every click on the desktop opened the ring
+/// (hardware-confirmed 2026-07-20). Earlier discovery notes calling
+/// `0x0050`/`0x0051` "companions of the pad" were a misread of stray real
+/// clicks in those captures.
+pub const LEFT_BUTTON_CID: u16 = 0x0050;
+
+/// Right mouse button control ID — see [`LEFT_BUTTON_CID`]; same telemetry
+/// behaviour for right clicks.
+pub const RIGHT_BUTTON_CID: u16 = 0x0051;
+
+/// CIDs the *diagnostic* panel watcher arms — the pad plus the click-telemetry
+/// CIDs Options+ also arms, so `openlogi diag panel` shows the full analytics
+/// stream (pad taps AND clicks, each labeled by CID). Production ring capture
+/// arms [`ACTION_RING_CID`] alone.
+pub const PANEL_DIAG_ANALYTICS_CIDS: [u16; 3] =
+    [ACTION_RING_CID, LEFT_BUTTON_CID, RIGHT_BUTTON_CID];
+
+/// Control ID of the thumb-side "back" button (Logi's decimal `_c83` in the
+/// asset metadata). On the MX Master 4 the side buttons emit **no native
+/// HID button events at all** — hardware-confirmed 2026-07-20: with no
+/// Logitech software running they do nothing in any app — so the capture
+/// session diverts them and dispatches their bindings, the same job
+/// Options+ quietly does on this device.
+pub const BACK_CID: u16 = 0x0053;
+
+/// Control ID of the thumb-side "forward" button (`_c86`) — see [`BACK_CID`].
+pub const FORWARD_CID: u16 = 0x0056;
 
 /// Control IDs of the "DPI / ModeShift" button family. Whichever a device
 /// exposes (and can divert) is captured and mapped to
