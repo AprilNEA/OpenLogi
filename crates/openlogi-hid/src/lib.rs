@@ -20,6 +20,7 @@ mod transport;
 mod windows_hid;
 
 pub mod gesture;
+pub mod hidden_features;
 mod hires_wheel;
 pub mod hotplug;
 pub mod inventory;
