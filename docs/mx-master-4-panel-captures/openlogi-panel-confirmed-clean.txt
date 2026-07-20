@@ -1,0 +1,62 @@
+2026-07-20T09:07:57.848262Z  WARN openlogi_hid::inventory: node probe keeps failing — dropping its channel to reopen next tick
+2026-07-20T09:08:00.880293Z  WARN openlogi_hid::inventory: node probe keeps failing — dropping its channel to reopen next tick
+2026-07-20T09:08:03.885247Z  WARN openlogi_hid::inventory: node probe keeps failing — dropping its channel to reopen next tick
+device: MX Master 4 (slot 2 on receiver 97B76948A846C55A)
+arming Action Ring panel (analytics on CIDs 0x0050/0x0051) — press it now, 150s window
+
+[watch_panel] 0x1b04 feature index = 13
+[watch_panel] force-sensing feature present = true
+[watch_panel] force threshold set -> [00, 15, a3, 00]
+[watch_panel] analytics armed on 0x01a0
+[watch_panel] analytics armed on 0x0050
+[watch_panel] analytics armed on 0x0051
+  [  1] panel cid=0x0050  PRESS    (event=0x01)
+  [  2] panel cid=0x0050  RELEASE  (event=0x00)
+  [  3] panel cid=0x0050  PRESS    (event=0x01)
+  [  4] panel cid=0x0050  RELEASE  (event=0x00)
+  [  5] panel cid=0x0050  PRESS    (event=0x01)
+  [  6] panel cid=0x0050  RELEASE  (event=0x00)
+  [  7] panel cid=0x0050  PRESS    (event=0x01)
+  [  8] panel cid=0x0050  RELEASE  (event=0x00)
+  [  9] panel cid=0x0050  PRESS    (event=0x01)
+  [ 10] panel cid=0x0050  RELEASE  (event=0x00)
+  [ 11] panel cid=0x0050  PRESS    (event=0x01)
+  [ 12] panel cid=0x0050  RELEASE  (event=0x00)
+  [ 13] panel cid=0x0050  PRESS    (event=0x01)
+  [ 14] panel cid=0x0050  RELEASE  (event=0x00)
+  [ 15] panel cid=0x0050  PRESS    (event=0x01)
+  [ 16] panel cid=0x0050  RELEASE  (event=0x00)
+  [ 17] panel cid=0x0050  PRESS    (event=0x01)
+  [ 18] panel cid=0x0050  RELEASE  (event=0x00)
+  [ 19] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 20] panel cid=0x01a0  RELEASE  (event=0x00)
+  [ 21] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 22] panel cid=0x01a0  RELEASE  (event=0x00)
+  [ 23] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 24] panel cid=0x01a0  RELEASE  (event=0x00)
+  [ 25] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 26] panel cid=0x01a0  RELEASE  (event=0x00)
+  [ 27] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 28] panel cid=0x01a0  RELEASE  (event=0x00)
+  [ 29] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 30] panel cid=0x01a0  RELEASE  (event=0x00)
+  [ 31] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 32] panel cid=0x01a0  RELEASE  (event=0x00)
+  [ 33] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 34] panel cid=0x01a0  RELEASE  (event=0x00)
+  [ 35] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 36] panel cid=0x01a0  RELEASE  (event=0x00)
+  [ 37] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 38] panel cid=0x01a0  RELEASE  (event=0x00)
+  [ 39] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 40] panel cid=0x01a0  RELEASE  (event=0x00)
+  [ 41] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 42] panel cid=0x01a0  RELEASE  (event=0x00)
+  [ 43] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 44] panel cid=0x01a0  RELEASE  (event=0x00)
+  [ 45] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 46] panel cid=0x01a0  RELEASE  (event=0x00)
+  [ 47] panel cid=0x01a0  PRESS    (event=0x01)
+  [ 48] panel cid=0x01a0  RELEASE  (event=0x00)
+
+48 panel event(s) captured.
