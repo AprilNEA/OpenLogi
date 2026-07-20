@@ -10,12 +10,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt as _;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
+use openlogi_agent_core::hook_runtime;
 use openlogi_agent_core::ipc::{
     Agent, AgentSnapshot, AgentStatus, MonitorEvent, PROTOCOL_VERSION, PairingCommandError,
-    PairingUpdate,
+    PairingUpdate, RingPress,
 };
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::{hardware, transport};
+use openlogi_core::binding::Action;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
@@ -170,6 +172,19 @@ impl Agent for AgentServer {
 
     async fn poll_event_monitor(self, _: Context) -> Vec<MonitorEvent> {
         self.event_monitor.poll()
+    }
+
+    async fn next_ring_press(self, _: Context) -> Option<RingPress> {
+        self.shared.ring.next_press().await
+    }
+
+    async fn execute_action(self, _: Context, action: Action) {
+        info!(action = %action.label(), "ring overlay → action");
+        hook_runtime::dispatch_action(
+            &action,
+            &self.shared.dpi_cycle,
+            &self.shared.capture_channel,
+        );
     }
 }
 

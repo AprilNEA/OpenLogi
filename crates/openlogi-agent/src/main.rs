@@ -162,6 +162,7 @@ async fn run(config: Config) {
         shared.capture_channel.clone(),
         shared.thumbwheel_sensitivity.clone(),
         shared.receiver_access.clone(),
+        shared.ring.clone(),
     );
 
     let mut inventory_rx = watchers::inventory::spawn(Duration::from_secs(2));

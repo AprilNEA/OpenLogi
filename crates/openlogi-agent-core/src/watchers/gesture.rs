@@ -33,6 +33,7 @@ use tracing::{debug, warn};
 use crate::DpiCycleState;
 use crate::hook_runtime::{self, SharedHookMaps};
 use crate::receiver_access::ReceiverAccess;
+use crate::ring::RingChannel;
 
 /// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
 /// direction). The watcher reads it to map a captured swipe to a bound action.
@@ -81,6 +82,7 @@ pub fn spawn(
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
+    ring: RingChannel,
 ) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -100,6 +102,7 @@ pub fn spawn(
             capture_channel,
             thumbwheel_sensitivity,
             receiver_access,
+            ring,
         ));
     });
 }
@@ -151,6 +154,7 @@ async fn manage(
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
+    ring: RingChannel,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
     // (route, capture_thumbwheel, divert_gesture_button)
@@ -180,6 +184,7 @@ async fn manage(
                     &dpi_cycle,
                     &capture_channel,
                     &thumbwheel_sensitivity,
+                    &ring,
                 );
             }
             _ = ticker.tick() => {
@@ -308,6 +313,10 @@ enum WheelOutput {
 }
 
 /// Route one captured input to its bound action (or re-synthesised scroll).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the watcher's full shared-state set; bundling it would just relocate the list"
+)]
 fn dispatch(
     input: CapturedInput,
     accumulators: &mut WheelAccumulators,
@@ -316,6 +325,7 @@ fn dispatch(
     dpi_cycle: &Arc<RwLock<DpiCycleState>>,
     capture: &CaptureChannel,
     thumbwheel_sensitivity: &ThumbwheelSensitivity,
+    ring: &RingChannel,
 ) {
     match input {
         CapturedInput::Gesture(direction) => {
@@ -329,6 +339,13 @@ fn dispatch(
             } else {
                 debug!(?direction, "gesture with no binding — ignored");
             }
+        }
+        // A ring-shaped Action Ring binding routes the press to the GUI
+        // overlay instead of the single-action path (whose projection for a
+        // ring binding is deliberately `Action::None`).
+        CapturedInput::ButtonPressed(ButtonId::ActionRing) if ring.is_armed() => {
+            debug!("action ring press → overlay long-poll");
+            ring.push_press();
         }
         CapturedInput::ButtonPressed(button) => {
             let action = hook_maps

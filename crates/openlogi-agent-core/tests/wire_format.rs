@@ -24,8 +24,9 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_agent_core::ipc::{
     AgentRequest, AgentSnapshot, AgentStatus, FoundDevice, InventoryHealth, MonitorEvent,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate, RingPress,
 };
+use openlogi_core::binding::Action;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
@@ -61,7 +62,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 10);
+    assert_eq!(PROTOCOL_VERSION, 11);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -83,6 +84,20 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::NextPairing {}, "0d");
     assert_wire(&AgentRequest::Snapshot {}, "0e");
     assert_wire(&AgentRequest::PollEventMonitor {}, "0f");
+    assert_wire(&AgentRequest::NextRingPress {}, "10");
+    assert_wire(
+        &AgentRequest::ExecuteAction {
+            action: Action::Copy,
+        },
+        "1106",
+    );
+}
+
+#[test]
+fn ring_press() {
+    // Varint seq: single byte below 251, 0xfb + u16 LE above.
+    assert_wire(&RingPress { seq: 3 }, "03");
+    assert_wire(&RingPress { seq: 300 }, "fb2c01");
 }
 
 #[test]
