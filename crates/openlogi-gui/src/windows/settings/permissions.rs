@@ -1,5 +1,6 @@
 //! Permissions settings page (macOS / Linux).
 
+#[cfg(target_os = "macos")]
 use super::{
     App, AppState, InteractiveElement, Permission, SharedString, StatefulInteractiveElement, h_flex,
 };
@@ -11,7 +12,6 @@ use super::{
 };
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::platform::permissions;
-#[cfg(target_os = "macos")]
 use crate::theme::Typography as _;
 
 #[cfg_attr(
