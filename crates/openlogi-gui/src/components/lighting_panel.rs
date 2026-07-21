@@ -151,7 +151,7 @@ fn swatch(idx: usize, color: Rgb, current: &Lighting, pal: Palette) -> AnyElemen
     div()
         .id(("light-swatch", idx))
         .size(px(SWATCH))
-        .rounded_md()
+        .rounded(pal.control_radius)
         .border_2()
         .border_color(if selected {
             theme::accent()
@@ -179,7 +179,7 @@ fn toggle(current: &Lighting, pal: Palette) -> AnyElement {
         .id("light-toggle")
         .px_2()
         .py_1()
-        .rounded_md()
+        .rounded(pal.control_radius)
         .selected_border(on, pal)
         .selected_fill(on)
         .text_xs()

@@ -83,6 +83,12 @@ pub struct Palette {
     /// relationship (outer radius > inner radius) that a single flat radius
     /// can't express.
     pub card_radius: Pixels,
+    /// Corner radius for the small controls nested inside cards — chips, pills,
+    /// segmented items, toggles. The base `cx.theme().radius`, i.e. the same
+    /// radius the framework's own controls use, and smaller than
+    /// [`Palette::card_radius`] so a control's corner sits concentrically inside
+    /// its card's.
+    pub control_radius: Pixels,
 }
 
 /// Derive the app palette from the active gpui-component theme's semantic
@@ -105,6 +111,7 @@ pub fn palette(cx: &App) -> Palette {
         text_primary: t.foreground,
         text_muted: t.muted_foreground,
         card_radius: t.radius * 1.5,
+        control_radius: t.radius,
     }
 }
 

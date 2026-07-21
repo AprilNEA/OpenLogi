@@ -295,7 +295,7 @@ fn device_row(idx: usize, device: &FoundDevice, pal: Palette) -> impl IntoElemen
         .w_full()
         .px_4()
         .py_3()
-        .rounded_md()
+        .rounded(pal.control_radius)
         .border_1()
         .border_color(pal.border)
         .cursor_pointer()
