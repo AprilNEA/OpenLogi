@@ -3,6 +3,8 @@
 //! [`GestureOwner`], plus
 //! their serde `default_*` / `deserialize_*` helpers.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::binding::ButtonId;
@@ -259,6 +261,17 @@ where
         .parse()
         .unwrap_or(Rgb::WHITE))
 }
+
+/// Per-webcam UVC controls, keyed by control name (`brightness`, `focus`,
+/// `focus_auto`, …). Each value is the raw device unit (its scale comes from
+/// the camera's own min/max); auto toggles store 0/1. Persisted so values
+/// survive an unplug or reboot — the GUI re-applies them over USB when the
+/// camera is next viewed, since the hardware only retains them until it loses
+/// power. Serializes to the same TOML table the earlier fixed-field struct
+/// wrote, so existing saved controls load unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CameraControls(pub BTreeMap<String, i32>);
 
 /// Vertical wheel reporting resolution for HID++ `0x2121 HiResWheel`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -5043,14 +5043,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "openlogi-camera"
+version = "0.6.22"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.4",
+ "serde",
+ "tracing",
+ "windows 0.61.3",
+]
+
+[[package]]
 name = "openlogi-cli"
 version = "0.6.22"
 dependencies = [
  "anyhow",
  "clap",
  "openlogi-assets",
+ "openlogi-camera",
  "openlogi-core",
  "openlogi-hid",
+ "png 0.17.16",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -5092,6 +5105,7 @@ dependencies = [
  "opener",
  "openlogi-agent-core",
  "openlogi-assets",
+ "openlogi-camera",
  "openlogi-core",
  "openlogi-hid",
  "openlogi-hook",

@@ -221,6 +221,14 @@ fn main() -> Result<()> {
         .detach();
 
         cx.spawn(async move |cx| {
+            // Enumerate webcams off the UI thread: AVFoundation discovery can
+            // stall for hundreds of ms on first touch, which must never block
+            // the first paint (or, below, a snapshot merge mid-render).
+            let mut latest_cams = cx
+                .background_executor()
+                .spawn(async { openlogi_camera::enumerate_cameras() })
+                .await;
+
             // Install the hook-shared AppState up front, then open the window at
             // launch; closing it leaves the app live in the menu bar.
             cx.update(|cx| {
@@ -230,6 +238,7 @@ fn main() -> Result<()> {
                         initial_config,
                         &inventories,
                         &cache,
+                        &latest_cams,
                         ipc_commands,
                     ));
                 }
@@ -283,6 +292,9 @@ fn main() -> Result<()> {
             // that sync finishes, so a Clear's cache wipe never races the
             // in-flight fetch's writes and the manual fetch is never dropped.
             let mut deferred_manual: Option<AssetCommand> = None;
+            // Consecutive empty camera scans while cameras were showing — see
+            // the grace logic in the snapshot arm.
+            let mut camera_misses: u8 = 0;
             // Cleared when the IPC update channel closes (the client thread
             // died), so the select stops polling a closed receiver.
             let mut ipc_open = true;
@@ -290,6 +302,24 @@ fn main() -> Result<()> {
                 tokio::select! {
                     update = ipc_updates.recv(), if ipc_open => match update {
                         Some(ipc_client::GuiUpdate::Snapshot(update)) => {
+                        // Refresh the camera set off the UI thread (AVFoundation
+                        // discovery is far too slow for the render path) so the
+                        // merge below sees hot-plugs without ever stalling paint.
+                        // An empty scan gets a two-snapshot grace before it
+                        // evicts anything: a USB control seize (e.g. another
+                        // process's CLI) blinks the camera out of discovery for
+                        // a moment, and one blink must not tear down the card —
+                        // or the detail page — the user is looking at.
+                        let scanned = cx
+                            .background_executor()
+                            .spawn(async { openlogi_camera::enumerate_cameras() })
+                            .await;
+                        if scanned.is_empty() && !latest_cams.is_empty() && camera_misses < 2 {
+                            camera_misses += 1;
+                        } else {
+                            camera_misses = 0;
+                            latest_cams = scanned;
+                        }
                         // Keep the latest completed enumeration for the manual
                         // Refresh / Clear arm — a not-yet-ready agent's empty
                         // pre-enumeration list must not shrink it.
@@ -323,7 +353,7 @@ fn main() -> Result<()> {
                                 // window keeps the receivers the UI is still showing; the
                                 // manual-sync arm reuses `inventory_ready` above.
                                 let merged = inventory_ready
-                                    && state.refresh_inventories(&update.inventory, &cache, force_refresh);
+                                    && state.refresh_inventories(&update.inventory, &cache, force_refresh, &latest_cams);
                                 if inventory_ready {
                                     state.store_inventory_snapshot(&update.inventory);
                                 }
@@ -356,6 +386,16 @@ fn main() -> Result<()> {
                         // works via the AssetControl arm below.
                         let backoff_passed = last_sync_at
                             .is_none_or(|t| t.elapsed() >= sync_retry_delay(sync_attempts));
+                        // Cameras are enumerated on the UI side (UVC, not HID++),
+                        // so `asset_models` — built from the HID++ device list —
+                        // can't see them. Fold their synthesized models in so a
+                        // webcam's product art downloads like any other device's.
+                        let mut models = models;
+                        models.extend(
+                            latest_cams
+                                .iter()
+                                .map(|c| (state::camera_model_info(c), Some(c.name.clone()))),
+                        );
                         let pending: Vec<_> = models
                             .into_iter()
                             .filter(|m| !synced_keys.contains(&model_key(m)))
@@ -429,7 +469,7 @@ fn main() -> Result<()> {
                                 cache = asset::AssetResolver::new();
                                 cx.update(|cx| {
                                     let changed = cx.update_global::<AppState, _>(|state, _| {
-                                        state.refresh_inventories(&latest_inv, &cache, true)
+                                        state.refresh_inventories(&latest_inv, &cache, true, &latest_cams)
                                     });
                                     if changed {
                                         cx.refresh_windows();
@@ -443,6 +483,14 @@ fn main() -> Result<()> {
                                 let state = cx.global::<AppState>();
                                 (state.asset_models(), state.app_settings().asset_source)
                             });
+                            // Include the UI-side webcam models (see the snapshot
+                            // arm) so a manual Refresh fetches camera art too.
+                            let mut models = models;
+                            models.extend(
+                                latest_cams
+                                    .iter()
+                                    .map(|c| (state::camera_model_info(c), Some(c.name.clone()))),
+                            );
                             let tx = sync_tx.clone();
                             std::thread::spawn(move || {
                                 let keys = models.iter().map(model_key).collect();

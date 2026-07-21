@@ -39,9 +39,10 @@ pub(super) fn read_png_dimensions(path: &Path) -> std::io::Result<(u32, u32)> {
 }
 
 /// Look up the colour variant matching `ext` in an already-loaded depot
-/// manifest. Returns the `device_image` src filename or `None` when the
-/// manifest lacks that variant. Pure — the caller loads the manifest once
-/// (see [`load_manifest`]) and reuses it across candidate bases.
+/// manifest. Returns the `device_image` src filename — falling back to
+/// `device_camera_image`, the hero-render key webcam depots use instead — or
+/// `None` when the manifest lacks that variant. Pure — the caller loads the
+/// manifest once (see [`load_manifest`]) and reuses it across candidate bases.
 pub(super) fn variant_image_for(
     manifest: &DepotManifest,
     base_model_id: &str,
@@ -49,6 +50,7 @@ pub(super) fn variant_image_for(
 ) -> Option<String> {
     manifest
         .resource_for_variant(base_model_id, ext, "device_image")
+        .or_else(|| manifest.resource_for_variant(base_model_id, ext, "device_camera_image"))
         .map(str::to_string)
 }
 

@@ -42,6 +42,8 @@ pub enum DeviceKind {
     Joystick,
     /// Audio headsets paired through a receiver.
     Headset,
+    /// Logitech webcam (UVC), configured through `openlogi-camera`.
+    Camera,
     /// Not classified by any source — also the "no asset opinion" value
     /// [`DeviceKind::from_registry_type`] returns for unmodelled strings.
     Unknown,
@@ -68,6 +70,7 @@ impl DeviceKind {
             "gamepad" => Self::Gamepad,
             "joystick" => Self::Joystick,
             "headset" => Self::Headset,
+            "camera" => Self::Camera,
             _ => Self::Unknown,
         }
     }

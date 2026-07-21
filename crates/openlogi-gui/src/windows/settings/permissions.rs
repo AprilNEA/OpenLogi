@@ -18,14 +18,14 @@ use crate::theme::Typography as _;
     not(any(target_os = "macos", target_os = "linux")),
     allow(unused_variables)
 )]
-pub(super) fn permissions_page(pal: Palette) -> SettingPage {
+pub(super) fn permissions_page(pal: Palette, has_camera: bool) -> SettingPage {
     let page = SettingPage::new(tr!("Permissions"))
         .icon(IconName::Info)
         .resettable(false);
 
     #[cfg(target_os = "macos")]
-    let page = page.group(
-        SettingGroup::new()
+    let page = {
+        let mut group = SettingGroup::new()
             .item(permission_item(
                 "perm-accessibility",
                 tr!("Accessibility"),
@@ -58,8 +58,27 @@ pub(super) fn permissions_page(pal: Palette) -> SettingPage {
                 Permission::Bluetooth,
                 |_| permissions::bluetooth(),
                 pal,
-            )),
-    );
+            ));
+        // Camera access is only worth asking for once a Logitech webcam is
+        // actually connected — it then appears on the main page, and granting
+        // access turns on its live preview.
+        if has_camera {
+            group = group.item(permission_item(
+                "perm-camera",
+                tr!("Camera"),
+                tr!(
+                    "Your Logitech webcam shows up on the main page. Grant access to see its live preview — video never leaves your Mac."
+                ),
+                Permission::Camera,
+                |_| permissions::camera(),
+                pal,
+            ));
+        }
+        page.group(group)
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = has_camera;
 
     #[cfg(target_os = "linux")]
     let page = page.group(SettingGroup::new().item({

@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use openlogi_agent_core::device_order::DeviceStableId;
+use openlogi_camera::Camera;
 use openlogi_core::config::{Config, DeviceIdentity};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -64,6 +65,7 @@ pub(super) fn build_device_list(
     inventories: &[DeviceInventory],
     cache: &AssetResolver,
     config: &Config,
+    cameras: &[Camera],
 ) -> Vec<DeviceRecord> {
     let mut list = Vec::new();
     for inv in inventories {
@@ -138,8 +140,61 @@ pub(super) fn build_device_list(
         cache,
         &present_receivers,
     );
+    // Cameras are UVC, not HID++, so they come from a parallel discovery path
+    // (AVFoundation on macOS) rather than the receiver inventory. The caller
+    // enumerates them off the UI thread — discovery is too slow for the render
+    // path — so this assembly stays pure; the merge in
+    // `super::AppState::refresh_inventories` reconciles them by config_key.
+    for camera in cameras {
+        list.push(camera_record(camera, cache));
+    }
     sort_device_list(&mut list);
     list
+}
+
+/// A [`DeviceRecord`] for a Logitech UVC webcam. The `"camera-<unique_id>"`
+/// config key is what `components::camera_preview` parses back to open the
+/// stream; `route: None` and `capabilities: None` keep it out of every HID++
+/// path — its only detail surface is the live preview tab.
+///
+/// The asset registry keys cameras by their 4-hex USB product id (e.g. the
+/// StreamCam's `0893`), so a webcam's product render resolves through the same
+/// [`AssetResolver`] as HID++ devices once we synthesize a minimal
+/// [`DeviceModelInfo`] from the USB pid.
+fn camera_record(camera: &Camera, cache: &AssetResolver) -> DeviceRecord {
+    let config_key = format!("camera-{}", camera.unique_id);
+    let model_info = camera_model_info(camera);
+    let asset = cache.resolve(&model_info, Some(&camera.name));
+    DeviceRecord {
+        model_key: config_key.clone(),
+        config_key,
+        display_name: camera.name.clone(),
+        asset,
+        model_info: None,
+        codename: None,
+        serial_number: Some(camera.unique_id.clone()),
+        unit_id: [0; 4],
+        route: None,
+        kind: DeviceKind::Camera,
+        capabilities: None,
+        slot: 0,
+        online: true,
+        battery: None,
+    }
+}
+
+/// A minimal [`DeviceModelInfo`] standing in for a UVC camera, carrying just the
+/// USB product id in `model_ids[0]` so [`AssetResolver::resolve`] can match the
+/// registry's camera depots (which key on the 4-hex pid).
+pub(crate) fn camera_model_info(camera: &Camera) -> DeviceModelInfo {
+    DeviceModelInfo {
+        entity_count: 0,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports::default(),
+        model_ids: [camera.product_id, 0, 0],
+        extended_model_id: 0,
+    }
 }
 
 /// Append an offline placeholder for every known device not already present in
@@ -394,8 +449,8 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord, DeviceTransports,
-        append_offline_known, build_device_list, effective_kind, offline_record,
+        Camera, Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord,
+        DeviceTransports, append_offline_known, build_device_list, effective_kind, offline_record,
     };
 
     fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
@@ -462,7 +517,7 @@ mod tests {
     fn no_model_info_uses_receiver_slot_as_config_key() {
         let inv = inventory_with(vec![paired_device_no_model_info(1, Some(0x4076))]);
         let cache = AssetResolver::new();
-        let list = build_device_list(&[inv], &cache, &Config::default());
+        let list = build_device_list(&[inv], &cache, &Config::default(), &[]);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].config_key, "receiver:da2699e1:slot:1");
         assert_eq!(list[0].model_key, "wpid4076");
@@ -474,7 +529,7 @@ mod tests {
     fn no_model_info_falls_back_to_slot_when_no_wpid() {
         let inv = inventory_with(vec![paired_device_no_model_info(3, None)]);
         let cache = AssetResolver::new();
-        let list = build_device_list(&[inv], &cache, &Config::default());
+        let list = build_device_list(&[inv], &cache, &Config::default(), &[]);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].config_key, "receiver:da2699e1:slot:3");
         assert_eq!(list[0].model_key, "slot3");
@@ -484,7 +539,7 @@ mod tests {
     fn no_model_info_display_name_falls_back_to_slot() {
         let inv = inventory_with(vec![paired_device_no_model_info(2, Some(0x4051))]);
         let cache = AssetResolver::new();
-        let list = build_device_list(&[inv], &cache, &Config::default());
+        let list = build_device_list(&[inv], &cache, &Config::default(), &[]);
         assert_eq!(list[0].display_name, "Slot 2");
     }
 
@@ -619,5 +674,29 @@ mod tests {
             effective_kind(DeviceKind::Mouse, Some(DeviceKind::Unknown)),
             DeviceKind::Mouse
         );
+    }
+
+    #[test]
+    fn webcams_are_appended_as_camera_records() {
+        // A discovered UVC webcam joins the list as a routeless Camera record
+        // whose config key encodes its unique id (parsed back by the preview).
+        let camera = Camera {
+            name: "Logitech StreamCam".to_string(),
+            unique_id: "0x1123000046d0893".to_string(),
+            vendor_id: 0x046d,
+            product_id: 0x0893,
+            max_resolution: Some((1920, 1080)),
+            max_fps: Some(60),
+        };
+        let cache = AssetResolver::new();
+        let list = build_device_list(&[], &cache, &Config::default(), &[camera]);
+
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].kind, DeviceKind::Camera);
+        assert_eq!(list[0].config_key, "camera-0x1123000046d0893");
+        assert_eq!(list[0].display_name, "Logitech StreamCam");
+        assert!(list[0].route.is_none());
+        assert!(list[0].capabilities.is_none());
+        assert!(list[0].online);
     }
 }
