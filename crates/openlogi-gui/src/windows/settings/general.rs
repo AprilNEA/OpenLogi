@@ -5,6 +5,7 @@ use super::{
     FluentBuilder, IconName, IntoElement, ParentElement, SettingField, SettingGroup, SettingItem,
     SettingPage, Slider, SliderState, Styled, div, h_flex, px, theme, v_flex,
 };
+use crate::theme::Typography as _;
 
 pub(super) fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPage {
     let group = SettingGroup::new()
@@ -100,7 +101,7 @@ fn sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> AnyElement {
                 .child(
                     div()
                         .w(px(72.))
-                        .text_sm()
+                        .text_body()
                         .text_color(pal.text_muted)
                         .child(value.to_string()),
                 ),
@@ -108,7 +109,7 @@ fn sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> AnyElement {
         .when(is_default, |this| {
             this.child(
                 div()
-                    .text_xs()
+                    .text_caption()
                     .text_color(pal.text_muted)
                     .whitespace_nowrap()
                     .child(format!("({})", rust_i18n::t!("Default"))),

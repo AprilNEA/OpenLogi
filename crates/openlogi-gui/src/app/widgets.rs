@@ -3,7 +3,7 @@
 //! screens.
 
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled, div,
+    AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div,
     prelude::FluentBuilder as _, px, relative, rgb,
 };
 use gpui_component::{
@@ -16,7 +16,7 @@ use openlogi_hid::DeviceRoute;
 
 use super::AppView;
 use crate::state::AppState;
-use crate::theme::{self, Palette};
+use crate::theme::{self, Palette, Typography as _};
 
 /// "← Back" affordance on the detail screen; returns to the gallery without
 /// changing the active-device selection.
@@ -105,12 +105,7 @@ fn panel_card_inner(
                             .gap_2()
                             .text_color(pal.text_primary)
                             .child(Icon::new(icon).size_4().text_color(pal.text_muted))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(title),
-                            ),
+                            .child(div().text_subheading().child(title)),
                     )
                 })
                 .child(content),
@@ -131,7 +126,7 @@ pub(super) fn status_badge(online: bool, pal: Palette) -> impl IntoElement {
         .border_color(pal.border)
         .px_2()
         .py_1()
-        .text_xs()
+        .text_caption()
         .text_color(pal.text_muted)
         .child(div().size_1p5().rounded_full().bg(rgb(color)))
         .child(label)
@@ -149,7 +144,7 @@ pub(super) fn battery_summary(battery: &BatteryInfo, pal: Palette) -> impl IntoE
         .child(
             h_flex()
                 .justify_between()
-                .text_xs()
+                .text_caption()
                 .text_color(pal.text_muted)
                 .child(status)
                 .child(format!("{}%", battery.percentage)),

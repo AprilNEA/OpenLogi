@@ -9,6 +9,7 @@ use super::{
     Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter, ThemeMode, ThemeRegistry, div, h_flex, px,
     rgb, theme, v_flex,
 };
+use crate::theme::Typography as _;
 
 /// The Appearance page: light/dark mode, the theme grid, corner radius, and the
 /// interface language. Every theme here re-skins the whole app — the bespoke
@@ -189,7 +190,7 @@ fn mode_card(
                 .items_center()
                 .gap(px(6.))
                 .child(radio_dot(selected, accent, pal))
-                .child(div().text_sm().child(label)),
+                .child(div().text_body().child(label)),
         )
         .on_click(move |_, _, cx| on_click(cx))
 }
@@ -337,7 +338,7 @@ fn theme_picker(
 
     let grid = if themes.is_empty() {
         div()
-            .text_sm()
+            .text_body()
             .text_color(pal.text_muted)
             .child(tr!("No themes match “%{query}”.", query => query))
             .into_any_element()
@@ -496,7 +497,7 @@ fn theme_card(
                 .child(
                     div()
                         .overflow_hidden()
-                        .text_xs()
+                        .text_caption()
                         .text_color(pal.text_primary)
                         .child(name),
                 )
@@ -547,7 +548,7 @@ fn filter_chip(
         .py_1()
         .rounded_full()
         .border_1()
-        .text_xs()
+        .text_caption()
         .cursor_pointer()
         .map(|this| {
             if selected {

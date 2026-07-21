@@ -2,8 +2,8 @@
 //! four section bodies (Buttons, Pointer, Lighting, Device).
 
 use gpui::{
-    AnyElement, BorrowAppContext as _, Context, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
+    AnyElement, BorrowAppContext as _, Context, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     IconName,
@@ -27,7 +27,7 @@ use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AppState, DeviceRecord};
-use crate::theme::{HEADER_H, Palette, SCREEN_PAD, SelectableStyle as _};
+use crate::theme::{HEADER_H, Palette, SCREEN_PAD, SelectableStyle as _, Typography as _};
 
 /// Device-detail top bar, in three zones: a back affordance + device name
 /// (leading), the section tabs as a centred segmented control (middle), and the
@@ -66,8 +66,7 @@ pub(super) fn detail_header(
         .child(
             div()
                 .min_w_0()
-                .text_lg()
-                .font_weight(FontWeight::SEMIBOLD)
+                .text_heading()
                 .child(name),
         )
         // Flexible spacers on either side centre the segmented tabs in the space
@@ -221,13 +220,13 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             v_flex()
                 .child(
                     div()
-                        .text_sm()
+                        .text_body()
                         .text_color(pal.text_primary)
                         .child(tr!("Invert scroll direction")),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .text_caption()
                         .text_color(pal.text_muted)
                         .child(inversion_description),
                 ),
@@ -250,13 +249,13 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             v_flex()
                 .child(
                     div()
-                        .text_sm()
+                        .text_body()
                         .text_color(pal.text_primary)
                         .child(tr!("Wheel resolution")),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .text_caption()
                         .text_color(pal.text_muted)
                         .child(resolution_description),
                 ),
@@ -329,7 +328,7 @@ fn wheel_resolution_segment(
         .py_1()
         .rounded(pal.control_radius)
         .text_center()
-        .text_xs()
+        .text_caption()
         .selected_fill(active)
         .text_color(if enabled {
             if active {
@@ -366,7 +365,7 @@ fn invert_scroll_toggle(on: bool, enabled: bool, pal: Palette) -> AnyElement {
             .rounded(pal.control_radius)
             .border_1()
             .border_color(pal.border)
-            .text_xs()
+            .text_caption()
             .text_color(pal.text_muted)
             .child(tr!("Unavailable"))
             .into_any_element();
@@ -378,7 +377,7 @@ fn invert_scroll_toggle(on: bool, enabled: bool, pal: Palette) -> AnyElement {
         .rounded(pal.control_radius)
         .selected_border(on, pal)
         .selected_fill(on)
-        .text_xs()
+        .text_caption()
         .text_color(if on { pal.text_primary } else { pal.text_muted })
         .cursor_pointer()
         .child(label)
@@ -437,7 +436,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
         .map_or_else(
             || {
                 div()
-                    .text_sm()
+                    .text_body()
                     .text_color(pal.text_muted)
                     .child(tr!("No active device"))
                     .into_any_element()
@@ -529,15 +528,10 @@ fn device_summary(name: &str, kind: DeviceKind, online: bool, pal: Palette) -> i
             v_flex()
                 .gap_1()
                 .min_w_0()
+                .child(div().text_subheading().child(name.to_string()))
                 .child(
                     div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(name.to_string()),
-                )
-                .child(
-                    div()
-                        .text_xs()
+                        .text_caption()
                         .text_color(pal.text_muted)
                         .child(kind_label(kind)),
                 ),

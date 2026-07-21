@@ -28,7 +28,7 @@ use openlogi_hid::{AUTO_DISENGAGE_PERMANENT, DeviceRoute, SmartShiftMode, SmartS
 use crate::components::device_read::issue_device_read;
 use crate::components::status::{retry_line, status_line};
 use crate::state::{AppState, SmartShiftLoad};
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
+use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
 
 /// Friendly slider range for the `autoDisengage` threshold. The wire field is
 /// `0x01`–`0xFE` (0.25 turn/s steps); the slider exposes the usable band
@@ -216,7 +216,7 @@ impl SmartShiftPanel {
                     .child(section_label(tr!("Sensitivity"), pal))
                     .child(
                         div()
-                            .text_sm()
+                            .text_body()
                             .text_color(value_color)
                             .child(format!("{display}")),
                     ),
@@ -226,7 +226,7 @@ impl SmartShiftPanel {
             } else {
                 disabled_track(pal)
             })
-            .child(div().text_xs().text_color(pal.text_muted).child(tr!(
+            .child(div().text_caption().text_color(pal.text_muted).child(tr!(
                 "Higher keeps the ratchet engaged longer before free-spin."
             )));
 
@@ -238,7 +238,7 @@ impl SmartShiftPanel {
                     .child(section_label(tr!("Permanent ratchet"), pal))
                     .child(
                         div()
-                            .text_xs()
+                            .text_caption()
                             .text_color(pal.text_muted)
                             .child(tr!("Never auto-switch to free-spin.")),
                     ),
@@ -314,7 +314,7 @@ fn smartshift_load_target(cx: &mut Context<SmartShiftPanel>) -> Option<(String, 
 /// A small muted section heading.
 fn section_label(text: SharedString, pal: Palette) -> AnyElement {
     div()
-        .text_sm()
+        .text_body()
         .text_color(pal.text_muted)
         .child(text)
         .into_any_element()
@@ -342,7 +342,7 @@ fn mode_pill(
         .selected_border(selected, pal)
         .bg(pal.surface)
         .selected_fill(selected)
-        .text_sm()
+        .text_body()
         .text_color(pal.text_primary)
         .cursor_pointer()
         .hover(|s| s.bg(pal.surface_hover))
@@ -373,7 +373,7 @@ fn permanent_toggle(
             .rounded(pal.control_radius)
             .border_1()
             .border_color(pal.border)
-            .text_xs()
+            .text_caption()
             .text_color(pal.text_muted)
             .child(label)
             .into_any_element();
@@ -385,7 +385,7 @@ fn permanent_toggle(
         .rounded(pal.control_radius)
         .selected_border(on, pal)
         .selected_fill(on)
-        .text_xs()
+        .text_caption()
         .text_color(if on { pal.text_primary } else { pal.text_muted })
         .cursor_pointer()
         .child(label)

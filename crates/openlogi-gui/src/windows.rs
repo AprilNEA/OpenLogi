@@ -13,6 +13,7 @@ pub mod add_device;
 pub mod settings;
 pub mod update_consent;
 
+use crate::theme::Typography as _;
 use gpui::{
     App, AppContext as _, Bounds, Context, Global, IntoElement, ParentElement as _, Pixels, Render,
     SharedString, Size, Styled as _, Subscription, TitlebarOptions, WindowBounds, WindowHandle,
@@ -69,7 +70,7 @@ pub fn aux_title_bar(title: impl Into<SharedString>, cx: &App) -> impl IntoEleme
             .flex()
             .items_center()
             .justify_center()
-            .text_sm()
+            .text_body()
             .text_color(cx.theme().muted_foreground)
             .child(title),
     )

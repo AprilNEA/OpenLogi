@@ -1,5 +1,6 @@
 //! Assets (device-image cache) settings page.
 
+use crate::theme::Typography as _;
 use std::time::Duration;
 
 use super::{
@@ -213,7 +214,7 @@ fn action_button(
         .rounded(pal.control_radius)
         .border_1()
         .border_color(pal.border)
-        .text_xs()
+        .text_caption()
         .cursor_pointer()
         .hover(move |s| s.bg(pal.surface_hover))
         .child(label)
