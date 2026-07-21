@@ -50,7 +50,10 @@ concurrency:
   group: build-${{ github.event.pull_request.number || format('{0}-{1}', github.ref, github.event_name) }}
   # Cancel only when this event should supersede a PR build. Unrelated
   # label add/remove must not kill an in-flight installer build.
-  cancel-in-progress: "${{ github.event_name == 'pull_request' && (github.event.action == 'synchronize' || github.event.action == 'reopened' || github.event.action == 'closed' || (github.event.action == 'labeled' && github.event.label.name == 'needs: build') || (github.event.action == 'unlabeled' && github.event.label.name == 'needs: build')) }}"
+  # Keep this unquoted so the expression stays a boolean (a quoted "false"
+  # string is truthy). format() avoids a bare `needs: build` colon that YAML
+  # would parse as a mapping.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && (github.event.action == 'synchronize' || github.event.action == 'reopened' || github.event.action == 'closed' || (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && github.event.label.name == format('needs{0} build', ':'))) }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -72,8 +75,10 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_ACTION: ${{ github.event.action }}
-          HAS_BUILD_LABEL: "${{ contains(github.event.pull_request.labels.*.name, 'needs: build') }}"
+          # format() keeps `needs: build` out of bare YAML (colon).
+          HAS_BUILD_LABEL: ${{ contains(github.event.pull_request.labels.*.name, format('needs{0} build', ':')) }}
           EVENT_LABEL: ${{ github.event.label.name }}
+          BUILD_LABEL: ${{ format('needs{0} build', ':') }}
         run: |
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -83,7 +88,7 @@ jobs:
             echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [ "$EVENT_ACTION" = "labeled" ] && [ "$EVENT_LABEL" != "needs: build" ]; then
+          if [ "$EVENT_ACTION" = "labeled" ] && [ "$EVENT_LABEL" != "$BUILD_LABEL" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
