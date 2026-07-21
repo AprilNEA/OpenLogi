@@ -1,8 +1,8 @@
 name: Build
 
 # Reusable build workflow. `release.yml` calls it with `sign: true` to produce
-# the signed/notarized installers it publishes; PRs and manual dispatches build
-# the SAME installers UNSIGNED and upload them as run artifacts for testing.
+# the signed/notarized installers it publishes; PRs labeled `needs: build` and
+# manual dispatches build the SAME installers UNSIGNED as run artifacts.
 # Every signing step and the protected `release` environment are gated on
 # `inputs.sign`, so an unsigned run needs no secrets at all — fork PRs (which
 # get none) build fine.
@@ -31,8 +31,11 @@ on:
       linux_result:
         description: Result of the Linux packages build job.
         value: ${{ jobs.results.outputs.linux }}
-  # Every PR builds unsigned installers for testing (all four platforms).
+  # PR builds are opt-in: add the `needs: build` label to produce unsigned
+  # installers for testing. `closed` / unlabel cancel an in-flight run via
+  # concurrency (jobs below no-op on those actions).
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, closed]
   workflow_dispatch:
     inputs:
       sign:
@@ -41,9 +44,13 @@ on:
         default: false
 
 concurrency:
-  group: build-${{ github.ref }}-${{ github.event_name }}
-  # A superseding PR push cancels the old build; never cancel a signed run.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # PR number keeps the group stable across open/sync/label/close — on a
+  # merged close, github.ref becomes the base branch, which would not match
+  # the in-flight PR run. Non-PR events fall back to ref+event.
+  group: build-${{ github.event.pull_request.number || format('{0}-{1}', github.ref, github.event_name) }}
+  # Cancel only when this event should supersede a PR build. Unrelated
+  # label add/remove must not kill an in-flight installer build.
+  cancel-in-progress: "${{ github.event_name == 'pull_request' && (github.event.action == 'synchronize' || github.event.action == 'reopened' || github.event.action == 'closed' || (github.event.action == 'labeled' && github.event.label.name == 'needs: build') || (github.event.action == 'unlabeled' && github.event.label.name == 'needs: build')) }}"
 
 env:
   CARGO_TERM_COLOR: always
@@ -52,8 +59,44 @@ env:
   DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
 
 jobs:
+  # Opt-in gate for PR builds. Non-PR triggers (workflow_call / dispatch)
+  # always pass. closed/unlabeled still start a run so concurrency can cancel
+  # the previous one, but this job fails the gate and all build jobs skip.
+  should-build:
+    name: Should build
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          HAS_BUILD_LABEL: "${{ contains(github.event.pull_request.labels.*.name, 'needs: build') }}"
+          EVENT_LABEL: ${{ github.event.label.name }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT_ACTION" = "closed" ] || [ "$EVENT_ACTION" = "unlabeled" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT_ACTION" = "labeled" ] && [ "$EVENT_LABEL" != "needs: build" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$HAS_BUILD_LABEL" = "true" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   macos:
     name: macOS DMG (${{ matrix.arch }})
+    needs: should-build
+    if: ${{ needs.should-build.outputs.run == 'true' }}
     runs-on: ${{ matrix.runner }}
     # Bound a stuck brew/linker/notarize hang so it can't hold a PR build slot
     # for the 6-hour runner default (the signed path also notarizes).
@@ -232,6 +275,8 @@ jobs:
 
   windows:
     name: Windows EXE (${{ matrix.arch }})
+    needs: should-build
+    if: ${{ needs.should-build.outputs.run == 'true' }}
     # Both arches build on the x86_64 runner — arm64 as an MSVC cross-compile.
     # Native Arm runners are not an option: artifact-signing-action refuses to
     # run on them, while the signing itself is arch-agnostic over the PE file.
@@ -423,12 +468,13 @@ jobs:
   windows-msi:
     name: Windows MSI (${{ matrix.arch }})
     runs-on: windows-2025
-    needs: windows
+    needs: [should-build, windows]
     # `needs` only orders the jobs; this gate runs the MSI legs even when the
     # windows matrix AGGREGATE failed. The by-name artifact download below
     # then fails exactly the leg whose exe never shipped, and the other arch
-    # keeps going.
-    if: ${{ !cancelled() }}
+    # keeps going. Skip when the PR gate is off; `!cancelled()` alone would
+    # still run when `windows` was skipped.
+    if: ${{ !cancelled() && needs.should-build.outputs.run == 'true' }}
     # No Rust build here — dotnet tool install + wix build + signing.
     timeout-minutes: 15
     strategy:
@@ -601,6 +647,8 @@ jobs:
 
   linux-packages:
     name: Linux packages (${{ matrix.arch }})
+    needs: should-build
+    if: ${{ needs.should-build.outputs.run == 'true' }}
     runs-on: ${{ matrix.runner }}
     # Bound a hang so it can't hold a PR build slot for the 6-hour runner
     # default; a cargo build + nfpm package is well under this.
@@ -701,7 +749,7 @@ jobs:
   results:
     name: Build results
     if: ${{ always() }}
-    needs: [macos, windows, windows-msi, linux-packages]
+    needs: [should-build, macos, windows, windows-msi, linux-packages]
     runs-on: ubuntu-latest
     outputs:
       macos: ${{ needs.macos.result }}
