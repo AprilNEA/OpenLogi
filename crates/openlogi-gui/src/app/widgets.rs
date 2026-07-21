@@ -90,7 +90,7 @@ fn panel_card_inner(
         .when(fill_height, gpui::Styled::h_full)
         .max_w_full()
         .min_w_0()
-        .rounded_lg()
+        .rounded(pal.card_radius)
         .border_1()
         .border_color(pal.border)
         .bg(pal.surface)

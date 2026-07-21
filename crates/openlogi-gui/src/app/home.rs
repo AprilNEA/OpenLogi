@@ -191,7 +191,7 @@ fn device_card(
         .items_center()
         .gap_3()
         .p_3()
-        .rounded_xl()
+        .rounded(pal.card_radius)
         .border_1()
         .border_color(ring)
         .child(

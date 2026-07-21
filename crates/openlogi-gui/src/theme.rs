@@ -12,7 +12,7 @@
 //!   own widgets — which is what keeps a popover from rendering white under
 //!   an otherwise dark UI (see `main.rs`'s appearance wiring).
 
-use gpui::{App, Hsla, Styled, Window, hsla, px, rgb};
+use gpui::{App, Hsla, Pixels, Styled, Window, hsla, px, rgb};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 use openlogi_core::config::Appearance;
 
@@ -61,6 +61,16 @@ pub struct Palette {
     pub text_primary: Hsla,
     /// De-emphasised labels / metadata.
     pub text_muted: Hsla,
+    /// Corner radius for the bespoke card / panel surfaces. Derived from the
+    /// active gpui-component theme radius (`cx.theme().radius`) so the
+    /// hand-painted cards follow the Appearance → radius slider — which the old
+    /// hard-coded `rounded_*` helpers (fixed px, blind to the slider) could not.
+    ///
+    /// Scaled `× 1.5` above the base control radius so a card reads as rounder
+    /// than the small controls nested inside it — the concentric-corner
+    /// relationship (outer radius > inner radius) that a single flat radius
+    /// can't express.
+    pub card_radius: Pixels,
 }
 
 /// Derive the app palette from the active gpui-component theme's semantic
@@ -82,6 +92,7 @@ pub fn palette(cx: &App) -> Palette {
         border: t.border,
         text_primary: t.foreground,
         text_muted: t.muted_foreground,
+        card_radius: t.radius * 1.5,
     }
 }
 
