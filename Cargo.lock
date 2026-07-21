@@ -5060,8 +5060,8 @@ dependencies = [
 name = "openlogi-camera"
 version = "0.6.23"
 dependencies = [
- "block",
- "objc",
+ "block2 0.6.2",
+ "objc2 0.6.4",
  "serde",
  "tracing",
  "windows 0.61.3",
