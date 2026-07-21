@@ -73,7 +73,7 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
             .uniform(px(theme::GALLERY_CARD_W))
             .gap(px(GALLERY_GAP))
             .accent(rgb(theme::ACCENT_BLUE).into())
-            .render_item(move |idx, focused, _window, cx| {
+            .render_item(move |idx, _focused, _window, cx| {
                 let pal = theme::palette(cx);
                 let Some(record) = cx
                     .try_global::<AppState>()
@@ -86,10 +86,10 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                     .try_global::<AppState>()
                     .and_then(|s| keyboard_glow(s, &record));
                 let view = view.clone();
-                device_card(&record, focused, glow, pal)
+                device_card(&record, glow, pal)
                     .id(("device-card", idx))
                     .cursor_pointer()
-                    .hover(move |s| s.bg(pal.surface))
+                    .hover(move |s| s.bg(pal.surface).border_color(rgb(theme::ACCENT_BLUE)))
                     .on_click(move |_, _, cx| {
                         view.update(cx, |this, cx| this.open_device(key.clone(), cx));
                     })
@@ -170,21 +170,17 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
 
 /// A device card in the Home gallery: the device photo floating on the window
 /// background above the name, connectivity dot, kind/slot, and battery. Fixed
-/// width so cards stay equal in the scrollable row. The active device wears a
-/// faint accent ring; inactive cards reserve the same 1px border in a
-/// transparent colour so selection never nudges the layout. Returns a bare
-/// [`Div`] so the gallery can wire the click handler.
+/// width so cards stay equal in the scrollable row. The border stays transparent
+/// at rest — a card only shows its accent ring on hover (wired by the gallery),
+/// so an idle row carries no boxed-in chrome; the live device is marked by the
+/// carousel's centring and page dot instead. The transparent 1px is always
+/// reserved so the hover ring never nudges the layout. Returns a bare [`Div`] so
+/// the gallery can wire the hover and click handlers.
 fn device_card(
     record: &DeviceRecord,
-    active: bool,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     pal: Palette,
 ) -> Div {
-    let ring = if active {
-        rgb(theme::ACCENT_BLUE).into()
-    } else {
-        gpui::transparent_black()
-    };
     v_flex()
         .w(px(theme::GALLERY_CARD_W))
         .flex_shrink_0()
@@ -193,7 +189,7 @@ fn device_card(
         .p_3()
         .rounded(pal.card_radius)
         .border_1()
-        .border_color(ring)
+        .border_color(gpui::transparent_black())
         .child(
             div()
                 .relative()
