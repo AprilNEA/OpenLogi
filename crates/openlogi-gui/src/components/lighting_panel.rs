@@ -18,7 +18,7 @@ use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
+use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
 
 const SWATCH: f32 = 28.;
 
@@ -117,7 +117,7 @@ impl Render for LightingPanel {
                     .items_center()
                     .child(
                         div()
-                            .text_sm()
+                            .text_body()
                             .text_color(pal.text_muted)
                             .child(tr!("LIGHTING")),
                     )
@@ -130,13 +130,13 @@ impl Render for LightingPanel {
                     .items_baseline()
                     .child(
                         div()
-                            .text_xs()
+                            .text_caption()
                             .text_color(pal.text_muted)
                             .child(tr!("BRIGHTNESS")),
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_caption()
                             .text_color(rgb(ACCENT_BLUE))
                             .child(format!("{}%", lighting.brightness)),
                     ),
@@ -182,7 +182,7 @@ fn toggle(current: &Lighting, pal: Palette) -> AnyElement {
         .rounded(pal.control_radius)
         .selected_border(on, pal)
         .selected_fill(on)
-        .text_xs()
+        .text_caption()
         .text_color(if on { pal.text_primary } else { pal.text_muted })
         .cursor_pointer()
         .child(if on { tr!("On") } else { tr!("Off") })

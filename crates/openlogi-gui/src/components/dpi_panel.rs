@@ -20,7 +20,7 @@ use tracing::debug;
 use crate::components::device_read::issue_device_read;
 use crate::components::status::{retry_line, status_line};
 use crate::state::{AppState, DpiStatus};
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
+use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
 
 pub struct DpiPanel {
     slider_state: Option<Entity<SliderState>>,
@@ -225,10 +225,15 @@ impl Render for DpiPanel {
                 h_flex()
                     .justify_between()
                     .items_baseline()
-                    .child(div().text_sm().text_color(pal.text_muted).child(tr!("DPI")))
                     .child(
                         div()
-                            .text_sm()
+                            .text_body()
+                            .text_color(pal.text_muted)
+                            .child(tr!("DPI")),
+                    )
+                    .child(
+                        div()
+                            .text_body()
                             .text_color(rgb(ACCENT_BLUE))
                             .child(format!("{}", snapshot.dpi)),
                     ),
@@ -236,7 +241,7 @@ impl Render for DpiPanel {
             .child(slider)
             .child(
                 div()
-                    .text_xs()
+                    .text_caption()
                     .text_color(pal.text_muted)
                     .child(range_label),
             )
@@ -245,7 +250,7 @@ impl Render for DpiPanel {
                     .gap_2()
                     .child(
                         div()
-                            .text_xs()
+                            .text_caption()
                             .text_color(pal.text_muted)
                             .child(tr!("PRESETS")),
                     )
@@ -364,7 +369,7 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
         .child(
             div()
                 .id(("dpi-preset-apply", idx))
-                .text_sm()
+                .text_body()
                 .text_color(pal.text_primary)
                 .child(format!("{value}"))
                 .on_click(move |_event, _window, cx| {
@@ -384,7 +389,7 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
         .child(
             div()
                 .id(("dpi-preset-remove", idx))
-                .text_xs()
+                .text_caption()
                 .text_color(pal.text_muted)
                 .child(Icon::new(IconName::Close).size_3())
                 .on_click(move |_event, _window, cx| {
@@ -415,7 +420,7 @@ fn add_preset_chip(pal: Palette) -> AnyElement {
             h_flex()
                 .gap_1()
                 .items_center()
-                .text_sm()
+                .text_body()
                 .text_color(pal.text_muted)
                 .child(Icon::new(IconName::Plus).size_3())
                 .child(tr!("Add")),

@@ -2,9 +2,7 @@
 //! pre-connection / unreachable / outdated-build frames rendered in place of
 //! the real UI, and the footer status bar shown once it's up.
 
-use gpui::{
-    AnyElement, Div, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, px, rgb,
-};
+use gpui::{AnyElement, Div, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
 use gpui_component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -13,7 +11,7 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::theme::{self, FOOTER_H, Palette};
+use crate::theme::{self, FOOTER_H, Palette, Typography as _};
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"
 /// body shared by the pre-connection frame and the scanning state, so the two
@@ -29,7 +27,7 @@ pub(super) fn loading_body(caption: SharedString, pal: Palette) -> Div {
         .justify_center()
         .gap_3()
         .child(Spinner::new().large().color(pal.text_muted))
-        .child(div().text_sm().text_color(pal.text_muted).child(caption))
+        .child(div().text_body().text_color(pal.text_muted).child(caption))
 }
 
 /// Static centered notice — icon, headline, muted caption — for the
@@ -48,16 +46,11 @@ pub(super) fn notice_body(headline: SharedString, caption: SharedString, pal: Pa
                 .size_8()
                 .text_color(rgb(theme::STATUS_CONNECTING)),
         )
-        .child(
-            div()
-                .text_xl()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(headline),
-        )
+        .child(div().text_title().child(headline))
         .child(
             div()
                 .max_w(px(440.))
-                .text_sm()
+                .text_body()
                 .text_center()
                 .text_color(pal.text_muted)
                 .child(caption),
@@ -136,7 +129,7 @@ pub(super) fn footer(pal: Palette, granted: bool) -> impl IntoElement {
         })
         .child(
             div()
-                .text_xs()
+                .text_caption()
                 .text_color(pal.text_muted)
                 .child(concat!("v", env!("CARGO_PKG_VERSION"))),
         )
@@ -158,7 +151,7 @@ fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
         h_flex()
             .gap_1p5()
             .items_center()
-            .text_xs()
+            .text_caption()
             .text_color(pal.text_muted)
             .child(
                 div()
@@ -175,7 +168,7 @@ fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
             .id("footer-accessibility")
             .gap_2()
             .items_center()
-            .text_xs()
+            .text_caption()
             .text_color(pal.text_primary)
             .cursor_pointer()
             .child(

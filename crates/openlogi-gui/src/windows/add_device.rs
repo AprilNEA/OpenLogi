@@ -29,7 +29,7 @@ use openlogi_hid::{Click, PasskeyMethod, ReceiverSelector};
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::ipc_client::Command;
 use crate::state::AppState;
-use crate::theme::{self, Palette};
+use crate::theme::{self, Palette, Typography as _};
 use crate::windows::{self, AuxWindow};
 
 /// The pairing flow's current UI state. Mirrors the [`PairingUpdate`] stream.
@@ -200,8 +200,7 @@ impl Render for AddDeviceView {
                     .gap_5()
                     .child(
                         div()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_heading()
                             .child(tr!("Add Device")),
                     )
                     .child(body(&state, pal)),
@@ -305,7 +304,7 @@ fn device_row(idx: usize, device: &FoundDevice, pal: Palette) -> impl IntoElemen
         .hover(|s| s.bg(pal.surface_hover))
         .child(
             div()
-                .text_sm()
+                .text_body()
                 .child(SharedString::from(device.name.clone())),
         )
         .on_click(move |_, _, cx| {
@@ -324,12 +323,7 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
                     tr!("Type this passkey on the new keyboard, then press Enter:"),
                     pal,
                 ))
-                .child(
-                    div()
-                        .text_xl()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(SharedString::from(digits.clone())),
-                );
+                .child(div().text_title().child(SharedString::from(digits.clone())));
         }
         PasskeyMethod::Pointer { clicks, .. } => {
             let sequence: String = clicks
@@ -345,12 +339,7 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
                     tr!("On the new mouse, click in this order, then press both buttons together:"),
                     pal,
                 ))
-                .child(
-                    div()
-                        .text_xl()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(SharedString::from(sequence)),
-                );
+                .child(div().text_title().child(SharedString::from(sequence)));
         }
     }
     col
@@ -358,14 +347,14 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
 
 fn status_line(text: impl Into<SharedString>, _pal: Palette) -> impl IntoElement {
     div()
-        .text_sm()
+        .text_body()
         .font_weight(FontWeight::MEDIUM)
         .child(text.into())
 }
 
 fn hint(text: impl Into<SharedString>, pal: Palette) -> impl IntoElement {
     div()
-        .text_xs()
+        .text_caption()
         .text_color(pal.text_muted)
         .child(text.into())
 }

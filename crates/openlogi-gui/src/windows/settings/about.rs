@@ -6,6 +6,7 @@ use super::{
     SettingItem, SettingPage, SettingsView, SharedString, Sizable, Styled, div, h_flex, img, px,
     v_flex,
 };
+use crate::theme::Typography as _;
 
 /// The About page: a hero card with the build identity and outbound links, the
 /// on-disk config location, and a trademark disclaimer.
@@ -16,7 +17,7 @@ pub(super) fn about_page(view: Entity<SettingsView>, copied: bool, pal: Palette)
     let config = SettingGroup::new().item(SettingItem::render(move |_, _, _| about_config(pal)));
     let footer = SettingGroup::new().item(SettingItem::render(move |_, _, _| {
         div()
-            .text_xs()
+            .text_caption()
             .text_color(pal.text_muted)
             .child(tr!(
                 "Not affiliated with Logitech. \"Logitech\", \"MX Master\", and \"Options+\" are trademarks of Logitech International S.A."
@@ -65,7 +66,7 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, pal: Palette, _: &mut A
                         )
                         .child(
                             div()
-                                .text_sm()
+                                .text_body()
                                 .text_color(pal.text_muted)
                                 .child(env!("CARGO_PKG_VERSION")),
                         ),
@@ -158,7 +159,7 @@ fn about_config(pal: Palette) -> AnyElement {
                 .child(div().font_weight(FontWeight::MEDIUM).child("config.toml"))
                 .child(
                     div()
-                        .text_xs()
+                        .text_caption()
                         .text_color(pal.text_muted)
                         .truncate()
                         .child(path),

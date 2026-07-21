@@ -25,7 +25,7 @@ use super::widgets::{add_device_button, kind_label, settings_button};
 use crate::asset::GlowGeometry;
 use crate::components::carousel::Carousel;
 use crate::state::{AppState, DeviceRecord};
-use crate::theme::{self, HEADER_H, Palette, SelectableStyle as _};
+use crate::theme::{self, HEADER_H, Palette, SelectableStyle as _, Typography as _};
 
 /// Home (gallery) top bar: the "Devices" title, a Settings gear, and the
 /// Add-Device button — the entry points the old carousel header used to carry.
@@ -42,8 +42,7 @@ pub(super) fn home_header(pal: Palette) -> impl IntoElement {
             div()
                 .flex_1()
                 .min_w_0()
-                .text_lg()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_heading()
                 .child(tr!("Devices")),
         )
         .child(settings_button())
@@ -220,8 +219,7 @@ fn device_card(
                             div()
                                 .min_w_0()
                                 .truncate()
-                                .text_sm()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_subheading()
                                 .child(record.display_name.clone()),
                         )
                         .child(status_dot(record.online)),
@@ -236,7 +234,7 @@ fn device_card(
                             div()
                                 .min_w_0()
                                 .truncate()
-                                .text_xs()
+                                .text_caption()
                                 .text_color(pal.text_muted)
                                 .child(format!(
                                     "{} · slot {}",
@@ -323,7 +321,7 @@ fn battery_view(b: &BatteryInfo, pal: Palette) -> AnyElement {
     h_flex()
         .gap_1()
         .items_center()
-        .text_xs()
+        .text_caption()
         .text_color(pal.text_muted)
         .child(Icon::new(battery_icon(b)).size_3())
         .child(format!("{}%", b.percentage))
@@ -430,14 +428,13 @@ pub(super) fn device_empty_state(pal: Palette) -> AnyElement {
         )
         .child(
             div()
-                .text_xl()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_title()
                 .child(tr!("No devices connected")),
         )
         .child(
             div()
                 .max_w(px(440.))
-                .text_sm()
+                .text_body()
                 .text_center()
                 .child(tr!(
                     "Plug in or pair a supported Logitech device — it'll show up here automatically. For direct Bluetooth connections, pair in your computer's bluetooth settings."
@@ -450,7 +447,7 @@ pub(super) fn device_empty_state(pal: Palette) -> AnyElement {
                 .label(tr!("Add Device"))
                 .on_click(|_, _, cx| crate::windows::add_device::open(cx)),
         )
-        .child(div().mt_1().max_w(px(440.)).text_xs().text_center().text_color(pal.text_muted).child(tr!(
+        .child(div().mt_1().max_w(px(440.)).text_caption().text_center().text_color(pal.text_muted).child(tr!(
             "Using Logi Options+? Quit it first — both apps compete for HID++ access."
         )))
         .into_any_element()
