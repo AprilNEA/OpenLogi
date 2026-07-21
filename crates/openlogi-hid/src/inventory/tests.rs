@@ -206,19 +206,13 @@ fn paired_slots(probe: &NodeProbe) -> Vec<u8> {
 #[test]
 fn bolt_probe_is_complete_when_count_matches_readable_slots() {
     // Two paired slots, both readable, and the pairing-count register agrees.
-    // The `None` gaps are empty slots; `join` yields results in slot order, so
-    // the surfaced devices must come out ordered without an explicit sort.
+    // Empty slots are dropped in phase 1, so only occupied slots reach here;
+    // `join` yields them in slot order, so the devices must come out ordered
+    // without an explicit sort.
     let probe = assemble_bolt_probe(
         bolt_receiver_info(),
         Some(2),
-        vec![
-            Some(bolt_slot(1)),
-            None,
-            Some(bolt_slot(2)),
-            None,
-            None,
-            None,
-        ],
+        vec![bolt_slot(1), bolt_slot(2)],
     );
     assert!(probe.complete, "count matches the readable slots");
     assert!(probe.healthy, "a complete Bolt walk is authoritative");
@@ -236,7 +230,7 @@ fn bolt_probe_is_incomplete_when_a_counted_slot_is_unreadable() {
     // register read this tick. Presenting that partial walk as the new truth is
     // the #218 regression: it must stay incomplete so the ledger replays the
     // last good snapshot instead of dropping the missing device.
-    let probe = assemble_bolt_probe(bolt_receiver_info(), Some(2), vec![Some(bolt_slot(1))]);
+    let probe = assemble_bolt_probe(bolt_receiver_info(), Some(2), vec![bolt_slot(1)]);
     assert_eq!(
         paired_slots(&probe),
         vec![1],
@@ -254,11 +248,7 @@ fn bolt_probe_is_incomplete_when_the_count_register_is_unanswered() {
     // A parked/unresponsive receiver channel returns no pairing count. Even with
     // slots surfaced from arrival events, the walk can't be trusted as the whole
     // truth, so it stays incomplete and the ledger keeps the prior snapshot.
-    let probe = assemble_bolt_probe(
-        bolt_receiver_info(),
-        None,
-        vec![Some(bolt_slot(1)), Some(bolt_slot(2))],
-    );
+    let probe = assemble_bolt_probe(bolt_receiver_info(), None, vec![bolt_slot(1), bolt_slot(2)]);
     assert_eq!(paired_slots(&probe), vec![1, 2]);
     assert!(
         !probe.complete,
