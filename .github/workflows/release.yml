@@ -266,6 +266,7 @@ jobs:
             --dist dist \
             --tag "$GITHUB_REF_NAME" \
             --base-url "$OPENLOGI_UPDATE_BASE_URL" \
+            --include-windows \
             --output dist/latest.json
 
       - name: Upload static updater assets to R2
@@ -282,22 +283,18 @@ jobs:
           release_prefix="s3://${R2_BUCKET}/releases/${GITHUB_REF_NAME}"
           channel_manifest="s3://${R2_BUCKET}/channels/stable/latest.json"
 
-          # The Windows binaries' distribution channel is the GitHub Release;
-          # latest.json is still dmg-only, so nothing in the updater bucket
-          # references the zip/msi or their minisigs — keep them all out of
-          # the immutable releases/ prefix until the Windows auto-updater
-          # lands (#347 PR 4). SHA256SUMS still lists them — it describes the
-          # GitHub Release's asset set. *.exe stays excluded defensively even
-          # though no bare exe ships anymore.
+          # latest.json now carries the Windows msi/zip entries (notify-only:
+          # a Windows check resolves and routes to the GitHub Release for the
+          # download — the client's install flow stays off, INSTALL_SUPPORTED
+          # is false). Their asset + signature URLs point into this prefix, so
+          # the zip/msi and their minisigs must ship here too or the manifest
+          # would reference 404s. *.exe stays excluded defensively — no bare
+          # exe ships anymore.
           aws s3 cp dist/ "$release_prefix/" \
             --recursive \
             --exclude latest.json \
             --exclude "*.exe" \
             --exclude "*.exe.minisig" \
-            --exclude "*.zip" \
-            --exclude "*.zip.minisig" \
-            --exclude "*.msi" \
-            --exclude "*.msi.minisig" \
             --cache-control "public, max-age=31536000, immutable" \
             --endpoint-url "$endpoint"
 
