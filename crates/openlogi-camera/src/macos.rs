@@ -26,6 +26,7 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
+use objc2::encode::{Encoding, RefEncode};
 use objc2::msg_send;
 use objc2::rc::autoreleasepool;
 use objc2::runtime::{AnyClass, AnyObject};
@@ -55,9 +56,26 @@ struct CMVideoDimensions {
     height: i32,
 }
 
+/// Opaque `CMFormatDescriptionRef`. `AVCaptureDeviceFormat.formatDescription`
+/// hands back a CoreMedia handle, not an Objective-C object, so it needs its own
+/// type encoding: objc2 verifies msg_send return types against the runtime and
+/// panics if we claim `AnyObject` (`@`) for what CoreMedia reports as
+/// `^{opaqueCMFormatDescription=}`.
+#[repr(C)]
+struct CMFormatDescription {
+    _private: [u8; 0],
+}
+
+// SAFETY: only ever handled behind a pointer (a `CMFormatDescriptionRef`); the
+// encoding mirrors CoreMedia's `^{opaqueCMFormatDescription=}`.
+unsafe impl RefEncode for CMFormatDescription {
+    const ENCODING_REF: Encoding =
+        Encoding::Pointer(&Encoding::Struct("opaqueCMFormatDescription", &[]));
+}
+
 #[link(name = "CoreMedia", kind = "framework")]
 unsafe extern "C" {
-    fn CMVideoFormatDescriptionGetDimensions(desc: *mut AnyObject) -> CMVideoDimensions;
+    fn CMVideoFormatDescriptionGetDimensions(desc: *mut CMFormatDescription) -> CMVideoDimensions;
 }
 
 /// Enumerate every video `AVCaptureDevice`, as raw metadata. The Logitech
@@ -129,7 +147,7 @@ fn best_format(device: *mut AnyObject) -> (u32, u32, u32) {
             if format.is_null() {
                 continue;
             }
-            let desc: *mut AnyObject = msg_send![format, formatDescription];
+            let desc: *mut CMFormatDescription = msg_send![format, formatDescription];
             if desc.is_null() {
                 continue;
             }
