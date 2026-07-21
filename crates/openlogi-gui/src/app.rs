@@ -15,6 +15,8 @@ use openlogi_agent_core::ipc::InventoryHealth;
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::asset::AssetResolver;
+use crate::components::camera_controls::CameraControlsPanel;
+use crate::components::camera_preview::CameraPreview;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
@@ -69,6 +71,8 @@ enum DetailTab {
     Pointer,
     /// RGB lighting — color, brightness, on/off.
     Lighting,
+    /// Live webcam preview (UVC cameras only).
+    Camera,
     /// Device info and configuration.
     Device,
 }
@@ -97,6 +101,11 @@ impl DetailTab {
         let can_show_mouse_model = record.asset.is_some()
             || matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
         let mut tabs = Vec::new();
+        // A webcam is a UVC device with no HID++ capabilities; its detail screen
+        // leads with the live preview, then the generic info tab.
+        if matches!(record.kind, DeviceKind::Camera) {
+            tabs.push(Self::Camera);
+        }
         if caps.buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
         }
@@ -123,6 +132,7 @@ impl DetailTab {
             Self::Buttons => tr!("Buttons"),
             Self::Pointer => tr!("Pointer"),
             Self::Lighting => tr!("Lighting"),
+            Self::Camera => tr!("Camera"),
             Self::Device => tr!("Device"),
         }
     }
@@ -136,6 +146,8 @@ pub struct AppView {
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
+    camera_preview: Entity<CameraPreview>,
+    camera_controls: Entity<CameraControlsPanel>,
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
     /// Re-renders the root when the device list changes so the empty state
@@ -180,6 +192,8 @@ impl AppView {
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
+        let camera_preview = cx.new(CameraPreview::new);
+        let camera_controls = cx.new(CameraControlsPanel::new);
         let state_obs = cx.observe_global::<AppState>(|_, cx| cx.notify());
         Self {
             focus_handle,
@@ -188,6 +202,8 @@ impl AppView {
             dpi_panel,
             smartshift_panel,
             lighting_panel,
+            camera_preview,
+            camera_controls,
             appearance_obs: None,
             state_obs,
             accessibility_dismissed: false,
@@ -333,6 +349,10 @@ fn app_title_bar(pal: Palette) -> impl IntoElement {
 }
 
 impl Render for AppView {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "root view assembles every screen branch inline"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
 
@@ -433,6 +453,18 @@ impl Render for AppView {
             } else {
                 tabs.first().copied().unwrap_or(DetailTab::Device)
             };
+            // Run the camera only while its live-preview tab is the one on screen;
+            // any other tab, device, or Home tears the session down (LED off).
+            let camera_target = if active == DetailTab::Camera {
+                record
+                    .as_ref()
+                    .filter(|r| matches!(r.kind, DeviceKind::Camera))
+                    .and_then(|r| r.config_key.strip_prefix("camera-").map(ToOwned::to_owned))
+            } else {
+                None
+            };
+            self.camera_preview
+                .update(cx, |preview, cx| preview.set_target(camera_target, cx));
             (
                 detail::detail_header(record.as_ref(), &tabs, active, pal, cx).into_any_element(),
                 detail::detail_content(
@@ -440,6 +472,8 @@ impl Render for AppView {
                     &self.dpi_panel,
                     &self.smartshift_panel,
                     &self.lighting_panel,
+                    &self.camera_preview,
+                    &self.camera_controls,
                     active,
                     pal,
                     cx,
@@ -447,6 +481,8 @@ impl Render for AppView {
                 .into_any_element(),
             )
         } else {
+            self.camera_preview
+                .update(cx, |preview, cx| preview.set_target(None, cx));
             (
                 home::home_header(pal).into_any_element(),
                 if has_device {

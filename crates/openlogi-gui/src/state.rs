@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 
 use gpui::{App, Global};
+use openlogi_camera::CameraControl;
 use openlogi_core::config::{
     AppSettings, Appearance, AssetSourcePreference, Config, DeviceIdentity, Lighting,
 };
@@ -44,6 +45,7 @@ pub enum SmartShiftWriteStatus {
     Failed,
 }
 
+pub(crate) use devices::camera_model_info;
 use load::LazyDeviceData;
 
 use crate::asset::AssetResolver;
@@ -183,9 +185,10 @@ impl AppState {
         mut config: Config,
         inventories: &[DeviceInventory],
         cache: &AssetResolver,
+        cameras: &[openlogi_camera::Camera],
         ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
     ) -> Self {
-        let device_list = build_device_list(inventories, cache, &config);
+        let device_list = build_device_list(inventories, cache, &config, cameras);
         // Record any device probed at launch so it survives the next cold start.
         persist_identities(&mut config, &device_list);
         let current_device = pick_initial_device(&device_list, config.selected_device());
@@ -341,6 +344,111 @@ impl AppState {
             .collect()
     }
 
+    /// Whether any connected device is a webcam. Gates the camera-permission UI
+    /// so it only appears when there is actually a camera to grant access to.
+    /// Only the platforms that register the permission page (macOS/Linux) call
+    /// this; Windows has no such page, so the method is scoped to match.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[must_use]
+    pub fn has_camera(&self) -> bool {
+        self.device_list
+            .iter()
+            .any(|r| matches!(r.kind, openlogi_core::device::DeviceKind::Camera))
+    }
+
+    /// The saved value of a UVC control for `config_key`, if any.
+    #[must_use]
+    pub fn camera_control(&self, config_key: &str, control: CameraControl) -> Option<i32> {
+        self.config
+            .camera_controls(config_key)?
+            .0
+            .get(control.name())
+            .copied()
+    }
+
+    /// The saved state of a camera auto toggle for `config_key`, if any.
+    #[must_use]
+    pub fn camera_auto(
+        &self,
+        config_key: &str,
+        toggle: openlogi_camera::AutoToggle,
+    ) -> Option<bool> {
+        self.config
+            .camera_controls(config_key)?
+            .0
+            .get(toggle.name())
+            .map(|v| *v != 0)
+    }
+
+    /// Persist a UVC control for `config_key`. No agent IPC — webcams are
+    /// driven straight from the GUI over USB, so the agent never sees this.
+    pub fn commit_camera_control(&mut self, config_key: &str, control: CameraControl, value: i32) {
+        self.commit_camera_entry(config_key, control.name(), value);
+    }
+
+    /// Persist a camera auto toggle for `config_key` (stored as 0/1).
+    pub fn commit_camera_auto(
+        &mut self,
+        config_key: &str,
+        toggle: openlogi_camera::AutoToggle,
+        on: bool,
+    ) {
+        self.commit_camera_entry(config_key, toggle.name(), i32::from(on));
+    }
+
+    fn commit_camera_entry(&mut self, config_key: &str, name: &str, value: i32) {
+        let mut controls = self.config.camera_controls(config_key).unwrap_or_default();
+        controls.0.insert(name.to_string(), value);
+        self.config.set_camera_controls(config_key, controls);
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist camera controls");
+        }
+    }
+
+    /// User-saved camera profiles for `config_key` (name → snapshot).
+    #[must_use]
+    pub fn camera_profiles(
+        &self,
+        config_key: &str,
+    ) -> std::collections::BTreeMap<String, openlogi_core::config::CameraControls> {
+        self.config.camera_profiles(config_key)
+    }
+
+    /// Save a custom camera profile and persist it.
+    pub fn save_camera_profile(
+        &mut self,
+        config_key: &str,
+        name: &str,
+        snap: openlogi_core::config::CameraControls,
+    ) {
+        self.config.save_camera_profile(config_key, name, snap);
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist camera profile");
+        }
+    }
+
+    /// Delete a custom camera profile and persist the removal.
+    pub fn delete_camera_profile(&mut self, config_key: &str, name: &str) {
+        self.config.delete_camera_profile(config_key, name);
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist camera profile removal");
+        }
+    }
+
+    /// The camera profile last applied for `config_key`, if any.
+    #[must_use]
+    pub fn camera_active_profile(&self, config_key: &str) -> Option<String> {
+        self.config.camera_active_profile(config_key)
+    }
+
+    /// Record (and persist) which camera profile `config_key` last applied.
+    pub fn set_camera_active_profile(&mut self, config_key: &str, name: Option<String>) {
+        self.config.set_camera_active_profile(config_key, name);
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist camera profile selection");
+        }
+    }
+
     /// The agent connection state the render path branches on.
     #[must_use]
     pub fn agent_link(&self) -> &AgentLink {
@@ -385,8 +493,9 @@ impl AppState {
         inventories: &[DeviceInventory],
         cache: &AssetResolver,
         force: bool,
+        cameras: &[openlogi_camera::Camera],
     ) -> bool {
-        let new_list = build_device_list(inventories, cache, &self.config);
+        let new_list = build_device_list(inventories, cache, &self.config, cameras);
         let merged_list = self.merge_inventory_snapshot(new_list);
         // Capture any newly-probed identity before the unchanged-check can early
         // out: a device whose capabilities just resolved keeps the same
@@ -1596,8 +1705,13 @@ mod tests {
         let cache = AssetResolver::new();
         let transient_inventory = direct_inventory([0; 4]);
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut state =
-            AppState::with_runtime(Config::default(), &[transient_inventory], &cache, commands);
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[transient_inventory],
+            &cache,
+            &[],
+            commands,
+        );
         let transient_key = "direct:046d:b023:unit:00000000";
 
         assert_eq!(state.device_list.len(), 1);
@@ -1609,6 +1723,7 @@ mod tests {
             &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
             &cache,
             &state.config,
+            &[],
         );
         let merged = state.merge_inventory_snapshot(stable_list);
 
@@ -1628,12 +1743,14 @@ mod tests {
             Config::default(),
             &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
             &cache,
+            &[],
             commands,
         );
         let stable_key = "direct:046d:b023:unit:a393cae0";
         assert_eq!(state.device_list[0].config_key, stable_key);
 
-        let transient_list = build_device_list(&[direct_inventory([0; 4])], &cache, &state.config);
+        let transient_list =
+            build_device_list(&[direct_inventory([0; 4])], &cache, &state.config, &[]);
         let merged = state.merge_inventory_snapshot(transient_list);
 
         assert_eq!(merged.len(), 1, "no second card for the half-read probe");
@@ -1653,6 +1770,7 @@ mod tests {
             Config::default(),
             &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
             &cache,
+            &[],
             commands,
         );
 
@@ -1663,6 +1781,7 @@ mod tests {
             ],
             &cache,
             &state.config,
+            &[],
         );
         assert_eq!(both.len(), 2);
         let merged = state.merge_inventory_snapshot(both);
@@ -1687,6 +1806,7 @@ mod tests {
                 direct_inventory([2, 2, 2, 2]),
             ],
             &cache,
+            &[],
             commands,
         );
 
@@ -1694,6 +1814,7 @@ mod tests {
             &[direct_inventory([1, 1, 1, 1]), direct_inventory([0; 4])],
             &cache,
             &state.config,
+            &[],
         );
         let merged = state.merge_inventory_snapshot(snapshot);
 
@@ -1724,11 +1845,13 @@ mod tests {
                 direct_inventory([2, 2, 2, 2]),
             ],
             &cache,
+            &[],
             commands,
         );
         assert_eq!(state.device_list.len(), 2);
 
-        let transient_list = build_device_list(&[direct_inventory([0; 4])], &cache, &state.config);
+        let transient_list =
+            build_device_list(&[direct_inventory([0; 4])], &cache, &state.config, &[]);
         let merged = state.merge_inventory_snapshot(transient_list);
 
         assert_eq!(merged.len(), 3, "both known cards survive on grace");
@@ -1746,7 +1869,7 @@ mod tests {
         config.set_lighting(transient_key, Lighting::default());
         assert!(config.lighting(transient_key).is_some());
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        let state = AppState::with_runtime(config, &[], &AssetResolver::new(), commands);
+        let state = AppState::with_runtime(config, &[], &AssetResolver::new(), &[], commands);
 
         assert!(state.device_list.is_empty());
         assert!(state.lighting_for(transient_key).is_none());
@@ -1827,7 +1950,7 @@ mod tests {
             },
         );
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        let state = AppState::with_runtime(config, &[], &AssetResolver::new(), commands);
+        let state = AppState::with_runtime(config, &[], &AssetResolver::new(), &[], commands);
 
         assert_eq!(
             state.asset_models(),
