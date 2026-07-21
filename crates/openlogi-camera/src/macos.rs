@@ -9,6 +9,14 @@
 //!
 //! All of this is metadata — no capture session is opened, so no Camera
 //! permission is required.
+//!
+//! FFI is `objc2` (matching the rest of the workspace's ObjC surface): the
+//! dynamic `AVCaptureDevice` classes aren't in a typed framework crate, so this
+//! uses the `objc2` runtime (`AnyClass::get` + `msg_send!`) like
+//! `platform/permissions.rs`. There is no long-lived ownership here — every
+//! object AVFoundation hands back is autoreleased and copied into an owned Rust
+//! value before the enclosing [`autoreleasepool`] drains — so no `Retained<T>`
+//! is needed (an off-run-loop caller thread has no pool of its own).
 
 #![expect(
     unsafe_code,
@@ -18,8 +26,9 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
-use objc::runtime::{Class, Object};
-use objc::{msg_send, sel, sel_impl};
+use objc2::msg_send;
+use objc2::rc::autoreleasepool;
+use objc2::runtime::{AnyClass, AnyObject};
 
 /// Raw camera metadata as reported by `AVCaptureDevice`, before vendor parsing.
 pub(crate) struct RawCamera {
@@ -37,7 +46,7 @@ pub(crate) struct RawCamera {
 // framework must be linked for it and the `AVCaptureDevice` class to resolve.
 #[link(name = "AVFoundation", kind = "framework")]
 unsafe extern "C" {
-    static AVMediaTypeVideo: *const Object;
+    static AVMediaTypeVideo: *const AnyObject;
 }
 
 #[repr(C)]
@@ -48,80 +57,79 @@ struct CMVideoDimensions {
 
 #[link(name = "CoreMedia", kind = "framework")]
 unsafe extern "C" {
-    fn CMVideoFormatDescriptionGetDimensions(desc: *mut Object) -> CMVideoDimensions;
+    fn CMVideoFormatDescriptionGetDimensions(desc: *mut AnyObject) -> CMVideoDimensions;
 }
 
 /// Enumerate every video `AVCaptureDevice`, as raw metadata. The Logitech
 /// filter is applied by the caller in `lib.rs`.
 pub(crate) fn enumerate() -> Vec<RawCamera> {
-    let (Some(pool_cls), Some(device_cls)) = (
-        Class::get("NSAutoreleasePool"),
-        Class::get("AVCaptureDevice"),
-    ) else {
+    let Some(device_cls) = AnyClass::get(c"AVCaptureDevice") else {
         return Vec::new();
     };
 
-    // SAFETY: `NSAutoreleasePool` / `AVCaptureDevice` exist once AVFoundation is
-    // linked. Every message uses a documented selector and matching types; the
-    // returned array + its devices are autoreleased, so an explicit pool brackets
-    // the work and every string is copied into an owned `String` before it drains.
-    unsafe {
-        let pool: *mut Object = msg_send![pool_cls, new];
-        let devices: *mut Object = msg_send![device_cls, devicesWithMediaType: AVMediaTypeVideo];
+    // An explicit pool brackets the work: the returned array and its devices are
+    // autoreleased, and a caller thread with no run loop drains none on its own.
+    // Every string is copied into an owned `String` before the pool drops.
+    autoreleasepool(|_| {
+        // SAFETY: `AVCaptureDevice` exists once AVFoundation is linked. Every
+        // message uses a documented selector and matching types; `AVMediaTypeVideo`
+        // is the framework's exported `NSString` constant.
+        unsafe {
+            let devices: *mut AnyObject =
+                msg_send![device_cls, devicesWithMediaType: AVMediaTypeVideo];
 
-        let mut out = Vec::new();
-        if !devices.is_null() {
-            let count: usize = msg_send![devices, count];
-            out.reserve(count);
-            for i in 0..count {
-                let device: *mut Object = msg_send![devices, objectAtIndex: i];
-                if device.is_null() {
-                    continue;
-                }
-                let name_obj: *mut Object = msg_send![device, localizedName];
-                let uid_obj: *mut Object = msg_send![device, uniqueID];
-                let model_obj: *mut Object = msg_send![device, modelID];
-                if let (Some(name), Some(unique_id), Some(model_id)) =
-                    (nsstring(name_obj), nsstring(uid_obj), nsstring(model_obj))
-                {
-                    let (max_width, max_height, max_fps) = best_format(device);
-                    out.push(RawCamera {
-                        name,
-                        unique_id,
-                        model_id,
-                        max_width,
-                        max_height,
-                        max_fps,
-                    });
+            let mut out = Vec::new();
+            if !devices.is_null() {
+                let count: usize = msg_send![devices, count];
+                out.reserve(count);
+                for i in 0..count {
+                    let device: *mut AnyObject = msg_send![devices, objectAtIndex: i];
+                    if device.is_null() {
+                        continue;
+                    }
+                    let name_obj: *mut AnyObject = msg_send![device, localizedName];
+                    let uid_obj: *mut AnyObject = msg_send![device, uniqueID];
+                    let model_obj: *mut AnyObject = msg_send![device, modelID];
+                    if let (Some(name), Some(unique_id), Some(model_id)) =
+                        (nsstring(name_obj), nsstring(uid_obj), nsstring(model_obj))
+                    {
+                        let (max_width, max_height, max_fps) = best_format(device);
+                        out.push(RawCamera {
+                            name,
+                            unique_id,
+                            model_id,
+                            max_width,
+                            max_height,
+                            max_fps,
+                        });
+                    }
                 }
             }
+            out
         }
-
-        let _: () = msg_send![pool, drain];
-        out
-    }
+    })
 }
 
 /// Largest `(width, height, max_fps)` among the device's supported formats, or
 /// `(0, 0, 0)` when none are reported. Reads format metadata only — no capture
 /// session, so no Camera permission is needed.
-fn best_format(device: *mut Object) -> (u32, u32, u32) {
+fn best_format(device: *mut AnyObject) -> (u32, u32, u32) {
     // SAFETY: `device` is a valid `AVCaptureDevice`; `formats` is an autoreleased
     // `NSArray` of `AVCaptureDeviceFormat`, each exposing a `CMFormatDescription`
     // and frame-rate ranges via documented selectors.
     unsafe {
-        let formats: *mut Object = msg_send![device, formats];
+        let formats: *mut AnyObject = msg_send![device, formats];
         if formats.is_null() {
             return (0, 0, 0);
         }
         let count: usize = msg_send![formats, count];
         let mut best = (0u32, 0u32, 0u32);
         for i in 0..count {
-            let format: *mut Object = msg_send![formats, objectAtIndex: i];
+            let format: *mut AnyObject = msg_send![formats, objectAtIndex: i];
             if format.is_null() {
                 continue;
             }
-            let desc: *mut Object = msg_send![format, formatDescription];
+            let desc: *mut AnyObject = msg_send![format, formatDescription];
             if desc.is_null() {
                 continue;
             }
@@ -140,18 +148,18 @@ fn best_format(device: *mut Object) -> (u32, u32, u32) {
 }
 
 /// Highest `maxFrameRate` across a format's `videoSupportedFrameRateRanges`.
-fn max_frame_rate(format: *mut Object) -> u32 {
+fn max_frame_rate(format: *mut AnyObject) -> u32 {
     // SAFETY: documented selectors on a valid `AVCaptureDeviceFormat` /
     // `AVFrameRateRange`; `maxFrameRate` returns a `double`.
     unsafe {
-        let ranges: *mut Object = msg_send![format, videoSupportedFrameRateRanges];
+        let ranges: *mut AnyObject = msg_send![format, videoSupportedFrameRateRanges];
         if ranges.is_null() {
             return 0;
         }
         let count: usize = msg_send![ranges, count];
         let mut max = 0.0f64;
         for i in 0..count {
-            let range: *mut Object = msg_send![ranges, objectAtIndex: i];
+            let range: *mut AnyObject = msg_send![ranges, objectAtIndex: i];
             if range.is_null() {
                 continue;
             }
@@ -180,7 +188,7 @@ fn round_fps(rate: f64) -> u32 {
 
 /// Copy an `NSString` into an owned Rust `String`. `None` for a null pointer or
 /// non-UTF-8 contents.
-fn nsstring(s: *mut Object) -> Option<String> {
+fn nsstring(s: *mut AnyObject) -> Option<String> {
     if s.is_null() {
         return None;
     }

@@ -14,11 +14,14 @@ categories = ["hardware-support"]
 serde = { workspace = true }
 tracing = { workspace = true }
 
-# AVFoundation (AVCaptureDevice) enumeration — same objc 0.2 toolchain the GUI's
-# menu-bar / permission FFI uses, so it's already proven in this workspace.
+# AVFoundation (AVCaptureDevice enumeration + AVCaptureSession capture) on the
+# same objc2 toolchain as the rest of the workspace's ObjC FFI (GUI menu bar /
+# permissions, the hook's NSWorkspace read): leak-proof `Retained<T>` ownership,
+# `define_class!` for the frame delegate (matching the agent tray target), and
+# `block2` for the `requestAccess…` completion block.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc = "0.2"
-block = "0.1"
+objc2 = { workspace = true }
+block2 = "0.6"
 
 # DirectShow enumeration + IAMVideoProcAmp / IAMCameraControl UVC controls.
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -32,12 +35,11 @@ windows = { version = "0.61", features = [
     "Win32_System_Ole",
 ] }
 
-# Mirrors [workspace.lints], but allows the legacy `cfg(cargo-clippy)` check the
-# objc 0.2 macros emit (same as openlogi-gui / openlogi-hook). unsafe_code stays
-# denied; the AVFoundation module opts in locally with #[expect(unsafe_code)].
+# Mirrors [workspace.lints]. unsafe_code stays denied; the AVFoundation modules
+# opt in locally with #[expect(unsafe_code)]. (The `unexpected_cfgs` allow the
+# old objc 0.2 macros needed is gone — objc2 doesn't emit `cfg(cargo-clippy)`.)
 [lints.rust]
 unsafe_code = "deny"
-unexpected_cfgs = { level = "allow", check-cfg = [] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
