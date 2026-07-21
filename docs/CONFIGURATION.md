@@ -87,3 +87,17 @@ brightness = 80
 Action names are the catalog's variant names (`LeftClick`, `MouseBack`,
 `Copy`, `PlayPause`, `CycleDpiPresets`, …). Custom keyboard shortcuts are
 currently hand-authored as a `CustomShortcut` table in the TOML file.
+
+The modifier mask uses `1` for Command, `2` for Shift, `4` for Control, `8`
+for Option, and `16` for Fn/Globe on macOS. For example, these bindings send
+Fn+Down and Fn+Up:
+
+```toml
+[devices.2b042.bindings]
+Back = { CustomShortcut = { modifiers = 16, key_code = 125, display = "fn↓" } }
+Forward = { CustomShortcut = { modifiers = 16, key_code = 126, display = "fn↑" } }
+```
+
+macOS Page Down (`key_code = 121`) and Page Up (`key_code = 116`) shortcuts
+also preserve the SecondaryFn event flag automatically, matching the events
+produced by the corresponding physical Fn+arrow combinations.
