@@ -3,6 +3,7 @@
 use std::{any::TypeId, collections::HashMap, sync::Arc};
 
 use thiserror::Error;
+use tracing::trace;
 
 use crate::{
     channel::{ChannelError, HidppChannel},
@@ -138,9 +139,20 @@ impl Device {
         let feature_set_feature = self.add_feature::<FeatureSetFeature>(feature_set_info.index);
 
         let count = feature_set_feature.count().await?;
+        trace!(
+            index = self.device_index,
+            count, "enumerating feature table"
+        );
         let mut features = Vec::with_capacity(count as usize);
         for i in 1..=count {
             let info = feature_set_feature.get_feature(i).await?;
+            trace!(
+                index = self.device_index,
+                slot = i,
+                id = format_args!("{:#06x}", info.id),
+                version = info.version,
+                "feature",
+            );
             features.push(info);
 
             if i == feature_set_info.index {

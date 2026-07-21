@@ -5143,6 +5143,7 @@ dependencies = [
  "rand 0.9.4",
  "serde",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
