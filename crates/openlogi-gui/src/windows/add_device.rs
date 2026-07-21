@@ -19,7 +19,10 @@ use gpui::{
     ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::v_flex;
+use gpui_component::{
+    button::{Button, ButtonVariants as _},
+    v_flex,
+};
 use openlogi_agent_core::ipc::{FoundDevice, PairingFailure, PairingUpdate};
 use openlogi_hid::{Click, PasskeyMethod, ReceiverSelector};
 
@@ -217,7 +220,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                     pal,
                 ))
                 .child(
-                    action_button("ad-search", tr!("Search for devices"), pal, true)
+                    action_button("ad-search", tr!("Search for devices"), true)
                         .on_click(|_, _, cx| start_search(cx)),
                 );
         }
@@ -228,7 +231,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                     tr!("Make sure the device is on and in pairing mode."),
                     pal,
                 ))
-                .child(cancel_button(pal));
+                .child(cancel_button());
         }
         PairingUi::Found(devices) => {
             col = col.child(status_line(tr!("Searching for devices…"), pal));
@@ -240,17 +243,17 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                     col = col.child(device_row(idx, device, pal));
                 }
             }
-            col = col.child(cancel_button(pal));
+            col = col.child(cancel_button());
         }
         PairingUi::Pairing => {
             col = col
                 .child(status_line(tr!("Pairing…"), pal))
                 .child(hint(tr!("Follow the instructions on your device."), pal))
-                .child(cancel_button(pal));
+                .child(cancel_button());
         }
         PairingUi::Passkey(method) => {
             col = col.child(passkey_panel(method, pal));
-            col = col.child(cancel_button(pal));
+            col = col.child(cancel_button());
         }
         PairingUi::Paired { slot } => {
             col = col
@@ -265,7 +268,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                     pal,
                 ))
                 .child(
-                    action_button("ad-done", tr!("Done"), pal, false)
+                    action_button("ad-done", tr!("Done"), false)
                         .on_click(|_, _, cx| cx.set_global(PairingUi::Idle)),
                 );
         }
@@ -279,7 +282,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                 )
                 .child(hint(SharedString::from(detail.clone()), pal))
                 .child(
-                    action_button("ad-retry", tr!("Try again"), pal, true)
+                    action_button("ad-retry", tr!("Try again"), true)
                         .on_click(|_, _, cx| start_search(cx)),
                 );
         }
@@ -367,34 +370,15 @@ fn hint(text: impl Into<SharedString>, pal: Palette) -> impl IntoElement {
         .child(text.into())
 }
 
-/// A styled button. `primary` paints it accent-filled; otherwise it's outlined.
-/// The caller attaches `.on_click`.
-fn action_button(
-    id: &'static str,
-    label: impl Into<SharedString>,
-    pal: Palette,
-    primary: bool,
-) -> gpui::Stateful<gpui::Div> {
-    let base = div()
-        .id(id)
-        .px_4()
-        .py_2()
-        .rounded_md()
-        .cursor_pointer()
-        .child(label.into());
-    if primary {
-        base.bg(rgb(theme::ACCENT_BLUE))
-            .text_color(rgb(0x00ff_ffff))
-            .font_weight(FontWeight::MEDIUM)
-    } else {
-        base.border_1()
-            .border_color(pal.border)
-            .hover(|s| s.bg(pal.surface_hover))
-    }
+/// A styled button. `primary` paints it accent-filled; otherwise it's the
+/// neutral default. The caller attaches `.on_click`.
+fn action_button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> Button {
+    let button = Button::new(id).label(label);
+    if primary { button.primary() } else { button }
 }
 
-fn cancel_button(pal: Palette) -> impl IntoElement {
-    action_button("ad-cancel", tr!("Cancel"), pal, false).on_click(|_, _, cx| {
+fn cancel_button() -> impl IntoElement {
+    action_button("ad-cancel", tr!("Cancel"), false).on_click(|_, _, cx| {
         send(cx, Command::CancelPairing);
         cx.set_global(PairingUi::Idle);
     })

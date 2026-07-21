@@ -176,7 +176,7 @@ fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
             .cursor_pointer()
             .child(
                 div()
-                    .size_2()
+                    .size_1p5()
                     .rounded_full()
                     .bg(rgb(theme::STATUS_CONNECTING)),
             )
