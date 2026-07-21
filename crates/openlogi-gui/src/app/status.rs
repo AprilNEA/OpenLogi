@@ -3,8 +3,7 @@
 //! the real UI, and the footer status bar shown once it's up.
 
 use gpui::{
-    AnyElement, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement as _, Styled, div, px, rgb,
+    AnyElement, Div, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, px, rgb,
 };
 use gpui_component::{
     Icon, IconName, Sizable as _,
@@ -148,6 +147,11 @@ pub(super) fn footer(pal: Palette, granted: bool) -> impl IntoElement {
 /// click (the native prompt + System Settings, via [`open_accessibility_settings`]).
 #[cfg(target_os = "macos")]
 fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
+    // Scoped here rather than at module level: these traits' only user is this
+    // macOS-gated affordance (`.id()` + `.on_click()`), so an ungated import
+    // would be unused — and a hard error under `-D warnings` — on Linux/Windows.
+    use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
+
     if granted {
         // Reassurance only — kept deliberately quiet: a small dimmed dot and
         // muted text that recede until something is actually wrong.
