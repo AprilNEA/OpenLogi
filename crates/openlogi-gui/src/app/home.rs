@@ -236,11 +236,13 @@ fn device_card(
                                 .truncate()
                                 .text_caption()
                                 .text_color(pal.text_muted)
-                                .child(format!(
-                                    "{} · slot {}",
-                                    kind_label(record.kind),
-                                    record.slot
-                                )),
+                                .child(if matches!(record.kind, DeviceKind::Camera) {
+                                    // A camera's synthetic slot 0 means nothing
+                                    // next to real receiver slots.
+                                    kind_label(record.kind)
+                                } else {
+                                    format!("{} · slot {}", kind_label(record.kind), record.slot)
+                                }),
                         )
                         .child(
                             h_flex()
@@ -249,10 +251,15 @@ fn device_card(
                                 .gap_1p5()
                                 .child(
                                     svg()
-                                        .path(connection_icon_path(
-                                            record.route.as_ref(),
-                                            record.model_info.as_ref().map(|m| &m.transports),
-                                        ))
+                                        .path(if matches!(record.kind, DeviceKind::Camera) {
+                                            // UVC cameras are always on the cable.
+                                            "action-icons/usb.svg"
+                                        } else {
+                                            connection_icon_path(
+                                                record.route.as_ref(),
+                                                record.model_info.as_ref().map(|m| &m.transports),
+                                            )
+                                        })
                                         .size_3()
                                         .flex_none()
                                         .text_color(pal.text_muted),
@@ -274,20 +281,27 @@ fn device_card(
 /// which (with an `overflow_hidden` parent) cropped the device into a zoomed
 /// close-up. `object_fit` defaults to `Contain`, so the whole device shows.
 fn device_image(record: &DeviceRecord, pal: Palette) -> AnyElement {
-    match record
+    if let Some(path) = record
         .asset
         .as_ref()
         .and_then(|a| a.hero_image_path.clone())
     {
-        Some(path) => img(path).max_w_full().max_h_full().into_any_element(),
-        None => div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(Icon::new(IconName::Cpu).size_8().text_color(pal.text_muted))
-            .into_any_element(),
+        return img(path).max_w_full().max_h_full().into_any_element();
     }
+    // Cameras carry no depot asset, so give them a recognisable glyph on their
+    // gallery card instead of the generic chip fallback.
+    let icon = if matches!(record.kind, DeviceKind::Camera) {
+        IconName::Eye
+    } else {
+        IconName::Cpu
+    };
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(Icon::new(icon).size_8().text_color(pal.text_muted))
+        .into_any_element()
 }
 
 /// Connectivity dot for a gallery card: a steady grey when offline, a green dot

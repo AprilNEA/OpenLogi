@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::settings::{
-    GestureOwner, Lighting, ScrollResolution, SmartShift, deserialize_gesture_owner,
+    CameraControls, GestureOwner, Lighting, ScrollResolution, SmartShift, deserialize_gesture_owner,
 };
 use crate::binding::{Action, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo};
@@ -101,6 +101,17 @@ pub struct DeviceConfig {
     /// the same reason as [`Self::dpi`]. `None` until the user changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smartshift: Option<SmartShift>,
+    /// Per-webcam UVC image controls (brightness/contrast/…). `None` until the
+    /// user adjusts one, so it stays out of `config.toml` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_controls: Option<CameraControls>,
+    /// User-saved camera profiles (name → control snapshot). Built-in profiles
+    /// (Default / Streaming / Video call) live in the GUI, not here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub camera_profiles: BTreeMap<String, CameraControls>,
+    /// The camera profile last applied from the GUI, highlighted on reopen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_profile: Option<String>,
     /// Invert this device's scroll-wheel direction relative to the OS setting
     /// (issue #126): on, a wheel tick scrolls the opposite way, so a user who
     /// keeps macOS "natural scrolling" for the trackpad can have a traditional
@@ -160,6 +171,12 @@ struct RawDeviceConfig {
     #[serde(default)]
     smartshift: Option<SmartShift>,
     #[serde(default)]
+    camera_controls: Option<CameraControls>,
+    #[serde(default)]
+    camera_profiles: BTreeMap<String, CameraControls>,
+    #[serde(default)]
+    camera_profile: Option<String>,
+    #[serde(default)]
     invert_scroll: bool,
     #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
@@ -205,6 +222,9 @@ impl From<RawDeviceConfig> for DeviceConfig {
             dpi: raw.dpi,
             lighting: raw.lighting,
             smartshift: raw.smartshift,
+            camera_controls: raw.camera_controls,
+            camera_profiles: raw.camera_profiles,
+            camera_profile: raw.camera_profile,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
         }

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Args;
+use openlogi_camera::Camera;
 use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceModelInfo, PairedDevice};
 
 #[derive(Debug, Args)]
@@ -9,9 +10,10 @@ pub async fn run(_args: ListArgs) -> Result<()> {
     let inventories = openlogi_hid::enumerate()
         .await
         .context("failed to enumerate HID++ devices")?;
+    let cameras = openlogi_camera::enumerate_cameras();
 
-    if inventories.is_empty() {
-        println!("No Logitech HID++ devices found.");
+    if inventories.is_empty() && cameras.is_empty() {
+        println!("No Logitech HID++ devices or webcams found.");
         println!();
         println!("Notes:");
         println!("  - On macOS, quit Logi Options+ first — both apps fight over HID++ access.");
@@ -33,7 +35,31 @@ pub async fn run(_args: ListArgs) -> Result<()> {
         print_inventory(inv);
     }
 
+    if !cameras.is_empty() {
+        if !inventories.is_empty() {
+            println!();
+        }
+        print_cameras(&cameras);
+    }
+
     Ok(())
+}
+
+fn print_cameras(cameras: &[Camera]) {
+    println!("Cameras ({} Logitech UVC)", cameras.len());
+    let last = cameras.len() - 1;
+    for (i, cam) in cameras.iter().enumerate() {
+        let prefix = if i == last { "  └─" } else { "  ├─" };
+        let caps = match (cam.max_resolution, cam.max_fps) {
+            (Some((w, h)), Some(fps)) => format!(", up to {w}x{h}@{fps}"),
+            (Some((w, h)), None) => format!(", up to {w}x{h}"),
+            _ => String::new(),
+        };
+        println!(
+            "{prefix} ● {} (camera, vid={:04x} pid={:04x}{caps}, id={})",
+            cam.name, cam.vendor_id, cam.product_id, cam.unique_id
+        );
+    }
 }
 
 fn print_inventory(inv: &DeviceInventory) {

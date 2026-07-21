@@ -21,8 +21,8 @@ mod settings;
 
 pub use device::{DeviceConfig, DeviceIdentity};
 pub use settings::{
-    AppSettings, Appearance, AssetSourcePreference, DEFAULT_THUMBWHEEL_SENSITIVITY, GestureOwner,
-    Lighting, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
+    AppSettings, Appearance, AssetSourcePreference, CameraControls, DEFAULT_THUMBWHEEL_SENSITIVITY,
+    GestureOwner, Lighting, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
     WheelMode,
 };
@@ -495,6 +495,67 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .lighting = Some(lighting);
+    }
+
+    /// The saved UVC image controls for `device_key`, or `None` if never set.
+    #[must_use]
+    pub fn camera_controls(&self, device_key: &str) -> Option<CameraControls> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.camera_controls.clone())
+    }
+
+    /// Replace the saved UVC image controls for `device_key`.
+    pub fn set_camera_controls(&mut self, device_key: &str, controls: CameraControls) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .camera_controls = Some(controls);
+    }
+
+    /// The saved custom camera profiles for `device_key` (name → snapshot).
+    #[must_use]
+    pub fn camera_profiles(&self, device_key: &str) -> BTreeMap<String, CameraControls> {
+        self.devices
+            .get(device_key)
+            .map(|d| d.camera_profiles.clone())
+            .unwrap_or_default()
+    }
+
+    /// Save (or overwrite) a custom camera profile for `device_key`.
+    pub fn save_camera_profile(&mut self, device_key: &str, name: &str, snap: CameraControls) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .camera_profiles
+            .insert(name.to_string(), snap);
+    }
+
+    /// Delete a custom camera profile, clearing the active selection if it
+    /// named it. Unknown names are a no-op.
+    pub fn delete_camera_profile(&mut self, device_key: &str, name: &str) {
+        if let Some(device) = self.devices.get_mut(device_key) {
+            device.camera_profiles.remove(name);
+            if device.camera_profile.as_deref() == Some(name) {
+                device.camera_profile = None;
+            }
+        }
+    }
+
+    /// The last-applied camera profile name for `device_key`, if any.
+    #[must_use]
+    pub fn camera_active_profile(&self, device_key: &str) -> Option<String> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.camera_profile.clone())
+    }
+
+    /// Record which camera profile `device_key` last applied.
+    pub fn set_camera_active_profile(&mut self, device_key: &str, name: Option<String>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .camera_profile = name;
     }
 
     /// The committed sensor DPI for `device_key`, or `None` if never set.

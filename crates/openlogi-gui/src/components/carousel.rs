@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ElementId, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, RenderOnce, SharedString,
+    IntoElement, ParentElement as _, Pixels, RenderOnce, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled, Window, div, ease_in_out, prelude::FluentBuilder as _,
     px, relative,
 };
@@ -39,8 +39,9 @@ type SelectHandler = Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
 type ItemRenderer = Rc<dyn Fn(usize, bool, &mut Window, &mut App) -> AnyElement + 'static>;
 
 /// Side padding of the uniform-mode row (also used in its fits-the-viewport
-/// check, so the two stay in step).
-const UNIFORM_PAD: f32 = 24.;
+/// check, so the two stay in step). Wide enough that a left-aligned
+/// overflowing row starts clear of the floating prev arrow.
+const UNIFORM_PAD: f32 = 56.;
 
 /// A centre-stage carousel. See the module docs.
 #[derive(IntoElement)]
@@ -52,6 +53,9 @@ pub struct Carousel {
     /// When set, switch from coverflow to an equal-size scrolling row whose
     /// cards are this wide; coverflow's magnify/peek options are then ignored.
     uniform: Option<Pixels>,
+    /// Caller-owned scroll state for the uniform row, so selection changes can
+    /// scroll the active card into view instead of clipping off-screen.
+    track_scroll: Option<ScrollHandle>,
     focused_frac: f32,
     side_frac: f32,
     gap: Pixels,
@@ -74,6 +78,7 @@ impl Carousel {
             selected: 0,
             render_item: None,
             uniform: None,
+            track_scroll: None,
             focused_frac: 0.44,
             side_frac: 0.17,
             gap: px(16.),
@@ -118,6 +123,15 @@ impl Carousel {
     #[must_use]
     pub fn uniform(mut self, card_w: Pixels) -> Self {
         self.uniform = Some(card_w);
+        self
+    }
+
+    /// Track the uniform row's scroll state with a caller-owned handle. Pair
+    /// with [`ScrollHandle::scroll_to_item`] on selection changes so the active
+    /// card always scrolls into view. Uniform mode only.
+    #[must_use]
+    pub fn track_scroll(mut self, handle: ScrollHandle) -> Self {
+        self.track_scroll = Some(handle);
         self
     }
 
@@ -198,6 +212,7 @@ impl Carousel {
             indicators,
             accent,
             on_select,
+            track_scroll,
             ..
         } = self;
         let Some(render_item) = render_item.filter(|_| len > 0) else {
@@ -211,7 +226,10 @@ impl Carousel {
         let count = u16::try_from(len).map_or(f32::MAX, f32::from);
         let content_w =
             count * f32::from(card_w) + (count - 1.).max(0.) * f32::from(gap) + 2. * UNIFORM_PAD;
-        let centered = content_w <= f32::from(window.viewport_size().width);
+        // The arrows overlay the row's side margins (they take no flex space),
+        // so the row owns the full viewport width; the small slack keeps a
+        // borderline row from centring and clipping its outer cards.
+        let centered = content_w <= f32::from(window.viewport_size().width) - 16.;
         let mut items = Vec::with_capacity(len);
         for i in 0..len {
             items.push(render_item(i, i == selected, window, cx));
@@ -223,39 +241,47 @@ impl Carousel {
             .min_w_0()
             .h_full()
             .overflow_x_scroll()
+            .when_some(track_scroll.as_ref(), |row, handle| {
+                row.track_scroll(handle)
+            })
             .items_center()
             .gap(gap)
             .px(px(UNIFORM_PAD))
             .py_4()
             .map(|row| if centered { row.justify_center() } else { row })
-            .children(items);
+            // Fixed-width, no-shrink cells: a row that doesn't fit must
+            // overflow into the scroll, never squeeze the cards themselves.
+            .children(
+                items
+                    .into_iter()
+                    .map(|item| div().w(card_w).flex_none().child(item)),
+            );
 
-        // Prev/next arrows hug the left and right edges (vertically centred),
-        // flanking the scrollable row; the page dots sit centred underneath.
+        // Prev/next arrows float over the row's side margins (absolute, so the
+        // row keeps the full width and a fitting page truly fits); the page
+        // dots sit centred underneath.
         let stage = h_flex()
+            .relative()
             .w_full()
             .flex_1()
             .min_h_0()
             .items_center()
-            .px_4()
+            .child(row)
             .when(multi && arrows, |this| {
-                this.child(arrow(
+                this.child(overlay_arrow(
+                    true,
                     "carousel-prev",
                     IconName::ChevronLeft,
                     selected.saturating_sub(1),
                     selected == 0,
-                    Size::Large,
                     on_select.clone(),
                 ))
-            })
-            .child(row)
-            .when(multi && arrows, |this| {
-                this.child(arrow(
+                .child(overlay_arrow(
+                    false,
                     "carousel-next",
                     IconName::ChevronRight,
                     (selected + 1).min(len - 1),
                     selected + 1 >= len,
-                    Size::Large,
                     on_select.clone(),
                 ))
             });
@@ -479,6 +505,25 @@ fn side_slot(
     }
 }
 
+/// A prev/next arrow floated over the uniform row's side margin (vertically
+/// centred, absolute so it takes no flex space from the row).
+fn overlay_arrow(
+    left: bool,
+    id: &'static str,
+    icon: IconName,
+    target: usize,
+    disabled: bool,
+    on_select: Option<SelectHandler>,
+) -> impl IntoElement {
+    h_flex()
+        .absolute()
+        .map(|this| if left { this.left_3() } else { this.right_3() })
+        .top_0()
+        .bottom_0()
+        .items_center()
+        .child(arrow(id, icon, target, disabled, Size::Large, on_select))
+}
+
 fn arrow(
     id: &'static str,
     icon: IconName,
@@ -493,7 +538,13 @@ fn arrow(
         .with_size(size)
         .disabled(disabled)
         .when_some(on_select.filter(|_| !disabled), |this, handler| {
-            this.on_click(move |_, window, cx| handler(&target, window, cx))
+            this.on_click(move |_, window, cx| {
+                // The floating arrows sit over the row's outer cards once it
+                // overflows; without this the same click also reaches the
+                // card underneath and opens its detail page.
+                cx.stop_propagation();
+                handler(&target, window, cx);
+            })
         })
 }
 
