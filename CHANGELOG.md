@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.22](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.21...openlogi-core-v0.6.22) - 2026-07-21
+
+### Added
+
+- *(gui)* add asset source selector
+
+### Fixed
+
+- *(gui)* label the official asset source as OpenLogi
+
+### Other
+
+- *(core)* describe selected asset source
+
 ## [0.6.21](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.20...openlogi-core-v0.6.21) - 2026-07-19
 
 ### Added

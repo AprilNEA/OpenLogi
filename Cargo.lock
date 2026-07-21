@@ -4977,7 +4977,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi"
-version = "0.6.21"
+version = "0.6.22"
 dependencies = [
  "anyhow",
  "openlogi-cli",
@@ -4986,7 +4986,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-agent"
-version = "0.6.21"
+version = "0.6.22"
 dependencies = [
  "embed-resource",
  "futures",
@@ -5011,7 +5011,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-agent-core"
-version = "0.6.21"
+version = "0.6.22"
 dependencies = [
  "async-hid",
  "bincode",
@@ -5029,7 +5029,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-assets"
-version = "0.6.21"
+version = "0.6.22"
 dependencies = [
  "atomic-write-file",
  "backon",
@@ -5044,7 +5044,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-cli"
-version = "0.6.21"
+version = "0.6.22"
 dependencies = [
  "anyhow",
  "clap",
@@ -5058,7 +5058,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-core"
-version = "0.6.21"
+version = "0.6.22"
 dependencies = [
  "atomic-write-file",
  "etcetera",
@@ -5072,7 +5072,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-gui"
-version = "0.6.21"
+version = "0.6.22"
 dependencies = [
  "anyhow",
  "backon",
@@ -5112,7 +5112,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hid"
-version = "0.6.21"
+version = "0.6.22"
 dependencies = [
  "async-hid",
  "futures-concurrency",
@@ -5129,7 +5129,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hidpp"
-version = "0.6.21"
+version = "0.6.22"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -5148,7 +5148,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hook"
-version = "0.6.21"
+version = "0.6.22"
 dependencies = [
  "core-foundation 0.10.0",
  "core-graphics 0.25.0",
@@ -5169,7 +5169,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-inject"
-version = "0.6.21"
+version = "0.6.22"
 dependencies = [
  "core-foundation 0.10.0",
  "core-graphics 0.25.0",
@@ -9458,7 +9458,7 @@ checksum = "32ac00cd3f8ec9c1d33fb3e7958a82df6989c42d747bd326c822b1d625283547"
 
 [[package]]
 name = "xtask"
-version = "0.6.21"
+version = "0.6.22"
 dependencies = [
  "anyhow",
  "clap",
