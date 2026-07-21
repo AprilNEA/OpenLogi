@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.23](https://github.com/AprilNEA/OpenLogi/compare/v0.6.22...v0.6.23) - 2026-07-21
+
+### Other
+
+- *(build)* run PR installer builds only with needs: build label ([#443](https://github.com/AprilNEA/OpenLogi/pull/443))
+
 ## [0.6.22](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.21...openlogi-core-v0.6.22) - 2026-07-21
 
 ### Added
