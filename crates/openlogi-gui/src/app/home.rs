@@ -25,7 +25,7 @@ use super::widgets::{add_device_button, kind_label, settings_button};
 use crate::asset::GlowGeometry;
 use crate::components::carousel::Carousel;
 use crate::state::{AppState, DeviceRecord};
-use crate::theme::{self, HEADER_H, Palette};
+use crate::theme::{self, HEADER_H, Palette, SelectableStyle as _};
 
 /// Home (gallery) top bar: the "Devices" title, a Settings gear, and the
 /// Add-Device button — the entry points the old carousel header used to carry.
@@ -73,7 +73,7 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
             .uniform(px(theme::GALLERY_CARD_W))
             .gap(px(GALLERY_GAP))
             .accent(rgb(theme::ACCENT_BLUE).into())
-            .render_item(move |idx, _focused, _window, cx| {
+            .render_item(move |idx, focused, _window, cx| {
                 let pal = theme::palette(cx);
                 let Some(record) = cx
                     .try_global::<AppState>()
@@ -86,10 +86,10 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                     .try_global::<AppState>()
                     .and_then(|s| keyboard_glow(s, &record));
                 let view = view.clone();
-                device_card(&record, glow, pal)
+                device_card(&record, focused, glow, pal)
                     .id(("device-card", idx))
                     .cursor_pointer()
-                    .hover(move |s| s.bg(pal.surface).border_color(rgb(theme::ACCENT_BLUE)))
+                    .hover(move |s| s.border_color(rgb(theme::ACCENT_BLUE)))
                     .on_click(move |_, _, cx| {
                         view.update(cx, |this, cx| this.open_device(key.clone(), cx));
                     })
@@ -170,14 +170,16 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
 
 /// A device card in the Home gallery: the device photo floating on the window
 /// background above the name, connectivity dot, kind/slot, and battery. Fixed
-/// width so cards stay equal in the scrollable row. The border stays transparent
-/// at rest — a card only shows its accent ring on hover (wired by the gallery),
-/// so an idle row carries no boxed-in chrome; the live device is marked by the
-/// carousel's centring and page dot instead. The transparent 1px is always
-/// reserved so the hover ring never nudges the layout. Returns a bare [`Div`] so
+/// width so cards stay equal in the scrollable row. No card shows a border at
+/// rest — the accent ring appears only on hover (wired by the gallery). The
+/// `active` device (whose bindings and DPI are live) keeps a persistent but
+/// borderless marker: a faint accent fill, which reads whether or not the
+/// carousel centres it. The 1px border is always reserved in a transparent
+/// colour so the hover ring never nudges the layout. Returns a bare [`Div`] so
 /// the gallery can wire the hover and click handlers.
 fn device_card(
     record: &DeviceRecord,
+    active: bool,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     pal: Palette,
 ) -> Div {
@@ -190,6 +192,7 @@ fn device_card(
         .rounded(pal.card_radius)
         .border_1()
         .border_color(gpui::transparent_black())
+        .selected_fill(active)
         .child(
             div()
                 .relative()
