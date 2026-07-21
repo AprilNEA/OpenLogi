@@ -75,12 +75,16 @@ pub struct Assignment {
     /// `map_slot_name`-style consumers treat unknown names as "no hotspot".
     #[serde(rename = "slotName", default)]
     pub slot_name: String,
+    /// Camera depots ship marker-less settings-slot assignments (under the
+    /// `device_camera_image` entry, which no hotspot consumer reads); a
+    /// missing marker defaults to the origin rather than failing the file.
+    #[serde(default)]
     pub marker: Point,
     #[serde(default)]
     pub label: Direction,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Clone, Copy, Default)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
@@ -146,5 +150,31 @@ mod tests {
         let origin = meta.origin().expect("origin survives");
         assert_eq!((origin.width, origin.height), (3598, 1315));
         assert_eq!(meta.images[0].assignments[0].slot_name, "");
+    }
+
+    /// Camera depots (StreamCam) list settings-slot assignments with no
+    /// `marker` under their `device_camera_image` entry. Parsing must not
+    /// fail wholesale, and `assignments()` must not surface them (it reads
+    /// only the `device_buttons_image` entry).
+    #[test]
+    fn camera_metadata_without_markers_parses() {
+        let json = r#"{
+          "images": [
+            { "key": "device_image", "origin": { "width": 1280, "height": 800 } },
+            {
+              "key": "device_camera_image",
+              "origin": { "width": 396, "height": 396 },
+              "assignments": [
+                { "slotId": "streamcam-0893_webcam_camera_settings",
+                  "slotName": "SLOT_NAME_WEBCAM_CAMERA_SETTINGS",
+                  "disableAssignmentClick": true }
+              ]
+            }
+          ]
+        }"#;
+        let meta: Metadata = serde_json::from_str(json).expect("camera schema must parse");
+        let origin = meta.origin().expect("origin survives");
+        assert_eq!((origin.width, origin.height), (1280, 800));
+        assert_eq!(meta.assignments().count(), 0);
     }
 }

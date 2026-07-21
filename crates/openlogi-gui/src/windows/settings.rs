@@ -355,6 +355,14 @@ impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
         let view = cx.entity();
+        // Only surface the Camera permission when a webcam is actually present,
+        // so people without a Logitech camera are never asked for camera access.
+        // Gated to the platforms that register the permission page below (macOS
+        // consent is the AVFoundation gate; Windows has no such page).
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let has_camera = cx
+            .try_global::<AppState>()
+            .is_some_and(AppState::has_camera);
 
         // Outline group boxes give every page bordered cards (depth /
         // definition that the flat Fill variant lacked); the hero /
@@ -371,7 +379,7 @@ impl Render for SettingsView {
         // Registered only where grants exist to manage — see the `mod
         // permissions` cfg for why Windows skips it.
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let settings = settings.page(permissions::permissions_page(pal));
+        let settings = settings.page(permissions::permissions_page(pal, has_camera));
         let settings = settings
             .page(appearance::appearance_page(
                 view.clone(),

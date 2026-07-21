@@ -126,13 +126,18 @@ fn sync_depot(
         warn!(depot, error = %e, "buttons render fetch failed");
     }
 
-    // Optional second pass: download the colour variant PNGs matching
-    // the connected device's `extended_model_id`, for both the front
-    // (carousel) and the side / buttons (mouse-model) views. Failure is
-    // non-fatal — `AssetResolver.load_files` falls back to the bare hero
-    // render that came in with the baseline fetch above.
+    // Optional second pass: download the manifest-mapped render PNGs — the
+    // colour variant matching the device's `extended_model_id` for the front
+    // (carousel) and side / buttons (mouse-model) views, plus the camera hero
+    // (`device_camera_image` — camera depots ship no bare `front*.png`, so the
+    // baseline fetch above brings no render for them at all). Failure is
+    // non-fatal — `AssetResolver.load_files` falls back to whatever landed.
     let manifest_path = dir.join("manifest.json");
-    for resource_key in ["device_image", "device_buttons_image"] {
+    for resource_key in [
+        "device_image",
+        "device_buttons_image",
+        "device_camera_image",
+    ] {
         let Some(variant) =
             pick_variant_filename(&manifest_path, &entry.model_id, ext, resource_key)
         else {
@@ -178,15 +183,17 @@ fn fetch_to_cache(
 
 /// Parse a freshly-downloaded `manifest.json` and resolve the colour
 /// variant filename for `resource_key` (e.g. `"device_image"` or
-/// `"device_buttons_image"`). `None` when the manifest is missing,
-/// malformed, or doesn't list the device's `ext` byte.
+/// `"device_camera_image"`). `ext == 0` resolves the base-model entry —
+/// needed for depots whose base render isn't a baseline `front*.png` (the
+/// caller's skip list keeps already-fetched baseline names from re-fetching).
+/// `None` when the manifest is missing, malformed, or lacks the variant.
 fn pick_variant_filename(
     manifest_path: &Path,
     base_model_id: &str,
     ext: u8,
     resource_key: &str,
 ) -> Option<String> {
-    if ext == 0 || !manifest_path.exists() {
+    if !manifest_path.exists() {
         return None;
     }
     let manifest = DepotManifest::load_from(manifest_path)
