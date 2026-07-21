@@ -27,7 +27,7 @@ use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AppState, DeviceRecord};
-use crate::theme::{HEADER_H, Palette, SelectableStyle as _};
+use crate::theme::{HEADER_H, Palette, SCREEN_PAD, SelectableStyle as _};
 
 /// Device-detail top bar, in three zones: a back affordance + device name
 /// (leading), the section tabs as a centred segmented control (middle), and the
@@ -138,7 +138,7 @@ fn buttons_tab(mouse_model: &gpui::Entity<MouseModelView>) -> impl IntoElement {
         .min_h_0()
         .items_center()
         .justify_center()
-        .p_6()
+        .p(px(SCREEN_PAD))
         .child(div().w_full().max_w(px(760.)).child(mouse_model.clone()))
 }
 
@@ -158,7 +158,7 @@ fn pointer_tab(
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
-        .p_5()
+        .p(px(SCREEN_PAD))
         .child(
             h_flex()
                 .w_full()
@@ -189,7 +189,8 @@ fn pointer_tab(
 
 fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
     // Two cards plus one 16 px gap fit exactly inside the 720 px window minimum
-    // after this tab's 20 px side padding, while still leaving a usable slider.
+    // after this tab's `SCREEN_PAD` (20 px) side inset, while still leaving a
+    // usable slider: 332·2 + 16 + 20·2 = 720.
     div().min_w(px(332.)).flex_1().h_full().child(card)
 }
 
@@ -400,7 +401,7 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>, pal: Palette) -> i
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
-        .p_6()
+        .p(px(SCREEN_PAD))
         .child(div().w_full().max_w(px(560.)).child(panel_card(
             tr!("Lighting"),
             IconName::Palette,
@@ -417,7 +418,7 @@ fn device_tab(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
-        .p_6()
+        .p(px(SCREEN_PAD))
         .child(
             v_flex()
                 .w_full()

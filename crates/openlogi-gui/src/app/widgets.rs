@@ -94,10 +94,10 @@ fn panel_card_inner(
         .border_1()
         .border_color(pal.border)
         .bg(pal.surface)
-        .p_4()
+        .p(px(theme::CARD_PAD))
         .child(
             v_flex()
-                .gap_3()
+                .gap(px(theme::CARD_GAP))
                 .when(!title.is_empty(), |this| {
                     this.child(
                         h_flex()

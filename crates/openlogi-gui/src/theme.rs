@@ -31,6 +31,18 @@ pub const STATUS_OFFLINE: u32 = 0x006b_7280;
 pub const HEADER_H: f32 = 80.;
 pub const FOOTER_H: f32 = 50.;
 
+/// Semantic spacing tokens (px), so surfaces that must agree share one value
+/// instead of each call site hand-picking a `p_*` / `gap_*` step.
+///
+/// - `SCREEN_PAD` — the inset around a detail-tab body. Uniform across tabs so
+///   the content's start doesn't shift when switching tabs (the pointer tab's
+///   two-column grid is sized against this exact value; see its card min-width).
+/// - `CARD_PAD` / `CARD_GAP` — a card's inner padding and its title-to-content
+///   gap, so every [`panel_card`](crate::app) reads the same.
+pub const SCREEN_PAD: f32 = 20.;
+pub const CARD_PAD: f32 = 16.;
+pub const CARD_GAP: f32 = 12.;
+
 /// Fixed footprint of a device card in the Home gallery. Equal-width cards lay
 /// out in a horizontally scrollable row (centred when they fit, scrollable when
 /// they don't); `GALLERY_PHOTO_H` is the height of the device photo above the
