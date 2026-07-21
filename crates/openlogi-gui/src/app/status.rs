@@ -6,7 +6,13 @@ use gpui::{
     AnyElement, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement as _, Styled, div, px, rgb,
 };
-use gpui_component::{Icon, IconName, Sizable as _, h_flex, spinner::Spinner, v_flex};
+use gpui_component::{
+    Icon, IconName, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
+    spinner::Spinner,
+    v_flex,
+};
 
 use crate::theme::{self, FOOTER_H, Palette};
 
@@ -95,17 +101,9 @@ pub(super) fn outdated_gui_body(pal: Palette) -> AnyElement {
     )
     .size_full()
     .child(
-        div()
-            .id("relaunch-gui")
-            .mt_1()
-            .px_4()
-            .py_2()
-            .rounded_md()
-            .bg(rgb(theme::ACCENT_BLUE))
-            .text_color(rgb(0x00ff_ffff))
-            .font_weight(FontWeight::MEDIUM)
-            .cursor_pointer()
-            .child(tr!("Relaunch OpenLogi"))
+        Button::new("relaunch-gui")
+            .primary()
+            .label(tr!("Relaunch OpenLogi"))
             .on_click(|_, _, cx| cx.restart()),
     )
     .into_any_element()

@@ -62,7 +62,7 @@ pub(super) fn detail_header(
         .items_center()
         .border_b_1()
         .border_color(pal.border)
-        .child(back_button(pal, cx))
+        .child(back_button(cx))
         .child(
             div()
                 .min_w_0()
@@ -76,7 +76,7 @@ pub(super) fn detail_header(
         .children(tab_strip)
         .child(div().flex_1())
         .when_some(online, |this, online| this.child(status_badge(online, pal)))
-        .child(add_device_button(pal))
+        .child(add_device_button())
 }
 
 /// The device-detail body: the active section, filling the height between the
@@ -500,14 +500,12 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                     "right-panel-settings",
                     IconName::Settings,
                     tr!("Settings"),
-                    pal,
                     |_event, _window, cx| crate::windows::settings::open(cx),
                 ))
                 .child(sidebar_action(
                     "right-panel-config-folder",
                     IconName::Folder,
                     tr!("Config folder"),
-                    pal,
                     |_event, _window, cx| {
                         if let Ok(path) = openlogi_core::paths::config_dir()
                             && let Some(url) = file_url(&path)

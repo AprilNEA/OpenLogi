@@ -9,7 +9,11 @@ use gpui::{
     IntoElement, ParentElement, StatefulInteractiveElement as _, Styled, canvas, div, fill, img,
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::{Icon, IconName, h_flex, v_flex};
+use gpui_component::{
+    Icon, IconName,
+    button::{Button, ButtonVariants as _},
+    h_flex, v_flex,
+};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind, DeviceTransports,
 };
@@ -42,8 +46,8 @@ pub(super) fn home_header(pal: Palette) -> impl IntoElement {
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(tr!("Devices")),
         )
-        .child(settings_button(pal))
-        .child(add_device_button(pal))
+        .child(settings_button())
+        .child(add_device_button())
 }
 
 /// Horizontal gap between gallery cards, in pixels.
@@ -441,23 +445,10 @@ pub(super) fn device_empty_state(pal: Palette) -> AnyElement {
                 )),
         )
         .child(
-            div()
-                .id("empty-add-device")
-                .mt_1()
-                .px_4()
-                .py_1()
-                .rounded_md()
-                .bg(rgb(theme::ACCENT_BLUE))
-                .text_color(rgb(0x00ff_ffff))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .cursor_pointer()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Icon::new(IconName::Plus))
-                        .child(tr!("Add Device")),
-                )
+            Button::new("empty-add-device")
+                .primary()
+                .icon(IconName::Plus)
+                .label(tr!("Add Device"))
                 .on_click(|_, _, cx| crate::windows::add_device::open(cx)),
         )
         .child(div().mt_1().max_w(px(440.)).text_xs().text_center().text_color(pal.text_muted).child(tr!(

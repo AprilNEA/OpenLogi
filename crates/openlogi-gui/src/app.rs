@@ -4,7 +4,11 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, Subscription, Window, div,
     prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::{Icon, IconName, TitleBar, h_flex, v_flex};
+use gpui_component::{
+    Icon, IconName, TitleBar,
+    button::{Button, ButtonVariants as _},
+    v_flex,
+};
 use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
 use tracing::info;
 
@@ -271,22 +275,10 @@ impl AppView {
                     )),
             )
             .child(
-                div()
-                    .id("open-accessibility")
-                    .px_4()
-                    .py_2()
-                    .rounded_md()
-                    .bg(rgb(theme::ACCENT_BLUE))
-                    .text_color(rgb(0x00ff_ffff))
-                    .font_weight(FontWeight::MEDIUM)
-                    .cursor_pointer()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(Icon::new(IconName::Settings))
-                            .child(tr!("Open System Settings to grant access")),
-                    )
+                Button::new("open-accessibility")
+                    .primary()
+                    .icon(IconName::Settings)
+                    .label(tr!("Open System Settings to grant access"))
                     .on_click(|_, _, cx| request_accessibility(cx)),
             )
             .child(div().text_xs().text_color(pal.text_muted).child(tr!(

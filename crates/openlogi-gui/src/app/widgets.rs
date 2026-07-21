@@ -3,10 +3,14 @@
 //! screens.
 
 use gpui::{
-    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, relative, rgb,
+    AnyElement, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled, div,
+    prelude::FluentBuilder as _, px, relative, rgb,
 };
-use gpui_component::{Icon, IconName, h_flex, tooltip::Tooltip, v_flex};
+use gpui_component::{
+    Icon, IconName, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex, v_flex,
+};
 use openlogi_core::device::{BatteryInfo, BatteryStatus, DeviceKind};
 use openlogi_hid::DeviceRoute;
 
@@ -16,62 +20,31 @@ use crate::theme::{self, Palette};
 
 /// "← Back" affordance on the detail screen; returns to the gallery without
 /// changing the active-device selection.
-pub(super) fn back_button(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    h_flex()
-        .id("detail-back")
-        .flex_shrink_0()
-        .items_center()
-        .gap_1()
-        .px_2()
-        .py_1()
-        .rounded_md()
-        .text_color(pal.text_muted)
-        .cursor_pointer()
-        .hover(|s| s.bg(pal.surface_hover).text_color(pal.text_primary))
-        .child(Icon::new(IconName::ChevronLeft).size_4())
-        .child(tr!("Back"))
-        .on_click(cx.listener(|this, _, _, cx| this.go_home(cx)))
+pub(super) fn back_button(cx: &mut Context<AppView>) -> impl IntoElement {
+    let view = cx.entity();
+    Button::new("detail-back")
+        .ghost()
+        .small()
+        .icon(IconName::ChevronLeft)
+        .label(tr!("Back"))
+        .on_click(move |_, _, cx| view.update(cx, AppView::go_home))
 }
 
 /// Square Settings gear in the Home header: opens the Settings window.
-pub(super) fn settings_button(pal: Palette) -> impl IntoElement {
-    h_flex()
-        .id("home-settings")
-        .flex_shrink_0()
-        .size(px(36.))
-        .items_center()
-        .justify_center()
-        .rounded_md()
-        .border_1()
-        .border_color(pal.border)
-        .bg(pal.surface)
-        .text_color(pal.text_muted)
-        .cursor_pointer()
-        .hover(|s| s.bg(pal.surface_hover).text_color(pal.text_primary))
-        .tooltip(|window, cx| Tooltip::new(tr!("Settings")).build(window, cx))
-        .child(Icon::new(IconName::Settings).size_4())
+pub(super) fn settings_button() -> impl IntoElement {
+    Button::new("home-settings")
+        .icon(IconName::Settings)
+        .tooltip(tr!("Settings"))
         .on_click(|_, _, cx| crate::windows::settings::open(cx))
 }
 
 /// Trailing "+" button that opens the pairing window. Present in both screen
 /// headers; the empty state carries its own primary "Add Device" CTA, so this
 /// never floats alone in an empty header.
-pub(super) fn add_device_button(pal: Palette) -> impl IntoElement {
-    h_flex()
-        .id("header-add-device")
-        .flex_shrink_0()
-        .size(px(36.))
-        .items_center()
-        .justify_center()
-        .rounded_md()
-        .border_1()
-        .border_color(pal.border)
-        .bg(pal.surface)
-        .text_color(pal.text_muted)
-        .cursor_pointer()
-        .hover(|s| s.bg(pal.surface_hover).text_color(pal.text_primary))
-        .tooltip(|window, cx| Tooltip::new(tr!("Add Device")).build(window, cx))
-        .child(Icon::new(IconName::Plus).size_4())
+pub(super) fn add_device_button() -> impl IntoElement {
+    Button::new("header-add-device")
+        .icon(IconName::Plus)
+        .tooltip(tr!("Add Device"))
         .on_click(|_, _, cx| crate::windows::add_device::open(cx))
 }
 
@@ -209,28 +182,14 @@ pub(super) fn sidebar_action(
     id: &'static str,
     icon: IconName,
     label: SharedString,
-    pal: Palette,
     handler: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
-    h_flex()
-        .id(id)
-        .flex_1()
-        .justify_center()
-        .items_center()
-        .gap_1()
-        .rounded_md()
-        .border_1()
-        .border_color(pal.border)
-        .bg(pal.surface)
-        .px_2()
-        .py_1()
-        .text_xs()
-        .text_color(pal.text_primary)
-        .cursor_pointer()
-        .hover(move |s| s.bg(pal.surface_hover))
-        .child(Icon::new(icon).size_3())
-        .child(label)
+    Button::new(id)
+        .small()
+        .icon(icon)
+        .label(label)
         .on_click(handler)
+        .flex_1()
         .into_any_element()
 }
 
