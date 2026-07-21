@@ -168,26 +168,46 @@ impl CameraControlsPanel {
             desired_values.push((*control, *range, initial));
         }
 
-        // Saved state only sticks when the hardware takes it: after a rejected
-        // batch the panel builds from the device's live values instead, so the
-        // UI never claims settings the camera doesn't actually have.
-        let synced = if apply_autos.is_empty() && apply_values.is_empty() {
-            true
+        // Saved state only sticks when the hardware takes it. A rejected batch
+        // isn't atomic — an earlier auto write can land before a later one
+        // fails — so the pre-write snapshot is no longer trustworthy. On failure
+        // re-read the device once and build from its actual state: the panel
+        // keeps `self.key`, so without this fresh read it would show stale values
+        // and never read again. (A fresh read, not `self.key = None`, so a
+        // persistent write failure can't busy-loop device seizes every render.)
+        let live = if apply_autos.is_empty() && apply_values.is_empty() {
+            None
+        } else if let Err(e) = openlogi_camera::apply_settings(&uid, &apply_autos, &apply_values) {
+            debug!(error = %e, "saved camera state reapply failed");
+            Some(openlogi_camera::read_camera_state(&uid).unwrap_or(snap))
         } else {
-            openlogi_camera::apply_settings(&uid, &apply_autos, &apply_values)
-                .map_err(|e| debug!(error = %e, "saved camera state reapply failed"))
-                .is_ok()
+            None
         };
 
         for (toggle, on, st) in desired_autos {
+            let shown_on = match &live {
+                None => on,
+                Some(state) => state
+                    .autos
+                    .iter()
+                    .find(|(t, _)| *t == toggle)
+                    .map_or(st.current, |(_, s)| s.current),
+            };
             self.autos.push(AutoRow {
                 toggle,
-                on: if synced { on } else { st.current },
+                on: shown_on,
                 default: st.default,
             });
         }
         for (control, range, initial) in desired_values {
-            let shown = if synced { initial } else { range.current };
+            let shown = match &live {
+                None => initial,
+                Some(state) => state
+                    .controls
+                    .iter()
+                    .find(|(c, _)| *c == control)
+                    .map_or(range.current, |(_, r)| r.current),
+            };
             let state = cx.new(|_| {
                 SliderState::new()
                     .max(range.max as f32)
@@ -243,8 +263,13 @@ impl CameraControlsPanel {
             None => openlogi_camera::set_control(uid, control, v),
         };
         if let Err(e) = written {
-            // The device didn't take it — persisting would lie.
             debug!(?control, value = v, error = %e, "camera control write failed");
+            // A plain set_control is atomic (the panel still matches the
+            // device); a takeover batches auto-off + value, so a partial
+            // failure needs a live resync rather than the stale panel state.
+            if takeover.is_some() {
+                self.resync_after_failed_write(cx);
+            }
             return;
         }
         if let Some((toggle, ix)) = takeover {
@@ -291,8 +316,10 @@ impl CameraControlsPanel {
             ));
         }
         if let Err(e) = openlogi_camera::apply_settings(&uid, &[(toggle, on)], &values) {
-            // The device kept its mode — flipping the chip would lie.
             debug!(?toggle, on, error = %e, "camera auto write failed");
+            // Turning auto off batches the slider value, so a partial write can
+            // land the mode but not the value; resync from live hardware.
+            self.resync_after_failed_write(cx);
             return;
         }
         self.autos[ix].on = on;
@@ -331,8 +358,10 @@ impl CameraControlsPanel {
             Some(pos)
         });
         if let Err(e) = openlogi_camera::apply_settings(&uid, &autos, &[(control, default)]) {
-            // The device kept its state — leave the UI and config matching it.
             debug!(?control, value = default, error = %e, "camera control reset failed");
+            // Auto default + value default aren't atomic; resync from live
+            // hardware so a partial reset can't desync the row.
+            self.resync_after_failed_write(cx);
             return;
         }
         if let Some(pos) = auto_pos {
@@ -413,11 +442,10 @@ impl CameraControlsPanel {
         }
 
         if let Err(e) = openlogi_camera::apply_settings(&uid, &autos, &values) {
-            // Some writes may have landed; rebuild from the device's live state
-            // rather than persisting a profile the hardware didn't fully take.
             debug!(profile = id, error = %e, "camera profile apply failed");
-            self.key = None;
-            cx.notify();
+            // Some writes may have landed; resync from live state and drop the
+            // active profile so a later edit can't persist a half-applied one.
+            self.resync_after_failed_write(cx);
             return;
         }
         for (toggle, on) in &autos {
@@ -476,6 +504,22 @@ impl CameraControlsPanel {
                 state.save_camera_profile(&key, &active, snap);
             }
         });
+    }
+
+    /// Recover after a batched device write failed partway through.
+    /// `apply_settings` is not atomic (it writes the auto mode, then the value,
+    /// in one open), so a partial failure can leave the hardware between the old
+    /// and new state. Drop the cached rows so the panel rebuilds from the
+    /// device's live state on the next render, and clear any active profile so a
+    /// later edit's [`Self::sync_active_custom`] can't overwrite a saved profile
+    /// with those rebuilt values.
+    fn resync_after_failed_write(&mut self, cx: &mut Context<Self>) {
+        if let Some(key) = self.key.take() {
+            cx.update_global::<AppState, _>(|state, _| {
+                state.set_camera_active_profile(&key, None);
+            });
+        }
+        cx.notify();
     }
 
     /// Save the current control values + auto states as a new custom profile

@@ -425,6 +425,12 @@ impl UsbDevice {
             }
 
             let mut chosen: Option<Opened> = None;
+            // Count Logitech cameras reached on the location-less path. With a
+            // parseable location only an exact match opens; without a hint (an
+            // unparseable unique id) the first Logitech camera is a best effort
+            // that is only safe when it's the *only* one — see the fail-closed
+            // check after the loop.
+            let mut vendor_candidates = 0usize;
             loop {
                 let service = IOIteratorNext(iter);
                 if service == 0 {
@@ -432,11 +438,6 @@ impl UsbDevice {
                 }
                 match Self::try_open(service, want_vid, want_location) {
                     Some(found) => {
-                        // With a parseable location hint only that camera may
-                        // be opened — falling back to "first Logitech camera"
-                        // could write another webcam's registers when two are
-                        // attached. Without a hint (an unparseable unique id),
-                        // the first Logitech camera stays the best effort.
                         let exact =
                             want_location.is_some_and(|l| found.matched_location == Some(l));
                         IOObjectRelease(service);
@@ -446,8 +447,13 @@ impl UsbDevice {
                             }
                             chosen = Some(found);
                             break;
-                        } else if want_location.is_none() && chosen.is_none() {
-                            chosen = Some(found);
+                        } else if want_location.is_none() {
+                            vendor_candidates += 1;
+                            if chosen.is_none() {
+                                chosen = Some(found);
+                            } else {
+                                found.into_device().close();
+                            }
                         } else {
                             found.into_device().close();
                         }
@@ -458,6 +464,17 @@ impl UsbDevice {
                 }
             }
             IOObjectRelease(iter);
+
+            // A location-less match is only unambiguous with exactly one
+            // Logitech camera attached; with two (and a unique id we couldn't
+            // parse into a USB location) we can't tell them apart, so refuse
+            // rather than write the wrong camera's registers.
+            if want_location.is_none() && vendor_candidates > 1 {
+                if let Some(dev) = chosen.take() {
+                    dev.into_device().close();
+                }
+                return Err(ControlError::Ambiguous);
+            }
 
             chosen
                 .map(Opened::into_device)
