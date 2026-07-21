@@ -229,7 +229,7 @@ fn decodes_parameters_changed_event() {
     assert_eq!(event.sensor_index, 1);
     assert_eq!(event.dpi_x, 800);
     assert_eq!(event.dpi_y, 1600);
-    assert_eq!(event.lod, Lod::Medium);
+    assert_eq!(event.lod, Some(Lod::Medium));
 }
 
 #[test]
@@ -242,7 +242,7 @@ fn decodes_calibration_completed_event() {
     let ExtendedDpiEvent::CalibrationCompleted(event) = decode_event(1, &payload).unwrap() else {
         panic!("expected a calibration-completed event");
     };
-    assert_eq!(event.direction, DpiDirection::Y);
+    assert_eq!(event.direction, Some(DpiDirection::Y));
     assert_eq!(event.correction, 100);
     assert_eq!(event.delta, -1);
     assert!(!event.failed());
@@ -265,11 +265,37 @@ fn ignores_unknown_event_sub_id() {
 }
 
 #[test]
-fn ignores_event_with_unknown_lod() {
+fn keeps_event_with_unknown_lod() {
     let mut payload = [0; 16];
+    payload[0] = 3; // sensor index — a valid sibling that must survive
     payload[5] = 9;
 
-    assert!(decode_event(0, &payload).is_none());
+    let ExtendedDpiEvent::ParametersChanged(changed) =
+        decode_event(0, &payload).expect("event kept")
+    else {
+        panic!("expected ParametersChanged");
+    };
+    // Lod stays a closed, write-safe enum; an unknown lift-off value surfaces
+    // as None on the event without dropping the DPI change.
+    assert_eq!(changed.lod, None);
+    assert_eq!(changed.sensor_index, 3);
+}
+
+/// Totality: a known event sub-id must decode for any enum-field byte value.
+#[test]
+fn known_sub_id_survives_any_field_byte() {
+    for byte in 0..=u8::MAX {
+        // sub 0: Lod at payload[5]; sub 1: DpiDirection at payload[1].
+        for (sub_id, pos) in [(0u8, 5usize), (1, 1)] {
+            let mut payload = [0; 16];
+            payload[0] = 3; // sensor index sibling
+            payload[pos] = byte;
+            assert!(
+                decode_event(sub_id, &payload).is_some(),
+                "dropped sub {sub_id} for payload[{pos}]={byte:#04x}"
+            );
+        }
+    }
 }
 
 #[test]

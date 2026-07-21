@@ -33,8 +33,9 @@ pub enum RgbEffectsEvent {
         params: [u8; CLUSTER_EFFECT_PARAM_COUNT],
         /// Persistence the effect was applied with.
         persistence: RgbPersistence,
-        /// Power-mode target the effect applies to.
-        power_mode: PowerModeTarget,
+        /// Power-mode target the effect applies to, or `None` when the device
+        /// reported a value this crate does not model.
+        power_mode: Option<PowerModeTarget>,
     },
 }
 
@@ -45,9 +46,9 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<RgbEffectsE
             cluster_index: payload[0],
             effect_counter: be16(payload, 1),
         }),
-        1 => Some(RgbEffectsEvent::UserActivity(
-            ActivityEventType::try_from(payload[0]).ok()?,
-        )),
+        1 => Some(RgbEffectsEvent::UserActivity(ActivityEventType::from(
+            payload[0],
+        ))),
         2 => {
             let mut params = [0; CLUSTER_EFFECT_PARAM_COUNT];
             params.copy_from_slice(&payload[2..2 + CLUSTER_EFFECT_PARAM_COUNT]);
@@ -62,7 +63,7 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<RgbEffectsE
                 power_mode: PowerModeTarget::try_from(
                     (flags >> POWER_TARGET_SHIFT) & FLAGS_FIELD_MASK,
                 )
-                .ok()?,
+                .ok(),
             })
         }
         _ => None,
