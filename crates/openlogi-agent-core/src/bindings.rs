@@ -54,18 +54,29 @@ pub fn gesture_bindings_for(
     config: &Config,
     config_key: Option<&str>,
 ) -> BTreeMap<GestureDirection, Action> {
+    gesture_bindings_for_app(config, config_key, None)
+}
+
+/// Effective gesture bindings for the dedicated HID++ gesture button, with a
+/// foreground application's plain-click override applied when present.
+#[must_use]
+pub fn gesture_bindings_for_app(
+    config: &Config,
+    config_key: Option<&str>,
+    app_bundle: Option<&str>,
+) -> BTreeMap<GestureDirection, Action> {
     // The dedicated HID++ gesture button (CID 0x00c3) only gestures while it is the device's gesture
     // owner. When the user moves the role to an OS-hook button (Middle/Back/
     // Forward) or turns gestures off, return an empty map so the gesture watcher
     // dispatches nothing — otherwise the always-seeded defaults would keep the
     // HID++ gesture button firing regardless of the selection.
-    let owner = config_key.and_then(|key| config.gesture_owner(key));
-    if owner != Some(ButtonId::GestureButton) {
+    let Some(key) = config_key else {
+        return BTreeMap::new();
+    };
+    if config.gesture_owner(key) != Some(ButtonId::GestureButton) {
         return BTreeMap::new();
     }
-    let stored = config_key
-        .map(|key| config.gesture_bindings_for(key))
-        .unwrap_or_default();
+    let stored = config.gesture_bindings_for(key);
     let mut bindings: BTreeMap<GestureDirection, Action> = GestureDirection::ALL
         .iter()
         .copied()
@@ -73,6 +84,17 @@ pub fn gesture_bindings_for(
         .collect();
     for (k, v) in stored {
         bindings.insert(k, v);
+    }
+    // Per-app bindings are deliberately single-action overrides. For the
+    // dedicated HID++ gesture button that action applies to a plain press,
+    // while the global directional gestures remain intact.
+    if let Some(app) = app_bundle
+        && config.has_app_override(key, app)
+        && let Some(Binding::Single(action)) = config
+            .effective_bindings(key, Some(app))
+            .get(&ButtonId::GestureButton)
+    {
+        bindings.insert(GestureDirection::Click, action.clone());
     }
     bindings
 }
@@ -239,6 +261,35 @@ mod tests {
         assert!(
             gesture_bindings_for(&cfg, Some("2b042")).is_empty(),
             "HID++ gesture button must dispatch nothing once another button owns gestures"
+        );
+    }
+
+    #[test]
+    fn dedicated_gesture_button_applies_per_app_click_override() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_owner("2b042", ButtonId::GestureButton);
+        cfg.set_per_app_binding(
+            "2b042",
+            "com.apple.Safari",
+            ButtonId::GestureButton,
+            Some(Action::MouseBack),
+        );
+
+        let global = gesture_bindings_for(&cfg, Some("2b042"));
+        let safari = gesture_bindings_for_app(&cfg, Some("2b042"), Some("com.apple.Safari"));
+
+        assert_eq!(
+            global.get(&GestureDirection::Click),
+            Some(&default_gesture_binding(GestureDirection::Click))
+        );
+        assert_eq!(
+            safari.get(&GestureDirection::Click),
+            Some(&Action::MouseBack)
+        );
+        assert_eq!(
+            safari.get(&GestureDirection::Up),
+            global.get(&GestureDirection::Up),
+            "the per-app click override must preserve directional gestures"
         );
     }
 }
