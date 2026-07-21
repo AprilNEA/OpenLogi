@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
 
-use super::cache::{CACHE_MISS_GRACE, CacheKey, Cached, REFRESH_TICKS, is_stale};
-use super::probe::parse_codename_unifying;
+use super::cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_TICKS, is_stale};
+use super::probe::{NodeProbe, assemble_bolt_probe, parse_codename_unifying};
 use super::{Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop};
 use crate::inventory::features::ProbedFeatures;
 
@@ -164,6 +164,107 @@ fn one_shot_retry_stops_at_attempt_cap_when_inventory_keeps_changing() {
         ),
         "the retry loop must remain bounded even if the inventory changes every time"
     );
+}
+
+fn bolt_receiver_info() -> ReceiverInfo {
+    ReceiverInfo {
+        name: "Logi Bolt Receiver".to_string(),
+        vendor_id: 0x046d,
+        product_id: 0xc548,
+        unique_id: Some("bolt-1".to_string()),
+    }
+}
+
+/// A readable slot's probe result. `Seen` models the fallback a feature-walk
+/// timeout produces (#251): the device still surfaces from its pairing-register
+/// identity, so a timed-out slot counts as readable here.
+fn bolt_slot(slot: u8) -> (PairedDevice, CacheOutcome) {
+    (
+        PairedDevice {
+            slot,
+            codename: Some(format!("device-{slot}")),
+            wpid: None,
+            kind: DeviceKind::Mouse,
+            online: true,
+            battery: None,
+            model_info: None,
+            capabilities: None,
+        },
+        CacheOutcome::Seen(CacheKey::Bolt {
+            unit_id: [0, 0, 0, slot],
+        }),
+    )
+}
+
+fn paired_slots(probe: &NodeProbe) -> Vec<u8> {
+    let Some(inventory) = probe.inventory.as_ref() else {
+        panic!("expected an inventory");
+    };
+    inventory.paired.iter().map(|d| d.slot).collect()
+}
+
+#[test]
+fn bolt_probe_is_complete_when_count_matches_readable_slots() {
+    // Two paired slots, both readable, and the pairing-count register agrees.
+    // The `None` gaps are empty slots; `join` yields results in slot order, so
+    // the surfaced devices must come out ordered without an explicit sort.
+    let probe = assemble_bolt_probe(
+        bolt_receiver_info(),
+        Some(2),
+        vec![
+            Some(bolt_slot(1)),
+            None,
+            Some(bolt_slot(2)),
+            None,
+            None,
+            None,
+        ],
+    );
+    assert!(probe.complete, "count matches the readable slots");
+    assert!(probe.healthy, "a complete Bolt walk is authoritative");
+    assert_eq!(paired_slots(&probe), vec![1, 2], "slots surface in order");
+    assert_eq!(
+        probe.outcomes.len(),
+        2,
+        "one cache outcome per readable slot"
+    );
+}
+
+#[test]
+fn bolt_probe_is_incomplete_when_a_counted_slot_is_unreadable() {
+    // The receiver reports two paired devices but only one slot's pairing
+    // register read this tick. Presenting that partial walk as the new truth is
+    // the #218 regression: it must stay incomplete so the ledger replays the
+    // last good snapshot instead of dropping the missing device.
+    let probe = assemble_bolt_probe(bolt_receiver_info(), Some(2), vec![Some(bolt_slot(1))]);
+    assert_eq!(
+        paired_slots(&probe),
+        vec![1],
+        "only the readable slot surfaces"
+    );
+    assert!(!probe.complete, "a count shortfall is not complete");
+    assert!(
+        !probe.healthy,
+        "an incomplete Bolt walk is not authoritative"
+    );
+}
+
+#[test]
+fn bolt_probe_is_incomplete_when_the_count_register_is_unanswered() {
+    // A parked/unresponsive receiver channel returns no pairing count. Even with
+    // slots surfaced from arrival events, the walk can't be trusted as the whole
+    // truth, so it stays incomplete and the ledger keeps the prior snapshot.
+    let probe = assemble_bolt_probe(
+        bolt_receiver_info(),
+        None,
+        vec![Some(bolt_slot(1)), Some(bolt_slot(2))],
+    );
+    assert_eq!(paired_slots(&probe), vec![1, 2]);
+    assert!(
+        !probe.complete,
+        "no count register means we couldn't fully check"
+    );
+    assert!(!probe.healthy);
 }
 
 #[test]

@@ -87,16 +87,42 @@ async fn probe_bolt_receiver(
     let by_slot: HashMap<u8, BoltDeviceConnection> =
         connections.into_iter().map(|c| (c.index, c)).collect();
 
-    let mut paired = Vec::new();
-    let mut outcomes = Vec::new();
-    for slot in 1u8..=MAX_BOLT_SLOTS {
-        if let Some((device, outcome)) =
-            probe_bolt_slot(&channel, &bolt, by_slot.get(&slot), slot, cache, tick).await
-        {
-            paired.push(device);
-            outcomes.push(outcome);
-        }
-    }
+    // Probe every slot concurrently so one slow or hung device's feature walk
+    // can't push the next slot past `PROBE_BUDGET` — each slot's walk is bounded
+    // independently by `BOLT_SLOT_PROBE`. Mirrors the Unifying path. The slot
+    // range is ordered and `join` preserves input order, so the device list
+    // stays stable across ticks without an explicit sort.
+    let slot_results = (1u8..=MAX_BOLT_SLOTS)
+        .map(|slot| probe_bolt_slot(&channel, &bolt, by_slot.get(&slot), slot, cache, tick))
+        .collect::<Vec<_>>()
+        .join()
+        .await;
+
+    let receiver = ReceiverInfo {
+        name: "Logi Bolt Receiver".to_string(),
+        vendor_id: info.vendor_id,
+        product_id: info.product_id,
+        unique_id,
+    };
+    assemble_bolt_probe(receiver, pairing_count, slot_results)
+}
+
+/// Fold a Bolt receiver's per-slot probe results into a [`NodeProbe`].
+///
+/// `slot_results` holds one entry per pairing slot in slot order; `None` is an
+/// empty slot or one whose pairing register didn't read this tick. The probe is
+/// `complete`/`healthy` only when the pairing-count register answered AND every
+/// counted slot was readable — `None` (the receiver didn't answer, e.g. a parked
+/// channel) or a shortfall is "couldn't fully check", so the ledger replays the
+/// last good snapshot instead of presenting the partial walk as the new truth
+/// (#218). A slot whose *feature walk* merely timed out still counts here: it
+/// falls back to cached/identity data in [`probe_bolt_slot`] and returns `Some`.
+pub(super) fn assemble_bolt_probe(
+    receiver: ReceiverInfo,
+    pairing_count: Option<u8>,
+    slot_results: Vec<Option<(PairedDevice, CacheOutcome)>>,
+) -> NodeProbe {
+    let (paired, outcomes): (Vec<_>, Vec<_>) = slot_results.into_iter().flatten().unzip();
 
     if let Some(count) = pairing_count
         && paired.len() != usize::from(count)
@@ -107,23 +133,10 @@ async fn probe_bolt_receiver(
             "paired-device count mismatch — some slots may be unreadable"
         );
     }
-    // Authoritative only when the pairing-count register answered AND every
-    // counted slot was readable. `None` (the receiver didn't answer — e.g. a
-    // parked channel) or a shortfall is "couldn't fully check": the ledger
-    // then replays the last good snapshot instead of presenting the partial
-    // walk as the new truth (#218).
     let complete = pairing_count.is_some_and(|count| paired.len() == usize::from(count));
 
     NodeProbe {
-        inventory: Some(DeviceInventory {
-            receiver: ReceiverInfo {
-                name: "Logi Bolt Receiver".to_string(),
-                vendor_id: info.vendor_id,
-                product_id: info.product_id,
-                unique_id,
-            },
-            paired,
-        }),
+        inventory: Some(DeviceInventory { receiver, paired }),
         healthy: complete,
         complete,
         outcomes,
