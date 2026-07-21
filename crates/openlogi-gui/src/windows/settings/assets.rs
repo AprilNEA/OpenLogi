@@ -210,7 +210,7 @@ fn action_button(
         .flex_shrink_0()
         .px_2()
         .py_1()
-        .rounded_md()
+        .rounded(pal.control_radius)
         .border_1()
         .border_color(pal.border)
         .text_xs()

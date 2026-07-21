@@ -321,7 +321,7 @@ fn owner_chip(
         .id(("gesture-owner", id_part))
         .px_2()
         .py_1()
-        .rounded_md()
+        .rounded(pal.control_radius)
         .selected_border(selected, pal)
         .selected_fill(selected)
         .text_xs()
@@ -573,7 +573,7 @@ impl RenderOnce for LabelTrigger {
             .px_3()
             .justify_center()
             .gap_0p5()
-            .rounded_md()
+            .rounded(pal.control_radius)
             .border_1()
             .border_color(if highlighted {
                 rgb(ACCENT_BLUE).into()
@@ -658,6 +658,10 @@ fn localized_action_label(action: &Action) -> gpui::SharedString {
 }
 
 /// Shape-based silhouette used when no asset is cached for the device.
+///
+/// Its `rounded_*` values are illustration proportions — the body shell and the
+/// two drawn side buttons — not UI chrome, so they stay fixed rather than
+/// tracking the `Palette` radius tokens the way real cards and controls do.
 fn silhouette(w: f32, h: f32, pal: Palette) -> impl IntoElement {
     div()
         .absolute()
