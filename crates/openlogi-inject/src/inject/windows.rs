@@ -124,6 +124,14 @@ pub(super) fn execute(action: &Action) {
         | Action::HorizontalScrollLeft
         | Action::HorizontalScrollRight => post_scroll(action),
         Action::CustomShortcut(combo) => post_custom_shortcut(combo),
+        // See the macOS arm: a hold with no release edge degrades to a tap.
+        Action::HoldShortcut(combo) => {
+            tracing::debug!(
+                chord = %combo.rendered_label(),
+                "HoldShortcut dispatched without a release edge — tapping instead"
+            );
+            post_custom_shortcut(combo);
+        }
         Action::None => {}
     }
 }
@@ -191,6 +199,13 @@ fn post_custom_shortcut(combo: &KeyCombo) {
         return;
     };
 
+    post_key(vk, &combo_modifiers(combo));
+}
+
+/// Translate a [`KeyCombo`]'s modifier bitmask into Windows virtual-key codes.
+/// macOS Cmd maps to Ctrl, so a chord carrying both Cmd and Ctrl must not push
+/// `VK_CONTROL` twice.
+fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
     let mut modifiers = Vec::new();
     if combo.modifiers & KeyCombo::MOD_CMD != 0 {
         modifiers.push(VK_CONTROL);
@@ -204,7 +219,37 @@ fn post_custom_shortcut(combo: &KeyCombo) {
     if combo.modifiers & KeyCombo::MOD_OPTION != 0 {
         modifiers.push(VK_MENU);
     }
-    post_key(vk, &modifiers);
+    modifiers
+}
+
+/// Inject one edge of a held chord in a single `SendInput` batch.
+///
+/// Down order is modifiers-then-key and up order is key-then-modifiers
+/// (the reverse), matching [`post_key`].
+pub(super) fn key_phase(combo: &KeyCombo, down: bool) {
+    let Some(vk) = super::mac_virtual_key_to_windows(combo.key_code) else {
+        tracing::warn!(
+            key_code = combo.key_code,
+            chord = %combo.rendered_label(),
+            "hold chord key has no Windows mapping yet; ignored"
+        );
+        return;
+    };
+    let modifiers = combo_modifiers(combo);
+
+    let mut inputs = Vec::with_capacity(modifiers.len() + 1);
+    if down {
+        for modifier in &modifiers {
+            inputs.push(key_input(*modifier, false));
+        }
+        inputs.push(key_input(vk, false));
+    } else {
+        inputs.push(key_input(vk, true));
+        for modifier in modifiers.iter().rev() {
+            inputs.push(key_input(*modifier, true));
+        }
+    }
+    send_inputs(&inputs);
 }
 
 fn send_inputs(inputs: &[INPUT]) {

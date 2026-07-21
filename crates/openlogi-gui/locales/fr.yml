@@ -146,6 +146,7 @@ _version: 1
 "Middle": "Milieu"
 "DPI Preset %{index}": "Préréglage DPI %{index}"
 "Gesture %{name}": "Geste %{name}"
+"Hold %{chord}": "Maintenir %{chord}"
 "Left Click": "Clic gauche"
 "Right Click": "Clic droit"
 "Middle Click": "Clic du milieu"

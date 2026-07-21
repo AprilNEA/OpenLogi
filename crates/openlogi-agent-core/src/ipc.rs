@@ -28,7 +28,8 @@ use serde::{Deserialize, Serialize};
 /// v8: [`WriteError`] carries typed HID++ operation failures.
 /// v9: `poll_event_monitor` appended + [`MonitorEvent`] (live event monitor).
 /// v10: `Capabilities::hires_wheel` appended.
-pub const PROTOCOL_VERSION: u32 = 10;
+/// v11: `Action::HoldShortcut` appended (push-to-talk).
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep

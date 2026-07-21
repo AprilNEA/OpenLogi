@@ -146,6 +146,7 @@ _version: 1
 "Middle": "Środkowy"
 "DPI Preset %{index}": "Ustawienie wstępne DPI %{index}"
 "Gesture %{name}": "Gest %{name}"
+"Hold %{chord}": "Przytrzymaj %{chord}"
 "Left Click": "Lewy przycisk"
 "Right Click": "Prawy przycisk"
 "Middle Click": "Środkowy przycisk"

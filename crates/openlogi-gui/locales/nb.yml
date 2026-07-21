@@ -146,6 +146,7 @@ _version: 1
 "Middle": "Midtknapp"
 "DPI Preset %{index}": "DPI-forhåndsinnstilling %{index}"
 "Gesture %{name}": "Bevegelse %{name}"
+"Hold %{chord}": "Hold %{chord}"
 "Left Click": "Venstreklikk"
 "Right Click": "Høyreklikk"
 "Middle Click": "Midtklikk"
