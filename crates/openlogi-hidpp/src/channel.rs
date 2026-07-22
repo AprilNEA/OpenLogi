@@ -96,6 +96,15 @@ pub trait RawHidChannel: Sync + Send + 'static {
     /// must do the same and must not await `read_report` bare.
     async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Sync + Send>>;
 
+    /// Whether the underlying device connection is still usable.
+    ///
+    /// Implementations that can detect a permanent disconnect should override
+    /// this. The default preserves the behavior of transports that cannot
+    /// report connection state.
+    fn is_connected(&self) -> bool {
+        true
+    }
+
     /// If the implementation already knows whether the underlying HID channel
     /// supports HID++ messages, it should return `Some((supports_short,
     /// supports_long))` from this method.
@@ -400,6 +409,11 @@ impl HidppChannel {
             read_thread_close: Some(close_sender),
             read_thread_hdl: Some(read_thread_hdl),
         })
+    }
+
+    /// Whether the underlying HID transport still reports a live connection.
+    pub fn is_connected(&self) -> bool {
+        self.raw_channel.is_connected()
     }
 
     /// Sets the software ID that should be returned by the next call to
