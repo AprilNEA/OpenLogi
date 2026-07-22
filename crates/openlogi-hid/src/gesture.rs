@@ -16,6 +16,7 @@
 //! is therefore only diverted when its click is actually bound.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::time::Duration;
 
 use hidpp::{channel::HidppChannel, device::Device, protocol::v20};
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
@@ -33,6 +34,16 @@ use crate::write::SharedChannel;
 /// SmartShift writes can reuse it instead of opening a fresh one. `None`
 /// whenever no session is connected.
 pub type CaptureChannel = Arc<RwLock<Option<SharedChannel>>>;
+
+/// How an established capture session should release its diverted controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureStop {
+    /// Restore each diverted control to its firmware default before exiting.
+    Restore,
+    /// Exit without writes because a reconnect already discarded the device's
+    /// volatile diversion state.
+    Abandon,
+}
 
 /// One input captured from the active device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +75,36 @@ pub enum GestureError {
     /// A HID++ feature call returned an error; inner string carries context.
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+    /// An established HID channel disconnected while capture was active.
+    #[error("HID channel disconnected")]
+    ChannelDisconnected,
+}
+
+const CAPTURE_HEALTH_POLL: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureExit {
+    Stopped(CaptureStop),
+    Disconnected,
+}
+
+async fn wait_for_capture_exit(
+    chan: &HidppChannel,
+    mut shutdown: oneshot::Receiver<CaptureStop>,
+    poll_period: Duration,
+) -> CaptureExit {
+    loop {
+        tokio::select! {
+            stop = &mut shutdown => {
+                return CaptureExit::Stopped(stop.unwrap_or(CaptureStop::Restore));
+            }
+            () = tokio::time::sleep(poll_period) => {
+                if !chan.is_connected() {
+                    return CaptureExit::Disconnected;
+                }
+            }
+        }
+    }
 }
 
 /// Movement + button state accumulated across messages. Lives behind a `Mutex`
@@ -90,14 +131,17 @@ struct CaptureAccum {
 ///
 /// Opens and holds one HID++ channel, diverts whichever of those controls the
 /// device exposes, and listens. Returns once `shutdown` fires (or its sender is
-/// dropped), after restoring every diverted control. Setup errors are returned;
-/// failures to restore on the way out are logged, not propagated.
+/// dropped), or when the established channel disconnects. A normal shutdown
+/// restores every diverted control; [`CaptureStop::Abandon`] and a disconnect
+/// skip restoration because the device has already reset its volatile mappings.
+/// Setup errors are returned; failures to restore on the way out are logged,
+/// not propagated.
 pub async fn run_capture_session(
     route: DeviceRoute,
     capture_thumbwheel: bool,
     divert_gesture_button: bool,
     sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
+    shutdown: oneshot::Receiver<CaptureStop>,
     channel_slot: CaptureChannel,
 ) -> Result<(), GestureError> {
     let chan = open_route_channel(&route)
@@ -159,15 +203,30 @@ pub async fn run_capture_session(
         thumbwheel = armed.thumb.is_some(),
         "control capture active"
     );
-    let _ = shutdown.await;
+    let exit = wait_for_capture_exit(&chan, shutdown, CAPTURE_HEALTH_POLL).await;
 
     drop(listener);
     if let Ok(mut slot) = channel_slot.write() {
         *slot = None;
     }
-    armed.disarm().await;
-    debug!(index = device_index, "control capture stopped");
-    Ok(())
+    match exit {
+        CaptureExit::Stopped(CaptureStop::Restore) => {
+            armed.disarm().await;
+            debug!(index = device_index, "control capture stopped");
+            Ok(())
+        }
+        CaptureExit::Stopped(CaptureStop::Abandon) => {
+            debug!(
+                index = device_index,
+                "control capture abandoned after reconnect"
+            );
+            Ok(())
+        }
+        CaptureExit::Disconnected => {
+            debug!(index = device_index, "control capture channel disconnected");
+            Err(GestureError::ChannelDisconnected)
+        }
+    }
 }
 
 /// The set of controls a session has diverted, kept so they can be handed back

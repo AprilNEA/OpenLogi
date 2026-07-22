@@ -1,9 +1,13 @@
 use std::collections::HashSet;
 
-use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
+use openlogi_core::device::{
+    Capabilities, DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo,
+};
 
 use super::cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_TICKS, is_stale};
-use super::probe::{NodeProbe, assemble_bolt_probe, parse_codename_unifying};
+use super::probe::{
+    NodeProbe, assemble_bolt_probe, assemble_unifying_device, parse_codename_unifying,
+};
 use super::{Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop};
 use crate::inventory::features::ProbedFeatures;
 
@@ -72,6 +76,32 @@ fn cached_probe_is_reused_until_refresh_ticks() {
     assert!(
         is_stale(&cached, 10 + REFRESH_TICKS),
         "at the window the probe is refreshed"
+    );
+}
+
+#[test]
+fn unifying_cached_features_do_not_override_current_liveness() {
+    let probe = ProbedFeatures {
+        capabilities: Some(Capabilities::default()),
+        ..ProbedFeatures::default()
+    };
+
+    let device = assemble_unifying_device(
+        1,
+        Some("cached mouse".to_string()),
+        0x4082,
+        DeviceKind::Mouse,
+        probe,
+        false,
+    );
+
+    assert!(
+        !device.online,
+        "the current liveness probe is authoritative"
+    );
+    assert!(
+        device.capabilities.is_some(),
+        "cached immutable features remain available while offline"
     );
 }
 

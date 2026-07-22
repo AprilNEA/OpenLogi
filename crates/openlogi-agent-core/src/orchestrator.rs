@@ -11,13 +11,13 @@
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::config::{Config, ScrollResolution};
 use openlogi_core::device::{Capabilities, DeviceInventory};
 use openlogi_hid::{CaptureChannel, DeviceRoute};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::DpiCycleState;
 use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
@@ -58,6 +58,10 @@ pub struct SharedRuntime {
     pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
     pub thumbwheel_sensitivity: Arc<AtomicI32>,
     pub capture_channel: CaptureChannel,
+    /// Incremented when the selected device reconnects or the system wakes, so
+    /// the gesture watcher re-arms volatile HID++ control diversion even when
+    /// the receiver route itself never changed.
+    pub capture_rearm_generation: Arc<AtomicU64>,
     /// Exclusive receiver access shared by HID++ capture and pairing. Capture
     /// and pairing must never open the same receiver HID node concurrently.
     pub receiver_access: ReceiverAccess,
@@ -111,6 +115,7 @@ impl Orchestrator {
                 config.app_settings.thumbwheel_sensitivity,
             )),
             capture_channel: Arc::new(RwLock::new(None)),
+            capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
         };
         let orch = Self {
@@ -205,6 +210,9 @@ impl Orchestrator {
         // (offline→online), or — via the
         // flag — a system wake where none of those are observable.
         let reapply_all = std::mem::take(&mut self.reapply_all_next_refresh);
+        let next_current = pick_current(&devices, self.config.selected_device());
+        let rearm_capture =
+            selected_needs_capture_rearm(&self.devices, &devices, next_current, reapply_all);
         let followup = std::mem::take(&mut self.reapply_followup);
         let (targets, next_followup) =
             plan_reapply(&self.devices, &devices, &followup, reapply_all);
@@ -218,15 +226,23 @@ impl Orchestrator {
                     || a.route != b.route
                     || a.capabilities != b.capabilities
             });
-        if !changed {
+        if changed {
+            self.devices = devices;
+            self.current = next_current;
+            self.rebuild();
+        } else {
             // Same set and routes — but keep the fresh `online` flags, or a
             // device that woke this tick would read as a transition forever.
             self.devices = devices;
-            return;
         }
-        self.devices = devices;
-        self.current = pick_current(&self.devices, self.config.selected_device());
-        self.rebuild();
+        if rearm_capture {
+            let generation = self
+                .shared
+                .capture_rearm_generation
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
+            debug!(generation, "selected device requires capture re-arm");
+        }
     }
 
     /// Force a volatile-settings re-apply for every online device on the next
@@ -465,6 +481,18 @@ fn reapply_targets(prev: &[AgentDevice], next: &[AgentDevice], reapply_all: bool
         .collect()
 }
 
+/// Whether this refresh invalidated the selected device's volatile control
+/// diversion. Receiver routes stay connected while a paired mouse sleeps, so
+/// route equality alone cannot tell the capture watcher to re-arm on wake.
+fn selected_needs_capture_rearm(
+    prev: &[AgentDevice],
+    next: &[AgentDevice],
+    selected: usize,
+    reapply_all: bool,
+) -> bool {
+    reapply_targets(prev, next, reapply_all).contains(&selected)
+}
+
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
 /// plus one confirming re-apply for devices first sighted last refresh, and
 /// the follow-up keys to confirm next refresh.
@@ -519,7 +547,7 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 mod tests {
     use super::{
         AgentDevice, InventoryHealth, Orchestrator, configured_wheel_mode, plan_reapply,
-        reapply_targets,
+        reapply_targets, selected_needs_capture_rearm,
     };
     use openlogi_core::config::{Config, ScrollResolution};
     use openlogi_core::device::Capabilities;
@@ -631,6 +659,29 @@ mod tests {
         // The post-wake snapshot looks identical to the pre-sleep one; the
         // flag still re-applies to the online device (and only that one).
         assert_eq!(reapply_targets(&prev, &next, true), vec![0]);
+    }
+
+    #[test]
+    fn selected_receiver_reconnect_requests_capture_rearm() {
+        let prev = [dev("selected", 1, false), dev("other", 2, true)];
+        let next = [dev("selected", 1, true), dev("other", 2, true)];
+
+        assert!(selected_needs_capture_rearm(&prev, &next, 0, false));
+        assert!(!selected_needs_capture_rearm(&prev, &next, 1, false));
+    }
+
+    #[test]
+    fn system_wake_requests_capture_rearm_for_selected_online_device() {
+        let devices = [dev("selected", 1, true), dev("other", 2, true)];
+
+        assert!(selected_needs_capture_rearm(&devices, &devices, 0, true));
+    }
+
+    #[test]
+    fn steady_inventory_does_not_cycle_capture() {
+        let devices = [dev("selected", 1, true)];
+
+        assert!(!selected_needs_capture_rearm(&devices, &devices, 0, false));
     }
 
     #[test]

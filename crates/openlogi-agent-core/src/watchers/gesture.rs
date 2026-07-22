@@ -19,14 +19,14 @@
 //! way regardless.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
+use openlogi_hid::{CaptureChannel, CaptureStop, CapturedInput, DeviceRoute, run_capture_session};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
@@ -80,6 +80,7 @@ pub fn spawn(
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
+    capture_rearm_generation: Arc<AtomicU64>,
     receiver_access: ReceiverAccess,
 ) {
     thread::spawn(move || {
@@ -99,6 +100,7 @@ pub fn spawn(
             dpi_cycle,
             capture_channel,
             thumbwheel_sensitivity,
+            capture_rearm_generation,
             receiver_access,
         ));
     });
@@ -141,6 +143,27 @@ fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -> bool {
     done_epoch == live_epoch && has_target
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CaptureTarget {
+    route: DeviceRoute,
+    capture_thumbwheel: bool,
+    divert_gesture_button: bool,
+    rearm_generation: u64,
+}
+
+/// A generation-only restart on the same route follows a device reconnect or
+/// system wake. Its old firmware state is already gone, so restoring it would
+/// only delay (or permanently block) the replacement session.
+fn stop_for_transition(current: &CaptureTarget, next: Option<&CaptureTarget>) -> CaptureStop {
+    if next.is_some_and(|next| {
+        next.route == current.route && next.rearm_generation != current.rearm_generation
+    }) {
+        CaptureStop::Abandon
+    } else {
+        CaptureStop::Restore
+    }
+}
+
 /// Keep one capture session alive for the active device, restarting it when the
 /// device or the thumb-wheel arming changes, and dispatch incoming inputs. Runs
 /// for the lifetime of the process.
@@ -150,12 +173,12 @@ async fn manage(
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
+    capture_rearm_generation: Arc<AtomicU64>,
     receiver_access: ReceiverAccess,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
-    // (route, capture_thumbwheel, divert_gesture_button)
-    let mut current: Option<(DeviceRoute, bool, bool)> = None;
-    let mut stop: Option<oneshot::Sender<()>> = None;
+    let mut current: Option<CaptureTarget> = None;
+    let mut stop: Option<oneshot::Sender<CaptureStop>> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut accumulators = WheelAccumulators::default();
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
@@ -197,33 +220,39 @@ async fn manage(
                     // thread the full config in. Re-evaluated each tick, so a
                     // ReloadConfig owner change restarts the session accordingly.
                     let divert_gesture = gesture_bindings.read().is_ok_and(|g| !g.is_empty());
-                    target.map(|t| {
-                        (
-                            t,
-                            thumbwheel_armed(&hook_maps, sensitivity),
-                            divert_gesture,
-                        )
+                    let rearm_generation = capture_rearm_generation.load(Ordering::Relaxed);
+                    target.map(|route| CaptureTarget {
+                        route,
+                        capture_thumbwheel: thumbwheel_armed(&hook_maps, sensitivity),
+                        divert_gesture_button: divert_gesture,
+                        rearm_generation,
                     })
                 };
                 if want == current {
                     continue;
                 }
+                debug!(?current, ?want, "capture target state changed");
                 // Target or thumb-wheel arming changed (or first tick): stop the
                 // old session and start one for the new state. Sending on the
                 // oneshot lets the old session restore the diverted controls.
                 if let Some(stop) = stop.take() {
-                    let _ = stop.send(());
+                    let reason = current
+                        .as_ref()
+                        .map_or(CaptureStop::Restore, |current| {
+                            stop_for_transition(current, want.as_ref())
+                        });
+                    let _ = stop.send(reason);
                 }
                 if current.is_some() {
                     current = None;
                     continue;
                 }
-                if let Some((route, capture_thumbwheel, divert_gesture_button)) = want {
+                if let Some(target) = want {
                     let Some(receiver_lease) = receiver_access.try_acquire_for_capture() else {
                         current = None;
                         continue;
                     };
-                    current = Some((route.clone(), capture_thumbwheel, divert_gesture_button));
+                    current = Some(target.clone());
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
                     let slot = Arc::clone(&capture_channel);
@@ -233,9 +262,9 @@ async fn manage(
                     tokio::spawn(async move {
                         let _receiver_lease = receiver_lease;
                         if let Err(e) = run_capture_session(
-                            route,
-                            capture_thumbwheel,
-                            divert_gesture_button,
+                            target.route,
+                            target.capture_thumbwheel,
+                            target.divert_gesture_button,
                             sink,
                             stop_rx,
                             slot,
@@ -445,7 +474,57 @@ fn advance(
 
 #[cfg(test)]
 mod tests {
+    use openlogi_hid::{CaptureStop, DeviceRoute};
+
     use super::*;
+
+    fn capture_target(route: DeviceRoute, generation: u64) -> CaptureTarget {
+        CaptureTarget {
+            route,
+            capture_thumbwheel: false,
+            divert_gesture_button: true,
+            rearm_generation: generation,
+        }
+    }
+
+    #[test]
+    fn reconnect_restart_abandons_stale_state_on_the_same_route() {
+        let route = DeviceRoute::Unifying {
+            receiver_uid: "receiver".to_string(),
+            slot: 1,
+        };
+        let current = capture_target(route.clone(), 3);
+        let next = capture_target(route, 4);
+
+        assert_eq!(
+            stop_for_transition(&current, Some(&next)),
+            CaptureStop::Abandon
+        );
+    }
+
+    #[test]
+    fn ordinary_target_changes_restore_old_controls() {
+        let current = capture_target(
+            DeviceRoute::Unifying {
+                receiver_uid: "receiver".to_string(),
+                slot: 1,
+            },
+            3,
+        );
+        let next = capture_target(
+            DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb023,
+            },
+            4,
+        );
+
+        assert_eq!(
+            stop_for_transition(&current, Some(&next)),
+            CaptureStop::Restore
+        );
+        assert_eq!(stop_for_transition(&current, None), CaptureStop::Restore);
+    }
 
     #[test]
     fn multiplier_is_unity_at_default_sensitivity() {
