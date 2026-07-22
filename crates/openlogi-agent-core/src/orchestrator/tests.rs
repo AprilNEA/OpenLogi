@@ -1,8 +1,9 @@
 //! Orchestrator inventory/reapply/camera tests.
 
 use super::{
-    AgentDevice, InventoryHealth, Orchestrator, build_devices, configured_wheel_mode,
-    host_switch_links, pick_current, plan_reapply, reapply_targets, selected_needs_capture_rearm,
+    AgentDevice, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES, build_devices,
+    configured_wheel_mode, host_switch_links, pick_current, plan_reapply, reapply_targets,
+    selected_needs_capture_rearm,
 };
 use openlogi_core::config::{Config, LightSettings, ScrollResolution};
 use openlogi_core::device::{
@@ -324,31 +325,47 @@ fn steady_inventory_does_not_cycle_capture() {
 }
 
 #[test]
-fn plan_reapply_confirms_a_first_sighting_once() {
-    use std::collections::HashSet;
-    // First sighting: applied now, queued for one confirming re-apply.
-    let (targets, followup) = plan_reapply(&[], &[dev("a", 1, true)], &HashSet::new(), false);
+fn plan_reapply_retries_a_first_sighting_for_a_bounded_run() {
+    use std::collections::HashMap;
+    // First sighting: applied now, queued for VOLATILE_REAPPLY_CONFIRM_RETRIES
+    // confirming re-applies. A cold restart can leave the device still
+    // booting, so the initial write and a single confirm need a retry run,
+    // not a one-shot confirm.
+    let (targets, followup) = plan_reapply(&[], &[dev("a", 1, true)], &HashMap::new(), false);
     assert_eq!(targets, vec![0]);
-    assert_eq!(followup, HashSet::from(["a".to_string()]));
-    // Next refresh: the confirming apply fires, then the queue drains.
+    assert_eq!(
+        followup,
+        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES)])
+    );
+    // Each steady tick after a first sighting re-applies once and decrements
+    // the remaining retry budget — the device may still be booting.
     let prev = [dev("a", 1, true)];
-    let (targets, followup) = plan_reapply(&prev, &prev, &followup, false);
+    let followup_in = HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES)]);
+    let (targets, followup) = plan_reapply(&prev, &prev, &followup_in, false);
+    assert_eq!(targets, vec![0]);
+    assert_eq!(
+        followup,
+        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES - 1)])
+    );
+    // The budget exhausts: a last retry fires but queues no further ones.
+    let followup_in = HashMap::from([("a".to_string(), 1)]);
+    let (targets, followup) = plan_reapply(&prev, &prev, &followup_in, false);
     assert_eq!(targets, vec![0]);
     assert!(followup.is_empty());
     // Steady state after that: nothing.
-    let (targets, _) = plan_reapply(&prev, &prev, &followup, false);
+    let (targets, _) = plan_reapply(&prev, &prev, &HashMap::new(), false);
     assert!(targets.is_empty());
 }
 
 #[test]
 fn plan_reapply_transitions_are_not_queued_for_confirmation() {
-    use std::collections::HashSet;
+    use std::collections::HashMap;
     // A wake from device sleep re-applies once — the device was already
     // booted, so no confirming write is queued.
     let (targets, followup) = plan_reapply(
         &[dev("a", 1, false)],
         &[dev("a", 1, true)],
-        &HashSet::new(),
+        &HashMap::new(),
         false,
     );
     assert_eq!(targets, vec![0]);
@@ -357,12 +374,12 @@ fn plan_reapply_transitions_are_not_queued_for_confirmation() {
 
 #[test]
 fn plan_reapply_skips_a_followup_that_went_offline() {
-    use std::collections::HashSet;
+    use std::collections::HashMap;
     let prev = [dev("a", 1, true)];
     let (targets, followup) = plan_reapply(
         &prev,
         &[dev("a", 1, false)],
-        &HashSet::from(["a".to_string()]),
+        &HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES)]),
         false,
     );
     assert!(targets.is_empty());

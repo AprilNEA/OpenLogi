@@ -10,7 +10,7 @@
 //! [`DpiCycleState::capabilities`] stays `None` and presets cycle at their raw
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -112,9 +112,12 @@ pub struct Orchestrator {
     /// set/route/online state looks identical across the sleep gap, so the
     /// next refresh re-applies volatile settings to every online device.
     reapply_all_next_refresh: bool,
-    /// Config keys of devices first sighted last refresh, due one confirming
-    /// re-apply: the first write can race the device's own boot and be lost.
-    reapply_followup: HashSet<String>,
+    /// Config keys of devices first sighted last refresh, mapped to a remaining
+    /// count of confirming re-applies. The first write can race the device's own
+    /// boot and be lost — a cold restart leaves the MX Master 3s slow to enumerate,
+    /// so the volatile write (DPI/SmartShift/wheel/lighting) is retried for a
+    /// bounded run of inventory ticks until the device finishes booting (#189).
+    reapply_followup: HashMap<String, u8>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
     /// watcher has not produced its first usable observation yet.
     camera_active: Option<bool>,
@@ -168,7 +171,7 @@ impl Orchestrator {
             current_app: None,
             inventory: InventoryState::Pending,
             reapply_all_next_refresh: false,
-            reapply_followup: HashSet::new(),
+            reapply_followup: HashMap::new(),
             camera_active: None,
             manual_light_overrides: BTreeMap::new(),
             shared,
@@ -856,31 +859,52 @@ fn selected_needs_capture_rearm(
     reapply_targets(prev, next, reapply_all).contains(&selected)
 }
 
+/// How many inventory ticks a first-sighted device keeps re-applying its
+/// volatile settings after the initial write. A cold restart leaves a Bolt/
+/// Unifying mouse slow to enumerate, so the first write (and a single confirm)
+/// can both time out against a still-booting device; retrying for ~8s at the 2s
+/// cadence lets the write land once it finishes booting. Bounded rather than
+/// read-back-confirmed — see the note on [`plan_reapply`].
+const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
+
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
-/// plus one confirming re-apply for devices first sighted last refresh, and
-/// the follow-up keys to confirm next refresh.
+/// plus a bounded run of confirming re-applies for devices first sighted
+/// recently, and the follow-up keys (with remaining retry counts) to confirm
+/// next refresh. Reconnects (offline→online) re-apply once — the device was
+/// already booted, so it needs no boot-race retry.
 fn plan_reapply(
     prev: &[AgentDevice],
     next: &[AgentDevice],
-    followup: &HashSet<String>,
+    followup: &HashMap<String, u8>,
     reapply_all: bool,
-) -> (Vec<usize>, HashSet<String>) {
+) -> (Vec<usize>, HashMap<String, u8>) {
     let mut targets = reapply_targets(prev, next, reapply_all);
-    let next_followup = targets
+    let mut next_followup: HashMap<String, u8> = targets
         .iter()
         .filter(|&&idx| {
             let id = stable_id(&next[idx]);
             !prev.iter().any(|p| stable_id(p) == id)
         })
-        .map(|&idx| next[idx].config_key.clone())
+        .map(|&idx| {
+            (
+                next[idx].config_key.clone(),
+                VOLATILE_REAPPLY_CONFIRM_RETRIES,
+            )
+        })
         .collect();
     for (idx, dev) in next.iter().enumerate() {
-        if dev.online
-            && dev.route.is_some()
-            && followup.contains(&dev.config_key)
-            && !targets.contains(&idx)
-        {
-            targets.push(idx);
+        if dev.online && dev.route.is_some() && !targets.contains(&idx) {
+            // ponytail: bounded retry, not read-back-confirmed. The upgrade is
+            // to confirm the write took (read DPI back via openlogi_hid and
+            // stop retrying on a match) instead of running out a fixed budget —
+            // that converges faster and drops the redundant writes on a device
+            // that accepted the first one.
+            if let Some(&remaining) = followup.get(&dev.config_key) {
+                targets.push(idx);
+                if remaining > 1 {
+                    next_followup.insert(dev.config_key.clone(), remaining - 1);
+                }
+            }
         }
     }
     (targets, next_followup)
