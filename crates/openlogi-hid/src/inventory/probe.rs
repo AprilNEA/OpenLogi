@@ -22,7 +22,7 @@ use tracing::{debug, warn};
 use crate::mappings::{map_kind, map_unifying_kind, resolve_device_kind};
 use crate::route::DIRECT_DEVICE_INDEX;
 
-use super::cache::{CacheKey, CacheOutcome, Cached, is_stale, probe_or_reuse, seen};
+use super::cache::{CacheKey, CacheOutcome, Cached, probe_or_reuse, seen};
 use super::features::ProbedFeatures;
 use super::{ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_SLOT_PROBE};
 
@@ -602,25 +602,22 @@ async fn probe_unifying_slot(
 /// A successful full probe ([`CacheOutcome::Fresh`]) confirms liveness on a
 /// cache miss/stale entry. A fresh cached entry normally refreshes its battery,
 /// whose successful response ([`CacheOutcome::Update`]) is the liveness check.
-/// Devices without that feature get a root ping instead.
-async fn probe_unifying_features(
+/// A failed battery refresh, or a device without that feature, gets a root ping
+/// before being treated as offline.
+pub(super) async fn probe_unifying_features(
     channel: &Arc<HidppChannel>,
     slot: u8,
     id: &CacheKey,
     cached: Option<&Cached>,
     tick: u64,
 ) -> (ProbedFeatures, CacheOutcome, bool) {
-    if let Some(cached) = cached
-        && !is_stale(cached, tick)
-        && cached.battery_index.is_none()
-    {
-        let online = Device::new(Arc::clone(channel), slot).await.is_ok();
-        return (cached.probe.clone(), CacheOutcome::Seen(id.clone()), online);
-    }
-
     let (probe, outcome) =
         probe_or_reuse(channel, slot, Some(id.clone()), cached, true, tick).await;
-    let online = matches!(outcome, CacheOutcome::Fresh(..) | CacheOutcome::Update(..));
+    let online = if matches!(outcome, CacheOutcome::Fresh(..) | CacheOutcome::Update(..)) {
+        true
+    } else {
+        Device::new(Arc::clone(channel), slot).await.is_ok()
+    };
     (probe, outcome, online)
 }
 
