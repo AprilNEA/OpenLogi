@@ -1,12 +1,15 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, error::Error, io, sync::Arc};
 
+use hidpp::channel::{HidppChannel, RawHidChannel};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo,
 };
+use tokio::sync::{Mutex, mpsc};
 
 use super::cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_TICKS, is_stale};
 use super::probe::{
     NodeProbe, assemble_bolt_probe, assemble_unifying_device, parse_codename_unifying,
+    probe_unifying_features,
 };
 use super::{Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop};
 use crate::inventory::features::ProbedFeatures;
@@ -102,6 +105,101 @@ fn unifying_cached_features_do_not_override_current_liveness() {
     assert!(
         device.capabilities.is_some(),
         "cached immutable features remain available while offline"
+    );
+}
+
+struct BatteryErrorPingChannel {
+    incoming_tx: mpsc::UnboundedSender<Vec<u8>>,
+    incoming_rx: Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
+}
+
+impl BatteryErrorPingChannel {
+    fn new() -> Self {
+        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+        Self {
+            incoming_tx,
+            incoming_rx: Mutex::new(incoming_rx),
+        }
+    }
+}
+
+#[hidpp::async_trait]
+impl RawHidChannel for BatteryErrorPingChannel {
+    fn vendor_id(&self) -> u16 {
+        0x046d
+    }
+
+    fn product_id(&self) -> u16 {
+        0xc52b
+    }
+
+    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
+        let mut response = src.to_vec();
+        if src.get(2).copied() != Some(0) {
+            if response.len() < 7 {
+                return Err(Box::new(io::Error::other("short mock HID++ report")));
+            }
+            response[2] = 0xff;
+            response[3] = src[2];
+            response[4] = src[3];
+            response[5] = 0x08;
+            response[6] = 0;
+        }
+        self.incoming_tx.send(response).map_err(|_| {
+            Box::new(io::Error::other("mock HID++ response receiver closed"))
+                as Box<dyn Error + Send + Sync>
+        })?;
+        Ok(src.len())
+    }
+
+    async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
+        let Some(report) = self.incoming_rx.lock().await.recv().await else {
+            return Err(Box::new(io::Error::other(
+                "mock HID++ response sender closed",
+            )));
+        };
+        let len = report.len().min(buf.len());
+        buf[..len].copy_from_slice(&report[..len]);
+        Ok(len)
+    }
+
+    fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
+        Some((true, true))
+    }
+
+    async fn get_report_descriptor(
+        &self,
+        _buf: &mut [u8],
+    ) -> Result<usize, Box<dyn Error + Send + Sync>> {
+        unreachable!("mock declares HID++ support")
+    }
+}
+
+#[tokio::test]
+async fn unifying_battery_failure_uses_root_ping_before_marking_offline() {
+    let channel = Arc::new(
+        HidppChannel::from_raw_channel(BatteryErrorPingChannel::new())
+            .await
+            .unwrap_or_else(|e| panic!("mock HID++ channel should open: {e}")),
+    );
+    let id = CacheKey::UnifyingSlot {
+        receiver_uid: "receiver".to_string(),
+        slot: 1,
+    };
+    let cached = Cached {
+        probe: ProbedFeatures {
+            capabilities: Some(Capabilities::default()),
+            ..ProbedFeatures::default()
+        },
+        battery_index: Some(4),
+        probed_tick: 10,
+    };
+
+    let (_, _, online) = probe_unifying_features(&channel, 1, &id, Some(&cached), 11).await;
+
+    assert!(
+        online,
+        "a failed battery refresh is inconclusive when the root ping still answers"
     );
 }
 
