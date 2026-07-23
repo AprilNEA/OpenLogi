@@ -221,8 +221,9 @@ impl Orchestrator {
                     || a.capabilities != b.capabilities
             });
         if !changed {
-            // Same set and routes — but keep the fresh `online` flags, or a
-            // device that woke this tick would read as a transition forever.
+            // Same set, routes, and runtime selection — but keep the fresh
+            // `online` flags, or a device that woke this tick would read as a
+            // transition forever.
             self.devices = devices;
             return;
         }
