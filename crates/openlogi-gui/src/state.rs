@@ -34,6 +34,7 @@ use crate::asset::AssetResolver;
 use crate::data::mouse_buttons::{Action, Binding, ButtonId, GestureDirection};
 use crate::state::devices::{build_device_list, pick_initial_device, sort_device_list};
 use openlogi_agent_core::bindings::{bindings_for, gesture_bindings_for};
+use openlogi_agent_core::device_order::PhysicalDeviceKey;
 
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
@@ -904,10 +905,11 @@ impl AppState {
     /// The stored lighting config for `key`, or `None` when unset.
     #[must_use]
     pub fn lighting_for(&self, key: &str) -> Option<Lighting> {
-        if self
-            .device_list
-            .iter()
-            .any(|record| record.config_key == key && !record.is_persistent())
+        if PhysicalDeviceKey::is_transient(key)
+            || self
+                .device_list
+                .iter()
+                .any(|record| record.config_key == key && !record.is_persistent())
         {
             return None;
         }
@@ -1348,7 +1350,7 @@ impl Global for AppState {}
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::config::{Config, DeviceIdentity, ScrollResolution};
+    use openlogi_core::config::{Config, DeviceIdentity, Lighting, ScrollResolution};
     use openlogi_core::device::{
         Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice,
         ReceiverInfo,
@@ -1410,6 +1412,19 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].config_key, "direct:046d:b023:unit:a393cae0");
         assert!(merged[0].is_persistent());
+    }
+
+    #[test]
+    fn historical_transient_lighting_is_not_exposed_without_a_live_record() {
+        let transient_key = "direct:046d:b023:unit:00000000";
+        let mut config = Config::default();
+        config.set_lighting(transient_key, Lighting::default());
+        assert!(config.lighting(transient_key).is_some());
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState::with_runtime(config, &[], &AssetResolver::new(), commands);
+
+        assert!(state.device_list.is_empty());
+        assert!(state.lighting_for(transient_key).is_none());
     }
 
     #[test]
