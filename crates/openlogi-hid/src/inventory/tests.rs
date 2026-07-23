@@ -11,7 +11,7 @@ use super::probe::{
     NodeProbe, assemble_bolt_probe, assemble_unifying_device, parse_codename_unifying,
     probe_unifying_features,
 };
-use super::{Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop};
+use super::{Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop, retained_nodes};
 use crate::inventory::features::ProbedFeatures;
 
 fn cache_entry(probed_tick: u64) -> Cached {
@@ -62,6 +62,16 @@ fn being_seen_resets_the_miss_counter() {
         e.cache.contains_key(&key),
         "counter reset by a sighting, so still within grace"
     );
+}
+
+#[test]
+fn live_cached_channel_survives_a_transient_enumeration_gap() {
+    let enumerated = HashSet::from([1]);
+    let cached_channels = [(1, true), (2, true), (3, false)];
+
+    let retained = retained_nodes(&enumerated, cached_channels);
+
+    assert_eq!(retained, HashSet::from([1, 2]));
 }
 
 #[test]
