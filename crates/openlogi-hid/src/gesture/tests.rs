@@ -2,6 +2,10 @@ use super::*;
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
 const PANEL: &[u16] = &[reprog_controls::HAPTIC_PANEL_CID];
+const BOTH: &[u16] = &[
+    reprog_controls::GESTURE_BUTTON_CID,
+    reprog_controls::HAPTIC_PANEL_CID,
+];
 
 #[test]
 fn reporting_restore_preserves_every_mutable_field() {
@@ -39,8 +43,161 @@ fn panel_press() -> RawControlEvent {
     RawControlEvent::DivertedButtons([reprog_controls::HAPTIC_PANEL_CID, 0, 0, 0])
 }
 
+fn both_press() -> RawControlEvent {
+    RawControlEvent::DivertedButtons([
+        reprog_controls::GESTURE_BUTTON_CID,
+        reprog_controls::HAPTIC_PANEL_CID,
+        0,
+        0,
+    ])
+}
+
 fn release() -> RawControlEvent {
     RawControlEvent::DivertedButtons([0, 0, 0, 0])
+}
+
+#[test]
+#[ignore = "RED: multi-source hold takeover not implemented yet"]
+fn a_still_held_second_source_takes_over_when_the_holder_releases() {
+    // Both sources diverted: press the gesture button, add the panel, release
+    // the gesture button (click — no swipe committed), and the still-held
+    // panel must become the new holder so its subsequent swipe dispatches —
+    // not be swallowed until its own release.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
+    handle_reprog(&mut acc, both_press(), BOTH, &[], &[], &tx);
+    handle_reprog(&mut acc, panel_press(), BOTH, &[], &[], &tx);
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Click
+        )),
+        "the released holder still clicks"
+    );
+
+    acc.swipe.backdate_hold_for_test();
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        BOTH,
+        &[],
+        &[],
+        &tx,
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(
+            ButtonId::HapticPanel,
+            GestureDirection::Right
+        )),
+        "the taken-over hold dispatches through the panel's own map"
+    );
+
+    handle_reprog(&mut acc, release(), BOTH, &[], &[], &tx);
+    assert!(
+        rx.try_recv().is_err(),
+        "a committed takeover swipe must not also click on release"
+    );
+}
+
+#[test]
+#[ignore = "RED: overlap suppression not implemented yet"]
+fn raw_xy_during_a_two_source_overlap_is_dropped_not_misattributed() {
+    // Raw-XY reports carry no source attribution: while BOTH sources are held,
+    // motion must not commit through the first holder's map (the reports could
+    // as well be the other control's). Motion resumes once the overlap ends.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
+    acc.swipe.backdate_hold_for_test();
+    handle_reprog(&mut acc, both_press(), BOTH, &[], &[], &tx);
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        BOTH,
+        &[],
+        &[],
+        &tx,
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "ambiguous overlap motion must not commit a swipe"
+    );
+
+    // The panel lifts; the surviving hold accumulates again.
+    handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
+    acc.swipe.backdate_hold_for_test();
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        BOTH,
+        &[],
+        &[],
+        &tx,
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Right
+        )),
+        "the original hold resumes once the overlap ends"
+    );
+}
+
+#[test]
+#[ignore = "RED: multi-source hold takeover not implemented yet"]
+fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
+    // Holder release and panel press arriving in ONE report: the takeover must
+    // treat the panel as freshly touched, so its first raw-XY sample (the
+    // absolute contact jump) is discarded before the accumulator sees it.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
+    handle_reprog(&mut acc, panel_press(), BOTH, &[], &[], &tx);
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Click
+        )),
+        "the swapped-out holder still clicks"
+    );
+
+    acc.swipe.backdate_hold_for_test();
+    // The contact jump — leftward, far past every threshold — must be dropped.
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: -3000, dy: 40 },
+        BOTH,
+        &[],
+        &[],
+        &tx,
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "the panel's contact jump must not commit a swipe"
+    );
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        BOTH,
+        &[],
+        &[],
+        &tx,
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(
+            ButtonId::HapticPanel,
+            GestureDirection::Right
+        ))
+    );
 }
 
 #[test]
