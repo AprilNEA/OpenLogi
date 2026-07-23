@@ -122,23 +122,40 @@ fn convert_modifiers(m: openlogi_hook::KeyModifiers) -> KeyModifiers {
 /// *mid-motion* like the HID++ gesture-button path in `openlogi-hid`. This wrapper
 /// adds only the button identity the accumulator doesn't track; a press that
 /// never commits a direction is a plain click, fired on release.
+/// A gesture hold this old is presumed stale — real hold+swipe interactions
+/// finish in well under a second, and only a lost button-up (with no OS
+/// interrupt to trigger [`HoldState::cancel`]) leaves one lingering.
+const STALE_HOLD: Duration = Duration::from_secs(10);
+
 #[derive(Default)]
 struct HoldState {
-    button: Option<ButtonId>,
+    /// The held button and when its hold began. The timestamp exists solely
+    /// for stale-hold recovery in [`Self::begin`].
+    button: Option<(ButtonId, Instant)>,
     swipe: SwipeAccumulator,
 }
 
 impl HoldState {
-    /// Begin a hold for `button`, unless another button's hold is already in
+    /// Begin a hold for `button`, unless another button's live hold is in
     /// progress — with several gesture buttons the first hold wins, so a second
     /// press can't hijack the accumulated motion mid-swipe. Returns whether the
     /// hold started (the caller lets a refused press fall through to the
     /// single-action path, where it means its plain click).
+    ///
+    /// Two presses recover a hold whose button-up was lost (nothing else ever
+    /// clears it when the OS drops a release without an interrupt): a re-press
+    /// of the held button itself — a button cannot be pressed while down, so
+    /// this is proof the release was lost — and any press once the hold has
+    /// aged past [`STALE_HOLD`], without which every other gesture button
+    /// would stay refused indefinitely.
     fn begin(&mut self, button: ButtonId) -> bool {
-        if self.button.is_some() {
+        if let Some((held, since)) = self.button
+            && held != button
+            && since.elapsed() < STALE_HOLD
+        {
             return false;
         }
-        self.button = Some(button);
+        self.button = Some((button, Instant::now()));
         self.swipe.begin();
         true
     }
@@ -147,7 +164,7 @@ impl HoldState {
     /// with the held button. Returns `Some((button, direction))` exactly once per
     /// hold, or `None` while still too short, already fired, or not holding.
     fn accumulate(&mut self, dx: i32, dy: i32) -> Option<(ButtonId, GestureDirection)> {
-        let button = self.button?;
+        let (button, _) = self.button?;
         self.swipe.accumulate(dx, dy).map(|dir| (button, dir))
     }
 
@@ -156,7 +173,7 @@ impl HoldState {
     /// `Some(false)` when a swipe already fired, and `None` for a stray release
     /// of a button we weren't holding.
     fn end(&mut self, button: ButtonId) -> Option<bool> {
-        if self.button == Some(button) {
+        if self.button.is_some_and(|(held, _)| held == button) {
             self.button = None;
             Some(self.swipe.end())
         } else {
@@ -175,7 +192,13 @@ impl HoldState {
     /// Age the current hold past the staleness horizon, so tests can exercise
     /// the lost-button-up recovery without sleeping.
     #[cfg(test)]
-    fn backdate_for_test(&mut self) {}
+    fn backdate_for_test(&mut self) {
+        if let Some((_, since)) = &mut self.button
+            && let Some(aged) = Instant::now().checked_sub(STALE_HOLD)
+        {
+            *since = aged;
+        }
+    }
 }
 
 thread_local! {
@@ -644,7 +667,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "RED: stale-hold recovery not implemented yet"]
     fn a_same_button_re_press_restarts_the_stale_hold() {
         // A press for the very button we think is held can only mean its
         // release was lost (a button cannot be pressed while down): the hold
@@ -663,7 +685,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "RED: stale-hold recovery not implemented yet"]
     fn an_aged_hold_yields_to_a_new_buttons_press() {
         // No release ever clears a hold whose button-up was lost (and no OS
         // interrupt fired), so a different gesture button's press takes over
