@@ -1213,6 +1213,71 @@ gesture_owner = \"Off\"
 }
 
 #[test]
+#[ignore = "RED: owner-map materialization not implemented yet"]
+fn migration_materializes_a_hidpp_owners_missing_map() {
+    // A v3 HID++ owner dispatched the seeded default direction map
+    // regardless of its stored shape (the runtime seeded at projection
+    // time), so an owner with no stored map must not lose gestures when
+    // the file is rewritten to v4.
+    let toml = "\
+schema_version = 3
+
+[devices.2b042]
+gesture_owner = \"HapticPanel\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, toml).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load");
+    assert!(cfg.is_gesture_mode("2b042", ButtonId::HapticPanel));
+    match cfg.bindings_for("2b042").get(&ButtonId::HapticPanel) {
+        Some(Binding::Gesture(map)) => {
+            for dir in GestureDirection::ALL {
+                assert_eq!(map.get(&dir), Some(&default_gesture_binding(dir)));
+            }
+        }
+        other => panic!("expected the owner's materialized default map, got {other:?}"),
+    }
+    // The non-owner dedicated button is still pinned off.
+    assert!(!cfg.is_gesture_mode("2b042", ButtonId::GestureButton));
+}
+
+#[test]
+#[ignore = "RED: owner-map materialization not implemented yet"]
+fn migration_replaces_a_hidpp_owners_single_with_the_default_map() {
+    // A hand-edited v3 file: the owner field says GestureButton but its
+    // stored binding is a Single. The v3 runtime still dispatched the full
+    // default direction map (seeded at projection), so the load must
+    // materialize that map rather than keep the never-dispatched Single.
+    let toml = "\
+schema_version = 3
+
+[devices.2b042]
+gesture_owner = \"GestureButton\"
+
+[devices.2b042.bindings]
+GestureButton = \"CycleDpiPresets\"
+";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, toml).expect("write");
+
+    let cfg = Config::load_from_path(&path).expect("load");
+    assert!(cfg.is_gesture_mode("2b042", ButtonId::GestureButton));
+    match cfg.bindings_for("2b042").get(&ButtonId::GestureButton) {
+        Some(Binding::Gesture(map)) => {
+            assert_eq!(
+                map.get(&GestureDirection::Click),
+                Some(&default_gesture_binding(GestureDirection::Click)),
+                "v3 dispatched the seeded default Click, not the stored Single"
+            );
+        }
+        other => panic!("expected the owner's materialized default map, got {other:?}"),
+    }
+}
+
+#[test]
 fn migration_infers_the_owner_for_pre_field_configs() {
     // Pre-owner-field file: a gesture-shaped OS-hook button was the owner by
     // inference, silencing the dedicated button. The load preserves exactly
