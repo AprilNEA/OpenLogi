@@ -57,7 +57,6 @@ fn release() -> RawControlEvent {
 }
 
 #[test]
-#[ignore = "RED: multi-source hold takeover not implemented yet"]
 fn a_still_held_second_source_takes_over_when_the_holder_releases() {
     // Both sources diverted: press the gesture button, add the panel, release
     // the gesture button (click — no swipe committed), and the still-held
@@ -104,7 +103,6 @@ fn a_still_held_second_source_takes_over_when_the_holder_releases() {
 }
 
 #[test]
-#[ignore = "RED: overlap suppression not implemented yet"]
 fn raw_xy_during_a_two_source_overlap_is_dropped_not_misattributed() {
     // Raw-XY reports carry no source attribution: while BOTH sources are held,
     // motion must not commit through the first holder's map (the reports could
@@ -150,7 +148,6 @@ fn raw_xy_during_a_two_source_overlap_is_dropped_not_misattributed() {
 }
 
 #[test]
-#[ignore = "RED: multi-source hold takeover not implemented yet"]
 fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
     // Holder release and panel press arriving in ONE report: the takeover must
     // treat the panel as freshly touched, so its first raw-XY sample (the
