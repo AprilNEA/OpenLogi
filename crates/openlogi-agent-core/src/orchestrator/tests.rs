@@ -81,6 +81,39 @@ fn direct_inventory(serial_number: Option<&str>, unit_id: [u8; 4]) -> DeviceInve
     }
 }
 
+fn direct_inventory_state(
+    product_id: u16,
+    serial_number: Option<&str>,
+    unit_id: [u8; 4],
+    online: bool,
+) -> DeviceInventory {
+    DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "MX Master 3S".to_string(),
+            vendor_id: 0x046d,
+            product_id,
+            unique_id: None,
+        },
+        paired: vec![PairedDevice {
+            slot: DIRECT_DEVICE_INDEX,
+            codename: Some("MX Master 3S".to_string()),
+            wpid: None,
+            kind: DeviceKind::Mouse,
+            online,
+            battery: None,
+            model_info: Some(DeviceModelInfo {
+                entity_count: 1,
+                serial_number: serial_number.map(str::to_string),
+                unit_id,
+                transports: DeviceTransports::default(),
+                model_ids: [product_id, 0, 0],
+                extended_model_id: 2,
+            }),
+            capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+        }],
+    }
+}
+
 #[test]
 fn build_devices_skips_transient_zero_unit_direct_identity() {
     assert!(build_devices(&[direct_inventory(None, [0; 4])], &[]).is_empty());
@@ -136,6 +169,54 @@ fn standalone_selection_never_replaces_the_hidpp_capture_target() {
 
     assert_eq!(pick_current(&devices, Some("light")), 1);
     assert_eq!(pick_current(&devices, None), 1);
+}
+
+#[test]
+fn runtime_selection_falls_back_from_saved_offline_device_to_online_device() {
+    let devices = [dev("saved", 1, false), dev("online", 2, true)];
+
+    assert_eq!(pick_current(&devices, Some("saved")), 1);
+}
+
+#[test]
+fn runtime_selection_keeps_saved_device_when_it_is_online() {
+    let devices = [dev("other", 1, true), dev("saved", 2, true)];
+
+    assert_eq!(pick_current(&devices, Some("saved")), 1);
+}
+
+#[test]
+fn runtime_selection_keeps_saved_device_when_all_devices_are_offline() {
+    let devices = [dev("other", 1, false), dev("saved", 2, false)];
+
+    assert_eq!(pick_current(&devices, Some("saved")), 1);
+}
+
+#[test]
+fn runtime_selection_tracks_online_transition_without_device_set_change() {
+    let saved_key = "direct:046d:b023:unit:01000000";
+    let other_key = "direct:046d:b034:unit:02000000";
+    let mut config = Config::default();
+    config.set_selected_device(Some(saved_key.to_string()));
+    let mut orchestrator = Orchestrator::new(config);
+
+    orchestrator.refresh_inventory(
+        &[
+            direct_inventory_state(0xb023, None, [1, 0, 0, 0], true),
+            direct_inventory_state(0xb034, None, [2, 0, 0, 0], false),
+        ],
+        &[],
+    );
+    assert_eq!(orchestrator.current_key(), Some(saved_key));
+
+    orchestrator.refresh_inventory(
+        &[
+            direct_inventory_state(0xb023, None, [1, 0, 0, 0], false),
+            direct_inventory_state(0xb034, None, [2, 0, 0, 0], true),
+        ],
+        &[],
+    );
+    assert_eq!(orchestrator.current_key(), Some(other_key));
 }
 
 #[test]

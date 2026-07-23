@@ -320,10 +320,11 @@ impl Orchestrator {
     /// Apply a fresh inventory snapshot. Always refreshes the snapshot the IPC
     /// `inventory()` poll serves (battery / online state changes without
     /// altering the device *set*), but only re-picks the selection and rebuilds
-    /// the shared maps when the device set actually changed — `rebuild()` is
-    /// driven solely by `config_key` + route and resets the live DPI-cycle
-    /// index, so running it every 2s tick on an unchanged set would snap DPI
-    /// back to `preset[0]` (and burn three `RwLock` writes) for nothing.
+    /// the shared maps when the device set or runtime selection changed —
+    /// `rebuild()` is driven by `config_key` + route and resets the live
+    /// DPI-cycle index, so running it every 2s tick on a steady selection
+    /// would snap DPI back to `preset[0]` (and burn three `RwLock` writes)
+    /// for nothing.
     pub fn refresh_inventory(
         &mut self,
         inventories: &[DeviceInventory],
@@ -354,7 +355,8 @@ impl Orchestrator {
         for idx in targets {
             self.reapply_volatile_settings(&devices[idx]);
         }
-        let changed = devices.len() != self.devices.len()
+        let changed = next_current != self.current
+            || devices.len() != self.devices.len()
             || devices.iter().zip(&self.devices).any(|(a, b)| {
                 a.config_key != b.config_key
                     || a.route != b.route
@@ -366,8 +368,9 @@ impl Orchestrator {
             self.current = next_current;
             self.rebuild();
         } else {
-            // Same set and routes — but keep the fresh `online` flags, or a
-            // device that woke this tick would read as a transition forever.
+            // Same set, routes, and runtime selection — but keep the fresh
+            // `online` flags, or a device that woke this tick would read as a
+            // transition forever.
             self.devices = devices;
             self.sync_current_route();
             write_value(
@@ -886,17 +889,26 @@ fn plan_reapply(
     (targets, next_followup)
 }
 
-/// Index of the selected HID++ input device: the saved selection when it is an
-/// input route, otherwise the first input route. Standalone raw-HID devices
-/// participate in inventory and settings re-apply but must never replace the
-/// mouse/keyboard capture target when selected in the GUI.
+/// Index of the selected HID++ input device. Prefer the saved selection while
+/// it is an online input route, otherwise the first online input route. If
+/// every input device is offline, preserve the saved selection (or the first
+/// input route) so its configuration remains stable. Standalone raw-HID
+/// devices participate in inventory and settings re-apply but must never
+/// replace the mouse/keyboard capture target when selected in the GUI.
 fn pick_current(devices: &[AgentDevice], saved: Option<&str>) -> usize {
+    let saved = saved.and_then(|key| {
+        devices
+            .iter()
+            .position(|device| device.config_key == key && is_hidpp_device(device))
+    });
     saved
-        .and_then(|key| {
+        .filter(|&idx| devices[idx].online)
+        .or_else(|| {
             devices
                 .iter()
-                .position(|device| device.config_key == key && is_hidpp_device(device))
+                .position(|device| device.online && is_hidpp_device(device))
         })
+        .or(saved)
         .or_else(|| devices.iter().position(is_hidpp_device))
         .unwrap_or(0)
 }
