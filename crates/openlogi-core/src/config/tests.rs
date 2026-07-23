@@ -1213,7 +1213,6 @@ gesture_owner = \"Off\"
 }
 
 #[test]
-#[ignore = "RED: owner-map materialization not implemented yet"]
 fn migration_materializes_a_hidpp_owners_missing_map() {
     // A v3 HID++ owner dispatched the seeded default direction map
     // regardless of its stored shape (the runtime seeded at projection
@@ -1244,7 +1243,6 @@ gesture_owner = \"HapticPanel\"
 }
 
 #[test]
-#[ignore = "RED: owner-map materialization not implemented yet"]
 fn migration_replaces_a_hidpp_owners_single_with_the_default_map() {
     // A hand-edited v3 file: the owner field says GestureButton but its
     // stored binding is a Single. The v3 runtime still dispatched the full

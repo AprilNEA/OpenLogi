@@ -450,7 +450,13 @@ impl Config {
     /// [`Binding::Gesture`] IS gesture mode — so this resolves the old owner
     /// and rewrites the shapes to dispatch exactly what the old config did:
     ///
-    /// - the owner keeps its gesture map;
+    /// - the owner keeps its gesture map. A HID++ owner whose stored binding
+    ///   is absent or `Single`-shaped gets the seeded default direction map
+    ///   materialized: the v3 runtime seeded at projection time and dispatched
+    ///   that map regardless of the stored shape, so leaving the shape
+    ///   non-gesture would silently lose gestures in the rewritten file. (An
+    ///   OS-hook owner is different — the v3 hook only dispatched a stored
+    ///   gesture map, so a `Single` owner stays single.)
     /// - every other gesture-shaped binding demotes to a [`Binding::Single`] of
     ///   its `Click` — the only part of a dormant map the old runtime
     ///   dispatched;
@@ -470,6 +476,34 @@ impl Config {
             for (id, binding) in &mut device.bindings {
                 if Some(*id) != owner {
                     binding.demote_to_single(default_binding(*id));
+                }
+            }
+            if let Some(owner) = owner
+                && owner.is_hidpp_gesture_source()
+            {
+                let seeded = || {
+                    Binding::Gesture(
+                        GestureDirection::ALL
+                            .iter()
+                            .copied()
+                            .map(|d| (d, crate::binding::default_gesture_binding(d)))
+                            .collect(),
+                    )
+                };
+                match device.bindings.get_mut(&owner) {
+                    // A stored non-gesture shape is replaced by the map v3
+                    // actually dispatched.
+                    Some(binding) if !binding.is_gesture() => *binding = seeded(),
+                    Some(_) => {}
+                    // An absent owner only needs materializing when its
+                    // canonical default is not gesture-shaped (the haptic
+                    // panel); an absent dedicated button already means
+                    // default gesture mode.
+                    None => {
+                        if !default_binding_for(owner).is_gesture() {
+                            device.bindings.insert(owner, seeded());
+                        }
+                    }
                 }
             }
             if owner != Some(ButtonId::GestureButton) {
