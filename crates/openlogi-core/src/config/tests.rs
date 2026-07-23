@@ -1276,7 +1276,6 @@ GestureButton = \"CycleDpiPresets\"
 }
 
 #[test]
-#[ignore = "RED: disabled-gesture stash not implemented yet"]
 fn off_then_on_restores_customized_swipe_arms() {
     // Turning gesture mode off must not destroy the user's four customized
     // swipe arms: re-enabling restores the map exactly as it was — the
@@ -1306,7 +1305,6 @@ fn off_then_on_restores_customized_swipe_arms() {
 }
 
 #[test]
-#[ignore = "RED: disabled-gesture stash not implemented yet"]
 fn re_promoting_a_genuine_single_keeps_it_as_click() {
     // A user's deliberate Single that happens to equal the button's
     // canonical default must not be mistaken for the pinned-off marker:
@@ -1332,7 +1330,6 @@ fn re_promoting_a_genuine_single_keeps_it_as_click() {
 }
 
 #[test]
-#[ignore = "RED: disabled-gesture stash not implemented yet"]
 fn disabled_gesture_maps_survive_a_save_load_cycle() {
     let mut cfg = Config::default();
     cfg.set_gesture_direction(
@@ -1354,7 +1351,6 @@ fn disabled_gesture_maps_survive_a_save_load_cycle() {
 }
 
 #[test]
-#[ignore = "RED: disabled-gesture stash not implemented yet"]
 fn migration_stashes_dormant_maps_for_re_enabling() {
     // The owner-lock model preserved every dormant non-owner map for
     // restore-on-reselection. The migration keeps that promise: the demoted

@@ -88,11 +88,18 @@ pub struct DeviceConfig {
     /// `None` for configs written before this field existed or by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<DeviceIdentity>,
-    /// Every rebindable button's binding: a single [`Action`], or — for the
-    /// gesture button (and, later, any raw-XY-capable button) — a
-    /// [`Binding::Gesture`] per-direction map.
+    /// Every rebindable button's binding: a single [`Action`], or — for a
+    /// button in gesture mode — a [`Binding::Gesture`] per-direction map.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bindings: BTreeMap<ButtonId, Binding>,
+    /// Direction maps of buttons whose gesture mode is currently OFF, keyed by
+    /// button — pure UX memory so re-enabling restores the user's customized
+    /// arms exactly
+    /// (see [`Config::set_gesture_mode`](crate::config::Config::set_gesture_mode)).
+    /// Never dispatched: the runtime reads only `bindings`, where a demoted
+    /// button is a [`Binding::Single`] of its former `Click`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Per-application binding overlays (P1.4). Keyed by bundle identifier
     /// (e.g. `"com.microsoft.VSCode"` on macOS). When the foreground app's
     /// id matches a key here, those bindings take precedence; anything not
@@ -179,6 +186,7 @@ impl Default for DeviceConfig {
             gesture_owner: None,
             identity: None,
             bindings: BTreeMap::new(),
+            disabled_gestures: BTreeMap::new(),
             per_app_bindings: BTreeMap::new(),
             action_ring: ActionRingConfig::default(),
             dpi_presets: Vec::new(),
@@ -240,6 +248,9 @@ struct RawDeviceConfig {
     /// v2 shape — present on already-migrated files; wins on any key collision.
     #[serde(default)]
     bindings: BTreeMap<ButtonId, Binding>,
+    /// v4 stash of turned-off gesture maps (see [`DeviceConfig::disabled_gestures`]).
+    #[serde(default)]
+    disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Legacy v1 per-button single bindings.
     #[serde(default)]
     button_bindings: BTreeMap<ButtonId, Action>,
@@ -316,6 +327,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             gesture_owner: raw.gesture_owner,
             identity: raw.identity,
             bindings,
+            disabled_gestures: raw.disabled_gestures,
             per_app_bindings: raw.per_app_bindings,
             action_ring: raw.action_ring,
             dpi_presets: raw.dpi_presets,

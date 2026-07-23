@@ -37,7 +37,7 @@ pub use settings::{
 
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureDirection,
-    RingAction, default_binding, default_binding_for,
+    RingAction, default_binding, default_binding_for, default_gesture_binding,
 };
 use crate::paths::{self, PathsError};
 
@@ -337,17 +337,6 @@ impl Config {
             .bindings
             .entry(button)
             .or_insert_with(|| default_binding_for(button));
-        // An explicit `Single` at the button's canonical single default carries
-        // no user customization — it is the "pinned off" marker
-        // [`Self::set_gesture_mode`] stamps on a gesture-shaped-by-default
-        // button. Re-promoting it restores the canonical default shape (the
-        // full default direction map for the dedicated gesture button) rather
-        // than freezing the pin action as a Click choice the user never made.
-        // For single-shaped-by-default buttons this replaces the value with
-        // itself, so the rule is uniform.
-        if *entry == Binding::Single(default_binding(button)) {
-            *entry = default_binding_for(button);
-        }
         entry.upgrade_to_gesture();
         entry
     }
@@ -411,33 +400,54 @@ impl Config {
     /// Turn gesture mode on or off for one button, independently of every
     /// other button.
     ///
-    /// On: promote the stored binding in place ([`Binding::upgrade_to_gesture`]
-    /// keeps a prior single action as the [`GestureDirection::Click`] entry)
-    /// and seed unbound directions from
-    /// [`default_gesture_binding`](crate::binding::default_gesture_binding).
-    /// Off: demote to a [`Binding::Single`] of the map's `Click` action,
-    /// falling back to the button's canonical
-    /// [`default_binding`](crate::binding::default_binding) when the map has no
-    /// explicit `Click` — a demoted button always keeps a meaningful press. A
-    /// button gesturing only by default (no stored binding) is pinned off with
-    /// an explicit `Single` at its canonical default, which the capture layer
-    /// leaves native.
+    /// On: restore the button's stashed map when one exists (see
+    /// [`DeviceConfig::disabled_gestures`]) — an off/on round trip hands back
+    /// the user's customized arms exactly. Otherwise promote the stored
+    /// binding in place ([`Binding::upgrade_to_gesture`] keeps a prior single
+    /// action as the [`GestureDirection::Click`] entry) and seed unbound
+    /// directions from [`default_gesture_binding`].
+    ///
+    /// Off: stash the live map, then demote to a [`Binding::Single`] of the
+    /// map's `Click` action, falling back to the button's canonical
+    /// [`default_binding`] when the map has no explicit `Click` — a demoted
+    /// button always keeps a meaningful press. A button gesturing only by
+    /// default (no stored binding) stashes its seeded default map and is
+    /// pinned off with an explicit `Single` at its canonical default, which
+    /// the capture layer leaves native.
     pub fn set_gesture_mode(&mut self, device_key: &str, button: ButtonId, enabled: bool) {
         if enabled {
-            self.ensure_gesture_binding(device_key, button)
-                .fill_gesture_defaults();
-        } else if let Some(binding) = self
-            .devices
-            .get_mut(device_key)
-            .and_then(|d| d.bindings.get_mut(&button))
-        {
-            binding.demote_to_single(default_binding(button));
-        } else if default_binding_for(button).is_gesture() {
-            self.devices
-                .entry(device_key.to_string())
-                .or_default()
-                .bindings
-                .insert(button, Binding::Single(default_binding(button)));
+            let device = self.devices.entry(device_key.to_string()).or_default();
+            if let Some(map) = device.disabled_gestures.remove(&button) {
+                device.bindings.insert(button, Binding::Gesture(map));
+            } else {
+                self.ensure_gesture_binding(device_key, button)
+                    .fill_gesture_defaults();
+            }
+            return;
+        }
+        let device = self.devices.entry(device_key.to_string()).or_default();
+        match device.bindings.get_mut(&button) {
+            Some(binding) => {
+                if let Binding::Gesture(map) = binding {
+                    device.disabled_gestures.insert(button, map.clone());
+                }
+                binding.demote_to_single(default_binding(button));
+            }
+            None => {
+                if default_binding_for(button).is_gesture() {
+                    device.disabled_gestures.insert(
+                        button,
+                        GestureDirection::ALL
+                            .iter()
+                            .copied()
+                            .map(|d| (d, default_gesture_binding(d)))
+                            .collect(),
+                    );
+                    device
+                        .bindings
+                        .insert(button, Binding::Single(default_binding(button)));
+                }
+            }
         }
     }
 
@@ -457,8 +467,10 @@ impl Config {
     ///   non-gesture would silently lose gestures in the rewritten file. (An
     ///   OS-hook owner is different — the v3 hook only dispatched a stored
     ///   gesture map, so a `Single` owner stays single.)
-    /// - every other gesture-shaped binding demotes to a [`Binding::Single`] of
-    ///   its `Click` — the only part of a dormant map the old runtime
+    /// - every other gesture-shaped binding is stashed into
+    ///   [`DeviceConfig::disabled_gestures`] — keeping the owner-lock model's
+    ///   restore-on-reselection promise — and demotes to a [`Binding::Single`]
+    ///   of its `Click`, the only part of a dormant map the old runtime
     ///   dispatched;
     /// - a non-owner dedicated gesture button with no stored binding is pinned
     ///   with an explicit `Single` at its canonical default (absence would
@@ -475,6 +487,9 @@ impl Config {
             };
             for (id, binding) in &mut device.bindings {
                 if Some(*id) != owner {
+                    if let Binding::Gesture(map) = binding {
+                        device.disabled_gestures.insert(*id, map.clone());
+                    }
                     binding.demote_to_single(default_binding(*id));
                 }
             }
@@ -486,7 +501,7 @@ impl Config {
                         GestureDirection::ALL
                             .iter()
                             .copied()
-                            .map(|d| (d, crate::binding::default_gesture_binding(d)))
+                            .map(|d| (d, default_gesture_binding(d)))
                             .collect(),
                     )
                 };
