@@ -171,6 +171,11 @@ impl HoldState {
         self.button = None;
         self.swipe.end();
     }
+
+    /// Age the current hold past the staleness horizon, so tests can exercise
+    /// the lost-button-up recovery without sleeping.
+    #[cfg(test)]
+    fn backdate_for_test(&mut self) {}
 }
 
 thread_local! {
@@ -636,6 +641,46 @@ mod tests {
         );
         // A release after a committed swipe is NOT a click.
         assert_eq!(hold.end(ButtonId::Back), Some(false));
+    }
+
+    #[test]
+    #[ignore = "RED: stale-hold recovery not implemented yet"]
+    fn a_same_button_re_press_restarts_the_stale_hold() {
+        // A press for the very button we think is held can only mean its
+        // release was lost (a button cannot be pressed while down): the hold
+        // restarts instead of wedging on the stale state.
+        let mut hold = HoldState::default();
+        assert!(hold.begin(ButtonId::Back));
+        assert!(
+            hold.begin(ButtonId::Back),
+            "a same-button re-press is proof of a lost release"
+        );
+        hold.swipe.backdate_hold_for_test();
+        assert_eq!(
+            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some((ButtonId::Back, GestureDirection::Right))
+        );
+    }
+
+    #[test]
+    #[ignore = "RED: stale-hold recovery not implemented yet"]
+    fn an_aged_hold_yields_to_a_new_buttons_press() {
+        // No release ever clears a hold whose button-up was lost (and no OS
+        // interrupt fired), so a different gesture button's press takes over
+        // once the hold is old enough to be presumed stale — otherwise every
+        // gesture button stays wedged until the stale one is pressed again.
+        let mut hold = HoldState::default();
+        assert!(hold.begin(ButtonId::Back));
+        hold.backdate_for_test();
+        assert!(
+            hold.begin(ButtonId::Forward),
+            "an aged hold must yield to a new press"
+        );
+        hold.swipe.backdate_hold_for_test();
+        assert_eq!(
+            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some((ButtonId::Forward, GestureDirection::Right))
+        );
     }
 
     #[test]
