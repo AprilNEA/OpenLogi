@@ -3,6 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use futures_concurrency::future::Join as _;
 use hidpp::{
     channel::HidppChannel,
+    device::Device,
     receiver::{
         self, Receiver,
         bolt::{
@@ -575,39 +576,69 @@ async fn probe_unifying_slot(
     // online or not, and the crate's `event.online` reads the wrong notification
     // byte (payload[1] bit6, always set here — wire-verified `04 62 69 40`), so
     // neither tells us if the device is actually reachable on this receiver.
-    // We therefore always attempt the probe (passing `true`) and treat the
-    // feature walk succeeding as the real liveness signal below — a device that
-    // moved to Bluetooth answers `DeviceNotFound` and surfaces as offline.
+    // A cache hit must therefore still do one live round-trip: otherwise cached
+    // capabilities keep an absent device "online" forever and its reconnect is
+    // invisible to the agent's volatile-state re-apply/capture re-arm path.
     let probe_result = timeout(
         UNIFYING_SLOT_PROBE,
-        probe_or_reuse(channel, slot, Some(id.clone()), cached, true, tick),
+        probe_unifying_features(channel, slot, &id, cached, tick),
     )
     .await;
-    let (probe, outcome) = if let Ok(r) = probe_result {
+    let (probe, outcome, online) = if let Ok(r) = probe_result {
         r
     } else {
         debug!(slot, budget = ?UNIFYING_SLOT_PROBE,
             "Unifying slot probe timed out; using cached data if available");
         let probe = cached.map_or_else(ProbedFeatures::default, |c| c.probe.clone());
-        (probe, CacheOutcome::Seen(id))
+        (probe, CacheOutcome::Seen(id), false)
     };
 
-    let device = PairedDevice {
+    let device = assemble_unifying_device(slot, codename, event.wpid, register_kind, probe, online);
+    Some((device, outcome))
+}
+
+/// Return cached immutable features together with a fresh reachability result.
+///
+/// A successful full probe ([`CacheOutcome::Fresh`]) confirms liveness on a
+/// cache miss/stale entry. A fresh cached entry normally refreshes its battery,
+/// whose successful response ([`CacheOutcome::Update`]) is the liveness check.
+/// A failed battery refresh, or a device without that feature, gets a root ping
+/// before being treated as offline.
+pub(super) async fn probe_unifying_features(
+    channel: &Arc<HidppChannel>,
+    slot: u8,
+    id: &CacheKey,
+    cached: Option<&Cached>,
+    tick: u64,
+) -> (ProbedFeatures, CacheOutcome, bool) {
+    let (probe, outcome) =
+        probe_or_reuse(channel, slot, Some(id.clone()), cached, true, tick).await;
+    let online = if matches!(outcome, CacheOutcome::Fresh(..) | CacheOutcome::Update(..)) {
+        true
+    } else {
+        Device::new(Arc::clone(channel), slot).await.is_ok()
+    };
+    (probe, outcome, online)
+}
+
+pub(super) fn assemble_unifying_device(
+    slot: u8,
+    codename: Option<String>,
+    wpid: u16,
+    register_kind: DeviceKind,
+    probe: ProbedFeatures,
+    online: bool,
+) -> PairedDevice {
+    PairedDevice {
         slot,
         codename,
-        wpid: Some(event.wpid),
+        wpid: Some(wpid),
         kind: resolve_device_kind(probe.kind, register_kind),
-        // Reachable on this receiver iff the feature walk got through this tick.
-        // Caveat: a GUI cache hit can serve stale capabilities for up to
-        // REFRESH_TICKS after the device leaves for Bluetooth, briefly showing it
-        // online; self-heals on the next forced re-probe. Add a per-tick liveness
-        // ping if that window ever matters.
-        online: probe.capabilities.is_some(),
+        online,
         battery: probe.battery,
         model_info: probe.model_info,
         capabilities: probe.capabilities,
-    };
-    Some((device, outcome))
+    }
 }
 
 /// Reads a Unifying paired device's name. Unifying stores names at

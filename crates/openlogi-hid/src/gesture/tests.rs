@@ -1,4 +1,99 @@
 use super::*;
+use std::error::Error;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use hidpp::channel::{HidppChannel, RawHidChannel};
+
+struct LivenessRawChannel {
+    connected: Arc<AtomicBool>,
+}
+
+#[hidpp::async_trait]
+impl RawHidChannel for LivenessRawChannel {
+    fn vendor_id(&self) -> u16 {
+        0x046d
+    }
+
+    fn product_id(&self) -> u16 {
+        0xb023
+    }
+
+    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Sync + Send>> {
+        Ok(src.len())
+    }
+
+    async fn read_report(&self, _buf: &mut [u8]) -> Result<usize, Box<dyn Error + Sync + Send>> {
+        std::future::pending().await
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
+    }
+
+    fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
+        Some((false, true))
+    }
+
+    async fn get_report_descriptor(
+        &self,
+        _buf: &mut [u8],
+    ) -> Result<usize, Box<dyn Error + Sync + Send>> {
+        unreachable!("mock declares HID++ support")
+    }
+}
+
+#[tokio::test]
+async fn established_capture_exits_when_its_channel_disconnects() {
+    let connected = Arc::new(AtomicBool::new(true));
+    let channel = HidppChannel::from_raw_channel(LivenessRawChannel {
+        connected: Arc::clone(&connected),
+    })
+    .await
+    .unwrap_or_else(|e| panic!("mock HID++ channel should open: {e}"));
+    let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+
+    connected.store(false, Ordering::Release);
+    let exit = tokio::time::timeout(
+        Duration::from_millis(50),
+        wait_for_capture_exit(&channel, shutdown_rx, Duration::from_millis(1)),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("capture did not notice the disconnected channel"));
+
+    assert_eq!(exit, CaptureExit::Disconnected);
+}
+
+#[tokio::test]
+async fn established_capture_honors_shutdown_while_connected() {
+    let connected = Arc::new(AtomicBool::new(true));
+    let channel = HidppChannel::from_raw_channel(LivenessRawChannel { connected })
+        .await
+        .unwrap_or_else(|e| panic!("mock HID++ channel should open: {e}"));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    shutdown_tx
+        .send(CaptureStop::Restore)
+        .unwrap_or_else(|_| panic!("capture shutdown receiver should still be live"));
+
+    let exit = wait_for_capture_exit(&channel, shutdown_rx, Duration::from_millis(1)).await;
+
+    assert_eq!(exit, CaptureExit::Stopped(CaptureStop::Restore));
+}
+
+#[tokio::test]
+async fn established_capture_can_abandon_stale_firmware_state() {
+    let connected = Arc::new(AtomicBool::new(true));
+    let channel = HidppChannel::from_raw_channel(LivenessRawChannel { connected })
+        .await
+        .unwrap_or_else(|e| panic!("mock HID++ channel should open: {e}"));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    shutdown_tx
+        .send(CaptureStop::Abandon)
+        .unwrap_or_else(|_| panic!("capture shutdown receiver should still be live"));
+
+    let exit = wait_for_capture_exit(&channel, shutdown_rx, Duration::from_millis(1)).await;
+
+    assert_eq!(exit, CaptureExit::Stopped(CaptureStop::Abandon));
+}
 
 fn press() -> RawControlEvent {
     RawControlEvent::DivertedButtons([reprog_controls::GESTURE_BUTTON_CID, 0, 0, 0])
