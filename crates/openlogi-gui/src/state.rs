@@ -452,6 +452,14 @@ impl AppState {
                 continue;
             }
 
+            // An all-zero direct unit id is only a transient probe result. If
+            // the next snapshot resolves a physical serial/unit key, retaining
+            // this record through the normal miss grace would show both cards.
+            if !previous.is_persistent() {
+                self.inventory_misses.remove(&previous.config_key);
+                continue;
+            }
+
             let misses = self
                 .inventory_misses
                 .entry(previous.config_key.clone())
@@ -506,8 +514,15 @@ impl AppState {
         self.dpi = self.dpi_for_current();
         self.button_bindings = self.bindings_for_current();
         self.gesture_bindings = self.gesture_bindings_for_current();
-        let key = self.current_record().map(|r| r.config_key.clone());
-        self.config.set_selected_device(key);
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!("transient device selection not persisted");
+            return;
+        };
+        self.config.set_selected_device(Some(key));
         // The agent owns the hook + device I/O; have it switch devices too.
         self.persist_and_reload("selected device");
     }
@@ -521,8 +536,12 @@ impl AppState {
     /// No-op when no device is selected (binding panel won't expose the
     /// editor in that state).
     pub fn commit_dpi_presets(&mut self, presets: Vec<u32>) {
-        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
-            debug!("no active device key — DPI presets kept in memory only");
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!("no persistent device key — DPI presets kept in memory only");
             return;
         };
         self.config.set_dpi_presets(&key, presets);
@@ -534,7 +553,8 @@ impl AppState {
     #[must_use]
     pub fn dpi_presets(&self) -> Vec<u32> {
         self.current_record()
-            .map(|r| self.config.dpi_presets(&r.config_key))
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(|key| self.config.dpi_presets(key))
             .unwrap_or_default()
     }
 
@@ -742,6 +762,7 @@ impl AppState {
             return;
         };
         let key = record.config_key.clone();
+        let persistent_key = record.persistent_config_key().map(str::to_string);
         let route = record.route.clone();
         if let Some(route) = route {
             self.send_ipc(crate::ipc_client::Command::SetSmartShift(
@@ -751,15 +772,17 @@ impl AppState {
                 tunable_torque,
             ));
         }
-        self.config.set_smartshift(
-            &key,
-            openlogi_core::config::SmartShift {
-                mode: mode.into(),
-                auto_disengage,
-                tunable_torque,
-            },
-        );
-        self.persist_and_reload("SmartShift");
+        if let Some(persistent_key) = persistent_key {
+            self.config.set_smartshift(
+                &persistent_key,
+                openlogi_core::config::SmartShift {
+                    mode: mode.into(),
+                    auto_disengage,
+                    tunable_torque,
+                },
+            );
+            self.persist_and_reload("SmartShift");
+        }
         // Reflect the write immediately so the panel doesn't flicker back to
         // the previous value before a re-read lands, but queue a confirming
         // re-read: the write is fire-and-forget, so a sleeping device that
@@ -781,7 +804,8 @@ impl AppState {
     #[must_use]
     pub fn current_invert_scroll(&self) -> bool {
         self.current_record()
-            .is_some_and(|r| self.config.invert_scroll(&r.config_key))
+            .and_then(DeviceRecord::persistent_config_key)
+            .is_some_and(|key| self.config.invert_scroll(key))
     }
 
     /// Whether the active device reports native HID++ wheel inversion support.
@@ -800,8 +824,12 @@ impl AppState {
             debug!("active device does not support native scroll inversion");
             return;
         }
-        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
-            debug!("no active device — invert-scroll change ignored");
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!("no persistent device key — invert-scroll change ignored");
             return;
         };
         self.config.set_invert_scroll(&key, invert);
@@ -813,7 +841,8 @@ impl AppState {
     #[must_use]
     pub fn current_scroll_resolution(&self) -> Option<openlogi_core::config::ScrollResolution> {
         self.current_record()
-            .and_then(|record| self.config.scroll_resolution(&record.config_key))
+            .and_then(DeviceRecord::persistent_config_key)
+            .and_then(|key| self.config.scroll_resolution(key))
     }
 
     /// Whether the active device exposes HID++ `0x2121 HiResWheel`.
@@ -831,15 +860,16 @@ impl AppState {
         &mut self,
         resolution: Option<openlogi_core::config::ScrollResolution>,
     ) {
-        let Some((key, supported)) = self.current_record().map(|record| {
-            (
-                record.config_key.clone(),
+        let Some((key, supported)) = self.current_record().and_then(|record| {
+            let key = record.persistent_config_key()?.to_string();
+            Some((
+                key,
                 record
                     .capabilities
                     .is_some_and(|capabilities| capabilities.hires_wheel),
-            )
+            ))
         }) else {
-            debug!("no active device — wheel-resolution change ignored");
+            debug!("no persistent device key — wheel-resolution change ignored");
             return;
         };
         if !set_scroll_resolution_if_supported(&mut self.config, &key, supported, resolution) {
@@ -866,30 +896,43 @@ impl AppState {
     #[must_use]
     pub fn lighting(&self) -> Lighting {
         self.current_record()
-            .and_then(|r| self.config.lighting(&r.config_key))
+            .and_then(DeviceRecord::persistent_config_key)
+            .and_then(|key| self.config.lighting(key))
             .unwrap_or_default()
     }
 
     /// The stored lighting config for `key`, or `None` when unset.
     #[must_use]
     pub fn lighting_for(&self, key: &str) -> Option<Lighting> {
+        if self
+            .device_list
+            .iter()
+            .any(|record| record.config_key == key && !record.is_persistent())
+        {
+            return None;
+        }
         self.config.lighting(key)
     }
 
     /// Persist a new lighting config for the active device and push it to the
     /// hardware (best-effort). No-op when no device is selected.
     pub fn commit_lighting(&mut self, lighting: Lighting) {
-        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
-            debug!("no active device key — lighting kept in memory only");
+        let Some(record) = self.current_record() else {
+            debug!("no active device — lighting change ignored");
             return;
         };
-        let target = self.current_record().and_then(|r| r.route.clone());
+        let key = record.persistent_config_key().map(str::to_string);
+        let target = record.route.clone();
         if let Some(route) = target {
             self.send_ipc(crate::ipc_client::Command::SetLighting(
                 route,
                 lighting.clone(),
             ));
         }
+        let Some(key) = key else {
+            debug!("transient device lighting applied without persistence");
+            return;
+        };
         self.config.set_lighting(&key, lighting);
         // Keep the agent's config copy fresh: it re-applies the saved colour
         // when the keyboard reconnects, and without the reload it would
@@ -908,12 +951,17 @@ impl AppState {
             return;
         };
         let key = record.config_key.clone();
+        let persistent_key = record.persistent_config_key().map(str::to_string);
         let route = record.route.clone();
         if let Some(route) = route {
             self.send_ipc(crate::ipc_client::Command::SetDpi(route, dpi));
         }
-        self.config.set_dpi(&key, dpi);
-        self.persist_and_reload("DPI");
+        if let Some(persistent_key) = persistent_key {
+            self.config.set_dpi(&persistent_key, dpi);
+            self.persist_and_reload("DPI");
+        } else {
+            debug!(key, "transient device DPI applied without persistence");
+        }
     }
 
     /// App-wide settings backing the Settings window (launch-at-login,
@@ -1109,10 +1157,14 @@ impl AppState {
     pub fn commit_binding(&mut self, button: ButtonId, action: Action) {
         self.button_bindings.insert(button, action.clone());
 
-        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
             debug!(
                 ?button,
-                "no active device key — binding kept in memory only"
+                "no persistent device key — binding kept in memory only"
             );
             return;
         };
@@ -1125,13 +1177,17 @@ impl AppState {
     fn bindings_for_current(&self) -> BTreeMap<ButtonId, Action> {
         bindings_for(
             &self.config,
-            self.current_record().map(|r| r.config_key.as_str()),
+            self.current_record()
+                .and_then(DeviceRecord::persistent_config_key),
             self.current_app_bundle.as_deref(),
         )
     }
 
     fn gesture_bindings_for_current(&self) -> BTreeMap<GestureDirection, Action> {
-        let Some(key) = self.current_record().map(|r| r.config_key.as_str()) else {
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+        else {
             return BTreeMap::new();
         };
         match self.config.gesture_owner(key) {
@@ -1153,7 +1209,7 @@ impl AppState {
     /// the gesture menu rather than the single-action picker.
     #[must_use]
     pub fn current_gesture_owner(&self) -> Option<ButtonId> {
-        let key = self.current_record()?.config_key.as_str();
+        let key = self.current_record()?.persistent_config_key()?;
         self.config.gesture_owner(key)
     }
 
@@ -1161,7 +1217,11 @@ impl AppState {
     /// `None`), enforcing the one-gesture-button-per-device lock. Persists, tells
     /// the agent to rebuild, and refreshes the projected maps the UI reads.
     pub fn commit_gesture_owner(&mut self, button: Option<ButtonId>) {
-        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
             return;
         };
         match button {
@@ -1181,10 +1241,14 @@ impl AppState {
     /// Update a single gesture-button sub-binding in memory, on disk, and in the
     /// shared gesture map the watcher thread reads.
     pub fn commit_gesture_binding(&mut self, direction: GestureDirection, action: Action) {
-        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
             debug!(
                 ?direction,
-                "no active device key — gesture binding edit ignored"
+                "no persistent device key — gesture binding edit ignored"
             );
             return;
         };
@@ -1223,6 +1287,9 @@ fn persist_identities(config: &mut Config, list: &[DeviceRecord]) {
         if !record.online {
             continue;
         }
+        let Some(config_key) = record.persistent_config_key() else {
+            continue;
+        };
         let Some(capabilities) = record.capabilities else {
             continue;
         };
@@ -1237,8 +1304,8 @@ fn persist_identities(config: &mut Config, list: &[DeviceRecord]) {
             }),
             codename: record.codename.clone(),
         };
-        if config.device_identity(&record.config_key) != Some(&identity) {
-            config.set_device_identity(&record.config_key, identity);
+        if config.device_identity(config_key) != Some(&identity) {
+            config.set_device_identity(config_key, identity);
             changed = true;
         }
     }
@@ -1282,11 +1349,68 @@ impl Global for AppState {}
 #[cfg(test)]
 mod tests {
     use openlogi_core::config::{Config, DeviceIdentity, ScrollResolution};
-    use openlogi_core::device::{Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports};
+    use openlogi_core::device::{
+        Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice,
+        ReceiverInfo,
+    };
 
     use crate::asset::AssetResolver;
 
-    use super::{AppState, set_scroll_resolution_if_supported};
+    use super::{AppState, build_device_list, set_scroll_resolution_if_supported};
+
+    fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
+        DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "MX Master 3S".to_string(),
+                vendor_id: 0x046d,
+                product_id: 0xb023,
+                unique_id: None,
+            },
+            paired: vec![PairedDevice {
+                slot: openlogi_hid::DIRECT_DEVICE_INDEX,
+                codename: Some("MX Master 3S".to_string()),
+                wpid: None,
+                kind: DeviceKind::Mouse,
+                online: true,
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: None,
+                    unit_id,
+                    transports: DeviceTransports::default(),
+                    model_ids: [0xb034, 0, 0],
+                    extended_model_id: 2,
+                }),
+                capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            }],
+        }
+    }
+
+    #[test]
+    fn transient_identity_is_not_persisted_or_retained_after_resolution() {
+        let cache = AssetResolver::new();
+        let transient_inventory = direct_inventory([0; 4]);
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state =
+            AppState::with_runtime(Config::default(), &[transient_inventory], &cache, commands);
+        let transient_key = "direct:046d:b023:unit:00000000";
+
+        assert_eq!(state.device_list.len(), 1);
+        assert!(state.config.device_identity(transient_key).is_none());
+        state.commit_dpi(2400);
+        assert!(state.config.dpi(transient_key).is_none());
+
+        let stable_list = build_device_list(
+            &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+            &cache,
+            &state.config,
+        );
+        let merged = state.merge_inventory_snapshot(stable_list);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].config_key, "direct:046d:b023:unit:a393cae0");
+        assert!(merged[0].is_persistent());
+    }
 
     #[test]
     fn known_offline_device_is_an_asset_sync_target() {
