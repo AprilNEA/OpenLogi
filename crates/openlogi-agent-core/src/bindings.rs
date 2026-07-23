@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, default_binding, default_gesture_binding,
+    Action, Binding, ButtonId, GestureDirection, default_binding, default_binding_for,
 };
 use openlogi_core::config::Config;
 
@@ -50,9 +50,9 @@ pub fn bindings_for(
 /// Per-direction maps for every HID++ gesture source (the dedicated gesture
 /// button, the MX Master 4 haptic panel) in gesture mode on `config_key`,
 /// keyed by the button its captured swipes dispatch as. Each map is seeded
-/// from [`default_gesture_binding`] with the stored directions overlaid, so
-/// the watcher always dispatches the full five-direction set the GUI shows.
-/// Empty when no HID++ source gestures (or `config_key` is `None`).
+/// via [`Binding::fill_gesture_defaults`] — the one canonical seeding rule —
+/// so the watcher always dispatches the full five-direction set the GUI
+/// shows. Empty when no HID++ source gestures (or `config_key` is `None`).
 #[must_use]
 pub fn hidpp_gesture_maps_for(
     config: &Config,
@@ -66,19 +66,18 @@ pub fn hidpp_gesture_maps_for(
         .iter()
         .copied()
         .filter(|button| button.is_hidpp_gesture_source())
-        .filter(|button| config.is_gesture_mode(key, *button))
-        .map(|button| {
-            let mut map: BTreeMap<GestureDirection, Action> = GestureDirection::ALL
-                .iter()
-                .copied()
-                .map(|d| (d, default_gesture_binding(d)))
-                .collect();
-            if let Some(Binding::Gesture(dirs)) = stored.get(&button) {
-                for (dir, action) in dirs {
-                    map.insert(*dir, action.clone());
-                }
+        .filter_map(|button| {
+            // The stored shape (or the button's canonical default) IS gesture
+            // mode — a Single-shaped source simply drops out.
+            let mut binding = stored
+                .get(&button)
+                .cloned()
+                .unwrap_or_else(|| default_binding_for(button));
+            binding.fill_gesture_defaults();
+            match binding {
+                Binding::Gesture(map) => Some((button, map)),
+                Binding::Single(_) => None,
             }
-            (button, map)
         })
         .collect()
 }
@@ -90,9 +89,9 @@ pub fn hidpp_gesture_maps_for(
 /// concurrency between them is the hook's first-hold-wins policy, not a config
 /// concern.
 ///
-/// Unlike [`hidpp_gesture_maps_for`] (whose maps seed every direction from
-/// [`default_gesture_binding`] at projection time),
-/// this returns each button's raw stored map. In practice those maps are
+/// Unlike [`hidpp_gesture_maps_for`] (whose maps seed every direction at
+/// projection time), this returns each button's raw stored map. In practice
+/// those maps are
 /// already fully populated — [`Config::set_gesture_mode`] seeds all five
 /// directions via [`Binding::fill_gesture_defaults`] when a button is
 /// promoted — so only a hand-edited sparse map leaves a direction unbound, in
@@ -129,6 +128,8 @@ pub fn oshook_gestures_for(
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
+    use openlogi_core::binding::default_gesture_binding;
+
     use super::*;
 
     #[test]

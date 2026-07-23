@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, ButtonId, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
-use openlogi_hid::gesture::CaptureSpec;
+use openlogi_hid::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
 use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
@@ -106,7 +106,13 @@ fn thumbwheel_armed(plan: &DeviceCapturePlan) -> bool {
 fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
     CaptureSpec {
         capture_thumbwheel: thumbwheel_armed(plan),
-        divert_gesture_sources: plan.gesture_source_cids.clone(),
+        // Derived from the dispatch maps, so the armed diverts and the maps
+        // resolving their events can never drift apart.
+        divert_gesture_sources: GESTURE_SOURCE_BUTTONS
+            .into_iter()
+            .filter(|(_, button)| plan.gesture_bindings.contains_key(button))
+            .map(|(cid, _)| cid)
+            .collect(),
         divert_buttons: plan.divert_buttons.clone(),
     }
 }

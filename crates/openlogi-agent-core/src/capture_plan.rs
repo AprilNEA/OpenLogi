@@ -33,9 +33,6 @@ pub struct DeviceCapturePlan {
     /// keyed by the button its captured swipes dispatch as; empty when none
     /// gestures.
     pub gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    /// The gesture sources' CIDs to divert with raw-XY — one per
-    /// `gesture_bindings` entry the source table knows.
-    pub gesture_source_cids: Vec<u16>,
     /// Standard buttons whose binding leaves the default — divert over
     /// `0x1b04`. A button at its default keeps its native HID behavior, so no
     /// re-synthesis is ever needed.
@@ -69,18 +66,13 @@ pub fn plan_for_device(
     // hook of events.
     let oshook = oshook_gestures_for(config, Some(config_key), app);
     // One direction map per HID++ source in gesture mode — several may
-    // gesture at once, each armed with its own raw-XY divert.
+    // gesture at once, each armed with its own raw-XY divert (the watcher
+    // derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
-    let gesture_source_cids: Vec<u16> = GESTURE_SOURCE_BUTTONS
-        .into_iter()
-        .filter(|(_, button)| gesture_bindings.contains_key(button))
-        .map(|(cid, _)| cid)
-        .collect();
     // The HID++ gesture sources never reach the OS hook, so a non-default
     // single binding on one is deliverable only via a plain HID++ divert — but
     // only while the source is NOT in gesture mode (the raw-XY gesture divert
-    // owns a gesturing source's CID, and `gesture_source_cids` is how the
-    // watcher arms those diverts).
+    // owns a gesturing source's CID).
     let plain_sources = GESTURE_SOURCE_BUTTONS
         .into_iter()
         .filter(|(_, button)| !gesture_bindings.contains_key(button));
@@ -117,7 +109,6 @@ pub fn plan_for_device(
         route,
         bindings,
         gesture_bindings,
-        gesture_source_cids,
         divert_buttons,
         thumbwheel_bindings_nondefault,
         thumbwheel_sensitivity: config.thumbwheel_sensitivity(config_key),
@@ -154,12 +145,6 @@ mod tests {
                 && plan.gesture_bindings.contains_key(&ButtonId::HapticPanel),
             "both sources need their own dispatch map, got: {:?}",
             plan.gesture_bindings.keys().collect::<Vec<_>>()
-        );
-        assert!(
-            plan.gesture_source_cids.contains(&GESTURE_BUTTON_CID)
-                && plan.gesture_source_cids.contains(&HAPTIC_PANEL_CID),
-            "both source CIDs must be raw-XY diverted, got: {:?}",
-            plan.gesture_source_cids
         );
         assert!(
             !plan

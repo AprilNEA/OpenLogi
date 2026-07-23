@@ -367,6 +367,9 @@ async fn arm_controls(
     Ok(armed)
 }
 
+/// The fallible arming steps of [`arm_controls`], recording each successful
+/// divert into `armed` as it lands — so the caller can disarm exactly what was
+/// armed when a later step fails.
 async fn arm_controls_into(
     device: &Device,
     chan: &Arc<HidppChannel>,
@@ -382,6 +385,8 @@ async fn arm_controls_into(
     {
         let rc = ReprogControlsV4::new(Arc::clone(chan), slot, info.index);
         let controls = enumerate_controls(&rc).await?;
+        // Register an accessor before the first divert, so a failure on any
+        // divert (including the first) can be handed back via `disarm`.
         armed.reprog = Some((rc.clone(), info.index));
 
         // Divert each gesture-mode source; a source not listed stays native
@@ -450,7 +455,6 @@ async fn arm_controls_into(
         }
         armed.thumb = Some((tw, info.index));
     }
-
     Ok(())
 }
 
