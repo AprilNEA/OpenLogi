@@ -238,55 +238,61 @@ impl Orchestrator {
         self.reapply_all_next_refresh = true;
     }
 
-    /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift,
-    /// native wheel mode) to one device, fire-and-forget on background threads.
-    /// Reuses the capture session's channel when it already points at the
-    /// device, like every other hardware write.
+    /// Push the persisted volatile settings (onboard-profiles mode, lighting,
+    /// sensor DPI, SmartShift, native wheel mode) to one device, fire-and-forget
+    /// on background threads. Reuses the capture session's channel when it
+    /// already points at the device, like every other hardware write.
     fn reapply_volatile_settings(&self, dev: &AgentDevice) {
         let Some(route) = dev.route.clone() else {
             return;
         };
         let key = &dev.config_key;
-        // First, before any DPI/SmartShift write: a gaming mouse boots in
-        // onboard mode, where the profile in its flash shadows every software
-        // setting below. The configured mode (default: host, so OpenLogi's
-        // settings apply) is written to RAM and reverts on power cycle. Each
-        // helper spawns its own thread, so this races the writes below; the
-        // next reapply trigger self-heals if the mode switch lands after a
-        // DPI write.
-        if let Some((mode, profile)) = configured_onboard_profiles(&self.config, dev) {
-            crate::hardware::apply_onboard_profiles_in_background(
+
+        // Resolve every configured value up front, then bundle the writes so
+        // they can run either immediately (no 0x8100) or strictly *after* the
+        // onboard-profiles mode switch: a gaming mouse boots in onboard mode,
+        // where the profile in its flash shadows the settings below and the
+        // firmware rejects writes like DPI with InvalidArgument (observed on
+        // a G502 X) until host mode is active.
+        let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
+        let lighting = self.config.lighting(key).filter(|l| l.enabled);
+        let dpi = self.config.dpi(key);
+        let smartshift = self.config.smartshift(key);
+        let capture = Arc::clone(&self.shared.capture_channel);
+        let profiles_route = route.clone();
+        let rest = move || {
+            crate::hardware::write_scroll_wheel_mode_in_background(
+                Some(&capture),
+                (resolution.is_some() || inverted.is_some()).then_some(route.clone()),
+                resolution,
+                inverted,
+            );
+            if let Some(lighting) = lighting {
+                crate::hardware::set_lighting_in_background(Some(route.clone()), &lighting);
+            }
+            if let Some(dpi) = dpi {
+                crate::hardware::write_dpi_in_background(Some(&capture), Some(route.clone()), dpi);
+            }
+            if let Some(smartshift) = smartshift {
+                crate::hardware::write_smartshift_in_background(
+                    Some(&capture),
+                    Some(route),
+                    smartshift.mode.into(),
+                    smartshift.auto_disengage,
+                    smartshift.tunable_torque,
+                );
+            }
+        };
+
+        match configured_onboard_profiles(&self.config, dev) {
+            Some((mode, profile)) => crate::hardware::apply_onboard_profiles_in_background(
                 Some(&self.shared.capture_channel),
-                Some(route.clone()),
+                Some(profiles_route),
                 mode,
                 profile,
-            );
-        }
-        let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
-        crate::hardware::write_scroll_wheel_mode_in_background(
-            Some(&self.shared.capture_channel),
-            (resolution.is_some() || inverted.is_some()).then_some(route.clone()),
-            resolution,
-            inverted,
-        );
-        if let Some(lighting) = self.config.lighting(key).filter(|l| l.enabled) {
-            crate::hardware::set_lighting_in_background(Some(route.clone()), &lighting);
-        }
-        if let Some(dpi) = self.config.dpi(key) {
-            crate::hardware::write_dpi_in_background(
-                Some(&self.shared.capture_channel),
-                Some(route.clone()),
-                dpi,
-            );
-        }
-        if let Some(smartshift) = self.config.smartshift(key) {
-            crate::hardware::write_smartshift_in_background(
-                Some(&self.shared.capture_channel),
-                Some(route),
-                smartshift.mode.into(),
-                smartshift.auto_disengage,
-                smartshift.tunable_torque,
-            );
+                rest,
+            ),
+            None => rest(),
         }
     }
 

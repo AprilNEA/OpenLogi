@@ -384,7 +384,14 @@ pub fn write_scroll_wheel_mode_in_background(
 }
 
 /// Spawn an OS thread that applies the configured onboard-profiles mode (and,
-/// in onboard mode, the active profile) to the gaming device at `target`.
+/// in onboard mode, the active profile) to the gaming device at `target`,
+/// then runs `after` on the same thread.
+///
+/// `after` runs regardless of the apply's outcome. It exists because a gaming
+/// mouse still in onboard mode rejects the other volatile writes (a G502 X
+/// answered a DPI reapply with `InvalidArgument` while onboard), so the
+/// reconnect reapply passes the rest of its writes as this continuation
+/// instead of racing them in parallel threads.
 ///
 /// Devices without HID++ `0x8100` are expected and only logged at debug level
 /// — this fires for every reconnecting device, most of which have no onboard
@@ -396,9 +403,11 @@ pub fn apply_onboard_profiles_in_background(
     target: Option<DeviceRoute>,
     mode: ProfilesMode,
     profile: Option<u16>,
+    after: impl FnOnce() + Send + 'static,
 ) {
     let Some(target) = target else {
         debug!(?mode, "no target device — onboard-profiles apply skipped");
+        after();
         return;
     };
     let shared = reusable_channel(capture, &target);
@@ -411,6 +420,7 @@ pub fn apply_onboard_profiles_in_background(
             Ok(rt) => rt,
             Err(e) => {
                 warn!(error = %e, "tokio runtime init failed; onboard-profiles apply skipped");
+                after();
                 return;
             }
         };
@@ -446,6 +456,7 @@ pub fn apply_onboard_profiles_in_background(
                 "onboard-profiles apply timed out (device asleep/unresponsive)"
             ),
         }
+        after();
     });
 }
 

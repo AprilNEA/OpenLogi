@@ -174,16 +174,18 @@ pub(super) async fn apply_profiles_config_on_channel(
     if current != mode {
         write_mode(&feature, index, mode).await?;
         // Read back to confirm the firmware accepted the mode. Mirrors the DPI
-        // write path: a mismatch is logged, not fatal, because the request
-        // reached the device.
-        let actual = read_mode(&feature).await?;
-        if actual != mode {
-            tracing::warn!(
+        // write path: a mismatch — or a failed read-back, which happens when
+        // the read races the device's mode transition (observed on a G502 X)
+        // — is logged, not fatal, because the request reached the device.
+        match read_mode(&feature).await {
+            Ok(actual) if actual != mode => tracing::warn!(
                 index,
                 requested = ?mode,
                 ?actual,
                 "onboard mode write accepted but device reports a different mode"
-            );
+            ),
+            Ok(_) => {}
+            Err(error) => debug!(index, %error, "onboard mode read-back skipped"),
         }
         written = true;
     }
@@ -207,14 +209,17 @@ pub(super) async fn apply_profiles_config_on_channel(
                     OnboardProfilesFeature::ID,
                 )
             })?;
-            let actual = feature.get_current_profile().await.map_err(read)?;
-            if actual != sector {
-                tracing::warn!(
+            match feature.get_current_profile().await {
+                Ok(actual) if actual != sector => tracing::warn!(
                     index,
                     requested = sector,
                     actual,
                     "active-profile write accepted but device reports a different sector"
-                );
+                ),
+                Ok(_) => {}
+                Err(error) => {
+                    debug!(index, %error, "active-profile read-back skipped");
+                }
             }
             written = true;
         }
