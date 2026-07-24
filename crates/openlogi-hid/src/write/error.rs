@@ -100,6 +100,11 @@ pub enum HidppOperation {
     ReadWheelMode,
     /// Write and verify the native HiResWheel mode.
     WriteWheelMode,
+    /// Read onboard-profiles state (description, mode, active profile,
+    /// directory).
+    ReadOnboardProfiles,
+    /// Write the onboard mode or the active onboard profile.
+    WriteOnboardProfiles,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

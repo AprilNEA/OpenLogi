@@ -452,6 +452,7 @@ mod tests {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: false,
+                onboard_profiles: false,
             },
             model_info: None,
             codename: None,

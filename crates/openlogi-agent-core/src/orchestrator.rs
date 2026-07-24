@@ -14,9 +14,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 
-use openlogi_core::config::{Config, ScrollResolution};
+use openlogi_core::config::{Config, ProfileSource, ScrollResolution};
 use openlogi_core::device::{Capabilities, DeviceInventory};
-use openlogi_hid::{CaptureChannel, DeviceRoute};
+use openlogi_hid::{CaptureChannel, DeviceRoute, ProfilesMode};
 use tracing::warn;
 
 use crate::DpiCycleState;
@@ -199,10 +199,10 @@ impl Orchestrator {
         self.inventory = InventoryState::Ready(inventories.to_vec());
         let devices = build_devices(inventories);
         // Volatile settings (lighting colour, sensor DPI, SmartShift, native
-        // wheel mode) live in device RAM and reset on a power cycle. Every
-        // reconnect shape re-applies the persisted values (#189): a first
-        // sighting, a replug (new route), a wake from device sleep
-        // (offline→online), or — via the
+        // wheel mode, onboard-profiles host mode) live in device RAM and reset
+        // on a power cycle. Every reconnect shape re-applies the persisted
+        // values (#189): a first sighting, a replug (new route), a wake from
+        // device sleep (offline→online), or — via the
         // flag — a system wake where none of those are observable.
         let reapply_all = std::mem::take(&mut self.reapply_all_next_refresh);
         let followup = std::mem::take(&mut self.reapply_followup);
@@ -238,40 +238,61 @@ impl Orchestrator {
         self.reapply_all_next_refresh = true;
     }
 
-    /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift,
-    /// native wheel mode) to one device, fire-and-forget on background threads.
-    /// Reuses the capture session's channel when it already points at the
-    /// device, like every other hardware write.
+    /// Push the persisted volatile settings (onboard-profiles mode, lighting,
+    /// sensor DPI, SmartShift, native wheel mode) to one device, fire-and-forget
+    /// on background threads. Reuses the capture session's channel when it
+    /// already points at the device, like every other hardware write.
     fn reapply_volatile_settings(&self, dev: &AgentDevice) {
         let Some(route) = dev.route.clone() else {
             return;
         };
         let key = &dev.config_key;
+
+        // Resolve every configured value up front, then bundle the writes so
+        // they can run either immediately (no 0x8100) or strictly *after* the
+        // onboard-profiles mode switch: a gaming mouse boots in onboard mode,
+        // where the profile in its flash shadows the settings below and the
+        // firmware rejects writes like DPI with InvalidArgument (observed on
+        // a G502 X) until host mode is active.
         let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
-        crate::hardware::write_scroll_wheel_mode_in_background(
-            Some(&self.shared.capture_channel),
-            (resolution.is_some() || inverted.is_some()).then_some(route.clone()),
-            resolution,
-            inverted,
-        );
-        if let Some(lighting) = self.config.lighting(key).filter(|l| l.enabled) {
-            crate::hardware::set_lighting_in_background(Some(route.clone()), &lighting);
-        }
-        if let Some(dpi) = self.config.dpi(key) {
-            crate::hardware::write_dpi_in_background(
-                Some(&self.shared.capture_channel),
-                Some(route.clone()),
-                dpi,
+        let lighting = self.config.lighting(key).filter(|l| l.enabled);
+        let dpi = self.config.dpi(key);
+        let smartshift = self.config.smartshift(key);
+        let capture = Arc::clone(&self.shared.capture_channel);
+        let profiles_route = route.clone();
+        let rest = move || {
+            crate::hardware::write_scroll_wheel_mode_in_background(
+                Some(&capture),
+                (resolution.is_some() || inverted.is_some()).then_some(route.clone()),
+                resolution,
+                inverted,
             );
-        }
-        if let Some(smartshift) = self.config.smartshift(key) {
-            crate::hardware::write_smartshift_in_background(
+            if let Some(lighting) = lighting {
+                crate::hardware::set_lighting_in_background(Some(route.clone()), &lighting);
+            }
+            if let Some(dpi) = dpi {
+                crate::hardware::write_dpi_in_background(Some(&capture), Some(route.clone()), dpi);
+            }
+            if let Some(smartshift) = smartshift {
+                crate::hardware::write_smartshift_in_background(
+                    Some(&capture),
+                    Some(route),
+                    smartshift.mode.into(),
+                    smartshift.auto_disengage,
+                    smartshift.tunable_torque,
+                );
+            }
+        };
+
+        match configured_onboard_profiles(&self.config, dev) {
+            Some((mode, profile)) => crate::hardware::apply_onboard_profiles_in_background(
                 Some(&self.shared.capture_channel),
-                Some(route),
-                smartshift.mode.into(),
-                smartshift.auto_disengage,
-                smartshift.tunable_torque,
-            );
+                Some(profiles_route),
+                mode,
+                profile,
+                rest,
+            ),
+            None => rest(),
         }
     }
 
@@ -366,6 +387,30 @@ impl Orchestrator {
 
 /// Resolve the two independently-gated HiResWheel settings for one device.
 /// `None` means preserve the device's current value.
+/// The onboard-profiles mode + profile to apply to `dev`, or `None` for a
+/// device whose measured feature table has no `0x8100` (or was never probed).
+/// An unconfigured device gets the default policy — host mode — so OpenLogi's
+/// DPI/button/report-rate settings apply instead of the onboard profile the
+/// device booted into.
+fn configured_onboard_profiles(
+    config: &Config,
+    dev: &AgentDevice,
+) -> Option<(ProfilesMode, Option<u16>)> {
+    if !dev.capabilities?.onboard_profiles {
+        return None;
+    }
+    Some(match config.onboard_profiles(&dev.config_key) {
+        None => (ProfilesMode::Host, None),
+        Some(cfg) => (
+            match cfg.mode {
+                ProfileSource::Host => ProfilesMode::Host,
+                ProfileSource::Onboard => ProfilesMode::Onboard,
+            },
+            cfg.profile,
+        ),
+    })
+}
+
 fn configured_wheel_mode(
     config: &Config,
     dev: &AgentDevice,

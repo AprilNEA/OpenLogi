@@ -17,8 +17,9 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, DeviceRoute, DpiInfo, HidppFeatureErrorKind, HidppOperation, ScrollResolution,
-    SharedChannel, SmartShiftMode, SmartShiftStatus, WriteError,
+    CaptureChannel, DeviceRoute, DpiInfo, HidppFeatureErrorKind, HidppOperation,
+    OnboardProfilesInfo, ProfilesMode, ScrollResolution, SharedChannel, SmartShiftMode,
+    SmartShiftStatus, WriteError,
 };
 use tracing::{debug, warn};
 
@@ -382,6 +383,83 @@ pub fn write_scroll_wheel_mode_in_background(
     });
 }
 
+/// Spawn an OS thread that applies the configured onboard-profiles mode (and,
+/// in onboard mode, the active profile) to the gaming device at `target`,
+/// then runs `after` on the same thread.
+///
+/// `after` runs regardless of the apply's outcome. It exists because a gaming
+/// mouse still in onboard mode rejects the other volatile writes (a G502 X
+/// answered a DPI reapply with `InvalidArgument` while onboard), so the
+/// reconnect reapply passes the rest of its writes as this continuation
+/// instead of racing them in parallel threads.
+///
+/// Devices without HID++ `0x8100` are expected and only logged at debug level
+/// — this fires for every reconnecting device, most of which have no onboard
+/// profile memory. The write path short-circuits when the device already
+/// matches, so a reapply on an already-configured device costs one or two
+/// reads.
+pub fn apply_onboard_profiles_in_background(
+    capture: Option<&CaptureChannel>,
+    target: Option<DeviceRoute>,
+    mode: ProfilesMode,
+    profile: Option<u16>,
+    after: impl FnOnce() + Send + 'static,
+) {
+    let Some(target) = target else {
+        debug!(?mode, "no target device — onboard-profiles apply skipped");
+        after();
+        return;
+    };
+    let shared = reusable_channel(capture, &target);
+    let reused = shared.is_some();
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                warn!(error = %e, "tokio runtime init failed; onboard-profiles apply skipped");
+                after();
+                return;
+            }
+        };
+        let result = rt.block_on(async {
+            tokio::time::timeout(WRITE_BUDGET, async {
+                match &shared {
+                    Some(shared) => {
+                        openlogi_hid::apply_profiles_config_on(shared, mode, profile).await
+                    }
+                    None => openlogi_hid::apply_profiles_config(&target, mode, profile).await,
+                }
+            })
+            .await
+        });
+        let index = target.device_index();
+        match result {
+            Ok(Ok(written)) => debug!(
+                index,
+                ?mode,
+                ?profile,
+                written,
+                reused,
+                "onboard-profiles config applied"
+            ),
+            Ok(Err(WriteError::FeatureUnsupported { feature_hex })) => debug!(
+                index,
+                feature = format_args!("{feature_hex:#06x}"),
+                "no onboard profile memory — profiles apply not applicable"
+            ),
+            Ok(Err(e)) => warn!(error = ?e, "onboard-profiles apply failed"),
+            Err(_) => warn!(
+                index,
+                "onboard-profiles apply timed out (device asleep/unresponsive)"
+            ),
+        }
+        after();
+    });
+}
+
 /// Apply `lighting` to the keyboard at `target` on a background thread.
 ///
 /// Resolves the configured colour (scaled by brightness, or black when the
@@ -497,6 +575,34 @@ pub async fn read_smartshift(route: &DeviceRoute) -> Result<SmartShiftStatus, Wr
     timed(
         HidppOperation::ReadSmartShift,
         openlogi_hid::get_smartshift_status(route),
+    )
+    .await
+}
+
+/// Apply an onboard-profiles config to `route` (capture-channel-aware).
+pub async fn apply_onboard_profiles(
+    capture: &CaptureChannel,
+    route: &DeviceRoute,
+    mode: ProfilesMode,
+    profile: Option<u16>,
+) -> Result<(), WriteError> {
+    let shared = reusable_channel(Some(capture), route);
+    timed(HidppOperation::WriteOnboardProfiles, async {
+        match &shared {
+            Some(shared) => openlogi_hid::apply_profiles_config_on(shared, mode, profile).await,
+            None => openlogi_hid::apply_profiles_config(route, mode, profile).await,
+        }
+    })
+    .await
+    .map(|_written| ())
+}
+
+/// Read the onboard-profiles state (description, mode, active profile,
+/// directory) from `route`.
+pub async fn read_onboard_profiles(route: &DeviceRoute) -> Result<OnboardProfilesInfo, WriteError> {
+    timed(
+        HidppOperation::ReadOnboardProfiles,
+        openlogi_hid::get_onboard_profiles(route),
     )
     .await
 }

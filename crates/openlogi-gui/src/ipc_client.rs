@@ -26,7 +26,8 @@ use openlogi_agent_core::ipc::{
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, DpiInfo, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
+    DeviceRoute, DpiInfo, OnboardProfilesInfo, ProfilesMode, ReceiverSelector, SmartShiftMode,
+    SmartShiftStatus, WriteError,
 };
 use tarpc::client;
 use tarpc::context;
@@ -84,6 +85,11 @@ pub enum Command {
     ReadSmartShift(
         DeviceRoute,
         oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
+    ),
+    SetOnboardProfiles(DeviceRoute, ProfilesMode, Option<u16>),
+    ReadOnboardProfiles(
+        DeviceRoute,
+        oneshot::Sender<Result<OnboardProfilesInfo, WriteError>>,
     ),
     ReloadConfig,
     /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
@@ -559,6 +565,12 @@ async fn handle(
         Command::ReadSmartShift(route, reply) => {
             let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
         }
+        Command::SetOnboardProfiles(route, mode, profile) => {
+            log_apply(client.set_onboard_profiles(ctx, route, mode, profile).await)?;
+        }
+        Command::ReadOnboardProfiles(route, reply) => {
+            let _ = reply.send(rpc_result(client.read_onboard_profiles(ctx, route).await)?);
+        }
         Command::ReloadConfig => client.reload_config(ctx).await.map_err(|_| ())?,
         Command::RequestAccessibilityPrompt => client
             .request_accessibility_prompt(ctx)
@@ -627,6 +639,9 @@ fn reply_disconnected(pairing_tx: &mpsc::UnboundedSender<PairingUpdate>, cmd: Co
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::ReadSmartShift(_, reply) => {
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
+        }
+        Command::ReadOnboardProfiles(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::StartPairing(_) | Command::PairDevice(_) => {

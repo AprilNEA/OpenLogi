@@ -339,6 +339,37 @@ pub struct SmartShift {
     pub tunable_torque: u8,
 }
 
+/// Where a gaming device with HID++ `0x8100` onboard profile memory takes its
+/// settings from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileSource {
+    /// Host mode: OpenLogi drives the device; onboard profiles are dormant.
+    /// The default — onboard mode would shadow every software setting.
+    #[default]
+    Host,
+    /// Onboard mode: the device applies a profile from its own flash.
+    Onboard,
+}
+
+/// Per-device onboard-profiles configuration for gaming mice, persisted so the
+/// agent can re-apply it when the device reconnects: the mode is written to
+/// device RAM and reverts to onboard on a power cycle.
+///
+/// Config-file only — never crosses the IPC (the agent reads it from
+/// `config.toml` on reload), so it is free to evolve without a
+/// `PROTOCOL_VERSION` bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnboardProfiles {
+    /// Whether the device runs from host software or its onboard memory.
+    pub mode: ProfileSource,
+    /// Flash sector of the onboard profile to activate in
+    /// [`ProfileSource::Onboard`] mode. `None` keeps whatever profile the
+    /// device already has active. Ignored in host mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<u16>,
+}
+
 /// Which control owns a device's single gesture role.
 ///
 /// Stored explicitly — rather than inferred from which button happens to carry a
@@ -396,6 +427,26 @@ where
 #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn onboard_profiles_parses_both_toml_shapes() {
+        // Onboard with an explicit profile sector.
+        let onboard: OnboardProfiles =
+            toml::from_str("mode = \"onboard\"\nprofile = 2\n").expect("parse onboard");
+        assert_eq!(onboard.mode, ProfileSource::Onboard);
+        assert_eq!(onboard.profile, Some(2));
+
+        // Host mode omits the profile field entirely.
+        let host: OnboardProfiles = toml::from_str("mode = \"host\"\n").expect("parse host");
+        assert_eq!(host.mode, ProfileSource::Host);
+        assert_eq!(host.profile, None);
+        assert!(
+            !toml::to_string(&host)
+                .expect("serialize")
+                .contains("profile"),
+            "unset profile must stay out of config.toml"
+        );
+    }
 
     #[test]
     fn low_auto_disengage_heals_to_default_on_load() {

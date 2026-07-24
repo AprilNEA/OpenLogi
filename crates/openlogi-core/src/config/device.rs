@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::settings::{
-    GestureOwner, Lighting, ScrollResolution, SmartShift, deserialize_gesture_owner,
+    GestureOwner, Lighting, OnboardProfiles, ScrollResolution, SmartShift,
+    deserialize_gesture_owner,
 };
 use crate::binding::{Action, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo};
@@ -113,6 +114,11 @@ pub struct DeviceConfig {
     /// current resolution unmanaged and omits the field from `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll_resolution: Option<ScrollResolution>,
+    /// Onboard-profiles mode for gaming mice with HID++ `0x8100`, re-applied
+    /// on reconnect for the same reason as [`Self::dpi`]. `None` means the
+    /// default policy: host mode, so OpenLogi's settings apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboard_profiles: Option<OnboardProfiles>,
 }
 
 /// `skip_serializing_if` helper for plain `bool` fields whose default is
@@ -163,6 +169,8 @@ struct RawDeviceConfig {
     invert_scroll: bool,
     #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
+    #[serde(default)]
+    onboard_profiles: Option<OnboardProfiles>,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -207,6 +215,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             smartshift: raw.smartshift,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
+            onboard_profiles: raw.onboard_profiles,
         }
     }
 }

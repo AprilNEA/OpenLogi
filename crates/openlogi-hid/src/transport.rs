@@ -178,6 +178,7 @@ fn is_receiver_child_sysfs_path(path: &str) -> bool {
     crate::BOLT_PIDS
         .iter()
         .chain(crate::UNIFYING_PIDS.iter())
+        .chain(crate::LIGHTSPEED_PIDS.iter())
         .any(|&pid| {
             let marker = format!(":{LOGITECH_VID:04X}:{pid:04X}.");
             // A parent component contains the marker followed by at least one

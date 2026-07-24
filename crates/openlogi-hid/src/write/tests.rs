@@ -3,10 +3,13 @@ use std::assert_matches;
 use super::*;
 use hidpp::feature::smartshift::WheelMode;
 
-use crate::SmartShiftMode;
+use hidpp::feature::onboard_profiles::OnboardMode;
+
+use crate::write::onboard_profiles::{onboard_mode_to_profiles, profiles_to_onboard_mode};
 use crate::write::smartshift::{
     is_missing_enhanced, smartshift_to_wheel, wheel_mode_to_smartshift,
 };
+use crate::{ProfilesMode, SmartShiftMode};
 
 #[test]
 fn capabilities_sort_and_deduplicate_values() -> Result<(), WriteError> {
@@ -95,6 +98,29 @@ fn smartshift_to_wheel_round_trips() {
     // smartshift_to_wheel is the inverse of wheel_mode_to_smartshift.
     for mode in [SmartShiftMode::Free, SmartShiftMode::Ratchet] {
         assert_eq!(wheel_mode_to_smartshift(smartshift_to_wheel(mode)), mode);
+    }
+}
+
+#[test]
+fn onboard_mode_maps_to_profiles_mode() {
+    assert_eq!(
+        onboard_mode_to_profiles(OnboardMode::Host),
+        ProfilesMode::Host
+    );
+    assert_eq!(
+        onboard_mode_to_profiles(OnboardMode::Onboard),
+        ProfilesMode::Onboard
+    );
+}
+
+#[test]
+fn profiles_to_onboard_mode_round_trips() {
+    // profiles_to_onboard_mode is the inverse of onboard_mode_to_profiles.
+    for mode in [ProfilesMode::Host, ProfilesMode::Onboard] {
+        assert_eq!(
+            onboard_mode_to_profiles(profiles_to_onboard_mode(mode)),
+            mode
+        );
     }
 }
 

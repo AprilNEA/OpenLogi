@@ -17,6 +17,7 @@ use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::asset::AssetResolver;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::lighting_panel::LightingPanel;
+use crate::components::profiles_panel::ProfilesPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AgentLink, AppState, DeviceRecord};
@@ -67,6 +68,8 @@ enum DetailTab {
     Pointer,
     /// RGB lighting — color, brightness, on/off.
     Lighting,
+    /// Onboard profile memory (gaming mice) — host vs. onboard mode.
+    Profiles,
     /// Device info and configuration.
     Device,
 }
@@ -104,6 +107,9 @@ impl DetailTab {
         if caps.lighting {
             tabs.push(Self::Lighting);
         }
+        if caps.onboard_profiles {
+            tabs.push(Self::Profiles);
+        }
         tabs.push(Self::Device);
         tabs
     }
@@ -121,6 +127,7 @@ impl DetailTab {
             Self::Buttons => tr!("Buttons"),
             Self::Pointer => tr!("Pointer"),
             Self::Lighting => tr!("Lighting"),
+            Self::Profiles => tr!("Profiles"),
             Self::Device => tr!("Device"),
         }
     }
@@ -134,6 +141,7 @@ pub struct AppView {
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
+    profiles_panel: Entity<ProfilesPanel>,
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
     /// Re-renders the root when the device list changes so the empty state
@@ -178,6 +186,7 @@ impl AppView {
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
+        let profiles_panel = cx.new(ProfilesPanel::new);
         let state_obs = cx.observe_global::<AppState>(|_, cx| cx.notify());
         Self {
             focus_handle,
@@ -186,6 +195,7 @@ impl AppView {
             dpi_panel,
             smartshift_panel,
             lighting_panel,
+            profiles_panel,
             appearance_obs: None,
             state_obs,
             accessibility_dismissed: false,
@@ -438,6 +448,7 @@ impl Render for AppView {
                     &self.dpi_panel,
                     &self.smartshift_panel,
                     &self.lighting_panel,
+                    &self.profiles_panel,
                     active,
                     pal,
                     cx,
@@ -581,6 +592,7 @@ mod tests {
             lighting: false,
             scroll_inversion: false,
             hires_wheel: false,
+            onboard_profiles: false,
         });
         // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -600,6 +612,7 @@ mod tests {
             lighting: true,
             scroll_inversion: false,
             hires_wheel: false,
+            onboard_profiles: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(
