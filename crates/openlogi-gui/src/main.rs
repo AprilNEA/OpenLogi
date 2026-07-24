@@ -340,9 +340,10 @@ fn main() -> Result<()> {
                                 )
                             });
                             // The steady poll mostly repeats an identical snapshot;
-                            // skip the full-window invalidation for those.
+                            // skip the full-window invalidation and menu rebuild for those.
                             if changed {
                                 cx.refresh_windows();
+                                app_menu::rebuild(cx);
                             }
                             (auto_download, asset_source, models)
                         });
