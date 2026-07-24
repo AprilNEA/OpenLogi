@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use openlogi_hid::{DpiInfo, SmartShiftStatus, WriteError};
+use openlogi_hid::{DpiInfo, OnboardProfilesInfo, SmartShiftStatus, WriteError};
 use tracing::debug;
 
 /// How many times to retry a device read (DPI capability discovery or a
@@ -43,6 +43,9 @@ pub type DpiStatus = Load<DpiInfo>;
 /// stores wheel mode / threshold / torque in its own non-volatile memory, so the
 /// GUI only ever reads and writes the device.
 pub type SmartShiftLoad = Load<SmartShiftStatus>;
+
+/// Per-device onboard-profiles (`0x8100`) state load. See [`Load`].
+pub type ProfilesLoad = Load<OnboardProfilesInfo>;
 
 /// Per-device lazy-load cache for a background HID++ read, keyed by
 /// [`DeviceRecord::config_key`](super::DeviceRecord::config_key). Holds each

@@ -17,7 +17,8 @@ use openlogi_core::config::{
 };
 use openlogi_core::device::{DeviceInventory, DeviceModelInfo};
 use openlogi_hid::{
-    DeviceRoute, DpiCapabilities, DpiInfo, SmartShiftMode, SmartShiftStatus, WriteError,
+    DeviceRoute, DpiCapabilities, DpiInfo, OnboardProfilesInfo, ProfilesMode, SmartShiftMode,
+    SmartShiftStatus, WriteError,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -26,7 +27,7 @@ mod devices;
 mod load;
 
 pub use devices::DeviceRecord;
-pub use load::{DpiStatus, Load, SmartShiftLoad};
+pub use load::{DpiStatus, Load, ProfilesLoad, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +141,16 @@ pub struct AppState {
     next_smartshift_write_id: u64,
     /// Visible outcome of the post-write SmartShift confirmation.
     smartshift_write_status: BTreeMap<String, SmartShiftWriteStatus>,
+    /// Onboard-profiles (`0x8100`) state keyed by
+    /// [`DeviceRecord::config_key`], loaded lazily on the same pattern as
+    /// [`Self::smartshift_data`].
+    profiles_data: LazyDeviceData<OnboardProfilesInfo>,
+    /// Devices whose onboard-profiles config was just written optimistically
+    /// and still need a confirming re-read, keyed by
+    /// [`DeviceRecord::config_key`]. A plain set: the re-read only replaces the
+    /// optimistic value with the device's actual state, and the panel shows no
+    /// per-write outcome, so there is nothing to match a reply against.
+    profiles_pending_confirm: std::collections::BTreeSet<String>,
     /// All paired devices, in carousel order. Each entry caches the per-
     /// device data the views need so a switch is a pure index update.
     pub device_list: Vec<DeviceRecord>,
@@ -206,6 +217,8 @@ impl AppState {
             smartshift_pending_confirm: BTreeMap::new(),
             next_smartshift_write_id: 0,
             smartshift_write_status: BTreeMap::new(),
+            profiles_data: LazyDeviceData::default(),
+            profiles_pending_confirm: std::collections::BTreeSet::new(),
             device_list,
             config,
             ipc_commands,
@@ -446,6 +459,7 @@ impl AppState {
             self.smartshift_data.remove(key);
             self.smartshift_pending_confirm.remove(key);
             self.smartshift_write_status.remove(key);
+            self.profiles_data.remove(key);
         }
         let present = |key: &str| {
             self.device_list
@@ -457,6 +471,7 @@ impl AppState {
         self.smartshift_pending_confirm
             .retain(|key, _| present(key));
         self.smartshift_write_status.retain(|key, _| present(key));
+        self.profiles_data.retain_present(present);
         self.current_device = new_index;
         // The active device may have changed (selection fell back to index 0
         // when the previous one vanished); re-seed the displayed DPI so it
@@ -620,6 +635,9 @@ impl AppState {
             if matches!(self.smartshift_data.get(&key), Some(Load::Failed(_))) {
                 self.smartshift_data.retry(&key);
                 self.smartshift_write_status.remove(&key);
+            }
+            if matches!(self.profiles_data.get(&key), Some(Load::Failed(_))) {
+                self.profiles_data.retry(&key);
             }
         }
         // `self.dpi` is the active device's value; adopt the newly-selected
@@ -1056,6 +1074,120 @@ impl AppState {
             self.smartshift_write_status
                 .insert(key.to_string(), SmartShiftWriteStatus::Failed);
         }
+    }
+
+    /// Onboard-profiles status for the active device.
+    #[must_use]
+    pub fn current_profiles_status(&self) -> ProfilesLoad {
+        self.current_record()
+            .map_or(ProfilesLoad::Unknown, |record| {
+                self.profiles_data.status(&record.config_key)
+            })
+    }
+
+    /// Whether the active device still needs an onboard-profiles read.
+    #[must_use]
+    pub fn current_profiles_unqueried(&self) -> bool {
+        self.current_record()
+            .is_some_and(|record| self.profiles_data.unqueried(&record.config_key))
+    }
+
+    /// Mark onboard-profiles discovery as in flight for `key`.
+    pub fn mark_profiles_loading(&mut self, key: &str) {
+        self.profiles_data.mark_loading(key);
+    }
+
+    /// Reset a stuck `Loading` for `key` back to `Unknown` — called when the
+    /// read worker vanished without delivering a result.
+    pub fn clear_profiles_loading(&mut self, key: &str) {
+        self.profiles_data.clear_loading(key);
+    }
+
+    /// Drop the active device's recorded onboard-profiles state so the next
+    /// render re-runs discovery — the "click to retry" affordance.
+    pub fn retry_active_profiles(&mut self) {
+        if let Some(key) = self.current_record().map(|r| r.config_key.clone()) {
+            self.profiles_data.retry(&key);
+        }
+    }
+
+    /// Store an onboard-profiles read result, with the same stale-route guard
+    /// and retry policy as [`Self::store_smartshift_status`].
+    pub fn store_profiles_info(
+        &mut self,
+        key: String,
+        route: &DeviceRoute,
+        result: Result<OnboardProfilesInfo, WriteError>,
+    ) {
+        let matches_route = self
+            .device_list
+            .iter()
+            .any(|record| record.config_key == key && record.route.as_ref() == Some(route));
+        let still_present = self
+            .device_list
+            .iter()
+            .any(|record| record.config_key == key);
+        self.profiles_data.store(
+            key,
+            result,
+            profiles_error_is_permanent,
+            matches_route,
+            still_present,
+            "onboard profiles",
+        );
+    }
+
+    /// Write an onboard-profiles config to the active device (best-effort over
+    /// IPC), persist it to `config.toml`, and optimistically update the cached
+    /// state — the mode lives in device RAM and reverts to onboard on a power
+    /// cycle, so the agent re-applies the persisted config on reconnect.
+    /// No-op when no device is selected.
+    pub fn commit_onboard_profiles(&mut self, mode: ProfilesMode, profile: Option<u16>) {
+        let Some(record) = self.current_record() else {
+            debug!("no active device — onboard-profiles change ignored");
+            return;
+        };
+        let key = record.config_key.clone();
+        let route = record.route.clone();
+        if let Some(route) = route {
+            self.send_ipc(crate::ipc_client::Command::SetOnboardProfiles(
+                route, mode, profile,
+            ));
+        }
+        self.config.set_onboard_profiles(
+            &key,
+            openlogi_core::config::OnboardProfiles {
+                mode: match mode {
+                    ProfilesMode::Host => openlogi_core::config::ProfileSource::Host,
+                    ProfilesMode::Onboard => openlogi_core::config::ProfileSource::Onboard,
+                },
+                profile,
+            },
+        );
+        self.persist_and_reload("onboard profiles");
+        // Reflect the write immediately (when a read already resolved) so the
+        // panel doesn't flicker back, and queue a confirming re-read to replace
+        // the optimistic value with the device's actual state.
+        if let Some(ProfilesLoad::Ready(info)) = self.profiles_data.get(&key) {
+            let mut info = info.clone();
+            info.mode = mode;
+            if let Some(sector) = profile {
+                info.active_profile = sector;
+            }
+            self.profiles_data.set_ready(key.clone(), info);
+        }
+        self.profiles_pending_confirm.insert(key);
+    }
+
+    /// Take the active device's pending onboard-profiles confirm, if any — the
+    /// one-shot re-read companion to [`Self::commit_onboard_profiles`].
+    pub fn take_active_profiles_confirm(&mut self) -> Option<(String, DeviceRoute)> {
+        let record = self.current_record()?;
+        let key = record.config_key.clone();
+        let route = record.route.clone()?;
+        self.profiles_pending_confirm
+            .remove(&key)
+            .then_some((key, route))
     }
 
     /// The lighting config for the active device, or the default when none is
@@ -1529,6 +1661,12 @@ fn smartshift_read_is_current(
         (None, Some(SmartShiftWriteStatus::Applying { .. })) | (Some(_), _) => false,
         (None, _) => true,
     }
+}
+
+/// Whether an onboard-profiles read error is permanent: the device genuinely
+/// lacks `0x8100`. Everything else (timeouts, busy device) is transient.
+fn profiles_error_is_permanent(error: &WriteError) -> bool {
+    matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
 fn set_scroll_resolution_if_supported(
