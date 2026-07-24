@@ -290,6 +290,12 @@ fn open_or_focus_gui() {
 /// same-user filter keeps other sessions (fast user switching) out of
 /// Show/Quit — their windows are invisible to `EnumWindows` and their
 /// processes unkillable anyway, but don't even consider them.
+///
+/// The `OpenLogi.exe` match is case-*sensitive*: the CLI binary is
+/// `openlogi.exe`, which case-insensitively equals the GUI's `OpenLogi.exe`.
+/// The two share a name on the case-insensitive filesystem (only the dev
+/// target dir ever holds both), so an `eq_ignore_ascii_case` match would take
+/// a transient CLI invocation for the GUI and then fail to find its window.
 fn gui_pids() -> Vec<u32> {
     use sysinfo::{Pid, Process, ProcessesToUpdate, System};
     let mut system = System::new();
@@ -302,8 +308,7 @@ fn gui_pids() -> Vec<u32> {
         .values()
         .filter(|p| {
             let name = p.name().to_string_lossy();
-            (name.eq_ignore_ascii_case("OpenLogi.exe")
-                || name.eq_ignore_ascii_case("openlogi-gui.exe"))
+            (name == "OpenLogi.exe" || name.eq_ignore_ascii_case("openlogi-gui.exe"))
                 && (own_user.is_none() || p.user_id() == own_user)
         })
         .map(|p| p.pid().as_u32())
@@ -354,9 +359,13 @@ fn spawn_gui() {
         return;
     };
     let Some(dir) = exe.parent() else { return };
-    // Installed/portable layout first (the product name), then the cargo
-    // target-dir name (dev) — the reverse of the GUI's agent sibling lookup.
-    let gui = ["OpenLogi.exe", "openlogi-gui.exe"]
+    // Dev target dir first: it holds both `openlogi.exe` (CLI) and
+    // `openlogi-gui.exe`, and the CLI shares `OpenLogi.exe`'s name on the
+    // case-insensitive filesystem — so `dir.join("OpenLogi.exe").exists()`
+    // there resolves to the CLI and would launch it. Probing the unambiguous
+    // `openlogi-gui.exe` first avoids that; the installed layout has only
+    // `OpenLogi.exe` and falls through to it.
+    let gui = ["openlogi-gui.exe", "OpenLogi.exe"]
         .iter()
         .map(|name| dir.join(name))
         .find(|p| p.exists());
