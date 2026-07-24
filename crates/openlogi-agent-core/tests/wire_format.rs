@@ -62,7 +62,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 11);
+    assert_eq!(PROTOCOL_VERSION, 12);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -90,6 +90,20 @@ fn request_variant_order() {
             action: Action::Copy,
         },
         "1106",
+    );
+    // The appended v12 payload variants: variant index as a varint, then the
+    // usual length-prefixed UTF-8 payload.
+    assert_wire(
+        &AgentRequest::ExecuteAction {
+            action: Action::Run("a".into()),
+        },
+        "112d0161",
+    );
+    assert_wire(
+        &AgentRequest::ExecuteAction {
+            action: Action::PasteText("Hi".into()),
+        },
+        "112e024869",
     );
 }
 

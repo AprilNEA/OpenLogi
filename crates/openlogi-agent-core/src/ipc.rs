@@ -30,7 +30,9 @@ use serde::{Deserialize, Serialize};
 /// v9: `poll_event_monitor` appended + [`MonitorEvent`] (live event monitor).
 /// v10: `Capabilities::hires_wheel` appended.
 /// v11: `next_ring_press` + `execute_action` appended (Action Ring overlay).
-pub const PROTOCOL_VERSION: u32 = 11;
+/// v12: [`Action`] gains the appended `Run` / `PasteText` variants (they ride
+///      inside `execute_action` and config snapshots).
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// One Action Ring pad press, streamed to the GUI via
 /// [`Agent::next_ring_press`] so the on-screen ring opens (or confirms a
