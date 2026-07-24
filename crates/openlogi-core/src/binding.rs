@@ -466,6 +466,57 @@ pub enum Action {
     /// The `display` field is used by [`Action::label`] so the popover
     /// shows the user-friendly chord name.
     CustomShortcut(KeyCombo),
+
+    /// Open a URL, file, or program — the Options+ "Run" action.
+    ///
+    /// The payload is the target optionally followed by `||` and an argument
+    /// string (`"C:\tool.exe||--flag value"`), the same convention Options+
+    /// documents in its Run editor; split it with [`split_run_target`].
+    /// On Windows `%VAR%` environment references in either half expand at
+    /// fire time.
+    Run(String),
+
+    /// Type a fixed text snippet wherever the caret is — the Options+
+    /// "Paste Text" action. Synthesized as Unicode key events rather than a
+    /// clipboard round-trip, so the user's clipboard is never clobbered.
+    PasteText(String),
+}
+
+/// Split an [`Action::Run`] payload into its target and optional argument
+/// string at the first `||`, trimming whitespace around both halves. An
+/// empty argument half (`"app||"`) collapses to `None`.
+#[must_use]
+pub fn split_run_target(payload: &str) -> (&str, Option<&str>) {
+    match payload.split_once("||") {
+        Some((target, args)) => {
+            let args = args.trim();
+            (
+                target.trim(),
+                if args.is_empty() { None } else { Some(args) },
+            )
+        }
+        None => (payload.trim(), None),
+    }
+}
+
+/// Short human name for a [`Action::Run`] target — the host for URLs, the
+/// file stem for paths, the raw target otherwise — truncated so slot labels
+/// stay readable.
+fn run_target_short_name(payload: &str) -> String {
+    let (target, _) = split_run_target(payload);
+    let short = if let Some((_, rest)) = target.split_once("://") {
+        rest.split(['/', '?']).next().unwrap_or(rest)
+    } else {
+        std::path::Path::new(target)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(target)
+    };
+    let mut out: String = short.chars().take(24).collect();
+    if short.chars().count() > 24 {
+        out.push('…');
+    }
+    out
 }
 
 /// A modifier + virtual-key keystroke captured by the P1.3 recorder UI or
@@ -756,6 +807,22 @@ impl Action {
             Action::HorizontalScrollLeft => "Scroll Left".into(),
             Action::HorizontalScrollRight => "Scroll Right".into(),
             Action::CustomShortcut(combo) => combo.rendered_label(),
+            Action::Run(payload) => {
+                format!("Run: {}", run_target_short_name(payload))
+            }
+            Action::PasteText(text) => {
+                let mut snippet: String = text
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(18)
+                    .collect();
+                if snippet.chars().count() < text.chars().count() {
+                    snippet.push('…');
+                }
+                format!("Paste: {snippet}")
+            }
         }
     }
 
@@ -768,8 +835,9 @@ impl Action {
             | Action::MiddleClick
             | Action::MouseBack
             | Action::MouseForward => Category::Mouse,
-            // CustomShortcut is assigned to Editing so it doesn't need a
-            // separate arm (it's not in the picker catalog).
+            // CustomShortcut and PasteText are assigned to Editing, Run to
+            // System, so they don't need separate arms (none are in the
+            // picker catalog — they're entered via dedicated editor rows).
             Action::Copy
             | Action::Paste
             | Action::Cut
@@ -778,7 +846,8 @@ impl Action {
             | Action::SelectAll
             | Action::Find
             | Action::Save
-            | Action::CustomShortcut(_) => Category::Editing,
+            | Action::CustomShortcut(_)
+            | Action::PasteText(_) => Category::Editing,
             Action::BrowserBack
             | Action::BrowserForward
             | Action::NewTab
@@ -793,9 +862,11 @@ impl Action {
             | Action::NextDesktop
             | Action::ShowDesktop
             | Action::LaunchpadShow => Category::Navigation,
-            Action::None | Action::LockScreen | Action::Screenshot | Action::CaptureRegion => {
-                Category::System
-            }
+            Action::None
+            | Action::LockScreen
+            | Action::Screenshot
+            | Action::CaptureRegion
+            | Action::Run(_) => Category::System,
             Action::PlayPause
             | Action::NextTrack
             | Action::PrevTrack
@@ -814,8 +885,10 @@ impl Action {
 
     /// All pickable actions in a deterministic order.
     ///
-    /// [`Action::CustomShortcut`] is intentionally excluded — it is opened via
-    /// "Record shortcut…" (P1.3), not selected from the catalog.
+    /// [`Action::CustomShortcut`], [`Action::Run`] and [`Action::PasteText`]
+    /// are intentionally excluded — they carry payloads and are entered via
+    /// their dedicated editor rows ("Record shortcut…", "Run…", "Paste
+    /// text…"), not selected from the catalog.
     #[must_use]
     pub fn catalog() -> Vec<Action> {
         vec![
@@ -1012,10 +1085,48 @@ mod tests {
         let catalog = Action::catalog();
         for action in &catalog {
             assert!(
-                !matches!(action, Action::CustomShortcut(_)),
-                "catalog must not contain CustomShortcut"
+                !matches!(
+                    action,
+                    Action::CustomShortcut(_) | Action::Run(_) | Action::PasteText(_)
+                ),
+                "catalog must not contain payload-carrying editor actions"
             );
         }
+    }
+
+    #[test]
+    fn split_run_target_handles_args_and_whitespace() {
+        assert_eq!(
+            split_run_target("https://gemini.google.com/"),
+            ("https://gemini.google.com/", None)
+        );
+        assert_eq!(
+            split_run_target(r"C:\tools\wispr.exe || --toggle voice"),
+            (r"C:\tools\wispr.exe", Some("--toggle voice"))
+        );
+        // An empty argument half collapses to None.
+        assert_eq!(split_run_target("notepad.exe||"), ("notepad.exe", None));
+        // Only the FIRST `||` splits — later ones belong to the arguments.
+        assert_eq!(split_run_target("a.exe||x||y"), ("a.exe", Some("x||y")));
+    }
+
+    #[test]
+    fn run_and_paste_labels_stay_short_and_readable() {
+        assert_eq!(
+            Action::Run("https://gemini.google.com/app?q=1".into()).label(),
+            "Run: gemini.google.com"
+        );
+        assert_eq!(
+            Action::Run(r"C:\Program Files\Wispr\wispr.exe||--paste".into()).label(),
+            "Run: wispr"
+        );
+        assert_eq!(
+            Action::PasteText("Build Phase Two".into()).label(),
+            "Paste: Build Phase Two"
+        );
+        // Long / multi-line text truncates with an ellipsis marker.
+        let long = Action::PasteText("Please write a draft response to this\nsecond line".into());
+        assert_eq!(long.label(), "Paste: Please write a dra…");
     }
 
     // ── Binding (merged model) serde routing ──────────────────────────────────
@@ -1121,6 +1232,44 @@ mod tests {
                 "a {slot:?}-keyed table must route to Ring, not Single/Gesture"
             );
         }
+    }
+
+    /// The payload variants added for Options+ parity (`Run`, `PasteText`)
+    /// serialize as single-key tables (`{ Run = "…" }`) — the untagged router
+    /// must still land them on [`Binding::Single`], not mistake them for a
+    /// one-entry Gesture/Ring map. Their variant names live in the same
+    /// namespace as [`GestureDirection`] and [`RingSlot`] keys, so a rename
+    /// on either side shows up here.
+    #[test]
+    fn binding_payload_variant_tables_route_to_single() {
+        for toml in [
+            "bindings.Forward = { Run = \"https://gemini.google.com/\" }",
+            "bindings.Forward = { PasteText = \"Build Phase Two\" }",
+        ] {
+            let parsed = toml::from_str::<BindingWrapper>(toml).expect("deserialize");
+            assert!(
+                matches!(parsed.bindings[&ButtonId::Forward], Binding::Single(_)),
+                "{toml} must route to Single"
+            );
+        }
+        let roundtrip = binding_roundtrip(BTreeMap::from([
+            (
+                ButtonId::Back,
+                Binding::Single(Action::Run("notepad.exe||readme.txt".into())),
+            ),
+            (
+                ButtonId::Forward,
+                Binding::Single(Action::PasteText("Master Spec".into())),
+            ),
+        ]));
+        assert_eq!(
+            roundtrip[&ButtonId::Back],
+            Binding::Single(Action::Run("notepad.exe||readme.txt".into()))
+        );
+        assert_eq!(
+            roundtrip[&ButtonId::Forward],
+            Binding::Single(Action::PasteText("Master Spec".into()))
+        );
     }
 
     #[test]
