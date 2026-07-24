@@ -144,6 +144,10 @@ pub(super) fn execute(action: &Action) {
             if combo.modifiers & KeyCombo::MOD_OPTION != 0 {
                 flags |= CGEventFlags::CGEventFlagAlternate;
             }
+            // ⊞ has no macOS key; ⌘ is the conventional stand-in.
+            if combo.modifiers & KeyCombo::MOD_WIN != 0 {
+                flags |= CGEventFlags::CGEventFlagCommand;
+            }
             post_key(combo.key_code, flags);
         }
         // ── Run / Paste Text ──────────────────────────────────────────────

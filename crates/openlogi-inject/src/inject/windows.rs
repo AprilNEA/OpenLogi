@@ -337,6 +337,9 @@ fn post_custom_shortcut(combo: &KeyCombo) {
     if combo.modifiers & KeyCombo::MOD_OPTION != 0 {
         modifiers.push(VK_MENU);
     }
+    if combo.modifiers & KeyCombo::MOD_WIN != 0 {
+        modifiers.push(VK_LWIN);
+    }
     post_key(vk, &modifiers);
 }
 

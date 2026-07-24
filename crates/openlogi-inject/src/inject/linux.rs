@@ -320,6 +320,9 @@ fn modifiers_to_keycodes(modifiers: u8) -> Vec<KeyCode> {
     if modifiers & KeyCombo::MOD_OPTION != 0 {
         mods.push(KeyCode::KEY_LEFTALT);
     }
+    if modifiers & KeyCombo::MOD_WIN != 0 {
+        mods.push(KeyCode::KEY_LEFTMETA);
+    }
     mods
 }
 
