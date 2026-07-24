@@ -553,6 +553,12 @@ impl KeyCombo {
     pub const MOD_CTRL: u8 = 1 << 2;
     /// Bit for the ⌥ Option/Alt modifier in [`Self::modifiers`].
     pub const MOD_OPTION: u8 = 1 << 3;
+    /// Bit for the ⊞ Windows / Super modifier in [`Self::modifiers`].
+    ///
+    /// Appended for shortcuts like Win+Ctrl+Space that macOS's four
+    /// modifiers cannot express. Injection maps it to `VK_LWIN` on Windows
+    /// and Super/Meta on Linux; macOS treats it as ⌘ (the closest key).
+    pub const MOD_WIN: u8 = 1 << 4;
 
     /// Build the human-readable label from the modifier bitmask + key code.
     /// Falls back to `"⌘key 0xNN"` when the key code isn't one of the
@@ -564,6 +570,9 @@ impl KeyCombo {
             return self.display.clone();
         }
         let mut out = String::new();
+        if self.modifiers & Self::MOD_WIN != 0 {
+            out.push('⊞');
+        }
         if self.modifiers & Self::MOD_CTRL != 0 {
             out.push('⌃');
         }
@@ -1092,6 +1101,16 @@ mod tests {
                 "catalog must not contain payload-carrying editor actions"
             );
         }
+    }
+
+    #[test]
+    fn key_combo_win_modifier_renders_first() {
+        let combo = KeyCombo {
+            modifiers: KeyCombo::MOD_WIN | KeyCombo::MOD_CTRL,
+            key_code: 0x08,
+            display: String::new(),
+        };
+        assert_eq!(combo.rendered_label(), "⊞⌃C");
     }
 
     #[test]
