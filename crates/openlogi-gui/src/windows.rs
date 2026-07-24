@@ -10,6 +10,7 @@
 //! [`crate::theme::apply_from_settings`].
 
 pub mod add_device;
+pub mod ring_action_editor;
 pub mod settings;
 pub mod update_consent;
 
@@ -33,6 +34,7 @@ pub struct WindowRegistry {
     pub settings: Option<WindowHandle<Root>>,
     pub add_device: Option<WindowHandle<Root>>,
     pub update_consent: Option<WindowHandle<Root>>,
+    pub ring_action_editor: Option<WindowHandle<Root>>,
 }
 
 impl Global for WindowRegistry {}

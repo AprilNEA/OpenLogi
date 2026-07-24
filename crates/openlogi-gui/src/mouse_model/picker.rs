@@ -34,6 +34,7 @@ use crate::data::mouse_buttons::{
 use crate::mouse_model::view::MouseModelView;
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
+use crate::windows::ring_action_editor::PayloadKind;
 use openlogi_core::binding::{RingSlot, default_ring_binding};
 
 /// Floor width for the [`action_picker`] popover. The action labels drive the
@@ -252,6 +253,17 @@ fn ring_flyout_card(
         view_pick.update(cx, |_, vcx| vcx.notify());
     });
 
+    // The payload actions (Run / Paste Text) close the list: they open the
+    // editor dialog instead of committing a fixed action.
+    let mut rows = action_rows("ring-action", Some(&current), &on_pick, pal);
+    rows.push(section_header(&rust_i18n::t!("Custom"), pal));
+    for (idx, kind) in [PayloadKind::Run, PayloadKind::PasteText]
+        .into_iter()
+        .enumerate()
+    {
+        rows.push(payload_editor_row(slot, kind, idx, &current, pal));
+    }
+
     menu_card(pal)
         .min_w(px(POPOVER_W))
         .child(title(
@@ -259,10 +271,47 @@ fn ring_flyout_card(
             pal,
         ))
         .child(divider(pal))
-        .child(scroll_list(
-            "ring-slot-scroll",
-            action_rows("ring-action", Some(&current), &on_pick, pal),
-        ))
+        .child(scroll_list("ring-slot-scroll", rows))
+        .into_any_element()
+}
+
+/// A "Run Command…" / "Paste Text…" flyout row. Unlike the catalog rows it
+/// commits nothing itself — it opens the payload-editor dialog seeded from
+/// the slot's current action. Selection styling still mirrors the catalog so
+/// a slot bound to a payload action shows where its value lives.
+fn payload_editor_row(
+    slot: RingSlot,
+    kind: PayloadKind,
+    idx: usize,
+    current: &Action,
+    pal: Palette,
+) -> AnyElement {
+    let selected = kind.payload_of(current).is_some();
+    let icon_path = action_icon_path(&kind.action(String::new()));
+    menu_row(("ring-payload", idx), pal, selected)
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    svg()
+                        .path(icon_path)
+                        .size_4()
+                        .flex_none()
+                        .text_color(pal.text_muted),
+                )
+                .child(div().child(format!("{}…", tr!(kind.title_key())))),
+        )
+        .when(selected, |s| {
+            s.child(
+                Icon::new(IconName::Check)
+                    .size_3()
+                    .text_color(rgb(ACCENT_BLUE)),
+            )
+        })
+        .on_click(move |_event, _window, cx| {
+            crate::windows::ring_action_editor::open(slot, kind, cx);
+        })
         .into_any_element()
 }
 
@@ -467,7 +516,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::MouseBack => "action-icons/circle-arrow-left.svg",
         Action::MouseForward => "action-icons/circle-arrow-right.svg",
         Action::Copy => "action-icons/copy.svg",
-        Action::Paste => "action-icons/clipboard-paste.svg",
+        Action::Paste | Action::PasteText(_) => "action-icons/clipboard-paste.svg",
         Action::Cut => "action-icons/scissors.svg",
         Action::Undo => "action-icons/undo-2.svg",
         Action::Redo => "action-icons/redo-2.svg",
@@ -485,7 +534,9 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::MissionControl => "action-icons/layout-grid.svg",
         Action::AppExpose => "action-icons/layers.svg",
         Action::PreviousDesktop => "action-icons/square-arrow-left.svg",
-        Action::NextDesktop => "action-icons/square-arrow-right.svg",
+        // Run shares the "launch outward" arrow — the closest glyph in the
+        // vendored set to Options+'s run icon.
+        Action::NextDesktop | Action::Run(_) => "action-icons/square-arrow-right.svg",
         Action::ShowDesktop => "action-icons/monitor.svg",
         Action::LaunchpadShow => "action-icons/grid-3x3.svg",
         Action::LockScreen => "action-icons/lock.svg",
