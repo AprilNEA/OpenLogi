@@ -14,9 +14,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 
-use openlogi_core::config::{Config, ScrollResolution};
+use openlogi_core::config::{Config, ProfileSource, ScrollResolution};
 use openlogi_core::device::{Capabilities, DeviceInventory};
-use openlogi_hid::{CaptureChannel, DeviceRoute};
+use openlogi_hid::{CaptureChannel, DeviceRoute, ProfilesMode};
 use tracing::warn;
 
 use crate::DpiCycleState;
@@ -199,10 +199,10 @@ impl Orchestrator {
         self.inventory = InventoryState::Ready(inventories.to_vec());
         let devices = build_devices(inventories);
         // Volatile settings (lighting colour, sensor DPI, SmartShift, native
-        // wheel mode) live in device RAM and reset on a power cycle. Every
-        // reconnect shape re-applies the persisted values (#189): a first
-        // sighting, a replug (new route), a wake from device sleep
-        // (offline→online), or — via the
+        // wheel mode, onboard-profiles host mode) live in device RAM and reset
+        // on a power cycle. Every reconnect shape re-applies the persisted
+        // values (#189): a first sighting, a replug (new route), a wake from
+        // device sleep (offline→online), or — via the
         // flag — a system wake where none of those are observable.
         let reapply_all = std::mem::take(&mut self.reapply_all_next_refresh);
         let followup = std::mem::take(&mut self.reapply_followup);
@@ -247,6 +247,21 @@ impl Orchestrator {
             return;
         };
         let key = &dev.config_key;
+        // First, before any DPI/SmartShift write: a gaming mouse boots in
+        // onboard mode, where the profile in its flash shadows every software
+        // setting below. The configured mode (default: host, so OpenLogi's
+        // settings apply) is written to RAM and reverts on power cycle. Each
+        // helper spawns its own thread, so this races the writes below; the
+        // next reapply trigger self-heals if the mode switch lands after a
+        // DPI write.
+        if let Some((mode, profile)) = configured_onboard_profiles(&self.config, dev) {
+            crate::hardware::apply_onboard_profiles_in_background(
+                Some(&self.shared.capture_channel),
+                Some(route.clone()),
+                mode,
+                profile,
+            );
+        }
         let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
         crate::hardware::write_scroll_wheel_mode_in_background(
             Some(&self.shared.capture_channel),
@@ -366,6 +381,30 @@ impl Orchestrator {
 
 /// Resolve the two independently-gated HiResWheel settings for one device.
 /// `None` means preserve the device's current value.
+/// The onboard-profiles mode + profile to apply to `dev`, or `None` for a
+/// device whose measured feature table has no `0x8100` (or was never probed).
+/// An unconfigured device gets the default policy — host mode — so OpenLogi's
+/// DPI/button/report-rate settings apply instead of the onboard profile the
+/// device booted into.
+fn configured_onboard_profiles(
+    config: &Config,
+    dev: &AgentDevice,
+) -> Option<(ProfilesMode, Option<u16>)> {
+    if !dev.capabilities?.onboard_profiles {
+        return None;
+    }
+    Some(match config.onboard_profiles(&dev.config_key) {
+        None => (ProfilesMode::Host, None),
+        Some(cfg) => (
+            match cfg.mode {
+                ProfileSource::Host => ProfilesMode::Host,
+                ProfileSource::Onboard => ProfilesMode::Onboard,
+            },
+            cfg.profile,
+        ),
+    })
+}
+
 fn configured_wheel_mode(
     config: &Config,
     dev: &AgentDevice,

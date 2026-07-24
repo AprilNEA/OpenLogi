@@ -19,7 +19,8 @@ use openlogi_agent_core::{hardware, transport};
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, DpiInfo, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
+    DeviceRoute, DpiInfo, OnboardProfilesInfo, ProfilesMode, ReceiverSelector, SmartShiftMode,
+    SmartShiftStatus, WriteError,
 };
 
 use crate::pairing::PairingManager;
@@ -170,6 +171,24 @@ impl Agent for AgentServer {
 
     async fn poll_event_monitor(self, _: Context) -> Vec<MonitorEvent> {
         self.event_monitor.poll()
+    }
+
+    async fn set_onboard_profiles(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        mode: ProfilesMode,
+        profile: Option<u16>,
+    ) -> Result<(), WriteError> {
+        hardware::apply_onboard_profiles(&self.shared.capture_channel, &route, mode, profile).await
+    }
+
+    async fn read_onboard_profiles(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<OnboardProfilesInfo, WriteError> {
+        hardware::read_onboard_profiles(&route).await
     }
 }
 

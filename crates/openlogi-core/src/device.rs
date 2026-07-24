@@ -102,6 +102,9 @@ pub struct Capabilities {
     /// can be read and changed independently of inversion support.
     #[serde(default)]
     pub hires_wheel: bool,
+    /// Onboard profile memory — HID++ `0x8100 OnboardProfiles` (gaming mice).
+    #[serde(default)]
+    pub onboard_profiles: bool,
 }
 
 impl Capabilities {
@@ -123,6 +126,7 @@ impl Capabilities {
             lighting: has(&LIGHTING),
             scroll_inversion: false,
             hires_wheel: ids.contains(&0x2121),
+            onboard_profiles: ids.contains(&0x8100),
         }
     }
 
@@ -140,6 +144,7 @@ impl Capabilities {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: false,
+                onboard_profiles: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -371,6 +376,7 @@ mod tests {
                     lighting: false,
                     scroll_inversion: false,
                     hires_wheel: false,
+                    onboard_profiles: false,
                 }),
             }],
         }
@@ -434,6 +440,7 @@ mod tests {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: true,
+                onboard_profiles: false,
             }
         );
         // A wired G-series keyboard: PerKeyLighting (0x8080), no DPI/buttons.
@@ -446,8 +453,12 @@ mod tests {
                 lighting: true,
                 scroll_inversion: false,
                 hires_wheel: false,
+                onboard_profiles: false,
             }
         );
+        // A G-series gaming mouse: OnboardProfiles (0x8100) flips the flag.
+        let gaming = Capabilities::from_feature_ids(&[0x1b04, 0x2201, 0x8100]);
+        assert!(gaming.onboard_profiles);
         // No driving features → nothing offered.
         assert_eq!(
             Capabilities::from_feature_ids(&[0x0000, 0x0003]),

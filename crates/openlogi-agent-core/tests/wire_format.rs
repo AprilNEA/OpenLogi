@@ -33,7 +33,8 @@ use openlogi_core::device::{
 };
 use openlogi_hid::{
     Click, DeviceRoute, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
-    PasskeyMethod, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
+    OnboardProfilesInfo, PasskeyMethod, ProfileEntry, ProfilesMode, ReceiverSelector,
+    SmartShiftMode, SmartShiftStatus, WriteError,
 };
 
 /// Serialize exactly as the transport does (`tokio_serde::formats::Bincode`
@@ -61,7 +62,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 10);
+    assert_eq!(PROTOCOL_VERSION, 11);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -83,6 +84,26 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::NextPairing {}, "0d");
     assert_wire(&AgentRequest::Snapshot {}, "0e");
     assert_wire(&AgentRequest::PollEventMonitor {}, "0f");
+    assert_wire(
+        &AgentRequest::SetOnboardProfiles {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            mode: ProfilesMode::Host,
+            profile: Some(2),
+        },
+        "100008463030444341464501000102",
+    );
+    assert_wire(
+        &AgentRequest::ReadOnboardProfiles {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "110008463030444341464501",
+    );
 }
 
 #[test]
@@ -178,12 +199,13 @@ fn device_inventory() {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: true,
+                onboard_profiles: false,
             }),
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000100",
     );
 }
 
@@ -291,4 +313,48 @@ fn device_settings_payloads() {
         &ReceiverSelector::BoltUid("F00DCAFE".into()),
         "01084630304443414645",
     );
+
+    // HidppOperation variants appended for v11 — their indices are pinned so a
+    // later insertion above them fails loudly.
+    assert_wire(
+        &WriteError::RequestTimedOut {
+            operation: HidppOperation::ReadOnboardProfiles,
+        },
+        "080a",
+    );
+    assert_wire(
+        &WriteError::RequestTimedOut {
+            operation: HidppOperation::WriteOnboardProfiles,
+        },
+        "080b",
+    );
+
+    // serde encodes ProfilesMode's variant *index* (Host=0, Onboard=1); there
+    // is no firmware discriminant on this type by design.
+    assert_wire(&ProfilesMode::Host, "00");
+    assert_wire(&ProfilesMode::Onboard, "01");
+
+    let profiles: Result<OnboardProfilesInfo, WriteError> = Ok(OnboardProfilesInfo {
+        profile_count: 5,
+        profile_count_oob: 3,
+        button_count: 11,
+        sector_count: 16,
+        sector_size: 256,
+        memory_model_id: 1,
+        profile_format_id: 2,
+        macro_format_id: 3,
+        mode: ProfilesMode::Onboard,
+        active_profile: 2,
+        directory: vec![
+            ProfileEntry {
+                sector: 1,
+                enabled: true,
+            },
+            ProfileEntry {
+                sector: 2,
+                enabled: false,
+            },
+        ],
+    });
+    assert_wire(&profiles, "0005030b10fb000101020301020201010200");
 }
