@@ -7,6 +7,7 @@ use crate::smartshift::SmartShiftMode;
 
 use super::WriteError;
 use super::dpi::set_dpi_on_channel;
+use super::onboard_profiles::apply_profiles_config_on_channel;
 use super::smartshift::{set_smartshift_on_channel, toggle_smartshift_on_channel};
 
 /// An open HID++ channel to a device, shared so DPI / SmartShift writes can
@@ -54,6 +55,18 @@ pub async fn set_dpi_on(shared: &SharedChannel, dpi: u16) -> Result<(), WriteErr
 /// Toggle SmartShift on an already-open [`SharedChannel`].
 pub async fn toggle_smartshift_on(shared: &SharedChannel) -> Result<SmartShiftMode, WriteError> {
     toggle_smartshift_on_channel(&shared.channel, shared.route.device_index()).await
+}
+
+/// Apply the persisted onboard-profiles configuration on an already-open
+/// [`SharedChannel`] — the fast path that skips enumeration and channel setup.
+/// Returns whether anything was written.
+pub async fn apply_profiles_config_on(
+    shared: &SharedChannel,
+    mode: crate::onboard_profiles::ProfilesMode,
+    profile: Option<u16>,
+) -> Result<bool, WriteError> {
+    apply_profiles_config_on_channel(&shared.channel, shared.route.device_index(), mode, profile)
+        .await
 }
 
 /// Write a full SmartShift configuration on an already-open [`SharedChannel`]
