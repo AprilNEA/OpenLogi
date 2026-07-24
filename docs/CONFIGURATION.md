@@ -89,13 +89,16 @@ Right = "NextDesktop"
 # replace the whole table with a single action (ActionRing = "Copy") to make
 # a tap fire that action directly instead.
 [devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing]
-North = "Copy"
+North = "PlayPause"
 NorthEast = "CaptureRegion"
-East = "Redo"
-SouthEast = "PlayPause"
-South = "Paste"
+# `Run` opens a URL, file, or program (`||` separates a program's arguments;
+# %VAR% environment variables expand). `PasteText` types a snippet at the
+# cursor. Both are also editable from the ring menu in the app.
+East = { Run = "https://gemini.google.com/" }
+SouthEast = "LockScreen"
+South = { Run = 'C:\Windows\notepad.exe||%USERPROFILE%\notes.txt' }
 SouthWest = "ShowDesktop"
-West = "Undo"
+West = { PasteText = "Reviewed — looks good to me." }
 NorthWest = "MissionControl"
 
 # Per-app overlay: Back becomes Undo only while VS Code is frontmost.
