@@ -22,9 +22,9 @@ mod settings;
 pub use device::{DeviceConfig, DeviceIdentity};
 pub use settings::{
     AppSettings, Appearance, AssetSourcePreference, DEFAULT_THUMBWHEEL_SENSITIVITY, GestureOwner,
-    Lighting, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
-    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
-    WheelMode,
+    Lighting, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY, OnboardProfiles,
+    ProfileSource, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE,
+    ScrollResolution, SmartShift, WheelMode,
 };
 
 use crate::binding::{Action, Binding, ButtonId, GestureDirection, default_binding_for};
@@ -563,6 +563,25 @@ impl Config {
             .or_default()
             .scroll_resolution = resolution;
     }
+
+    /// The onboard-profiles config for `device_key`, or `None` if never set —
+    /// which means the default policy (host mode) applies.
+    #[must_use]
+    pub fn onboard_profiles(&self, device_key: &str) -> Option<OnboardProfiles> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.onboard_profiles)
+    }
+
+    /// Record the onboard-profiles config for `device_key`, so the agent can
+    /// re-apply it when the device reconnects (the mode reverts to onboard on
+    /// a power cycle).
+    pub fn set_onboard_profiles(&mut self, device_key: &str, profiles: OnboardProfiles) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .onboard_profiles = Some(profiles);
+    }
 }
 
 /// Write `bytes` to `path` atomically via a randomized temp file + rename,
@@ -598,6 +617,23 @@ mod tests {
         let path = dir.path().join("config.toml");
         config.save_to_path(&path).expect("save");
         Config::load_from_path(&path).expect("load")
+    }
+
+    #[test]
+    fn onboard_profiles_round_trip_through_save_and_load() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.onboard_profiles("2b042"), None);
+
+        let profiles = OnboardProfiles {
+            mode: ProfileSource::Onboard,
+            profile: Some(2),
+        };
+        cfg.set_onboard_profiles("2b042", profiles);
+
+        let reloaded = write_and_read(&cfg);
+        assert_eq!(reloaded.onboard_profiles("2b042"), Some(profiles));
+        // An unconfigured device stays on the default policy (None → host).
+        assert_eq!(reloaded.onboard_profiles("other"), None);
     }
 
     #[test]
