@@ -23,6 +23,7 @@ pub mod gesture;
 mod hires_wheel;
 pub mod hotplug;
 pub mod inventory;
+pub mod onboard_profiles;
 pub mod pairing;
 pub mod reprog_controls;
 pub mod smartshift;
@@ -37,6 +38,7 @@ pub use hires_wheel::{
 };
 pub use hotplug::{HotplugEvent, watch_hotplug};
 pub use inventory::{Enumerator, InventoryError, enumerate};
+pub use onboard_profiles::{OnboardProfilesInfo, ProfileEntry, ProfilesMode};
 pub use pairing::{
     Click, DiscoveredDevice, PairingCommand, PairingError, PairingEvent, PairingReceiver,
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
@@ -45,8 +47,9 @@ pub use route::{BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, UNIFYING_PIDS};
 pub use smartshift::{AUTO_DISENGAGE_PERMANENT, SmartShiftMode, SmartShiftStatus};
 pub use write::{
     DpiCapabilities, DpiInfo, FeatureEntry, HidppFeatureErrorKind, HidppOperation, LightingMethod,
-    ReprogControlEntry, SharedChannel, WriteError, dump_features, dump_reprog_controls, get_dpi,
-    get_dpi_info, get_smartshift_status, set_dpi, set_dpi_on, set_keyboard_color,
-    set_keyboard_color_with, set_smartshift, set_smartshift_on, set_smartshift_sensitivity,
-    toggle_smartshift, toggle_smartshift_on,
+    ReprogControlEntry, SharedChannel, WriteError, apply_profiles_config, apply_profiles_config_on,
+    dump_features, dump_reprog_controls, get_dpi, get_dpi_info, get_onboard_profiles,
+    get_smartshift_status, set_active_profile, set_dpi, set_dpi_on, set_keyboard_color,
+    set_keyboard_color_with, set_profiles_mode, set_smartshift, set_smartshift_on,
+    set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
 };
