@@ -40,16 +40,17 @@ use crate::state::AppState;
 /// button circle plus shadows. The popup carries no labels, so it stays
 /// tight; near a screen edge [`platform_win::show_at`] clamps it into the
 /// work area.
-const RING_WINDOW: f32 = 288.;
+const RING_WINDOW: f32 = 240.;
 /// Radius of the circle the eight sector buttons sit on, from the centre.
-const SECTOR_RADIUS: f32 = 96.;
+/// Matched to the real Options+ ring: adjacent circles nearly touch.
+const SECTOR_RADIUS: f32 = 86.;
 /// Diameter of one sector's circular icon button.
-const SECTOR_BUTTON: f32 = 44.;
+const SECTOR_BUTTON: f32 = 48.;
 /// Diameter of the centre ✕ cancel button.
-const CENTER_BUTTON: f32 = 30.;
+const CENTER_BUTTON: f32 = 36.;
 /// Cursor distance (logical px) below which a confirm means "cancel" — the
 /// dead zone around the centre ✕.
-const DEADZONE: f32 = 38.;
+const DEADZONE: f32 = 34.;
 /// How often the open-ring watcher samples the global cursor (highlight) and
 /// the Esc / outside-click cancel signals.
 const WATCH_TICK: Duration = Duration::from_millis(33);
@@ -63,12 +64,12 @@ const PLATE: u32 = 0x00f7_f7f9;
 const INK: u32 = 0x001c_1c1e;
 /// Aimed icon strokes.
 const WHITE: u32 = 0x00ff_ffff;
-/// Centre ✕ fill.
-const CROSS_BG: u32 = 0x002c_2c2e;
+/// Centre ✕ fill — the Options+ crimson cancel button.
+const CROSS_BG: u32 = 0x00b0_2a38;
 /// Centre ✕ fill while the cursor aims at the dead zone.
-const CROSS_BG_AIMED: u32 = 0x0045_4549;
+const CROSS_BG_AIMED: u32 = 0x00c9_3a49;
 /// Centre ✕ glyph.
-const CROSS_TEXT: u32 = 0x00c9_c9ce;
+const CROSS_TEXT: u32 = 0x00ff_ffff;
 
 /// What the cursor currently points at, driven from the global cursor by the
 /// watcher so it works even when the pointer is outside the overlay window.
@@ -128,6 +129,17 @@ pub fn init(commands: mpsc::UnboundedSender<Command>, cx: &mut App) {
         scale: 1.,
         epoch: 0,
     });
+    // Create the hidden overlay window eagerly rather than on the first tap:
+    // it removes window-construction latency from the first open, and — since
+    // it is never closed, only hidden — it keeps this on-demand GUI process
+    // alive past "quit when the last window closes", so the ring survives the
+    // user closing the settings window. Windows-only, like the overlay
+    // itself: elsewhere an invisible popup would still surface in window
+    // switchers.
+    #[cfg(target_os = "windows")]
+    if let Some(window) = create_window(Vec::new(), cx) {
+        cx.global_mut::<RingOverlay>().window = Some(window);
+    }
 }
 
 /// Handle one Action Ring pad press from the agent: open the ring when it is
@@ -775,7 +787,20 @@ mod tests {
     fn dead_zone_aims_center() {
         let c = point(500., 500.);
         assert_eq!(sector(c, 0., 0.), Aim::Center);
-        assert_eq!(sector(c, 30., -20.), Aim::Center, "inside the dead zone");
+        // Just inside the zone boundary, on a diagonal — const-relative so a
+        // DEADZONE retune doesn't silently rot this case.
+        let inside = (DEADZONE - 1.) / 2_f32.sqrt();
+        assert_eq!(
+            sector(c, inside, -inside),
+            Aim::Center,
+            "inside the dead zone"
+        );
+        let outside = (DEADZONE + 1.) / 2_f32.sqrt();
+        assert_eq!(
+            sector(c, outside, -outside),
+            Aim::Sector(RingSlot::NorthEast),
+            "just past the dead zone"
+        );
     }
 
     #[test]
