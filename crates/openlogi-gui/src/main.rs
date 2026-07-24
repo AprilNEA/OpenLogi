@@ -193,6 +193,11 @@ fn main() -> Result<()> {
     // Reopen the window when the app is relaunched with none open (dock click).
     app.on_reopen(|cx| open_main_window(&[], cx));
 
+    // `--background` (login autostart): start resident for the Action Ring
+    // and the agent's tray, but do not open the main window — the tray's
+    // "Show Main Window" deeplink opens it on demand.
+    let background = std::env::args().any(|arg| arg == "--background");
+
     app.run(move |cx| {
         gpui_component::init(cx);
         theme::register_builtin_themes(cx);
@@ -220,6 +225,9 @@ fn main() -> Result<()> {
         // On-demand GUI: quit when the last window closes. The agent stays
         // resident and keeps remapping (and hosts the menu-bar item from which
         // the GUI is reopened), so nothing needs the GUI process to linger.
+        // On Windows this never fires: the ring overlay's always-alive hidden
+        // window (created eagerly in `ring::init`) keeps the process resident,
+        // because the on-screen ring lives in this process, not the agent.
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -240,15 +248,20 @@ fn main() -> Result<()> {
                         ipc_commands,
                     ));
                 }
-                open_main_window(&inventories, cx);
+                if !background {
+                    open_main_window(&inventories, cx);
+                }
             });
 
             // First launch only: offer to opt in to the update check, since it
             // defaults to off. Marked seen either way so it shows just once.
+            // Deferred in background mode (nothing may pop over the login
+            // desktop); it stays unseen and shows on the first real open.
             cx.update(|cx| {
-                let show = cx
-                    .try_global::<AppState>()
-                    .is_some_and(|s| !s.app_settings().update_prompt_seen);
+                let show = !background
+                    && cx
+                        .try_global::<AppState>()
+                        .is_some_and(|s| !s.app_settings().update_prompt_seen);
                 if show {
                     windows::update_consent::open(cx);
                 }
