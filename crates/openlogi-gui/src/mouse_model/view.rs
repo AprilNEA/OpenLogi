@@ -23,7 +23,6 @@ use crate::mouse_model::leader_lines::{
 };
 use crate::mouse_model::picker::{
     GESTURE_BUTTON_ICON, RING_BUTTON_ICON, action_icon_path, action_picker, gesture_overview,
-    ring_overview,
 };
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
@@ -64,6 +63,9 @@ pub struct MouseModelView {
     /// state, so the popover's `on_open_change` — which runs outside paint — can
     /// reset it without tripping gpui's render-only guard.
     gesture_active_dir: Option<GestureDirection>,
+    /// Whether the Action Ring's full-page editor is shown in place of the
+    /// mouse diagram (see [`crate::mouse_model::ring_editor`]).
+    ring_editor_open: bool,
     /// Which ring slot the open Action Ring menu has activated (so its level-2
     /// flyout card shows) — the ring counterpart of
     /// [`Self::gesture_active_dir`].
@@ -78,6 +80,7 @@ impl MouseModelView {
         Self {
             hovered: None,
             gesture_active_dir: None,
+            ring_editor_open: false,
             ring_active_slot: None,
             _state_obs: state_obs,
         }
@@ -104,10 +107,32 @@ impl MouseModelView {
     pub(crate) fn set_ring_selected_slot(&mut self, slot: Option<RingSlot>) {
         self.ring_active_slot = slot;
     }
+
+    /// Show or hide the Action Ring's full-page editor. Callers must
+    /// `cx.notify()` to re-render.
+    pub(crate) fn set_ring_editor_open(&mut self, open: bool) {
+        self.ring_editor_open = open;
+    }
+
+    /// The Action Ring's full-page editor, while its scratch flag is set —
+    /// rendered in place of the mouse diagram (the Options+ customization-page
+    /// shape, entered from the ring's hotspot / label card, left via its back
+    /// arrow).
+    fn ring_editor_page(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.ring_editor_open.then(|| {
+            let view = cx.entity();
+            let pal = theme::palette(cx);
+            crate::mouse_model::ring_editor::page(&view, pal, cx)
+        })
+    }
 }
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(page) = self.ring_editor_page(cx) {
+            return page;
+        }
+
         let (asset, active, bindings, gesture_owner, glow) = cx
             .try_global::<AppState>()
             .map(|s| {
@@ -231,6 +256,7 @@ impl Render for MouseModelView {
                 col.child(gesture_owner_selector(&capable, gesture_owner, &view, pal))
             })
             .child(canvas)
+            .into_any_element()
     }
 }
 
@@ -483,36 +509,6 @@ where
         .content(move |_state, _window, cx| gesture_overview(&view, cx))
 }
 
-/// Wrap `trigger` in a left-click [`Popover`] hosting the Action Ring's
-/// customization menu (see [`ring_overview`]) — the ring counterpart of
-/// [`gesture_overview_popover`], resetting the activated slot on close so the
-/// next open starts on the compass grid.
-fn ring_overview_popover<Tr>(
-    popover_id: impl Into<ElementId>,
-    anchor: Anchor,
-    trigger: Tr,
-    view: Entity<MouseModelView>,
-) -> impl IntoElement
-where
-    Tr: Selectable + IntoElement + 'static,
-{
-    let view_reset = view.clone();
-    Popover::new(popover_id)
-        .appearance(false)
-        .mouse_button(MouseButton::Left)
-        .anchor(anchor)
-        .trigger(trigger)
-        .on_open_change(move |open, _window, cx| {
-            if !*open {
-                view_reset.update(cx, |v, vcx| {
-                    v.set_ring_selected_slot(None);
-                    vcx.notify();
-                });
-            }
-        })
-        .content(move |_state, _window, cx| ring_overview(&view, cx))
-}
-
 /// Position the popover wrapper at the label's slot in the side gutter and
 /// host a Popover whose trigger is the label card itself. Same picker
 /// content as the hotspot dot — clicking either entry point lands on the
@@ -556,13 +552,20 @@ fn label_popover(
         )
         .into_any_element()
     } else if label.id == ButtonId::ActionRing {
-        ring_overview_popover(
-            ("label-popover", idx),
-            Anchor::TopLeft,
-            trigger,
-            view.clone(),
-        )
-        .into_any_element()
+        // The ring gets the full-page editor, not a popover: clicking the
+        // card swaps the diagram for it.
+        let view_open = view.clone();
+        div()
+            .id(("label-ring-editor", idx))
+            .cursor_pointer()
+            .on_click(move |_, _, cx| {
+                view_open.update(cx, |v, vcx| {
+                    v.set_ring_editor_open(true);
+                    vcx.notify();
+                });
+            })
+            .child(trigger)
+            .into_any_element()
     } else {
         Popover::new(("label-popover", idx))
             // `action_picker` draws its own `menu_card` surface, matching the
@@ -712,7 +715,7 @@ impl RenderOnce for LabelTrigger {
     }
 }
 
-fn localized_action_label(action: &Action) -> gpui::SharedString {
+pub(crate) fn localized_action_label(action: &Action) -> gpui::SharedString {
     match action {
         Action::SetDpiPreset(index) => {
             tr!("DPI Preset %{index}", index => (index + 1).to_string())
@@ -797,13 +800,19 @@ fn hotspot_popover(
         )
         .into_any_element()
     } else if hotspot.id == ButtonId::ActionRing {
-        ring_overview_popover(
-            ("hotspot-popover", idx),
-            Anchor::TopRight,
-            trigger,
-            view.clone(),
-        )
-        .into_any_element()
+        // Same full-page editor entry as the ring's label card.
+        let view_open = view.clone();
+        div()
+            .id(("hotspot-ring-editor", idx))
+            .cursor_pointer()
+            .on_click(move |_, _, cx| {
+                view_open.update(cx, |v, vcx| {
+                    v.set_ring_editor_open(true);
+                    vcx.notify();
+                });
+            })
+            .child(trigger)
+            .into_any_element()
     } else {
         Popover::new(("hotspot-popover", idx))
             // `action_picker` draws its own `menu_card` surface, matching the
