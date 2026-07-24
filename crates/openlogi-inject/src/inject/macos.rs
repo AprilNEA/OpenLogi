@@ -146,6 +146,40 @@ pub(super) fn execute(action: &Action) {
             }
             post_key(combo.key_code, flags);
         }
+        // ── Run / Paste Text ──────────────────────────────────────────────
+        // `open` routes URLs, apps and documents through Launch Services; an
+        // explicit `||` argument string execs the target directly instead.
+        Action::Run(payload) => run_target(payload),
+        // Unicode typing (CGEvent keyboardSetUnicodeString) is not wired up
+        // yet.
+        Action::PasteText(_) => {
+            tracing::warn!("PasteText is not implemented on macOS yet — press ignored");
+        }
+    }
+}
+
+/// Open a [`Action::Run`] target (see the match arm above for the split).
+/// The child is reaped on a detached thread so short-lived openers don't
+/// linger as zombies.
+fn run_target(payload: &str) {
+    let (target, args) = openlogi_core::binding::split_run_target(payload);
+    if target.is_empty() {
+        tracing::warn!("Run action with an empty target; ignored");
+        return;
+    }
+    let spawned = match args {
+        Some(args) => std::process::Command::new(target)
+            .args(args.split_whitespace())
+            .spawn(),
+        None => std::process::Command::new("open").arg(target).spawn(),
+    };
+    match spawned {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => tracing::warn!(run_target = target, "Run target failed to spawn: {e}"),
     }
 }
 

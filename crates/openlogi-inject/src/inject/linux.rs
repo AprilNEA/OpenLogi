@@ -108,6 +108,41 @@ pub(super) fn execute(action: &Action) {
             };
             press_key(&modifiers_to_keycodes(combo.modifiers), key);
         }
+        // ── Run / Paste Text ──────────────────────────────────────────────
+        // `xdg-open` routes URLs and documents to the right handler; an
+        // explicit `||` argument string execs the target directly instead,
+        // since xdg-open takes no arguments.
+        Action::Run(payload) => run_target(payload),
+        // Typing arbitrary Unicode through uinput needs a keymap round-trip
+        // (evdev codes are layout-relative); not wired up yet.
+        Action::PasteText(_) => {
+            tracing::warn!("PasteText is not implemented on Linux yet — press ignored");
+        }
+    }
+}
+
+/// Open a [`Action::Run`] target (see the match arm above for the split).
+/// The child is reaped on a detached thread so short-lived openers don't
+/// linger as zombies.
+fn run_target(payload: &str) {
+    let (target, args) = openlogi_core::binding::split_run_target(payload);
+    if target.is_empty() {
+        tracing::warn!("Run action with an empty target; ignored");
+        return;
+    }
+    let spawned = match args {
+        Some(args) => std::process::Command::new(target)
+            .args(args.split_whitespace())
+            .spawn(),
+        None => std::process::Command::new("xdg-open").arg(target).spawn(),
+    };
+    match spawned {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => tracing::warn!(run_target = target, "Run target failed to spawn: {e}"),
     }
 }
 

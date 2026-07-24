@@ -37,6 +37,10 @@ objc2-app-kit = { workspace = true, features = [
 objc2-core-graphics = { version = "0.3.2", features = ["CGEvent"] }
 objc2-foundation = { workspace = true }
 
-# SendInput-based action synthesis (execute_windows).
+# SendInput-based action synthesis (execute_windows); Win32_UI_Shell for
+# ShellExecuteW, which backs the `Run` action.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { workspace = true, features = [
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+] }
