@@ -78,6 +78,10 @@ impl OnboardProfilesFeature {
     ///
     /// User profiles live in sectors `0x0001..`; ROM profiles carry
     /// [`ROM_SECTOR_FLAG`](types::ROM_SECTOR_FLAG).
+    ///
+    /// Only legal in [`OnboardMode::Onboard`]: in host mode the firmware
+    /// rejects this with an invalid-argument error (observed on a G502 X
+    /// LIGHTSPEED; the official spec is not public).
     pub async fn set_current_profile(&self, sector: u16) -> Result<(), Hidpp20Error> {
         let [hi, lo] = sector.to_be_bytes();
         self.endpoint.call(3, [hi, lo, 0]).await?;

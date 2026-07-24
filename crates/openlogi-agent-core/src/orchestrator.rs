@@ -238,31 +238,25 @@ impl Orchestrator {
         self.reapply_all_next_refresh = true;
     }
 
-    /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift,
-    /// native wheel mode) to one device. Mouse settings run on one background
-    /// thread and one HID++ channel so concurrent multi-open of the same
-    /// receiver cannot cross-talk (#485); lighting stays a separate path
-    /// (keyboards / different feature).
+    /// Push the persisted volatile settings (onboard-profiles mode, lighting,
+    /// sensor DPI, SmartShift, native wheel mode) to one device. When the
+    /// device has `0x8100`, the onboard-mode switch settles first — a mouse
+    /// still in onboard mode rejects DPI writes with `InvalidArgument`. Mouse
+    /// settings then run on one background thread and one HID++ channel so
+    /// concurrent multi-open of the same receiver cannot cross-talk (#485);
+    /// lighting stays a separate path (keyboards / different feature).
     fn reapply_volatile_settings(&self, dev: &AgentDevice) {
         let Some(route) = dev.route.clone() else {
             return;
         };
         let key = &dev.config_key;
-        // First, before any DPI/SmartShift write: a gaming mouse boots in
-        // onboard mode, where the profile in its flash shadows every software
-        // setting below. The configured mode (default: host, so OpenLogi's
-        // settings apply) is written to RAM and reverts on power cycle. Each
-        // helper spawns its own thread, so this races the writes below; the
-        // next reapply trigger self-heals if the mode switch lands after a
-        // DPI write.
-        if let Some((mode, profile)) = configured_onboard_profiles(&self.config, dev) {
-            crate::hardware::apply_onboard_profiles_in_background(
-                Some(&self.shared.capture_channel),
-                Some(route.clone()),
-                mode,
-                profile,
-            );
-        }
+
+        // Resolve every configured value up front, then bundle the writes so
+        // they can run either immediately (no 0x8100) or strictly *after* the
+        // onboard-profiles mode switch: a gaming mouse boots in onboard mode,
+        // where the profile in its flash shadows the settings below and the
+        // firmware rejects writes like DPI with InvalidArgument (observed on
+        // a G502 X) until host mode is active.
         let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
         let dpi = self.config.dpi(key);
         let smartshift = self
@@ -273,18 +267,34 @@ impl Orchestrator {
                 auto_disengage: ss.auto_disengage,
                 tunable_torque: ss.tunable_torque,
             });
-        if resolution.is_some() || inverted.is_some() || dpi.is_some() || smartshift.is_some() {
-            crate::hardware::reapply_mouse_volatile_in_background(
+        let lighting = self.config.lighting(key).filter(|l| l.enabled);
+        let capture = Arc::clone(&self.shared.capture_channel);
+        let profiles_route = route.clone();
+        let rest = move || {
+            if resolution.is_some() || inverted.is_some() || dpi.is_some() || smartshift.is_some() {
+                crate::hardware::reapply_mouse_volatile_in_background(
+                    Some(&capture),
+                    route.clone(),
+                    resolution,
+                    inverted,
+                    dpi,
+                    smartshift,
+                );
+            }
+            if let Some(lighting) = lighting {
+                crate::hardware::set_lighting_in_background(Some(route), &lighting);
+            }
+        };
+
+        match configured_onboard_profiles(&self.config, dev) {
+            Some((mode, profile)) => crate::hardware::apply_onboard_profiles_in_background(
                 Some(&self.shared.capture_channel),
-                route.clone(),
-                resolution,
-                inverted,
-                dpi,
-                smartshift,
-            );
-        }
-        if let Some(lighting) = self.config.lighting(key).filter(|l| l.enabled) {
-            crate::hardware::set_lighting_in_background(Some(route), &lighting);
+                Some(profiles_route),
+                mode,
+                profile,
+                rest,
+            ),
+            None => rest(),
         }
     }
 
