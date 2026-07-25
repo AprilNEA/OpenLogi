@@ -108,7 +108,14 @@ impl ProfilesPanel {
 
         let mut body = v_flex().gap_4().w_full().child(source_row);
         if onboard {
-            let enabled: Vec<&ProfileEntry> = info.directory.iter().filter(|e| e.enabled).collect();
+            // Number by directory position, not by position among the enabled
+            // entries: a disabled slot must not renumber the ones after it.
+            let enabled: Vec<(usize, &ProfileEntry)> = info
+                .directory
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.enabled)
+                .collect();
             let profile_row = v_flex()
                 .gap_2()
                 .child(section_label(tr!("Active onboard profile"), pal))
@@ -118,8 +125,8 @@ impl ProfilesPanel {
                     h_flex()
                         .gap_2()
                         .flex_wrap()
-                        .children(enabled.iter().enumerate().map(|(i, entry)| {
-                            profile_pill(i, **entry, entry.sector == info.active_profile, pal)
+                        .children(enabled.iter().map(|&(i, entry)| {
+                            profile_pill(i, *entry, entry.sector == info.active_profile, pal)
                         }))
                         .into_any_element()
                 });
