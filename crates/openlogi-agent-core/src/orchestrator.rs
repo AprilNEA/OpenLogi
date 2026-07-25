@@ -391,12 +391,8 @@ impl Orchestrator {
 /// is nothing to assert — no `0x8100` in the measured feature table (or it was
 /// never probed), or the user has never chosen a mode for this device.
 ///
-/// A device nobody configured is left in whatever mode it powered on in. The
-/// mode is user-visible state the mouse changes on its own (a G502 X boots into
-/// onboard mode and signals its profile only by blinking an LED), so taking it
-/// over uninvited would silently override the profile the user chose on the
-/// device itself. The flip side: a configured mode has to be re-asserted on
-/// every reconnect, since the device does not remember host mode.
+/// The mode is device state the user changes from the mouse itself, so OpenLogi
+/// never takes it uninvited. See `.claude/rules/onboard-profiles.md`.
 fn configured_onboard_profiles(
     config: &Config,
     dev: &AgentDevice,

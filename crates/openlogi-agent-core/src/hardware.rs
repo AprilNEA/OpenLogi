@@ -645,8 +645,7 @@ pub fn apply_onboard_profiles_in_background(
     });
 }
 
-/// Runs the wrapped closure when dropped, so a continuation survives an early
-/// return or a panic on the way to it.
+/// Runs the closure on drop, so an early return or panic can't swallow it.
 struct RunOnDrop<F: FnOnce()>(Option<F>);
 
 impl<F: FnOnce()> Drop for RunOnDrop<F> {

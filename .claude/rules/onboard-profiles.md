@@ -63,12 +63,8 @@ of the spawned thread. Do not "simplify" it back to a trailing call.
 configured mode has to be re-asserted on every reconnect. Never skip the reapply
 because the device reported the right mode in an earlier session.
 
-Smaller ones, same category: `memory_read` rejects offsets past
-`sector_size - 16`, so a full-sector read fetches its last partial chunk from
-`sector_size - 16`; erased flash reads back as `0xFF`, which parses as the
-directory terminator, so an empty directory is a legal state and not a failure;
-ROM profiles carry `ROM_SECTOR_FLAG` (`0x0100`) and the bit is never re-derived
-at a call site — go through `openlogi_hid::is_rom_sector`.
+Never re-derive `ROM_SECTOR_FLAG` at a call site — go through
+`openlogi_hid::is_rom_sector`.
 
 ## Never switch a device's mode uninvited
 

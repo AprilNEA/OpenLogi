@@ -108,8 +108,7 @@ impl ProfilesPanel {
 
         let mut body = v_flex().gap_4().w_full().child(source_row);
         if onboard {
-            // Number by directory position, not by position among the enabled
-            // entries: a disabled slot must not renumber the ones after it.
+            // Number by directory position: a disabled slot must not renumber later ones.
             let enabled: Vec<(usize, &ProfileEntry)> = info
                 .directory
                 .iter()
