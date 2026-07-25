@@ -21,13 +21,11 @@ use gpui::{
 use gpui_component::{h_flex, v_flex};
 use openlogi_core::binding::{Action, RingSlot, default_ring_binding};
 
-use crate::mouse_model::picker::{
-    PickFn, action_icon_path, action_rows, payload_editor_row, section_header,
-};
+use crate::mouse_model::picker::{PickFn, action_icon_path, action_rows, payload_rows};
 use crate::mouse_model::view::{MouseModelView, localized_action_label};
 use crate::state::AppState;
 use crate::theme::{ACCENT_BLUE, Palette};
-use crate::windows::ring_action_editor::{EditTarget, PayloadKind};
+use crate::windows::ring_action_editor::EditTarget;
 
 /// Radius of the circle the editor's slot buttons sit on.
 const EDIT_RADIUS: f32 = 110.;
@@ -422,17 +420,7 @@ fn action_panel(
         &on_pick,
         pal,
     ));
-    rows.push(section_header(&rust_i18n::t!("CUSTOM"), pal));
-    for (idx, kind) in [
-        PayloadKind::Run,
-        PayloadKind::PasteText,
-        PayloadKind::Shortcut,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        rows.push(payload_editor_row(target, kind, idx, &current, pal));
-    }
+    rows.extend(payload_rows(target, &current, pal));
     if folder_open.is_none() {
         let view_convert = view.clone();
         let is_folder = matches!(current, Action::Folder(_));

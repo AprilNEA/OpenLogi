@@ -71,14 +71,19 @@ pub fn action_picker<T: 'static>(
 
     let pal = theme::palette(cx);
     let button = rust_i18n::t!(btn.label());
+    let mut rows = action_rows("action-item", current.as_ref(), &on_pick, pal);
+    // Any button can carry a shortcut / command / snippet, not just ring
+    // slots — the DPI toggle bound to another app's hotkey, say.
+    rows.extend(payload_rows(
+        EditTarget::Button(btn),
+        current.as_ref().unwrap_or(&Action::None),
+        pal,
+    ));
     menu_card(pal)
         .min_w(px(POPOVER_W))
         .child(title(tr!("Bind %{name}", name => button), pal))
         .child(divider(pal))
-        .child(scroll_list(
-            "picker-scroll",
-            action_rows("action-item", current.as_ref(), &on_pick, pal),
-        ))
+        .child(scroll_list("picker-scroll", rows))
         .into_any_element()
 }
 
@@ -106,6 +111,26 @@ pub fn gesture_overview(
         // The flyout card only appears once a direction is activated.
         .when_some(active, |row, dir| row.child(flyout_card(dir, view, pal, cx)))
         .into_any_element()
+}
+
+/// The CUSTOM section every binding menu ends with: the payload actions that
+/// carry free text and so open the editor dialog instead of committing
+/// straight from the list. Appended to the catalog rows so any binding
+/// surface — a ring slot, a gesture direction, a plain button — offers the
+/// same three.
+pub(crate) fn payload_rows(target: EditTarget, current: &Action, pal: Palette) -> Vec<AnyElement> {
+    let mut rows = vec![section_header(&rust_i18n::t!("CUSTOM"), pal)];
+    for (idx, kind) in [
+        PayloadKind::Run,
+        PayloadKind::PasteText,
+        PayloadKind::Shortcut,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        rows.push(payload_editor_row(target, kind, idx, current, pal));
+    }
+    rows
 }
 
 /// A "Run Command…" / "Paste Text…" action-list row. Unlike the catalog rows it
@@ -293,14 +318,16 @@ fn flyout_card(
         view_pick.update(cx, |_, vcx| vcx.notify());
     });
 
+    let mut rows = action_rows("gesture-action", Some(&current), &on_pick, pal);
+    // Hold + swipe should reach a keyboard shortcut or a command too, not
+    // only the built-in catalog.
+    rows.extend(payload_rows(EditTarget::Gesture(dir), &current, pal));
+
     menu_card(pal)
         .min_w(px(POPOVER_W))
         .child(title(format!("{}  {}", dir.glyph(), tr!(dir.label())), pal))
         .child(divider(pal))
-        .child(scroll_list(
-            "gesture-dir-scroll",
-            action_rows("gesture-action", Some(&current), &on_pick, pal),
-        ))
+        .child(scroll_list("gesture-dir-scroll", rows))
         .into_any_element()
 }
 

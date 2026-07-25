@@ -19,7 +19,7 @@ use gpui_component::{
     input::{Input, InputState},
     v_flex,
 };
-use openlogi_core::binding::{Action, KeyCombo, RingSlot};
+use openlogi_core::binding::{Action, ButtonId, GestureDirection, KeyCombo, RingSlot};
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::chord_recorder::{ChordRecorder, Poll};
@@ -47,25 +47,32 @@ pub enum EditTarget {
         /// The position inside that folder.
         sub: RingSlot,
     },
+    /// One direction of the gesture button (hold + swipe).
+    Gesture(GestureDirection),
+    /// A plain button's single action — the DPI toggle, Middle, Back, …
+    Button(ButtonId),
 }
 
 impl EditTarget {
     /// The action currently at this target, resolved against the selected
     /// device's ring.
     pub fn current_action(self, state: &AppState) -> Option<Action> {
-        let slots = state.ring_slots_for_current();
         match self {
-            EditTarget::Slot(slot) => slots
+            EditTarget::Slot(slot) => state
+                .ring_slots_for_current()
                 .into_iter()
                 .find(|(candidate, _)| *candidate == slot)
                 .map(|(_, action)| action),
-            EditTarget::FolderSlot { folder, sub } => slots
+            EditTarget::FolderSlot { folder, sub } => state
+                .ring_slots_for_current()
                 .into_iter()
                 .find(|(candidate, _)| *candidate == folder)
                 .and_then(|(_, action)| match action {
                     Action::Folder(items) => items.get(&sub).cloned(),
                     _ => None,
                 }),
+            EditTarget::Gesture(direction) => state.gesture_bindings.get(&direction).cloned(),
+            EditTarget::Button(button) => state.button_bindings.get(&button).cloned(),
         }
     }
 
@@ -77,6 +84,8 @@ impl EditTarget {
             EditTarget::FolderSlot { folder, sub } => {
                 state.commit_ring_folder_binding(folder, sub, action);
             }
+            EditTarget::Gesture(direction) => state.commit_gesture_binding(direction, action),
+            EditTarget::Button(button) => state.commit_binding(button, action),
         });
     }
 
@@ -92,6 +101,10 @@ impl EditTarget {
                 sub.glyph(),
                 tr!(sub.label())
             ),
+            EditTarget::Gesture(direction) => {
+                format!("{}  {}", direction.glyph(), tr!(direction.label()))
+            }
+            EditTarget::Button(button) => tr!(button.label()).to_string(),
         }
     }
 }
