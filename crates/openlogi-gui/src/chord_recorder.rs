@@ -36,7 +36,14 @@ pub struct ChordRecorder {
 impl ChordRecorder {
     /// Sample the keyboard once. Call on a ~30 ms timer while listening.
     pub fn poll(&mut self) -> Poll {
-        let (modifiers, key) = platform::sample();
+        self.advance(platform::sample())
+    }
+
+    /// [`Self::poll`] with the keyboard reading supplied, so the state
+    /// machine is testable without depending on what is physically held
+    /// while the suite runs.
+    fn advance(&mut self, sample: (Vec<&'static str>, Option<&'static str>)) -> Poll {
+        let (modifiers, key) = sample;
         // Escape with no modifiers is the cancel gesture, never a binding —
         // matching the ring overlay, where Esc means "back out".
         if modifiers.is_empty() && key == Some("Escape") {
@@ -181,24 +188,71 @@ pub const fn is_supported() -> bool {
 mod tests {
     use super::{ChordRecorder, Poll};
 
-    /// The state machine's contract, exercised without touching the
-    /// keyboard: nothing held finalizes nothing, and a finished chord is
-    /// emitted exactly once.
+    /// Nothing held: no chord is ever invented, however long we wait.
     #[test]
     fn idle_polls_never_finalize_a_chord() {
         let mut recorder = ChordRecorder::default();
-        // On a platform with no capture support `sample` reports nothing
-        // held, which must stay Idle rather than emitting an empty chord.
-        assert_eq!(recorder.poll(), Poll::Idle);
-        assert_eq!(recorder.poll(), Poll::Idle);
+        assert_eq!(recorder.advance((vec![], None)), Poll::Idle);
+        assert_eq!(recorder.advance((vec![], None)), Poll::Idle);
     }
 
+    /// The full gesture: modifiers first (not yet a chord), then the key,
+    /// then release — emitting the chord exactly once.
     #[test]
     fn a_held_chord_is_emitted_once_on_release() {
-        let mut recorder = ChordRecorder {
-            held: Some("Ctrl+Shift+P".into()),
-        };
-        assert_eq!(recorder.poll(), Poll::Done("Ctrl+Shift+P".into()));
-        assert_eq!(recorder.poll(), Poll::Idle, "not re-emitted");
+        let mut recorder = ChordRecorder::default();
+        assert_eq!(
+            recorder.advance((vec!["Ctrl"], None)),
+            Poll::Idle,
+            "a bare modifier is not a chord"
+        );
+        assert_eq!(
+            recorder.advance((vec!["Ctrl", "Shift"], Some("P"))),
+            Poll::Holding("Ctrl+Shift+P".into())
+        );
+        assert_eq!(
+            recorder.advance((vec!["Ctrl"], None)),
+            Poll::Idle,
+            "still coming up — the chord is not final until everything is up"
+        );
+        assert_eq!(
+            recorder.advance((vec![], None)),
+            Poll::Done("Ctrl+Shift+P".into())
+        );
+        assert_eq!(
+            recorder.advance((vec![], None)),
+            Poll::Idle,
+            "not re-emitted"
+        );
+    }
+
+    /// A chord that grows keeps its most complete form.
+    #[test]
+    fn the_last_held_chord_wins() {
+        let mut recorder = ChordRecorder::default();
+        let _ = recorder.advance((vec!["Ctrl"], Some("Space")));
+        let _ = recorder.advance((vec!["Win", "Ctrl"], Some("Space")));
+        assert_eq!(
+            recorder.advance((vec![], None)),
+            Poll::Done("Win+Ctrl+Space".into())
+        );
+    }
+
+    /// Escape alone backs out and discards anything held.
+    #[test]
+    fn escape_cancels_without_emitting() {
+        let mut recorder = ChordRecorder::default();
+        let _ = recorder.advance((vec!["Ctrl"], Some("P")));
+        assert_eq!(recorder.advance((vec![], Some("Escape"))), Poll::Cancelled);
+        assert_eq!(
+            recorder.advance((vec![], None)),
+            Poll::Idle,
+            "the cancelled chord is gone, not pending"
+        );
+        // Escape *with* a modifier is a real binding, not a cancel.
+        assert_eq!(
+            recorder.advance((vec!["Ctrl"], Some("Escape"))),
+            Poll::Holding("Ctrl+Escape".into())
+        );
     }
 }
