@@ -34,7 +34,9 @@ use serde::{Deserialize, Serialize};
 ///      inside `execute_action` and config snapshots).
 /// v13: [`Action`] gains the appended `Folder` variant (ring sub-menus).
 /// v14: [`Action`] gains the appended `Named` variant (user action labels).
-pub const PROTOCOL_VERSION: u32 = 14;
+/// v15: [`RingPress`] gains the appended `device_key` field, so the overlay
+///      resolves slots against the pad's own device.
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// One Action Ring pad press, streamed to the GUI via
 /// [`Agent::next_ring_press`] so the on-screen ring opens (or confirms a
@@ -42,12 +44,21 @@ pub const PROTOCOL_VERSION: u32 = 14;
 ///
 /// bincode encodes struct fields positionally — fields are append-only, like
 /// the [`Agent`] trait methods.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RingPress {
     /// Monotonic press counter within one agent run. Lets the GUI drop
     /// stale presses that queued while it had no poll outstanding (e.g.
     /// while reconnecting) instead of replaying a burst.
     pub seq: u64,
+    /// Config key of the device whose pad fired, so the overlay renders that
+    /// device's ring.
+    ///
+    /// Without it the GUI would resolve slots against its carousel selection,
+    /// which is a different device whenever the pad's mouse isn't the one on
+    /// screen — and a device with no ring binding falls back to the canonical
+    /// default ring, i.e. a ring the user never configured. Empty when the
+    /// agent has no active device key.
+    pub device_key: String,
 }
 
 /// Where the agent's device enumeration stands. The distinction matters

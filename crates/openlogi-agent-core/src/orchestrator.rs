@@ -189,11 +189,10 @@ impl Orchestrator {
             self.config.app_settings.thumbwheel_sensitivity,
             Ordering::Relaxed,
         );
-        self.shared.ring.set_armed(ring_armed_for(
-            &self.config,
+        self.shared.ring.set_armed(
+            ring_armed_for(&self.config, key, self.current_app.as_deref()),
             key,
-            self.current_app.as_deref(),
-        ));
+        );
     }
 
     /// Apply a fresh inventory snapshot. Always refreshes the snapshot the IPC

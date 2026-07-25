@@ -114,6 +114,10 @@ pub struct RingOverlay {
     scale: f32,
     /// Generation counter; bumping it retires the previous open's watcher.
     epoch: u64,
+    /// Config key of the device whose pad opened this ring, carried on the
+    /// press. Slot lookups use it rather than the carousel selection — see
+    /// [`AppState::ring_slots_for_device`].
+    device_key: Option<String>,
 }
 
 impl gpui::Global for RingOverlay {}
@@ -128,6 +132,7 @@ pub fn init(commands: mpsc::UnboundedSender<Command>, cx: &mut App) {
         center: point(0., 0.),
         scale: 1.,
         epoch: 0,
+        device_key: None,
     });
     // Create the hidden overlay window eagerly rather than on the first tap:
     // it removes window-construction latency from the first open, and — since
@@ -144,12 +149,24 @@ pub fn init(commands: mpsc::UnboundedSender<Command>, cx: &mut App) {
 
 /// Handle one Action Ring pad press from the agent: open the ring when it is
 /// closed, confirm the aimed selection when it is open.
-pub fn on_pad_press(cx: &mut App) {
+pub fn on_pad_press(device_key: Option<String>, cx: &mut App) {
     if cx.global::<RingOverlay>().open {
         confirm(cx);
     } else {
+        // The press names its own device; remember it for this open so the
+        // slots — and every re-read while the ring is up — come from the pad's
+        // mouse rather than whatever the carousel shows.
+        cx.global_mut::<RingOverlay>().device_key = device_key;
         open(cx);
     }
+}
+
+/// The slots to render: always the pad's own device (carried on the press),
+/// never the carousel selection.
+fn ring_slots(cx: &App) -> Vec<(RingSlot, Action)> {
+    let key = cx.global::<RingOverlay>().device_key.clone();
+    cx.global::<AppState>()
+        .ring_slots_for_device(key.as_deref())
 }
 
 /// Open the ring centred at the cursor.
@@ -161,7 +178,7 @@ fn open(cx: &mut App) {
         return;
     };
 
-    let slots = cx.global::<AppState>().ring_slots_for_current();
+    let slots = ring_slots(cx);
     let window = match cx.global::<RingOverlay>().window {
         Some(window) => {
             let refreshed = window.update(cx, |view, _, cx| {
@@ -349,7 +366,7 @@ fn view_in_folder(cx: &mut App) -> bool {
 
 /// Swap an open folder back to the main ring.
 fn back_to_main(cx: &mut App) {
-    let slots = cx.global::<AppState>().ring_slots_for_current();
+    let slots = ring_slots(cx);
     if let Some(window) = cx.global::<RingOverlay>().window {
         let _ = window.update(cx, |view, _, cx| {
             view.slots.clone_from(&slots);

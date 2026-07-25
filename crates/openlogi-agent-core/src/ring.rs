@@ -32,6 +32,14 @@ struct RingChannelState {
     /// gesture watcher routes a pad press here only while set, and to the
     /// ordinary single-action dispatch otherwise.
     armed: bool,
+    /// Config key of the device whose pad is armed, published alongside
+    /// [`Self::armed`] and stamped onto every press.
+    ///
+    /// The GUI must resolve a press against *this* device, not whichever one
+    /// its carousel happens to show: the ring belongs to the mouse with the
+    /// pad, and asking a keyboard for ring slots yields the canonical
+    /// defaults — a second, phantom ring the user never configured.
+    device_key: Option<String>,
     /// Monotonic press counter for [`RingPress::seq`].
     seq: u64,
     pending: VecDeque<RingPress>,
@@ -51,9 +59,12 @@ impl RingChannel {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Publish whether the pad's effective binding opens the ring.
-    pub fn set_armed(&self, armed: bool) {
-        self.lock().armed = armed;
+    /// Publish whether the pad's effective binding opens the ring, and which
+    /// device that binding belongs to.
+    pub fn set_armed(&self, armed: bool, device_key: Option<&str>) {
+        let mut st = self.lock();
+        st.armed = armed;
+        st.device_key = device_key.map(str::to_owned);
     }
 
     /// Whether a pad press should be routed to the ring overlay.
@@ -69,10 +80,11 @@ impl RingChannel {
             let mut st = self.lock();
             st.seq += 1;
             let seq = st.seq;
+            let device_key = st.device_key.clone().unwrap_or_default();
             if st.pending.len() == QUEUE_CAP {
                 st.pending.pop_front();
             }
-            st.pending.push_back(RingPress { seq });
+            st.pending.push_back(RingPress { seq, device_key });
         }
         // notify_one stores a permit when no poll is waiting, so a press that
         // lands between a poll's queue check and its await is never lost.
@@ -102,30 +114,75 @@ impl RingChannel {
 mod tests {
     use super::*;
 
+    /// A press carrying `seq`, from the device the tests arm below.
+    fn press(seq: u64) -> RingPress {
+        RingPress {
+            seq,
+            device_key: "mouse".into(),
+        }
+    }
+
+    /// An armed channel, as the orchestrator publishes it.
+    fn armed() -> RingChannel {
+        let chan = RingChannel::default();
+        chan.set_armed(true, Some("mouse"));
+        chan
+    }
+
     #[tokio::test]
     async fn queued_press_answers_immediately() {
-        let chan = RingChannel::default();
+        let chan = armed();
         chan.push_press();
-        assert_eq!(chan.next_press().await, Some(RingPress { seq: 1 }));
+        assert_eq!(chan.next_press().await, Some(press(1)));
     }
 
     #[tokio::test]
     async fn presses_deliver_in_order_with_monotonic_seq() {
-        let chan = RingChannel::default();
+        let chan = armed();
         chan.push_press();
         chan.push_press();
-        assert_eq!(chan.next_press().await, Some(RingPress { seq: 1 }));
-        assert_eq!(chan.next_press().await, Some(RingPress { seq: 2 }));
+        assert_eq!(chan.next_press().await, Some(press(1)));
+        assert_eq!(chan.next_press().await, Some(press(2)));
     }
 
     #[tokio::test]
     async fn overflow_drops_the_oldest_press_not_the_newest() {
-        let chan = RingChannel::default();
+        let chan = armed();
         for _ in 0..QUEUE_CAP + 2 {
             chan.push_press();
         }
         // Seqs 1 and 2 were evicted; the survivors are the most recent CAP.
-        assert_eq!(chan.next_press().await, Some(RingPress { seq: 3 }));
+        assert_eq!(chan.next_press().await, Some(press(3)));
+    }
+
+    /// Every press names the device whose pad fired, so the overlay renders
+    /// that device's ring instead of falling back to defaults for whatever
+    /// the GUI's carousel happens to show.
+    #[tokio::test]
+    async fn a_press_carries_the_armed_device_key() {
+        let chan = RingChannel::default();
+        chan.set_armed(true, Some("receiver:abc:slot:2"));
+        chan.push_press();
+        assert_eq!(
+            chan.next_press().await.map(|p| p.device_key),
+            Some("receiver:abc:slot:2".to_string())
+        );
+
+        // Re-arming for another device restamps subsequent presses.
+        chan.set_armed(true, Some("receiver:abc:slot:3"));
+        chan.push_press();
+        assert_eq!(
+            chan.next_press().await.map(|p| p.device_key),
+            Some("receiver:abc:slot:3".to_string())
+        );
+
+        // No active device: an empty key, which the GUI treats as "unknown".
+        chan.set_armed(true, None);
+        chan.push_press();
+        assert_eq!(
+            chan.next_press().await.map(|p| p.device_key),
+            Some(String::new())
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -137,7 +194,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn press_during_a_held_poll_wakes_it() {
-        let chan = RingChannel::default();
+        let chan = armed();
         let waiter = tokio::spawn({
             let chan = chan.clone();
             async move { chan.next_press().await }
@@ -145,16 +202,16 @@ mod tests {
         // Let the poll reach its await before pushing.
         tokio::task::yield_now().await;
         chan.push_press();
-        assert_eq!(waiter.await.expect("join"), Some(RingPress { seq: 1 }));
+        assert_eq!(waiter.await.expect("join"), Some(press(1)));
     }
 
     #[tokio::test]
     async fn armed_flag_round_trips() {
         let chan = RingChannel::default();
         assert!(!chan.is_armed(), "unarmed until the orchestrator publishes");
-        chan.set_armed(true);
+        chan.set_armed(true, Some("mouse"));
         assert!(chan.is_armed());
-        chan.set_armed(false);
+        chan.set_armed(false, None);
         assert!(!chan.is_armed());
     }
 }

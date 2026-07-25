@@ -389,9 +389,23 @@ impl AppState {
         }
 
         let previous_key = self.current_record().map(|r| r.config_key.clone());
+        // Keep the live selection; if it is gone — or there is none yet —
+        // restore the persisted one before falling back to "first device".
+        //
+        // The GUI launches before enumeration finishes, so its first device
+        // list is empty and `with_runtime` has nothing to match
+        // `selected_device` against. Without this second chance the saved
+        // choice is silently lost the moment devices actually arrive, and the
+        // carousel lands on whichever device sorts first — for a mouse+keyboard
+        // pair, the keyboard. That is not cosmetic: the agent points its
+        // control-capture session at the selected device, so a mouse demoted
+        // this way stops having its buttons captured at all.
+        let saved_key = self.config.selected_device().map(str::to_owned);
+        let find = |key: &str| merged_list.iter().position(|r| r.config_key == key);
         let new_index = previous_key
             .as_deref()
-            .and_then(|k| merged_list.iter().position(|r| r.config_key == k))
+            .and_then(find)
+            .or_else(|| saved_key.as_deref().and_then(find))
             .unwrap_or(0);
         let connected_keys = merged_list
             .iter()
@@ -1192,11 +1206,26 @@ impl AppState {
     /// ring-shaped, so this is display data, never dispatch policy.
     #[must_use]
     pub fn ring_slots_for_current(&self) -> Vec<(openlogi_core::binding::RingSlot, Action)> {
+        let key = self.current_record().map(|r| r.config_key.clone());
+        self.ring_slots_for_device(key.as_deref())
+    }
+
+    /// The Action Ring sector actions stored for `device_key` — what the
+    /// on-screen ring renders for the pad that fired.
+    ///
+    /// The overlay must pass the *pressing* device's key rather than relying
+    /// on [`Self::ring_slots_for_current`]: the carousel often shows another
+    /// device (a keyboard, or a second mouse), and since defaults are filled
+    /// in below, resolving against it would render a ring the user never
+    /// configured instead of theirs.
+    #[must_use]
+    pub fn ring_slots_for_device(
+        &self,
+        device_key: Option<&str>,
+    ) -> Vec<(openlogi_core::binding::RingSlot, Action)> {
         use openlogi_core::binding::{RingSlot, default_binding_for};
-        let stored = self
-            .current_record()
-            .map(|r| r.config_key.clone())
-            .and_then(|key| self.config.bindings_for(&key).remove(&ButtonId::ActionRing))
+        let stored = device_key
+            .and_then(|key| self.config.bindings_for(key).remove(&ButtonId::ActionRing))
             .filter(Binding::is_ring);
         let mut binding = stored.unwrap_or_else(|| default_binding_for(ButtonId::ActionRing));
         binding.fill_ring_defaults();
@@ -1518,6 +1547,75 @@ mod tests {
         assert_eq!(
             state.asset_models(),
             vec![(model, Some("MX Anywhere 3S".to_string()))]
+        );
+    }
+
+    /// The launch sequence that silently dropped a user's device choice: the
+    /// GUI starts before enumeration, so its first list is empty and there is
+    /// nothing to match `selected_device` against; when devices finally
+    /// arrive, the saved key must still win over "first in the list".
+    ///
+    /// This is load-bearing beyond the carousel — the agent aims its
+    /// control-capture session at the selected device, so landing on the
+    /// keyboard leaves the mouse's buttons (Action Ring included) uncaptured.
+    #[test]
+    fn a_late_arriving_inventory_restores_the_saved_device() {
+        use openlogi_core::device::{DeviceInventory, PairedDevice, ReceiverInfo};
+
+        let paired = |slot: u8, name: &str, kind: DeviceKind| PairedDevice {
+            slot,
+            codename: Some(name.to_string()),
+            wpid: Some(u16::from(slot)),
+            kind,
+            online: true,
+            battery: None,
+            model_info: None,
+            capabilities: None,
+        };
+        let inventory = DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Logi Bolt Receiver".to_string(),
+                vendor_id: 0x046d,
+                product_id: 0xc548,
+                unique_id: Some("DEADBEEF".to_string()),
+            },
+            // The saved choice is deliberately NOT the first listed.
+            paired: vec![
+                paired(1, "Keyboard", DeviceKind::Keyboard),
+                paired(2, "Mouse", DeviceKind::Mouse),
+            ],
+        };
+        let cache = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        // Config keys are derived from route + slot, so read the real ones
+        // out of a throwaway state rather than restating the formula here.
+        let probe = AppState::with_runtime(
+            Config::default(),
+            std::slice::from_ref(&inventory),
+            &cache,
+            commands.clone(),
+        );
+        let keys: Vec<String> = probe
+            .device_list
+            .iter()
+            .map(|r| r.config_key.clone())
+            .collect();
+        assert_eq!(keys.len(), 2, "both devices enumerate");
+        let wanted = keys[1].clone();
+
+        let mut config = Config::default();
+        config.set_selected_device(Some(wanted.clone()));
+        // Launch with nothing enumerated yet — the real startup order.
+        let mut state = AppState::with_runtime(config, &[], &cache, commands);
+        assert!(state.current_record().is_none(), "no devices at launch");
+
+        state.refresh_inventories(std::slice::from_ref(&inventory), &cache, false);
+
+        assert_eq!(
+            state.current_record().map(|r| r.config_key.as_str()),
+            Some(wanted.as_str()),
+            "the persisted selection must win over the first-listed device"
         );
     }
 

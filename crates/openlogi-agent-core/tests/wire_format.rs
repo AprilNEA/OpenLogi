@@ -62,7 +62,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 14);
+    assert_eq!(PROTOCOL_VERSION, 15);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -127,9 +127,22 @@ fn request_variant_order() {
 
 #[test]
 fn ring_press() {
-    // Varint seq: single byte below 251, 0xfb + u16 LE above.
-    assert_wire(&RingPress { seq: 3 }, "03");
-    assert_wire(&RingPress { seq: 300 }, "fb2c01");
+    // Varint seq: single byte below 251, 0xfb + u16 LE above; then the
+    // appended device key as a length-prefixed string.
+    assert_wire(
+        &RingPress {
+            seq: 3,
+            device_key: String::new(),
+        },
+        "0300",
+    );
+    assert_wire(
+        &RingPress {
+            seq: 300,
+            device_key: "ab".into(),
+        },
+        "fb2c01026162",
+    );
 }
 
 #[test]
