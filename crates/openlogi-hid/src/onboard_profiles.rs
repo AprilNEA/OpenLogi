@@ -6,7 +6,16 @@
 //! settings; OpenLogi therefore defaults such devices to host mode so the
 //! configured DPI / buttons / report rate actually apply.
 
+use hidpp::feature::onboard_profiles::ROM_SECTOR_FLAG;
 use serde::{Deserialize, Serialize};
+
+/// Whether `sector` names a ROM (factory) profile rather than a writable user
+/// profile. Takes a bare sector so callers holding only
+/// [`OnboardProfilesInfo::active_profile`] can ask too.
+#[must_use]
+pub fn is_rom_sector(sector: u16) -> bool {
+    sector & ROM_SECTOR_FLAG != 0
+}
 
 /// Whether a gaming device applies its onboard flash profile or host software
 /// settings.
@@ -42,7 +51,7 @@ impl ProfileEntry {
     /// profile.
     #[must_use]
     pub fn is_rom(&self) -> bool {
-        self.sector & 0x0100 != 0
+        is_rom_sector(self.sector)
     }
 }
 

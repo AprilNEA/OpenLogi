@@ -38,7 +38,7 @@ pub use hires_wheel::{
 };
 pub use hotplug::{HotplugEvent, watch_hotplug};
 pub use inventory::{Enumerator, InventoryError, enumerate};
-pub use onboard_profiles::{OnboardProfilesInfo, ProfileEntry, ProfilesMode};
+pub use onboard_profiles::{OnboardProfilesInfo, ProfileEntry, ProfilesMode, is_rom_sector};
 pub use pairing::{
     Click, DiscoveredDevice, PairingCommand, PairingError, PairingEvent, PairingReceiver,
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
