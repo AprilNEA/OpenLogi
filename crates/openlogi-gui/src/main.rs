@@ -33,6 +33,7 @@ mod app;
 mod app_assets;
 mod app_menu;
 mod asset;
+mod chord_recorder;
 mod components;
 mod data;
 mod diagnostics;

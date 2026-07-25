@@ -12,7 +12,9 @@ use gpui::{
     Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    button::{Button, ButtonVariants as _},
+    // Named (not `as _`) because the record button selects its variant with
+    // `.when(cond, ButtonVariants::danger)`, which needs the trait's path.
+    button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputState},
     v_flex,
@@ -20,9 +22,16 @@ use gpui_component::{
 use openlogi_core::binding::{Action, KeyCombo, RingSlot};
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
+use crate::chord_recorder::{ChordRecorder, Poll};
 use crate::state::AppState;
 use crate::theme;
 use crate::windows::{self, AuxWindow, WindowRegistry};
+
+/// How often the chord recorder samples the keyboard while listening.
+const RECORD_TICK: std::time::Duration = std::time::Duration::from_millis(30);
+/// Give up listening after this long with nothing pressed, so an abandoned
+/// dialog doesn't leave a timer running forever.
+const RECORD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Where a ring edit lands: a top-level slot, or a sub-slot inside the
 /// folder at `folder`. Carried by the payload dialog and the editor's
@@ -174,6 +183,9 @@ pub struct RingActionEditorView {
     /// Set when Save could not parse the input (Shortcut only); renders an
     /// inline error until the next attempt.
     invalid: bool,
+    /// Live chord recording (Shortcut only): the chord held so far, or an
+    /// empty string right after "Press Keys" and before the first key.
+    listening: Option<String>,
 }
 
 impl AuxWindow for RingActionEditorView {
@@ -220,10 +232,147 @@ pub fn open(target: EditTarget, kind: PayloadKind, cx: &mut App) {
                 kind,
                 input,
                 invalid: false,
+                listening: None,
             }
         },
         cx,
     );
+}
+
+/// Start listening for a physical chord on `editor`, sampling until the
+/// user releases a real chord (committed straight to `target` — recording
+/// *is* the save), presses Escape alone, or the timeout elapses.
+fn start_listening(editor: &Entity<RingActionEditorView>, target: EditTarget, cx: &mut App) {
+    editor.update(cx, |view, vcx| {
+        view.invalid = false;
+        view.listening = Some(String::new());
+        vcx.notify();
+    });
+
+    let editor = editor.clone();
+    cx.spawn(async move |cx| {
+        let mut recorder = ChordRecorder::default();
+        let mut idle_ticks = 0_u32;
+        let max_idle = RECORD_TIMEOUT.as_millis() / RECORD_TICK.as_millis().max(1);
+        loop {
+            cx.background_executor().timer(RECORD_TICK).await;
+            let done = cx.update(|cx| {
+                // The dialog closed (or a different one opened) — stop.
+                let still_listening = editor.read_with(cx, |view, _| view.listening.is_some());
+                if !still_listening {
+                    return true;
+                }
+                match recorder.poll() {
+                    Poll::Idle => {
+                        idle_ticks += 1;
+                        if u128::from(idle_ticks) >= max_idle {
+                            stop_listening(&editor, cx);
+                            return true;
+                        }
+                        false
+                    }
+                    Poll::Holding(chord) => {
+                        idle_ticks = 0;
+                        editor.update(cx, |view, vcx| {
+                            view.listening = Some(chord);
+                            vcx.notify();
+                        });
+                        false
+                    }
+                    Poll::Cancelled => {
+                        stop_listening(&editor, cx);
+                        true
+                    }
+                    Poll::Done(chord) => {
+                        // The recorder emits canonical chord text, so this
+                        // parse is the same one a typed chord takes.
+                        if let Some(action) = PayloadKind::Shortcut.to_action(chord) {
+                            target.commit(action, cx);
+                            close_editor_window(cx);
+                        } else {
+                            stop_listening(&editor, cx);
+                        }
+                        true
+                    }
+                }
+            });
+            if done {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
+/// The "Press Keys" button plus its live readout. While listening the row
+/// shows the chord as it is held (or a prompt before the first key); the
+/// captured chord commits and closes on release, so recording *is* saving.
+fn record_row(
+    listening: Option<&str>,
+    editor: &Entity<RingActionEditorView>,
+    target: EditTarget,
+    pal: crate::theme::Palette,
+) -> impl IntoElement {
+    let editor_click = editor.clone();
+    let is_listening = listening.is_some();
+    let readout: gpui::SharedString = match listening {
+        Some("") => tr!("Press a shortcut…"),
+        Some(chord) => chord.to_owned().into(),
+        None => tr!("Or record it: hold the keys, then let go."),
+    };
+
+    h_flex()
+        .items_center()
+        .gap_3()
+        .child(
+            Button::new("ring-editor-record")
+                .when(is_listening, ButtonVariants::danger)
+                .when(!is_listening, Button::outline)
+                .label(if is_listening {
+                    tr!("Listening…")
+                } else {
+                    tr!("Press Keys")
+                })
+                .on_click(move |_, _, cx| {
+                    let listening = editor_click.read_with(cx, |view, _| view.listening.is_some());
+                    if listening {
+                        stop_listening(&editor_click, cx);
+                    } else {
+                        start_listening(&editor_click, target, cx);
+                    }
+                }),
+        )
+        .child(
+            div()
+                .text_sm()
+                .when(is_listening, |s| s.font_weight(FontWeight::SEMIBOLD))
+                .text_color(if is_listening {
+                    pal.text_primary
+                } else {
+                    pal.text_muted
+                })
+                .child(readout),
+        )
+}
+
+/// Leave listening mode without committing.
+fn stop_listening(editor: &Entity<RingActionEditorView>, cx: &mut App) {
+    editor.update(cx, |view, vcx| {
+        view.listening = None;
+        vcx.notify();
+    });
+}
+
+/// Close the payload dialog from outside its own event handlers (the
+/// recorder's timer has no `&mut Window`), via the registry handle.
+fn close_editor_window(cx: &mut App) {
+    if let Some(handle) = cx
+        .default_global::<WindowRegistry>()
+        .ring_action_editor
+        .take()
+    {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+    }
 }
 
 impl Render for RingActionEditorView {
@@ -266,6 +415,19 @@ impl Render for RingActionEditorView {
                                     .child(self.target.caption()),
                             ),
                     )
+                    // Recording is the primary path for a shortcut; the
+                    // text field stays as the editable / accessible form.
+                    .when(
+                        kind == PayloadKind::Shortcut && crate::chord_recorder::is_supported(),
+                        |this| {
+                            this.child(record_row(
+                                self.listening.as_deref(),
+                                &editor,
+                                target,
+                                pal,
+                            ))
+                        },
+                    )
                     .child(Input::new(&self.input))
                     .child(
                         div()
@@ -283,49 +445,53 @@ impl Render for RingActionEditorView {
                                 )),
                         )
                     })
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_end()
-                            .gap_3()
-                            .pt_1()
-                            .child(
-                                Button::new("ring-editor-cancel")
-                                    .outline()
-                                    .label(tr!("Cancel"))
-                                    .on_click(|_, window, _| window.remove_window()),
-                            )
-                            .child(
-                                Button::new("ring-editor-save")
-                                    .primary()
-                                    .label(tr!("Save"))
-                                    // An emptied input closes without
-                                    // committing — clearing a slot is what
-                                    // the plain rows ("Do Nothing") are for.
-                                    // Unparseable input (Shortcut) keeps the
-                                    // dialog open with an inline error.
-                                    .on_click(move |_, window, cx| {
-                                        let payload =
-                                            input.read(cx).value().trim().to_owned();
-                                        if payload.is_empty() {
-                                            window.remove_window();
-                                            return;
-                                        }
-                                        match kind.to_action(payload) {
-                                            Some(action) => {
-                                                target.commit(action, cx);
-                                                window.remove_window();
-                                            }
-                                            None => {
-                                                editor.update(cx, |view, vcx| {
-                                                    view.invalid = true;
-                                                    vcx.notify();
-                                                });
-                                            }
-                                        }
-                                    }),
-                            ),
-                    ),
+                    .child(button_row(&input, &editor, target, kind)),
             )
     }
+}
+
+/// Cancel / Save. An emptied input closes without committing — clearing a
+/// slot is what the plain rows ("Do Nothing") are for — and input this kind
+/// can't parse (Shortcut) keeps the dialog open with an inline error
+/// instead of dropping the edit.
+fn button_row(
+    input: &Entity<InputState>,
+    editor: &Entity<RingActionEditorView>,
+    target: EditTarget,
+    kind: PayloadKind,
+) -> impl IntoElement {
+    let (input, editor) = (input.clone(), editor.clone());
+    h_flex()
+        .w_full()
+        .justify_end()
+        .gap_3()
+        .pt_1()
+        .child(
+            Button::new("ring-editor-cancel")
+                .outline()
+                .label(tr!("Cancel"))
+                .on_click(|_, window, _| window.remove_window()),
+        )
+        .child(
+            Button::new("ring-editor-save")
+                .primary()
+                .label(tr!("Save"))
+                .on_click(move |_, window, cx| {
+                    let payload = input.read(cx).value().trim().to_owned();
+                    if payload.is_empty() {
+                        window.remove_window();
+                        return;
+                    }
+                    match kind.to_action(payload) {
+                        Some(action) => {
+                            target.commit(action, cx);
+                            window.remove_window();
+                        }
+                        None => editor.update(cx, |view, vcx| {
+                            view.invalid = true;
+                            vcx.notify();
+                        }),
+                    }
+                }),
+        )
 }
