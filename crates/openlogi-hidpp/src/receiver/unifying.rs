@@ -28,8 +28,9 @@ use crate::{
 /// HID++ 1.0 receiver registers (`0x02` connections, `0xB5/0x5N` pairing
 /// info), so device enumeration goes through this implementation unchanged.
 /// Callers that surface a user-facing receiver name label them separately
-/// (see `openlogi-hid`). Verified against a G305 (paired device wpid `0x4074`)
-/// and a G502 X LS (paired device wpid `0x409f`).
+/// (see `openlogi-hid`). `0xc547` is verified on hardware (a G502 X LIGHTSPEED,
+/// paired device wpid `0x409f`); `0xc53f` follows upstream `hidpp` PR #388 and
+/// is not bench-verified here.
 pub const VPID_PAIRS: &[(u16, u16)] = &[
     (0x046d, 0xc52b),
     (0x046d, 0xc532),

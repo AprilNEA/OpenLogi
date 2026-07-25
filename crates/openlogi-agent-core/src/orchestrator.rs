@@ -387,8 +387,6 @@ impl Orchestrator {
     }
 }
 
-/// Resolve the two independently-gated HiResWheel settings for one device.
-/// `None` means preserve the device's current value.
 /// The onboard-profiles mode + profile to apply to `dev`, or `None` for a
 /// device whose measured feature table has no `0x8100` (or was never probed).
 /// An unconfigured device gets the default policy — host mode — so OpenLogi's
@@ -413,6 +411,8 @@ fn configured_onboard_profiles(
     })
 }
 
+/// Resolve the two independently-gated HiResWheel settings for one device.
+/// `None` means preserve the device's current value.
 fn configured_wheel_mode(
     config: &Config,
     dev: &AgentDevice,
