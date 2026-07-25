@@ -159,6 +159,9 @@ pub(super) fn execute(action: &Action) {
         Action::PasteText(_) => {
             tracing::warn!("PasteText is not implemented on macOS yet — press ignored");
         }
+        Action::Folder(_) => {
+            tracing::warn!("folder reached the injector — containers are resolved by the ring");
+        }
     }
 }
 

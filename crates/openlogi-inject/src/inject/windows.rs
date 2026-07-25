@@ -128,6 +128,9 @@ pub(super) fn execute(action: &Action) {
         Action::CustomShortcut(combo) => post_custom_shortcut(combo),
         Action::Run(payload) => run_target(payload),
         Action::PasteText(text) => post_text(text),
+        Action::Folder(_) => {
+            tracing::warn!("folder reached the injector — containers are resolved by the ring");
+        }
         Action::None => {}
     }
 }
