@@ -387,11 +387,16 @@ impl Orchestrator {
     }
 }
 
-/// The onboard-profiles mode + profile to apply to `dev`, or `None` for a
-/// device whose measured feature table has no `0x8100` (or was never probed).
-/// An unconfigured device gets the default policy — host mode — so OpenLogi's
-/// DPI/button/report-rate settings apply instead of the onboard profile the
-/// device booted into.
+/// The onboard-profiles mode + profile to apply to `dev`, or `None` when there
+/// is nothing to assert — no `0x8100` in the measured feature table (or it was
+/// never probed), or the user has never chosen a mode for this device.
+///
+/// A device nobody configured is left in whatever mode it powered on in. The
+/// mode is user-visible state the mouse changes on its own (a G502 X boots into
+/// onboard mode and signals its profile only by blinking an LED), so taking it
+/// over uninvited would silently override the profile the user chose on the
+/// device itself. The flip side: a configured mode has to be re-asserted on
+/// every reconnect, since the device does not remember host mode.
 fn configured_onboard_profiles(
     config: &Config,
     dev: &AgentDevice,
@@ -399,16 +404,14 @@ fn configured_onboard_profiles(
     if !dev.capabilities?.onboard_profiles {
         return None;
     }
-    Some(match config.onboard_profiles(&dev.config_key) {
-        None => (ProfilesMode::Host, None),
-        Some(cfg) => (
-            match cfg.mode {
-                ProfileSource::Host => ProfilesMode::Host,
-                ProfileSource::Onboard => ProfilesMode::Onboard,
-            },
-            cfg.profile,
-        ),
-    })
+    let cfg = config.onboard_profiles(&dev.config_key)?;
+    Some((
+        match cfg.mode {
+            ProfileSource::Host => ProfilesMode::Host,
+            ProfileSource::Onboard => ProfilesMode::Onboard,
+        },
+        cfg.profile,
+    ))
 }
 
 /// Resolve the two independently-gated HiResWheel settings for one device.

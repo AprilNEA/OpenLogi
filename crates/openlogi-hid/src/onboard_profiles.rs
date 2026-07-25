@@ -3,8 +3,9 @@
 //! The protocol-level `0x8100` wrapper lives in `openlogi-hidpp`; this module
 //! keeps OpenLogi's IPC-facing mode and snapshot types. In onboard mode the
 //! device applies a profile from its own flash and ignores most host software
-//! settings; OpenLogi therefore defaults such devices to host mode so the
-//! configured DPI / buttons / report rate actually apply.
+//! settings, so the configured DPI / buttons / report rate only take effect in
+//! host mode. OpenLogi never switches a device over on its own — the mode is
+//! written only after the user picks one.
 
 use hidpp::feature::onboard_profiles::ROM_SECTOR_FLAG;
 use serde::{Deserialize, Serialize};
