@@ -105,8 +105,9 @@ async fn profile_round_trip(route: &DeviceRoute, info: &OnboardProfilesInfo) -> 
                     "active-profile write not applied: requested {target:#06x}, device reports {read_back:#06x}"
                 );
             }
-            // Restore, unless the device had never activated a profile
-            // (0x0000 is not a writable target).
+            // Restore, unless nothing was active to begin with — which is what
+            // a device found in host mode reports (0x0000, not a writable
+            // target), since host mode parks the flash profile.
             if info.active_profile == 0 {
                 println!("  original active profile was 0x0000 (none) — restore skipped");
             } else if info.active_profile != target {

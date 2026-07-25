@@ -573,11 +573,11 @@ pub fn write_scroll_wheel_mode_in_background(
 /// then runs `after` on the same thread.
 ///
 /// `after` runs regardless of the apply's outcome — including a panic, since
-/// the whole rest of the reconnect reapply rides on it. It exists because a gaming
-/// mouse still in onboard mode rejects the other volatile writes (a G502 X
-/// answered a DPI reapply with `InvalidArgument` while onboard), so the
-/// reconnect reapply passes the rest of its writes as this continuation
-/// instead of racing them in parallel threads.
+/// the whole rest of the reconnect reapply rides on it. It exists because
+/// activating an onboard profile reloads that profile's DPI (and the rest of
+/// its stored settings) out of flash, which would overwrite a configured DPI
+/// that had already landed — so the reapply passes its remaining writes as this
+/// continuation rather than starting them in parallel threads.
 ///
 /// Devices without HID++ `0x8100` are expected and only logged at debug level
 /// — this fires for every reconnecting device, most of which have no onboard

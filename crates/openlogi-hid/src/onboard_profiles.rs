@@ -2,10 +2,10 @@
 //!
 //! The protocol-level `0x8100` wrapper lives in `openlogi-hidpp`; this module
 //! keeps OpenLogi's IPC-facing mode and snapshot types. In onboard mode the
-//! device applies a profile from its own flash and ignores most host software
-//! settings, so the configured DPI / buttons / report rate only take effect in
-//! host mode. OpenLogi never switches a device over on its own — the mode is
-//! written only after the user picks one.
+//! device runs a profile out of its own flash, and activating one reloads that
+//! profile's stored settings — so a host DPI write is accepted either way, but
+//! only survives until the next profile switch. OpenLogi never moves a device
+//! between modes on its own — the mode is written only after the user picks one.
 
 use hidpp::feature::onboard_profiles::ROM_SECTOR_FLAG;
 use serde::{Deserialize, Serialize};
@@ -81,7 +81,9 @@ pub struct OnboardProfilesInfo {
     pub macro_format_id: u8,
     /// Whether the device is in host or onboard mode.
     pub mode: ProfilesMode,
-    /// Sector of the active profile; `0x0000` when none has been activated.
+    /// Sector of the active profile, or `0x0000` for "none active" — which is
+    /// what a device in [`ProfilesMode::Host`] reports, since host mode parks
+    /// the flash profile. Not a writable target.
     pub active_profile: u16,
     /// The profile directory (enabled and disabled entries).
     pub directory: Vec<ProfileEntry>,

@@ -253,10 +253,9 @@ impl Orchestrator {
 
         // Resolve every configured value up front, then bundle the writes so
         // they can run either immediately (no 0x8100) or strictly *after* the
-        // onboard-profiles mode switch: a gaming mouse boots in onboard mode,
-        // where the profile in its flash shadows the settings below and the
-        // firmware rejects writes like DPI with InvalidArgument (observed on
-        // a G502 X) until host mode is active.
+        // onboard-profiles apply: activating a profile reloads that profile's
+        // stored DPI from flash, so a DPI write that raced ahead of it would be
+        // silently discarded.
         let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
         let dpi = self.config.dpi(key);
         let smartshift = self
