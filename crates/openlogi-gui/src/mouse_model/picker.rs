@@ -340,8 +340,11 @@ pub(crate) const RING_BUTTON_ICON: &str = "action-icons/grid-3x3.svg";
 /// card. Exhaustive on purpose: a new [`Action`] variant must pick an icon here
 /// (no catch-all fallback).
 pub(crate) fn action_icon_path(action: &Action) -> &'static str {
-    match action {
-        Action::None => "action-icons/ban.svg",
+    // A label doesn't change the glyph — look through it.
+    match action.inner() {
+        // `Named` is unreachable — `inner()` strips labels above — but it
+        // shares the neutral glyph rather than inventing an icon.
+        Action::None | Action::Named { .. } => "action-icons/ban.svg",
         Action::LeftClick | Action::RightClick => "action-icons/mouse-pointer-click.svg",
         Action::MiddleClick => "action-icons/mouse.svg",
         // Circled arrows: visually "back/forward as a button", distinct from

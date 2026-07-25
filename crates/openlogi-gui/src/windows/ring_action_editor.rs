@@ -140,6 +140,15 @@ impl PayloadKind {
         }
     }
 
+    /// Caption above this kind's payload input.
+    fn field_label_key(self) -> &'static str {
+        match self {
+            PayloadKind::Run => "Command",
+            PayloadKind::PasteText => "Text",
+            PayloadKind::Shortcut => "Shortcut",
+        }
+    }
+
     /// The vendored icon shown on this kind's editor row.
     pub fn icon_path(self) -> &'static str {
         match self {
@@ -153,7 +162,9 @@ impl PayloadKind {
     /// editor seeds its input with it so reopening a configured slot edits
     /// in place.
     pub fn payload_of(self, action: &Action) -> Option<String> {
-        match (self, action) {
+        // Look through a user label: naming a Run action doesn't stop it
+        // being the Run action this dialog edits.
+        match (self, action.inner()) {
             (PayloadKind::Run, Action::Run(payload)) => Some(payload.clone()),
             (PayloadKind::PasteText, Action::PasteText(text)) => Some(text.clone()),
             (PayloadKind::Shortcut, Action::CustomShortcut(combo)) => Some(combo.rendered_label()),
@@ -180,6 +191,10 @@ pub struct RingActionEditorView {
     target: EditTarget,
     kind: PayloadKind,
     input: Entity<InputState>,
+    /// The user's label for this action ("Wispr Voice"), shown on the ring
+    /// instead of the raw payload. Empty means "use the payload's own
+    /// label".
+    name_input: Entity<InputState>,
     /// Set when Save could not parse the input (Shortcut only); renders an
     /// inline error until the next attempt.
     invalid: bool,
@@ -206,16 +221,25 @@ pub fn open(target: EditTarget, kind: PayloadKind, cx: &mut App) {
         let _ = handle.update(cx, |_, window, _| window.remove_window());
     }
 
-    let seed: String = cx
+    let current = cx
         .try_global::<AppState>()
-        .and_then(|state| target.current_action(state))
-        .and_then(|action| kind.payload_of(&action))
+        .and_then(|state| target.current_action(state));
+    // Seed both fields from the slot, but only when it already holds this
+    // kind — a name belongs to the action it was given to.
+    let seed: String = current
+        .as_ref()
+        .and_then(|action| kind.payload_of(action))
+        .unwrap_or_default();
+    let name_seed: String = current
+        .as_ref()
+        .filter(|action| kind.payload_of(action).is_some())
+        .and_then(|action| action.display_name().map(str::to_owned))
         .unwrap_or_default();
 
     windows::open_or_focus(
         |reg| &mut reg.ring_action_editor,
         tr!(kind.title_key()),
-        Size::new(px(420.), px(240.)),
+        Size::new(px(440.), px(320.)),
         move |window, cx| {
             let focus_handle = cx.focus_handle();
             let input = cx.new(|cx| {
@@ -223,7 +247,12 @@ pub fn open(target: EditTarget, kind: PayloadKind, cx: &mut App) {
                     .placeholder(tr!(kind.placeholder_key()))
                     .default_value(seed)
             });
-            // Type straight away — the input is the whole dialog.
+            let name_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(tr!("Optional — shown on the ring"))
+                    .default_value(name_seed)
+            });
+            // Type straight away — the payload is the point of the dialog.
             input.update(cx, |state, cx| state.focus(window, cx));
             RingActionEditorView {
                 focus_handle,
@@ -231,6 +260,7 @@ pub fn open(target: EditTarget, kind: PayloadKind, cx: &mut App) {
                 target,
                 kind,
                 input,
+                name_input,
                 invalid: false,
                 listening: None,
             }
@@ -285,9 +315,13 @@ fn start_listening(editor: &Entity<RingActionEditorView>, target: EditTarget, cx
                     }
                     Poll::Done(chord) => {
                         // The recorder emits canonical chord text, so this
-                        // parse is the same one a typed chord takes.
+                        // parse is the same one a typed chord takes. Any
+                        // name already typed in the dialog rides along.
+                        let name = editor.read_with(cx, |view, cx| {
+                            view.name_input.read(cx).value().trim().to_owned()
+                        });
                         if let Some(action) = PayloadKind::Shortcut.to_action(chord) {
-                            target.commit(action, cx);
+                            target.commit(action.with_name(&name), cx);
                             close_editor_window(cx);
                         } else {
                             stop_listening(&editor, cx);
@@ -428,6 +462,7 @@ impl Render for RingActionEditorView {
                             ))
                         },
                     )
+                    .child(field_label(tr!(self.kind.field_label_key()), pal))
                     .child(Input::new(&self.input))
                     .child(
                         div()
@@ -435,6 +470,8 @@ impl Render for RingActionEditorView {
                             .text_color(pal.text_muted)
                             .child(tr!(self.kind.hint_key())),
                     )
+                    .child(field_label(tr!("Name"), pal))
+                    .child(Input::new(&self.name_input))
                     .when(self.invalid, |this| {
                         this.child(
                             div()
@@ -445,9 +482,24 @@ impl Render for RingActionEditorView {
                                 )),
                         )
                     })
-                    .child(button_row(&input, &editor, target, kind)),
+                    .child(button_row(
+                        &input,
+                        &self.name_input,
+                        &editor,
+                        target,
+                        kind,
+                    )),
             )
     }
+}
+
+/// Small uppercase caption above an input.
+fn field_label(text: gpui::SharedString, pal: crate::theme::Palette) -> impl IntoElement {
+    div()
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(pal.text_muted)
+        .child(text)
 }
 
 /// Cancel / Save. An emptied input closes without committing — clearing a
@@ -456,11 +508,12 @@ impl Render for RingActionEditorView {
 /// instead of dropping the edit.
 fn button_row(
     input: &Entity<InputState>,
+    name_input: &Entity<InputState>,
     editor: &Entity<RingActionEditorView>,
     target: EditTarget,
     kind: PayloadKind,
 ) -> impl IntoElement {
-    let (input, editor) = (input.clone(), editor.clone());
+    let (input, name_input, editor) = (input.clone(), name_input.clone(), editor.clone());
     h_flex()
         .w_full()
         .justify_end()
@@ -482,9 +535,10 @@ fn button_row(
                         window.remove_window();
                         return;
                     }
+                    let name = name_input.read(cx).value().trim().to_owned();
                     match kind.to_action(payload) {
                         Some(action) => {
-                            target.commit(action, cx);
+                            target.commit(action.with_name(&name), cx);
                             window.remove_window();
                         }
                         None => editor.update(cx, |view, vcx| {

@@ -301,7 +301,9 @@ fn activate(slot: RingSlot, cx: &mut App) {
     let Some(action) = action else {
         return;
     };
-    match action {
+    // A user label is presentation only: resolve folders and dispatch by
+    // what the action actually is.
+    match action.inner().clone() {
         Action::Folder(items) if !in_folder => {
             let items: Vec<(RingSlot, Action)> = items
                 .into_iter()
