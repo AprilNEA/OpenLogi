@@ -17,7 +17,7 @@ use gpui_component::{
     input::{Input, InputState},
     v_flex,
 };
-use openlogi_core::binding::{Action, RingSlot};
+use openlogi_core::binding::{Action, KeyCombo, RingSlot};
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::state::AppState;
@@ -94,6 +94,9 @@ pub enum PayloadKind {
     Run,
     /// [`Action::PasteText`] — a text snippet typed at the cursor.
     PasteText,
+    /// [`Action::CustomShortcut`] — a chord entered as text
+    /// (`"Win+Ctrl+Space"`) and parsed by [`KeyCombo::parse`].
+    Shortcut,
 }
 
 impl PayloadKind {
@@ -102,6 +105,7 @@ impl PayloadKind {
         match self {
             PayloadKind::Run => "Run Command",
             PayloadKind::PasteText => "Paste Text",
+            PayloadKind::Shortcut => "Keyboard Shortcut",
         }
     }
 
@@ -109,6 +113,7 @@ impl PayloadKind {
         match self {
             PayloadKind::Run => "Command or URL",
             PayloadKind::PasteText => "Text to paste",
+            PayloadKind::Shortcut => "e.g. Ctrl+Shift+P",
         }
     }
 
@@ -119,26 +124,41 @@ impl PayloadKind {
                  arguments; %VAR% environment variables expand."
             }
             PayloadKind::PasteText => "Typed at the cursor exactly as written.",
+            PayloadKind::Shortcut => {
+                "Modifier names joined with +, then one key: Ctrl+Shift+P, \
+                 Win+Ctrl+Space, Alt+F4."
+            }
         }
     }
 
-    /// The payload of `action` when it already is this kind — the editor
-    /// seeds its input with it so reopening a configured slot edits in
-    /// place.
-    pub fn payload_of(self, action: &Action) -> Option<&str> {
+    /// The vendored icon shown on this kind's editor row.
+    pub fn icon_path(self) -> &'static str {
+        match self {
+            PayloadKind::Run => "action-icons/square-arrow-right.svg",
+            PayloadKind::PasteText => "action-icons/clipboard-paste.svg",
+            PayloadKind::Shortcut => "action-icons/keyboard.svg",
+        }
+    }
+
+    /// The editable payload of `action` when it already is this kind — the
+    /// editor seeds its input with it so reopening a configured slot edits
+    /// in place.
+    pub fn payload_of(self, action: &Action) -> Option<String> {
         match (self, action) {
-            (PayloadKind::Run, Action::Run(payload)) => Some(payload),
-            (PayloadKind::PasteText, Action::PasteText(text)) => Some(text),
+            (PayloadKind::Run, Action::Run(payload)) => Some(payload.clone()),
+            (PayloadKind::PasteText, Action::PasteText(text)) => Some(text.clone()),
+            (PayloadKind::Shortcut, Action::CustomShortcut(combo)) => Some(combo.rendered_label()),
             _ => None,
         }
     }
 
-    /// Wrap `payload` in this kind's [`Action`] variant. (With an empty
-    /// payload it also serves as the icon-lookup sample for the flyout row.)
-    pub fn action(self, payload: String) -> Action {
+    /// Parse `payload` into this kind's [`Action`]. `None` means the input
+    /// is not valid for this kind (only `Shortcut` can fail).
+    pub fn to_action(self, payload: String) -> Option<Action> {
         match self {
-            PayloadKind::Run => Action::Run(payload),
-            PayloadKind::PasteText => Action::PasteText(payload),
+            PayloadKind::Run => Some(Action::Run(payload)),
+            PayloadKind::PasteText => Some(Action::PasteText(payload)),
+            PayloadKind::Shortcut => KeyCombo::parse(&payload).map(Action::CustomShortcut),
         }
     }
 }
@@ -151,6 +171,9 @@ pub struct RingActionEditorView {
     target: EditTarget,
     kind: PayloadKind,
     input: Entity<InputState>,
+    /// Set when Save could not parse the input (Shortcut only); renders an
+    /// inline error until the next attempt.
+    invalid: bool,
 }
 
 impl AuxWindow for RingActionEditorView {
@@ -174,7 +197,7 @@ pub fn open(target: EditTarget, kind: PayloadKind, cx: &mut App) {
     let seed: String = cx
         .try_global::<AppState>()
         .and_then(|state| target.current_action(state))
-        .and_then(|action| kind.payload_of(&action).map(str::to_owned))
+        .and_then(|action| kind.payload_of(&action))
         .unwrap_or_default();
 
     windows::open_or_focus(
@@ -196,6 +219,7 @@ pub fn open(target: EditTarget, kind: PayloadKind, cx: &mut App) {
                 target,
                 kind,
                 input,
+                invalid: false,
             }
         },
         cx,
@@ -206,6 +230,7 @@ impl Render for RingActionEditorView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
         let (target, kind, input) = (self.target, self.kind, self.input.clone());
+        let editor = cx.entity();
 
         v_flex()
             .size_full()
@@ -248,6 +273,16 @@ impl Render for RingActionEditorView {
                             .text_color(pal.text_muted)
                             .child(tr!(self.kind.hint_key())),
                     )
+                    .when(self.invalid, |this| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(gpui::rgb(0x00d6_4541))
+                                .child(tr!(
+                                    "That shortcut could not be read — use the Ctrl+Shift+P shape."
+                                )),
+                        )
+                    })
                     .child(
                         h_flex()
                             .w_full()
@@ -267,13 +302,27 @@ impl Render for RingActionEditorView {
                                     // An emptied input closes without
                                     // committing — clearing a slot is what
                                     // the plain rows ("Do Nothing") are for.
+                                    // Unparseable input (Shortcut) keeps the
+                                    // dialog open with an inline error.
                                     .on_click(move |_, window, cx| {
                                         let payload =
                                             input.read(cx).value().trim().to_owned();
-                                        if !payload.is_empty() {
-                                            target.commit(kind.action(payload), cx);
+                                        if payload.is_empty() {
+                                            window.remove_window();
+                                            return;
                                         }
-                                        window.remove_window();
+                                        match kind.to_action(payload) {
+                                            Some(action) => {
+                                                target.commit(action, cx);
+                                                window.remove_window();
+                                            }
+                                            None => {
+                                                editor.update(cx, |view, vcx| {
+                                                    view.invalid = true;
+                                                    vcx.notify();
+                                                });
+                                            }
+                                        }
                                     }),
                             ),
                     ),

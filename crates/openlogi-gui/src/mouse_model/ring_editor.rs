@@ -30,22 +30,26 @@ use crate::theme::{ACCENT_BLUE, Palette};
 use crate::windows::ring_action_editor::{EditTarget, PayloadKind};
 
 /// Radius of the circle the editor's slot buttons sit on.
-const EDIT_RADIUS: f32 = 130.;
+const EDIT_RADIUS: f32 = 110.;
 /// Diameter of one slot circle on the canvas.
-const EDIT_CIRCLE: f32 = 52.;
+const EDIT_CIRCLE: f32 = 48.;
 /// Diameter of the decorative centre circle.
-const EDIT_CENTER: f32 = 38.;
+const EDIT_CENTER: f32 = 36.;
 /// Width reserved for a floating label pill column beside a circle.
-const PILL_W: f32 = 150.;
+const PILL_W: f32 = 140.;
 /// Gap between a circle and its label pill.
 const PILL_GAP: f32 = 10.;
-/// Square canvas the ring is drawn in — sized so the side pills stay inside
-/// it instead of spilling under the action panel.
-const CANVAS: f32 = 2. * (EDIT_RADIUS + EDIT_CIRCLE / 2. + PILL_GAP + PILL_W);
+/// Vertical room above / below the ring for the North / South pills.
+const PILL_V: f32 = 44.;
+/// The canvas is a wide, short rectangle — pills extend sideways, so the
+/// height only needs the ring plus the North/South pill rows. A square at
+/// pill width was taller than the content area and clipped.
+const CANVAS_W: f32 = 2. * (EDIT_RADIUS + EDIT_CIRCLE / 2. + PILL_GAP + PILL_W);
+const CANVAS_H: f32 = 2. * (EDIT_RADIUS + EDIT_CIRCLE / 2. + PILL_V);
 /// Fixed width of the right-hand action panel.
 const PANEL_W: f32 = 260.;
 /// Height cap for the action panel's scrolling list.
-const PANEL_LIST_H: f32 = 420.;
+const PANEL_LIST_H: f32 = 360.;
 
 /// One canvas position: the slot, what's bound there (`None` = an empty
 /// folder position rendered as a dashed add target), and whether it is the
@@ -163,21 +167,21 @@ pub(crate) fn page(
                 .child(tr!("8 actions")),
         );
 
-    h_flex()
+    // Header on top; below it the canvas and panel side by side, the pair
+    // centred as one block so the page reads composed at any window size.
+    v_flex()
         .size_full()
-        .items_start()
-        .gap_6()
+        .gap_2()
+        .child(back)
         .child(
-            v_flex().flex_1().gap_2().child(back).child(
-                div()
-                    .flex_1()
-                    .flex()
+            div().flex_1().flex().items_center().justify_center().child(
+                h_flex()
                     .items_center()
-                    .justify_center()
-                    .child(canvas(&canvas_slots, folder_open, view, pal)),
+                    .gap_6()
+                    .child(canvas(&canvas_slots, folder_open, view, pal))
+                    .child(action_panel(selected, folder_open, &actions, view, pal)),
             ),
         )
-        .child(action_panel(selected, folder_open, &actions, view, pal))
         .into_any_element()
 }
 
@@ -190,16 +194,16 @@ fn canvas(
     view: &Entity<MouseModelView>,
     pal: Palette,
 ) -> AnyElement {
-    let c = CANVAS / 2.;
-    let mut layer = div().relative().w(px(CANVAS)).h(px(CANVAS));
+    let (cw, ch) = (CANVAS_W / 2., CANVAS_H / 2.);
+    let mut layer = div().relative().flex_none().w(px(CANVAS_W)).h(px(CANVAS_H));
 
     // Decorative centre — the popup's ✕ (or the folder's ← back) is only in
     // the on-screen ring; here it is orientation.
     layer = layer.child(
         div()
             .absolute()
-            .left(px(c - EDIT_CENTER / 2.))
-            .top(px(c - EDIT_CENTER / 2.))
+            .left(px(cw - EDIT_CENTER / 2.))
+            .top(px(ch - EDIT_CENTER / 2.))
             .w(px(EDIT_CENTER))
             .h(px(EDIT_CENTER))
             .rounded_full()
@@ -218,8 +222,8 @@ fn canvas(
         let slot = canvas_slot.slot;
         let is_selected = canvas_slot.selected;
         let angle = slot.angle_degrees().to_radians();
-        let bx = c + EDIT_RADIUS * angle.sin() - EDIT_CIRCLE / 2.;
-        let by = c - EDIT_RADIUS * angle.cos() - EDIT_CIRCLE / 2.;
+        let bx = cw + EDIT_RADIUS * angle.sin() - EDIT_CIRCLE / 2.;
+        let by = ch - EDIT_RADIUS * angle.cos() - EDIT_CIRCLE / 2.;
 
         // Clicking selects; clicking an already-selected folder drills in.
         let drills = folder_open.is_none()
@@ -332,6 +336,7 @@ fn label_pill(
         .text_color(pal.text_primary)
         .whitespace_nowrap()
         .overflow_hidden()
+        .text_ellipsis()
         .max_w(px(PILL_W))
         .child(localized_action_label(action))
         .on_click(move |_, _, cx| on_activate(cx));
@@ -349,7 +354,7 @@ fn label_pill(
             .justify_end(),
         RingSlot::North => holder
             .left(px(bx + EDIT_CIRCLE / 2. - PILL_W / 2.))
-            .top(px(by - 36.))
+            .top(px(by - 34.))
             .justify_center(),
         RingSlot::South => holder
             .left(px(bx + EDIT_CIRCLE / 2. - PILL_W / 2.))
@@ -418,9 +423,13 @@ fn action_panel(
         pal,
     ));
     rows.push(section_header(&rust_i18n::t!("CUSTOM"), pal));
-    for (idx, kind) in [PayloadKind::Run, PayloadKind::PasteText]
-        .into_iter()
-        .enumerate()
+    for (idx, kind) in [
+        PayloadKind::Run,
+        PayloadKind::PasteText,
+        PayloadKind::Shortcut,
+    ]
+    .into_iter()
+    .enumerate()
     {
         rows.push(payload_editor_row(target, kind, idx, &current, pal));
     }

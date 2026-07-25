@@ -120,7 +120,7 @@ pub(crate) fn payload_editor_row(
     pal: Palette,
 ) -> AnyElement {
     let selected = kind.payload_of(current).is_some();
-    let icon_path = action_icon_path(&kind.action(String::new()));
+    let icon_path = kind.icon_path();
     menu_row(("ring-payload", idx), pal, selected)
         .child(
             h_flex()
