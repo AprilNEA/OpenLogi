@@ -3,20 +3,22 @@ use crate::protocol::v20::Hidpp20Error;
 
 #[test]
 fn parses_full_description_payload() {
-    // G502-style description: 5 user profiles, 3 OOB, 11 buttons, 16 sectors
-    // of 256 bytes (0x0100 big-endian at offset 7).
-    let payload = [1, 2, 3, 5, 3, 11, 16, 0x01, 0x00, 0x04, 0x07, 0, 0, 0, 0, 0];
+    // As read from a G502 X LIGHTSPEED: 5 user profiles, 2 ROM, 11 buttons,
+    // 16 sectors of 255 bytes (0x00ff big-endian at offset 7). The odd sector
+    // size is the point — it feeds the `sector_size - 16` read bound, so a
+    // rounded-up 256 here would hide an off-by-one.
+    let payload = [1, 3, 1, 5, 2, 11, 16, 0x00, 0xff, 0x04, 0x07, 0, 0, 0, 0, 0];
 
     let descr = ProfilesDescription::from_payload(&payload);
 
     assert_eq!(descr.memory_model_id, 1);
-    assert_eq!(descr.profile_format_id, 2);
-    assert_eq!(descr.macro_format_id, 3);
+    assert_eq!(descr.profile_format_id, 3);
+    assert_eq!(descr.macro_format_id, 1);
     assert_eq!(descr.profile_count, 5);
-    assert_eq!(descr.profile_count_oob, 3);
+    assert_eq!(descr.profile_count_oob, 2);
     assert_eq!(descr.button_count, 11);
     assert_eq!(descr.sector_count, 16);
-    assert_eq!(descr.sector_size, 256);
+    assert_eq!(descr.sector_size, 255);
     assert_eq!(descr.mechanical_layout, 0x04);
     assert_eq!(descr.various_info, 0x07);
 }
