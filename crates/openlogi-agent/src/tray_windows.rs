@@ -290,12 +290,6 @@ fn open_or_focus_gui() {
 /// same-user filter keeps other sessions (fast user switching) out of
 /// Show/Quit — their windows are invisible to `EnumWindows` and their
 /// processes unkillable anyway, but don't even consider them.
-///
-/// The `OpenLogi.exe` match is case-*sensitive*: the CLI binary is
-/// `openlogi.exe`, which case-insensitively equals the GUI's `OpenLogi.exe`.
-/// The two share a name on the case-insensitive filesystem (only the dev
-/// target dir ever holds both), so an `eq_ignore_ascii_case` match would take
-/// a transient CLI invocation for the GUI and then fail to find its window.
 fn gui_pids() -> Vec<u32> {
     use sysinfo::{Pid, Process, ProcessesToUpdate, System};
     let mut system = System::new();
@@ -307,12 +301,20 @@ fn gui_pids() -> Vec<u32> {
         .processes()
         .values()
         .filter(|p| {
-            let name = p.name().to_string_lossy();
-            (name == "OpenLogi.exe" || name.eq_ignore_ascii_case("openlogi-gui.exe"))
+            is_gui_process_name(&p.name().to_string_lossy())
                 && (own_user.is_none() || p.user_id() == own_user)
         })
         .map(|p| p.pid().as_u32())
         .collect()
+}
+
+/// Whether a process image name is one of the GUI binaries.
+///
+/// `OpenLogi.exe` is matched case-*sensitively*: the CLI is `openlogi.exe`,
+/// which `eq_ignore_ascii_case` would accept, and the dev target dir holds
+/// both. Windows reports image names with their on-disk case, so this holds.
+fn is_gui_process_name(name: &str) -> bool {
+    name == "OpenLogi.exe" || name.eq_ignore_ascii_case("openlogi-gui.exe")
 }
 
 /// Bring the first visible top-level window owned by one of `pids` to the
@@ -411,4 +413,16 @@ fn quit(hwnd: HWND) {
 /// NUL-terminated UTF-16 for win32 W-APIs.
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_gui_process_name;
+
+    #[test]
+    fn the_cli_binary_is_not_the_gui() {
+        assert!(is_gui_process_name("OpenLogi.exe"));
+        assert!(is_gui_process_name("openlogi-gui.exe"));
+        assert!(!is_gui_process_name("openlogi.exe")); // the CLI
+    }
 }
