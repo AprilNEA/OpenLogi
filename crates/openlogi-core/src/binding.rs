@@ -508,6 +508,86 @@ pub fn split_run_target(payload: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Map one non-modifier chord token to its macOS virtual key code (the
+/// [`KeyCombo`] storage format) plus its canonical display spelling.
+fn parse_key_name(token: &str) -> Option<(u16, String)> {
+    let lower = token.to_ascii_lowercase();
+    // Letters and digits: canonical form is the uppercase letter / digit.
+    if lower.len() == 1 {
+        let ch = lower.chars().next()?;
+        let code = match ch {
+            'a' => 0x00,
+            's' => 0x01,
+            'd' => 0x02,
+            'f' => 0x03,
+            'h' => 0x04,
+            'g' => 0x05,
+            'z' => 0x06,
+            'x' => 0x07,
+            'c' => 0x08,
+            'v' => 0x09,
+            'b' => 0x0B,
+            'q' => 0x0C,
+            'w' => 0x0D,
+            'e' => 0x0E,
+            'r' => 0x0F,
+            'y' => 0x10,
+            't' => 0x11,
+            'u' => 0x20,
+            'i' => 0x22,
+            'o' => 0x1F,
+            'p' => 0x23,
+            'j' => 0x26,
+            'k' => 0x28,
+            'l' => 0x25,
+            'm' => 0x2E,
+            'n' => 0x2D,
+            '0' => 0x1D,
+            '1' => 0x12,
+            '2' => 0x13,
+            '3' => 0x14,
+            '4' => 0x15,
+            '5' => 0x17,
+            '6' => 0x16,
+            '7' => 0x1A,
+            '8' => 0x1C,
+            '9' => 0x19,
+            _ => return None,
+        };
+        return Some((code, ch.to_ascii_uppercase().to_string()));
+    }
+    let (code, canonical) = match lower.as_str() {
+        "space" => (0x31, "Space"),
+        "enter" | "return" => (0x24, "Enter"),
+        "tab" => (0x30, "Tab"),
+        "escape" | "esc" => (0x35, "Escape"),
+        "backspace" => (0x33, "Backspace"),
+        "delete" | "del" => (0x75, "Delete"),
+        "home" => (0x73, "Home"),
+        "end" => (0x77, "End"),
+        "pageup" => (0x74, "PageUp"),
+        "pagedown" => (0x79, "PageDown"),
+        "up" => (0x7E, "Up"),
+        "down" => (0x7D, "Down"),
+        "left" => (0x7B, "Left"),
+        "right" => (0x7C, "Right"),
+        "f1" => (0x7A, "F1"),
+        "f2" => (0x78, "F2"),
+        "f3" => (0x63, "F3"),
+        "f4" => (0x76, "F4"),
+        "f5" => (0x60, "F5"),
+        "f6" => (0x61, "F6"),
+        "f7" => (0x62, "F7"),
+        "f8" => (0x64, "F8"),
+        "f9" => (0x65, "F9"),
+        "f10" => (0x6D, "F10"),
+        "f11" => (0x67, "F11"),
+        "f12" => (0x6F, "F12"),
+        _ => return None,
+    };
+    Some((code, canonical.to_string()))
+}
+
 /// Short human name for a [`Action::Run`] target — the host for URLs, the
 /// file stem for paths, the raw target otherwise — truncated so slot labels
 /// stay readable.
@@ -554,6 +634,60 @@ pub struct KeyCombo {
 }
 
 impl KeyCombo {
+    /// Parse a human `"Win+Ctrl+Space"`-style chord: `+`-separated modifier
+    /// names (`Ctrl`/`Control`, `Shift`, `Alt`/`Option`, `Win`/`Super`/
+    /// `Meta`, `Cmd`/`Command`; case-insensitive) followed by exactly one
+    /// key — a letter, digit, `F1`–`F12`, or a named key (`Space`, `Enter`/
+    /// `Return`, `Tab`, `Escape`/`Esc`, `Backspace`, `Delete`, `Home`,
+    /// `End`, `PageUp`, `PageDown`, `Up`, `Down`, `Left`, `Right`). The
+    /// stored `display` is the canonical re-rendering of what was parsed,
+    /// so labels stay consistent regardless of input casing or order.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut modifiers = 0u8;
+        let mut key: Option<(u16, String)> = None;
+        for token in text.split('+') {
+            let token = token.trim();
+            if token.is_empty() {
+                return None;
+            }
+            match token.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => modifiers |= Self::MOD_CTRL,
+                "shift" => modifiers |= Self::MOD_SHIFT,
+                "alt" | "option" => modifiers |= Self::MOD_OPTION,
+                "win" | "windows" | "super" | "meta" => modifiers |= Self::MOD_WIN,
+                "cmd" | "command" => modifiers |= Self::MOD_CMD,
+                _ => {
+                    // Exactly one non-modifier token, and it must be last.
+                    if key.is_some() {
+                        return None;
+                    }
+                    key = Some(parse_key_name(token)?);
+                }
+            }
+        }
+        let (key_code, canonical_key) = key?;
+        let mut display = String::new();
+        for (bit, name) in [
+            (Self::MOD_WIN, "Win"),
+            (Self::MOD_CTRL, "Ctrl"),
+            (Self::MOD_OPTION, "Alt"),
+            (Self::MOD_SHIFT, "Shift"),
+            (Self::MOD_CMD, "Cmd"),
+        ] {
+            if modifiers & bit != 0 {
+                display.push_str(name);
+                display.push('+');
+            }
+        }
+        display.push_str(&canonical_key);
+        Some(Self {
+            modifiers,
+            key_code,
+            display,
+        })
+    }
+
     /// Bit for the ⌘ Command modifier in [`Self::modifiers`].
     pub const MOD_CMD: u8 = 1 << 0;
     /// Bit for the ⇧ Shift modifier in [`Self::modifiers`].
@@ -1153,6 +1287,27 @@ mod tests {
             parsed.bindings[&ButtonId::Forward],
             Binding::Single(Action::Folder(_))
         ));
+    }
+
+    #[test]
+    fn key_combo_parse_accepts_chords_and_rejects_garbage() {
+        let combo = KeyCombo::parse("win + ctrl + space").expect("valid chord");
+        assert_eq!(combo.modifiers, KeyCombo::MOD_WIN | KeyCombo::MOD_CTRL);
+        assert_eq!(combo.key_code, 0x31);
+        assert_eq!(combo.display, "Win+Ctrl+Space");
+
+        let combo = KeyCombo::parse("Alt+Shift+z").expect("valid chord");
+        assert_eq!(combo.modifiers, KeyCombo::MOD_OPTION | KeyCombo::MOD_SHIFT);
+        assert_eq!(combo.key_code, 0x06);
+        assert_eq!(combo.display, "Alt+Shift+Z");
+
+        assert_eq!(KeyCombo::parse("F5").map(|c| c.key_code), Some(0x60));
+        // Bare modifiers, two keys, unknown names, empties: all rejected.
+        assert!(KeyCombo::parse("Ctrl+Shift").is_none());
+        assert!(KeyCombo::parse("A+B").is_none());
+        assert!(KeyCombo::parse("Ctrl+Wibble").is_none());
+        assert!(KeyCombo::parse("").is_none());
+        assert!(KeyCombo::parse("Ctrl++A").is_none());
     }
 
     #[test]
