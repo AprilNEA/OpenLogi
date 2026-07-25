@@ -69,8 +69,12 @@ pub async fn get_onboard_profiles(route: &DeviceRoute) -> Result<OnboardProfiles
         let descr = feature.get_description().await.map_err(read)?;
         let mode = feature.get_onboard_mode().await.map_err(read)?;
         let active_profile = feature.get_current_profile().await.map_err(read)?;
+        // User *and* ROM profiles share sector 0's directory, and the ROM
+        // entries sit after the user ones — bounding the read by
+        // `profile_count` alone drops them before the terminator is reached.
+        let total_profiles = descr.profile_count.saturating_add(descr.profile_count_oob);
         let directory = feature
-            .read_profile_directory(descr.profile_count)
+            .read_profile_directory(total_profiles)
             .await
             .map_err(read)?
             .into_iter()

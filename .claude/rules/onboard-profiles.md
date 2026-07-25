@@ -84,6 +84,15 @@ parks the flash profile, so `get_current_profile` has nothing to name. `0x0000`
 is not a writable target, which is why the `diag profiles` round-trip skips its
 restore step when it found the device in host mode.
 
+**ROM profiles are counted but not reachable — on this device.** The G502 X
+description reports 2 ROM profiles, yet sector 0's directory terminates right
+after the 5 user entries, and `set_current_profile` rejects `0x0101`, `0x0102`
+and `0x0103` with `InvalidArgument`. So `is_rom_sector` and the GUI's
+`entry.is_rom()` branch are dead paths here — kept because the directory bound
+(`profile_count + profile_count_oob`) is what the format allows, not what this
+one device happens to fill in. Do not "simplify" them away on the strength of a
+single device.
+
 Never re-derive `ROM_SECTOR_FLAG` at a call site — go through
 `openlogi_hid::is_rom_sector`.
 
