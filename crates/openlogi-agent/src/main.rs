@@ -77,8 +77,12 @@ fn main() {
     self_restart::spawn();
 
     let config = Config::load_or_default().unwrap_or_else(|e| {
-        warn!(error = %e, "could not load config.toml; using defaults");
-        Config::default()
+        warn!(
+            error = %e,
+            "could not load config.toml; running on defaults WITHOUT persisting, \
+             so the unreadable file is left intact"
+        );
+        Config::defaults_for_unreadable()
     });
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()

@@ -143,8 +143,12 @@ fn main() -> Result<()> {
     let inventories: Vec<DeviceInventory> = Vec::new();
 
     let initial_config = Config::load_or_default().unwrap_or_else(|e| {
-        warn!(error = %e, "could not load config.toml; using defaults");
-        Config::default()
+        warn!(
+            error = %e,
+            "could not load config.toml; running on defaults WITHOUT persisting, \
+             so the unreadable file is left intact"
+        );
+        Config::defaults_for_unreadable()
     });
 
     // Resolve the UI locale before any menu or window is built so the first
@@ -508,8 +512,17 @@ fn main() -> Result<()> {
                         });
                     }
                     Some(press) = ipc_ring.recv() => {
-                        tracing::debug!(seq = press.seq, "action ring press received");
-                        cx.update(ring::on_pad_press);
+                        tracing::debug!(
+                            seq = press.seq,
+                            device = press.device_key,
+                            "action ring press received"
+                        );
+                        // An empty key means the agent had no active device;
+                        // fall back to the carousel selection rather than
+                        // rendering nothing.
+                        let device_key = (!press.device_key.is_empty())
+                            .then_some(press.device_key);
+                        cx.update(|cx| ring::on_pad_press(device_key, cx));
                     }
                     Some(cmd) = gui_cmd_rx.recv() => {
                         cx.update(|cx| dispatch_gui_command(cmd, cx));

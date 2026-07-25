@@ -34,6 +34,13 @@ use crate::paths::{self, PathsError};
 /// changes; readers branch on the parsed value before consuming the rest of
 /// the file.
 ///
+/// v4 adds bindings a v3 reader cannot represent: `ButtonId::ActionRing` with
+/// its `Binding::Ring` slot map, and the `Run` / `PasteText` / `Folder` /
+/// `Named` actions. A v3 build parsing them fails and falls back to defaults,
+/// which the next save then writes over the user's real config — the exact
+/// silent wipe the version gate exists to prevent, so writing any of them
+/// must declare v4.
+///
 /// v3 changes the device map from model keys to physical-device keys. No v2
 /// device entries are migrated because model-scoped settings cannot be assigned
 /// safely when two identical devices exist.
@@ -43,7 +50,7 @@ use crate::paths::{self, PathsError};
 /// `RawDeviceConfig` shim folds the legacy fields) and self-heals to v2 on the
 /// next save; [`Config::load_from_path`] rejects only versions *newer* than this
 /// so a forward file fails loudly instead of silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +72,12 @@ pub struct Config {
     /// an entry.
     #[serde(default)]
     pub devices: BTreeMap<String, DeviceConfig>,
+    /// Set when this doc is a stand-in for a config file that exists but
+    /// could not be read (see [`Self::defaults_for_unreadable`]). Saving is
+    /// then refused, because writing defaults over a file we failed to parse
+    /// destroys the user's real settings.
+    #[serde(skip)]
+    unreadable_source: bool,
 }
 
 impl Default for Config {
@@ -74,6 +87,7 @@ impl Default for Config {
             app_settings: AppSettings::default(),
             selected_device: None,
             devices: BTreeMap::new(),
+            unreadable_source: false,
         }
     }
 }
@@ -141,6 +155,31 @@ impl Config {
         Self::load_from_path(&paths::config_path()?)
     }
 
+    /// Defaults to run on after [`Self::load_or_default`] failed — a config
+    /// file exists but is unparseable, or was written by a newer build.
+    ///
+    /// Callers must use this rather than [`Self::default`], because the
+    /// resulting doc **refuses to save**. Persisting plain defaults over a
+    /// file we could not read is what turns "this build is too old for your
+    /// config" into "your bindings are gone": the failing build starts up
+    /// blank, and its first write — any setting toggle, any device
+    /// re-detection — replaces the user's real settings with that blank
+    /// state.
+    #[must_use]
+    pub fn defaults_for_unreadable() -> Self {
+        Self {
+            unreadable_source: true,
+            ..Self::default()
+        }
+    }
+
+    /// Whether this doc stands in for an unreadable file and so will not be
+    /// persisted (see [`Self::defaults_for_unreadable`]).
+    #[must_use]
+    pub const fn is_read_only(&self) -> bool {
+        self.unreadable_source
+    }
+
     /// Same as [`Self::load_or_default`] but reads from `path`. Used by tests
     /// to avoid touching the real user config.
     pub fn load_from_path(path: &Path) -> Result<Self, ConfigError> {
@@ -185,6 +224,14 @@ impl Config {
 
     /// Same as [`Self::save_atomic`] but writes to `path`. Used by tests.
     pub fn save_to_path(&self, path: &Path) -> Result<(), ConfigError> {
+        // Never let a build that couldn't read the config write over it —
+        // that is how an unreadable file becomes a lost one (see
+        // [`Self::defaults_for_unreadable`]). Not an error: the caller's save
+        // is genuinely unnecessary, and failing it would only surface as a
+        // second, more confusing symptom.
+        if self.unreadable_source {
+            return Ok(());
+        }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
                 path: path.to_path_buf(),
@@ -696,6 +743,60 @@ mod tests {
         assert!(cfg.devices.is_empty());
     }
 
+    /// The data-loss guard: a build that cannot read the config must never
+    /// overwrite it. This is the exact sequence that wiped a real user's
+    /// bindings — an older build parsed a config carrying actions it did not
+    /// know, fell back to defaults, and saved those defaults back.
+    #[test]
+    fn defaults_for_an_unreadable_config_never_overwrite_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let original = "schema_version = 4\nthis is not valid toml at all\n";
+        fs::write(&path, original).expect("seed");
+
+        let err = Config::load_from_path(&path).expect_err("must not parse");
+        assert!(matches!(err, ConfigError::Parse { .. }));
+
+        // The fallback a binary uses on that error, then a save it would
+        // normally perform (a settings toggle, a device re-detection).
+        let fallback = Config::defaults_for_unreadable();
+        assert!(fallback.is_read_only());
+        fallback
+            .save_to_path(&path)
+            .expect("save is a no-op, not an error");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read back"),
+            original,
+            "the unreadable config must be left exactly as it was"
+        );
+
+        // A normally-loaded config still saves.
+        let ok = Config::default();
+        assert!(!ok.is_read_only());
+        ok.save_to_path(&path).expect("save");
+        assert_ne!(fs::read_to_string(&path).expect("read back"), original);
+    }
+
+    /// A newer config must be refused rather than silently reset — the
+    /// version gate only works if writers bump [`SCHEMA_VERSION`] whenever
+    /// they emit bindings older readers cannot represent.
+    #[test]
+    fn a_newer_schema_is_rejected_and_left_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let original = format!("schema_version = {}\n", SCHEMA_VERSION + 1);
+        fs::write(&path, &original).expect("seed");
+
+        let err = Config::load_from_path(&path).expect_err("must be refused");
+        assert!(matches!(err, ConfigError::UnsupportedSchemaVersion { .. }));
+
+        Config::defaults_for_unreadable()
+            .save_to_path(&path)
+            .expect("no-op");
+        assert_eq!(fs::read_to_string(&path).expect("read back"), original);
+    }
+
     #[test]
     fn folder_conversion_keeps_the_old_action_and_edits_nest() {
         use crate::binding::{Action, RingSlot};
@@ -1006,7 +1107,10 @@ mod tests {
         // The key only contains [A-Za-z0-9_], so TOML emits it as a bare-word
         // table key (no surrounding quotes). The test asserts the observable
         // structure rather than locking in a specific quoting.
-        assert!(body.contains("schema_version = 3"), "got: {body}");
+        assert!(
+            body.contains(&format!("schema_version = {SCHEMA_VERSION}")),
+            "got: {body}"
+        );
         assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
         // A `Single` binding serializes byte-identically to the pre-v2 bare
         // `Action`, so the leaf line is unchanged.
@@ -1271,7 +1375,10 @@ Click = \"Paste\"
         // Saving self-heals to the current shape: stamped version + merged table,
         // legacy field names gone.
         let body = toml::to_string_pretty(&cfg).expect("serialize");
-        assert!(body.contains("schema_version = 3"), "got: {body}");
+        assert!(
+            body.contains(&format!("schema_version = {SCHEMA_VERSION}")),
+            "got: {body}"
+        );
         assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
         assert!(!body.contains("button_bindings"), "got: {body}");
         assert!(!body.contains("gesture_bindings"), "got: {body}");
