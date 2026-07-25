@@ -43,10 +43,10 @@ const MAX_BOLT_SLOTS: u8 = 6;
 ///
 /// A timed-out node is skipped and re-probed on the next watcher tick (~2 s),
 /// and the first probe usually wakes the device so the retry succeeds fast.
-/// Slots are probed concurrently on both receiver paths, so a healthy
-/// receiver's worst case is the 1.5 s arrival drain plus a single slot's
-/// [`BOLT_SLOT_PROBE`] / [`UNIFYING_SLOT_PROBE`] — not their sum — which this
-/// stays comfortably above, so awake devices never trip it.
+/// Slots are probed concurrently on both receiver paths, so a receiver's worst
+/// case is the 1.5 s arrival drain plus the sequential register pass plus a
+/// single slot's [`BOLT_SLOT_PROBE`] / [`UNIFYING_SLOT_PROBE`] — not their sum
+/// — which this stays comfortably above, so awake devices never trip it.
 ///
 /// Sized for the Bluetooth-direct feature walk, the long pole: a ~35-entry
 /// table over a link that drops individual reports, which `hidpp::device`
@@ -68,22 +68,20 @@ const UNIFYING_SLOT_PROBE: Duration = Duration::from_millis(3500);
 
 /// Per-slot budget for the HID++ 2.0 feature walk on a Bolt paired device.
 ///
-/// Without a per-slot cap a single online device that stops answering its
-/// feature-walk reads burns the whole receiver's [`PROBE_BUDGET`], so
-/// `probe_one` times out and the receiver yields *nothing* — every paired device
-/// drops to "No devices" even though its pairing-register identity read fine
-/// (#218). Capping each slot lets a hung device fall back to its cached /
-/// identity-only data while the rest of the receiver still enumerates, mirroring
-/// [`UNIFYING_SLOT_PROBE`].
-///
-/// Bolt slots are probed concurrently (see `probe_bolt_receiver`), so this cap
-/// bounds each slot independently and does *not* sum across slots — the receiver
-/// cycle is the arrival drain plus the single slowest slot. 3 s is generous
-/// headroom for a healthy walk: a feature-rich device enumerates a large table
-/// one round-trip per feature, and the MX Master 4 (45 features over Bolt) takes
-/// ~1–1.6 s even awake. The previous 1 s cap cut that walk off every tick, so
-/// the device surfaced permanently with no capabilities or battery.
-const BOLT_SLOT_PROBE: Duration = Duration::from_secs(3);
+/// Bounds a single device that stops answering its feature-walk reads (seen on
+/// a recent macOS IOHID stack with a new MX Master 4) so it falls back to its
+/// cached / identity-only data instead of pinning its slot future forever
+/// (#218). Slots walk *concurrently* (mirroring the Unifying path), so this
+/// budget covers the slowest single slot rather than dividing [`PROBE_BUDGET`]
+/// across the slot count. A healthy walk is not always fast either: a
+/// feature-rich device enumerates a large table one round-trip per feature
+/// (the MX Master 4's 45 features take ~1–1.6 s over Bolt even awake), and on
+/// high-latency USB paths (a Bolt receiver behind a KVM's USB emulation) it
+/// takes several seconds — the earlier 1 s cap starved every slot there, so a
+/// newly paired device could never acquire model info at all. 10 s is generous
+/// headroom for degraded-but-alive paths while still fitting [`PROBE_BUDGET`]
+/// after the 1.5 s arrival drain and the register pass.
+const BOLT_SLOT_PROBE: Duration = Duration::from_secs(10);
 
 /// Errors raised while enumerating HID++ devices.
 #[derive(Debug, Error)]
