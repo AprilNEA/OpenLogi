@@ -5,15 +5,29 @@ use std::mem::size_of;
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
-    MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+    MAPVK_VK_TO_VSC, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MapVirtualKeyW, SendInput,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
+use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 use openlogi_core::binding::{Action, KeyCombo, split_run_target};
 
 const WHEEL_DELTA: i32 = 120;
+
+/// How long a [`Action::CustomShortcut`] holds its keys down.
+///
+/// A whole chord delivered in one `SendInput` batch is physically down for
+/// microseconds. That is invisible to any hotkey listener that **polls**
+/// key state (`GetAsyncKeyState`) instead of handling key messages — the
+/// press falls between two samples and the app never fires. Polling is
+/// common precisely for chords like Ctrl+Space, where `RegisterHotKey`'s
+/// modifier-order rules are awkward. A real keypress lasts ~100 ms, so the
+/// synthetic one dwells too: long enough for any sane poll interval (a
+/// 60 fps frame loop is 16 ms) to sample it, short enough to feel instant
+/// and never auto-repeat.
+const CHORD_HOLD: std::time::Duration = std::time::Duration::from_millis(120);
 
 const VK_A: u16 = 0x41;
 const VK_C: u16 = 0x43;
@@ -136,11 +150,6 @@ pub(super) fn execute(action: &Action) {
         Action::Named { .. } | Action::None => {}
     }
 }
-
-// SW_SHOWNORMAL from WinUser.h — windows-sys puts it behind the
-// Win32_UI_WindowsAndMessaging feature; not worth enabling for one integer
-// (same treatment as the VK_* codes above).
-const SW_SHOWNORMAL: i32 = 1;
 
 /// Open a [`Action::Run`] target through the shell: URLs launch the default
 /// browser, documents open their association, executables run with the `||`
@@ -345,7 +354,33 @@ fn post_custom_shortcut(combo: &KeyCombo) {
     if combo.modifiers & KeyCombo::MOD_WIN != 0 {
         modifiers.push(VK_LWIN);
     }
-    post_key(vk, &modifiers);
+    post_held_chord(vk, modifiers);
+}
+
+/// Press `modifiers` + `vk`, hold for [`CHORD_HOLD`], then release in
+/// reverse order — the shape of a real keypress rather than an
+/// instantaneous blip (see [`CHORD_HOLD`]).
+///
+/// Runs on its own thread: the caller is a hook callback or an IPC handler
+/// that must not stall for the hold.
+fn post_held_chord(vk: u16, modifiers: Vec<u16>) {
+    std::thread::spawn(move || {
+        let mut press = Vec::with_capacity(modifiers.len() + 1);
+        for modifier in &modifiers {
+            press.push(key_input(*modifier, false));
+        }
+        press.push(key_input(vk, false));
+        send_inputs(&press);
+
+        std::thread::sleep(CHORD_HOLD);
+
+        let mut release = Vec::with_capacity(modifiers.len() + 1);
+        release.push(key_input(vk, true));
+        for modifier in modifiers.iter().rev() {
+            release.push(key_input(*modifier, true));
+        }
+        send_inputs(&release);
+    });
 }
 
 fn send_inputs(inputs: &[INPUT]) {
@@ -376,12 +411,19 @@ fn key_input(vk: u16, key_up: bool) -> INPUT {
     if key_up {
         flags |= KEYEVENTF_KEYUP;
     }
+    // Carry the hardware scan code alongside the virtual key. Windows
+    // forwards it to low-level hooks as `KBDLLHOOKSTRUCT::scanCode`, and
+    // listeners that read that field (rather than the virtual key) ignore
+    // events where it is zero.
+    // SAFETY: MapVirtualKeyW is a pure lookup over the active layout; it
+    // takes no pointers and returns 0 for codes with no mapping.
+    let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) };
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
                 wVk: vk,
-                wScan: 0,
+                wScan: u16::try_from(scan).unwrap_or(0),
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
@@ -409,6 +451,61 @@ fn mouse_input(flags: u32, data: i32) -> INPUT {
 #[cfg(test)]
 mod tests {
     use super::expand_env_with;
+
+    /// The [`CHORD_HOLD`] contract, tested against the mechanism it exists
+    /// for: a listener that samples physical key state on a timer (the
+    /// common shape for global chords) must observe the synthetic chord
+    /// down. Before the hold, the whole chord went out in one `SendInput`
+    /// batch and every such listener missed it.
+    ///
+    /// Ignored by default: it needs an interactive desktop session (CI has
+    /// none, and `SendInput` is a no-op in session 0) and it briefly
+    /// presses real keys. Run with:
+    /// `cargo test -p openlogi-inject -- --ignored held_chord`
+    #[test]
+    #[ignore = "injects real key events; needs an interactive desktop"]
+    fn held_chord_is_visible_to_a_polling_listener() {
+        use openlogi_core::binding::{Action, KeyCombo};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+
+        // kVK 0x69 → VK_F13: bound by essentially nothing, so the test
+        // can't trip a real hotkey on the machine running it.
+        const VK_CONTROL: i32 = 0x11;
+        const VK_F13: i32 = 0x7C;
+
+        let seen = Arc::new(AtomicBool::new(false));
+        let poller = {
+            let seen = Arc::clone(&seen);
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_millis(600);
+                while Instant::now() < deadline {
+                    // SAFETY: same pure state read as the production path.
+                    let down =
+                        |vk: i32| unsafe { GetAsyncKeyState(vk) }.cast_unsigned() & 0x8000 != 0;
+                    if down(VK_CONTROL) && down(VK_F13) {
+                        seen.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+            })
+        };
+
+        super::execute(&Action::CustomShortcut(KeyCombo {
+            modifiers: KeyCombo::MOD_CTRL,
+            key_code: 0x69,
+            display: "Ctrl+F13".into(),
+        }));
+
+        drop(poller.join());
+        assert!(
+            seen.load(Ordering::SeqCst),
+            "a 15 ms poller never saw the chord down — CHORD_HOLD is too short or the press is instantaneous"
+        );
+    }
 
     #[test]
     fn expand_env_substitutes_known_and_keeps_unknown_names() {
