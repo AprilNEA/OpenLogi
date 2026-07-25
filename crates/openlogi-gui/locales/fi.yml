@@ -171,6 +171,8 @@ _version: 1
 "Text to paste": "Liitettävä teksti"
 "A URL, file, or program. After a program path, use || to separate arguments; %VAR% environment variables expand.": "URL, tiedosto tai ohjelma. Ohjelmapolun jälkeen || erottaa argumentit; %VAR%-ympäristömuuttujat laajennetaan."
 "Typed at the cursor exactly as written.": "Kirjoitetaan kohdistimen kohtaan täsmälleen sellaisenaan."
+"Folder": "Kansio"
+"Open Folder": "Avaa kansio"
 "Up": "Ylös"
 "Down": "Alas"
 "Left": "Vasen"

@@ -171,6 +171,8 @@ _version: 1
 "Text to paste": "Texto a pegar"
 "A URL, file, or program. After a program path, use || to separate arguments; %VAR% environment variables expand.": "Una URL, archivo o programa. Tras la ruta del programa, || separa los argumentos; las variables de entorno %VAR% se expanden."
 "Typed at the cursor exactly as written.": "Se escribe en el cursor exactamente como está."
+"Folder": "Carpeta"
+"Open Folder": "Abrir carpeta"
 "Up": "Arriba"
 "Down": "Abajo"
 "Left": "Izquierda"

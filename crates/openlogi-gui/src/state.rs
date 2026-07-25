@@ -1278,6 +1278,34 @@ impl AppState {
         self.persist_and_reload("ring binding");
     }
 
+    /// Persist one sub-slot inside the folder at ring `slot` (converting the
+    /// slot into a folder first when needed) and have the agent reload.
+    pub fn commit_ring_folder_binding(
+        &mut self,
+        slot: openlogi_core::binding::RingSlot,
+        sub_slot: openlogi_core::binding::RingSlot,
+        action: Action,
+    ) {
+        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
+            debug!(?slot, "no active device key — ring folder edit ignored");
+            return;
+        };
+        self.config
+            .set_ring_folder_slot(&key, slot, sub_slot, action);
+        self.persist_and_reload("ring folder binding");
+    }
+
+    /// Convert ring `slot` into a folder (its plain action kept as the
+    /// folder's North entry) and have the agent reload.
+    pub fn convert_ring_slot_to_folder(&mut self, slot: openlogi_core::binding::RingSlot) {
+        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
+            debug!(?slot, "no active device key — folder conversion ignored");
+            return;
+        };
+        self.config.convert_ring_slot_to_folder(&key, slot);
+        self.persist_and_reload("ring folder conversion");
+    }
+
     pub fn commit_gesture_binding(&mut self, direction: GestureDirection, action: Action) {
         let Some(key) = self
             .current_record()

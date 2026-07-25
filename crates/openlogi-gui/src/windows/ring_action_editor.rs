@@ -24,6 +24,69 @@ use crate::state::AppState;
 use crate::theme;
 use crate::windows::{self, AuxWindow, WindowRegistry};
 
+/// Where a ring edit lands: a top-level slot, or a sub-slot inside the
+/// folder at `folder`. Carried by the payload dialog and the editor's
+/// action panel so both commit through the right path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditTarget {
+    /// A top-level Action Ring slot.
+    Slot(RingSlot),
+    /// A position inside the folder at the top-level slot `folder`.
+    FolderSlot {
+        /// The top-level slot holding the folder.
+        folder: RingSlot,
+        /// The position inside that folder.
+        sub: RingSlot,
+    },
+}
+
+impl EditTarget {
+    /// The action currently at this target, resolved against the selected
+    /// device's ring.
+    pub fn current_action(self, state: &AppState) -> Option<Action> {
+        let slots = state.ring_slots_for_current();
+        match self {
+            EditTarget::Slot(slot) => slots
+                .into_iter()
+                .find(|(candidate, _)| *candidate == slot)
+                .map(|(_, action)| action),
+            EditTarget::FolderSlot { folder, sub } => slots
+                .into_iter()
+                .find(|(candidate, _)| *candidate == folder)
+                .and_then(|(_, action)| match action {
+                    Action::Folder(items) => items.get(&sub).cloned(),
+                    _ => None,
+                }),
+        }
+    }
+
+    /// Commit `action` to this target through the matching [`AppState`]
+    /// path.
+    pub fn commit(self, action: Action, cx: &mut App) {
+        cx.update_global::<AppState, _>(|state, _| match self {
+            EditTarget::Slot(slot) => state.commit_ring_binding(slot, action),
+            EditTarget::FolderSlot { folder, sub } => {
+                state.commit_ring_folder_binding(folder, sub, action);
+            }
+        });
+    }
+
+    /// Compass caption for dialog subtitles: `↗ Top Right` or
+    /// `↗ Top Right › ↓ Bottom`.
+    pub fn caption(self) -> String {
+        match self {
+            EditTarget::Slot(slot) => format!("{}  {}", slot.glyph(), tr!(slot.label())),
+            EditTarget::FolderSlot { folder, sub } => format!(
+                "{}  {}  ›  {}  {}",
+                folder.glyph(),
+                tr!(folder.label()),
+                sub.glyph(),
+                tr!(sub.label())
+            ),
+        }
+    }
+}
+
 /// Which payload action this editor edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PayloadKind {
@@ -85,7 +148,7 @@ pub struct RingActionEditorView {
     focus_handle: FocusHandle,
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
-    slot: RingSlot,
+    target: EditTarget,
     kind: PayloadKind,
     input: Entity<InputState>,
 }
@@ -96,10 +159,10 @@ impl AuxWindow for RingActionEditorView {
     }
 }
 
-/// Open the editor for `slot`, seeded with the slot's current payload when it
-/// already holds an action of `kind`. An editor left open for another slot is
-/// closed first — focusing it would edit the wrong slot.
-pub fn open(slot: RingSlot, kind: PayloadKind, cx: &mut App) {
+/// Open the editor for `target`, seeded with its current payload when it
+/// already holds an action of `kind`. An editor left open for another target
+/// is closed first — focusing it would edit the wrong slot.
+pub fn open(target: EditTarget, kind: PayloadKind, cx: &mut App) {
     if let Some(handle) = cx
         .default_global::<WindowRegistry>()
         .ring_action_editor
@@ -110,13 +173,8 @@ pub fn open(slot: RingSlot, kind: PayloadKind, cx: &mut App) {
 
     let seed: String = cx
         .try_global::<AppState>()
-        .and_then(|state| {
-            state
-                .ring_slots_for_current()
-                .into_iter()
-                .find(|(candidate, _)| *candidate == slot)
-                .and_then(|(_, action)| kind.payload_of(&action).map(str::to_owned))
-        })
+        .and_then(|state| target.current_action(state))
+        .and_then(|action| kind.payload_of(&action).map(str::to_owned))
         .unwrap_or_default();
 
     windows::open_or_focus(
@@ -135,7 +193,7 @@ pub fn open(slot: RingSlot, kind: PayloadKind, cx: &mut App) {
             RingActionEditorView {
                 focus_handle,
                 appearance_obs: None,
-                slot,
+                target,
                 kind,
                 input,
             }
@@ -147,7 +205,7 @@ pub fn open(slot: RingSlot, kind: PayloadKind, cx: &mut App) {
 impl Render for RingActionEditorView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let (slot, kind, input) = (self.slot, self.kind, self.input.clone());
+        let (target, kind, input) = (self.target, self.kind, self.input.clone());
 
         v_flex()
             .size_full()
@@ -176,11 +234,12 @@ impl Render for RingActionEditorView {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(tr!(self.kind.title_key())),
                             )
-                            .child(div().text_sm().text_color(pal.text_muted).child(format!(
-                                "{}  {}",
-                                self.slot.glyph(),
-                                tr!(self.slot.label())
-                            ))),
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(pal.text_muted)
+                                    .child(self.target.caption()),
+                            ),
                     )
                     .child(Input::new(&self.input))
                     .child(
@@ -212,10 +271,7 @@ impl Render for RingActionEditorView {
                                         let payload =
                                             input.read(cx).value().trim().to_owned();
                                         if !payload.is_empty() {
-                                            let action = kind.action(payload);
-                                            cx.update_global::<AppState, _>(|state, _| {
-                                                state.commit_ring_binding(slot, action);
-                                            });
+                                            target.commit(kind.action(payload), cx);
                                         }
                                         window.remove_window();
                                     }),

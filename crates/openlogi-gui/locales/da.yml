@@ -171,6 +171,8 @@ _version: 1
 "Text to paste": "Tekst der skal indsættes"
 "A URL, file, or program. After a program path, use || to separate arguments; %VAR% environment variables expand.": "En URL, fil eller et program. Efter en programsti adskiller || argumenterne; %VAR%-miljøvariabler udvides."
 "Typed at the cursor exactly as written.": "Skrives ved markøren præcis som skrevet."
+"Folder": "Mappe"
+"Open Folder": "Åbn mappe"
 "Up": "Op"
 "Down": "Ned"
 "Left": "Venstre"

@@ -66,6 +66,9 @@ pub struct MouseModelView {
     /// Whether the Action Ring's full-page editor is shown in place of the
     /// mouse diagram (see [`crate::mouse_model::ring_editor`]).
     ring_editor_open: bool,
+    /// The top-level ring slot whose folder the editor has drilled into, if
+    /// any — the editor then shows and edits that folder's contents.
+    ring_folder_open: Option<RingSlot>,
     /// Which ring slot the open Action Ring menu has activated (so its level-2
     /// flyout card shows) — the ring counterpart of
     /// [`Self::gesture_active_dir`].
@@ -81,6 +84,7 @@ impl MouseModelView {
             hovered: None,
             gesture_active_dir: None,
             ring_editor_open: false,
+            ring_folder_open: None,
             ring_active_slot: None,
             _state_obs: state_obs,
         }
@@ -97,11 +101,6 @@ impl MouseModelView {
         self.gesture_active_dir = dir;
     }
 
-    /// The ring slot whose level-2 flyout is open, if any.
-    pub(crate) fn ring_selected_slot(&self) -> Option<RingSlot> {
-        self.ring_active_slot
-    }
-
     /// Set (or clear, with `None`) the activated ring slot. Callers must
     /// `cx.notify()` to re-render.
     pub(crate) fn set_ring_selected_slot(&mut self, slot: Option<RingSlot>) {
@@ -109,9 +108,18 @@ impl MouseModelView {
     }
 
     /// Show or hide the Action Ring's full-page editor. Callers must
-    /// `cx.notify()` to re-render.
+    /// `cx.notify()` to re-render. Closing also pops any open folder.
     pub(crate) fn set_ring_editor_open(&mut self, open: bool) {
         self.ring_editor_open = open;
+        if !open {
+            self.ring_folder_open = None;
+        }
+    }
+
+    /// Drill into (or, with `None`, back out of) a ring folder in the
+    /// editor. Callers must `cx.notify()` to re-render.
+    pub(crate) fn set_ring_folder_open(&mut self, slot: Option<RingSlot>) {
+        self.ring_folder_open = slot;
     }
 
     /// The Action Ring's full-page editor, while its scratch flag is set —
@@ -122,7 +130,13 @@ impl MouseModelView {
         self.ring_editor_open.then(|| {
             let view = cx.entity();
             let pal = theme::palette(cx);
-            crate::mouse_model::ring_editor::page(&view, pal, cx)
+            crate::mouse_model::ring_editor::page(
+                self.ring_active_slot,
+                self.ring_folder_open,
+                &view,
+                pal,
+                cx,
+            )
         })
     }
 }

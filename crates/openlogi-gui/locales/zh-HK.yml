@@ -171,6 +171,8 @@ _version: 1
 "Text to paste": "要貼上的文字"
 "A URL, file, or program. After a program path, use || to separate arguments; %VAR% environment variables expand.": "URL、檔案或程式。在程式路徑後以 || 分隔參數；%VAR% 環境變數會展開。"
 "Typed at the cursor exactly as written.": "按原樣在游標處輸入。"
+"Folder": "資料夾"
+"Open Folder": "開啟資料夾"
 "Up": "上"
 "Down": "下"
 "Left": "左"

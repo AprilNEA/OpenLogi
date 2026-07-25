@@ -166,6 +166,7 @@ fn open(cx: &mut App) {
         Some(window) => {
             let refreshed = window.update(cx, |view, _, cx| {
                 view.slots.clone_from(&slots);
+                view.in_folder = false;
                 view.aim = Aim::Center;
                 cx.notify();
             });
@@ -263,8 +264,8 @@ fn watch_tick(epoch: u64, hwnd: isize, cx: &mut App) -> bool {
     false
 }
 
-/// Confirm the current aim: fire the aimed sector's action, or cancel from
-/// the dead zone.
+/// Confirm the current aim: fire the aimed sector, or — from the dead zone —
+/// step back out of an open folder / cancel from the main ring.
 fn confirm(cx: &mut App) {
     let (center, scale) = {
         let overlay = cx.global::<RingOverlay>();
@@ -273,33 +274,89 @@ fn confirm(cx: &mut App) {
     let aim =
         platform_win::cursor_pos().map_or(Aim::Center, |cursor| aim_for(center, cursor, scale));
     match aim {
-        Aim::Center => debug!("action ring cancelled (centre tap)"),
-        Aim::Sector(slot) => fire(slot, cx),
+        Aim::Center => {
+            if view_in_folder(cx) {
+                back_to_main(cx);
+            } else {
+                debug!("action ring cancelled (centre tap)");
+                close(cx);
+            }
+        }
+        Aim::Sector(slot) => activate(slot, cx),
     }
-    close(cx);
 }
 
-/// Fire `slot`'s bound action through the agent.
-fn fire(slot: RingSlot, cx: &mut App) {
-    let window = cx.global::<RingOverlay>().window;
-    let action = window.and_then(|window| {
-        window
-            .update(cx, |view, _, _| view.action_for(slot))
-            .ok()
-            .flatten()
-    });
+/// Fire `slot`: a folder swaps the ring to its contents (staying open); a
+/// leaf action goes to the agent and closes the ring; an empty sector — a
+/// sparse folder position — does nothing.
+fn activate(slot: RingSlot, cx: &mut App) {
+    let Some(window) = cx.global::<RingOverlay>().window else {
+        return;
+    };
+    let Ok((action, in_folder)) =
+        window.update(cx, |view, _, _| (view.action_for(slot), view.in_folder))
+    else {
+        return;
+    };
     let Some(action) = action else {
         return;
     };
-    info!(slot = %slot, action = %action.label(), "action ring → action");
-    if cx
-        .global::<RingOverlay>()
-        .commands
-        .send(Command::ExecuteAction(action))
-        .is_err()
-    {
-        warn!("IPC client is gone — ring action dropped");
+    match action {
+        Action::Folder(items) if !in_folder => {
+            let items: Vec<(RingSlot, Action)> = items
+                .into_iter()
+                .filter(|(_, action)| !matches!(action, Action::None))
+                .collect();
+            if items.is_empty() {
+                debug!("empty folder — ignored");
+                return;
+            }
+            info!(slot = %slot, "action ring → folder");
+            let _ = window.update(cx, |view, _, cx| {
+                view.slots = items;
+                view.in_folder = true;
+                view.aim = Aim::Center;
+                cx.notify();
+            });
+        }
+        // One level deep by convention — a folder nested inside a folder is
+        // ignored rather than dispatched (the injector would only warn).
+        Action::Folder(_) => warn!("nested folder ignored"),
+        action => {
+            info!(slot = %slot, action = %action.label(), "action ring → action");
+            if cx
+                .global::<RingOverlay>()
+                .commands
+                .send(Command::ExecuteAction(action))
+                .is_err()
+            {
+                warn!("IPC client is gone — ring action dropped");
+            }
+            close(cx);
+        }
     }
+}
+
+/// Whether the open ring currently shows a folder's contents.
+fn view_in_folder(cx: &mut App) -> bool {
+    cx.global::<RingOverlay>()
+        .window
+        .and_then(|window| window.update(cx, |view, _, _| view.in_folder).ok())
+        .unwrap_or(false)
+}
+
+/// Swap an open folder back to the main ring.
+fn back_to_main(cx: &mut App) {
+    let slots = cx.global::<AppState>().ring_slots_for_current();
+    if let Some(window) = cx.global::<RingOverlay>().window {
+        let _ = window.update(cx, |view, _, cx| {
+            view.slots.clone_from(&slots);
+            view.in_folder = false;
+            view.aim = Aim::Center;
+            cx.notify();
+        });
+    }
+    debug!("action ring folder closed — back to the main ring");
 }
 
 /// Hide the ring.
@@ -335,6 +392,7 @@ fn create_window(slots: Vec<(RingSlot, Action)>, cx: &mut App) -> Option<WindowH
     let opened = cx.open_window(options, |_, cx| {
         cx.new(|_| RingView {
             slots,
+            in_folder: false,
             aim: Aim::Center,
         })
     });
@@ -367,9 +425,12 @@ fn window_hwnd(window: &WindowHandle<RingView>, cx: &mut App) -> Option<isize> {
         .flatten()
 }
 
-/// The ring's root view: eight sector buttons on a circle and the centre ✕.
+/// The ring's root view: sector buttons on a circle and the centre ✕ — or,
+/// while a folder is open, the folder's (possibly sparse) contents with a
+/// centre ← that steps back to the main ring.
 pub struct RingView {
     slots: Vec<(RingSlot, Action)>,
+    in_folder: bool,
     aim: Aim,
 }
 
@@ -422,10 +483,7 @@ impl Render for RingView {
                             }),
                     )
                     .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.defer(move |cx| {
-                            fire(slot_for_click, cx);
-                            close(cx);
-                        });
+                        cx.defer(move |cx| activate(slot_for_click, cx));
                     })),
             )
         });
@@ -450,9 +508,13 @@ impl Render for RingView {
                 .shadow_sm()
                 .text_xs()
                 .text_color(gpui::rgb(CROSS_TEXT))
-                .child("✕")
-                .on_click(cx.listener(|_, _, _, cx| {
-                    cx.defer(close);
+                .child(if self.in_folder { "←" } else { "✕" })
+                .on_click(cx.listener(|view, _, _, cx| {
+                    if view.in_folder {
+                        cx.defer(back_to_main);
+                    } else {
+                        cx.defer(close);
+                    }
                 })),
         )
     }

@@ -34,8 +34,7 @@ use crate::data::mouse_buttons::{
 use crate::mouse_model::view::MouseModelView;
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
-use crate::windows::ring_action_editor::PayloadKind;
-use openlogi_core::binding::RingSlot;
+use crate::windows::ring_action_editor::{EditTarget, PayloadKind};
 
 /// Floor width for the [`action_picker`] popover. The action labels drive the
 /// actual width; this only stops the list from collapsing too narrow. Matches
@@ -111,10 +110,10 @@ pub fn gesture_overview(
 
 /// A "Run Command…" / "Paste Text…" action-list row. Unlike the catalog rows it
 /// commits nothing itself — it opens the payload-editor dialog seeded from
-/// the slot's current action. Selection styling still mirrors the catalog so
-/// a slot bound to a payload action shows where its value lives.
+/// the target's current action. Selection styling still mirrors the catalog
+/// so a slot bound to a payload action shows where its value lives.
 pub(crate) fn payload_editor_row(
-    slot: RingSlot,
+    target: EditTarget,
     kind: PayloadKind,
     idx: usize,
     current: &Action,
@@ -144,7 +143,7 @@ pub(crate) fn payload_editor_row(
             )
         })
         .on_click(move |_event, _window, cx| {
-            crate::windows::ring_action_editor::open(slot, kind, cx);
+            crate::windows::ring_action_editor::open(target, kind, cx);
         })
         .into_any_element()
 }
@@ -388,6 +387,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
         Action::CustomShortcut(_) => "action-icons/keyboard.svg",
+        Action::Folder(_) => "action-icons/folder.svg",
     }
 }
 

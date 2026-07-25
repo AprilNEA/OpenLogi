@@ -93,8 +93,10 @@ North = "PlayPause"
 NorthEast = "CaptureRegion"
 # `Run` opens a URL, file, or program (`||` separates a program's arguments;
 # %VAR% environment variables expand). `PasteText` types a snippet at the
-# cursor. Both are also editable from the ring menu in the app.
-East = { Run = "https://gemini.google.com/" }
+# cursor. `Folder` nests a sub-ring (one level; sparse maps fine) that the
+# on-screen ring opens in place. All are editable from the ring editor in
+# the app.
+East = { Folder = { North = { Run = "https://gemini.google.com/" }, South = "Copy" } }
 SouthEast = "LockScreen"
 South = { Run = 'C:\Windows\notepad.exe||%USERPROFILE%\notes.txt' }
 SouthWest = "ShowDesktop"
