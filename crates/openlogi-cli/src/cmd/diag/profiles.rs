@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use openlogi_hid::{OnboardProfilesInfo, ProfilesMode};
+use openlogi_hid::{DeviceRoute, OnboardProfilesInfo, ProfilesMode};
 
 use crate::cmd::diag::select_device;
 
@@ -55,9 +55,30 @@ pub async fn run(args: ProfilesArgs) -> Result<()> {
         }
     }
 
-    // Active-profile round-trip against an enabled entry. Prefer one that is
-    // not already active; a single-profile device re-writes the same sector,
-    // which still exercises the write path.
+    let round_trip = profile_round_trip(&route, &info).await;
+
+    if args.leave_onboard {
+        round_trip?;
+        println!("✓ onboard-profiles diag OK (device left in Onboard mode)");
+        return Ok(());
+    }
+
+    // Restore the original mode last, so the device leaves the diag exactly as
+    // it entered (host-mode users get host mode back) — including when the
+    // round-trip failed, which is precisely when the device is left changed.
+    let restore = restore_mode(&route, info.mode).await;
+    round_trip?;
+    restore?;
+
+    println!("✓ onboard-profiles diag OK");
+    Ok(())
+}
+
+/// Activate an enabled profile and put the original one back.
+///
+/// Prefers a sector that is not already active; a single-profile device
+/// re-writes the same sector, which still exercises the write path.
+async fn profile_round_trip(route: &DeviceRoute, info: &OnboardProfilesInfo) -> Result<()> {
     let target = info
         .directory
         .iter()
@@ -76,7 +97,7 @@ pub async fn run(args: ProfilesArgs) -> Result<()> {
                 );
             }
             println!("  activating profile sector {target:#06x}");
-            let read_back = openlogi_hid::set_active_profile(&route, target)
+            let read_back = openlogi_hid::set_active_profile(route, target)
                 .await
                 .context("write active profile")?;
             if read_back != target {
@@ -90,7 +111,7 @@ pub async fn run(args: ProfilesArgs) -> Result<()> {
                 println!("  original active profile was 0x0000 (none) — restore skipped");
             } else if info.active_profile != target {
                 println!("  restoring profile sector {:#06x}", info.active_profile);
-                let restored = openlogi_hid::set_active_profile(&route, info.active_profile)
+                let restored = openlogi_hid::set_active_profile(route, info.active_profile)
                     .await
                     .context("restore active profile")?;
                 if restored != info.active_profile {
@@ -103,29 +124,24 @@ pub async fn run(args: ProfilesArgs) -> Result<()> {
             println!("  ✓ profile round-trip OK");
         }
     }
+    Ok(())
+}
 
-    if args.leave_onboard {
-        println!("✓ onboard-profiles diag OK (device left in Onboard mode)");
+/// Put the device back into `mode`. A no-op when the diag never left it.
+async fn restore_mode(route: &DeviceRoute, mode: ProfilesMode) -> Result<()> {
+    if mode == ProfilesMode::Onboard {
         return Ok(());
     }
-
-    // Restore the original mode last, so the device leaves the diag exactly
-    // as it entered (host-mode users get host mode back).
-    if info.mode != ProfilesMode::Onboard {
-        println!("  restoring mode: {:?}", info.mode);
-        let restored = openlogi_hid::set_profiles_mode(&route, info.mode)
-            .await
-            .context("restore onboard mode")?;
-        if restored != info.mode {
-            anyhow::bail!(
-                "onboard mode restore not applied: requested {:?}, device reports {restored:?}",
-                info.mode
-            );
-        }
-        println!("  ✓ mode round-trip OK");
+    println!("  restoring mode: {mode:?}");
+    let restored = openlogi_hid::set_profiles_mode(route, mode)
+        .await
+        .context("restore onboard mode")?;
+    if restored != mode {
+        anyhow::bail!(
+            "onboard mode restore not applied: requested {mode:?}, device reports {restored:?}"
+        );
     }
-
-    println!("✓ onboard-profiles diag OK");
+    println!("  ✓ mode round-trip OK");
     Ok(())
 }
 
@@ -146,7 +162,7 @@ fn print_info(info: &OnboardProfilesInfo) {
     println!("  mode: {:?}", info.mode);
     match info.active_profile {
         0 => println!("  active profile: none reported (0x0000)"),
-        sector if sector & 0x0100 != 0 => {
+        sector if openlogi_hid::is_rom_sector(sector) => {
             println!("  active profile: {sector:#06x} (ROM)");
         }
         sector => println!("  active profile: {sector:#06x}"),
