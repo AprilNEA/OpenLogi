@@ -572,7 +572,8 @@ pub fn write_scroll_wheel_mode_in_background(
 /// in onboard mode, the active profile) to the gaming device at `target`,
 /// then runs `after` on the same thread.
 ///
-/// `after` runs regardless of the apply's outcome. It exists because a gaming
+/// `after` runs regardless of the apply's outcome — including a panic, since
+/// the whole rest of the reconnect reapply rides on it. It exists because a gaming
 /// mouse still in onboard mode rejects the other volatile writes (a G502 X
 /// answered a DPI reapply with `InvalidArgument` while onboard), so the
 /// reconnect reapply passes the rest of its writes as this continuation
@@ -598,6 +599,7 @@ pub fn apply_onboard_profiles_in_background(
     let shared = reusable_channel(capture, &target);
     let reused = shared.is_some();
     std::thread::spawn(move || {
+        let _continuation = RunOnDrop(Some(after));
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -605,7 +607,6 @@ pub fn apply_onboard_profiles_in_background(
             Ok(rt) => rt,
             Err(e) => {
                 warn!(error = %e, "tokio runtime init failed; onboard-profiles apply skipped");
-                after();
                 return;
             }
         };
@@ -641,8 +642,19 @@ pub fn apply_onboard_profiles_in_background(
                 "onboard-profiles apply timed out (device asleep/unresponsive)"
             ),
         }
-        after();
     });
+}
+
+/// Runs the wrapped closure when dropped, so a continuation survives an early
+/// return or a panic on the way to it.
+struct RunOnDrop<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> Drop for RunOnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
 }
 
 /// Apply `lighting` to the keyboard at `target` on a background thread.
