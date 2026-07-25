@@ -32,7 +32,8 @@ use serde::{Deserialize, Serialize};
 /// v11: `next_ring_press` + `execute_action` appended (Action Ring overlay).
 /// v12: [`Action`] gains the appended `Run` / `PasteText` variants (they ride
 ///      inside `execute_action` and config snapshots).
-pub const PROTOCOL_VERSION: u32 = 12;
+/// v13: [`Action`] gains the appended `Folder` variant (ring sub-menus).
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// One Action Ring pad press, streamed to the GUI via
 /// [`Agent::next_ring_press`] so the on-screen ring opens (or confirms a
