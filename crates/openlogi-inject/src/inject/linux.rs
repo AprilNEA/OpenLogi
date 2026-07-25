@@ -19,7 +19,8 @@ pub(super) fn execute(action: &Action) {
     let ctrl = KeyCode::KEY_LEFTCTRL;
     let shift = KeyCode::KEY_LEFTSHIFT;
     let alt = KeyCode::KEY_LEFTALT;
-    match action {
+    // A user-chosen label is presentation only — dispatch what it wraps.
+    match action.inner() {
         // ── Mouse clicks ──────────────────────────────────────────────────
         Action::LeftClick => click(KeyCode::BTN_LEFT),
         Action::RightClick => click(KeyCode::BTN_RIGHT),
@@ -121,6 +122,8 @@ pub(super) fn execute(action: &Action) {
         Action::Folder(_) => {
             tracing::warn!("folder reached the injector — containers are resolved by the ring");
         }
+        // `inner()` already stripped every label.
+        Action::Named { .. } => {}
     }
 }
 

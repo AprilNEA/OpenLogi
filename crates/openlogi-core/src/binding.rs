@@ -489,6 +489,57 @@ pub enum Action {
     /// overlay treats a folder nested inside a folder as a plain (warned,
     /// ignored) leaf.
     Folder(BTreeMap<RingSlot, Action>),
+
+    /// A user-labelled wrapper — the Options+ card name. `Run`/`PasteText`/
+    /// `CustomShortcut` payloads are what the machine does; this is what the
+    /// user calls it ("Wispr Voice", not `⊞⌃Space`). Purely presentational:
+    /// every consumer dispatches [`Action::inner`], so a name can be added
+    /// or removed without changing behaviour.
+    Named {
+        /// Display label. Empty falls back to the wrapped action's own
+        /// label, so a blanked name is not a blank slot.
+        name: String,
+        /// What actually runs.
+        action: Box<Action>,
+    },
+}
+
+impl Action {
+    /// The action stripped of any [`Action::Named`] wrappers — what every
+    /// dispatcher should execute. Loops rather than recurses so an
+    /// accidentally double-wrapped action still resolves.
+    #[must_use]
+    pub fn inner(&self) -> &Action {
+        let mut current = self;
+        while let Action::Named { action, .. } = current {
+            current = action;
+        }
+        current
+    }
+
+    /// The user-chosen name, if this action carries one.
+    #[must_use]
+    pub fn display_name(&self) -> Option<&str> {
+        match self {
+            Action::Named { name, .. } if !name.is_empty() => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Wrap in (or, with an empty `name`, strip) a [`Action::Named`] label,
+    /// never stacking one wrapper on another.
+    #[must_use]
+    pub fn with_name(self, name: &str) -> Action {
+        let inner = self.inner().clone();
+        if name.is_empty() {
+            inner
+        } else {
+            Action::Named {
+                name: name.to_owned(),
+                action: Box::new(inner),
+            }
+        }
+    }
 }
 
 /// Split an [`Action::Run`] payload into its target and optional argument
@@ -982,6 +1033,13 @@ impl Action {
                     .count();
                 format!("Folder ({filled})")
             }
+            Action::Named { name, action } => {
+                if name.is_empty() {
+                    action.label()
+                } else {
+                    name.clone()
+                }
+            }
         }
     }
 
@@ -1040,6 +1098,8 @@ impl Action {
             | Action::ScrollDown
             | Action::HorizontalScrollLeft
             | Action::HorizontalScrollRight => Category::Scroll,
+            // A label doesn't change what an action is.
+            Action::Named { action, .. } => action.category(),
         }
     }
 
@@ -1252,6 +1312,7 @@ mod tests {
                         | Action::Run(_)
                         | Action::PasteText(_)
                         | Action::Folder(_)
+                        | Action::Named { .. }
                 ),
                 "catalog must not contain payload-carrying editor actions"
             );
@@ -1287,6 +1348,56 @@ mod tests {
             parsed.bindings[&ButtonId::Forward],
             Binding::Single(Action::Folder(_))
         ));
+    }
+
+    #[test]
+    fn named_labels_by_name_but_stays_the_wrapped_action() {
+        let named = Action::Run("https://gemini.google.com/".into()).with_name("Rephrase");
+        assert_eq!(named.label(), "Rephrase");
+        assert_eq!(named.display_name(), Some("Rephrase"));
+        assert_eq!(
+            named.inner(),
+            &Action::Run("https://gemini.google.com/".into()),
+            "dispatch sees through the label"
+        );
+        assert_eq!(
+            named.category(),
+            Action::Run(String::new()).category(),
+            "a label does not re-categorize"
+        );
+
+        // Renaming replaces the wrapper instead of stacking one.
+        let renamed = named.with_name("Gemini");
+        assert_eq!(renamed.display_name(), Some("Gemini"));
+        assert_eq!(
+            renamed.inner(),
+            &Action::Run("https://gemini.google.com/".into())
+        );
+        // An empty name unwraps rather than showing a blank slot.
+        assert_eq!(
+            renamed.with_name(""),
+            Action::Run("https://gemini.google.com/".into())
+        );
+        // An empty name inside a stored action still renders something.
+        let blank = Action::Named {
+            name: String::new(),
+            action: Box::new(Action::Copy),
+        };
+        assert_eq!(blank.label(), "Copy");
+        assert_eq!(blank.display_name(), None);
+    }
+
+    #[test]
+    fn named_roundtrips_through_toml() {
+        let bindings = BTreeMap::from([(
+            ButtonId::Forward,
+            Binding::Single(Action::PasteText("hi".into()).with_name("Greeting")),
+        )]);
+        let back = binding_roundtrip(bindings);
+        assert_eq!(
+            back[&ButtonId::Forward],
+            Binding::Single(Action::PasteText("hi".into()).with_name("Greeting"))
+        );
     }
 
     #[test]

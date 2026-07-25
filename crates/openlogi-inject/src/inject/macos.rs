@@ -41,9 +41,11 @@ pub(super) fn execute(action: &Action) {
     let shift = CGEventFlags::CGEventFlagShift;
     let ctrl = CGEventFlags::CGEventFlagControl;
 
-    match action {
-        // Suppressed input: captured but deliberately produces no event.
-        Action::None => {}
+    // A user-chosen label is presentation only — dispatch what it wraps.
+    match action.inner() {
+        // Suppressed input: captured but deliberately produces no event;
+        // `inner()` already stripped every label.
+        Action::None | Action::Named { .. } => {}
         // ── Mouse clicks: synthesise a click at the cursor ────────────────
         // Remapping a *different* button to a click lands here (e.g. Back →
         // MiddleClick). A button left on its own native click never reaches

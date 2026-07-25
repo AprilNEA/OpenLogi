@@ -66,7 +66,8 @@ const XBUTTON2: i32 = 2;
 /// window-manager actions map to their Windows equivalents; `CustomShortcut`
 /// maps macOS `kVK_*` codes to Windows virtual-key codes (Cmd → Ctrl).
 pub(super) fn execute(action: &Action) {
-    match action {
+    // A user-chosen label is presentation only — dispatch what it wraps.
+    match action.inner() {
         Action::LeftClick => post_click(MouseButton::Left),
         Action::RightClick => post_click(MouseButton::Right),
         Action::MiddleClick => post_click(MouseButton::Middle),
@@ -131,7 +132,8 @@ pub(super) fn execute(action: &Action) {
         Action::Folder(_) => {
             tracing::warn!("folder reached the injector — containers are resolved by the ring");
         }
-        Action::None => {}
+        // `inner()` already stripped every label.
+        Action::Named { .. } | Action::None => {}
     }
 }
 

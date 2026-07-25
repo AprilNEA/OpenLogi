@@ -33,7 +33,8 @@ use serde::{Deserialize, Serialize};
 /// v12: [`Action`] gains the appended `Run` / `PasteText` variants (they ride
 ///      inside `execute_action` and config snapshots).
 /// v13: [`Action`] gains the appended `Folder` variant (ring sub-menus).
-pub const PROTOCOL_VERSION: u32 = 13;
+/// v14: [`Action`] gains the appended `Named` variant (user action labels).
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// One Action Ring pad press, streamed to the GUI via
 /// [`Agent::next_ring_press`] so the on-screen ring opens (or confirms a
