@@ -480,6 +480,15 @@ pub enum Action {
     /// "Paste Text" action. Synthesized as Unicode key events rather than a
     /// clipboard round-trip, so the user's clipboard is never clobbered.
     PasteText(String),
+
+    /// A sub-ring — the Options+ ring "Folder": firing this slot swaps the
+    /// on-screen ring to the nested actions instead of executing anything
+    /// (the overlay resolves it; it never reaches the injector). Sparse maps
+    /// are fine — empty positions just don't render. One level deep by
+    /// convention: the editor only offers folders at the top level, and the
+    /// overlay treats a folder nested inside a folder as a plain (warned,
+    /// ignored) leaf.
+    Folder(BTreeMap<RingSlot, Action>),
 }
 
 /// Split an [`Action::Run`] payload into its target and optional argument
@@ -832,6 +841,13 @@ impl Action {
                 }
                 format!("Paste: {snippet}")
             }
+            Action::Folder(items) => {
+                let filled = items
+                    .values()
+                    .filter(|action| !matches!(action, Action::None))
+                    .count();
+                format!("Folder ({filled})")
+            }
         }
     }
 
@@ -875,7 +891,8 @@ impl Action {
             | Action::LockScreen
             | Action::Screenshot
             | Action::CaptureRegion
-            | Action::Run(_) => Category::System,
+            | Action::Run(_)
+            | Action::Folder(_) => Category::System,
             Action::PlayPause
             | Action::NextTrack
             | Action::PrevTrack
@@ -894,10 +911,11 @@ impl Action {
 
     /// All pickable actions in a deterministic order.
     ///
-    /// [`Action::CustomShortcut`], [`Action::Run`] and [`Action::PasteText`]
-    /// are intentionally excluded — they carry payloads and are entered via
-    /// their dedicated editor rows ("Record shortcut…", "Run…", "Paste
-    /// text…"), not selected from the catalog.
+    /// [`Action::CustomShortcut`], [`Action::Run`], [`Action::PasteText`]
+    /// and [`Action::Folder`] are intentionally excluded — they carry
+    /// payloads and are entered via their dedicated editor rows ("Record
+    /// shortcut…", "Run…", "Paste text…", "Folder…"), not selected from the
+    /// catalog.
     #[must_use]
     pub fn catalog() -> Vec<Action> {
         vec![
@@ -1096,11 +1114,45 @@ mod tests {
             assert!(
                 !matches!(
                     action,
-                    Action::CustomShortcut(_) | Action::Run(_) | Action::PasteText(_)
+                    Action::CustomShortcut(_)
+                        | Action::Run(_)
+                        | Action::PasteText(_)
+                        | Action::Folder(_)
                 ),
                 "catalog must not contain payload-carrying editor actions"
             );
         }
+    }
+
+    #[test]
+    fn folder_roundtrips_inside_a_ring_and_labels_by_filled_count() {
+        let folder = Action::Folder(BTreeMap::from([
+            (RingSlot::North, Action::PasteText("4 Tracks".into())),
+            (RingSlot::East, Action::Run("https://chatgpt.com/".into())),
+            (RingSlot::South, Action::None),
+        ]));
+        assert_eq!(folder.label(), "Folder (2)", "None entries are hidden");
+
+        let mut ring: BTreeMap<RingSlot, Action> = RingSlot::ALL
+            .into_iter()
+            .map(|s| (s, default_ring_binding(s)))
+            .collect();
+        ring.insert(RingSlot::NorthEast, folder.clone());
+        let mut bindings = BTreeMap::new();
+        bindings.insert(ButtonId::ActionRing, Binding::Ring(ring.clone()));
+        let back = binding_roundtrip(bindings);
+        assert_eq!(back[&ButtonId::ActionRing], Binding::Ring(ring));
+
+        // The untagged router must still land a bare `{ Folder = … }` table
+        // on Single, not mistake it for a one-entry Gesture/Ring map.
+        let parsed = toml::from_str::<BindingWrapper>(
+            "bindings.Forward = { Folder = { North = \"Copy\" } }",
+        )
+        .expect("deserialize");
+        assert!(matches!(
+            parsed.bindings[&ButtonId::Forward],
+            Binding::Single(Action::Folder(_))
+        ));
     }
 
     #[test]

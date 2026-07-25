@@ -284,6 +284,66 @@ impl Config {
         }
     }
 
+    /// Converts the Action Ring `slot` into a [`Action::Folder`], keeping a
+    /// plain action it previously held as the folder's North entry so the
+    /// conversion never silently discards a binding. Idempotent: a slot that
+    /// already holds a folder is left untouched.
+    pub fn convert_ring_slot_to_folder(
+        &mut self,
+        device_key: &str,
+        slot: crate::binding::RingSlot,
+    ) {
+        use crate::binding::RingSlot;
+        let current = self.ring_slot_action(device_key, slot);
+        if matches!(current, Some(Action::Folder(_))) {
+            return;
+        }
+        let mut items = std::collections::BTreeMap::new();
+        if let Some(action) = current
+            && action != Action::None
+        {
+            items.insert(RingSlot::North, action);
+        }
+        self.set_ring_slot(device_key, slot, Action::Folder(items));
+    }
+
+    /// Records `action` for one `sub_slot` inside the folder at `slot`,
+    /// converting the slot into a folder first when it holds a plain action
+    /// (see [`Self::convert_ring_slot_to_folder`]).
+    pub fn set_ring_folder_slot(
+        &mut self,
+        device_key: &str,
+        slot: crate::binding::RingSlot,
+        sub_slot: crate::binding::RingSlot,
+        action: Action,
+    ) {
+        self.convert_ring_slot_to_folder(device_key, slot);
+        let entry = self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .bindings
+            .entry(ButtonId::ActionRing)
+            .or_insert_with(|| default_binding_for(ButtonId::ActionRing));
+        if let Binding::Ring(map) = entry
+            && let Some(Action::Folder(items)) = map.get_mut(&slot)
+        {
+            items.insert(sub_slot, action);
+        }
+    }
+
+    /// The action currently bound to one Action Ring `slot`, if the device
+    /// has a ring binding at all.
+    fn ring_slot_action(&self, device_key: &str, slot: crate::binding::RingSlot) -> Option<Action> {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.bindings.get(&ButtonId::ActionRing))
+            .and_then(|binding| match binding {
+                Binding::Ring(map) => map.get(&slot).cloned(),
+                _ => None,
+            })
+    }
+
     /// Ensure `button` on `device_key` is a [`Binding::Gesture`], creating the
     /// device + a default binding if needed and upgrading a [`Binding::Single`]
     /// in place (its action kept as the [`GestureDirection::Click`]). Returns the
@@ -634,6 +694,53 @@ mod tests {
         let cfg = Config::load_from_path(&path).expect("load");
         assert_eq!(cfg.schema_version, SCHEMA_VERSION);
         assert!(cfg.devices.is_empty());
+    }
+
+    #[test]
+    fn folder_conversion_keeps_the_old_action_and_edits_nest() {
+        use crate::binding::{Action, RingSlot};
+
+        let mut cfg = Config::default();
+        cfg.set_ring_slot("2b042", RingSlot::East, Action::LockScreen);
+        cfg.convert_ring_slot_to_folder("2b042", RingSlot::East);
+        cfg.set_ring_folder_slot(
+            "2b042",
+            RingSlot::East,
+            RingSlot::SouthEast,
+            Action::Run("https://chatgpt.com/".into()),
+        );
+        // Converting twice must not wipe the folder.
+        cfg.convert_ring_slot_to_folder("2b042", RingSlot::East);
+
+        let Some(Binding::Ring(map)) = cfg.bindings_for("2b042").remove(&ButtonId::ActionRing)
+        else {
+            panic!("ActionRing must stay ring-shaped");
+        };
+        let Action::Folder(items) = &map[&RingSlot::East] else {
+            panic!("East must hold a folder, got {:?}", map[&RingSlot::East]);
+        };
+        assert_eq!(
+            items[&RingSlot::North],
+            Action::LockScreen,
+            "the pre-conversion action survives as North"
+        );
+        assert_eq!(
+            items[&RingSlot::SouthEast],
+            Action::Run("https://chatgpt.com/".into())
+        );
+
+        // A folder edit on a slot holding a plain action converts implicitly.
+        cfg.set_ring_folder_slot("2b042", RingSlot::West, RingSlot::North, Action::Copy);
+        let Some(Binding::Ring(map)) = cfg.bindings_for("2b042").remove(&ButtonId::ActionRing)
+        else {
+            panic!("ActionRing must stay ring-shaped");
+        };
+        let Action::Folder(items) = &map[&RingSlot::West] else {
+            panic!("West must hold a folder");
+        };
+        // West's default (Undo) became the folder's North; the edit then
+        // overwrote North with Copy — dropping nothing silently.
+        assert_eq!(items[&RingSlot::North], Action::Copy);
     }
 
     #[test]
