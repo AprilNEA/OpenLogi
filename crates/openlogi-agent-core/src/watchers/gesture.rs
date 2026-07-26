@@ -3,7 +3,7 @@
 //! Runs [`openlogi_hid::run_capture_session`] concurrently for every device in
 //! the shared capture-plan list (not just the GUI's selection), restarts a
 //! session when its device's plan — route, diverted controls, thumb-wheel
-//! arming — changes, and dispatches each captured input against the binding
+//! capture mode — changes, and dispatches each captured input against the binding
 //! maps of the device it arrived on:
 //!
 //! - a gesture swipe through the gesture binding map,
@@ -27,7 +27,9 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{Action, ButtonId, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
 use openlogi_hid::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
+use openlogi_hid::{
+    CaptureChannel, CapturedInput, DeviceRoute, ThumbwheelCaptureMode, run_capture_session,
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
@@ -35,9 +37,8 @@ use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
 use crate::hook_runtime::ActionDispatcher;
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
 
-/// How often to re-read the active device target + thumb-wheel arming so a
-/// carousel switch or a binding/sensitivity edit re-points / re-arms capture.
-/// It also paces the respawn of a session that ended on its own (see `manage`).
+/// How often to re-read the device capture plans. It also paces the respawn of
+/// a session that ended on its own (see `manage`).
 const TARGET_POLL: Duration = Duration::from_secs(1);
 
 /// Idle gap after which a partly-accumulated *custom* wheel action is forgotten,
@@ -65,8 +66,7 @@ fn action_threshold(sensitivity: i32) -> i32 {
 }
 
 /// Spawn the capture-manager thread. It owns a current-thread tokio runtime that
-/// keeps one capture session pointed at the active device and dispatches each
-/// captured input.
+/// keeps one capture session alive per online device and dispatches each input.
 pub fn spawn(
     capture_plans: SharedCapturePlans,
     capture_channel: CaptureChannel,
@@ -93,19 +93,35 @@ pub fn spawn(
     });
 }
 
-/// Whether one device's thumb wheel must be diverted over HID++ (which
-/// suppresses native scroll) so we can re-synthesise its scroll or capture its
-/// tap: its sensitivity leaves the default (so we scale scroll ourselves) or a
-/// thumbwheel binding does.
-fn thumbwheel_armed(plan: &DeviceCapturePlan) -> bool {
-    plan.thumbwheel_sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY
-        || plan.thumbwheel_bindings_nondefault
+/// Select how the thumb wheel is captured over HID++.
+///
+/// Non-default sensitivity or rotation bindings require diversion so OpenLogi
+/// can re-synthesise the rotation. Tap reports are delivered only when the
+/// click binding itself differs from its seeded default.
+fn thumbwheel_capture_mode(plan: &DeviceCapturePlan) -> ThumbwheelCaptureMode {
+    let binding_changed = |button| {
+        plan.bindings
+            .get(&button)
+            .is_some_and(|action| *action != default_binding(button))
+    };
+
+    if binding_changed(ButtonId::Thumbwheel) {
+        ThumbwheelCaptureMode::DivertedRotationAndTap
+    } else if plan.thumbwheel_sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY
+        || [ButtonId::ThumbwheelScrollUp, ButtonId::ThumbwheelScrollDown]
+            .iter()
+            .any(|&button| binding_changed(button))
+    {
+        ThumbwheelCaptureMode::DivertedRotation
+    } else {
+        ThumbwheelCaptureMode::Native
+    }
 }
 
 /// The [`CaptureSpec`] one device's session should run with right now.
 fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
     CaptureSpec {
-        capture_thumbwheel: thumbwheel_armed(plan),
+        thumbwheel_mode: thumbwheel_capture_mode(plan),
         // Derived from the dispatch maps, so the armed diverts and the maps
         // resolving their events can never drift apart.
         divert_gesture_sources: GESTURE_SOURCE_BUTTONS
@@ -520,6 +536,94 @@ fn advance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn default_thumbwheel_plan() -> DeviceCapturePlan {
+        let bindings = [
+            ButtonId::Thumbwheel,
+            ButtonId::ThumbwheelScrollUp,
+            ButtonId::ThumbwheelScrollDown,
+        ]
+        .into_iter()
+        .map(|button| (button, default_binding(button)))
+        .collect();
+        DeviceCapturePlan {
+            config_key: "test-device".into(),
+            route: DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xc548,
+            },
+            bindings,
+            gesture_bindings: Default::default(),
+            divert_buttons: Vec::new(),
+            thumbwheel_bindings_nondefault: false,
+            thumbwheel_sensitivity: DEFAULT_THUMBWHEEL_SENSITIVITY,
+            rearm_generation: 0,
+        }
+    }
+
+    fn set_binding(plan: &mut DeviceCapturePlan, button: ButtonId, action: Action) {
+        plan.bindings.insert(button, action);
+        plan.thumbwheel_bindings_nondefault = true;
+    }
+
+    #[test]
+    fn default_thumbwheel_bindings_use_native_reporting() {
+        assert_eq!(
+            thumbwheel_capture_mode(&default_thumbwheel_plan()),
+            ThumbwheelCaptureMode::Native
+        );
+    }
+
+    #[test]
+    fn swapped_rotation_bindings_divert_without_delivering_taps() {
+        let mut plan = default_thumbwheel_plan();
+        set_binding(
+            &mut plan,
+            ButtonId::ThumbwheelScrollUp,
+            default_binding(ButtonId::ThumbwheelScrollDown),
+        );
+        set_binding(
+            &mut plan,
+            ButtonId::ThumbwheelScrollDown,
+            default_binding(ButtonId::ThumbwheelScrollUp),
+        );
+
+        assert_eq!(
+            thumbwheel_capture_mode(&plan),
+            ThumbwheelCaptureMode::DivertedRotation
+        );
+    }
+
+    #[test]
+    fn custom_sensitivity_diverts_without_delivering_taps() {
+        let mut plan = default_thumbwheel_plan();
+        plan.thumbwheel_sensitivity = DEFAULT_THUMBWHEEL_SENSITIVITY + 1;
+        assert_eq!(
+            thumbwheel_capture_mode(&plan),
+            ThumbwheelCaptureMode::DivertedRotation
+        );
+    }
+
+    #[test]
+    fn rebound_thumbwheel_click_enables_tap_delivery() {
+        let mut plan = default_thumbwheel_plan();
+        set_binding(&mut plan, ButtonId::Thumbwheel, Action::MissionControl);
+
+        assert_eq!(
+            thumbwheel_capture_mode(&plan),
+            ThumbwheelCaptureMode::DivertedRotationAndTap
+        );
+    }
+
+    #[test]
+    fn missing_default_bindings_do_not_divert() {
+        let mut plan = default_thumbwheel_plan();
+        plan.bindings.clear();
+        assert_eq!(
+            thumbwheel_capture_mode(&plan),
+            ThumbwheelCaptureMode::Native
+        );
+    }
 
     #[test]
     fn multiplier_is_unity_at_default_sensitivity() {
