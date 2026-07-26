@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -31,7 +32,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use crate::DpiCycleState;
-use crate::hook_runtime::{self, SharedHookMaps};
+use crate::hook_runtime::{self, RepeatCmd, SharedHookMaps, spawn_repeater};
 use crate::receiver_access::ReceiverAccess;
 
 /// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
@@ -141,6 +142,31 @@ fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -> bool {
     done_epoch == live_epoch && has_target
 }
 
+/// Buttons that need diverting so the capture session can see their release
+/// edge: the ones bound to a repeatable action.
+///
+/// Deliberately narrow. Diverting a thumb button trades its crash-safety — the
+/// OS hook's remap dies with the process, a divert outlives it and leaves the
+/// button dead until the mouse is power-cycled — so it is only worth doing for
+/// a binding that actually needs the hold duration.
+///
+/// Sorted and deduplicated so the result is stable tick to tick and can be
+/// compared as part of the session key.
+fn hold_buttons(hook_maps: &SharedHookMaps) -> Vec<ButtonId> {
+    let Ok(maps) = hook_maps.read() else {
+        return Vec::new();
+    };
+    let mut out: Vec<ButtonId> = maps
+        .bindings
+        .iter()
+        .filter(|(_, action)| action.is_repeatable())
+        .map(|(button, _)| *button)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Keep one capture session alive for the active device, restarting it when the
 /// device or the thumb-wheel arming changes, and dispatch incoming inputs. Runs
 /// for the lifetime of the process.
@@ -153,8 +179,11 @@ async fn manage(
     receiver_access: ReceiverAccess,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
-    // (route, capture_thumbwheel, divert_gesture_button)
-    let mut current: Option<(DeviceRoute, bool, bool)> = None;
+    // Hold-to-repeat for the buttons this path diverts. Lives for the whole
+    // manage loop so a session restart mid-hold cannot orphan a running cycle.
+    let repeat = spawn_repeater(Arc::clone(&dpi_cycle), Arc::clone(&capture_channel));
+    // (route, capture_thumbwheel, divert_gesture_button, hold_buttons)
+    let mut current: Option<(DeviceRoute, bool, bool, Vec<ButtonId>)> = None;
     let mut stop: Option<oneshot::Sender<()>> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut accumulators = WheelAccumulators::default();
@@ -175,11 +204,14 @@ async fn manage(
                 dispatch(
                     input,
                     &mut accumulators,
-                    &hook_maps,
-                    &gesture_bindings,
-                    &dpi_cycle,
-                    &capture_channel,
-                    &thumbwheel_sensitivity,
+                    &DispatchCtx {
+                        hook_maps: &hook_maps,
+                        gesture_bindings: &gesture_bindings,
+                        dpi_cycle: &dpi_cycle,
+                        capture: &capture_channel,
+                        thumbwheel_sensitivity: &thumbwheel_sensitivity,
+                        repeat: &repeat,
+                    },
                 );
             }
             _ = ticker.tick() => {
@@ -202,6 +234,7 @@ async fn manage(
                             t,
                             thumbwheel_armed(&hook_maps, sensitivity),
                             divert_gesture,
+                            hold_buttons(&hook_maps),
                         )
                     })
                 };
@@ -218,12 +251,17 @@ async fn manage(
                     current = None;
                     continue;
                 }
-                if let Some((route, capture_thumbwheel, divert_gesture_button)) = want {
+                if let Some((route, capture_thumbwheel, divert_gesture_button, hold)) = want {
                     let Some(receiver_lease) = receiver_access.try_acquire_for_capture() else {
                         current = None;
                         continue;
                     };
-                    current = Some((route.clone(), capture_thumbwheel, divert_gesture_button));
+                    current = Some((
+                        route.clone(),
+                        capture_thumbwheel,
+                        divert_gesture_button,
+                        hold.clone(),
+                    ));
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
                     let slot = Arc::clone(&capture_channel);
@@ -236,6 +274,7 @@ async fn manage(
                             route,
                             capture_thumbwheel,
                             divert_gesture_button,
+                            &hold,
                             sink,
                             stop_rx,
                             slot,
@@ -308,15 +347,29 @@ enum WheelOutput {
 }
 
 /// Route one captured input to its bound action (or re-synthesised scroll).
-fn dispatch(
-    input: CapturedInput,
-    accumulators: &mut WheelAccumulators,
-    hook_maps: &SharedHookMaps,
-    gesture_bindings: &GestureBindings,
-    dpi_cycle: &Arc<RwLock<DpiCycleState>>,
-    capture: &CaptureChannel,
-    thumbwheel_sensitivity: &ThumbwheelSensitivity,
-) {
+/// The long-lived state [`dispatch`] reads, bundled so the signature stays
+/// reviewable as inputs grow. Every field is borrowed for the call — nothing here
+/// is owned by the dispatch itself.
+#[derive(Clone, Copy)]
+struct DispatchCtx<'a> {
+    hook_maps: &'a SharedHookMaps,
+    gesture_bindings: &'a GestureBindings,
+    dpi_cycle: &'a Arc<RwLock<DpiCycleState>>,
+    capture: &'a CaptureChannel,
+    thumbwheel_sensitivity: &'a ThumbwheelSensitivity,
+    /// Drives hold-to-repeat for the buttons this path diverts.
+    repeat: &'a Sender<RepeatCmd>,
+}
+
+fn dispatch(input: CapturedInput, accumulators: &mut WheelAccumulators, ctx: &DispatchCtx<'_>) {
+    let &DispatchCtx {
+        hook_maps,
+        gesture_bindings,
+        dpi_cycle,
+        capture,
+        thumbwheel_sensitivity,
+        repeat,
+    } = ctx;
     match input {
         CapturedInput::Gesture(direction) => {
             let action = gesture_bindings
@@ -338,9 +391,22 @@ fn dispatch(
             if let Some(action) = action {
                 debug!(?button, action = %action.label(), "HID++ button → action");
                 hook_runtime::dispatch_action(&action, dpi_cycle, capture);
+                // Increment-style actions keep firing until the release arrives.
+                // Only the HID++ path can do this: the OS hook sees these
+                // buttons as a press/release pulse regardless of hold length.
+                if action.is_repeatable() {
+                    let _ = repeat.send(RepeatCmd::Start(action));
+                }
             } else {
                 debug!(?button, "HID++ button with no binding — ignored");
             }
+        }
+        CapturedInput::ButtonReleased(button) => {
+            // Unconditional: a Stop with nothing repeating is a no-op, and this
+            // way a binding that changed mid-hold still ends the cycle its own
+            // press started.
+            debug!(?button, "HID++ button released");
+            let _ = repeat.send(RepeatCmd::Stop);
         }
         CapturedInput::Scroll(rotation) => {
             // Positive rotation is "up"; each direction has its own binding.

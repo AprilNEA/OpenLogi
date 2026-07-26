@@ -40,9 +40,17 @@ pub enum CapturedInput {
     /// A completed gesture-button swipe.
     Gesture(GestureDirection),
     /// A diverted button was pressed — the DPI/ModeShift button
-    /// ([`ButtonId::DpiToggle`]) or the thumb-wheel single tap
-    /// ([`ButtonId::Thumbwheel`]).
+    /// ([`ButtonId::DpiToggle`]), the thumb-wheel single tap
+    /// ([`ButtonId::Thumbwheel`]), or a thumb-side button diverted for hold
+    /// tracking (see [`reprog_controls::hold_cid_for_button`]).
     ButtonPressed(ButtonId),
+    /// A button diverted for hold tracking was released.
+    ///
+    /// Emitted only for the buttons named in `hold_buttons`; the DPI/ModeShift
+    /// and thumb-wheel captures are rising-edge only and never produce this.
+    /// Pairs with [`CapturedInput::ButtonPressed`] so a consumer can measure how
+    /// long the button was held — the whole reason those buttons get diverted.
+    ButtonReleased(ButtonId),
     /// Thumb-wheel rotation to re-synthesise as horizontal scroll, in the
     /// wheel's `diverted_res` increments. Emitted only while the wheel is
     /// diverted to capture its click.
@@ -75,6 +83,9 @@ struct CaptureAccum {
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
     dpi_down: bool,
+    /// Which hold-tracked CIDs were held in the last event. Both edges matter
+    /// here (unlike `dpi_down`), so the consumer can time the hold.
+    held: Vec<u16>,
 }
 
 /// Capture the gesture button, DPI/ModeShift button, and (when
@@ -96,6 +107,7 @@ pub async fn run_capture_session(
     route: DeviceRoute,
     capture_thumbwheel: bool,
     divert_gesture_button: bool,
+    hold_buttons: &[ButtonId],
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
@@ -109,6 +121,7 @@ pub async fn run_capture_session(
         device_index,
         capture_thumbwheel,
         divert_gesture_button,
+        hold_buttons,
     )
     .await?;
 
@@ -122,6 +135,7 @@ pub async fn run_capture_session(
     let reprog_index = armed.reprog.as_ref().map(|(_, idx)| *idx);
     let thumb_index = armed.thumb.as_ref().map(|(_, idx)| *idx);
     let dpi_set = armed.dpi_cids.clone();
+    let hold_set = armed.hold.clone();
     let listener = chan.add_msg_listener_guarded({
         let accum = Arc::clone(&accum);
         let sink = sink.clone();
@@ -136,7 +150,7 @@ pub async fn run_capture_session(
                 // Recover the guard even if a prior holder panicked — the
                 // critical section is panic-free, so the data is consistent.
                 let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
-                handle_reprog(&mut acc, event, &dpi_set, &sink);
+                handle_reprog(&mut acc, event, &dpi_set, &hold_set, &sink);
                 return;
             }
             if let Some(idx) = thumb_index
@@ -179,6 +193,8 @@ struct ArmedControls {
     gesture_diverted: bool,
     /// DPI/ModeShift CIDs diverted as plain buttons.
     dpi_cids: Vec<u16>,
+    /// CIDs diverted for hold tracking, paired with the button they represent.
+    hold: Vec<(u16, ButtonId)>,
     /// `0x2150` accessor + feature index, present when the thumb wheel is
     /// diverted.
     thumb: Option<(Thumbwheel, u8)>,
@@ -197,6 +213,15 @@ impl ArmedControls {
             for &cid in &self.dpi_cids {
                 restore(rc.set_cid_reporting(cid, false, false).await, "DPI button");
             }
+            // Undiverting these matters more than the rest: they are the user's
+            // ordinary thumb buttons, and leaving them diverted makes them dead
+            // to the OS until the mouse is power-cycled.
+            for &(cid, _) in &self.hold {
+                restore(
+                    rc.set_cid_reporting(cid, false, false).await,
+                    "hold-tracked button",
+                );
+            }
         }
         if let Some((tw, _)) = self.thumb.as_ref() {
             restore(tw.set_reporting(false, false).await, "thumb wheel");
@@ -214,6 +239,7 @@ async fn arm_controls(
     slot: u8,
     capture_thumbwheel: bool,
     divert_gesture_button: bool,
+    hold_buttons: &[ButtonId],
 ) -> Result<ArmedControls, GestureError> {
     let device = Device::new(Arc::clone(chan), slot)
         .await
@@ -222,6 +248,7 @@ async fn arm_controls(
     let mut reprog: Option<(ReprogControlsV4, u8)> = None;
     let mut gesture_diverted = false;
     let mut dpi_cids: Vec<u16> = Vec::new();
+    let mut hold: Vec<(u16, ButtonId)> = Vec::new();
     if let Some(info) = device
         .root()
         .get_feature(reprog_controls::FEATURE_ID)
@@ -249,6 +276,29 @@ async fn arm_controls(
                     .await
                     .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
                 dpi_cids.push(cid);
+            }
+        }
+        // Thumb-side buttons, diverted only when a caller asked for hold
+        // tracking. A button the firmware does not mark divertable is skipped
+        // rather than forced: capturing a control the device won't hand over
+        // would swallow the press with nothing to show for it.
+        for &button in hold_buttons {
+            let Some(cid) = reprog_controls::hold_cid_for_button(button) else {
+                continue;
+            };
+            if hold.iter().any(|(existing, _)| *existing == cid) {
+                continue;
+            }
+            if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
+                rc.set_cid_reporting(cid, true, false)
+                    .await
+                    .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+                hold.push((cid, button));
+            } else {
+                debug!(
+                    ?button,
+                    cid, "button not divertable — hold tracking skipped"
+                );
             }
         }
         reprog = Some((rc, info.index));
@@ -290,6 +340,7 @@ async fn arm_controls(
         reprog,
         gesture_diverted,
         dpi_cids,
+        hold,
         thumb,
     })
 }
@@ -329,6 +380,7 @@ fn handle_reprog(
     acc: &mut CaptureAccum,
     event: RawControlEvent,
     dpi_cids: &[u16],
+    hold: &[(u16, ButtonId)],
     sink: &mpsc::UnboundedSender<CapturedInput>,
 ) {
     match event {
@@ -349,6 +401,22 @@ fn handle_reprog(
                 let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::DpiToggle));
             }
             acc.dpi_down = dpi_down;
+
+            // Hold-tracked buttons report both edges. The event carries the
+            // *complete* set of controls currently held, so a CID that was in
+            // the last set and is missing now is a release — the device sends
+            // one report per change, not one per poll.
+            for &(cid, button) in hold {
+                let now = cids.contains(&cid);
+                let was = acc.held.contains(&cid);
+                if now && !was {
+                    acc.held.push(cid);
+                    let _ = sink.send(CapturedInput::ButtonPressed(button));
+                } else if !now && was {
+                    acc.held.retain(|held| *held != cid);
+                    let _ = sink.send(CapturedInput::ButtonReleased(button));
+                }
+            }
         }
         RawControlEvent::RawXy { dx, dy } => {
             // Commit the instant a clean direction emerges (mid-swipe, once per

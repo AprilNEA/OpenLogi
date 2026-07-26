@@ -7,7 +7,9 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use openlogi_core::binding::{
     Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
@@ -96,6 +98,105 @@ thread_local! {
     static HOLD: RefCell<HoldState> = RefCell::new(HoldState::default());
 }
 
+/// How long a repeatable action's button must stay down before the action
+/// starts re-firing. Mirrors a keyboard's typematic delay: long enough that an
+/// ordinary click never repeats by accident.
+const REPEAT_INITIAL_DELAY: Duration = Duration::from_millis(400);
+
+/// The gap before the second fire. Deliberately slow: a short hold should nudge
+/// the value a step or two, not overshoot it.
+const REPEAT_START_INTERVAL: Duration = Duration::from_millis(220);
+
+/// The floor the gap ramps down to. Fast enough to cross a volume range in one
+/// hold, slow enough that the user can still stop on a value.
+const REPEAT_MIN_INTERVAL: Duration = Duration::from_millis(45);
+
+/// The gap shrinks by this fraction (`17/20` = 0.85) after every fire, so a hold
+/// accelerates instead of running at one flat rate. Integer maths keeps the ramp
+/// exactly reproducible in tests.
+const REPEAT_RAMP_NUM: u64 = 17;
+/// Denominator of [`REPEAT_RAMP_NUM`].
+const REPEAT_RAMP_DEN: u64 = 20;
+
+/// The gap to use after the one that just elapsed: 15% shorter, clamped at
+/// [`REPEAT_MIN_INTERVAL`].
+///
+/// From [`REPEAT_START_INTERVAL`] this reaches the floor after ~11 fires, about
+/// 1.2 s into the hold — gentle enough to land on a single step, quick enough
+/// that a long hold sweeps the whole range.
+fn ramp(current: Duration) -> Duration {
+    let next = Duration::from_millis(
+        u64::try_from(current.as_millis()).unwrap_or(u64::MAX) * REPEAT_RAMP_NUM / REPEAT_RAMP_DEN,
+    );
+    next.max(REPEAT_MIN_INTERVAL)
+}
+
+/// What a capture path tells the repeat worker.
+///
+/// Both input paths use this: the OS hook (for buttons it remaps directly) and
+/// the HID++ capture session (for buttons diverted to get the release edge).
+pub enum RepeatCmd {
+    /// A repeatable action's button went down — begin the delay-then-repeat
+    /// cycle. Supersedes any cycle already running.
+    Start(Action),
+    /// The button came up, or capture was interrupted — stop re-firing.
+    Stop,
+}
+
+/// Spawns the worker that re-fires a held button's action, and returns the
+/// sender the hook callback signals it with.
+///
+/// The delay and the interval are slept here, never in the callback: the
+/// callback must not block (see the freeze-hazard note in `macos.rs`). The
+/// worker also keeps the repeat state off the thread-local [`HOLD`], so a
+/// synthesized event re-entering the tap cannot double-borrow it.
+///
+/// [`Sender`] is `Sync` as of Rust 1.72, so the callback can hold it directly
+/// without a mutex.
+pub fn spawn_repeater(
+    dpi_cycle: Arc<RwLock<DpiCycleState>>,
+    capture: CaptureChannel,
+) -> Sender<RepeatCmd> {
+    let (tx, rx) = mpsc::channel::<RepeatCmd>();
+    std::thread::spawn(move || {
+        // Outer loop: idle until a press arrives. Inner loop: wait out the
+        // delay, then re-fire on every interval tick until release.
+        while let Ok(cmd) = rx.recv() {
+            let mut action = match cmd {
+                RepeatCmd::Start(action) => action,
+                RepeatCmd::Stop => continue,
+            };
+            let mut wait = REPEAT_INITIAL_DELAY;
+            let mut interval = REPEAT_START_INTERVAL;
+            loop {
+                match rx.recv_timeout(wait) {
+                    // Nothing interrupted the wait → fire, then wait out the
+                    // current interval and shorten it for the fire after that.
+                    // The first press was already dispatched by the caller, so
+                    // this is strictly the 2nd fire onward.
+                    Err(RecvTimeoutError::Timeout) => {
+                        dispatch_action(&action, &dpi_cycle, &capture);
+                        wait = interval;
+                        interval = ramp(interval);
+                    }
+                    // A fresh press mid-cycle (button swap, or a re-press that
+                    // outran the release): restart the delay *and* the ramp, so
+                    // every hold starts slow again.
+                    Ok(RepeatCmd::Start(next)) => {
+                        action = next;
+                        wait = REPEAT_INITIAL_DELAY;
+                        interval = REPEAT_START_INTERVAL;
+                    }
+                    Ok(RepeatCmd::Stop) => break,
+                    // The agent is shutting down.
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
+            }
+        }
+    });
+    tx
+}
+
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not
 /// granted or on an unsupported platform — the app continues without crashing.
 pub fn start(
@@ -111,6 +212,9 @@ pub fn start(
         );
         return None;
     }
+
+    // Hold-to-repeat runs on its own thread so the callback never sleeps.
+    let repeat = spawn_repeater(Arc::clone(&dpi_cycle), Arc::clone(&capture));
 
     // The per-hold pointer accumulator lives in the thread-local `HOLD`; the
     // callback must never block — see the freeze-hazard note in `macos.rs`.
@@ -181,6 +285,17 @@ pub fn start(
                 if pressed {
                     info!(button = %id, action = %action.label(), "button → executing bound action");
                     dispatch_action(&action, &dpi_cycle, &capture);
+                    // Increment-style actions keep firing while the button is
+                    // held; the worker owns the timing. A send failure just
+                    // means the worker is gone, which costs only the repeat.
+                    if action.is_repeatable() {
+                        let _ = repeat.send(RepeatCmd::Start(action));
+                    }
+                } else {
+                    // Unconditional: a Stop with nothing repeating is a no-op,
+                    // and this way a binding that changed mid-hold still ends
+                    // the cycle its press started.
+                    let _ = repeat.send(RepeatCmd::Stop);
                 }
                 EventDisposition::Suppress
             }
@@ -215,6 +330,9 @@ pub fn start(
                 // The OS dropped events (tap disabled); cancel any hold so a lost
                 // button-up can't later commit a phantom swipe off ordinary motion.
                 HOLD.with_borrow_mut(HoldState::cancel);
+                // Same reasoning for the repeat cycle: without this, a swallowed
+                // button-up would leave the action firing forever.
+                let _ = repeat.send(RepeatCmd::Stop);
                 EventDisposition::PassThrough
             }
             MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
@@ -318,6 +436,46 @@ pub fn dispatch_action(
 mod tests {
     use super::*;
     use openlogi_core::binding::GESTURE_SWIPE_THRESHOLD;
+
+    #[test]
+    fn the_repeat_ramp_accelerates_and_then_holds_at_the_floor() {
+        let mut interval = REPEAT_START_INTERVAL;
+        for _ in 0..40 {
+            let next = ramp(interval);
+            assert!(
+                next <= interval,
+                "the gap must never grow: {interval:?} → {next:?}"
+            );
+            assert!(next >= REPEAT_MIN_INTERVAL, "the floor must hold");
+            interval = next;
+        }
+        assert_eq!(
+            interval, REPEAT_MIN_INTERVAL,
+            "a long hold settles at the fastest rate"
+        );
+    }
+
+    #[test]
+    fn the_repeat_ramp_reaches_the_floor_in_about_a_second() {
+        // Feel check: too quick and a short hold overshoots, too slow and a long
+        // hold never gets anywhere. Sum the gaps until the rate stops changing.
+        let mut interval = REPEAT_START_INTERVAL;
+        let mut elapsed = Duration::ZERO;
+        let mut fires = 0;
+        while interval > REPEAT_MIN_INTERVAL {
+            elapsed += interval;
+            interval = ramp(interval);
+            fires += 1;
+        }
+        assert!(
+            (8..=16).contains(&fires),
+            "expected ~11 fires to reach the floor, got {fires}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(900) && elapsed <= Duration::from_millis(1600),
+            "expected ~1.2 s of holding to reach the floor, got {elapsed:?}"
+        );
+    }
 
     // The mid-swipe gate itself is unit-tested on `SwipeAccumulator` in
     // `openlogi-core`; these cover only what `HoldState` adds on top — tagging a
