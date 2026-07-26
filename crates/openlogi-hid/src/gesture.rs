@@ -12,8 +12,8 @@
 //! The GUI maps each [`CapturedInput`] to the user's bound action and dispatches
 //! it, mirroring how the CGEventTap hook handles the side buttons. The thumb
 //! wheel is special: diverting it stops native horizontal scroll, so the GUI
-//! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas — the wheel
-//! is therefore only diverted when its click is actually bound.
+//! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas. Its capture
+//! mode separately controls whether diverted single-tap reports are delivered.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
@@ -26,13 +26,24 @@ use tracing::{debug, info, warn};
 
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::route::{DeviceRoute, open_route_channel};
-use crate::thumbwheel::{self, Thumbwheel};
+use crate::thumbwheel::{self, Thumbwheel, ThumbwheelEvent};
 use crate::write::SharedChannel;
 
 /// Shared slot holding the active capture session's open channel, so DPI /
 /// SmartShift writes can reuse it instead of opening a fresh one. `None`
 /// whenever no session is connected.
 pub type CaptureChannel = Arc<RwLock<Option<SharedChannel>>>;
+
+/// How a capture session handles the thumb wheel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThumbwheelCaptureMode {
+    /// Leave the wheel in its native HID reporting mode.
+    Native,
+    /// Divert the wheel and forward rotation, but suppress single-tap reports.
+    DivertedRotation,
+    /// Divert the wheel and forward both rotation and single-tap reports.
+    DivertedRotationAndTap,
+}
 
 /// One input captured from the active device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,8 +89,8 @@ struct CaptureAccum {
 }
 
 /// Capture the gesture button, DPI/ModeShift button, and (when
-/// `capture_thumbwheel`) the thumb wheel on `route` until `shutdown` resolves,
-/// forwarding each event to `sink`.
+/// `thumbwheel_mode` is diverted) the thumb wheel on `route` until `shutdown`
+/// resolves, forwarding each event to `sink`.
 ///
 /// The dedicated gesture button (raw-XY) is diverted only when `divert_gesture_button` —
 /// i.e. it is the device's gesture owner. When the user moves the gesture role
@@ -94,7 +105,7 @@ struct CaptureAccum {
 /// failures to restore on the way out are logged, not propagated.
 pub async fn run_capture_session(
     route: DeviceRoute,
-    capture_thumbwheel: bool,
+    thumbwheel_mode: ThumbwheelCaptureMode,
     divert_gesture_button: bool,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
@@ -104,13 +115,7 @@ pub async fn run_capture_session(
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
     let device_index = route.device_index();
-    let armed = arm_controls(
-        &chan,
-        device_index,
-        capture_thumbwheel,
-        divert_gesture_button,
-    )
-    .await?;
+    let armed = arm_controls(&chan, device_index, thumbwheel_mode, divert_gesture_button).await?;
 
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
@@ -142,12 +147,7 @@ pub async fn run_capture_session(
             if let Some(idx) = thumb_index
                 && let Some(event) = thumbwheel::decode_event(&msg, device_index, idx)
             {
-                if event.single_tap {
-                    let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::Thumbwheel));
-                }
-                if event.rotation != 0 {
-                    let _ = sink.send(CapturedInput::Scroll(event.rotation));
-                }
+                forward_thumbwheel_event(event, thumbwheel_mode, &sink);
             }
         }
     });
@@ -168,6 +168,23 @@ pub async fn run_capture_session(
     armed.disarm().await;
     debug!(index = device_index, "control capture stopped");
     Ok(())
+}
+
+/// Forward the parts of a decoded thumb-wheel report enabled by `mode`.
+fn forward_thumbwheel_event(
+    event: ThumbwheelEvent,
+    mode: ThumbwheelCaptureMode,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    if mode == ThumbwheelCaptureMode::Native {
+        return;
+    }
+    if event.single_tap && mode == ThumbwheelCaptureMode::DivertedRotationAndTap {
+        let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::Thumbwheel));
+    }
+    if event.rotation != 0 {
+        let _ = sink.send(CapturedInput::Scroll(event.rotation));
+    }
 }
 
 /// The set of controls a session has diverted, kept so they can be handed back
@@ -206,13 +223,13 @@ impl ArmedControls {
 
 /// Resolve features off the device's root and divert the controls we capture:
 /// the gesture button (raw-XY) and DPI/ModeShift buttons over `0x1b04`, and —
-/// when `capture_thumbwheel` and the wheel reports a single tap — the thumb
-/// wheel over `0x2150`. The root-feature lookup mirrors `write::open_feature`,
+/// when `thumbwheel_mode` is diverted — the thumb wheel over `0x2150`. The
+/// root-feature lookup mirrors `write::open_feature`,
 /// since hidpp 0.2's registry doesn't carry the features OpenLogi reimplements.
 async fn arm_controls(
     chan: &Arc<HidppChannel>,
     slot: u8,
-    capture_thumbwheel: bool,
+    thumbwheel_mode: ThumbwheelCaptureMode,
     divert_gesture_button: bool,
 ) -> Result<ArmedControls, GestureError> {
     let device = Device::new(Arc::clone(chan), slot)
@@ -255,7 +272,7 @@ async fn arm_controls(
     }
 
     let mut thumb: Option<(Thumbwheel, u8)> = None;
-    if capture_thumbwheel
+    if thumbwheel_mode != ThumbwheelCaptureMode::Native
         && let Some(info) = device
             .root()
             .get_feature(thumbwheel::FEATURE_ID)
@@ -263,24 +280,10 @@ async fn arm_controls(
             .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
     {
         let tw = Thumbwheel::new(Arc::clone(chan), slot, info.index);
-        // Consume the getInfo error here, before the next await: Hidpp20Error
-        // isn't Send, so holding it across an await would make this future
-        // (spawned on tokio) non-Send.
-        let supports_single_tap = match tw.get_info().await {
-            Ok(twinfo) => twinfo.supports_single_tap,
-            Err(e) => {
-                warn!(error = ?e, "thumb wheel getInfo failed");
-                false
-            }
-        };
-        if supports_single_tap {
-            tw.set_reporting(true, false)
-                .await
-                .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-            thumb = Some((tw, info.index));
-        } else {
-            debug!("thumb wheel reports no single tap — click not capturable");
-        }
+        tw.set_reporting(true, false)
+            .await
+            .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+        thumb = Some((tw, info.index));
     }
 
     if !gesture_diverted && dpi_cids.is_empty() && thumb.is_none() {

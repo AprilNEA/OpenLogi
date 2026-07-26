@@ -3,7 +3,7 @@
 //! Runs [`openlogi_hid::run_capture_session`] on a dedicated thread for whichever
 //! device the DPI / SmartShift path currently targets
 //! ([`DpiCycleState::target`]), restarts it when the carousel selection — or the
-//! thumb-wheel arming — changes, and dispatches each captured input:
+//! thumb-wheel capture mode — changes, and dispatches each captured input:
 //!
 //! - a gesture swipe through the gesture binding map,
 //! - a DPI/ModeShift or thumb-wheel-tap press through the button binding map,
@@ -26,7 +26,9 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
+use openlogi_hid::{
+    CaptureChannel, CapturedInput, DeviceRoute, ThumbwheelCaptureMode, run_capture_session,
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
@@ -42,8 +44,8 @@ pub type GestureBindings = Arc<RwLock<BTreeMap<GestureDirection, Action>>>;
 /// event; written only by `AppState::set_thumbwheel_sensitivity`.
 pub type ThumbwheelSensitivity = Arc<AtomicI32>;
 
-/// How often to re-read the active device target + thumb-wheel arming so a
-/// carousel switch or a binding/sensitivity edit re-points / re-arms capture.
+/// How often to re-read the active device target + thumb-wheel capture mode so
+/// a carousel switch or a binding/sensitivity edit re-points / re-arms capture.
 /// It also paces the respawn of a session that ended on its own (see `manage`).
 const TARGET_POLL: Duration = Duration::from_secs(1);
 
@@ -104,29 +106,37 @@ pub fn spawn(
     });
 }
 
-/// Whether the thumb wheel must be diverted over HID++ (which suppresses native
-/// scroll) so we can re-synthesise its scroll or capture its tap.
+/// Select how the thumb wheel is captured over HID++.
 ///
-/// We divert when the sensitivity leaves its default (so we can scale scroll
-/// ourselves) or when the click or either rotation direction is rebound away
-/// from its default; otherwise the OS scrolls the wheel natively.
-fn thumbwheel_armed(hook_maps: &SharedHookMaps, sensitivity: i32) -> bool {
-    if sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY {
-        return true;
+/// Non-default sensitivity or rotation bindings require diversion so OpenLogi
+/// can re-synthesise the rotation. Tap reports are delivered only when the
+/// click binding itself differs from its seeded default.
+fn thumbwheel_capture_mode(hook_maps: &SharedHookMaps, sensitivity: i32) -> ThumbwheelCaptureMode {
+    let sensitivity_changed = sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY;
+    let Ok(maps) = hook_maps.read() else {
+        return if sensitivity_changed {
+            ThumbwheelCaptureMode::DivertedRotation
+        } else {
+            ThumbwheelCaptureMode::Native
+        };
+    };
+    let binding_changed = |button| {
+        maps.bindings
+            .get(&button)
+            .is_some_and(|action| *action != default_binding(button))
+    };
+
+    if binding_changed(ButtonId::Thumbwheel) {
+        ThumbwheelCaptureMode::DivertedRotationAndTap
+    } else if sensitivity_changed
+        || [ButtonId::ThumbwheelScrollUp, ButtonId::ThumbwheelScrollDown]
+            .iter()
+            .any(|&button| binding_changed(button))
+    {
+        ThumbwheelCaptureMode::DivertedRotation
+    } else {
+        ThumbwheelCaptureMode::Native
     }
-    hook_maps.read().ok().is_some_and(|maps| {
-        [
-            ButtonId::Thumbwheel,
-            ButtonId::ThumbwheelScrollUp,
-            ButtonId::ThumbwheelScrollDown,
-        ]
-        .iter()
-        .any(|&button| {
-            maps.bindings
-                .get(&button)
-                .is_some_and(|action| *action != default_binding(button))
-        })
-    })
 }
 
 /// Whether a finished capture session should make the manager re-arm.
@@ -153,8 +163,8 @@ async fn manage(
     receiver_access: ReceiverAccess,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
-    // (route, capture_thumbwheel, divert_gesture_button)
-    let mut current: Option<(DeviceRoute, bool, bool)> = None;
+    // (route, thumbwheel_mode, divert_gesture_button)
+    let mut current: Option<(DeviceRoute, ThumbwheelCaptureMode, bool)> = None;
     let mut stop: Option<oneshot::Sender<()>> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut accumulators = WheelAccumulators::default();
@@ -200,7 +210,7 @@ async fn manage(
                     target.map(|t| {
                         (
                             t,
-                            thumbwheel_armed(&hook_maps, sensitivity),
+                            thumbwheel_capture_mode(&hook_maps, sensitivity),
                             divert_gesture,
                         )
                     })
@@ -208,7 +218,7 @@ async fn manage(
                 if want == current {
                     continue;
                 }
-                // Target or thumb-wheel arming changed (or first tick): stop the
+                // Target or thumb-wheel mode changed (or first tick): stop the
                 // old session and start one for the new state. Sending on the
                 // oneshot lets the old session restore the diverted controls.
                 if let Some(stop) = stop.take() {
@@ -218,12 +228,12 @@ async fn manage(
                     current = None;
                     continue;
                 }
-                if let Some((route, capture_thumbwheel, divert_gesture_button)) = want {
+                if let Some((route, thumbwheel_mode, divert_gesture_button)) = want {
                     let Some(receiver_lease) = receiver_access.try_acquire_for_capture() else {
                         current = None;
                         continue;
                     };
-                    current = Some((route.clone(), capture_thumbwheel, divert_gesture_button));
+                    current = Some((route.clone(), thumbwheel_mode, divert_gesture_button));
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
                     let slot = Arc::clone(&capture_channel);
@@ -234,7 +244,7 @@ async fn manage(
                         let _receiver_lease = receiver_lease;
                         if let Err(e) = run_capture_session(
                             route,
-                            capture_thumbwheel,
+                            thumbwheel_mode,
                             divert_gesture_button,
                             sink,
                             stop_rx,
@@ -446,6 +456,104 @@ fn advance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn default_thumbwheel_maps() -> SharedHookMaps {
+        let bindings = [
+            ButtonId::Thumbwheel,
+            ButtonId::ThumbwheelScrollUp,
+            ButtonId::ThumbwheelScrollDown,
+        ]
+        .into_iter()
+        .map(|button| (button, default_binding(button)))
+        .collect();
+        Arc::new(RwLock::new(hook_runtime::HookMaps {
+            bindings,
+            ..hook_runtime::HookMaps::default()
+        }))
+    }
+
+    fn set_binding(hook_maps: &SharedHookMaps, button: ButtonId, action: Action) {
+        let Ok(mut maps) = hook_maps.write() else {
+            panic!("test hook map should be writable");
+        };
+        maps.bindings.insert(button, action);
+    }
+
+    #[test]
+    fn default_thumbwheel_bindings_use_native_reporting() {
+        assert_eq!(
+            thumbwheel_capture_mode(&default_thumbwheel_maps(), DEFAULT_THUMBWHEEL_SENSITIVITY),
+            ThumbwheelCaptureMode::Native
+        );
+    }
+
+    #[test]
+    fn swapped_rotation_bindings_divert_without_delivering_taps() {
+        let hook_maps = default_thumbwheel_maps();
+        set_binding(
+            &hook_maps,
+            ButtonId::ThumbwheelScrollUp,
+            default_binding(ButtonId::ThumbwheelScrollDown),
+        );
+        set_binding(
+            &hook_maps,
+            ButtonId::ThumbwheelScrollDown,
+            default_binding(ButtonId::ThumbwheelScrollUp),
+        );
+
+        assert_eq!(
+            thumbwheel_capture_mode(&hook_maps, DEFAULT_THUMBWHEEL_SENSITIVITY),
+            ThumbwheelCaptureMode::DivertedRotation
+        );
+    }
+
+    #[test]
+    fn custom_sensitivity_diverts_without_delivering_taps() {
+        assert_eq!(
+            thumbwheel_capture_mode(
+                &default_thumbwheel_maps(),
+                DEFAULT_THUMBWHEEL_SENSITIVITY + 1
+            ),
+            ThumbwheelCaptureMode::DivertedRotation
+        );
+    }
+
+    #[test]
+    fn rebound_thumbwheel_click_enables_tap_delivery() {
+        let hook_maps = default_thumbwheel_maps();
+        set_binding(&hook_maps, ButtonId::Thumbwheel, Action::MissionControl);
+
+        assert_eq!(
+            thumbwheel_capture_mode(&hook_maps, DEFAULT_THUMBWHEEL_SENSITIVITY),
+            ThumbwheelCaptureMode::DivertedRotationAndTap
+        );
+    }
+
+    #[test]
+    fn unavailable_or_poisoned_default_bindings_do_not_divert() {
+        let unavailable = Arc::new(RwLock::new(hook_runtime::HookMaps::default()));
+        assert_eq!(
+            thumbwheel_capture_mode(&unavailable, DEFAULT_THUMBWHEEL_SENSITIVITY),
+            ThumbwheelCaptureMode::Native
+        );
+
+        let poisoned = default_thumbwheel_maps();
+        let poison_target = Arc::clone(&poisoned);
+        assert!(
+            thread::spawn(move || {
+                let Ok(_guard) = poison_target.write() else {
+                    panic!("test hook map should initially be writable");
+                };
+                panic!("poison test hook map");
+            })
+            .join()
+            .is_err()
+        );
+        assert_eq!(
+            thumbwheel_capture_mode(&poisoned, DEFAULT_THUMBWHEEL_SENSITIVITY),
+            ThumbwheelCaptureMode::Native
+        );
+    }
 
     #[test]
     fn multiplier_is_unity_at_default_sensitivity() {
