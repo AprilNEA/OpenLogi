@@ -20,6 +20,7 @@ mod transport;
 #[cfg(target_os = "windows")]
 mod windows_hid;
 
+pub mod backlight;
 pub mod gesture;
 mod hires_wheel;
 pub mod hotplug;
@@ -30,6 +31,7 @@ pub mod smartshift;
 pub mod thumbwheel;
 pub mod write;
 
+pub use backlight::{BacklightMode, BacklightState, BacklightStatus};
 pub use channel_registry::ChannelRegistry;
 pub use gesture::{
     CaptureChannel, CaptureStop, CapturedInput, GestureError, run_capture_session,
@@ -50,9 +52,10 @@ pub use route::{BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, UNIFYING_PIDS};
 pub use smartshift::{AUTO_DISENGAGE_PERMANENT, SmartShiftMode, SmartShiftStatus};
 pub use write::{
     DpiCapabilities, DpiInfo, FeatureEntry, HidppFeatureErrorKind, HidppOperation, LightingMethod,
-    ReprogControlEntry, SharedChannel, WriteError, dump_features, dump_reprog_controls, get_dpi,
-    get_dpi_info, get_dpi_info_on, get_smartshift_status, get_smartshift_status_on,
-    read_battery_raw, set_dpi, set_dpi_on, set_keyboard_color, set_keyboard_color_on,
-    set_keyboard_color_with, set_keyboard_color_with_on, set_smartshift, set_smartshift_on,
-    set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
+    ReprogControlEntry, SharedChannel, WriteError, dump_features, dump_reprog_controls,
+    get_backlight, get_dpi, get_dpi_info, get_dpi_info_on, get_smartshift_status,
+    get_smartshift_status_on, read_battery_raw, set_backlight_enabled, set_dpi, set_dpi_on,
+    set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,
+    set_smartshift, set_smartshift_on, set_smartshift_sensitivity, toggle_smartshift,
+    toggle_smartshift_on,
 };
