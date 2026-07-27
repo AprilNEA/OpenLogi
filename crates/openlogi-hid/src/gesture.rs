@@ -188,8 +188,15 @@ pub async fn run_capture_session(
 /// to the firmware on teardown.
 ///
 /// [`Default`] is what makes partial arming recoverable: [`arm_controls`] starts
-/// from an empty record and fills it in as each divert succeeds, so a failure
-/// half-way still has something to restore.
+/// from an empty record and fills it in as it goes, so a failure half-way still
+/// has something to restore.
+///
+/// The record is deliberately pessimistic — a control is listed *before* its
+/// divert is awaited, because the request leaves for the device before the
+/// response comes back, so a timed-out or lost response can still leave the
+/// control diverted. Restoring one that was never actually diverted just hands
+/// back a mapping the firmware already owns; missing one leaves a thumb button
+/// dead to the OS.
 #[derive(Default)]
 struct ArmedControls {
     /// `0x1b04` accessor + feature index, present when the device exposes it.
@@ -247,10 +254,10 @@ async fn arm_controls(
     hold_buttons: &[ButtonId],
 ) -> Result<ArmedControls, GestureError> {
     // Arming is several independent HID++ writes and any one of them can fail.
-    // Build the record in place so a failure part-way can hand back whatever was
-    // already diverted: without this, a control diverted before the failure stays
-    // captured with no session alive to release it — for a thumb button that
-    // means it is dead to the OS until the mouse is power-cycled.
+    // Build the record in place so a failure part-way can hand back whatever may
+    // already be diverted: without this, a control diverted before the failure
+    // stays captured with no session alive to release it — for a thumb button
+    // that means it is dead to the OS until the mouse is power-cycled.
     let mut armed = ArmedControls::default();
     match arm_into(
         &mut armed,
@@ -271,7 +278,8 @@ async fn arm_controls(
     }
 }
 
-/// Body of [`arm_controls`], recording each success on `armed` as it goes.
+/// Body of [`arm_controls`], recording each control on `armed` before its divert
+/// is awaited — see [`ArmedControls`] for why that ordering is the safe one.
 async fn arm_into(
     armed: &mut ArmedControls,
     chan: &Arc<HidppChannel>,
@@ -308,17 +316,17 @@ async fn arm_into(
                 .iter()
                 .any(|c| c.cid == reprog_controls::GESTURE_BUTTON_CID && c.supports_raw_xy())
         {
+            armed.gesture_diverted = true;
             rc.set_cid_reporting(reprog_controls::GESTURE_BUTTON_CID, true, true)
                 .await
                 .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-            armed.gesture_diverted = true;
         }
         for &cid in &reprog_controls::DPI_MODE_SHIFT_CIDS {
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
+                armed.dpi_cids.push(cid);
                 rc.set_cid_reporting(cid, true, false)
                     .await
                     .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-                armed.dpi_cids.push(cid);
             }
         }
         // Thumb-side buttons, diverted only when a caller asked for hold
@@ -333,10 +341,10 @@ async fn arm_into(
                 continue;
             }
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
+                armed.hold.push((cid, button));
                 rc.set_cid_reporting(cid, true, false)
                     .await
                     .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-                armed.hold.push((cid, button));
             } else {
                 debug!(
                     ?button,
@@ -365,10 +373,13 @@ async fn arm_into(
             }
         };
         if supports_single_tap {
+            armed.thumb = Some((tw, info.index));
+            let Some((tw, _)) = armed.thumb.as_ref() else {
+                unreachable!("just assigned");
+            };
             tw.set_reporting(true, false)
                 .await
                 .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-            armed.thumb = Some((tw, info.index));
         } else {
             debug!("thumb wheel reports no single tap — click not capturable");
         }
