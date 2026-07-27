@@ -99,9 +99,17 @@ pub async fn get_backlight(route: &DeviceRoute) -> Result<BacklightState, WriteE
 /// non-volatile memory, so it survives reconnects, host switches, and power
 /// cycles — nothing needs to re-apply it.
 ///
-/// Every other field is read first and written back unchanged, so the mode,
-/// effect, brightness level, and fade-out durations the user configured are
-/// preserved and come back with a later `enabled = true`.
+/// The effect, brightness level, and fade-out durations are read first and
+/// written back unchanged, so they return with a later `enabled = true`.
+///
+/// The mode survives too, except from [`BacklightMode::TemporaryManual`] — the
+/// state the keyboard enters on its own when the user presses its backlight
+/// keys. `setBacklightConfig` cannot write that mode, so it lands in
+/// [`BacklightMode::Automatic`] and the level goes back under ambient-light
+/// control. Promoting it to [`BacklightMode::PermanentManual`] would hold the
+/// level but make a deliberately temporary adjustment permanent, so the
+/// firmware's own fallback wins instead. Read the mode first and tell the user
+/// when this applies.
 ///
 /// `FeatureUnsupported` when the device does not expose HID++ `0x1982`.
 pub async fn set_backlight_enabled(
