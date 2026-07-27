@@ -181,16 +181,39 @@ fn hold_buttons(hook_maps: &SharedHookMaps) -> Vec<ButtonId> {
     out
 }
 
+/// Cut a dead session's input loose and end any repeat it started.
+///
+/// A stop tells the repeater that nothing still held will ever see its release —
+/// that session was the only source of release edges. But the stop alone is not
+/// enough: the manager's receiver outlives individual sessions, so a press
+/// captured just before teardown can still be sitting in it and get dispatched
+/// *after* the stop, starting a cycle nothing can end. Handing the manager a
+/// fresh channel drops those queued events with the old receiver, so the fix
+/// does not depend on the order the loop happens to poll its branches in.
+fn discard_session_input(
+    tx: &mut mpsc::UnboundedSender<CapturedInput>,
+    rx: &mut mpsc::UnboundedReceiver<CapturedInput>,
+    repeat: &Sender<RepeatCmd>,
+) {
+    let (new_tx, new_rx) = mpsc::unbounded_channel();
+    *tx = new_tx;
+    *rx = new_rx;
+    let _ = repeat.send(RepeatCmd::StopAll);
+}
+
 /// Tear the live capture session down, if there is one.
 ///
-/// Signalling the oneshot lets the session restore the controls it diverted; the
-/// repeat stop goes with it because that session is the only source of release
-/// edges — anything held right now would never see its release, and the action
-/// would keep firing with nothing left to stop it.
-fn stop_session(stop: &mut Option<oneshot::Sender<()>>, repeat: &Sender<RepeatCmd>) {
+/// Signalling the oneshot lets the session restore the controls it diverted;
+/// [`discard_session_input`] handles everything it leaves behind.
+fn stop_session(
+    stop: &mut Option<oneshot::Sender<()>>,
+    tx: &mut mpsc::UnboundedSender<CapturedInput>,
+    rx: &mut mpsc::UnboundedReceiver<CapturedInput>,
+    repeat: &Sender<RepeatCmd>,
+) {
     if let Some(stop) = stop.take() {
         let _ = stop.send(());
-        let _ = repeat.send(RepeatCmd::StopAll);
+        discard_session_input(tx, rx, repeat);
     }
 }
 
@@ -205,7 +228,10 @@ async fn manage(
     thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
 ) {
-    let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
+    // Replaced on every teardown (see `discard_session_input`), so one session's
+    // queued input can never reach the next. The manager keeps its own sender so
+    // the receiver stays open while no session is running.
+    let (mut tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
     // Hold-to-repeat for the buttons this path diverts. Lives for the whole
     // manage loop so a session restart mid-hold cannot orphan a running cycle.
     let repeat = spawn_repeater(Arc::clone(&dpi_cycle), Arc::clone(&capture_channel));
@@ -270,7 +296,7 @@ async fn manage(
                 }
                 // Target or thumb-wheel arming changed (or first tick): stop the
                 // old session and start one for the new state.
-                stop_session(&mut stop, &repeat);
+                stop_session(&mut stop, &mut tx, &mut rx, &repeat);
                 if current.is_some() {
                     current = None;
                     continue;
@@ -326,9 +352,10 @@ async fn manage(
                 if should_rearm(done_epoch, epoch, current.is_some()) {
                     warn!("capture session for the active device ended unexpectedly, re-arming");
                     // A session that died mid-hold (device disconnect, HID++
-                    // error) takes the release edge with it — same reasoning as
-                    // the deliberate stop above.
-                    let _ = repeat.send(RepeatCmd::StopAll);
+                    // error) takes the release edge with it, and whatever it had
+                    // already queued is just as stale — same reasoning as the
+                    // deliberate stop above.
+                    discard_session_input(&mut tx, &mut rx, &repeat);
                     current = None;
                     // Keep the `stop`/`current` invariant: the session already
                     // exited, so its stop receiver is gone and dropping the sender
@@ -543,6 +570,38 @@ fn advance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_queued_before_a_teardown_never_reaches_the_next_session() {
+        // The press that arrives a moment before the session is stopped: its
+        // release can never follow, so dispatching it would start a repeat
+        // nothing could end.
+        let (mut tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
+        let session_sink = tx.clone();
+        let (repeat_tx, repeat_rx) = std::sync::mpsc::channel();
+        assert!(
+            session_sink
+                .send(CapturedInput::ButtonPressed(ButtonId::Back))
+                .is_ok()
+        );
+
+        discard_session_input(&mut tx, &mut rx, &repeat_tx);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "the dead session's queued press must be unreachable, not merely late"
+        );
+        assert!(
+            matches!(repeat_rx.try_recv(), Ok(RepeatCmd::StopAll)),
+            "and anything already repeating must be stopped"
+        );
+        assert!(
+            session_sink
+                .send(CapturedInput::ButtonPressed(ButtonId::Forward))
+                .is_err(),
+            "a session still running after teardown has nowhere left to send"
+        );
+    }
 
     /// Only the thumb-side buttons are diverted for hold tracking, so they are
     /// the only ones whose press is guaranteed a matching release. Starting a
