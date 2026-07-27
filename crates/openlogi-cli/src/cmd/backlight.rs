@@ -56,6 +56,13 @@ pub async fn run(args: BacklightArgs) -> Result<()> {
     let before = read_state(&route).await?;
     print_state("current", before);
 
+    // The keyboard sets this mode itself from its backlight keys and
+    // setBacklightConfig cannot write it back, so say so rather than let the
+    // mode change look like a side effect of the enable bit.
+    if before.mode == BacklightMode::TemporaryManual {
+        println!("  note: the level came from the keyboard's backlight keys, a mode software cannot write back — it returns to automatic (ambient-light sensor)");
+    }
+
     let after = openlogi_hid::set_backlight_enabled(&route, enable)
         .await
         .with_context(|| {
