@@ -688,7 +688,7 @@ fn short_payload_as_long(payload: &[u8; SHORT_REPORT_LENGTH - 1]) -> [u8; LONG_R
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::{
         io,
@@ -1107,14 +1107,14 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct MockRawHidHandle {
+    pub(crate) struct MockRawHidHandle {
         incoming_tx: async_channel::Sender<Vec<u8>>,
         written_reports: Arc<Mutex<Vec<Vec<u8>>>>,
         responses_on_write: Arc<Mutex<VecDeque<Vec<u8>>>>,
     }
 
     impl MockRawHidHandle {
-        fn queue_response(&self, msg: HidppMessage) {
+        pub(crate) fn queue_response(&self, msg: HidppMessage) {
             self.responses_on_write
                 .lock()
                 .unwrap()
@@ -1125,12 +1125,12 @@ mod tests {
             self.incoming_tx.send(raw_report(msg)).await.unwrap();
         }
 
-        fn written_reports(&self) -> Vec<Vec<u8>> {
+        pub(crate) fn written_reports(&self) -> Vec<Vec<u8>> {
             self.written_reports.lock().unwrap().clone()
         }
     }
 
-    struct MockRawHidChannel {
+    pub(crate) struct MockRawHidChannel {
         incoming_tx: async_channel::Sender<Vec<u8>>,
         incoming_rx: async_channel::Receiver<Vec<u8>>,
         written_reports: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -1138,7 +1138,7 @@ mod tests {
     }
 
     impl MockRawHidChannel {
-        fn new() -> (Self, MockRawHidHandle) {
+        pub(crate) fn new() -> (Self, MockRawHidHandle) {
             let (incoming_tx, incoming_rx) = async_channel::unbounded();
             let written_reports = Arc::new(Mutex::new(Vec::new()));
             let responses_on_write = Arc::new(Mutex::new(VecDeque::new()));
