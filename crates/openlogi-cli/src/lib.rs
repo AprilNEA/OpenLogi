@@ -43,6 +43,7 @@ mod tests {
 
     use super::*;
     use cmd::Command;
+    use cmd::backlight::BacklightAction;
     use cmd::diag::DiagCmd;
     use cmd::diag::lighting::Method;
     use cmd::diag::wheel::ResolutionArg;
@@ -61,6 +62,41 @@ mod tests {
     fn bare_invocation_has_no_subcommand() {
         let cli = Cli::try_parse_from(["openlogi"]).expect("bare invocation parses");
         assert!(cli.cmd.is_none());
+    }
+
+    /// A bare `openlogi backlight` must stay valid — `run` treats a missing
+    /// action as `status`, so it can never write to the device by accident.
+    #[test]
+    fn backlight_defaults_to_status_and_accepts_a_device_filter() {
+        let cli = Cli::try_parse_from(["openlogi", "backlight", "--device", "MX KEYS S"])
+            .expect("bare backlight invocation parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Backlight(args) => {
+                assert_eq!(args.device.as_deref(), Some("MX KEYS S"));
+                assert!(args.action.is_none());
+            }
+            other => panic!("expected Backlight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backlight_off_is_parsed_as_its_own_action() {
+        let cli =
+            Cli::try_parse_from(["openlogi", "backlight", "off"]).expect("backlight off parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Backlight(args) => {
+                assert!(matches!(args.action, Some(BacklightAction::Off)));
+            }
+            other => panic!("expected Backlight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backlight_rejects_an_unknown_action() {
+        let result = Cli::try_parse_from(["openlogi", "backlight", "dim"]);
+        assert!(result.is_err());
     }
 
     #[test]

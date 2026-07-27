@@ -1,4 +1,5 @@
-//! HID++ writes back to the device — DPI, SmartShift, lighting, and diagnostics.
+//! HID++ writes back to the device — DPI, SmartShift, lighting, backlight, and
+//! diagnostics.
 //!
 //! Each entry point takes a [`DeviceRoute`] and resolves it to an open channel
 //! through `open_route_channel`, so the same call works whether the device is
@@ -13,6 +14,7 @@ use hidpp::{channel::HidppChannel, device::Device, feature::CreatableFeature};
 
 use crate::route::{DeviceRoute, open_route_channel};
 
+mod backlight;
 mod diagnostics;
 mod dpi;
 mod error;
@@ -20,6 +22,7 @@ mod lighting;
 mod shared;
 mod smartshift;
 
+pub use backlight::{get_backlight, set_backlight_enabled};
 pub use diagnostics::{FeatureEntry, ReprogControlEntry, dump_features, dump_reprog_controls};
 pub use dpi::{DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, set_dpi};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
