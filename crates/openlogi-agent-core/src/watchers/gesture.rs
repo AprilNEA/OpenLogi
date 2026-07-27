@@ -27,7 +27,9 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
+use openlogi_hid::{
+    CaptureChannel, CapturedInput, DeviceRoute, reprog_controls, run_capture_session,
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
@@ -142,13 +144,25 @@ fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -> bool {
     done_epoch == live_epoch && has_target
 }
 
+/// Whether a captured button reports both edges, so a hold started on its press
+/// is guaranteed a release to end it.
+///
+/// Only the thumb-side buttons this path diverts for hold tracking do. The
+/// DPI/ModeShift and thumb-wheel captures are rising-edge only, so starting a
+/// repeat on their press would leave it firing with no release to stop it.
+fn reports_hold_edges(button: ButtonId) -> bool {
+    reprog_controls::hold_cid_for_button(button).is_some()
+}
+
 /// Buttons that need diverting so the capture session can see their release
 /// edge: the ones bound to a repeatable action.
 ///
 /// Deliberately narrow. Diverting a thumb button trades its crash-safety — the
 /// OS hook's remap dies with the process, a divert outlives it and leaves the
 /// button dead until the mouse is power-cycled — so it is only worth doing for
-/// a binding that actually needs the hold duration.
+/// a binding that actually needs the hold duration. Buttons with no hold CID are
+/// dropped here too: they cannot be hold-tracked, so listing them would only
+/// churn the session key.
 ///
 /// Sorted and deduplicated so the result is stable tick to tick and can be
 /// compared as part of the session key.
@@ -159,12 +173,25 @@ fn hold_buttons(hook_maps: &SharedHookMaps) -> Vec<ButtonId> {
     let mut out: Vec<ButtonId> = maps
         .bindings
         .iter()
-        .filter(|(_, action)| action.is_repeatable())
+        .filter(|(button, action)| action.is_repeatable() && reports_hold_edges(**button))
         .map(|(button, _)| *button)
         .collect();
     out.sort();
     out.dedup();
     out
+}
+
+/// Tear the live capture session down, if there is one.
+///
+/// Signalling the oneshot lets the session restore the controls it diverted; the
+/// repeat stop goes with it because that session is the only source of release
+/// edges — anything held right now would never see its release, and the action
+/// would keep firing with nothing left to stop it.
+fn stop_session(stop: &mut Option<oneshot::Sender<()>>, repeat: &Sender<RepeatCmd>) {
+    if let Some(stop) = stop.take() {
+        let _ = stop.send(());
+        let _ = repeat.send(RepeatCmd::StopAll);
+    }
 }
 
 /// Keep one capture session alive for the active device, restarting it when the
@@ -242,11 +269,8 @@ async fn manage(
                     continue;
                 }
                 // Target or thumb-wheel arming changed (or first tick): stop the
-                // old session and start one for the new state. Sending on the
-                // oneshot lets the old session restore the diverted controls.
-                if let Some(stop) = stop.take() {
-                    let _ = stop.send(());
-                }
+                // old session and start one for the new state.
+                stop_session(&mut stop, &repeat);
                 if current.is_some() {
                     current = None;
                     continue;
@@ -301,6 +325,10 @@ async fn manage(
                 // epoch or a deliberate stop-to-idle is a no-op (see `should_rearm`).
                 if should_rearm(done_epoch, epoch, current.is_some()) {
                     warn!("capture session for the active device ended unexpectedly, re-arming");
+                    // A session that died mid-hold (device disconnect, HID++
+                    // error) takes the release edge with it — same reasoning as
+                    // the deliberate stop above.
+                    let _ = repeat.send(RepeatCmd::StopAll);
                     current = None;
                     // Keep the `stop`/`current` invariant: the session already
                     // exited, so its stop receiver is gone and dropping the sender
@@ -394,19 +422,22 @@ fn dispatch(input: CapturedInput, accumulators: &mut WheelAccumulators, ctx: &Di
                 // Increment-style actions keep firing until the release arrives.
                 // Only the HID++ path can do this: the OS hook sees these
                 // buttons as a press/release pulse regardless of hold length.
-                if action.is_repeatable() {
-                    let _ = repeat.send(RepeatCmd::Start(action));
+                // Gated on the release edge existing — a rising-edge-only
+                // capture would start a cycle nothing could stop.
+                if action.is_repeatable() && reports_hold_edges(button) {
+                    let _ = repeat.send(RepeatCmd::Start(button, action));
                 }
             } else {
                 debug!(?button, "HID++ button with no binding — ignored");
             }
         }
         CapturedInput::ButtonReleased(button) => {
-            // Unconditional: a Stop with nothing repeating is a no-op, and this
-            // way a binding that changed mid-hold still ends the cycle its own
-            // press started.
+            // Unconditional, but keyed to this button: a stop for a button that
+            // is not repeating is a no-op, so a binding that changed mid-hold
+            // still ends the cycle its own press started — while another thumb
+            // button held at the same time keeps repeating.
             debug!(?button, "HID++ button released");
-            let _ = repeat.send(RepeatCmd::Stop);
+            let _ = repeat.send(RepeatCmd::Stop(button));
         }
         CapturedInput::Scroll(rotation) => {
             // Positive rotation is "up"; each direction has its own binding.
@@ -512,6 +543,51 @@ fn advance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the thumb-side buttons are diverted for hold tracking, so they are
+    /// the only ones whose press is guaranteed a matching release. Starting a
+    /// repeat off any other capture would leave it firing forever.
+    #[test]
+    fn only_the_hold_tracked_buttons_report_both_edges() {
+        assert!(reports_hold_edges(ButtonId::Back));
+        assert!(reports_hold_edges(ButtonId::Forward));
+        for button in [
+            ButtonId::DpiToggle,
+            ButtonId::Thumbwheel,
+            ButtonId::ThumbwheelScrollUp,
+            ButtonId::ThumbwheelScrollDown,
+            ButtonId::GestureButton,
+        ] {
+            assert!(
+                !reports_hold_edges(button),
+                "{button:?} is rising-edge only — it must not start a repeat"
+            );
+        }
+    }
+
+    #[test]
+    fn hold_buttons_lists_only_repeatable_bindings_that_can_be_tracked() {
+        let maps = Arc::new(RwLock::new(hook_runtime::HookMaps {
+            bindings: BTreeMap::from([
+                // Repeatable and divertable for hold tracking → wanted.
+                (ButtonId::Back, Action::VolumeDown),
+                (ButtonId::Forward, Action::VolumeUp),
+                // Repeatable but rising-edge only: diverting it would gain
+                // nothing and starting a repeat off it could never be stopped.
+                (ButtonId::DpiToggle, Action::VolumeUp),
+                // Repeatable by binding, but rotation is not a held button.
+                (ButtonId::ThumbwheelScrollUp, Action::HorizontalScrollRight),
+                // Hold-trackable button, but a one-shot action.
+                (ButtonId::MiddleClick, Action::PlayPause),
+            ]),
+            gestures: BTreeMap::new(),
+        }));
+        assert_eq!(
+            hold_buttons(&maps),
+            vec![ButtonId::Back, ButtonId::Forward],
+            "diverting anything else trades crash-safety for nothing"
+        );
+    }
 
     #[test]
     fn multiplier_is_unity_at_default_sensitivity() {

@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{
     Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
@@ -135,12 +135,89 @@ fn ramp(current: Duration) -> Duration {
 ///
 /// Both input paths use this: the OS hook (for buttons it remaps directly) and
 /// the HID++ capture session (for buttons diverted to get the release edge).
+///
+/// Every variant names the button it concerns. Two thumb buttons can be held at
+/// once, so an unkeyed stop would let releasing one end the other's cycle while
+/// it is still physically down.
 pub enum RepeatCmd {
     /// A repeatable action's button went down — begin the delay-then-repeat
-    /// cycle. Supersedes any cycle already running.
-    Start(Action),
-    /// The button came up, or capture was interrupted — stop re-firing.
-    Stop,
+    /// cycle for that button, superseding its own previous cycle only.
+    Start(ButtonId, Action),
+    /// The button came up — stop re-firing that button.
+    Stop(ButtonId),
+    /// Capture was interrupted, so no release edge is coming for anything still
+    /// held: end every cycle rather than leave an action firing with nothing left
+    /// to stop it.
+    StopAll,
+}
+
+/// One button's in-flight repeat cycle.
+struct RepeatCycle {
+    /// The action to re-fire, resolved when the press arrived.
+    action: Action,
+    /// When this button's next re-fire is due.
+    due: Instant,
+    /// The gap to apply *after* the fire that is currently pending.
+    interval: Duration,
+}
+
+/// Every hold currently repeating, keyed by button.
+///
+/// Split out from the worker thread so the scheduling is testable without
+/// dispatching real actions: the worker only sleeps and dispatches, this decides
+/// what is due and when to wake.
+#[derive(Default)]
+struct RepeatCycles {
+    cycles: BTreeMap<ButtonId, RepeatCycle>,
+}
+
+impl RepeatCycles {
+    /// Begin (or restart) one button's cycle. A restart resets the delay *and*
+    /// the ramp, so every hold starts slow again.
+    fn start(&mut self, button: ButtonId, action: Action, now: Instant) {
+        self.cycles.insert(
+            button,
+            RepeatCycle {
+                action,
+                due: now + REPEAT_INITIAL_DELAY,
+                interval: REPEAT_START_INTERVAL,
+            },
+        );
+    }
+
+    /// End one button's cycle, leaving any other held button running. A stop for
+    /// a button that is not repeating is a no-op, which is what lets the callers
+    /// send it unconditionally on release.
+    fn stop(&mut self, button: ButtonId) {
+        self.cycles.remove(&button);
+    }
+
+    /// End every cycle — see [`RepeatCmd::StopAll`].
+    fn stop_all(&mut self) {
+        self.cycles.clear();
+    }
+
+    /// How long the worker may sleep before the soonest re-fire, or `None` when
+    /// nothing is held (park until a press arrives).
+    fn next_wait(&self, now: Instant) -> Option<Duration> {
+        self.cycles
+            .values()
+            .map(|cycle| cycle.due)
+            .min()
+            .map(|due| due.saturating_duration_since(now))
+    }
+
+    /// Take every action whose gap has elapsed, advancing each ramp. Buttons ramp
+    /// independently: one held longer is already firing faster.
+    fn take_due(&mut self, now: Instant) -> Vec<Action> {
+        let mut due = Vec::new();
+        for cycle in self.cycles.values_mut().filter(|cycle| cycle.due <= now) {
+            due.push(cycle.action.clone());
+            cycle.due = now + cycle.interval;
+            cycle.interval = ramp(cycle.interval);
+        }
+        due
+    }
 }
 
 /// Spawns the worker that re-fires a held button's action, and returns the
@@ -159,37 +236,35 @@ pub fn spawn_repeater(
 ) -> Sender<RepeatCmd> {
     let (tx, rx) = mpsc::channel::<RepeatCmd>();
     std::thread::spawn(move || {
-        // Outer loop: idle until a press arrives. Inner loop: wait out the
-        // delay, then re-fire on every interval tick until release.
-        while let Ok(cmd) = rx.recv() {
-            let mut action = match cmd {
-                RepeatCmd::Start(action) => action,
-                RepeatCmd::Stop => continue,
-            };
-            let mut wait = REPEAT_INITIAL_DELAY;
-            let mut interval = REPEAT_START_INTERVAL;
-            loop {
-                match rx.recv_timeout(wait) {
-                    // Nothing interrupted the wait → fire, then wait out the
-                    // current interval and shorten it for the fire after that.
-                    // The first press was already dispatched by the caller, so
-                    // this is strictly the 2nd fire onward.
-                    Err(RecvTimeoutError::Timeout) => {
-                        dispatch_action(&action, &dpi_cycle, &capture);
-                        wait = interval;
-                        interval = ramp(interval);
-                    }
-                    // A fresh press mid-cycle (button swap, or a re-press that
-                    // outran the release): restart the delay *and* the ramp, so
-                    // every hold starts slow again.
-                    Ok(RepeatCmd::Start(next)) => {
-                        action = next;
-                        wait = REPEAT_INITIAL_DELAY;
-                        interval = REPEAT_START_INTERVAL;
-                    }
-                    Ok(RepeatCmd::Stop) => break,
+        let mut cycles = RepeatCycles::default();
+        loop {
+            // Park until a press arrives when nothing is held; otherwise wake on
+            // whichever comes first, the next command or the soonest re-fire.
+            let cmd = match cycles.next_wait(Instant::now()) {
+                Some(wait) => match rx.recv_timeout(wait) {
+                    Ok(cmd) => Some(cmd),
+                    Err(RecvTimeoutError::Timeout) => None,
                     // The agent is shutting down.
                     Err(RecvTimeoutError::Disconnected) => return,
+                },
+                None => match rx.recv() {
+                    Ok(cmd) => Some(cmd),
+                    Err(_) => return,
+                },
+            };
+            match cmd {
+                Some(RepeatCmd::Start(button, action)) => {
+                    cycles.start(button, action, Instant::now());
+                }
+                Some(RepeatCmd::Stop(button)) => cycles.stop(button),
+                Some(RepeatCmd::StopAll) => cycles.stop_all(),
+                // A gap elapsed: fire everything now due. The first press was
+                // already dispatched by the caller, so this is strictly the 2nd
+                // fire onward.
+                None => {
+                    for action in cycles.take_due(Instant::now()) {
+                        dispatch_action(&action, &dpi_cycle, &capture);
+                    }
                 }
             }
         }
@@ -289,13 +364,14 @@ pub fn start(
                     // held; the worker owns the timing. A send failure just
                     // means the worker is gone, which costs only the repeat.
                     if action.is_repeatable() {
-                        let _ = repeat.send(RepeatCmd::Start(action));
+                        let _ = repeat.send(RepeatCmd::Start(id, action));
                     }
                 } else {
-                    // Unconditional: a Stop with nothing repeating is a no-op,
-                    // and this way a binding that changed mid-hold still ends
-                    // the cycle its press started.
-                    let _ = repeat.send(RepeatCmd::Stop);
+                    // Unconditional, but keyed to this button: a stop for a
+                    // button that is not repeating is a no-op, so a binding that
+                    // changed mid-hold still ends the cycle its own press
+                    // started — without touching another button's hold.
+                    let _ = repeat.send(RepeatCmd::Stop(id));
                 }
                 EventDisposition::Suppress
             }
@@ -330,9 +406,9 @@ pub fn start(
                 // The OS dropped events (tap disabled); cancel any hold so a lost
                 // button-up can't later commit a phantom swipe off ordinary motion.
                 HOLD.with_borrow_mut(HoldState::cancel);
-                // Same reasoning for the repeat cycle: without this, a swallowed
+                // Same reasoning for the repeat cycles: without this, a swallowed
                 // button-up would leave the action firing forever.
-                let _ = repeat.send(RepeatCmd::Stop);
+                let _ = repeat.send(RepeatCmd::StopAll);
                 EventDisposition::PassThrough
             }
             MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
@@ -436,6 +512,135 @@ pub fn dispatch_action(
 mod tests {
     use super::*;
     use openlogi_core::binding::GESTURE_SWIPE_THRESHOLD;
+
+    /// The gap between fires is long enough that a test can step time by hand:
+    /// jump past the initial delay, then past one interval, without sleeping.
+    fn past(now: Instant, gap: Duration) -> Instant {
+        now + gap + Duration::from_millis(1)
+    }
+
+    #[test]
+    fn a_release_stops_only_the_button_that_was_released() {
+        // Two thumb buttons held at once is the case an unkeyed stop got wrong:
+        // letting go of one killed the other's repeat while it was still down.
+        let start = Instant::now();
+        let mut cycles = RepeatCycles::default();
+        cycles.start(ButtonId::Back, Action::VolumeDown, start);
+        cycles.start(ButtonId::Forward, Action::VolumeUp, start);
+        cycles.stop(ButtonId::Back);
+
+        let due = cycles.take_due(past(start, REPEAT_INITIAL_DELAY));
+        assert_eq!(
+            due,
+            vec![Action::VolumeUp],
+            "the button still held must keep repeating on its own"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_buttons_release_leaves_the_hold_running() {
+        // The OS hook sends a keyed stop on *every* bound button's release, so a
+        // click on some other button must not disturb a hold in progress.
+        let start = Instant::now();
+        let mut cycles = RepeatCycles::default();
+        cycles.start(ButtonId::Back, Action::VolumeDown, start);
+        cycles.stop(ButtonId::MiddleClick);
+
+        assert_eq!(
+            cycles.take_due(past(start, REPEAT_INITIAL_DELAY)),
+            vec![Action::VolumeDown]
+        );
+    }
+
+    #[test]
+    fn stop_all_ends_every_hold() {
+        // What a capture session sends as it goes away: no release edge is
+        // coming for anything still held, so nothing may stay armed.
+        let start = Instant::now();
+        let mut cycles = RepeatCycles::default();
+        cycles.start(ButtonId::Back, Action::VolumeDown, start);
+        cycles.start(ButtonId::Forward, Action::VolumeUp, start);
+        cycles.stop_all();
+
+        assert!(
+            cycles
+                .take_due(past(start, REPEAT_INITIAL_DELAY))
+                .is_empty(),
+            "an interrupted capture must not leave an action firing"
+        );
+        assert_eq!(
+            cycles.next_wait(start),
+            None,
+            "with nothing held the worker parks instead of spinning"
+        );
+    }
+
+    #[test]
+    fn nothing_fires_before_the_initial_delay_elapses() {
+        let start = Instant::now();
+        let mut cycles = RepeatCycles::default();
+        cycles.start(ButtonId::Back, Action::VolumeDown, start);
+
+        // 90% of the way into the delay — a firmly ordinary click.
+        let just_short = REPEAT_INITIAL_DELAY.mul_f32(0.9);
+        assert!(
+            cycles.take_due(start + just_short).is_empty(),
+            "an ordinary click must never repeat"
+        );
+        assert_eq!(
+            cycles.next_wait(start),
+            Some(REPEAT_INITIAL_DELAY),
+            "the worker sleeps exactly until the first re-fire is due"
+        );
+    }
+
+    #[test]
+    fn each_button_ramps_on_its_own_clock() {
+        // Independent ramps: the button held longer is already firing faster, and
+        // one button's fire must not reschedule the other's.
+        let start = Instant::now();
+        let mut cycles = RepeatCycles::default();
+        cycles.start(ButtonId::Back, Action::VolumeDown, start);
+
+        // Back has been repeating for a while before Forward is even pressed.
+        let mut now = past(start, REPEAT_INITIAL_DELAY);
+        for _ in 0..6 {
+            assert_eq!(cycles.take_due(now), vec![Action::VolumeDown]);
+            now = past(now, REPEAT_START_INTERVAL);
+        }
+        cycles.start(ButtonId::Forward, Action::VolumeUp, now);
+
+        // Forward serves out its own full initial delay, during which Back keeps
+        // firing alone.
+        assert_eq!(cycles.take_due(now), vec![Action::VolumeDown]);
+        assert_eq!(
+            cycles.take_due(past(now, REPEAT_INITIAL_DELAY)).len(),
+            2,
+            "once its delay is up, both buttons fire"
+        );
+    }
+
+    #[test]
+    fn a_re_press_restarts_that_buttons_delay_and_ramp() {
+        let start = Instant::now();
+        let mut cycles = RepeatCycles::default();
+        cycles.start(ButtonId::Back, Action::VolumeDown, start);
+        let mut now = past(start, REPEAT_INITIAL_DELAY);
+        assert_eq!(cycles.take_due(now), vec![Action::VolumeDown]);
+
+        // A fresh press (binding swap, or a re-press that outran the release).
+        now += Duration::from_millis(10);
+        cycles.start(ButtonId::Back, Action::VolumeUp, now);
+        assert!(
+            cycles.take_due(now + REPEAT_START_INTERVAL).is_empty(),
+            "the delay starts over, so the hold ramps up slowly again"
+        );
+        assert_eq!(
+            cycles.take_due(past(now, REPEAT_INITIAL_DELAY)),
+            vec![Action::VolumeUp],
+            "and it fires the newly bound action"
+        );
+    }
 
     #[test]
     fn the_repeat_ramp_accelerates_and_then_holds_at_the_floor() {
