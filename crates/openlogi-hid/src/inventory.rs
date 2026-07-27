@@ -38,13 +38,18 @@ const MAX_BOLT_SLOTS: u8 = 6;
 /// device wedges the whole enumeration — and the GUI runs `enumerate` on a
 /// polling watcher, so a permanent hang would stall every later refresh.
 ///
-/// Kept short so a snapshot settles quickly: a timed-out node is skipped and
-/// re-probed on the next watcher tick (~2 s), and the first probe usually wakes
-/// the device so the retry succeeds fast. Slots are probed concurrently on both
-/// receiver paths, so a healthy receiver's worst case is the 1.5 s arrival drain
-/// plus a single slot's [`BOLT_SLOT_PROBE`] / [`UNIFYING_SLOT_PROBE`] — not their
-/// sum — which this stays comfortably above, so awake devices never trip it.
-const PROBE_BUDGET: Duration = Duration::from_secs(6);
+/// A timed-out node is skipped and re-probed on the next watcher tick (~2 s),
+/// and the first probe usually wakes the device so the retry succeeds fast.
+/// Slots are probed concurrently on both receiver paths, so a healthy
+/// receiver's worst case is the 1.5 s arrival drain plus a single slot's
+/// [`BOLT_SLOT_PROBE`] / [`UNIFYING_SLOT_PROBE`] — not their sum — which this
+/// stays comfortably above, so awake devices never trip it.
+///
+/// Sized for the Bluetooth-direct feature walk, the long pole: a ~35-entry
+/// table over a link that drops individual reports, which `hidpp::device`
+/// re-asks for per entry. At 6 s one lost report consumed the whole budget and
+/// the walk was abandoned mid-table, surfacing as a mouse that never appeared.
+const PROBE_BUDGET: Duration = Duration::from_secs(25);
 
 /// Per-slot budget for the HID++ 2.0 feature walk on a Unifying paired device.
 ///
