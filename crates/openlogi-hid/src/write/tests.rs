@@ -1,3 +1,5 @@
+use std::assert_matches;
+
 use super::*;
 use hidpp::feature::smartshift::WheelMode;
 
@@ -18,10 +20,10 @@ fn capabilities_sort_and_deduplicate_values() -> Result<(), WriteError> {
 
 #[test]
 fn capabilities_reject_empty_list() {
-    assert!(matches!(
+    assert_matches!(
         DpiCapabilities::new(Vec::new()),
         Err(WriteError::EmptyDpiList)
-    ));
+    );
 }
 
 #[test]

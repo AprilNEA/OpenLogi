@@ -9,8 +9,14 @@
 //! | data   | `$XDG_DATA_HOME`    | `~/.local/share/openlogi`     |
 //!
 //! On Windows `$HOME` falls back to `%USERPROFILE%`, so paths resolve to
-//! `%USERPROFILE%\.config\openlogi` etc. — best-effort until a real Windows
-//! port lands.
+//! `%USERPROFILE%\.config\openlogi` etc.
+//!
+//! **Decision (#347):** the Windows location is final, not best-effort.
+//! XDG-on-every-platform is this module's deliberate design — macOS also
+//! skips its native `~/Library/Application Support` — and Windows follows
+//! the same rule rather than `%APPDATA%`. Recorded before the agent first
+//! shipped in Windows artifacts, because moving it afterwards would strand
+//! every existing user's `config.toml` and the agent's first-run state.
 //!
 //! Local packaged macOS builds stamped with `.dev` bundle identifiers use the
 //! same layout under an `openlogi-dev` app directory.
@@ -27,8 +33,11 @@ const APP_DIR: &str = "openlogi";
 /// cannot take over the installed app's socket, lock, config, or asset cache.
 const DEV_APP_DIR: &str = "openlogi-dev";
 
+/// Failure resolving the per-user base directories.
 #[derive(Debug, Error)]
 pub enum PathsError {
+    /// No home directory could be determined for the current user, so none
+    /// of the XDG bases resolve.
     #[error("could not resolve a home directory for the current user")]
     HomeNotFound,
 }
@@ -86,6 +95,14 @@ fn current_bundle_identifier() -> Option<String> {
     }
 
     None
+}
+
+/// The current user's home directory.
+///
+/// The plain home, not an XDG base — for callers placing files under
+/// OS-native locations (e.g. macOS `~/Library/LaunchAgents`).
+pub fn home_dir() -> Result<PathBuf, PathsError> {
+    Ok(xdg()?.home_dir().to_path_buf())
 }
 
 /// The raw XDG config home directory (without the `openlogi` subdirectory).

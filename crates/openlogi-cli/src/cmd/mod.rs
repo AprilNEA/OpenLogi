@@ -9,7 +9,7 @@ pub mod list;
 pub enum Command {
     /// List connected Logitech HID++ devices.
     List(list::ListArgs),
-    /// Manage assets fetched from assets.openlogi.org.
+    /// Manage assets fetched from OpenLogi's asset mirrors.
     #[command(subcommand)]
     Assets(assets::AssetsCmd),
     /// Real-device round-trip smoke tests against the HID++ write path.

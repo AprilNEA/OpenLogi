@@ -1,5 +1,7 @@
 //! Unit tests for `Crown` mode parsing and event decoding.
 
+use std::assert_matches;
+
 use super::event::{
     ActivityState, ButtonState, CrownEvent, CrownGesture, RotationState, decode_event,
 };
@@ -27,10 +29,10 @@ fn rejects_unknown_mode_value() {
     let mut payload = [0; 16];
     payload[0] = 9;
 
-    assert!(matches!(
+    assert_matches!(
         CrownMode::from_payload(&payload),
         Err(crate::protocol::v20::Hidpp20Error::UnsupportedResponse)
-    ));
+    );
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! Background HTTP sync against `assets.openlogi.org`.
+//! Background HTTP sync against OpenLogi's asset mirrors.
 //!
 //! Always fetches `index.json` first — even with no devices connected, so
 //! the registry is on disk before the first device needs resolving. Then,
@@ -10,16 +10,17 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use backon::{BackoffBuilder, ExponentialBuilder};
 use openlogi_assets::http;
-use openlogi_assets::{BUTTONS_RENDER_FILES, DepotManifest, DeviceEntry, FetchOutcome};
+use openlogi_assets::{
+    AssetRegistry, AssetSource, BUTTONS_RENDER_FILES, DepotManifest, DeviceEntry, FetchOutcome,
+};
+use openlogi_core::config::AssetSourcePreference;
 use openlogi_core::device::DeviceModelInfo;
 use tracing::{debug, info, warn};
-
-/// Default origin for asset fetches. Overridable via `OPENLOGI_ASSETS`
-/// so dev / staging deployments can point elsewhere without a rebuild.
-pub const DEFAULT_BASE: &str = "https://assets.openlogi.org";
 
 /// Whether the startup HTTP sync should run on this launch.
 ///
@@ -41,7 +42,8 @@ pub fn should_run(has_bundle: bool) -> bool {
     !has_bundle
 }
 
-/// Refresh the local cache: the shared `index.json` unconditionally, then
+/// Refresh the local cache: probe the built-in mirrors (or use the selected
+/// source), persist the selected source's `index.json`, then sync
 /// the depots for every model in `models`. An empty `models` is a valid
 /// call — it prefetches just the index so device resolution works the
 /// moment a device first appears.
@@ -49,21 +51,22 @@ pub fn should_run(has_bundle: bool) -> bool {
 /// Each entry pairs a device's HID++ model info with its firmware `codename`,
 /// so the depot match can fall back to the registry `displayName` for devices
 /// whose live PID isn't in the registry (e.g. an MX Master 3S over BTLE).
-pub fn sync(server: &str, models: &[(DeviceModelInfo, Option<String>)]) -> Result<()> {
+pub fn sync(
+    source: Option<AssetSource>,
+    models: &[(DeviceModelInfo, Option<String>)],
+) -> Result<()> {
     let cache_root = super::paths::user_cache_root();
     fs::create_dir_all(&cache_root)
         .with_context(|| format!("create cache root {}", cache_root.display()))?;
 
-    let client = http::AssetClient::new(server);
+    let registry = AssetRegistry::load_source(source, &cache_root).context("fetch asset index")?;
+    let client = registry.client();
+    let index = registry.index();
     // The index is the critical shared resource — if it can't be fetched
     // (after the HTTP layer's own retries) bail with an error so the caller
     // retries the whole sync on a later device snapshot, rather than latching
     // success off a run that downloaded nothing. Per-depot failures below stay
     // best-effort: an optional colour variant 404 shouldn't block everything.
-    let index = client
-        .fetch_index_to_dir(&cache_root)
-        .context("fetch asset index")?;
-
     // Each target carries the HID++ `extended_model_id` byte so the
     // depot sync can fetch the right colour variant. `OPENLOGI_FORCE_DEPOT`
     // doesn't correspond to a physical device, so we pass `ext = 0`
@@ -75,7 +78,7 @@ pub fn sync(server: &str, models: &[(DeviceModelInfo, Option<String>)]) -> Resul
         targets.push((forced, entry.clone(), 0));
     }
     for (model, codename) in models {
-        if let Some((depot, entry)) = super::resolve_in_index(&index, model, codename.as_deref()) {
+        if let Some((depot, entry)) = super::resolve_in_index(index, model, codename.as_deref()) {
             targets.push((depot.to_string(), entry.clone(), model.extended_model_id));
         }
     }
@@ -83,12 +86,12 @@ pub fn sync(server: &str, models: &[(DeviceModelInfo, Option<String>)]) -> Resul
     targets.dedup_by(|a, b| a.0 == b.0);
 
     if targets.is_empty() {
-        debug!("sync: no matching depots for connected devices");
+        debug!("sync: no matching depots for known devices");
         return Ok(());
     }
 
     for (depot, entry, ext) in &targets {
-        if let Err(e) = sync_depot(&client, &cache_root, depot, entry, *ext) {
+        if let Err(e) = sync_depot(client, &cache_root, depot, entry, *ext) {
             warn!(depot, error = %e, "depot sync failed");
         }
     }
@@ -192,4 +195,151 @@ fn pick_variant_filename(
     manifest
         .resource_for_variant(base_model_id, ext, resource_key)
         .map(str::to_string)
+}
+
+/// Result of one background asset-sync run, reported back to the select
+/// loop: whether the run succeeded, and which model keys it covered (folded
+/// into the synced set on success so the same device doesn't re-sync every
+/// snapshot).
+pub(crate) struct SyncOutcome {
+    pub(crate) ok: bool,
+    pub(crate) keys: Vec<String>,
+}
+
+/// Session-stable identity for a synced model: the HID++ model ids plus the
+/// extended-model byte (the colour-variant selector) and the codename the
+/// depot match falls back on. Models that collapse to one key would resolve
+/// to the same depot files anyway.
+pub(crate) fn model_key((model, codename): &(DeviceModelInfo, Option<String>)) -> String {
+    format!(
+        "{:02x}:{:04x}:{:04x}:{:04x}:{}",
+        model.extended_model_id,
+        model.model_ids[0],
+        model.model_ids[1],
+        model.model_ids[2],
+        codename.as_deref().unwrap_or_default()
+    )
+}
+
+/// A manual asset action requested from the Settings → Assets tab, pushed to
+/// the main event loop via [`AssetControl`].
+pub enum AssetCommand {
+    /// Force-fetch assets for known devices now, bypassing the
+    /// automatic download policy.
+    Refresh,
+    /// Delete the per-user cache, then re-fetch.
+    ClearCache,
+}
+
+/// Global handle the Settings window uses to push [`AssetCommand`]s into the
+/// main loop, mirroring how the Add Device window drives pairing.
+pub struct AssetControl(pub tokio::sync::mpsc::UnboundedSender<AssetCommand>);
+
+impl gpui::Global for AssetControl {}
+
+/// Minimum gap before re-attempting a failed sync, doubling with each
+/// consecutive attempt and capped at a minute. The first attempt is
+/// immediate (`last_sync_at` is `None`); after that a permanently-down host
+/// is polled ever more slowly (1s, 2s, 4s … 60s) instead of on every tick,
+/// while a recovered host still self-heals on the next attempt.
+pub(crate) fn sync_retry_delay(attempts: u32) -> Duration {
+    ExponentialBuilder::default()
+        .without_max_times()
+        .build()
+        .nth(attempts.saturating_sub(1).min(6) as usize)
+        .unwrap_or(Duration::from_mins(1))
+}
+
+/// Refresh the asset cache: the shared index always, plus the depots for
+/// `models`. Returns `true` when the sync completed and `false` when it
+/// failed and should be retried. Runs on a dedicated background thread —
+/// the HTTP layer's blocking retries are fine here. (Whether sync runs at
+/// all is the caller's gate: the automatic path checks `should_run` once at
+/// startup plus the auto-download setting; the Settings → Assets manual
+/// actions always fetch, even in a release build that would otherwise serve
+/// only bundled art.)
+pub(crate) fn run_asset_sync(
+    preference: AssetSourcePreference,
+    models: &[(DeviceModelInfo, Option<String>)],
+) -> bool {
+    let server = std::env::var("OPENLOGI_ASSETS").ok();
+    let source = source_for_sync(preference, server.as_deref());
+    match sync(source, models) {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(error = ?e, "asset sync failed — will retry with backoff");
+            false
+        }
+    }
+}
+
+fn source_for_sync(
+    preference: AssetSourcePreference,
+    override_base: Option<&str>,
+) -> Option<AssetSource> {
+    if let Some(base) = override_base {
+        return Some(AssetSource::Override(base.to_owned()));
+    }
+    match preference {
+        AssetSourcePreference::Automatic => None,
+        AssetSourcePreference::OpenLogi => Some(AssetSource::Production),
+        AssetSourcePreference::Cloudflare => Some(AssetSource::Pages),
+        AssetSourcePreference::Fastly => Some(AssetSource::JsDelivr),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{source_for_sync, sync_retry_delay};
+    use openlogi_assets::AssetSource;
+    use openlogi_core::config::AssetSourcePreference;
+    use std::time::Duration;
+
+    #[test]
+    fn retry_delay_doubles_then_caps() {
+        assert_eq!(sync_retry_delay(1), Duration::from_secs(1));
+        assert_eq!(sync_retry_delay(2), Duration::from_secs(2));
+        assert_eq!(sync_retry_delay(3), Duration::from_secs(4));
+        assert_eq!(sync_retry_delay(5), Duration::from_secs(16));
+        // Caps at 60s and never overflows the shift for large attempt counts.
+        assert_eq!(sync_retry_delay(7), Duration::from_mins(1));
+        assert_eq!(sync_retry_delay(u32::MAX), Duration::from_mins(1));
+    }
+
+    #[test]
+    fn automatic_preference_races_the_built_in_sources() {
+        assert_eq!(
+            source_for_sync(AssetSourcePreference::Automatic, None),
+            None
+        );
+    }
+
+    #[test]
+    fn openlogi_preference_uses_the_official_source() {
+        assert_eq!(
+            source_for_sync(AssetSourcePreference::OpenLogi, None),
+            Some(AssetSource::Production)
+        );
+    }
+
+    #[test]
+    fn fastly_preference_uses_the_shard_aware_jsdelivr_source() {
+        assert_eq!(
+            source_for_sync(AssetSourcePreference::Fastly, None),
+            Some(AssetSource::JsDelivr)
+        );
+    }
+
+    #[test]
+    fn environment_override_takes_precedence_over_the_saved_source() {
+        assert_eq!(
+            source_for_sync(
+                AssetSourcePreference::Cloudflare,
+                Some("https://assets.example.test")
+            ),
+            Some(AssetSource::Override(
+                "https://assets.example.test".to_owned()
+            ))
+        );
+    }
 }

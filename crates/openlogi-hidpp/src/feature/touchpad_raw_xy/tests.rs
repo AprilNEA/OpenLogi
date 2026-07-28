@@ -1,5 +1,7 @@
 //! Unit tests for `TouchpadRawXy` info parsing and raw-event decoding.
 
+use std::assert_matches;
+
 use super::event::{TouchpadRawEvent, decode_event};
 use super::{Origin, RawReportFlags, TouchpadInfo};
 
@@ -34,10 +36,10 @@ fn rejects_reserved_origin() {
     let mut payload = [0; 16];
     payload[8] = 0; // 0x00 is reserved
 
-    assert!(matches!(
+    assert_matches!(
         TouchpadInfo::from_payload(&payload),
         Err(crate::protocol::v20::Hidpp20Error::UnsupportedResponse)
-    ));
+    );
 }
 
 #[test]

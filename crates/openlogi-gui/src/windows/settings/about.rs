@@ -6,6 +6,7 @@ use super::{
     SettingItem, SettingPage, SettingsView, SharedString, Sizable, Styled, div, h_flex, img, px,
     v_flex,
 };
+use crate::theme::Typography as _;
 
 /// The About page: a hero card with the build identity and outbound links, the
 /// on-disk config location, and a trademark disclaimer.
@@ -16,7 +17,7 @@ pub(super) fn about_page(view: Entity<SettingsView>, copied: bool, pal: Palette)
     let config = SettingGroup::new().item(SettingItem::render(move |_, _, _| about_config(pal)));
     let footer = SettingGroup::new().item(SettingItem::render(move |_, _, _| {
         div()
-            .text_xs()
+            .text_caption()
             .text_color(pal.text_muted)
             .child(tr!(
                 "Not affiliated with Logitech. \"Logitech\", \"MX Master\", and \"Options+\" are trademarks of Logitech International S.A."
@@ -65,7 +66,7 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, pal: Palette, _: &mut A
                         )
                         .child(
                             div()
-                                .text_sm()
+                                .text_body()
                                 .text_color(pal.text_muted)
                                 .child(env!("CARGO_PKG_VERSION")),
                         ),
@@ -148,22 +149,35 @@ fn about_config(pal: Palette) -> AnyElement {
         .justify_between()
         .gap_3()
         .child(
+            // The absolute path can be arbitrarily long (deep home dirs,
+            // Windows profiles) — ellipsize it rather than letting it shove
+            // the reveal button past the window edge.
             v_flex()
                 .gap_1()
+                .flex_1()
+                .min_w_0()
                 .child(div().font_weight(FontWeight::MEDIUM).child("config.toml"))
-                .child(div().text_xs().text_color(pal.text_muted).child(path)),
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .truncate()
+                        .child(path),
+                ),
         )
         .child(
-            Button::new("about-reveal-config")
-                .outline()
-                .label(tr!("Show in file manager"))
-                .on_click(|_, _, cx| {
-                    if let Ok(dir) = openlogi_core::paths::config_dir()
-                        && let Ok(url) = url::Url::from_file_path(&dir)
-                    {
-                        cx.open_url(url.as_str());
-                    }
-                }),
+            div().flex_shrink_0().child(
+                Button::new("about-reveal-config")
+                    .outline()
+                    .label(tr!("Show in file manager"))
+                    .on_click(|_, _, cx| {
+                        if let Ok(dir) = openlogi_core::paths::config_dir()
+                            && let Ok(url) = url::Url::from_file_path(&dir)
+                        {
+                            cx.open_url(url.as_str());
+                        }
+                    }),
+            ),
         )
         .into_any_element()
 }

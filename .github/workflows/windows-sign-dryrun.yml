@@ -74,8 +74,8 @@ jobs:
           : "${AZURE_SIGNING_ACCOUNT:?Configure AZURE_SIGNING_ACCOUNT in the Azure 1Password item}"
           : "${AZURE_CERT_PROFILE:?Configure AZURE_CERT_PROFILE in the Azure 1Password item}"
 
-      - name: Build OpenLogi
-        run: cargo build --release -p openlogi-gui --target ${{ matrix.target }}
+      - name: Build OpenLogi (GUI + agent)
+        run: cargo build --release -p openlogi-gui -p openlogi-agent --target ${{ matrix.target }}
 
       - name: Azure login (OIDC)
         uses: azure/login@v3
@@ -84,28 +84,33 @@ jobs:
           tenant-id: ${{ steps.azure_config.outputs.AZURE_TENANT_ID }}
           subscription-id: ${{ steps.azure_config.outputs.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Sign openlogi-gui.exe with Artifact Signing
+      - name: Sign openlogi-gui.exe and openlogi-agent.exe with Artifact Signing
         uses: azure/artifact-signing-action@v2
         with:
           endpoint: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
           signing-account-name: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
-          files: ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-gui.exe
+          # `files` is a newline-separated list; one call signs both PE files.
+          files: |
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-gui.exe
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-agent.exe
           # Must stay http — SignTool rejects an https /tr ("Invalid Timestamp
           # URL", v0.6.5). The RFC3161 response is itself signed.
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           cache-dependencies: false
 
-      - name: Verify the binary is signed
+      - name: Verify the binaries are signed
         shell: pwsh
         run: |
-          $sig = Get-AuthenticodeSignature target\${{ matrix.target }}\release\openlogi-gui.exe
-          $sig | Format-List
           # NotSigned and HashMismatch are trust-store independent and always
           # ship-blockers; NotTrusted/UnknownError depend on the runner's
           # trust store, so they stay log-only.
-          if ($null -eq $sig.SignerCertificate -or
-              "$($sig.Status)" -in 'NotSigned', 'HashMismatch') {
-            Write-Error "openlogi-gui.exe Authenticode signature is invalid: $($sig.Status)"
-            exit 1
+          foreach ($exe in 'openlogi-gui.exe', 'openlogi-agent.exe') {
+            $sig = Get-AuthenticodeSignature "target\${{ matrix.target }}\release\$exe"
+            $sig | Format-List
+            if ($null -eq $sig.SignerCertificate -or
+                "$($sig.Status)" -in 'NotSigned', 'HashMismatch') {
+              Write-Error "$exe Authenticode signature is invalid: $($sig.Status)"
+              exit 1
+            }
           }

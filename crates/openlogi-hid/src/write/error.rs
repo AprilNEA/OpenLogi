@@ -96,6 +96,10 @@ pub enum HidppOperation {
     WriteSmartShift,
     /// Write keyboard lighting.
     Lighting,
+    /// Read HiResWheel capabilities or the current wheel mode.
+    ReadWheelMode,
+    /// Write and verify the native HiResWheel mode.
+    WriteWheelMode,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

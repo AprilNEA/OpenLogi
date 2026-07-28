@@ -9,6 +9,7 @@ use super::{
     Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter, ThemeMode, ThemeRegistry, div, h_flex, px,
     rgb, theme, v_flex,
 };
+use crate::theme::Typography as _;
 
 /// The Appearance page: light/dark mode, the theme grid, corner radius, and the
 /// interface language. Every theme here re-skins the whole app — the bespoke
@@ -148,7 +149,7 @@ fn mode_card(
     let thumb = div()
         .w(px(104.))
         .h(px(64.))
-        .rounded_lg()
+        .rounded(pal.control_radius)
         .overflow_hidden()
         .border_2()
         .border_color(if selected { accent } else { pal.border })
@@ -189,7 +190,7 @@ fn mode_card(
                 .items_center()
                 .gap(px(6.))
                 .child(radio_dot(selected, accent, pal))
-                .child(div().text_sm().child(label)),
+                .child(div().text_body().child(label)),
         )
         .on_click(move |_, _, cx| on_click(cx))
 }
@@ -337,7 +338,7 @@ fn theme_picker(
 
     let grid = if themes.is_empty() {
         div()
-            .text_sm()
+            .text_body()
             .text_color(pal.text_muted)
             .child(tr!("No themes match “%{query}”.", query => query))
             .into_any_element()
@@ -368,8 +369,14 @@ fn theme_picker(
                 .justify_between()
                 .gap_3()
                 .child(
+                    // Translated chip labels vary in width; let the chip row
+                    // yield (wrapping onto a second line if it must) so the
+                    // fixed-width search input is never pushed out of view.
                     h_flex()
                         .gap_2()
+                        .flex_1()
+                        .min_w_0()
+                        .flex_wrap()
                         .child(filter_chip(
                             view,
                             "filter-all",
@@ -396,7 +403,7 @@ fn theme_picker(
                         )),
                 )
                 .child(
-                    div().w(px(200.)).child(
+                    div().w(px(200.)).flex_shrink_0().child(
                         Input::new(theme_search)
                             .small()
                             .cleanable(true)
@@ -447,7 +454,7 @@ fn theme_card(
         .w(px(132.))
         .p(px(8.))
         .gap_2()
-        .rounded_lg()
+        .rounded(pal.card_radius)
         .border_1()
         .border_color(if selected { swatch.primary } else { pal.border })
         .bg(pal.surface)
@@ -459,7 +466,7 @@ fn theme_card(
             v_flex()
                 .h(px(54.))
                 .w_full()
-                .rounded_md()
+                .rounded(pal.control_radius)
                 .overflow_hidden()
                 .p(px(7.))
                 .gap(px(4.))
@@ -490,7 +497,7 @@ fn theme_card(
                 .child(
                     div()
                         .overflow_hidden()
-                        .text_xs()
+                        .text_caption()
                         .text_color(pal.text_primary)
                         .child(name),
                 )
@@ -541,7 +548,7 @@ fn filter_chip(
         .py_1()
         .rounded_full()
         .border_1()
-        .text_xs()
+        .text_caption()
         .cursor_pointer()
         .map(|this| {
             if selected {

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 use futures::{FutureExt, pin_mut, select};
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 
 use super::{RECEIVER_DEVICE_INDEX, ReceiverError};
 use crate::{
@@ -127,13 +127,11 @@ impl Receiver {
                 match header.sub_id {
                     // Device connection
                     0x41 => {
-                        let Ok(kind) = DeviceKind::try_from(payload[1] & 0x0f) else {
-                            return;
-                        };
-
+                        // Kind is identity-only; an unrecognised nibble folds
+                        // to `Unknown` instead of dropping the event.
                         emitter.emit(Event::DeviceConnection(DeviceConnection {
                             index: header.device_index,
-                            kind,
+                            kind: DeviceKind::from(payload[1] & 0x0f),
                             encrypted: payload[1] & (1 << 5) != 0,
                             online: payload[1] & (1 << 6) == 0,
                             wpid: u16::from_le_bytes(payload[2..=3].try_into().unwrap()),
@@ -144,13 +142,9 @@ impl Receiver {
                         match payload[2] {
                             // Device data
                             0 => {
-                                let Ok(kind) = DeviceKind::try_from(payload[4] & 0x0f) else {
-                                    return;
-                                };
-
                                 emitter.emit(Event::DeviceDiscoveryDeviceDetails {
                                     counter: payload[0] as u16 + payload[1] as u16 * 256,
-                                    kind,
+                                    kind: DeviceKind::from(payload[4] & 0x0f),
                                     wpid: u16::from_le_bytes(payload[5..=6].try_into().unwrap()),
                                     address: payload[7..=12].try_into().unwrap(),
                                     authentication: payload[15],
@@ -181,15 +175,10 @@ impl Receiver {
                         // payload[0] contains some kind of information about the status. I don't
                         // know how to map that though.
 
-                        let error = if payload[1] == 0x00 {
-                            None
-                        } else {
-                            let Ok(parsed) = PairingError::try_from(payload[1]) else {
-                                return;
-                            };
-
-                            Some(parsed)
-                        };
+                        // An unrecognised error code still means "pairing
+                        // failed" — dropping it here would turn the failure
+                        // into a session timeout. Carry the raw code instead.
+                        let error = (payload[1] != 0x00).then(|| PairingError::from(payload[1]));
 
                         emitter.emit(Event::PairingStatus {
                             device_address: payload[2..=7].try_into().unwrap(),
@@ -203,7 +192,10 @@ impl Receiver {
                     }
                     // Passkey request
                     0x4d => {
-                        let Ok(passkey) = str::from_utf8(&payload[1..=6]) else {
+                        // 6 bytes, NUL-padded when the passkey is shorter.
+                        let digits = &payload[1..=6];
+                        let len = digits.iter().position(|&b| b == 0).unwrap_or(digits.len());
+                        let Ok(passkey) = str::from_utf8(&digits[..len]) else {
                             return;
                         };
 
@@ -214,13 +206,9 @@ impl Receiver {
                     }
                     // Passkey pressed
                     0x4e => {
-                        let Ok(press_type) = PairingPasskeyPressType::try_from(payload[0]) else {
-                            return;
-                        };
-
                         emitter.emit(Event::PairingPasskeyPressed {
                             device_address: payload[1..=6].try_into().unwrap(),
-                            press_type,
+                            press_type: PairingPasskeyPressType::from(payload[0]),
                         });
                     }
                     _ => (),
@@ -384,8 +372,9 @@ impl Receiver {
 
         Ok(DevicePairingInformation {
             wpid: u16::from_le_bytes(response[2..=3].try_into().unwrap()),
-            kind: DeviceKind::try_from(response[1] & 0x0f)
-                .map_err(|_| Hidpp10Error::UnsupportedResponse)?,
+            // Kind is identity-only: an unrecognised nibble folds to
+            // `Unknown` instead of failing the whole pairing-info read.
+            kind: DeviceKind::from(response[1] & 0x0f),
             encrypted: response[1] & (1 << 5) != 0,
             online: response[1] & (1 << 6) == 0,
             unit_id: response[4..=7].try_into().unwrap(),
@@ -550,12 +539,14 @@ pub struct DevicePairingInformation {
 }
 
 /// Represents the kind of a device paired to a Bolt receiver.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, TryFromPrimitive)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum DeviceKind {
-    /// Unknown device kind.
+    /// Unknown device kind — also the fold target for values this crate
+    /// does not model (kind is identity-only and must never drop an event).
+    #[num_enum(default)]
     Unknown = 0x00,
     /// Keyboard device.
     Keyboard = 0x01,
@@ -727,7 +718,7 @@ pub struct DeviceConnection {
 /// Represents an error during device pairing.
 ///
 /// This is reported by the [`Event::PairingStatus`] event.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, TryFromPrimitive, IntoPrimitive)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, FromPrimitive, IntoPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -736,13 +727,16 @@ pub enum PairingError {
     DeviceTimeout = 0x01,
     /// Pairing failed.
     Failed = 0x02,
+    /// An error code this crate does not model; carries the raw byte.
+    #[num_enum(catch_all)]
+    Other(u8),
 }
 
 /// Represents the type of a single passkey press.
 ///
 /// This is reported by the [`Event::PairingPasskeyPressed`] event, which also
 /// includes some further information about the context of these values.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, TryFromPrimitive, IntoPrimitive)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, FromPrimitive, IntoPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -753,6 +747,9 @@ pub enum PairingPasskeyPressType {
     Keypress = 0x01,
     /// Passkey entry was submitted.
     Submit = 0x04,
+    /// A press type this crate does not model; carries the raw byte.
+    #[num_enum(catch_all)]
+    Other(u8),
 }
 
 #[cfg(test)]

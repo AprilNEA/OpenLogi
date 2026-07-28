@@ -1,5 +1,7 @@
 //! Unit tests for `ColorLedEffects` payload parsing and event decoding.
 
+use std::assert_matches;
+
 use super::event::{ColorLedEffectsEvent, decode_event};
 use super::types::{
     ColorLedInfo, EffectId, EffectSettings, ExtCapabilities, LedBinIndex, LedBinInfo,
@@ -64,10 +66,10 @@ fn rejects_unknown_zone_location() {
     let mut payload = [0; 16];
     payload[1..3].copy_from_slice(&99u16.to_be_bytes());
 
-    assert!(matches!(
+    assert_matches!(
         ZoneInfo::from_payload(&payload),
         Err(Hidpp20Error::UnsupportedResponse)
-    ));
+    );
 }
 
 #[test]
@@ -168,12 +170,12 @@ fn maps_effect_id_wire_values() {
 #[test]
 fn validates_single_nv_capability() {
     assert!(validate_single_nv_capability(NvCapabilities::BOOT_UP_EFFECT).is_ok());
-    assert!(matches!(
+    assert_matches!(
         validate_single_nv_capability(NvCapabilities::empty()),
         Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         validate_single_nv_capability(NvCapabilities::BOOT_UP_EFFECT | NvCapabilities::DEMO),
         Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
-    ));
+    );
 }

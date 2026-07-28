@@ -1,5 +1,7 @@
 //! Unit tests for `Illumination` payload parsing and event decoding.
 
+use std::assert_matches;
+
 use super::event::{IlluminationEvent, decode_event};
 use super::types::{
     BrightnessClampedSource, ControlCapabilities, ControlInfo, IlluminationState, LevelConfig,
@@ -160,10 +162,10 @@ fn rejects_invalid_non_linear_levels() {
             values: vec![1],
         },
     ] {
-        assert!(matches!(
+        assert_matches!(
             levels.to_payload(),
             Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
-        ));
+        );
     }
 }
 

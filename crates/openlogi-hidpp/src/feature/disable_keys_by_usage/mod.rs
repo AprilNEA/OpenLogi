@@ -101,6 +101,8 @@ fn usage_packets(usages: &[u8]) -> Vec<[u8; USAGES_PER_PACKET]> {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::{usage_packets, validate_usages};
     use crate::protocol::v20::{ErrorType, Hidpp20Error};
 
@@ -120,10 +122,10 @@ mod tests {
 
     #[test]
     fn rejects_zero_usage_before_packetizing() {
-        assert!(matches!(
+        assert_matches!(
             validate_usages(&[0x39, 0, 0x3a]),
             Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
-        ));
+        );
     }
 
     #[test]

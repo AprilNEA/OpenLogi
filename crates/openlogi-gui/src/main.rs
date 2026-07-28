@@ -52,22 +52,23 @@ mod windows;
 rust_i18n::i18n!("locales", fallback = "en");
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
-use backon::{BackoffBuilder, ExponentialBuilder};
 use gpui::{
-    AppContext, BorrowAppContext as _, Bounds, SharedString, Size, Styled, TitlebarOptions,
-    WindowBounds, WindowOptions, px,
+    AppContext, BorrowAppContext as _, Bounds, Size, Styled, WindowBounds, WindowOptions, px,
 };
 use gpui_component::{ActiveTheme, Root};
 use openlogi_core::brand::DeeplinkCommand;
 use openlogi_core::config::Config;
-use openlogi_core::device::{DeviceInventory, DeviceModelInfo};
+use openlogi_core::device::DeviceInventory;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::app::AppView;
+use crate::asset::sync::{
+    AssetCommand, AssetControl, SyncOutcome, model_key, run_asset_sync, sync_retry_delay,
+};
 use crate::state::AppState;
 
 fn dispatch_gui_command(command: DeeplinkCommand, cx: &mut gpui::App) {
@@ -290,38 +291,6 @@ fn main() -> Result<()> {
                 tokio::select! {
                     update = ipc_updates.recv(), if ipc_open => match update {
                         Some(ipc_client::GuiUpdate::Snapshot(update)) => {
-                        // Kick off (or re-arm) the background asset sync. The
-                        // index prefetch needs no devices; depot fetches fire
-                        // only for models not already synced this session. The
-                        // whole automatic path is skipped when the user turned
-                        // auto-download off — a manual Refresh still works via
-                        // the AssetControl arm below.
-                        let auto_download = cx.update(|cx| {
-                            cx.try_global::<AppState>()
-                                .is_none_or(|s| s.app_settings().auto_download_assets)
-                        });
-                        let backoff_passed = last_sync_at
-                            .is_none_or(|t| t.elapsed() >= sync_retry_delay(sync_attempts));
-                        let pending: Vec<_> = collect_models(&update.inventory)
-                            .into_iter()
-                            .filter(|m| !synced_keys.contains(&model_key(m)))
-                            .collect();
-                        if auto_download
-                            && sync_enabled
-                            && !sync_running
-                            && backoff_passed
-                            && (!index_refreshed || !pending.is_empty())
-                        {
-                            sync_running = true;
-                            sync_attempts = sync_attempts.saturating_add(1);
-                            last_sync_at = Some(Instant::now());
-                            let tx = sync_tx.clone();
-                            std::thread::spawn(move || {
-                                let keys = pending.iter().map(model_key).collect();
-                                let ok = run_asset_sync(&pending);
-                                let _ = tx.send(SyncOutcome { ok, keys });
-                            });
-                        }
                         // Keep the latest completed enumeration for the manual
                         // Refresh / Clear arm — a not-yet-ready agent's empty
                         // pre-enumeration list must not shrink it.
@@ -334,10 +303,17 @@ fn main() -> Result<()> {
                         // silhouettes were resolved: the resolver was rebuilt
                         // when its outcome landed; force this merge through
                         // the unchanged-list early-return so the fresh records
-                        // become visible.
-                        let force_refresh = std::mem::take(&mut assets_dirty);
-                        cx.update(|cx| {
-                            let changed = cx.update_global::<AppState, _>(|state, _| {
+                        // become visible. Only consume the flag on a `Ready`
+                        // snapshot that will actually run the merge below —
+                        // `refresh_inventories` is skipped while the agent is
+                        // still `Scanning`, so taking it there would drop the
+                        // repaint and strand the device on its silhouette until
+                        // the next inventory change or a restart (seen after an
+                        // update relaunches GUI and agent together: the agent's
+                        // Scanning window overlaps the first sync's completion).
+                        let force_refresh = inventory_ready && std::mem::take(&mut assets_dirty);
+                        let (auto_download, asset_source, models) = cx.update(|cx| {
+                            let (changed, auto_download, asset_source, models) = cx.update_global::<AppState, _>(|state, _| {
                                 // Merge only *completed* enumerations. A not-yet-ready
                                 // agent can only serve an empty pre-enumeration list, and
                                 // counting those as misses would wipe the device list (and
@@ -354,14 +330,53 @@ fn main() -> Result<()> {
                                 }
                                 // Bitwise `|`: the link must be set even when the
                                 // merge already reported a change.
-                                merged | state.set_agent_link(state::AgentLink::Ready(update.status))
+                                let changed = merged
+                                    | state.set_agent_link(state::AgentLink::Ready(update.status));
+                                let settings = state.app_settings();
+                                (
+                                    changed,
+                                    settings.auto_download_assets,
+                                    settings.asset_source,
+                                    state.asset_models(),
+                                )
                             });
                             // The steady poll mostly repeats an identical snapshot;
                             // skip the full-window invalidation for those.
                             if changed {
                                 cx.refresh_windows();
                             }
+                            (auto_download, asset_source, models)
                         });
+                        // Kick off (or re-arm) the background asset sync. The
+                        // index prefetch needs no devices; depot fetches fire
+                        // only for models not already synced this session. Use
+                        // the UI's merged device set so persisted identities are
+                        // covered when a live probe temporarily lacks model info.
+                        // The whole automatic path is skipped when the user
+                        // turned auto-download off — a manual Refresh still
+                        // works via the AssetControl arm below.
+                        let backoff_passed = last_sync_at
+                            .is_none_or(|t| t.elapsed() >= sync_retry_delay(sync_attempts));
+                        let pending: Vec<_> = models
+                            .into_iter()
+                            .filter(|m| !synced_keys.contains(&model_key(m)))
+                            .collect();
+                        if auto_download
+                            && sync_enabled
+                            && !sync_running
+                            && backoff_passed
+                            && (!index_refreshed || !pending.is_empty())
+                        {
+                            sync_running = true;
+                            sync_attempts = sync_attempts.saturating_add(1);
+                            last_sync_at = Some(Instant::now());
+                            let tx = sync_tx.clone();
+                            std::thread::spawn(move || {
+                                let keys = pending.iter().map(model_key).collect();
+                                let ok = run_asset_sync(asset_source, &pending);
+                                let _ = tx.send(SyncOutcome { ok, keys });
+                            });
+                        }
                         }
                         Some(ipc_client::GuiUpdate::Unreachable) => {
                             cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
@@ -425,11 +440,14 @@ fn main() -> Result<()> {
                             sync_running = true;
                             sync_attempts = 0;
                             last_sync_at = None;
-                            let models = collect_models(&latest_inv);
+                            let (models, asset_source) = cx.update(|cx| {
+                                let state = cx.global::<AppState>();
+                                (state.asset_models(), state.app_settings().asset_source)
+                            });
                             let tx = sync_tx.clone();
                             std::thread::spawn(move || {
                                 let keys = models.iter().map(model_key).collect();
-                                let ok = run_asset_sync(&models);
+                                let ok = run_asset_sync(asset_source, &models);
                                 let _ = tx.send(SyncOutcome { ok, keys });
                             });
                         }
@@ -478,79 +496,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Result of one background asset-sync run, reported back to the select
-/// loop: whether the run succeeded, and which model keys it covered (folded
-/// into the synced set on success so the same device doesn't re-sync every
-/// snapshot).
-struct SyncOutcome {
-    ok: bool,
-    keys: Vec<String>,
-}
-
-/// Session-stable identity for a synced model: the HID++ model ids plus the
-/// extended-model byte (the colour-variant selector) and the codename the
-/// depot match falls back on. Models that collapse to one key would resolve
-/// to the same depot files anyway.
-fn model_key((model, codename): &(DeviceModelInfo, Option<String>)) -> String {
-    format!(
-        "{:02x}:{:04x}:{:04x}:{:04x}:{}",
-        model.extended_model_id,
-        model.model_ids[0],
-        model.model_ids[1],
-        model.model_ids[2],
-        codename.as_deref().unwrap_or_default()
-    )
-}
-
-/// A manual asset action requested from the Settings → Assets tab, pushed to
-/// the main event loop via [`AssetControl`].
-pub enum AssetCommand {
-    /// Force-fetch assets for the connected devices now, bypassing the
-    /// automatic download policy.
-    Refresh,
-    /// Delete the per-user cache, then re-fetch.
-    ClearCache,
-}
-
-/// Global handle the Settings window uses to push [`AssetCommand`]s into the
-/// main loop, mirroring how the Add Device window drives pairing.
-pub struct AssetControl(pub tokio::sync::mpsc::UnboundedSender<AssetCommand>);
-
-impl gpui::Global for AssetControl {}
-
-/// Minimum gap before re-attempting a failed sync, doubling with each
-/// consecutive attempt and capped at a minute. The first attempt is
-/// immediate (`last_sync_at` is `None`); after that a permanently-down host
-/// is polled ever more slowly (1s, 2s, 4s … 60s) instead of on every tick,
-/// while a recovered host still self-heals on the next attempt.
-fn sync_retry_delay(attempts: u32) -> Duration {
-    ExponentialBuilder::default()
-        .without_max_times()
-        .build()
-        .nth(attempts.saturating_sub(1).min(6) as usize)
-        .unwrap_or(Duration::from_secs(60))
-}
-
-/// Refresh the asset cache: the shared index always, plus the depots for
-/// `models`. Returns `true` when the sync completed and `false` when it
-/// failed and should be retried. Runs on a dedicated background thread —
-/// the HTTP layer's blocking retries are fine here. (Whether sync runs at
-/// all is the caller's gate: the automatic path checks `should_run` once at
-/// startup plus the auto-download setting; the Settings → Assets manual
-/// actions always fetch, even in a release build that would otherwise serve
-/// only bundled art.)
-fn run_asset_sync(models: &[(DeviceModelInfo, Option<String>)]) -> bool {
-    let server =
-        std::env::var("OPENLOGI_ASSETS").unwrap_or_else(|_| asset::sync::DEFAULT_BASE.to_string());
-    match asset::sync::sync(&server, models) {
-        Ok(()) => true,
-        Err(e) => {
-            warn!(error = ?e, "asset sync failed — will retry with backoff");
-            false
-        }
-    }
-}
-
 fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
     let bounds = Bounds::centered(None, Size::new(px(1100.), px(750.)), cx);
     WindowOptions {
@@ -560,11 +505,10 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
         // overlap; below this the model can't shrink further without crowding.
         window_min_size: Some(Size::new(px(720.), px(680.))),
         app_id: Some("openlogi".to_string()),
-        titlebar: Some(TitlebarOptions {
-            title: Some(SharedString::from("OpenLogi")),
-            appears_transparent: false,
-            traffic_light_position: None,
-        }),
+        // Linux: transparent chrome so `AppView::render` can draw a client-side
+        // `TitleBar` (the compositor declines server-side decorations and gpui's
+        // fallback is unpainted). macOS/Windows keep their native titlebar.
+        titlebar: Some(windows::titlebar_options("OpenLogi")),
         ..WindowOptions::default()
     }
 }
@@ -615,31 +559,4 @@ fn init_tracing() {
             EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-}
-
-/// Flatten every paired device's HID++ model snapshot — that's what the
-/// asset sync feeds into the registry lookup.
-fn collect_models(inventories: &[DeviceInventory]) -> Vec<(DeviceModelInfo, Option<String>)> {
-    inventories
-        .iter()
-        .flat_map(|inv| inv.paired.iter())
-        .filter_map(|p| p.model_info.clone().map(|m| (m, p.codename.clone())))
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::sync_retry_delay;
-    use std::time::Duration;
-
-    #[test]
-    fn retry_delay_doubles_then_caps() {
-        assert_eq!(sync_retry_delay(1), Duration::from_secs(1));
-        assert_eq!(sync_retry_delay(2), Duration::from_secs(2));
-        assert_eq!(sync_retry_delay(3), Duration::from_secs(4));
-        assert_eq!(sync_retry_delay(5), Duration::from_secs(16));
-        // Caps at 60s and never overflows the shift for large attempt counts.
-        assert_eq!(sync_retry_delay(7), Duration::from_secs(60));
-        assert_eq!(sync_retry_delay(u32::MAX), Duration::from_secs(60));
-    }
 }

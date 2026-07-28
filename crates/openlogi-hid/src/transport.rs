@@ -105,6 +105,11 @@ fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
 /// single long-lived `IOHIDManager` across threads is the model hidapi uses too.
 static HID_BACKEND: LazyLock<HidBackend> = LazyLock::new(HidBackend::default);
 
+/// The process-wide HID backend shared by enumeration and hotplug watching.
+pub(crate) fn hid_backend() -> &'static HidBackend {
+    &HID_BACKEND
+}
+
 pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError>
 {
     let all: Vec<async_hid::Device> = HID_BACKEND.enumerate().await?.collect().await;

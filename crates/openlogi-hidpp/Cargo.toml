@@ -17,7 +17,7 @@ edition.workspace = true
 # Upstream HEAD uses std APIs stabilized in 1.87. Keep this explicit instead
 # of inheriting the workspace MSRV so future syncs can see the fork's own lower
 # bound.
-rust-version = "1.87"
+rust-version = "1.96"
 license = "0BSD"
 repository.workspace = true
 description = "OpenLogi's vendored fork of the `hidpp` crate (Logitech HID++ protocol)."
@@ -29,7 +29,7 @@ readme = "README.md"
 name = "hidpp"
 
 [dependencies]
-thiserror = "2"
+thiserror = { workspace = true }
 hidreport = "0.5.0"
 futures = "0.3.31"
 futures-timer = "3.0.4"
@@ -40,4 +40,7 @@ async-channel = "2.3.1"
 serde = { version = "1.0", features = ["derive"], optional = true }
 hex = "0.4.3"
 derive_builder = "0.20.2"
-bitflags = { version = "=2.11.1", features = ["serde"] }
+bitflags = { version = "2", features = ["serde"] }
+# OpenLogi-specific: request-level wire tracing at trace!. Off by default
+# (level-gated); enable with OPENLOGI_LOG=hidpp=trace. Not in upstream hidpp.
+tracing = { workspace = true }

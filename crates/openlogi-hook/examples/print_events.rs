@@ -40,7 +40,10 @@ fn main() {
 
     // Block until Ctrl-C.
     let (tx, rx) = std::sync::mpsc::channel();
-    #[allow(clippy::expect_used)]
+    #[expect(
+        clippy::expect_used,
+        reason = "example binary; aborting on a failed handler install is fine"
+    )]
     ctrlc::set_handler(move || {
         let _ = tx.send(());
     })

@@ -1,14 +1,6 @@
 #!/bin/sh
 set -eu
 
-# Expand the @BINDIR@ placeholder in the installed systemd unit.
-# Packages install binaries to /usr/bin; the template uses a placeholder so
-# install.sh can substitute a different prefix without a separate template.
-SERVICE=/usr/lib/systemd/user/openlogi-agent.service
-if [ -f "$SERVICE" ]; then
-    sed -i "s|@BINDIR@|/usr/bin|g" "$SERVICE"
-fi
-
 # Reload udev rules and wait for the new uaccess tags to be applied.
 # udevadm trigger is asynchronous — settle ensures the tags are in place
 # before the script exits so the agent can open /dev/hidraw* immediately.

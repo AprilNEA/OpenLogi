@@ -126,6 +126,8 @@ fn parse_dpi_list_payload(bytes: &[u8]) -> Result<Vec<u16>, Hidpp20Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::parse_dpi_list_payload;
     use crate::protocol::v20::Hidpp20Error;
 
@@ -157,40 +159,40 @@ mod tests {
     fn rejects_range_marker_without_previous_value() {
         let payload = [0xe0, 0x32, 0x1f, 0x40, 0x00, 0x00];
 
-        assert!(matches!(
+        assert_matches!(
             parse_dpi_list_payload(&payload),
             Err(Hidpp20Error::UnsupportedResponse)
-        ));
+        );
     }
 
     #[test]
     fn rejects_range_marker_without_end_value() {
         let payload = [0x01, 0x90, 0xe0, 0x32];
 
-        assert!(matches!(
+        assert_matches!(
             parse_dpi_list_payload(&payload),
             Err(Hidpp20Error::UnsupportedResponse)
-        ));
+        );
     }
 
     #[test]
     fn rejects_zero_step_range_marker() {
         let payload = [0x01, 0x90, 0xe0, 0x00, 0x06, 0x40, 0x00, 0x00];
 
-        assert!(matches!(
+        assert_matches!(
             parse_dpi_list_payload(&payload),
             Err(Hidpp20Error::UnsupportedResponse)
-        ));
+        );
     }
 
     #[test]
     fn rejects_descending_range_marker() {
         let payload = [0x06, 0x40, 0xe0, 0x32, 0x01, 0x90, 0x00, 0x00];
 
-        assert!(matches!(
+        assert_matches!(
             parse_dpi_list_payload(&payload),
             Err(Hidpp20Error::UnsupportedResponse)
-        ));
+        );
     }
 
     #[test]
@@ -216,9 +218,9 @@ mod tests {
 
     #[test]
     fn rejects_payload_with_no_values() {
-        assert!(matches!(
+        assert_matches!(
             parse_dpi_list_payload(&[0x00, 0x00]),
             Err(Hidpp20Error::UnsupportedResponse)
-        ));
+        );
     }
 }

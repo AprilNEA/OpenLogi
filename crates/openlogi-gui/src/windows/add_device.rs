@@ -17,16 +17,19 @@
 use gpui::{
     App, Context, FocusHandle, FontWeight, Global, InteractiveElement, IntoElement,
     ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, px, rgb,
+    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::v_flex;
+use gpui_component::{
+    button::{Button, ButtonVariants as _},
+    v_flex,
+};
 use openlogi_agent_core::ipc::{FoundDevice, PairingFailure, PairingUpdate};
 use openlogi_hid::{Click, PasskeyMethod, ReceiverSelector};
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::ipc_client::Command;
 use crate::state::AppState;
-use crate::theme::{self, Palette};
+use crate::theme::{self, Palette, Typography as _};
 use crate::windows::{self, AuxWindow};
 
 /// The pairing flow's current UI state. Mirrors the [`PairingUpdate`] stream.
@@ -183,15 +186,25 @@ impl Render for AddDeviceView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            .p_6()
-            .gap_5()
+            // Linux only: a client-side titlebar at the top of the window; the
+            // padded content sits in the flex-column below it. macOS / Windows
+            // keep their native titlebar.
+            .when(cfg!(target_os = "linux"), |this| {
+                this.child(windows::aux_title_bar(tr!("Add Device"), cx))
+            })
             .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(tr!("Add Device")),
+                v_flex()
+                    .flex_1()
+                    .w_full()
+                    .p_6()
+                    .gap_5()
+                    .child(
+                        div()
+                            .text_heading()
+                            .child(tr!("Add Device")),
+                    )
+                    .child(body(&state, pal)),
             )
-            .child(body(&state, pal))
     }
 }
 
@@ -206,7 +219,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                     pal,
                 ))
                 .child(
-                    action_button("ad-search", tr!("Search for devices"), pal, true)
+                    action_button("ad-search", tr!("Search for devices"), true)
                         .on_click(|_, _, cx| start_search(cx)),
                 );
         }
@@ -217,7 +230,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                     tr!("Make sure the device is on and in pairing mode."),
                     pal,
                 ))
-                .child(cancel_button(pal));
+                .child(cancel_button());
         }
         PairingUi::Found(devices) => {
             col = col.child(status_line(tr!("Searching for devices…"), pal));
@@ -229,17 +242,17 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                     col = col.child(device_row(idx, device, pal));
                 }
             }
-            col = col.child(cancel_button(pal));
+            col = col.child(cancel_button());
         }
         PairingUi::Pairing => {
             col = col
                 .child(status_line(tr!("Pairing…"), pal))
                 .child(hint(tr!("Follow the instructions on your device."), pal))
-                .child(cancel_button(pal));
+                .child(cancel_button());
         }
         PairingUi::Passkey(method) => {
             col = col.child(passkey_panel(method, pal));
-            col = col.child(cancel_button(pal));
+            col = col.child(cancel_button());
         }
         PairingUi::Paired { slot } => {
             col = col
@@ -254,7 +267,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                     pal,
                 ))
                 .child(
-                    action_button("ad-done", tr!("Done"), pal, false)
+                    action_button("ad-done", tr!("Done"), false)
                         .on_click(|_, _, cx| cx.set_global(PairingUi::Idle)),
                 );
         }
@@ -268,7 +281,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                 )
                 .child(hint(SharedString::from(detail.clone()), pal))
                 .child(
-                    action_button("ad-retry", tr!("Try again"), pal, true)
+                    action_button("ad-retry", tr!("Try again"), true)
                         .on_click(|_, _, cx| start_search(cx)),
                 );
         }
@@ -284,14 +297,14 @@ fn device_row(idx: usize, device: &FoundDevice, pal: Palette) -> impl IntoElemen
         .w_full()
         .px_4()
         .py_3()
-        .rounded_md()
+        .rounded(pal.control_radius)
         .border_1()
         .border_color(pal.border)
         .cursor_pointer()
         .hover(|s| s.bg(pal.surface_hover))
         .child(
             div()
-                .text_sm()
+                .text_body()
                 .child(SharedString::from(device.name.clone())),
         )
         .on_click(move |_, _, cx| {
@@ -310,12 +323,7 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
                     tr!("Type this passkey on the new keyboard, then press Enter:"),
                     pal,
                 ))
-                .child(
-                    div()
-                        .text_xl()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(SharedString::from(digits.clone())),
-                );
+                .child(div().text_title().child(SharedString::from(digits.clone())));
         }
         PasskeyMethod::Pointer { clicks, .. } => {
             let sequence: String = clicks
@@ -331,12 +339,7 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
                     tr!("On the new mouse, click in this order, then press both buttons together:"),
                     pal,
                 ))
-                .child(
-                    div()
-                        .text_xl()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(SharedString::from(sequence)),
-                );
+                .child(div().text_title().child(SharedString::from(sequence)));
         }
     }
     col
@@ -344,46 +347,27 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
 
 fn status_line(text: impl Into<SharedString>, _pal: Palette) -> impl IntoElement {
     div()
-        .text_sm()
+        .text_body()
         .font_weight(FontWeight::MEDIUM)
         .child(text.into())
 }
 
 fn hint(text: impl Into<SharedString>, pal: Palette) -> impl IntoElement {
     div()
-        .text_xs()
+        .text_caption()
         .text_color(pal.text_muted)
         .child(text.into())
 }
 
-/// A styled button. `primary` paints it accent-filled; otherwise it's outlined.
-/// The caller attaches `.on_click`.
-fn action_button(
-    id: &'static str,
-    label: impl Into<SharedString>,
-    pal: Palette,
-    primary: bool,
-) -> gpui::Stateful<gpui::Div> {
-    let base = div()
-        .id(id)
-        .px_4()
-        .py_2()
-        .rounded_md()
-        .cursor_pointer()
-        .child(label.into());
-    if primary {
-        base.bg(rgb(theme::ACCENT_BLUE))
-            .text_color(rgb(0x00ff_ffff))
-            .font_weight(FontWeight::MEDIUM)
-    } else {
-        base.border_1()
-            .border_color(pal.border)
-            .hover(|s| s.bg(pal.surface_hover))
-    }
+/// A styled button. `primary` paints it accent-filled; otherwise it's the
+/// neutral default. The caller attaches `.on_click`.
+fn action_button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> Button {
+    let button = Button::new(id).label(label);
+    if primary { button.primary() } else { button }
 }
 
-fn cancel_button(pal: Palette) -> impl IntoElement {
-    action_button("ad-cancel", tr!("Cancel"), pal, false).on_click(|_, _, cx| {
+fn cancel_button() -> impl IntoElement {
+    action_button("ad-cancel", tr!("Cancel"), false).on_click(|_, _, cx| {
         send(cx, Command::CancelPairing);
         cx.set_global(PairingUi::Idle);
     })

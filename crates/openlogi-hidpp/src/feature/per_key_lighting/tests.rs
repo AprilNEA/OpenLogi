@@ -1,5 +1,7 @@
 //! Unit tests for `PerKeyLighting` request encoding.
 
+use std::assert_matches;
+
 use super::{
     FramePersistence, Rgb, RgbZone, RgbZoneRange, ZonePresencePage, consecutive_zones_args,
     delta_args, frame_end_args, individual_zones_args, range_zones_args, single_value_args,
@@ -49,31 +51,31 @@ fn individual_zones_caps_at_four() {
 #[test]
 fn rejects_reserved_zone_ids() {
     for zone_id in [0, 0xff] {
-        assert!(matches!(
+        assert_matches!(
             validate_zone_id(zone_id),
             Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
-        ));
+        );
     }
 
-    assert!(matches!(
+    assert_matches!(
         validate_individual_zones(&[RgbZone {
             zone_id: 0,
             color: RED,
         }]),
         Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         validate_ranges(&[RgbZoneRange {
             first_zone_id: 1,
             last_zone_id: 0xff,
             color: RED,
         }]),
         Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         validate_single_value_zones(&[1, 0xff]),
         Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))
-    ));
+    );
 }
 
 #[test]

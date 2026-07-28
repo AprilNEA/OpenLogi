@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Asset registry schema + blocking HTTP fetch helpers for the assets.openlogi.org device asset host. Shared by the openlogi CLI (bundle sync) and openlogi-gui (runtime cache)."
+description = "Asset registry schema, mirror discovery, and blocking HTTP fetch helpers. Shared by the openlogi CLI (bundle sync) and openlogi-gui (runtime cache)."
 keywords = ["logitech", "openlogi", "assets", "hid"]
 categories = ["hardware-support"]
 
@@ -15,10 +15,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 ureq = { workspace = true }
 sha2 = { workspace = true }
-anyhow = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 backon = { workspace = true }
 atomic-write-file = "0.3.0"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

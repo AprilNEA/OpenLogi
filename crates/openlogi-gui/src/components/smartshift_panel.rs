@@ -5,11 +5,12 @@
 //! and a **permanent ratchet** toggle. The latter two only apply in ratchet
 //! mode, so they grey out under free-spin.
 //!
-//! Unlike DPI presets, nothing here is written to `config.toml`: the device
-//! persists wheel mode / threshold / torque in its own non-volatile memory, so
-//! the panel only reads and writes the device (via
-//! [`AppState::commit_smartshift`]). The current state is read lazily on the
-//! same background-thread pattern as [`crate::components::dpi_panel`].
+//! Each change is written to the device *and* persisted to `config.toml` (via
+//! [`AppState::commit_smartshift`]): the device holds wheel mode / threshold /
+//! torque in volatile RAM that resets on a power cycle (#189), so the agent
+//! re-applies the saved config when the device reconnects. The current state is
+//! read lazily on the same background-thread pattern as
+//! [`crate::components::dpi_panel`].
 
 use gpui::{
     AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
@@ -21,21 +22,24 @@ use gpui_component::{
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
+use openlogi_core::config::{SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE};
 use openlogi_hid::{AUTO_DISENGAGE_PERMANENT, DeviceRoute, SmartShiftMode, SmartShiftStatus};
 
 use crate::components::device_read::issue_device_read;
 use crate::components::status::{retry_line, status_line};
 use crate::state::{AppState, SmartShiftLoad};
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
+use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
 
 /// Friendly slider range for the `autoDisengage` threshold. The wire field is
-/// `0x01`–`0xFE` (0.25 turn/s steps), but realistic scroll speeds sit well
-/// inside 1–50 (≈12.5 turn/s) — Logitech's own default is ~16. A device
-/// reporting a value above this is clamped for display; it is only rewritten
-/// once the user actually drags the slider.
-const THRESHOLD_MIN: u8 = 1;
+/// `0x01`–`0xFE` (0.25 turn/s steps); the slider exposes the usable band
+/// [`SMARTSHIFT_MIN_AUTO_DISENGAGE`]–`50` (≈2–12.5 turn/s, default ~16).
+/// Thresholds below the floor free-spin on everyday scrolling (#317), so the
+/// floor and default are shared with the `openlogi-core` config heal. A device
+/// reporting a value outside the band is normalised for display by
+/// [`clamp_threshold`]; it is only rewritten once the user drags the slider.
+const THRESHOLD_MIN: u8 = SMARTSHIFT_MIN_AUTO_DISENGAGE;
 const THRESHOLD_MAX: u8 = 50;
-const DEFAULT_THRESHOLD: u8 = 16;
+const DEFAULT_THRESHOLD: u8 = SMARTSHIFT_AUTO_DISENGAGE_DEFAULT;
 
 pub struct SmartShiftPanel {
     /// The auto-disengage threshold slider. Always constructed (range is
@@ -212,7 +216,7 @@ impl SmartShiftPanel {
                     .child(section_label(tr!("Sensitivity"), pal))
                     .child(
                         div()
-                            .text_sm()
+                            .text_body()
                             .text_color(value_color)
                             .child(format!("{display}")),
                     ),
@@ -222,7 +226,7 @@ impl SmartShiftPanel {
             } else {
                 disabled_track(pal)
             })
-            .child(div().text_xs().text_color(pal.text_muted).child(tr!(
+            .child(div().text_caption().text_color(pal.text_muted).child(tr!(
                 "Higher keeps the ratchet engaged longer before free-spin."
             )));
 
@@ -234,7 +238,7 @@ impl SmartShiftPanel {
                     .child(section_label(tr!("Permanent ratchet"), pal))
                     .child(
                         div()
-                            .text_xs()
+                            .text_caption()
                             .text_color(pal.text_muted)
                             .child(tr!("Never auto-switch to free-spin.")),
                     ),
@@ -310,7 +314,7 @@ fn smartshift_load_target(cx: &mut Context<SmartShiftPanel>) -> Option<(String, 
 /// A small muted section heading.
 fn section_label(text: SharedString, pal: Palette) -> AnyElement {
     div()
-        .text_sm()
+        .text_body()
         .text_color(pal.text_muted)
         .child(text)
         .into_any_element()
@@ -334,11 +338,11 @@ fn mode_pill(
         .id(id)
         .px_3()
         .py_1()
-        .rounded_md()
+        .rounded(pal.control_radius)
         .selected_border(selected, pal)
         .bg(pal.surface)
         .selected_fill(selected)
-        .text_sm()
+        .text_body()
         .text_color(pal.text_primary)
         .cursor_pointer()
         .hover(|s| s.bg(pal.surface_hover))
@@ -366,10 +370,10 @@ fn permanent_toggle(
         return div()
             .px_2()
             .py_1()
-            .rounded_md()
+            .rounded(pal.control_radius)
             .border_1()
             .border_color(pal.border)
-            .text_xs()
+            .text_caption()
             .text_color(pal.text_muted)
             .child(label)
             .into_any_element();
@@ -378,10 +382,10 @@ fn permanent_toggle(
         .id("smartshift-permanent")
         .px_2()
         .py_1()
-        .rounded_md()
+        .rounded(pal.control_radius)
         .selected_border(on, pal)
         .selected_fill(on)
-        .text_xs()
+        .text_caption()
         .text_color(if on { pal.text_primary } else { pal.text_muted })
         .cursor_pointer()
         .child(label)
@@ -420,7 +424,41 @@ fn raw_to_threshold(raw: f32) -> u8 {
         .clamp(f32::from(THRESHOLD_MIN), f32::from(THRESHOLD_MAX)) as u8
 }
 
-/// Clamp a device-reported threshold into the slider's friendly range.
+/// Map a device-reported threshold into the slider's friendly band for display.
+///
+/// A non-permanent auto-disengage below [`THRESHOLD_MIN`] — including the `0`
+/// "do not change"/unset sentinel — releases the wheel into free-spin on the
+/// gentlest scroll (#317), so it must never seed the slider or the
+/// permanent-ratchet restore at that runaway value. Such values are normalised
+/// to the default (matching the `openlogi-core` config heal); values above the
+/// band clamp down to [`THRESHOLD_MAX`]. (`0xFF` permanent ratchet never reaches
+/// here — the caller handles it before clamping.)
 fn clamp_threshold(value: u8) -> u8 {
-    value.clamp(THRESHOLD_MIN, THRESHOLD_MAX)
+    if value < THRESHOLD_MIN {
+        DEFAULT_THRESHOLD
+    } else {
+        value.min(THRESHOLD_MAX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_THRESHOLD, THRESHOLD_MAX, THRESHOLD_MIN, clamp_threshold};
+
+    #[test]
+    fn clamp_threshold_heals_sub_floor_to_default() {
+        // 0 (the firmware "do not change" sentinel) and any sub-floor value
+        // used to seed the slider / permanent-ratchet restore with a runaway
+        // free-spin threshold (#317); they normalise to the default instead.
+        assert_eq!(clamp_threshold(0), DEFAULT_THRESHOLD);
+        assert_eq!(clamp_threshold(1), DEFAULT_THRESHOLD);
+        assert_eq!(clamp_threshold(THRESHOLD_MIN - 1), DEFAULT_THRESHOLD);
+    }
+
+    #[test]
+    fn clamp_threshold_keeps_in_band_values_and_clamps_high() {
+        assert_eq!(clamp_threshold(THRESHOLD_MIN), THRESHOLD_MIN);
+        assert_eq!(clamp_threshold(16), 16);
+        assert_eq!(clamp_threshold(200), THRESHOLD_MAX);
+    }
 }

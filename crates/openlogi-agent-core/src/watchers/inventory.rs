@@ -1,19 +1,20 @@
-//! Polling HID inventory watcher.
+//! HID inventory watcher: periodic polling, woken early by hotplug events.
 //!
 //! Spawns a dedicated OS thread with a one-shot tokio runtime that calls
 //! `openlogi_hid::enumerate` every `period` and forwards each completed
 //! snapshot over an unbounded mpsc to the agent's select loop, which applies
 //! it via `Orchestrator::refresh_inventory`.
 //!
-//! Polling beats hot-plug event registration on simplicity: HID transport
-//! crates ship different listener APIs across platforms, and `async-hid 0.4`
-//! does not expose any. A 2 s tick is cheap (one HID enumerate per cycle ≤
-//! a few hundred milliseconds) and matches the human-perceptible reconnect
-//! latency budget in PLAN.md.
+//! An OS hotplug event (`openlogi_hid::watch_hotplug`) cuts the wait short so
+//! a just-plugged device is probed — and gets its persisted settings applied —
+//! within a settle delay instead of a full period. The periodic tick stays as
+//! the reconciliation pass (battery refresh, missed events, platforms where
+//! the hotplug stream is unavailable).
 
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+use futures_lite::StreamExt as _;
 use openlogi_core::device::DeviceInventory;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -25,14 +26,19 @@ use tracing::{debug, info, warn};
 /// live inventory.
 const INITIAL_FAILURE_LIMIT: u8 = 3;
 
+/// Pause between a hotplug event and the early enumerate, so a just-connected
+/// node finishes registering with the OS before the probe opens it.
+const HOTPLUG_SETTLE: Duration = Duration::from_millis(400);
+
 /// Wall-clock slack past `period` before a late tick is read as a sleep/wake
 /// gap. Generously above the worst honest iteration (period + a fully
 /// timed-out probe pass), so only a genuine suspend trips it; a rare false
 /// positive (e.g. a large NTP step) merely re-applies settings the devices
 /// already have.
-const WAKE_GAP: Duration = Duration::from_secs(60);
+const WAKE_GAP: Duration = Duration::from_mins(1);
 
 /// What the watcher tells the agent.
+#[derive(Debug)]
 pub enum InventoryEvent {
     /// A completed enumeration — empty means "checked, no devices".
     Snapshot(Vec<DeviceInventory>),
@@ -126,6 +132,16 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<InventoryEvent> {
             let mut enumerator = openlogi_hid::Enumerator::default();
             let mut state = WatchState::default();
             let mut last_tick = SystemTime::now();
+            // `block_on` installs runtime context so a backend that registers an
+            // `AsyncFd` (Linux udev) fails as a catchable `Err`, not a panic that
+            // would take down the whole watcher thread.
+            let mut hotplug = match rt.block_on(async { openlogi_hid::watch_hotplug() }) {
+                Ok(stream) => Some(stream),
+                Err(e) => {
+                    warn!(error = ?e, "hotplug watch unavailable — polling only");
+                    None
+                }
+            };
             loop {
                 // A tick arriving far past its period means the system slept;
                 // `duration_since` errs when the clock stepped backwards, in
@@ -147,7 +163,38 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<InventoryEvent> {
                     debug!("inventory watcher receiver dropped — exiting");
                     return;
                 }
-                thread::sleep(period);
+                let stream_alive = rt.block_on(async {
+                    let Some(stream) = hotplug.as_mut() else {
+                        tokio::time::sleep(period).await;
+                        return true;
+                    };
+                    tokio::select! {
+                        () = tokio::time::sleep(period) => true,
+                        event = stream.next() => match event {
+                            Some(event) => {
+                                debug!(?event, "hotplug event — enumerating early");
+                                tokio::time::sleep(HOTPLUG_SETTLE).await;
+                                // Drain the burst so one enumerate covers every node that just
+                                // arrived; a `None` here is the stream closing, so report it now
+                                // rather than after a spurious extra enumerate next tick.
+                                let mut alive = true;
+                                while let Some(drained) =
+                                    futures_lite::future::poll_once(stream.next()).await
+                                {
+                                    if drained.is_none() {
+                                        alive = false;
+                                        break;
+                                    }
+                                }
+                                alive
+                            }
+                            None => false,
+                        },
+                    }
+                });
+                if !stream_alive && hotplug.take().is_some() {
+                    warn!("hotplug stream ended — falling back to pure polling");
+                }
             }
         });
     if let Err(e) = spawn_result {
@@ -163,6 +210,8 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<InventoryEvent> {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use openlogi_hid::InventoryError;
 
     use super::{INITIAL_FAILURE_LIMIT, InventoryEvent, WatchState};
@@ -178,10 +227,10 @@ mod tests {
         let mut state = WatchState::default();
         // A genuine "checked, nothing there" still propagates as a disconnect —
         // the resilience must not swallow a real empty.
-        assert!(matches!(
+        assert_matches!(
             state.classify(Ok(vec![])),
             Some(InventoryEvent::Snapshot(snap)) if snap.is_empty()
-        ));
+        );
         assert!(state.succeeded);
     }
 
@@ -189,10 +238,10 @@ mod tests {
     fn failure_after_a_success_keeps_the_last_snapshot() {
         let mut state = WatchState::default();
         // A good tick first, so there is a last-known-good set to preserve.
-        assert!(matches!(
+        assert_matches!(
             state.classify(Ok(vec![])),
             Some(InventoryEvent::Snapshot(_))
-        ));
+        );
         // Then transient enumerate failures emit nothing — the agent keeps the
         // last snapshot instead of flapping to "No devices" (#218).
         assert!(state.classify(Err(enumerate_failed())).is_none());
@@ -207,16 +256,16 @@ mod tests {
         for _ in 0..INITIAL_FAILURE_LIMIT - 1 {
             assert!(state.classify(Err(enumerate_failed())).is_none());
         }
-        assert!(matches!(
+        assert_matches!(
             state.classify(Err(enumerate_failed())),
             Some(InventoryEvent::Unavailable)
-        ));
+        );
         // Reported once, not on every later failure.
         assert!(state.classify(Err(enumerate_failed())).is_none());
         // …and a later success recovers with a live snapshot.
-        assert!(matches!(
+        assert_matches!(
             state.classify(Ok(vec![])),
             Some(InventoryEvent::Snapshot(_))
-        ));
+        );
     }
 }

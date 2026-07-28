@@ -25,7 +25,7 @@ use crate::mouse_model::picker::{
     GESTURE_BUTTON_ICON, action_icon_path, action_picker, gesture_overview,
 };
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
+use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
 
 const SIDE_W: f32 = 180.;
 const SIDE_GAP: f32 = 24.;
@@ -290,7 +290,7 @@ fn gesture_owner_selector(
         .pl(px(SIDE_W + SIDE_GAP))
         .child(
             div()
-                .text_xs()
+                .text_caption()
                 .text_color(pal.text_muted)
                 .child(tr!("Gesture Button")),
         )
@@ -321,10 +321,10 @@ fn owner_chip(
         .id(("gesture-owner", id_part))
         .px_2()
         .py_1()
-        .rounded_md()
+        .rounded(pal.control_radius)
         .selected_border(selected, pal)
         .selected_fill(selected)
-        .text_xs()
+        .text_caption()
         .text_color(if selected {
             pal.text_primary
         } else {
@@ -573,7 +573,7 @@ impl RenderOnce for LabelTrigger {
             .px_3()
             .justify_center()
             .gap_0p5()
-            .rounded_md()
+            .rounded(pal.control_radius)
             .border_1()
             .border_color(if highlighted {
                 rgb(ACCENT_BLUE).into()
@@ -591,7 +591,7 @@ impl RenderOnce for LabelTrigger {
             // popover title and category headers it shares the binding flow with.
             .child(
                 div()
-                    .text_xs()
+                    .text_caption()
                     .text_color(pal.text_muted)
                     .child(tr!(self.label.id.label())),
             )
@@ -623,7 +623,7 @@ impl RenderOnce for LabelTrigger {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .text_sm()
+                            .text_body()
                             .text_color(binding_color)
                             .child(binding),
                     )
@@ -658,6 +658,10 @@ fn localized_action_label(action: &Action) -> gpui::SharedString {
 }
 
 /// Shape-based silhouette used when no asset is cached for the device.
+///
+/// Its `rounded_*` values are illustration proportions — the body shell and the
+/// two drawn side buttons — not UI chrome, so they stay fixed rather than
+/// tracking the `Palette` radius tokens the way real cards and controls do.
 fn silhouette(w: f32, h: f32, pal: Palette) -> impl IntoElement {
     div()
         .absolute()

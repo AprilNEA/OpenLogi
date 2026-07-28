@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::{
     channel::{HidppChannel, MessageListenerGuard},
@@ -41,19 +41,14 @@ impl CreatableFeature for WirelessDeviceStatusFeature {
                     return;
                 }
 
-                let (Ok(status), Ok(request), Ok(reason)) = (
-                    WirelessDeviceStatus::try_from(payload[0]),
-                    WirelessDeviceStatusRequest::try_from(payload[1]),
-                    WirelessDeviceStatusReason::try_from(payload[2]),
-                ) else {
-                    return;
-                };
-
+                // This broadcast is the device's (re)connection signal; an
+                // unrecognised field value must not swallow it, so every
+                // field decodes infallibly and carries unknown raw bytes.
                 emitter.emit(WirelessDeviceStatusEvent::StatusBroadcast(
                     WirelessDeviceStatusBroadcast {
-                        status,
-                        request,
-                        reason,
+                        status: WirelessDeviceStatus::from(payload[0]),
+                        request: WirelessDeviceStatusRequest::from(payload[1]),
+                        reason: WirelessDeviceStatusReason::from(payload[2]),
                     },
                 ));
             }
@@ -104,7 +99,7 @@ pub struct WirelessDeviceStatusBroadcast {
 
 /// Represents a device status as reported in
 /// [`WirelessDeviceStatusBroadcast::status`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -113,11 +108,14 @@ pub enum WirelessDeviceStatus {
     Unknown = 0x00,
     /// Device is reconnecting.
     Reconnection = 0x01,
+    /// A status value this crate does not model; carries the raw byte.
+    #[num_enum(catch_all)]
+    Other(u8),
 }
 
 /// Represents a request as reported in
 /// [`WirelessDeviceStatusBroadcast::request`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -126,11 +124,14 @@ pub enum WirelessDeviceStatusRequest {
     NoRequest = 0x00,
     /// Host software must reconfigure the device.
     SoftwareReconfigurationNeeded = 0x01,
+    /// A request value this crate does not model; carries the raw byte.
+    #[num_enum(catch_all)]
+    Other(u8),
 }
 
 /// Represents a broadcast reason as reported in
 /// [`WirelessDeviceStatusBroadcast::reason`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -139,4 +140,7 @@ pub enum WirelessDeviceStatusReason {
     Unknown = 0x00,
     /// Broadcast was caused by the device power switch.
     PowerSwitchActivated = 0x01,
+    /// A reason value this crate does not model; carries the raw byte.
+    #[num_enum(catch_all)]
+    Other(u8),
 }

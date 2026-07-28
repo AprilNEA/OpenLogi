@@ -40,10 +40,11 @@ const MAX_BOLT_SLOTS: u8 = 6;
 ///
 /// Kept short so a snapshot settles quickly: a timed-out node is skipped and
 /// re-probed on the next watcher tick (~2 s), and the first probe usually wakes
-/// the device so the retry succeeds fast. Comfortably above a healthy device's
-/// probe time (the Bolt arrival drain alone is 1.5 s), so awake devices never
-/// trip it.
-const PROBE_BUDGET: Duration = Duration::from_secs(5);
+/// the device so the retry succeeds fast. Slots are probed concurrently on both
+/// receiver paths, so a healthy receiver's worst case is the 1.5 s arrival drain
+/// plus a single slot's [`BOLT_SLOT_PROBE`] / [`UNIFYING_SLOT_PROBE`] — not their
+/// sum — which this stays comfortably above, so awake devices never trip it.
+const PROBE_BUDGET: Duration = Duration::from_secs(6);
 
 /// Per-slot budget for the HID++ 2.0 feature walk on a Unifying paired device.
 ///
@@ -56,6 +57,25 @@ const PROBE_BUDGET: Duration = Duration::from_secs(5);
 /// still surfaces in the inventory (kind + wpid from the arrival event) — it
 /// just lacks capabilities / battery until the next tick.
 const UNIFYING_SLOT_PROBE: Duration = Duration::from_millis(3500);
+
+/// Per-slot budget for the HID++ 2.0 feature walk on a Bolt paired device.
+///
+/// Without a per-slot cap a single online device that stops answering its
+/// feature-walk reads burns the whole receiver's [`PROBE_BUDGET`], so
+/// `probe_one` times out and the receiver yields *nothing* — every paired device
+/// drops to "No devices" even though its pairing-register identity read fine
+/// (#218). Capping each slot lets a hung device fall back to its cached /
+/// identity-only data while the rest of the receiver still enumerates, mirroring
+/// [`UNIFYING_SLOT_PROBE`].
+///
+/// Bolt slots are probed concurrently (see `probe_bolt_receiver`), so this cap
+/// bounds each slot independently and does *not* sum across slots — the receiver
+/// cycle is the arrival drain plus the single slowest slot. 3 s is generous
+/// headroom for a healthy walk: a feature-rich device enumerates a large table
+/// one round-trip per feature, and the MX Master 4 (45 features over Bolt) takes
+/// ~1–1.6 s even awake. The previous 1 s cap cut that walk off every tick, so
+/// the device surfaced permanently with no capabilities or battery.
+const BOLT_SLOT_PROBE: Duration = Duration::from_secs(3);
 
 /// Errors raised while enumerating HID++ devices.
 #[derive(Debug, Error)]
@@ -120,25 +140,63 @@ pub async fn enumerate() -> Result<Vec<DeviceInventory>, InventoryError> {
     // few times instead, reusing the same enumerator so its ledger accumulates a
     // snapshot a later attempt can replay and the opened channel stays warm.
     // #226's 5 s request timeout inside `HidppChannel::send` makes a dead probe
-    // fail fast, so a short bounded retry is cheap.
+    // fail fast, so a short bounded retry is cheap. Some transports can answer
+    // while still yielding a short device set (for example, a Unifying arrival
+    // event landing just after the drain window). When every node answered this
+    // cycle but that healthy pass is still short, two identical inventories mean
+    // the expected stable Unifying offline drain has settled. A failed/timed-out
+    // probe must keep using the full retry budget so the next attempt can reopen
+    // the channel and recover.
     let mut enumerator = Enumerator::default();
+    let mut previous_inventories: Option<Vec<DeviceInventory>> = None;
     let mut attempt = 1u8;
     loop {
-        let (inventories, all_healthy) = enumerator.enumerate_reporting_health().await?;
-        if all_healthy || attempt >= ONESHOT_ATTEMPTS {
+        let (inventories, all_complete, all_healthy) =
+            enumerator.enumerate_reporting_completeness().await?;
+        if one_shot_should_stop(
+            previous_inventories.as_deref(),
+            &inventories,
+            all_complete,
+            all_healthy,
+            attempt,
+        ) {
             return Ok(inventories);
         }
         debug!(
             attempt,
-            "one-shot enumerate saw an unhealthy node — retrying"
+            all_complete,
+            all_healthy,
+            "one-shot enumerate inventory incomplete or still changing — retrying"
         );
+        // Only a healthy pass is valid evidence for the unchanged-inventory
+        // stop, so the equality check below only ever compares two consecutive
+        // healthy snapshots. A failed/timed-out probe (replayed last-good or
+        // partial live result) is cleared so it can't count as one of the two
+        // "stable" reads and short-circuit a later healthy-but-short pass.
+        previous_inventories = if all_healthy { Some(inventories) } else { None };
         tokio::time::sleep(ONESHOT_RETRY_DELAY).await;
         attempt += 1;
     }
 }
 
+/// Stop the one-shot retry loop when the snapshot is complete, when a healthy
+/// but short pass has stabilized (the expected Unifying offline-drain case), or
+/// when the explicit attempt cap is reached. An unchanged inventory from a
+/// failed probe is not stable evidence; it must keep retrying until the cap.
+fn one_shot_should_stop(
+    previous: Option<&[DeviceInventory]>,
+    current: &[DeviceInventory],
+    all_complete: bool,
+    all_healthy: bool,
+    attempt: u8,
+) -> bool {
+    all_complete
+        || (all_healthy && previous.is_some_and(|previous| previous == current))
+        || attempt >= ONESHOT_ATTEMPTS
+}
+
 /// Attempts a one-shot [`enumerate`] makes before returning whatever it last
-/// read, when a node keeps coming back unhealthy.
+/// read, when an inventory keeps coming back incomplete or changing.
 const ONESHOT_ATTEMPTS: u8 = 4;
 
 /// Delay between one-shot [`enumerate`] retries. A first probe usually wakes an
@@ -157,19 +215,22 @@ impl Enumerator {
     /// channel is reopened, so a transient HID++ glitch can't masquerade as
     /// "no devices" (#218) — see the node ledger.
     pub async fn enumerate(&mut self) -> Result<Vec<DeviceInventory>, InventoryError> {
-        self.enumerate_reporting_health().await.map(|(inv, _)| inv)
+        self.enumerate_reporting_completeness()
+            .await
+            .map(|(inv, _, _)| inv)
     }
 
-    /// [`Self::enumerate`] plus whether every probed node answered cleanly this
-    /// pass — `false` if any probe timed out, failed to open, or read short of a
-    /// receiver's pairing count. The polling watcher ignores the flag (the ledger
-    /// already replays a node through a transient miss), but the one-shot
-    /// [`enumerate`] free fn uses it to retry: a fresh `Enumerator` has no ledger
-    /// history to replay, so a transient miss would otherwise surface as an
-    /// empty/partial list (#218).
-    async fn enumerate_reporting_health(
+    /// [`Self::enumerate`] plus whether every probed node produced a complete
+    /// enough snapshot for the one-shot caller to stop early, and whether every
+    /// probed node answered this cycle. Completeness is separate from per-node
+    /// health: a node can answer cleanly enough for the ledger to accept its
+    /// live inventory while still reporting a known count/list shortfall that
+    /// the one-shot retry should give one more chance to settle. Only healthy
+    /// shortfalls can use the unchanged-inventory early stop; failed probes must
+    /// run through the retry budget so a later attempt can recover.
+    async fn enumerate_reporting_completeness(
         &mut self,
-    ) -> Result<(Vec<DeviceInventory>, bool), InventoryError> {
+    ) -> Result<(Vec<DeviceInventory>, bool, bool), InventoryError> {
         self.tick = self.tick.wrapping_add(1);
         let tick = self.tick;
         let candidates = enumerate_hidpp_devices().await?;
@@ -236,8 +297,11 @@ impl Enumerator {
 
         let mut inventories = Vec::new();
         let mut outcomes = Vec::new();
-        // Whether every node answered cleanly this pass. Drives the one-shot
-        // `enumerate` retry; the ledger's own per-node replay is unaffected.
+        // Aggregates for the one-shot retry. `all_complete` can stop
+        // immediately; `all_healthy` gates the unchanged-inventory shortcut so
+        // failed probes keep retrying. The ledger's own per-node replay is
+        // governed by `probe.healthy`.
+        let mut all_complete = true;
         let mut all_healthy = true;
         for (node, result) in results {
             let probe = if let Ok(probe) = result {
@@ -250,6 +314,7 @@ impl Enumerator {
                 warn!(budget = ?PROBE_BUDGET, "device probe timed out — treating as a failed probe");
                 NodeProbe::failed()
             };
+            all_complete &= probe.complete;
             all_healthy &= probe.healthy;
             outcomes.extend(probe.outcomes);
             let settled = self.ledger.settle(&node, probe.healthy, probe.inventory);
@@ -261,6 +326,7 @@ impl Enumerator {
         // Nodes that wouldn't open this tick still replay their last snapshot
         // (they have no cached channel to evict).
         for node in open_failures {
+            all_complete = false;
             all_healthy = false;
             let settled = self.ledger.settle(&node, false, None);
             inventories.extend(settled.inventory);
@@ -281,7 +347,7 @@ impl Enumerator {
             }
         }
         self.evict_unseen(&seen_keys);
-        Ok((inventories, all_healthy))
+        Ok((inventories, all_complete, all_healthy))
     }
 
     /// Drop cache entries for devices not seen this tick, after a short grace so

@@ -18,6 +18,7 @@ use openlogi_hook::{EventDisposition, Hook, HookEvent, MouseEvent};
 use tracing::{info, warn};
 
 use crate::DpiCycleState;
+use crate::event_monitor::SharedEventMonitor;
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 
 /// The two button maps the OS-hook callback reads, kept behind ONE lock so a
@@ -121,6 +122,7 @@ pub fn start(
     keyboard_bindings: SharedKeyboardBindings,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture: CaptureChannel,
+    monitor: SharedEventMonitor,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -132,135 +134,144 @@ pub fn start(
 
     // The per-hold pointer accumulator lives in the thread-local `HOLD`; the
     // callback must never block — see the freeze-hazard note in `macos.rs`.
-    let result = Hook::start(move |event| match event {
-        HookEvent::Mouse(mouse_event) => match mouse_event {
-            MouseEvent::Button { id, pressed } => {
-                // The CGEventTap only sees standard buttons 0-4. We remap
-                // Middle/Back/Forward; the primary L/R clicks always pass through
-                // (suppressing them would brick the mouse), and the DPI / thumb /
-                // dedicated gesture button aren't visible to the tap at all — the
-                // dedicated gesture button is captured separately over HID++.
-                if !id.is_os_hook_button() {
-                    return EventDisposition::PassThrough;
-                }
+    let result = Hook::start(move |event| {
+        match event {
+            HookEvent::Mouse(mouse_event) => {
+                // Mirror the raw event to the GUI's live monitor first (a single relaxed
+                // atomic load while monitoring is off — see `event_monitor`), before any
+                // remapping decides its disposition.
+                monitor.record(&mouse_event);
+                match mouse_event {
+                    MouseEvent::Button { id, pressed } => {
+                        // The CGEventTap only sees standard buttons 0-4. We remap
+                        // Middle/Back/Forward; the primary L/R clicks always pass through
+                        // (suppressing them would brick the mouse), and the DPI / thumb /
+                        // dedicated gesture button aren't visible to the tap at all — the
+                        // dedicated gesture button is captured separately over HID++.
+                        if !id.is_os_hook_button() {
+                            return EventDisposition::PassThrough;
+                        }
 
-                // Gesture button: suppress the native click and begin a hold. The
-                // swipe commits mid-motion in the `Moved` arm; here, on release, we
-                // only fire the plain `Click` when no swipe committed. The cursor is
-                // free to drift via the pass-through `Moved` events during the hold.
-                if pressed {
-                    let is_gesture = hooks.read().is_ok_and(|m| m.gestures.contains_key(&id));
-                    if is_gesture {
-                        HOLD.with_borrow_mut(|h| h.begin(id));
-                        return EventDisposition::Suppress;
+                        // Gesture button: suppress the native click and begin a hold. The
+                        // swipe commits mid-motion in the `Moved` arm; here, on release, we
+                        // only fire the plain `Click` when no swipe committed. The cursor is
+                        // free to drift via the pass-through `Moved` events during the hold.
+                        if pressed {
+                            let is_gesture =
+                                hooks.read().is_ok_and(|m| m.gestures.contains_key(&id));
+                            if is_gesture {
+                                HOLD.with_borrow_mut(|h| h.begin(id));
+                                return EventDisposition::Suppress;
+                            }
+                        } else {
+                            // Release: end the hold and release the `HOLD` borrow *before* any
+                            // dispatch — the callback must stay lock-light, since a
+                            // synthesized event could otherwise re-enter the tap and re-borrow
+                            // `HOLD` (a RefCell double-borrow panic, freeze hazard).
+                            let ended = HOLD.with_borrow_mut(|h| h.end(id));
+                            if let Some(was_click) = ended {
+                                if was_click {
+                                    // No swipe committed → fire the plain click. Resolve to an
+                                    // owned action (so no lock is held across dispatch), then
+                                    // dispatch with the guard already dropped.
+                                    let action = hooks
+                                        .read()
+                                        .ok()
+                                        .map(|m| resolve_gesture_click(&m.gestures, id));
+                                    if let Some(action) = action {
+                                        info!(button = %id, action = %action.label(), "gesture click → executing bound action");
+                                        dispatch_action(&action, &dpi_cycle, &capture);
+                                    }
+                                }
+                                return EventDisposition::Suppress;
+                            }
+                        }
+
+                        // Single-action button.
+                        let action = hooks.read().ok().and_then(|m| m.bindings.get(&id).cloned());
+                        let Some(action) = action else {
+                            // Unbound → leave the physical button to the OS.
+                            return EventDisposition::PassThrough;
+                        };
+
+                        // A button left on its own native click (e.g. Middle → MiddleClick)
+                        // should just do that click; suppressing and re-synthesising it
+                        // would be pointless churn.
+                        if is_native_click(id, &action) {
+                            return EventDisposition::PassThrough;
+                        }
+
+                        if pressed {
+                            info!(button = %id, action = %action.label(), "button → executing bound action");
+                            dispatch_action(&action, &dpi_cycle, &capture);
+                        }
+                        EventDisposition::Suppress
                     }
-                } else {
-                    // Release: end the hold and release the `HOLD` borrow *before* any
-                    // dispatch — the callback must stay lock-light, since a
-                    // synthesized event could otherwise re-enter the tap and re-borrow
-                    // `HOLD` (a RefCell double-borrow panic, freeze hazard).
-                    let ended = HOLD.with_borrow_mut(|h| h.end(id));
-                    if let Some(was_click) = ended {
-                        if was_click {
-                            // No swipe committed → fire the plain click. Resolve to an
-                            // owned action (so no lock is held across dispatch), then
-                            // dispatch with the guard already dropped.
-                            let action = hooks
-                                .read()
-                                .ok()
-                                .map(|m| resolve_gesture_click(&m.gestures, id));
+                    MouseEvent::Moved { delta_x, delta_y } => {
+                        // Feed an in-progress hold; a committed swipe fires here, mid-motion.
+                        // Always pass through so the cursor keeps moving — the swipe is read,
+                        // not consumed (the B2 cursor-drift tradeoff vs. a HID++ raw-XY divert
+                        // that would freeze the pointer).
+                        let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
+                        if let Some((button, dir)) = commit {
+                            // Resolve to an owned action and drop the read guard before
+                            // dispatch (same lock-light rule as the release arm). The button
+                            // can leave the gesture set mid-hold (a per-app rebuild); the
+                            // commit has already armed `fired`, so the release won't fire a
+                            // click. Fall back to the same click action the release path uses
+                            // so the suppressed press is never swallowed into nothing —
+                            // symmetric with `resolve_gesture_click`.
+                            let action = hooks.read().ok().map(|m| {
+                                m.gestures
+                                    .get(&button)
+                                    .and_then(|dirs| dirs.get(&dir).cloned())
+                                    .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
+                            });
                             if let Some(action) = action {
-                                info!(button = %id, action = %action.label(), "gesture click → executing bound action");
+                                info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
                                 dispatch_action(&action, &dpi_cycle, &capture);
                             }
                         }
-                        return EventDisposition::Suppress;
+                        EventDisposition::PassThrough
                     }
-                }
-
-                // Single-action button.
-                let action = hooks.read().ok().and_then(|m| m.bindings.get(&id).cloned());
-                let Some(action) = action else {
-                    // Unbound → leave the physical button to the OS.
-                    return EventDisposition::PassThrough;
-                };
-
-                // A button left on its own native click (e.g. Middle → MiddleClick)
-                // should just do that click; suppressing and re-synthesising it
-                // would be pointless churn.
-                if is_native_click(id, &action) {
-                    return EventDisposition::PassThrough;
-                }
-
-                if pressed {
-                    info!(button = %id, action = %action.label(), "button → executing bound action");
-                    dispatch_action(&action, &dpi_cycle, &capture);
-                }
-                EventDisposition::Suppress
-            }
-            MouseEvent::Moved { delta_x, delta_y } => {
-                // Feed an in-progress hold; a committed swipe fires here, mid-motion.
-                // Always pass through so the cursor keeps moving — the swipe is read,
-                // not consumed (the B2 cursor-drift tradeoff vs. a HID++ raw-XY divert
-                // that would freeze the pointer).
-                let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
-                if let Some((button, dir)) = commit {
-                    // Resolve to an owned action and drop the read guard before
-                    // dispatch (same lock-light rule as the release arm). The button
-                    // can leave the gesture set mid-hold (a per-app rebuild); the
-                    // commit has already armed `fired`, so the release won't fire a
-                    // click. Fall back to the same click action the release path uses
-                    // so the suppressed press is never swallowed into nothing —
-                    // symmetric with `resolve_gesture_click`.
-                    let action = hooks.read().ok().map(|m| {
-                        m.gestures
-                            .get(&button)
-                            .and_then(|dirs| dirs.get(&dir).cloned())
-                            .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
-                    });
-                    if let Some(action) = action {
-                        info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
-                        dispatch_action(&action, &dpi_cycle, &capture);
+                    MouseEvent::CaptureInterrupted => {
+                        // The OS dropped events (tap disabled); cancel any hold so a lost
+                        // button-up can't later commit a phantom swipe off ordinary motion.
+                        HOLD.with_borrow_mut(HoldState::cancel);
+                        EventDisposition::PassThrough
                     }
+                    MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
                 }
-                EventDisposition::PassThrough
             }
-            MouseEvent::CaptureInterrupted => {
-                // The OS dropped events (tap disabled); cancel any hold so a lost
-                // button-up can't later commit a phantom swipe off ordinary motion.
-                HOLD.with_borrow_mut(HoldState::cancel);
-                EventDisposition::PassThrough
-            }
-            MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
-        },
-        // Function-key remapper: on key-down, look up a [keyboard.bindings]
-        // entry for this keycode + modifier mask. A match fires its action
-        // (suppressing the original key so it doesn't also type / trigger its
-        // native function); an unmatched key passes through untouched. Key-up
-        // is ignored to avoid double-firing the action.
-        HookEvent::Key(openlogi_hook::KeyEvent {
-            keycode,
-            pressed,
-            modifiers,
-        }) => {
-            if !pressed {
-                return EventDisposition::PassThrough;
-            }
-            let trigger = KeyTrigger {
+            // Function-key remapper: on key-down, look up a [keyboard.bindings]
+            // entry for this keycode + modifier mask. A match fires its action
+            // (suppressing the original key so it doesn't also type / trigger its
+            // native function); an unmatched key passes through untouched. Key-up
+            // is ignored to avoid double-firing the action.
+            HookEvent::Key(openlogi_hook::KeyEvent {
                 keycode,
-                modifiers: convert_modifiers(modifiers),
-            };
-            match keyboard_bindings
-                .read()
-                .ok()
-                .and_then(|m| m.get(&trigger).cloned())
-            {
-                Some(action) => {
-                    info!(keycode, action = %action.label(), "key → executing bound action");
-                    dispatch_action(&action, &dpi_cycle, &capture);
-                    EventDisposition::Suppress
+                pressed,
+                modifiers,
+            }) => {
+                if !pressed {
+                    return EventDisposition::PassThrough;
                 }
-                None => EventDisposition::PassThrough,
+                let trigger = KeyTrigger {
+                    keycode,
+                    modifiers: convert_modifiers(modifiers),
+                };
+                match keyboard_bindings
+                    .read()
+                    .ok()
+                    .and_then(|m| m.get(&trigger).cloned())
+                {
+                    Some(action) => {
+                        info!(keycode, action = %action.label(), "key → executing bound action");
+                        dispatch_action(&action, &dpi_cycle, &capture);
+                        EventDisposition::Suppress
+                    }
+                    None => EventDisposition::PassThrough,
+                }
             }
         }
     });

@@ -12,6 +12,7 @@ use super::{
 };
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::platform::permissions;
+use crate::theme::Typography as _;
 
 #[cfg_attr(
     not(any(target_os = "macos", target_os = "linux")),
@@ -83,7 +84,7 @@ pub(super) fn permissions_page(pal: Palette) -> SettingPage {
                     PermissionStatus::Granted => None,
                 };
                 if let Some(text) = hint {
-                    field.child(div().text_xs().text_color(pal.text_muted).child(text))
+                    field.child(div().text_caption().text_color(pal.text_muted).child(text))
                 } else {
                     field
                 }
@@ -118,7 +119,7 @@ fn status_badge(status: PermissionStatus) -> impl IntoElement {
         PermissionStatus::Denied => (tr!("Not granted"), theme::STATUS_CONNECTING),
         PermissionStatus::Unknown => (tr!("Unknown"), theme::STATUS_OFFLINE),
     };
-    div().text_xs().text_color(rgb(color)).child(label)
+    div().text_caption().text_color(rgb(color)).child(label)
 }
 
 /// The right-side field for one permission row: live status, plus (macOS only)
@@ -142,10 +143,10 @@ fn permission_field(
             .id(id)
             .px_2()
             .py_1()
-            .rounded_md()
+            .rounded(pal.control_radius)
             .border_1()
             .border_color(pal.border)
-            .text_xs()
+            .text_caption()
             .cursor_pointer()
             .hover(move |s| s.bg(pal.surface_hover))
             .child(tr!("Open"))

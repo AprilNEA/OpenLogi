@@ -1,4 +1,4 @@
-# nfpm package descriptor for OpenLogi Linux packages (.deb / .rpm).
+# nfpm package descriptor for OpenLogi Linux packages (.deb / .rpm / .pkg.tar.zst).
 #
 # Build with the xtask:
 #   cargo run -p xtask -- linux package
@@ -6,11 +6,12 @@
 # Or directly (requires nfpm in PATH; set VERSION and PKG_ARCH):
 #   VERSION=0.6.0 PKG_ARCH=amd64 nfpm package --packager deb --target target/release
 #   VERSION=0.6.0 PKG_ARCH=arm64 nfpm package --packager rpm --target target/release
+#   VERSION=0.6.0 PKG_ARCH=amd64 nfpm package --packager archlinux --target target/release
 
 name: openlogi
 version: "${VERSION}"
 arch: "${PKG_ARCH}"
-maintainer: OpenLogi Contributors <dev@aprilnea.me>
+maintainer: AprilNEA <dev@aprilnea.me>
 description: |-
   Logitech HID++ device control — remap buttons, DPI, and SmartShift.
   An open-source, local-first alternative to Logi Options+. No account,
@@ -58,6 +59,33 @@ contents:
     dst: /usr/share/icons/hicolor/512x512/apps/openlogi.png
     file_info:
       mode: 0644
+
+  - src: LICENSE-APACHE
+    dst: /usr/share/licenses/openlogi/LICENSE-APACHE
+    file_info:
+      mode: 0644
+
+  - src: LICENSE-MIT
+    dst: /usr/share/licenses/openlogi/LICENSE-MIT
+    file_info:
+      mode: 0644
+
+archlinux:
+  packager: "AprilNEA <dev@aprilnea.me>"
+
+overrides:
+  archlinux:
+    depends:
+      - dbus
+      - fontconfig
+      - gcc-libs
+      - glibc
+      - libglvnd
+      - libxcb
+      - libxkbcommon
+      - libxkbcommon-x11
+      - vulkan-icd-loader
+      - wayland
 
 scripts:
   postinstall: packaging/linux/nfpm-scripts/postinstall.sh

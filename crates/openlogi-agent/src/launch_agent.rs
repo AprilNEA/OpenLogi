@@ -130,9 +130,9 @@ fn remove_legacy() {
 
 #[cfg(target_os = "macos")]
 fn plist_path(label: &str) -> io::Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "$HOME not set"))?;
-    Ok(PathBuf::from(home)
+    let home =
+        openlogi_core::paths::home_dir().map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
+    Ok(home
         .join("Library")
         .join("LaunchAgents")
         .join(format!("{label}.plist")))

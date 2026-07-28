@@ -14,17 +14,26 @@ use gpui_component::{
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
+use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
+use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
 
 const SWATCH: f32 = 28.;
 
-/// Preset colors as 6-hex `"RRGGBB"`. Deliberately small — covering the common
-/// keyboard accent colors.
-const PALETTE: &[&str] = &[
-    "ff3b30", "ff9500", "ffcc00", "34c759", "00c7be", "007aff", "5856d6", "af52de", "ffffff",
+/// Preset colors. Deliberately small — covering the common keyboard accent
+/// colors.
+const PALETTE: &[Rgb] = &[
+    Rgb::new(0xff, 0x3b, 0x30),
+    Rgb::new(0xff, 0x95, 0x00),
+    Rgb::new(0xff, 0xcc, 0x00),
+    Rgb::new(0x34, 0xc7, 0x59),
+    Rgb::new(0x00, 0xc7, 0xbe),
+    Rgb::new(0x00, 0x7a, 0xff),
+    Rgb::new(0x58, 0x56, 0xd6),
+    Rgb::new(0xaf, 0x52, 0xde),
+    Rgb::WHITE,
 ];
 
 pub struct LightingPanel {
@@ -96,7 +105,7 @@ impl Render for LightingPanel {
         let swatches: Vec<AnyElement> = PALETTE
             .iter()
             .enumerate()
-            .map(|(idx, hex)| swatch(idx, hex, &lighting, pal))
+            .map(|(idx, &color)| swatch(idx, color, &lighting, pal))
             .collect();
 
         v_flex()
@@ -108,7 +117,7 @@ impl Render for LightingPanel {
                     .items_center()
                     .child(
                         div()
-                            .text_sm()
+                            .text_body()
                             .text_color(pal.text_muted)
                             .child(tr!("LIGHTING")),
                     )
@@ -121,13 +130,13 @@ impl Render for LightingPanel {
                     .items_baseline()
                     .child(
                         div()
-                            .text_xs()
+                            .text_caption()
                             .text_color(pal.text_muted)
                             .child(tr!("BRIGHTNESS")),
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_caption()
                             .text_color(rgb(ACCENT_BLUE))
                             .child(format!("{}%", lighting.brightness)),
                     ),
@@ -137,25 +146,25 @@ impl Render for LightingPanel {
 }
 
 /// One color swatch. Clicking it turns lighting on and sets that color.
-fn swatch(idx: usize, hex: &'static str, current: &Lighting, pal: Palette) -> AnyElement {
-    let selected = current.enabled && current.color.eq_ignore_ascii_case(hex);
+fn swatch(idx: usize, color: Rgb, current: &Lighting, pal: Palette) -> AnyElement {
+    let selected = current.enabled && current.color == color;
     div()
         .id(("light-swatch", idx))
         .size(px(SWATCH))
-        .rounded_md()
+        .rounded(pal.control_radius)
         .border_2()
         .border_color(if selected {
             theme::accent()
         } else {
             pal.border
         })
-        .bg(rgb(parse_hex(hex)))
+        .bg(rgb(color.packed()))
         .cursor_pointer()
         .on_click(move |_event, _window, cx| {
             cx.update_global::<AppState, _>(|state, _| {
                 let mut next = state.lighting();
                 next.enabled = true;
-                next.color = hex.to_string();
+                next.color = color;
                 state.commit_lighting(next);
             });
             cx.refresh_windows();
@@ -170,10 +179,10 @@ fn toggle(current: &Lighting, pal: Palette) -> AnyElement {
         .id("light-toggle")
         .px_2()
         .py_1()
-        .rounded_md()
+        .rounded(pal.control_radius)
         .selected_border(on, pal)
         .selected_fill(on)
-        .text_xs()
+        .text_caption()
         .text_color(if on { pal.text_primary } else { pal.text_muted })
         .cursor_pointer()
         .child(if on { tr!("On") } else { tr!("Off") })
@@ -196,9 +205,4 @@ fn toggle(current: &Lighting, pal: Palette) -> AnyElement {
 )]
 fn clamp_brightness(raw: f32) -> u8 {
     raw.clamp(0., 100.).round() as u8
-}
-
-/// Parse `"RRGGBB"` to a `0xRRGGBB` int for `rgb()`. Falls back to white.
-pub(crate) fn parse_hex(hex: &str) -> u32 {
-    u32::from_str_radix(hex, 16).unwrap_or(0x00ff_ffff)
 }
