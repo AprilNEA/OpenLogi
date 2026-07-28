@@ -34,7 +34,7 @@ pub(super) use gpui_component::{
 pub(super) use gpui_updater::{UpdateStatus, Updater};
 pub(super) use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
 pub(super) use openlogi_core::config::{
-    Appearance, DEFAULT_THUMBWHEEL_SENSITIVITY, MAX_THUMBWHEEL_SENSITIVITY,
+    Appearance, AssetSourcePreference, DEFAULT_THUMBWHEEL_SENSITIVITY, MAX_THUMBWHEEL_SENSITIVITY,
     MIN_THUMBWHEEL_SENSITIVITY,
 };
 
@@ -117,6 +117,7 @@ pub struct SettingsView {
     /// window is just focused).
     initial_page: SettingsPage,
     language_select: Entity<SelectState<Vec<language::LanguageOption>>>,
+    asset_source_select: Entity<SelectState<Vec<assets::AssetSourceOption>>>,
     sensitivity_slider: Entity<SliderState>,
     /// Shared app-wide updater, surfaced on the Updates page. A launch-time
     /// check result is already visible when the window opens.
@@ -174,6 +175,18 @@ impl SettingsView {
         cx.subscribe_in(&language_select, window, Self::on_language_select)
             .detach();
 
+        let current_source = cx
+            .try_global::<AppState>()
+            .map_or(AssetSourcePreference::Automatic, |s| {
+                s.app_settings().asset_source
+            });
+        let source_options = assets::asset_source_options();
+        let selected_source = assets::selected_source_index(current_source, &source_options);
+        let asset_source_select =
+            cx.new(|cx| SelectState::new(source_options, Some(selected_source), window, cx));
+        cx.subscribe_in(&asset_source_select, window, Self::on_asset_source_select)
+            .detach();
+
         let sensitivity = cx
             .try_global::<AppState>()
             .map_or(DEFAULT_THUMBWHEEL_SENSITIVITY, |s| {
@@ -228,6 +241,7 @@ impl SettingsView {
             theme_search,
             initial_page,
             language_select,
+            asset_source_select,
             sensitivity_slider,
             updater,
             updater_obs,
@@ -282,6 +296,30 @@ impl SettingsView {
             .map(ToOwned::to_owned);
 
         cx.update_global::<AppState, _>(|s, cx| s.set_language(language, cx));
+    }
+
+    fn on_asset_source_select(
+        &mut self,
+        _: &Entity<SelectState<Vec<assets::AssetSourceOption>>>,
+        event: &SelectEvent<Vec<assets::AssetSourceOption>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let SelectEvent::Confirm(_) = event;
+        let source = self
+            .asset_source_select
+            .read(cx)
+            .selected_value()
+            .copied()
+            .unwrap_or_default();
+        let refresh = cx.try_global::<AppState>().is_some_and(|state| {
+            state.app_settings().asset_source != source && state.app_settings().auto_download_assets
+        });
+
+        cx.update_global::<AppState, _>(|state, _| state.set_asset_source(source));
+        if refresh {
+            assets::send_asset_command(cx, AssetCommand::Refresh);
+        }
     }
 }
 
@@ -344,6 +382,7 @@ impl Render for SettingsView {
             ))
             .page(assets::assets_page(
                 view.clone(),
+                self.asset_source_select.clone(),
                 pal,
                 self.asset_cache_desc.clone(),
             ))

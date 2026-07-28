@@ -3,7 +3,7 @@
     reason = "full schema parsed; only a subset is consumed by today's callers"
 )]
 
-//! Parses the `index.json` shipped by assets.openlogi.org.
+//! Parses the `index.json` shared by OpenLogi's asset mirrors.
 //!
 //! Schema mirrors the file the assets repo's `stage_assets.py` emits:
 //!

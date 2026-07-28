@@ -18,6 +18,7 @@ use futures::{FutureExt, channel::oneshot, select};
 use hidreport::{Field, Report, ReportDescriptor, Usage, UsageId, UsagePage};
 use rand::Rng;
 use thiserror::Error;
+use tracing::trace;
 
 use crate::nibble::U4;
 
@@ -215,6 +216,17 @@ impl HidppMessage {
                 LONG_REPORT_LENGTH
             }
         }
+    }
+
+    /// The HID++ addressing header `(device_index, feature_index, function)` —
+    /// the first three payload bytes, present on both report kinds. Used only
+    /// for wire tracing (OpenLogi-specific; not in upstream hidpp).
+    fn header(&self) -> (u8, u8, u8) {
+        let payload: &[u8] = match self {
+            Self::Short(payload) => payload,
+            Self::Long(payload) => payload,
+        };
+        (payload[0], payload[1], payload[2])
     }
 }
 
@@ -501,6 +513,12 @@ impl HidppChannel {
             return Err(ChannelError::MessageTypeNotSupported);
         }
 
+        // Wire trace (off by default; `OPENLOGI_LOG=hidpp=trace`). Capture the
+        // header before `msg` is moved into the send future so the outcome line
+        // below can name the same request.
+        let (dev, feat, func) = msg.header();
+        trace!(dev, feat, func, "hidpp request");
+
         let (sender, receiver) = oneshot::channel::<HidppMessage>();
         let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
 
@@ -537,6 +555,11 @@ impl HidppChannel {
             result = request => result,
             _ = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
         };
+
+        match &result {
+            Ok(_) => trace!(dev, feat, "hidpp response"),
+            Err(e) => trace!(dev, feat, error = ?e, "hidpp no response"),
+        }
 
         if result.is_err() {
             // A timeout or write failure leaves the entry queued — remove it

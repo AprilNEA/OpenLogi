@@ -2,6 +2,7 @@
 //! event stream — a common pointer-lag cause — and, in debug builds, dumps the
 //! full event-tap list plus a live event monitor.
 
+use crate::theme::Typography as _;
 #[cfg(not(debug_assertions))]
 use openlogi_hook::Hook;
 
@@ -57,14 +58,14 @@ fn input_conflict_field(pal: Palette, cx: &mut App) -> AnyElement {
     if conflicts.is_empty() {
         col = col.child(
             div()
-                .text_xs()
+                .text_caption()
                 .text_color(rgb(theme::STATUS_CONNECTED))
                 .child(tr!("No other app is intercepting mouse input.")),
         );
     } else {
         col = col.child(
             div()
-                .text_sm()
+                .text_body()
                 .text_color(rgb(theme::STATUS_CONNECTING))
                 .child(tr!(
                     "Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}",
@@ -124,20 +125,25 @@ fn monitor_list(pal: Palette, cx: &mut App) -> impl IntoElement {
 
     let mut col = v_flex().w_full().mt_2().gap_1().child(
         div()
-            .text_xs()
+            .text_caption()
             .text_color(pal.text_muted)
             .child("Live events (newest first)"),
     );
     if lines.is_empty() {
         col = col.child(
             div()
-                .text_xs()
+                .text_caption()
                 .text_color(pal.text_muted)
                 .child("(click or scroll to see what the hook receives)"),
         );
     } else {
         for line in lines {
-            col = col.child(div().text_xs().text_color(pal.text_primary).child(line));
+            col = col.child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_primary)
+                    .child(line),
+            );
         }
     }
     col
@@ -164,7 +170,7 @@ fn format_monitor_event(event: &openlogi_agent_core::ipc::MonitorEvent) -> Strin
 fn debug_tap_list(taps: &[openlogi_hook::EventTapInfo], pal: Palette) -> impl IntoElement {
     let mut col = v_flex().w_full().mt_2().gap_1().child(
         div()
-            .text_xs()
+            .text_caption()
             .text_color(pal.text_muted)
             .child(format!("{} event tap(s)", taps.len())),
     );
@@ -175,7 +181,7 @@ fn debug_tap_list(taps: &[openlogi_hook::EventTapInfo], pal: Palette) -> impl In
             "{owner} (pid {}) — {:?} {mode} enabled={}",
             tap.owner_pid, tap.location, tap.enabled
         );
-        let row = div().text_xs().child(line);
+        let row = div().text_caption().child(line);
         let row = if tap.gates_input() {
             row.text_color(rgb(theme::STATUS_CONNECTING))
         } else {

@@ -11,7 +11,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, div, px,
 };
 
-use crate::theme::{self, Palette};
+use crate::theme::{self, Palette, Typography as _};
 
 /// Fixed height for a status / retry row, so swapping a slider out for a status
 /// message (or back) doesn't make the panel jump.
@@ -22,7 +22,7 @@ const ROW_H: f32 = 28.;
 pub fn status_line(text: impl Into<SharedString>, pal: Palette) -> AnyElement {
     div()
         .h(px(ROW_H))
-        .text_sm()
+        .text_body()
         .text_color(pal.text_muted)
         .child(text.into())
         .into_any_element()
@@ -42,7 +42,7 @@ pub fn retry_line(
     div()
         .id(id)
         .h(px(ROW_H))
-        .text_sm()
+        .text_body()
         .text_color(theme::accent())
         .hover(|s| s.text_color(pal.text_primary))
         .child(text.into())

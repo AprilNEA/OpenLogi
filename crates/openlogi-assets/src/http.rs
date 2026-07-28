@@ -10,6 +10,7 @@
 //! The free functions below are stateless hash / local-file helpers with
 //! no relation to a host, so they stay off the client.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -51,9 +52,20 @@ const RETRY_MIN_DELAY: Duration = Duration::from_millis(200);
 /// pulls a sync makes against the same host share one keep-alive connection
 /// instead of paying a fresh TCP + TLS handshake each time.
 pub struct AssetClient {
-    /// Normalised origin, trailing slash trimmed once at construction.
-    base: String,
+    location: AssetLocation,
     agent: Agent,
+}
+
+enum AssetLocation {
+    Uniform {
+        base: String,
+    },
+    JsDelivr {
+        catalog_base: String,
+        package_root: String,
+        package_version: String,
+        package_by_asset_path: HashMap<String, String>,
+    },
 }
 
 /// Outcome of a cache-checked fetch ([`AssetClient::fetch_entry_if_stale`]).
@@ -69,15 +81,37 @@ impl AssetClient {
     /// Build a client for `base` (e.g. `https://assets.openlogi.org`).
     #[must_use]
     pub fn new(base: &str) -> Self {
-        let agent: Agent = Agent::config_builder()
+        Self {
+            location: AssetLocation::Uniform {
+                base: base.trim_end_matches('/').to_owned(),
+            },
+            agent: Self::agent(),
+        }
+    }
+
+    pub(crate) fn new_jsdelivr(
+        catalog_base: &str,
+        package_root: &str,
+        package_version: &str,
+        package_by_asset_path: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            location: AssetLocation::JsDelivr {
+                catalog_base: catalog_base.trim_end_matches('/').to_owned(),
+                package_root: package_root.trim_end_matches('/').to_owned(),
+                package_version: package_version.to_owned(),
+                package_by_asset_path,
+            },
+            agent: Self::agent(),
+        }
+    }
+
+    fn agent() -> Agent {
+        Agent::config_builder()
             .user_agent(USER_AGENT)
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .build()
-            .into();
-        Self {
-            base: base.trim_end_matches('/').to_owned(),
-            agent,
-        }
+            .into()
     }
 
     /// GET `<base>/index.json` and parse it.
@@ -88,7 +122,7 @@ impl AssetClient {
     /// GET `<base>/index.json`, returning both the raw bytes (so callers can
     /// persist them verbatim) and the parsed struct.
     pub fn fetch_index_raw(&self) -> Result<(Vec<u8>, Index), AssetError> {
-        let url = format!("{}/{INDEX_NAME}", self.base);
+        let url = self.index_url();
         debug!(%url, "fetching index.json");
         let body = self.get_bytes(&url)?;
         let parsed: Index =
@@ -109,10 +143,39 @@ impl AssetClient {
     /// GET a per-depot file, e.g.
     /// `fetch_file("v1/devices/mx_master_4/", "front_core.png")`.
     fn fetch_file(&self, asset_path: &str, name: &str) -> Result<Vec<u8>, AssetError> {
-        let asset_path = asset_path.trim_start_matches('/');
-        let url = format!("{}/{asset_path}{name}", self.base);
+        let url = self.asset_url(asset_path, name)?;
         debug!(%url, "fetching file");
         self.get_bytes(&url)
+    }
+
+    fn index_url(&self) -> String {
+        let base = match &self.location {
+            AssetLocation::Uniform { base } => base,
+            AssetLocation::JsDelivr { catalog_base, .. } => catalog_base,
+        };
+        format!("{base}/{INDEX_NAME}")
+    }
+
+    pub(crate) fn asset_url(&self, asset_path: &str, name: &str) -> Result<String, AssetError> {
+        let asset_path = asset_path.trim_start_matches('/');
+        match &self.location {
+            AssetLocation::Uniform { base } => Ok(format!("{base}/{asset_path}{name}")),
+            AssetLocation::JsDelivr {
+                package_root,
+                package_version,
+                package_by_asset_path,
+                ..
+            } => {
+                let package = package_by_asset_path.get(asset_path).ok_or_else(|| {
+                    AssetError::MissingNpmAssetPath {
+                        asset_path: asset_path.to_owned(),
+                    }
+                })?;
+                Ok(format!(
+                    "{package_root}/{package}@{package_version}/{asset_path}{name}"
+                ))
+            }
+        }
     }
 
     /// Fetch `file` into `dir` unless a file already there matches its
@@ -157,7 +220,7 @@ impl AssetClient {
     /// The backoff sleeps block the calling thread, which is fine: every
     /// caller runs on the sync's dedicated background thread, never the
     /// async runtime. `backon` defaults to `std::thread::sleep` here.
-    fn get_bytes(&self, url: &str) -> Result<Vec<u8>, AssetError> {
+    pub(crate) fn get_bytes(&self, url: &str) -> Result<Vec<u8>, AssetError> {
         let policy = ExponentialBuilder::default()
             .with_min_delay(RETRY_MIN_DELAY)
             .with_factor(2.0)
@@ -250,7 +313,7 @@ pub fn safe_component_path(
 /// The temporary file is created in the destination directory and committed via
 /// rename, so a concurrent reader sees the old file or the new one, never a
 /// half-written one. A planted symlink at `dst` is replaced, not followed.
-fn write_replace(dst: &Path, bytes: &[u8]) -> Result<(), AssetError> {
+pub(crate) fn write_replace(dst: &Path, bytes: &[u8]) -> Result<(), AssetError> {
     use std::io::Write as _;
 
     let fail = |source| AssetError::WriteFile {
@@ -290,9 +353,23 @@ pub fn cached_matches(path: &Path, expected_sha: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_retryable, safe_component_path, write_replace};
+    use super::{AssetClient, is_retryable, safe_component_path, write_replace};
     use std::path::Path;
     use ureq::Error;
+
+    #[test]
+    fn uniform_source_preserves_the_cloudflare_path() {
+        let client = AssetClient::new("https://assets.openlogi.org/");
+
+        assert_eq!(client.index_url(), "https://assets.openlogi.org/index.json");
+        assert_eq!(
+            client
+                .asset_url("v1/devices/mx_master_3s/", "front_core.png")
+                .ok()
+                .as_deref(),
+            Some("https://assets.openlogi.org/v1/devices/mx_master_3s/front_core.png")
+        );
+    }
 
     #[test]
     #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]

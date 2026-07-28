@@ -21,9 +21,10 @@ mod settings;
 
 pub use device::{DeviceConfig, DeviceIdentity};
 pub use settings::{
-    AppSettings, Appearance, DEFAULT_THUMBWHEEL_SENSITIVITY, GestureOwner, Lighting,
-    MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
-    SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift, WheelMode,
+    AppSettings, Appearance, AssetSourcePreference, DEFAULT_THUMBWHEEL_SENSITIVITY, GestureOwner,
+    Lighting, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
+    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
+    WheelMode,
 };
 
 use crate::binding::{Action, Binding, ButtonId, GestureDirection, default_binding_for};
@@ -1009,6 +1010,38 @@ mod tests {
         cfg.app_settings.launch_at_login = true;
         let parsed = write_and_read(&cfg);
         assert!(parsed.app_settings.launch_at_login);
+    }
+
+    #[test]
+    fn asset_source_preference_roundtrips() {
+        let mut cfg = Config::default();
+        cfg.app_settings.asset_source = AssetSourcePreference::OpenLogi;
+
+        let body = toml::to_string_pretty(&cfg).expect("serialize");
+        let parsed = write_and_read(&cfg);
+
+        assert!(body.contains("asset_source = \"openlogi\""));
+        assert_eq!(
+            parsed.app_settings.asset_source,
+            AssetSourcePreference::OpenLogi
+        );
+    }
+
+    #[test]
+    fn config_without_asset_source_keeps_automatic_selection() {
+        let parsed: Config = toml::from_str(
+            r"
+                schema_version = 3
+                [app_settings]
+                auto_download_assets = false
+            ",
+        )
+        .expect("config predating the asset-source setting loads");
+
+        assert_eq!(
+            parsed.app_settings.asset_source,
+            AssetSourcePreference::Automatic
+        );
     }
 
     #[test]

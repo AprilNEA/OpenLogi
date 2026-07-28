@@ -2,13 +2,16 @@
 //! pre-connection / unreachable / outdated-build frames rendered in place of
 //! the real UI, and the footer status bar shown once it's up.
 
-use gpui::{
-    AnyElement, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement as _, Styled, div, px, rgb,
+use gpui::{AnyElement, Div, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
+use gpui_component::{
+    Icon, IconName, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
+    spinner::Spinner,
+    v_flex,
 };
-use gpui_component::{Icon, IconName, Sizable as _, h_flex, spinner::Spinner, v_flex};
 
-use crate::theme::{self, FOOTER_H, Palette};
+use crate::theme::{self, FOOTER_H, Palette, Typography as _};
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"
 /// body shared by the pre-connection frame and the scanning state, so the two
@@ -24,7 +27,7 @@ pub(super) fn loading_body(caption: SharedString, pal: Palette) -> Div {
         .justify_center()
         .gap_3()
         .child(Spinner::new().large().color(pal.text_muted))
-        .child(div().text_sm().text_color(pal.text_muted).child(caption))
+        .child(div().text_body().text_color(pal.text_muted).child(caption))
 }
 
 /// Static centered notice — icon, headline, muted caption — for the
@@ -43,16 +46,11 @@ pub(super) fn notice_body(headline: SharedString, caption: SharedString, pal: Pa
                 .size_8()
                 .text_color(rgb(theme::STATUS_CONNECTING)),
         )
-        .child(
-            div()
-                .text_xl()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(headline),
-        )
+        .child(div().text_title().child(headline))
         .child(
             div()
                 .max_w(px(440.))
-                .text_sm()
+                .text_body()
                 .text_center()
                 .text_color(pal.text_muted)
                 .child(caption),
@@ -95,17 +93,9 @@ pub(super) fn outdated_gui_body(pal: Palette) -> AnyElement {
     )
     .size_full()
     .child(
-        div()
-            .id("relaunch-gui")
-            .mt_1()
-            .px_4()
-            .py_2()
-            .rounded_md()
-            .bg(rgb(theme::ACCENT_BLUE))
-            .text_color(rgb(0x00ff_ffff))
-            .font_weight(FontWeight::MEDIUM)
-            .cursor_pointer()
-            .child(tr!("Relaunch OpenLogi"))
+        Button::new("relaunch-gui")
+            .primary()
+            .label(tr!("Relaunch OpenLogi"))
             .on_click(|_, _, cx| cx.restart()),
     )
     .into_any_element()
@@ -139,7 +129,7 @@ pub(super) fn footer(pal: Palette, granted: bool) -> impl IntoElement {
         })
         .child(
             div()
-                .text_xs()
+                .text_caption()
                 .text_color(pal.text_muted)
                 .child(concat!("v", env!("CARGO_PKG_VERSION"))),
         )
@@ -150,13 +140,18 @@ pub(super) fn footer(pal: Palette, granted: bool) -> impl IntoElement {
 /// click (the native prompt + System Settings, via [`open_accessibility_settings`]).
 #[cfg(target_os = "macos")]
 fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
+    // Scoped here rather than at module level: these traits' only user is this
+    // macOS-gated affordance (`.id()` + `.on_click()`), so an ungated import
+    // would be unused — and a hard error under `-D warnings` — on Linux/Windows.
+    use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
+
     if granted {
         // Reassurance only — kept deliberately quiet: a small dimmed dot and
         // muted text that recede until something is actually wrong.
         h_flex()
             .gap_1p5()
             .items_center()
-            .text_xs()
+            .text_caption()
             .text_color(pal.text_muted)
             .child(
                 div()
@@ -173,12 +168,12 @@ fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
             .id("footer-accessibility")
             .gap_2()
             .items_center()
-            .text_xs()
+            .text_caption()
             .text_color(pal.text_primary)
             .cursor_pointer()
             .child(
                 div()
-                    .size_2()
+                    .size_1p5()
                     .rounded_full()
                     .bg(rgb(theme::STATUS_CONNECTING)),
             )

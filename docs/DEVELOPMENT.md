@@ -82,7 +82,7 @@ crates/
   openlogi-inject/  OS input synthesis: CGEvent, uinput/MPRIS, and SendInput
   openlogi-hidpp/   vendored HID++ protocol crate (lib name `hidpp`)
   openlogi-hid/     device discovery, HID++ reads/writes, and control capture over async-hid
-  openlogi-assets/  device-render registry schema + cached HTTP fetch from assets.openlogi.org
+  openlogi-assets/  device-render registry schema + cached HTTP fetch from OpenLogi asset mirrors
   openlogi-cli/     CLI implementation: command tree + `run()`, called by the `openlogi` binary
   openlogi-agent-core/  shared orchestration + the agent/GUI IPC contract
   openlogi-agent/   the `openlogi-agent` binary — background agent owning device I/O and the hook

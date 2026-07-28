@@ -22,8 +22,8 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, BorrowAppContext as _, Context, Entity, FontWeight, InteractiveElement,
-    IntoElement, ParentElement, StatefulInteractiveElement as _, Styled, Window, div,
+    AnyElement, App, BorrowAppContext as _, Context, Entity, InteractiveElement, IntoElement,
+    ParentElement, StatefulInteractiveElement as _, Styled, Window, div,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Icon, IconName, h_flex, popover::PopoverState, v_flex};
@@ -33,7 +33,7 @@ use crate::data::mouse_buttons::{
 };
 use crate::mouse_model::view::MouseModelView;
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle};
+use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
 
 /// Floor width for the [`action_picker`] popover. The action labels drive the
 /// actual width; this only stops the list from collapsing too narrow. Matches
@@ -120,7 +120,7 @@ fn menu_card(pal: Palette) -> gpui::Div {
         .bg(pal.surface)
         .border_1()
         .border_color(pal.border)
-        .rounded_lg()
+        .rounded(pal.card_radius)
         .shadow_md()
         .p_1p5()
 }
@@ -202,14 +202,14 @@ fn direction_cell(
         .gap(px(2.))
         .px_2()
         .py_1p5()
-        .rounded_md()
+        .rounded(pal.control_radius)
         .selected_border(active, pal)
         .selected_fill(active)
         .hover(move |s| s.bg(pal.surface_hover))
-        .child(div().text_xs().text_color(pal.text_muted).child(header))
+        .child(div().text_caption().text_color(pal.text_muted).child(header))
         .child(
             div()
-                .text_sm()
+                .text_body()
                 .text_color(if is_default {
                     pal.text_muted
                 } else {
@@ -414,8 +414,8 @@ fn menu_row(
         .gap_2()
         .px_2()
         .py_1p5()
-        .rounded_md()
-        .text_sm()
+        .rounded(pal.control_radius)
+        .text_body()
         .text_color(pal.text_primary)
         .selected_fill(selected)
         .hover(move |s| {
@@ -434,8 +434,7 @@ fn section_header(label: &str, pal: Palette) -> AnyElement {
         .px_2()
         .pt_2()
         .pb_0p5()
-        .text_xs()
-        .font_weight(FontWeight::SEMIBOLD)
+        .text_caption()
         .text_color(pal.text_muted)
         .child(label.to_uppercase())
         .into_any_element()
@@ -446,8 +445,7 @@ fn title(text: impl Into<gpui::SharedString>, pal: Palette) -> impl IntoElement 
     div()
         .px_2()
         .pb_1()
-        .text_xs()
-        .font_weight(FontWeight::SEMIBOLD)
+        .text_subheading()
         .text_color(pal.text_muted)
         .child(text.into())
 }

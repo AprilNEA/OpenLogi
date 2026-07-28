@@ -2,8 +2,8 @@
 //! four section bodies (Buttons, Pointer, Lighting, Device).
 
 use gpui::{
-    AnyElement, BorrowAppContext as _, Context, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
+    AnyElement, BorrowAppContext as _, Context, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     IconName,
@@ -27,7 +27,7 @@ use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AppState, DeviceRecord};
-use crate::theme::{HEADER_H, Palette, SelectableStyle as _};
+use crate::theme::{HEADER_H, Palette, SCREEN_PAD, SelectableStyle as _, Typography as _};
 
 /// Device-detail top bar, in three zones: a back affordance + device name
 /// (leading), the section tabs as a centred segmented control (middle), and the
@@ -62,12 +62,11 @@ pub(super) fn detail_header(
         .items_center()
         .border_b_1()
         .border_color(pal.border)
-        .child(back_button(pal, cx))
+        .child(back_button(cx))
         .child(
             div()
                 .min_w_0()
-                .text_lg()
-                .font_weight(FontWeight::SEMIBOLD)
+                .text_heading()
                 .child(name),
         )
         // Flexible spacers on either side centre the segmented tabs in the space
@@ -76,7 +75,7 @@ pub(super) fn detail_header(
         .children(tab_strip)
         .child(div().flex_1())
         .when_some(online, |this, online| this.child(status_badge(online, pal)))
-        .child(add_device_button(pal))
+        .child(add_device_button())
 }
 
 /// The device-detail body: the active section, filling the height between the
@@ -138,7 +137,7 @@ fn buttons_tab(mouse_model: &gpui::Entity<MouseModelView>) -> impl IntoElement {
         .min_h_0()
         .items_center()
         .justify_center()
-        .p_6()
+        .p(px(SCREEN_PAD))
         .child(div().w_full().max_w(px(760.)).child(mouse_model.clone()))
 }
 
@@ -158,7 +157,7 @@ fn pointer_tab(
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
-        .p_5()
+        .p(px(SCREEN_PAD))
         .child(
             h_flex()
                 .w_full()
@@ -189,7 +188,8 @@ fn pointer_tab(
 
 fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
     // Two cards plus one 16 px gap fit exactly inside the 720 px window minimum
-    // after this tab's 20 px side padding, while still leaving a usable slider.
+    // after this tab's `SCREEN_PAD` (20 px) side inset, while still leaving a
+    // usable slider: 332·2 + 16 + 20·2 = 720.
     div().min_w(px(332.)).flex_1().h_full().child(card)
 }
 
@@ -220,13 +220,13 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             v_flex()
                 .child(
                     div()
-                        .text_sm()
+                        .text_body()
                         .text_color(pal.text_primary)
                         .child(tr!("Invert scroll direction")),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .text_caption()
                         .text_color(pal.text_muted)
                         .child(inversion_description),
                 ),
@@ -249,13 +249,13 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             v_flex()
                 .child(
                     div()
-                        .text_sm()
+                        .text_body()
                         .text_color(pal.text_primary)
                         .child(tr!("Wheel resolution")),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .text_caption()
                         .text_color(pal.text_muted)
                         .child(resolution_description),
                 ),
@@ -282,7 +282,7 @@ fn wheel_resolution_control(
         .w_full()
         .p_1()
         .gap_1()
-        .rounded_md()
+        .rounded(pal.control_radius)
         .border_1()
         .border_color(pal.border)
         .child(wheel_resolution_segment(
@@ -326,9 +326,9 @@ fn wheel_resolution_segment(
         .flex_1()
         .px_2()
         .py_1()
-        .rounded_md()
+        .rounded(pal.control_radius)
         .text_center()
-        .text_xs()
+        .text_caption()
         .selected_fill(active)
         .text_color(if enabled {
             if active {
@@ -362,10 +362,10 @@ fn invert_scroll_toggle(on: bool, enabled: bool, pal: Palette) -> AnyElement {
         return div()
             .px_2()
             .py_1()
-            .rounded_md()
+            .rounded(pal.control_radius)
             .border_1()
             .border_color(pal.border)
-            .text_xs()
+            .text_caption()
             .text_color(pal.text_muted)
             .child(tr!("Unavailable"))
             .into_any_element();
@@ -374,10 +374,10 @@ fn invert_scroll_toggle(on: bool, enabled: bool, pal: Palette) -> AnyElement {
         .id("invert-scroll-toggle")
         .px_2()
         .py_1()
-        .rounded_md()
+        .rounded(pal.control_radius)
         .selected_border(on, pal)
         .selected_fill(on)
-        .text_xs()
+        .text_caption()
         .text_color(if on { pal.text_primary } else { pal.text_muted })
         .cursor_pointer()
         .child(label)
@@ -400,7 +400,7 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>, pal: Palette) -> i
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
-        .p_6()
+        .p(px(SCREEN_PAD))
         .child(div().w_full().max_w(px(560.)).child(panel_card(
             tr!("Lighting"),
             IconName::Palette,
@@ -417,7 +417,7 @@ fn device_tab(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
-        .p_6()
+        .p(px(SCREEN_PAD))
         .child(
             v_flex()
                 .w_full()
@@ -436,7 +436,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
         .map_or_else(
             || {
                 div()
-                    .text_sm()
+                    .text_body()
                     .text_color(pal.text_muted)
                     .child(tr!("No active device"))
                     .into_any_element()
@@ -500,14 +500,12 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                     "right-panel-settings",
                     IconName::Settings,
                     tr!("Settings"),
-                    pal,
                     |_event, _window, cx| crate::windows::settings::open(cx),
                 ))
                 .child(sidebar_action(
                     "right-panel-config-folder",
                     IconName::Folder,
                     tr!("Config folder"),
-                    pal,
                     |_event, _window, cx| {
                         if let Ok(path) = openlogi_core::paths::config_dir()
                             && let Some(url) = file_url(&path)
@@ -530,15 +528,10 @@ fn device_summary(name: &str, kind: DeviceKind, online: bool, pal: Palette) -> i
             v_flex()
                 .gap_1()
                 .min_w_0()
+                .child(div().text_subheading().child(name.to_string()))
                 .child(
                     div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(name.to_string()),
-                )
-                .child(
-                    div()
-                        .text_xs()
+                        .text_caption()
                         .text_color(pal.text_muted)
                         .child(kind_label(kind)),
                 ),

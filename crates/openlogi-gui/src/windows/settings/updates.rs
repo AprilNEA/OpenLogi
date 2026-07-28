@@ -6,6 +6,7 @@ use super::{
     SettingGroup, SettingItem, SettingPage, Sizable, Styled, Tag, UpdateStatus, Updater, div,
     h_flex, img, px, v_flex,
 };
+use crate::theme::Typography as _;
 
 /// The Updates page: a hero card with the running build, its update status, and
 /// the contextual check / install / restart action; the opt-in auto-check and
@@ -178,7 +179,7 @@ fn update_hero(updater: &Entity<Updater>, pal: Palette, cx: &mut App) -> AnyElem
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .text_caption()
                                 .text_color(pal.text_muted)
                                 .truncate()
                                 .child(message.unwrap_or_else(|| tr!("Stable channel"))),
@@ -214,7 +215,7 @@ fn update_source(pal: Palette) -> AnyElement {
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .text_caption()
                                 .text_color(pal.text_muted)
                                 .truncate()
                                 .child("github.com/AprilNEA/OpenLogi/releases"),
@@ -232,7 +233,7 @@ fn update_source(pal: Palette) -> AnyElement {
         )
         .child(
             div()
-                .text_xs()
+                .text_caption()
                 .text_color(pal.text_muted)
                 .child(tr!(
                     "No background updater — OpenLogi only connects when you turn on automatic checks or click Check for Updates."

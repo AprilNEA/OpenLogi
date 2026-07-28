@@ -9,7 +9,11 @@ use gpui::{
     IntoElement, ParentElement, StatefulInteractiveElement as _, Styled, canvas, div, fill, img,
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::{Icon, IconName, h_flex, v_flex};
+use gpui_component::{
+    Icon, IconName,
+    button::{Button, ButtonVariants as _},
+    h_flex, v_flex,
+};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind, DeviceTransports,
 };
@@ -21,7 +25,7 @@ use super::widgets::{add_device_button, kind_label, settings_button};
 use crate::asset::GlowGeometry;
 use crate::components::carousel::Carousel;
 use crate::state::{AppState, DeviceRecord};
-use crate::theme::{self, HEADER_H, Palette};
+use crate::theme::{self, HEADER_H, Palette, SelectableStyle as _, Typography as _};
 
 /// Home (gallery) top bar: the "Devices" title, a Settings gear, and the
 /// Add-Device button — the entry points the old carousel header used to carry.
@@ -38,12 +42,11 @@ pub(super) fn home_header(pal: Palette) -> impl IntoElement {
             div()
                 .flex_1()
                 .min_w_0()
-                .text_lg()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_heading()
                 .child(tr!("Devices")),
         )
-        .child(settings_button(pal))
-        .child(add_device_button(pal))
+        .child(settings_button())
+        .child(add_device_button())
 }
 
 /// Horizontal gap between gallery cards, in pixels.
@@ -85,7 +88,7 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                 device_card(&record, focused, glow, pal)
                     .id(("device-card", idx))
                     .cursor_pointer()
-                    .hover(move |s| s.bg(pal.surface))
+                    .hover(move |s| s.border_color(rgb(theme::ACCENT_BLUE)))
                     .on_click(move |_, _, cx| {
                         view.update(cx, |this, cx| this.open_device(key.clone(), cx));
                     })
@@ -166,30 +169,29 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
 
 /// A device card in the Home gallery: the device photo floating on the window
 /// background above the name, connectivity dot, kind/slot, and battery. Fixed
-/// width so cards stay equal in the scrollable row. The active device wears a
-/// faint accent ring; inactive cards reserve the same 1px border in a
-/// transparent colour so selection never nudges the layout. Returns a bare
-/// [`Div`] so the gallery can wire the click handler.
+/// width so cards stay equal in the scrollable row. No card shows a border at
+/// rest — the accent ring appears only on hover (wired by the gallery). The
+/// `active` device (whose bindings and DPI are live) keeps a persistent but
+/// borderless marker: a faint accent fill, which reads whether or not the
+/// carousel centres it. The 1px border is always reserved in a transparent
+/// colour so the hover ring never nudges the layout. Returns a bare [`Div`] so
+/// the gallery can wire the hover and click handlers.
 fn device_card(
     record: &DeviceRecord,
     active: bool,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     pal: Palette,
 ) -> Div {
-    let ring = if active {
-        rgb(theme::ACCENT_BLUE).into()
-    } else {
-        gpui::transparent_black()
-    };
     v_flex()
         .w(px(theme::GALLERY_CARD_W))
         .flex_shrink_0()
         .items_center()
         .gap_3()
         .p_3()
-        .rounded_xl()
+        .rounded(pal.card_radius)
         .border_1()
-        .border_color(ring)
+        .border_color(gpui::transparent_black())
+        .selected_fill(active)
         .child(
             div()
                 .relative()
@@ -217,8 +219,7 @@ fn device_card(
                             div()
                                 .min_w_0()
                                 .truncate()
-                                .text_sm()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_subheading()
                                 .child(record.display_name.clone()),
                         )
                         .child(status_dot(record.online)),
@@ -233,7 +234,7 @@ fn device_card(
                             div()
                                 .min_w_0()
                                 .truncate()
-                                .text_xs()
+                                .text_caption()
                                 .text_color(pal.text_muted)
                                 .child(format!(
                                     "{} · slot {}",
@@ -320,7 +321,7 @@ fn battery_view(b: &BatteryInfo, pal: Palette) -> AnyElement {
     h_flex()
         .gap_1()
         .items_center()
-        .text_xs()
+        .text_caption()
         .text_color(pal.text_muted)
         .child(Icon::new(battery_icon(b)).size_3())
         .child(format!("{}%", b.percentage))
@@ -427,40 +428,26 @@ pub(super) fn device_empty_state(pal: Palette) -> AnyElement {
         )
         .child(
             div()
-                .text_xl()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_title()
                 .child(tr!("No devices connected")),
         )
         .child(
             div()
                 .max_w(px(440.))
-                .text_sm()
+                .text_body()
                 .text_center()
                 .child(tr!(
                     "Plug in or pair a supported Logitech device — it'll show up here automatically. For direct Bluetooth connections, pair in your computer's bluetooth settings."
                 )),
         )
         .child(
-            div()
-                .id("empty-add-device")
-                .mt_1()
-                .px_4()
-                .py_1()
-                .rounded_md()
-                .bg(rgb(theme::ACCENT_BLUE))
-                .text_color(rgb(0x00ff_ffff))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .cursor_pointer()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Icon::new(IconName::Plus))
-                        .child(tr!("Add Device")),
-                )
+            Button::new("empty-add-device")
+                .primary()
+                .icon(IconName::Plus)
+                .label(tr!("Add Device"))
                 .on_click(|_, _, cx| crate::windows::add_device::open(cx)),
         )
-        .child(div().mt_1().max_w(px(440.)).text_xs().text_center().text_color(pal.text_muted).child(tr!(
+        .child(div().mt_1().max_w(px(440.)).text_caption().text_center().text_color(pal.text_muted).child(tr!(
             "Using Logi Options+? Quit it first — both apps compete for HID++ access."
         )))
         .into_any_element()

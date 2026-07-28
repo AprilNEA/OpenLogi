@@ -65,4 +65,47 @@ pub enum AssetError {
         /// The offending value.
         component: String,
     },
+    /// Every built-in asset mirror failed its catalog probe.
+    #[error(
+        "all asset sources are unavailable (assets.openlogi.org: {production}; Pages: {pages}; jsDelivr: {jsdelivr})"
+    )]
+    SourcesUnavailable {
+        /// Failure from the production custom domain.
+        production: Box<AssetError>,
+        /// Failure from the versioned Cloudflare Pages branch alias.
+        pages: Box<AssetError>,
+        /// Failure from the versioned jsDelivr npm mirror.
+        jsdelivr: Box<AssetError>,
+    },
+    /// Probe workers ended without reporting every source.
+    #[error("asset source probe workers stopped before reporting all results")]
+    SourceProbeInterrupted,
+    /// The npm routing catalog uses a schema this client does not understand.
+    #[error("unsupported npm route schema {found}; expected {expected}")]
+    UnsupportedNpmRoutesSchema {
+        /// Schema version required by this OpenLogi build.
+        expected: u32,
+        /// Schema version returned by the catalog.
+        found: u32,
+    },
+    /// The npm routing catalog does not describe the pinned package release.
+    #[error("npm route version {found} does not match pinned asset version {expected}")]
+    NpmRoutesVersionMismatch {
+        /// Asset package version required by this OpenLogi build.
+        expected: String,
+        /// Asset package version returned by the catalog.
+        found: String,
+    },
+    /// A depot in `index.json` has no matching npm shard route.
+    #[error("npm routes contain no package for asset depot {depot}")]
+    MissingNpmRoute {
+        /// Depot whose files cannot be resolved to an npm package.
+        depot: String,
+    },
+    /// A requested asset path was not present when npm routes were validated.
+    #[error("npm routes contain no package for asset path {asset_path}")]
+    MissingNpmAssetPath {
+        /// Registry asset path with no npm package mapping.
+        asset_path: String,
+    },
 }

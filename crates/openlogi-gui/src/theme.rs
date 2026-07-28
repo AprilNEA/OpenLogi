@@ -12,7 +12,7 @@
 //!   own widgets — which is what keeps a popover from rendering white under
 //!   an otherwise dark UI (see `main.rs`'s appearance wiring).
 
-use gpui::{App, Hsla, Styled, Window, hsla, px, rgb};
+use gpui::{App, FontWeight, Hsla, Pixels, Styled, Window, hsla, px, relative, rgb};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 use openlogi_core::config::Appearance;
 
@@ -30,6 +30,18 @@ pub const STATUS_OFFLINE: u32 = 0x006b_7280;
 /// Sizes that several components need to agree on.
 pub const HEADER_H: f32 = 80.;
 pub const FOOTER_H: f32 = 50.;
+
+/// Semantic spacing tokens (px), so surfaces that must agree share one value
+/// instead of each call site hand-picking a `p_*` / `gap_*` step.
+///
+/// - `SCREEN_PAD` — the inset around a detail-tab body. Uniform across tabs so
+///   the content's start doesn't shift when switching tabs (the pointer tab's
+///   two-column grid is sized against this exact value; see its card min-width).
+/// - `CARD_PAD` / `CARD_GAP` — a card's inner padding and its title-to-content
+///   gap, so every [`panel_card`](crate::app) reads the same.
+pub const SCREEN_PAD: f32 = 20.;
+pub const CARD_PAD: f32 = 16.;
+pub const CARD_GAP: f32 = 12.;
 
 /// Fixed footprint of a device card in the Home gallery. Equal-width cards lay
 /// out in a horizontally scrollable row (centred when they fit, scrollable when
@@ -61,6 +73,22 @@ pub struct Palette {
     pub text_primary: Hsla,
     /// De-emphasised labels / metadata.
     pub text_muted: Hsla,
+    /// Corner radius for the bespoke card / panel surfaces. Derived from the
+    /// active gpui-component theme radius (`cx.theme().radius`) so the
+    /// hand-painted cards follow the Appearance → radius slider — which the old
+    /// hard-coded `rounded_*` helpers (fixed px, blind to the slider) could not.
+    ///
+    /// Scaled `× 1.5` above the base control radius so a card reads as rounder
+    /// than the small controls nested inside it — the concentric-corner
+    /// relationship (outer radius > inner radius) that a single flat radius
+    /// can't express.
+    pub card_radius: Pixels,
+    /// Corner radius for the small controls nested inside cards — chips, pills,
+    /// segmented items, toggles. The base `cx.theme().radius`, i.e. the same
+    /// radius the framework's own controls use, and smaller than
+    /// [`Palette::card_radius`] so a control's corner sits concentrically inside
+    /// its card's.
+    pub control_radius: Pixels,
 }
 
 /// Derive the app palette from the active gpui-component theme's semantic
@@ -82,6 +110,8 @@ pub fn palette(cx: &App) -> Palette {
         border: t.border,
         text_primary: t.foreground,
         text_muted: t.muted_foreground,
+        card_radius: t.radius * 1.5,
+        control_radius: t.radius,
     }
 }
 
@@ -239,6 +269,60 @@ pub trait SelectableStyle: Styled + Sized {
 }
 
 impl<E: Styled> SelectableStyle for E {}
+
+/// The app's type ramp as semantic roles, so a heading is `.text_heading()`
+/// everywhere instead of each call site re-picking a `text_*` size and a
+/// `font_weight`. Sizes, weights, and line heights live here once — an
+/// Apple-HIG-inspired scale, more generous and higher-contrast than the raw
+/// Tailwind steps it replaces — and every screen re-skins by editing this trait.
+///
+/// Blanket-implemented for every [`Styled`] element, the same way
+/// [`SelectableStyle`] extends styling. Colour stays a separate axis (the caller
+/// still picks `pal.text_primary` / `text_muted`); this trait only fixes size,
+/// weight, and leading.
+pub trait Typography: Styled + Sized {
+    /// Page / dialog hero title (empty states, connection notices). The
+    /// heaviest, largest step — the one place Bold is used.
+    #[must_use]
+    fn text_title(self) -> Self {
+        self.text_size(px(26.))
+            .font_weight(FontWeight::BOLD)
+            .line_height(relative(1.2))
+    }
+
+    /// Screen / section heading — the Home title, a device name, a window's
+    /// primary heading.
+    #[must_use]
+    fn text_heading(self) -> Self {
+        self.text_size(px(20.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .line_height(relative(1.3))
+    }
+
+    /// Card / group title and item names — a heading one rung down, sitting
+    /// inside a card rather than titling a screen.
+    #[must_use]
+    fn text_subheading(self) -> Self {
+        self.text_size(px(15.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .line_height(relative(1.4))
+    }
+
+    /// Default body copy — control labels, descriptions, values.
+    #[must_use]
+    fn text_body(self) -> Self {
+        self.text_size(px(15.)).line_height(relative(1.45))
+    }
+
+    /// De-emphasised metadata and helper text — the muted line under a label,
+    /// battery readouts, hints. Pair with `pal.text_muted`.
+    #[must_use]
+    fn text_caption(self) -> Self {
+        self.text_size(px(12.)).line_height(relative(1.4))
+    }
+}
+
+impl<E: Styled> Typography for E {}
 
 #[cfg(test)]
 mod tests {

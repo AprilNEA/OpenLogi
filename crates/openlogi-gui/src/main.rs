@@ -66,8 +66,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::app::AppView;
 use crate::asset::sync::{
-    AssetCommand, AssetControl, SyncOutcome, collect_models, model_key, run_asset_sync,
-    sync_retry_delay,
+    AssetCommand, AssetControl, SyncOutcome, model_key, run_asset_sync, sync_retry_delay,
 };
 use crate::state::AppState;
 
@@ -291,38 +290,6 @@ fn main() -> Result<()> {
                 tokio::select! {
                     update = ipc_updates.recv(), if ipc_open => match update {
                         Some(ipc_client::GuiUpdate::Snapshot(update)) => {
-                        // Kick off (or re-arm) the background asset sync. The
-                        // index prefetch needs no devices; depot fetches fire
-                        // only for models not already synced this session. The
-                        // whole automatic path is skipped when the user turned
-                        // auto-download off — a manual Refresh still works via
-                        // the AssetControl arm below.
-                        let auto_download = cx.update(|cx| {
-                            cx.try_global::<AppState>()
-                                .is_none_or(|s| s.app_settings().auto_download_assets)
-                        });
-                        let backoff_passed = last_sync_at
-                            .is_none_or(|t| t.elapsed() >= sync_retry_delay(sync_attempts));
-                        let pending: Vec<_> = collect_models(&update.inventory)
-                            .into_iter()
-                            .filter(|m| !synced_keys.contains(&model_key(m)))
-                            .collect();
-                        if auto_download
-                            && sync_enabled
-                            && !sync_running
-                            && backoff_passed
-                            && (!index_refreshed || !pending.is_empty())
-                        {
-                            sync_running = true;
-                            sync_attempts = sync_attempts.saturating_add(1);
-                            last_sync_at = Some(Instant::now());
-                            let tx = sync_tx.clone();
-                            std::thread::spawn(move || {
-                                let keys = pending.iter().map(model_key).collect();
-                                let ok = run_asset_sync(&pending);
-                                let _ = tx.send(SyncOutcome { ok, keys });
-                            });
-                        }
                         // Keep the latest completed enumeration for the manual
                         // Refresh / Clear arm — a not-yet-ready agent's empty
                         // pre-enumeration list must not shrink it.
@@ -335,10 +302,17 @@ fn main() -> Result<()> {
                         // silhouettes were resolved: the resolver was rebuilt
                         // when its outcome landed; force this merge through
                         // the unchanged-list early-return so the fresh records
-                        // become visible.
-                        let force_refresh = std::mem::take(&mut assets_dirty);
-                        cx.update(|cx| {
-                            let changed = cx.update_global::<AppState, _>(|state, _| {
+                        // become visible. Only consume the flag on a `Ready`
+                        // snapshot that will actually run the merge below —
+                        // `refresh_inventories` is skipped while the agent is
+                        // still `Scanning`, so taking it there would drop the
+                        // repaint and strand the device on its silhouette until
+                        // the next inventory change or a restart (seen after an
+                        // update relaunches GUI and agent together: the agent's
+                        // Scanning window overlaps the first sync's completion).
+                        let force_refresh = inventory_ready && std::mem::take(&mut assets_dirty);
+                        let (auto_download, asset_source, models) = cx.update(|cx| {
+                            let (changed, auto_download, asset_source, models) = cx.update_global::<AppState, _>(|state, _| {
                                 // Merge only *completed* enumerations. A not-yet-ready
                                 // agent can only serve an empty pre-enumeration list, and
                                 // counting those as misses would wipe the device list (and
@@ -355,14 +329,53 @@ fn main() -> Result<()> {
                                 }
                                 // Bitwise `|`: the link must be set even when the
                                 // merge already reported a change.
-                                merged | state.set_agent_link(state::AgentLink::Ready(update.status))
+                                let changed = merged
+                                    | state.set_agent_link(state::AgentLink::Ready(update.status));
+                                let settings = state.app_settings();
+                                (
+                                    changed,
+                                    settings.auto_download_assets,
+                                    settings.asset_source,
+                                    state.asset_models(),
+                                )
                             });
                             // The steady poll mostly repeats an identical snapshot;
                             // skip the full-window invalidation for those.
                             if changed {
                                 cx.refresh_windows();
                             }
+                            (auto_download, asset_source, models)
                         });
+                        // Kick off (or re-arm) the background asset sync. The
+                        // index prefetch needs no devices; depot fetches fire
+                        // only for models not already synced this session. Use
+                        // the UI's merged device set so persisted identities are
+                        // covered when a live probe temporarily lacks model info.
+                        // The whole automatic path is skipped when the user
+                        // turned auto-download off — a manual Refresh still
+                        // works via the AssetControl arm below.
+                        let backoff_passed = last_sync_at
+                            .is_none_or(|t| t.elapsed() >= sync_retry_delay(sync_attempts));
+                        let pending: Vec<_> = models
+                            .into_iter()
+                            .filter(|m| !synced_keys.contains(&model_key(m)))
+                            .collect();
+                        if auto_download
+                            && sync_enabled
+                            && !sync_running
+                            && backoff_passed
+                            && (!index_refreshed || !pending.is_empty())
+                        {
+                            sync_running = true;
+                            sync_attempts = sync_attempts.saturating_add(1);
+                            last_sync_at = Some(Instant::now());
+                            let tx = sync_tx.clone();
+                            std::thread::spawn(move || {
+                                let keys = pending.iter().map(model_key).collect();
+                                let ok = run_asset_sync(asset_source, &pending);
+                                let _ = tx.send(SyncOutcome { ok, keys });
+                            });
+                        }
                         }
                         Some(ipc_client::GuiUpdate::Unreachable) => {
                             cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
@@ -426,11 +439,14 @@ fn main() -> Result<()> {
                             sync_running = true;
                             sync_attempts = 0;
                             last_sync_at = None;
-                            let models = collect_models(&latest_inv);
+                            let (models, asset_source) = cx.update(|cx| {
+                                let state = cx.global::<AppState>();
+                                (state.asset_models(), state.app_settings().asset_source)
+                            });
                             let tx = sync_tx.clone();
                             std::thread::spawn(move || {
                                 let keys = models.iter().map(model_key).collect();
-                                let ok = run_asset_sync(&models);
+                                let ok = run_asset_sync(asset_source, &models);
                                 let _ = tx.send(SyncOutcome { ok, keys });
                             });
                         }

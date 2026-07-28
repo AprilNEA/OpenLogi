@@ -6,8 +6,9 @@
 //! is how a user opts in on first launch. Either choice marks the prompt seen
 //! so it never reappears; "Enable" also runs one check immediately.
 
+use crate::theme::Typography as _;
 use gpui::{
-    App, BorrowAppContext as _, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement,
+    App, BorrowAppContext as _, Context, FocusHandle, InteractiveElement, IntoElement,
     ParentElement as _, Render, Size, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px,
 };
@@ -94,14 +95,13 @@ impl Render for UpdateConsentView {
                     .p_6()
                     .child(
                         div()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_heading()
                             .child(tr!("Check for updates?")),
                     )
                     .child(
                         div()
                             .max_w(px(320.))
-                            .text_sm()
+                            .text_body()
                             .text_center()
                             .text_color(pal.text_muted)
                             .child(tr!(

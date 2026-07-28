@@ -41,3 +41,6 @@ serde = { version = "1.0", features = ["derive"], optional = true }
 hex = "0.4.3"
 derive_builder = "0.20.2"
 bitflags = { version = "2", features = ["serde"] }
+# OpenLogi-specific: request-level wire tracing at trace!. Off by default
+# (level-gated); enable with OPENLOGI_LOG=hidpp=trace. Not in upstream hidpp.
+tracing = { workspace = true }

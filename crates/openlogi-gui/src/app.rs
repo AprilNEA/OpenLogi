@@ -1,10 +1,13 @@
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, FocusHandle,
-    FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, div,
-    prelude::FluentBuilder as _, px, rgb,
+    InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement as _,
+    Styled, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::{Icon, IconName, TitleBar, h_flex, v_flex};
+use gpui_component::{
+    Icon, IconName, TitleBar,
+    button::{Button, ButtonVariants as _},
+    v_flex,
+};
 use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
 use tracing::info;
 
@@ -17,7 +20,7 @@ use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AgentLink, AppState, DeviceRecord};
-use crate::theme::{self, Palette};
+use crate::theme::{self, Palette, Typography as _};
 
 mod detail;
 mod home;
@@ -242,14 +245,13 @@ impl AppView {
             )
             .child(
                 div()
-                    .text_xl()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_title()
                     .child(tr!("Accessibility permission required")),
             )
             .child(
                 div()
                     .max_w(px(440.))
-                    .text_sm()
+                    .text_body()
                     .text_color(pal.text_muted)
                     .child(tr!(
                         "OpenLogi captures mouse buttons (Back / Forward / gesture button) \
@@ -261,7 +263,7 @@ impl AppView {
             .child(
                 div()
                     .max_w(px(440.))
-                    .text_sm()
+                    .text_body()
                     .text_color(pal.text_muted)
                     .child(tr!(
                         "Enable “OpenLogi Agent” in the Accessibility list — the \
@@ -271,31 +273,19 @@ impl AppView {
                     )),
             )
             .child(
-                div()
-                    .id("open-accessibility")
-                    .px_4()
-                    .py_2()
-                    .rounded_md()
-                    .bg(rgb(theme::ACCENT_BLUE))
-                    .text_color(rgb(0x00ff_ffff))
-                    .font_weight(FontWeight::MEDIUM)
-                    .cursor_pointer()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(Icon::new(IconName::Settings))
-                            .child(tr!("Open System Settings to grant access")),
-                    )
+                Button::new("open-accessibility")
+                    .primary()
+                    .icon(IconName::Settings)
+                    .label(tr!("Open System Settings to grant access"))
                     .on_click(|_, _, cx| request_accessibility(cx)),
             )
-            .child(div().text_xs().text_color(pal.text_muted).child(tr!(
+            .child(div().text_caption().text_color(pal.text_muted).child(tr!(
                 "Takes effect automatically once granted — no restart needed."
             )))
             .child(
                 div()
                     .id("skip-accessibility")
-                    .text_xs()
+                    .text_caption()
                     .text_color(pal.text_muted)
                     .cursor_pointer()
                     .hover(|s| s.text_color(pal.text_primary))
@@ -334,7 +324,7 @@ fn app_title_bar(pal: Palette) -> impl IntoElement {
             .flex()
             .items_center()
             .justify_center()
-            .text_sm()
+            .text_body()
             .text_color(pal.text_muted)
             .child("OpenLogi"),
     )
