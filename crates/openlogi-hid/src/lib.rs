@@ -11,6 +11,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 mod channel_registry;
+pub mod host_switch;
 mod mappings;
 mod node_ledger;
 mod route;
@@ -42,6 +43,7 @@ pub use hires_wheel::{
     get_scroll_wheel_mode_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
     set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on,
 };
+pub use host_switch::{HostSwitchError, run_host_switch_session};
 pub use hotplug::{HotplugEvent, watch_hotplug};
 pub use inventory::{Enumerator, InventoryError, enumerate};
 pub use pairing::{

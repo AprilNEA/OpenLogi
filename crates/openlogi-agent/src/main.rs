@@ -171,6 +171,7 @@ async fn run(config: Config) {
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),
     );
+    watchers::host_switch::spawn(shared.host_switch_links.clone());
 
     let mut inventory_rx = watchers::inventory::spawn_with_registry(
         Duration::from_secs(2),

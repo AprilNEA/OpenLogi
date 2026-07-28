@@ -26,6 +26,7 @@ use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::ipc::InventoryHealth;
 use crate::receiver_access::ReceiverAccess;
 use crate::watchers::gesture::GestureBindings;
+use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 
 /// The minimal per-device facts the agent needs: the config key (binding /
 /// preset lookup), the HID++ route (DPI/SmartShift writes + capture target), and
@@ -63,6 +64,8 @@ pub struct SharedRuntime {
     /// Exclusive receiver access shared by HID++ capture and pairing. Capture
     /// and pairing must never open the same receiver HID node concurrently.
     pub receiver_access: ReceiverAccess,
+    /// Keyboard → pointing-device routes resolved from `config.toml`.
+    pub host_switch_links: HostSwitchLinks,
 }
 
 /// Owns the config + device selection and keeps [`SharedRuntime`] in sync.
@@ -115,6 +118,7 @@ impl Orchestrator {
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: ChannelRegistry::default(),
             receiver_access: ReceiverAccess::default(),
+            host_switch_links: Arc::new(RwLock::new(Vec::new())),
         };
         let orch = Self {
             config,
@@ -186,6 +190,11 @@ impl Orchestrator {
             self.config.app_settings.thumbwheel_sensitivity,
             Ordering::Relaxed,
         );
+        write_value(
+            &self.shared.host_switch_links,
+            host_switch_links(&self.config, &self.devices),
+            "host_switch_links",
+        );
     }
 
     /// Apply a fresh inventory snapshot. Always refreshes the snapshot the IPC
@@ -225,6 +234,11 @@ impl Orchestrator {
             // Same set and routes — but keep the fresh `online` flags, or a
             // device that woke this tick would read as a transition forever.
             self.devices = devices;
+            write_value(
+                &self.shared.host_switch_links,
+                host_switch_links(&self.config, &self.devices),
+                "host_switch_links",
+            );
             return;
         }
         self.devices = devices;
@@ -436,6 +450,31 @@ fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
     devices
 }
 
+fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec<HostSwitchLink> {
+    config
+        .devices
+        .iter()
+        .filter_map(|(keyboard_key, settings)| {
+            let keyboard = devices
+                .iter()
+                .find(|device| device.config_key == *keyboard_key && device.online)?
+                .route
+                .clone()?;
+            let targets = settings
+                .host_switch_targets
+                .iter()
+                .filter_map(|target_key| {
+                    devices
+                        .iter()
+                        .find(|device| device.config_key == *target_key)
+                        .and_then(|device| device.route.clone())
+                })
+                .collect::<Vec<_>>();
+            (!targets.is_empty()).then_some(HostSwitchLink { keyboard, targets })
+        })
+        .collect()
+}
+
 /// The canonical identity of one device: what the GUI carousel orders by, what
 /// the config key is derived from, and what [`reapply_targets`] matches a device
 /// against across inventory ticks.
@@ -529,7 +568,7 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDevice, InventoryHealth, Orchestrator, build_devices, configured_wheel_mode,
+        AgentDevice, InventoryHealth, Orchestrator, configured_wheel_mode, host_switch_links,
         plan_reapply, reapply_targets,
     };
     use openlogi_core::config::{Config, ScrollResolution};
@@ -631,6 +670,45 @@ mod tests {
         });
 
         assert_eq!(configured_wheel_mode(&config, &device), (None, None));
+    }
+
+    #[test]
+    fn host_switch_links_keep_sleeping_targets_but_require_online_keyboard() {
+        let mut config = Config::default();
+        config
+            .devices
+            .entry("keyboard".into())
+            .or_default()
+            .host_switch_targets = vec!["mouse".into(), "offline".into(), "missing".into()];
+        let devices = [
+            dev("keyboard", 1, true),
+            dev("mouse", 2, true),
+            dev("offline", 3, false),
+        ];
+
+        let links = host_switch_links(&config, &devices);
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].keyboard,
+            DeviceRoute::Bolt {
+                receiver_uid: "AA00".into(),
+                slot: 1,
+            }
+        );
+        assert_eq!(
+            links[0].targets,
+            vec![
+                DeviceRoute::Bolt {
+                    receiver_uid: "AA00".into(),
+                    slot: 2,
+                },
+                DeviceRoute::Bolt {
+                    receiver_uid: "AA00".into(),
+                    slot: 3,
+                }
+            ]
+        );
     }
 
     #[test]
