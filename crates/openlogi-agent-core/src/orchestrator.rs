@@ -144,7 +144,29 @@ impl Orchestrator {
     }
 
     fn current_route(&self) -> Option<DeviceRoute> {
-        self.devices.get(self.current).and_then(|d| d.route.clone())
+        self.devices
+            .get(self.current)
+            .filter(|device| device.online)
+            .and_then(|device| device.route.clone())
+    }
+
+    /// Keep the capture/DPI write target aligned with the selected device's
+    /// live connection state without rebuilding the rest of the DPI cycle.
+    ///
+    /// Inventory-only online transitions do not warrant [`Self::rebuild`]
+    /// (which intentionally resets the cycle index), but they do have to stop
+    /// and restart HID++ capture. Easy-Switch preserves the receiver route
+    /// while the device is away, and its volatile control diversion is lost;
+    /// publishing `None` while offline and the route again on return makes the
+    /// capture watcher open a fresh session and re-arm those controls.
+    fn sync_current_route(&self) {
+        let target = self.current_route();
+        match self.shared.dpi_cycle.write() {
+            Ok(mut state) => state.target = target,
+            Err(error) => {
+                warn!(%error, lock = "dpi_cycle", "lock poisoned — keeping stale value");
+            }
+        }
     }
 
     /// Build the OS-hook callback's maps for `key` + foreground `app`. Both hook
@@ -231,6 +253,7 @@ impl Orchestrator {
             // Same set and routes — but keep the fresh `online` flags, or a
             // device that woke this tick would read as a transition forever.
             self.devices = devices;
+            self.sync_current_route();
             write_value(
                 &self.shared.host_switch_links,
                 host_switch_links(&self.config, &self.devices),
@@ -719,6 +742,31 @@ mod tests {
         );
         // Going to sleep (online → offline) → nothing.
         assert!(reapply_targets(&[dev("a", 1, true)], &[dev("a", 1, false)], false).is_empty());
+    }
+
+    #[test]
+    fn capture_target_tracks_online_state_without_resetting_dpi_cycle() {
+        let mut orch = Orchestrator::new(Config::default());
+        orch.devices = vec![dev("mouse", 1, true)];
+        orch.rebuild();
+        {
+            let mut dpi = orch.shared.dpi_cycle.write().unwrap();
+            dpi.index = 3;
+        }
+
+        orch.devices[0].online = false;
+        orch.sync_current_route();
+        {
+            let dpi = orch.shared.dpi_cycle.read().unwrap();
+            assert_eq!(dpi.target, None);
+            assert_eq!(dpi.index, 3);
+        }
+
+        orch.devices[0].online = true;
+        orch.sync_current_route();
+        let dpi = orch.shared.dpi_cycle.read().unwrap();
+        assert_eq!(dpi.target, orch.devices[0].route);
+        assert_eq!(dpi.index, 3);
     }
 
     #[test]
