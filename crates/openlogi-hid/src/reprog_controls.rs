@@ -30,6 +30,7 @@ pub use hidpp_reprog::{
     ControlId, GroupMask, RawWheelResolution, ReprogControlsCapabilities, ReprogControlsEvent,
     TaskId, decode_event as decode_full_event,
 };
+pub use hidpp_reprog::{control_ids, task_ids};
 
 /// `ReprogControlsV4` HID++ feature ID.
 pub const FEATURE_ID: u16 = 0x1b04;
