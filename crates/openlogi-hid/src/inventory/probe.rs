@@ -97,8 +97,14 @@ async fn probe_bolt_receiver(
     // serializing them costs little.
     let mut identities = Vec::new();
     for slot in 1u8..=MAX_BOLT_SLOTS {
-        if let Some(identity) =
-            read_bolt_slot_identity(&bolt, &channel, by_slot.get(&slot), slot).await
+        if let Some(identity) = read_bolt_slot_identity(
+            &bolt,
+            &channel,
+            by_slot.get(&slot),
+            slot,
+            unique_id.as_deref(),
+        )
+        .await
         {
             identities.push(identity);
         }
@@ -268,6 +274,34 @@ async fn probe_unifying_receiver(
     }
 }
 
+/// Cache identity for one Bolt slot.
+///
+/// The pairing register gives the device's own unit id cheaply every tick and
+/// is the preferred key. Some firmware reports it as all zeros, though (an MX
+/// Master 4 over Bolt does), and treating that as "unidentifiable, re-probe
+/// every tick" means a full feature walk — tens of HID++ round-trips — every
+/// couple of seconds forever, over the same radio link the device sends its
+/// input on. Those devices fall back to receiver + slot + model
+/// ([`CacheKey::BoltSlot`]).
+///
+/// `None` only when the receiver's own id is also unknown; that slot is
+/// re-probed every tick, as before.
+fn bolt_cache_key(
+    unit_id: [u8; 4],
+    receiver_uid: Option<&str>,
+    slot: u8,
+    wpid: Option<u16>,
+) -> Option<CacheKey> {
+    if unit_id != [0u8; 4] {
+        return Some(CacheKey::Bolt { unit_id });
+    }
+    receiver_uid.map(|uid| CacheKey::BoltSlot {
+        receiver_uid: uid.to_string(),
+        slot,
+        wpid,
+    })
+}
+
 /// Identity read from the receiver's registers for one occupied Bolt slot
 /// (phase 1). Both reads address the receiver at index `0xff`, and the channel
 /// correlates responses by register — not by the slot encoded in the request
@@ -292,6 +326,7 @@ async fn read_bolt_slot_identity(
     channel: &Arc<HidppChannel>,
     event: Option<&BoltDeviceConnection>,
     slot: u8,
+    receiver_uid: Option<&str>,
 ) -> Option<BoltSlotIdentity> {
     let pairing = match bolt.get_device_pairing_information(slot).await {
         Ok(p) => p,
@@ -316,12 +351,7 @@ async fn read_bolt_slot_identity(
         "paired slot"
     );
 
-    // The pairing register gives the device's unit id cheaply every tick — its
-    // stable cache identity. An all-zero id is treated as unidentifiable (don't
-    // cache; always probe when online).
-    let id = (pairing.unit_id != [0u8; 4]).then_some(CacheKey::Bolt {
-        unit_id: pairing.unit_id,
-    });
+    let id = bolt_cache_key(pairing.unit_id, receiver_uid, slot, wpid);
     Some(BoltSlotIdentity {
         slot,
         codename,
@@ -662,4 +692,64 @@ async fn read_codename(channel: &HidppChannel, slot: u8) -> Option<String> {
     core::str::from_utf8(&response[3..3 + len])
         .ok()
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CacheKey, bolt_cache_key};
+
+    /// A device that reports a real unit id keys on it — the strongest
+    /// identity, independent of which slot it sits in.
+    #[test]
+    fn a_real_unit_id_keys_on_the_device_itself() {
+        assert_eq!(
+            bolt_cache_key([1, 2, 3, 4], Some("F00DCAFE"), 2, Some(0xb042)),
+            Some(CacheKey::Bolt {
+                unit_id: [1, 2, 3, 4]
+            })
+        );
+    }
+
+    /// The regression this fixes: an all-zero unit id used to yield no key at
+    /// all, so the device was re-walked (tens of HID++ round-trips) on every
+    /// enumeration tick for as long as the agent ran.
+    #[test]
+    fn a_zero_unit_id_still_gets_a_cache_key() {
+        let key = bolt_cache_key([0; 4], Some("F00DCAFE"), 2, Some(0xb042));
+        assert_eq!(
+            key,
+            Some(CacheKey::BoltSlot {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 2,
+                wpid: Some(0xb042),
+            }),
+            "a zero unit id must not mean 'never cache'"
+        );
+    }
+
+    /// The fallback stays scoped: a different model, slot, or receiver is a
+    /// different key, so no device can inherit another's cached feature walk.
+    #[test]
+    fn the_fallback_key_does_not_collide_across_slots_models_or_receivers() {
+        let base = bolt_cache_key([0; 4], Some("F00DCAFE"), 2, Some(0xb042));
+        assert_ne!(
+            base,
+            bolt_cache_key([0; 4], Some("F00DCAFE"), 3, Some(0xb042))
+        );
+        assert_ne!(
+            base,
+            bolt_cache_key([0; 4], Some("F00DCAFE"), 2, Some(0xc548))
+        );
+        assert_ne!(
+            base,
+            bolt_cache_key([0; 4], Some("0BADBEEF"), 2, Some(0xb042))
+        );
+    }
+
+    /// With no receiver id there is nothing stable to key on, so the old
+    /// re-probe-every-tick behaviour is kept rather than risking a collision.
+    #[test]
+    fn no_receiver_id_means_no_key() {
+        assert_eq!(bolt_cache_key([0; 4], None, 2, Some(0xb042)), None);
+    }
 }
