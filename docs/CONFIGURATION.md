@@ -32,6 +32,11 @@ MX Master 4):
   RGB keyboards.
 - `gesture_owner` — which button owns the gesture role, when chosen
   explicitly (otherwise inferred).
+- `host_switch_targets` — on a compatible keyboard, physical config keys of
+  mice that should follow its Easy-Switch channel. Both devices must already
+  be paired on corresponding channels. The keyboard's host controls and every
+  target must expose the HID++ features needed for host switching. Configure
+  the link on every computer from which the keyboard may initiate a switch.
 
 The app-wide `[app_settings]` block holds `launch_at_login`,
 `check_for_updates`, and `auto_install_updates` (all off by default);
@@ -65,6 +70,12 @@ appearance = "system"
 
 [devices.2b042]
 dpi_presets = [800, 1600, 3200]
+
+# Put this on the keyboard's physical device entry. Values are the physical
+# keys of the mice that should follow it; use the exact keys already present
+# under [devices] in your generated config.
+[devices."receiver:aabbccdd:slot:1"]
+host_switch_targets = ["receiver:aabbccdd:slot:2"]
 
 [devices.2b042.bindings]
 Back = "BrowserBack"
