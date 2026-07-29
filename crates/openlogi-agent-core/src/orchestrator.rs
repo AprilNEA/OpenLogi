@@ -750,21 +750,27 @@ mod tests {
         orch.devices = vec![dev("mouse", 1, true)];
         orch.rebuild();
         {
-            let mut dpi = orch.shared.dpi_cycle.write().unwrap();
+            let Ok(mut dpi) = orch.shared.dpi_cycle.write() else {
+                panic!("DPI cycle lock should not be poisoned");
+            };
             dpi.index = 3;
         }
 
         orch.devices[0].online = false;
         orch.sync_current_route();
         {
-            let dpi = orch.shared.dpi_cycle.read().unwrap();
+            let Ok(dpi) = orch.shared.dpi_cycle.read() else {
+                panic!("DPI cycle lock should not be poisoned");
+            };
             assert_eq!(dpi.target, None);
             assert_eq!(dpi.index, 3);
         }
 
         orch.devices[0].online = true;
         orch.sync_current_route();
-        let dpi = orch.shared.dpi_cycle.read().unwrap();
+        let Ok(dpi) = orch.shared.dpi_cycle.read() else {
+            panic!("DPI cycle lock should not be poisoned");
+        };
         assert_eq!(dpi.target, orch.devices[0].route);
         assert_eq!(dpi.index, 3);
     }
