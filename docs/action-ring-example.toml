@@ -1,0 +1,129 @@
+# Action Ring — working example configuration
+#
+# This is the live ring from the first machine, kept as a starting point.
+# Copy the `ActionRing` sections into
+# `%USERPROFILE%\.config\openlogi\config.toml` and adapt.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# BEFORE YOU COPY — replace the device key
+#
+#   receiver:97b76948a846c55a:slot:2
+#
+# is the *first machine's* Bolt receiver UID + pairing slot. Yours is different.
+# Launch OpenLogi once so it writes its device blocks, then read yours:
+#
+#   Select-String -Path "$env:USERPROFILE\.config\openlogi\config.toml" `
+#     -Pattern '^\[devices\.' | ForEach-Object { $_.Line }
+#
+# Use the key whose identity block says `display_name = "MX Master 4"`, and
+# substitute it everywhere below. Edit with the app CLOSED, or it will
+# overwrite your changes on its next save.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Slots are compass-named clockwise from the top:
+#   North · NorthEast · East · SouthEast · South · SouthWest · West · NorthWest
+#
+# Any slot may hold:
+#   "PlayPause"                      a built-in action (see the catalog in-app)
+#   { Run = "…" }                    URL, file, or program; `||` separates args,
+#                                    %VAR% expands
+#   { PasteText = "…" }              typed at the cursor as Unicode
+#   { CustomShortcut = { … } }       a key chord — RECORD THIS IN THE APP
+#   { Folder = { … } }               a nested ring, one level deep
+#   { Named = { name = "…",          any of the above with your own label,
+#               action = { … } } }   shown on the ring instead of the payload
+
+schema_version = 4
+
+# ── Top-level ring ───────────────────────────────────────────────────────────
+[devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing]
+North = "PlayPause"
+SouthEast = "LockScreen"
+SouthWest = "CaptureRegion"     # Win+Shift+S region snip
+
+# ── East: a folder of AI sites ───────────────────────────────────────────────
+# Firing this slot swaps the on-screen ring to these four; the centre button
+# becomes ← to step back out. Empty positions simply don't render.
+[devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing.East.Folder.North]
+Run = "https://chatgpt.com/"
+
+[devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing.East.Folder.NorthEast]
+Run = "https://www.perplexity.ai/"
+
+[devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing.East.Folder.East]
+Run = "https://gemini.google.com/"
+
+[devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing.East.Folder.SouthEast]
+Run = "https://copilot.microsoft.com/"
+
+# ── NorthEast: a folder of prompt snippets ───────────────────────────────────
+# PasteText types the snippet wherever the caret is — no clipboard involvement,
+# so whatever you had copied survives.
+[devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing.NorthEast.Folder.North]
+PasteText = "Okay, then it's time to start making the four-track documents, all .md files. Include a preview for phase two, phase three, and phase four in each of the documents so I can hand them off and have them continue autonomously."
+
+[devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing.NorthEast.Folder.NorthEast]
+PasteText = "We're working on a multiphase coding round. We've just completed phase one. Read the previews of the phases, then build phase two as a .md document I can hand back to the coding agent."
+
+[devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing.NorthEast.Folder.East]
+PasteText = "Ok, please make the phase three document. Here's the report."
+
+[devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing.NorthEast.Folder.SouthEast]
+PasteText = "Okay, great, phase three is complete. Now please write phase four."
+
+[devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing.NorthEast.Folder.South]
+PasteText = "Please write a quick summary here in the chat, referencing any important components, backlogged items, and cross-messages between tracks, so I can send it to the master orchestrator."
+
+[devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing.NorthEast.Folder.SouthWest]
+PasteText = "Let's do a master document I can paste from one agent to the next for an audit, ending with a release on the server. Make sure they all know to get, add, commit, and push."
+
+# ── South: launch a program ──────────────────────────────────────────────────
+# Opens OpenLogi itself. Use `||` for arguments, e.g.
+#   Run = 'C:\Windows\notepad.exe||%USERPROFILE%\notes.txt'
+[devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing.South]
+Run = 'C:\Users\ultra\AppData\Local\Programs\OpenLogi\OpenLogi.exe'
+
+# ── West / NorthWest: key chords ─────────────────────────────────────────────
+# PREFER RECORDING THESE IN THE APP:
+#   ring editor → slot → "Keyboard Shortcut…" → "Press Keys" → press → release.
+# It writes this block for you and gets the codes right, including chords another
+# app already owns globally (the recorder reads physical key state, so a hotkey
+# owner swallowing the message doesn't matter).
+#
+# If you must hand-write: `modifiers` is a bitmask —
+#   1 = Cmd/Meta   2 = Shift   4 = Ctrl   8 = Alt/Option   16 = Win
+# and `key_code` is a macOS kVK virtual-key code (the cross-platform storage
+# format; the injector maps it to a Windows VK). 49 = Space, 6 = Z, 0 = A.
+#
+# Note: chords are injected with a ~120 ms hold, so apps that detect their
+# hotkey by polling key state (common) actually observe the press.
+
+# Ctrl+Space — dictation toggle on the first machine (Voice Node).
+[devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing.West.CustomShortcut]
+modifiers = 4
+key_code = 49
+display = "Ctrl+Space"
+
+# Win+Ctrl+Space
+[devices."receiver:97b76948a846c55a:slot:2".bindings.ActionRing.NorthWest.CustomShortcut]
+modifiers = 20
+key_code = 49
+display = "Win+Ctrl+Space"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Other buttons take the same rich actions — not just the ring.
+# The gesture button (hold + swipe) and plain buttons (DPI toggle, Middle,
+# Back, Forward) all offer Run / Paste Text / Keyboard Shortcut in their
+# pickers. Example: the gesture button's five directions.
+# ─────────────────────────────────────────────────────────────────────────────
+[devices."receiver:97b76948a846c55a:slot:2".bindings.GestureButton]
+Up = "MissionControl"
+Down = "ShowDesktop"
+Left = "PrevTab"
+Right = "NextTab"
+Click = "AppExpose"
+
+# The pad is only a ring while its binding is a slot map. Replacing the whole
+# table with a single action makes a tap fire that action directly instead:
+#   [devices."<KEY>".bindings]
+#   ActionRing = "Copy"
