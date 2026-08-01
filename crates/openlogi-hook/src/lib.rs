@@ -4,7 +4,7 @@
 //! |----------|---------------|
 //! | macOS    | `CGEventTap` (same primitive used by Logi Options+) |
 //! | Linux    | `evdev` grab + `uinput` re-injection |
-//! | Windows  | `WH_MOUSE_LL` low-level mouse hook |
+//! | Windows  | `WH_MOUSE_LL` low-level mouse hook + raw input (motion) |
 //!
 //! # Usage
 //!

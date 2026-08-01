@@ -1,4 +1,5 @@
-//! Windows `WH_MOUSE_LL` implementation of the OS-level mouse hook.
+//! Windows implementation of the OS-level mouse hook: `WH_MOUSE_LL` for buttons
+//! and wheel (it alone can suppress an event), raw input for pointer motion.
 #![allow(
     clippy::borrow_as_ptr,
     clippy::cast_possible_truncation,
@@ -7,6 +8,8 @@
     reason = "Win32 FFI uses raw pointer parameters and fixed-width message values"
 )]
 
+mod raw_input;
+
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
@@ -14,12 +17,14 @@ use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LPARAM, LRESULT,
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
+use windows_sys::Win32::UI::Input::HRAWINPUT;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
-    HC_ACTION, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostThreadMessageW,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_QUIT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+    CallNextHookEx, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageW,
+    GetWindowThreadProcessId, HC_ACTION, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE,
+    PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    WH_MOUSE_LL, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_USER, WM_XBUTTONDOWN,
+    WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
 use crate::{ButtonId, EventDisposition, HookError, MouseEvent};
@@ -132,9 +137,24 @@ fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError
         return;
     }
 
+    // Pointer motion comes from raw input, not the hook — see `raw_input`.
+    // Losing it costs gestures, not buttons, so it only warns.
+    let sink = match raw_input::install() {
+        Ok(hwnd) => Some(hwnd),
+        Err(e) => {
+            tracing::warn!(error = %e, "raw mouse input unavailable; gestures will not commit");
+            None
+        }
+    };
+
     let _ = ready.send(Ok(thread_id));
     message_loop();
 
+    // The raw-input registration is process-wide, so it has to be dropped
+    // explicitly — this thread owns the sink window, so it must happen here.
+    if let Some(hwnd) = sink {
+        raw_input::uninstall(hwnd);
+    }
     // SAFETY: `hook` is the live handle just returned by SetWindowsHookExW,
     // unhooked exactly once here as the thread exits.
     unsafe {
@@ -145,6 +165,9 @@ fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError
 
 fn message_loop() {
     let mut msg = MSG::default();
+    // Allocated on first WM_INPUT and reused for the life of the hook — see
+    // `raw_input::drain_motion`.
+    let mut batch = Vec::new();
     loop {
         // SAFETY: `msg` is a live, owned MSG; a null window handle retrieves
         // messages for the calling thread. Returns <= 0 on WM_QUIT or error.
@@ -152,11 +175,45 @@ fn message_loop() {
         if result <= 0 {
             break;
         }
+        // WM_INPUT lands here because the sink window belongs to this thread.
+        // The disposition is ignored: raw input can't be suppressed, and motion
+        // is passed through anyway (see `hook_runtime`).
+        //
+        // The whole queued backlog is drained per wakeup, not one record per
+        // message: this thread also services the low-level hook, and reading
+        // singly put a 1 kHz mouse's reports in front of every click.
+        if msg.message == WM_INPUT {
+            // SAFETY: `msg` was just retrieved by GetMessageW, so for WM_INPUT
+            // its lParam is the live raw-input handle `drain_motion` requires.
+            if let Some(event) =
+                unsafe { raw_input::drain_motion(msg.lParam as HRAWINPUT, &mut batch) }
+            {
+                let _ = dispatch(event);
+            }
+            // DefWindowProcW after the read is what releases the record. Called
+            // directly rather than via DispatchMessageW so cleanup doesn't
+            // depend on the `Static` control's procedure forwarding it.
+            // SAFETY: the message fields are forwarded verbatim from the MSG
+            // GetMessageW just filled in.
+            unsafe { DefWindowProcW(msg.hwnd, msg.message, msg.wParam, msg.lParam) };
+            continue;
+        }
         // SAFETY: `msg` was just populated by GetMessageW and outlives the call.
         unsafe { TranslateMessage(&msg) };
         // SAFETY: as above — `msg` is a live, initialized MSG.
         unsafe { DispatchMessageW(&msg) };
     }
+}
+
+/// Hand an event to the installed callback, or pass through when the hook is
+/// being torn down and none is installed. The lock is released before the
+/// callback runs: it may synthesize input that re-enters this module.
+fn dispatch(event: MouseEvent) -> EventDisposition {
+    CALLBACK
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .map_or(EventDisposition::PassThrough, |cb| cb(event))
 }
 
 fn clear_callback() {
@@ -195,11 +252,13 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         return call_next(code, wparam, lparam);
     };
 
-    let callback = CALLBACK.lock().ok().and_then(|slot| slot.clone());
-    let disposition = callback
-        .as_ref()
-        .map_or(EventDisposition::PassThrough, |cb| cb(event));
-    match disposition {
+    // A press begins a gesture hold downstream, and motion that predates it is
+    // still queued as unread `WM_INPUT` — see `raw_input::invalidate`.
+    if matches!(event, MouseEvent::Button { pressed: true, .. }) {
+        raw_input::invalidate();
+    }
+
+    match dispatch(event) {
         EventDisposition::PassThrough => call_next(code, wparam, lparam),
         EventDisposition::Suppress => 1,
     }

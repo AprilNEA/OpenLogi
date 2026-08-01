@@ -34,13 +34,16 @@ objc2 = { workspace = true }
 objc2-foundation = { workspace = true, features = ["NSString"] }
 objc2-app-kit = { workspace = true, features = ["NSWorkspace", "NSRunningApplication"] }
 
-# WH_MOUSE_LL low-level mouse hook + foreground-process path (GetForegroundWindow
-# / QueryFullProcessImageNameW).
+# WH_MOUSE_LL low-level mouse hook (buttons + wheel), raw input (unclamped
+# pointer deltas) + foreground-process path (GetForegroundWindow /
+# QueryFullProcessImageNameW).
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [
+    # HID_USAGE_PAGE_GENERIC / HID_USAGE_GENERIC_MOUSE, the raw-input usage pair.
+    "Win32_Devices_HumanInterfaceDevice",
     "Win32_Foundation",
     "Win32_System_Threading",
-    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
