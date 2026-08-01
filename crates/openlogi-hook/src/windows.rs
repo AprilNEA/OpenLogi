@@ -29,8 +29,9 @@ use crate::{ButtonId, EventDisposition, HookError, MouseEvent};
 const WHEEL_DELTA: f32 = 120.0;
 
 thread_local! {
-    /// Cursor position carried by the previous `WM_MOUSEMOVE`, differenced into
-    /// the relative delta [`MouseEvent::Moved`] carries — see [`motion_delta`].
+    /// Cursor position carried by the previous mouse message of any kind,
+    /// differenced into the relative delta [`MouseEvent::Moved`] carries — see
+    /// [`translate_event`] and [`motion_delta`].
     ///
     /// Thread-local rather than a `static`: `WH_MOUSE_LL` callbacks run on the
     /// thread that installed the hook, so this is single-threaded by
@@ -236,13 +237,12 @@ unsafe fn hook_data(lparam: LPARAM) -> Option<MSLLHOOKSTRUCT> {
 }
 
 fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
+    // Every mouse message carries the cursor point, so the baseline advances on
+    // all of them: injected motion is dropped below but still moves the cursor,
+    // and a gesture's button-down seeds the baseline for its own first move.
+    let previous = LAST_POINT.replace(Some(data.pt));
+
     if data.flags & LLMHF_INJECTED != 0 {
-        // Injected motion is not the user's, but it still moves the cursor:
-        // advance the baseline so the next real move reports its own travel
-        // rather than the jump, which could otherwise commit a phantom swipe.
-        if wparam as u32 == WM_MOUSEMOVE {
-            LAST_POINT.set(Some(data.pt));
-        }
         return None;
     }
 
@@ -288,15 +288,16 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
             device: None,
         }),
         WM_MOUSEMOVE => {
-            let (delta_x, delta_y) = motion_delta(data.pt)?;
+            let (delta_x, delta_y) = motion_delta(previous?, data.pt)?;
             Some(MouseEvent::Moved { delta_x, delta_y })
         }
         _ => None,
     }
 }
 
-/// Relative motion since the previous `WM_MOUSEMOVE`, or `None` for the first
-/// move seen (no baseline) and for a report that didn't move the cursor.
+/// Relative motion between two cursor points, or `None` for a report that
+/// didn't move the cursor — the accumulator downstream sums these deltas
+/// against a threshold, so a non-move must not count.
 ///
 /// # Limitation
 /// `WH_MOUSE_LL` carries the cursor *position*, which the OS clamps to the
@@ -304,8 +305,7 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
 /// even though the device keeps reporting counts. A gesture started near an
 /// edge can therefore fail to reach the swipe threshold. Reading the device's
 /// own counts needs raw input (`WM_INPUT`), a separate message pump.
-fn motion_delta(pt: POINT) -> Option<(i32, i32)> {
-    let previous = LAST_POINT.replace(Some(pt))?;
+fn motion_delta(previous: POINT, pt: POINT) -> Option<(i32, i32)> {
     let delta_x = pt.x - previous.x;
     let delta_y = pt.y - previous.y;
     (delta_x != 0 || delta_y != 0).then_some((delta_x, delta_y))
@@ -372,55 +372,30 @@ fn last_error(context: &str) -> HookError {
 mod tests {
     use super::*;
 
-    /// The accumulator downstream sums these deltas and tests a threshold, so
-    /// the first move of a session must not report the cursor's absolute
-    /// position as travel, and a report that didn't move the cursor must not
-    /// count at all.
+    /// A gesture button pressed before the hook has seen any motion used to
+    /// leave the baseline empty, so the swipe's first move was swallowed as the
+    /// initial sample and a short swipe fell back to a click.
     #[test]
-    fn motion_delta_differences_successive_points() {
-        let at = |x, y| POINT { x, y };
+    fn button_down_seeds_the_baseline_for_the_first_move() {
+        let at = |x, y| MSLLHOOKSTRUCT {
+            pt: POINT { x, y },
+            ..MSLLHOOKSTRUCT::default()
+        };
         // Explicit, so the test doesn't depend on running on a fresh thread
         // (`--test-threads=1` shares one with every other test).
         LAST_POINT.set(None);
+        translate_event(WM_LBUTTONDOWN as WPARAM, at(500, 400));
 
+        assert!(matches!(
+            translate_event(WM_MOUSEMOVE as WPARAM, at(560, 395)),
+            Some(MouseEvent::Moved {
+                delta_x: 60,
+                delta_y: -5
+            })
+        ));
         assert!(
-            motion_delta(at(800, 600)).is_none(),
-            "the first move has no baseline to difference against"
-        );
-        assert_eq!(motion_delta(at(860, 595)), Some((60, -5)));
-        assert_eq!(motion_delta(at(900, 595)), Some((40, 0)));
-        assert!(
-            motion_delta(at(900, 595)).is_none(),
+            translate_event(WM_MOUSEMOVE as WPARAM, at(560, 395)).is_none(),
             "a repeated point is not motion"
-        );
-    }
-
-    /// Injected motion is filtered out of the event stream, but it still moves
-    /// the cursor — if it didn't advance the baseline, the next real move would
-    /// report the injected jump as the user's own travel and could commit a
-    /// swipe from a single event.
-    #[test]
-    fn injected_motion_advances_the_baseline_without_reporting() {
-        let injected = MSLLHOOKSTRUCT {
-            flags: LLMHF_INJECTED,
-            pt: POINT { x: 100, y: 100 },
-            ..MSLLHOOKSTRUCT::default()
-        };
-        let real = MSLLHOOKSTRUCT {
-            pt: POINT { x: 110, y: 100 },
-            ..MSLLHOOKSTRUCT::default()
-        };
-
-        assert!(translate_event(WM_MOUSEMOVE as WPARAM, injected).is_none());
-        assert!(
-            matches!(
-                translate_event(WM_MOUSEMOVE as WPARAM, real),
-                Some(MouseEvent::Moved {
-                    delta_x: 10,
-                    delta_y: 0
-                })
-            ),
-            "the delta spans the injected point, not the pre-injection one"
         );
     }
 
@@ -432,6 +407,7 @@ mod tests {
         };
 
         assert!(translate_event(WM_LBUTTONDOWN as WPARAM, data).is_none());
+        assert!(translate_event(WM_MOUSEMOVE as WPARAM, data).is_none());
     }
 
     /// Wheel-forward (away from the user) must produce a positive `delta_y`, the
