@@ -8,6 +8,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # Match CI so shared-key linux-stable-debug restore hits the env hash.
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   # Opens/updates a release PR that bumps the shared workspace version and writes

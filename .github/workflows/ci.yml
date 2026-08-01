@@ -173,7 +173,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-      - run: cargo deny check
+      - run: cargo deny check --all-features
 
   clippy-windows:
     name: clippy (windows)
