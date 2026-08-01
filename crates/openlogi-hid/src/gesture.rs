@@ -1,6 +1,6 @@
 //! Live control capture for one device: divert the MX dedicated gesture button, the
-//! DPI/ModeShift button, and the thumb wheel over HID++ and turn their events
-//! into [`CapturedInput`] the GUI can dispatch.
+//! DPI/ModeShift button, the wheel-tilt buttons, and the thumb wheel over HID++
+//! and turn their events into [`CapturedInput`] the GUI can dispatch.
 //!
 //! [`run_capture_session`] holds a single HID++ channel open for one device,
 //! enables diversion on whichever of those controls it exposes, registers one
@@ -40,7 +40,8 @@ pub enum CapturedInput {
     /// A completed gesture-button swipe.
     Gesture(GestureDirection),
     /// A diverted button was pressed — the DPI/ModeShift button
-    /// ([`ButtonId::DpiToggle`]) or the thumb-wheel single tap
+    /// ([`ButtonId::DpiToggle`]), a wheel-tilt button ([`ButtonId::TiltLeft`] /
+    /// [`ButtonId::TiltRight`]), or the thumb-wheel single tap
     /// ([`ButtonId::Thumbwheel`]).
     ButtonPressed(ButtonId),
     /// Thumb-wheel rotation to re-synthesise as horizontal scroll, in the
@@ -75,11 +76,15 @@ struct CaptureAccum {
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
     dpi_down: bool,
+    /// Whether the left tilt control was held in the last event.
+    tilt_left_down: bool,
+    /// Whether the right tilt control was held in the last event.
+    tilt_right_down: bool,
 }
 
-/// Capture the gesture button, DPI/ModeShift button, and (when
-/// `capture_thumbwheel`) the thumb wheel on `route` until `shutdown` resolves,
-/// forwarding each event to `sink`.
+/// Capture the gesture button, DPI/ModeShift button, (when `capture_tilt`)
+/// the wheel-tilt buttons, and (when `capture_thumbwheel`) the thumb wheel on
+/// `route` until `shutdown` resolves, forwarding each event to `sink`.
 ///
 /// The dedicated gesture button (raw-XY) is diverted only when `divert_gesture_button` —
 /// i.e. it is the device's gesture owner. When the user moves the gesture role
@@ -95,6 +100,7 @@ struct CaptureAccum {
 pub async fn run_capture_session(
     route: DeviceRoute,
     capture_thumbwheel: bool,
+    capture_tilt: bool,
     divert_gesture_button: bool,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
@@ -108,6 +114,7 @@ pub async fn run_capture_session(
         &chan,
         device_index,
         capture_thumbwheel,
+        capture_tilt,
         divert_gesture_button,
     )
     .await?;
@@ -156,6 +163,7 @@ pub async fn run_capture_session(
         index = device_index,
         gesture = armed.gesture_diverted,
         dpi_buttons = armed.dpi_cids.len(),
+        tilt_buttons = armed.tilt_cids.len(),
         thumbwheel = armed.thumb.is_some(),
         "control capture active"
     );
@@ -179,6 +187,8 @@ struct ArmedControls {
     gesture_diverted: bool,
     /// DPI/ModeShift CIDs diverted as plain buttons.
     dpi_cids: Vec<u16>,
+    /// Wheel tilt CIDs diverted as plain buttons.
+    tilt_cids: Vec<u16>,
     /// `0x2150` accessor + feature index, present when the thumb wheel is
     /// diverted.
     thumb: Option<(Thumbwheel, u8)>,
@@ -197,6 +207,9 @@ impl ArmedControls {
             for &cid in &self.dpi_cids {
                 restore(rc.set_cid_reporting(cid, false, false).await, "DPI button");
             }
+            for &cid in &self.tilt_cids {
+                restore(rc.set_cid_reporting(cid, false, false).await, "tilt button");
+            }
         }
         if let Some((tw, _)) = self.thumb.as_ref() {
             restore(tw.set_reporting(false, false).await, "thumb wheel");
@@ -205,14 +218,16 @@ impl ArmedControls {
 }
 
 /// Resolve features off the device's root and divert the controls we capture:
-/// the gesture button (raw-XY) and DPI/ModeShift buttons over `0x1b04`, and —
-/// when `capture_thumbwheel` and the wheel reports a single tap — the thumb
-/// wheel over `0x2150`. The root-feature lookup mirrors `write::open_feature`,
-/// since hidpp 0.2's registry doesn't carry the features OpenLogi reimplements.
+/// the gesture button (raw-XY), DPI/ModeShift buttons, and (when
+/// `capture_tilt`) the wheel-tilt buttons, all over `0x1b04`, and — when
+/// `capture_thumbwheel` and the wheel reports a single tap — the thumb wheel
+/// over `0x2150`. The root-feature lookup mirrors `write::open_feature`, since
+/// hidpp 0.2's registry doesn't carry the features OpenLogi reimplements.
 async fn arm_controls(
     chan: &Arc<HidppChannel>,
     slot: u8,
     capture_thumbwheel: bool,
+    capture_tilt: bool,
     divert_gesture_button: bool,
 ) -> Result<ArmedControls, GestureError> {
     let device = Device::new(Arc::clone(chan), slot)
@@ -222,6 +237,7 @@ async fn arm_controls(
     let mut reprog: Option<(ReprogControlsV4, u8)> = None;
     let mut gesture_diverted = false;
     let mut dpi_cids: Vec<u16> = Vec::new();
+    let mut tilt_cids: Vec<u16> = Vec::new();
     if let Some(info) = device
         .root()
         .get_feature(reprog_controls::FEATURE_ID)
@@ -249,6 +265,19 @@ async fn arm_controls(
                     .await
                     .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
                 dpi_cids.push(cid);
+            }
+        }
+        if capture_tilt {
+            for &cid in &[
+                reprog_controls::TILT_LEFT_CID,
+                reprog_controls::TILT_RIGHT_CID,
+            ] {
+                if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
+                    rc.set_cid_reporting(cid, true, false)
+                        .await
+                        .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+                    tilt_cids.push(cid);
+                }
             }
         }
         reprog = Some((rc, info.index));
@@ -283,13 +312,14 @@ async fn arm_controls(
         }
     }
 
-    if !gesture_diverted && dpi_cids.is_empty() && thumb.is_none() {
+    if !gesture_diverted && dpi_cids.is_empty() && tilt_cids.is_empty() && thumb.is_none() {
         debug!(slot, "no capturable controls — idle session");
     }
     Ok(ArmedControls {
         reprog,
         gesture_diverted,
         dpi_cids,
+        tilt_cids,
         thumb,
     })
 }
@@ -349,6 +379,18 @@ fn handle_reprog(
                 let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::DpiToggle));
             }
             acc.dpi_down = dpi_down;
+
+            let tilt_left_down = cids.contains(&reprog_controls::TILT_LEFT_CID);
+            if tilt_left_down && !acc.tilt_left_down {
+                let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::TiltLeft));
+            }
+            acc.tilt_left_down = tilt_left_down;
+
+            let tilt_right_down = cids.contains(&reprog_controls::TILT_RIGHT_CID);
+            if tilt_right_down && !acc.tilt_right_down {
+                let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::TiltRight));
+            }
+            acc.tilt_right_down = tilt_right_down;
         }
         RawControlEvent::RawXy { dx, dy } => {
             // Commit the instant a clean direction emerges (mid-swipe, once per

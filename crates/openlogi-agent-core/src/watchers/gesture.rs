@@ -6,7 +6,8 @@
 //! thumb-wheel arming — changes, and dispatches each captured input:
 //!
 //! - a gesture swipe through the gesture binding map,
-//! - a DPI/ModeShift or thumb-wheel-tap press through the button binding map,
+//! - a DPI/ModeShift, wheel-tilt, or thumb-wheel-tap press through the button
+//!   binding map,
 //! - thumb-wheel rotation through the [`ButtonId::ThumbwheelScrollUp`] /
 //!   [`ButtonId::ThumbwheelScrollDown`] bindings — either re-synthesised as
 //!   continuous, sensitivity-scaled horizontal scroll or accumulated into a
@@ -129,6 +130,24 @@ fn thumbwheel_armed(hook_maps: &SharedHookMaps, sensitivity: i32) -> bool {
     })
 }
 
+/// Whether either wheel-tilt control must be diverted over HID++ (which
+/// suppresses native horizontal scroll) so we can run a custom action.
+///
+/// We divert only when a tilt is rebound away from its default horizontal
+/// scroll; otherwise the OS scrolls the wheel natively. Mirrors
+/// [`thumbwheel_armed`].
+fn tilt_armed(hook_maps: &SharedHookMaps) -> bool {
+    hook_maps.read().ok().is_some_and(|maps| {
+        [ButtonId::TiltLeft, ButtonId::TiltRight]
+            .iter()
+            .any(|&button| {
+                maps.bindings
+                    .get(&button)
+                    .is_some_and(|action| *action != default_binding(button))
+            })
+    })
+}
+
 /// Whether a finished capture session should make the manager re-arm.
 ///
 /// `done_epoch` identifies the session that signalled completion; `live_epoch`
@@ -153,8 +172,8 @@ async fn manage(
     receiver_access: ReceiverAccess,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
-    // (route, capture_thumbwheel, divert_gesture_button)
-    let mut current: Option<(DeviceRoute, bool, bool)> = None;
+    // (route, capture_thumbwheel, capture_tilt, divert_gesture_button)
+    let mut current: Option<(DeviceRoute, bool, bool, bool)> = None;
     let mut stop: Option<oneshot::Sender<()>> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut accumulators = WheelAccumulators::default();
@@ -201,6 +220,7 @@ async fn manage(
                         (
                             t,
                             thumbwheel_armed(&hook_maps, sensitivity),
+                            tilt_armed(&hook_maps),
                             divert_gesture,
                         )
                     })
@@ -218,12 +238,17 @@ async fn manage(
                     current = None;
                     continue;
                 }
-                if let Some((route, capture_thumbwheel, divert_gesture_button)) = want {
+                if let Some((route, capture_thumbwheel, capture_tilt, divert_gesture_button)) = want {
                     let Some(receiver_lease) = receiver_access.try_acquire_for_capture() else {
                         current = None;
                         continue;
                     };
-                    current = Some((route.clone(), capture_thumbwheel, divert_gesture_button));
+                    current = Some((
+                        route.clone(),
+                        capture_thumbwheel,
+                        capture_tilt,
+                        divert_gesture_button,
+                    ));
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
                     let slot = Arc::clone(&capture_channel);
@@ -235,6 +260,7 @@ async fn manage(
                         if let Err(e) = run_capture_session(
                             route,
                             capture_thumbwheel,
+                            capture_tilt,
                             divert_gesture_button,
                             sink,
                             stop_rx,
@@ -597,5 +623,28 @@ mod tests {
         // The session was stopped on purpose (pairing took the receiver, or no
         // device is targeted): no target means there is nothing to re-arm.
         assert!(!should_rearm(7, 7, false));
+    }
+
+    #[test]
+    fn tilt_armed_false_at_defaults_true_when_rebound() {
+        use crate::hook_runtime::HookMaps;
+        use openlogi_core::binding::Action;
+        use std::sync::{Arc, RwLock};
+
+        let maps: SharedHookMaps = Arc::new(RwLock::new(HookMaps::default()));
+        assert!(!tilt_armed(&maps), "no bindings → not armed");
+
+        // The default binding is not "armed".
+        if let Ok(mut m) = maps.write() {
+            m.bindings
+                .insert(ButtonId::TiltLeft, default_binding(ButtonId::TiltLeft));
+        }
+        assert!(!tilt_armed(&maps), "default binding → not armed");
+
+        // A non-default binding on either tilt arms capture.
+        if let Ok(mut m) = maps.write() {
+            m.bindings.insert(ButtonId::TiltRight, Action::Copy);
+        }
+        assert!(tilt_armed(&maps), "a rebound tilt → armed");
     }
 }
