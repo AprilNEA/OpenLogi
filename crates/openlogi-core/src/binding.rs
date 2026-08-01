@@ -665,6 +665,31 @@ impl Action {
         }
     }
 
+    /// Whether holding the bound button should keep re-firing this action.
+    ///
+    /// Only actions whose effect is a small increment worth applying many times
+    /// in a row qualify. Toggles ([`MuteVolume`](Action::MuteVolume),
+    /// [`PlayPause`](Action::PlayPause)) and one-shot navigation
+    /// ([`NextTrack`](Action::NextTrack), tab and desktop switches) are excluded
+    /// on purpose: repeating those on a long press would be surprising rather
+    /// than useful.
+    ///
+    /// Deliberately an explicit list rather than a [`category`](Action::category)
+    /// test — `Category::Media` holds both `VolumeUp` (repeatable) and
+    /// `PlayPause` (not), so the category is the wrong granularity.
+    #[must_use]
+    pub fn is_repeatable(&self) -> bool {
+        matches!(
+            self,
+            Action::VolumeUp
+                | Action::VolumeDown
+                | Action::ScrollUp
+                | Action::ScrollDown
+                | Action::HorizontalScrollLeft
+                | Action::HorizontalScrollRight
+        )
+    }
+
     /// All pickable actions in a deterministic order.
     ///
     /// [`Action::CustomShortcut`] is intentionally excluded — it is opened via
@@ -1039,6 +1064,66 @@ mod tests {
         assert_eq!(Action::VolumeUp.category(), Category::Media);
         assert_eq!(Action::VolumeDown.category(), Category::Media);
         assert_eq!(Action::MuteVolume.category(), Category::Media);
+    }
+
+    #[test]
+    fn repeatable_actions_are_the_increment_style_ones() {
+        for action in [
+            Action::VolumeUp,
+            Action::VolumeDown,
+            Action::ScrollUp,
+            Action::ScrollDown,
+            Action::HorizontalScrollLeft,
+            Action::HorizontalScrollRight,
+        ] {
+            assert!(action.is_repeatable(), "{action:?} should repeat on hold");
+        }
+    }
+
+    #[test]
+    fn toggles_and_one_shots_never_repeat() {
+        // `MuteVolume` and `PlayPause` share `Category::Media` with `VolumeUp`,
+        // which is exactly why `is_repeatable` cannot be derived from the
+        // category.
+        for action in [
+            Action::MuteVolume,
+            Action::PlayPause,
+            Action::NextTrack,
+            Action::PrevTrack,
+            Action::NextTab,
+            Action::PrevTab,
+            Action::NextDesktop,
+            Action::PreviousDesktop,
+            Action::LeftClick,
+            Action::Copy,
+            Action::None,
+        ] {
+            assert!(
+                !action.is_repeatable(),
+                "{action:?} must not repeat on hold"
+            );
+        }
+    }
+
+    #[test]
+    fn every_repeatable_action_is_in_the_catalog() {
+        // A repeatable action the picker cannot offer would be dead config.
+        for action in Action::catalog() {
+            if action.is_repeatable() {
+                assert!(
+                    matches!(
+                        action,
+                        Action::VolumeUp
+                            | Action::VolumeDown
+                            | Action::ScrollUp
+                            | Action::ScrollDown
+                            | Action::HorizontalScrollLeft
+                            | Action::HorizontalScrollRight
+                    ),
+                    "unexpected repeatable action in catalog: {action:?}"
+                );
+            }
+        }
     }
 
     #[test]

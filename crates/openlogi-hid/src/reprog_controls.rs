@@ -51,6 +51,46 @@ pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 /// cross-checked against Solaar `special_keys.py`.
 pub const DPI_MODE_SHIFT_CIDS: [u16; 3] = [0x00c4, 0x00ed, 0x00fd];
 
+/// Control IDs for the thumb-side buttons the OS hook normally remaps —
+/// [`ButtonId::Back`](openlogi_core::binding::ButtonId::Back) and
+/// [`ButtonId::Forward`](openlogi_core::binding::ButtonId::Forward).
+///
+/// These are **not** diverted by default. The OS hook handles them natively,
+/// which keeps them working even if the agent dies mid-session — a diverted
+/// control stays diverted in the device until something restores it, so an
+/// abnormal exit would leave the buttons dead until the mouse is power-cycled.
+///
+/// They are diverted only when a bound action needs the release edge, which the
+/// OS hook cannot supply: the device reports these buttons to the OS as a short
+/// press/release pulse (measured 7–22 ms on a Lift) no matter how long the
+/// button is physically held, so hold-to-repeat is impossible from that path.
+/// See `gesture::arm_controls`.
+///
+/// **Reverse-engineered, not read off a spec.** Both values were identified on a
+/// single Logitech Lift (BLE, PID `b031`) by correlating `0x1b04`
+/// divertedButtonsEvent reports against OS-level `WM_XBUTTONDOWN` timestamps:
+/// `0x0056` fired with button 5 / `Forward`, `0x0053` with button 4 / `Back`,
+/// and `getCtrlIdInfo` reports both as divertable. Not yet confirmed against the
+/// official control-ID list or a second model — `arm_controls` therefore checks
+/// `is_divertable()` before using them instead of assuming they exist.
+pub const BACK_CID: u16 = 0x0053;
+/// See [`BACK_CID`].
+pub const FORWARD_CID: u16 = 0x0056;
+
+/// The `0x1b04` control ID for `button`, when OpenLogi knows how to divert it
+/// for hold tracking. `None` for buttons that have no divertable control (the
+/// primary/secondary clicks) or that are already handled by their own capture
+/// path (the gesture button, DPI/ModeShift, thumb wheel).
+#[must_use]
+pub fn hold_cid_for_button(button: openlogi_core::binding::ButtonId) -> Option<u16> {
+    use openlogi_core::binding::ButtonId;
+    match button {
+        ButtonId::Back => Some(BACK_CID),
+        ButtonId::Forward => Some(FORWARD_CID),
+        _ => None,
+    }
+}
+
 /// Identity and capabilities of one reprogrammable control, as returned by
 /// `getCtrlIdInfo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
