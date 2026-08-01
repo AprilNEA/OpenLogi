@@ -173,7 +173,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-      - run: cargo deny check --all-features
+      # Global flags before subcommand (matches cargo-deny-action defaults).
+      - run: cargo deny --all-features check
 
   clippy-windows:
     name: clippy (windows)
