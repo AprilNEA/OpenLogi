@@ -34,6 +34,9 @@ windows-sys = { workspace = true, features = [
     # exposed when Win32_Security is also enabled.
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    # WriteFile's signature references OVERLAPPED, so windows-sys 0.61.2 gates
+    # it behind Win32_System_IO as well.
+    "Win32_System_IO",
 ] }
 
 [lints]

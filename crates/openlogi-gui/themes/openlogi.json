@@ -129,7 +129,7 @@
         "chart_bullish": "green-600",
         "chart_bearish": "red-600",
         "danger.background": "#ef4444",
-        "danger.foreground": "red-600",
+        "danger.foreground": "neutral-50",
         "description_list_label.background": "#171717",
         "description_list_label.foreground": "#f5f5f5",
         "drag_border": "#3b82f6",
