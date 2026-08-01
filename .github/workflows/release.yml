@@ -126,6 +126,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: linux-stable-debug
+          # Tag publish is not a useful cache writer; restore CI deps only.
+          save-if: false
 
       - uses: actions/download-artifact@v8
         with:
