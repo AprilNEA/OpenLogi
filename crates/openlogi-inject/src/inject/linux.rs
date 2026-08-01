@@ -12,7 +12,7 @@ use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::blocking::Connection as DbusConn;
 
-use openlogi_core::binding::Action;
+use openlogi_core::binding::{Action, WorkflowStep};
 
 /// Linux implementation: inject events via a shared `uinput` virtual device.
 pub(super) fn execute(action: &Action) {
@@ -108,7 +108,69 @@ pub(super) fn execute(action: &Action) {
             };
             press_key(&modifiers_to_keycodes(combo.modifiers), key);
         }
+        Action::TypeText(text) => {
+            tracing::warn!(
+                chars = text.chars().count(),
+                "TypeText injection is not implemented on Linux yet"
+            );
+        }
+        Action::RunAppleScript(_) => {
+            tracing::warn!("RunAppleScript is only supported on macOS");
+        }
+        Action::RunShellCommand(cmd) => run_shell_command_async(cmd.clone()),
+        Action::Workflow(steps) => run_workflow_async(steps.clone()),
     }
+}
+
+fn run_shell_command_async(cmd: String) {
+    std::thread::spawn(move || run_shell_command(&cmd));
+}
+
+fn run_workflow_async(steps: Vec<WorkflowStep>) {
+    std::thread::spawn(move || run_workflow(&steps));
+}
+
+fn run_workflow(steps: &[WorkflowStep]) {
+    for step in steps {
+        match step {
+            WorkflowStep::TypeText(text) => {
+                tracing::warn!(
+                    chars = text.chars().count(),
+                    "workflow TypeText injection is not implemented on Linux yet"
+                );
+            }
+            WorkflowStep::PressKey(combo) => {
+                if combo.key_code == 0 {
+                    tracing::warn!(
+                        chord = %combo.rendered_label(),
+                        "workflow PressKey with no key code; step ignored"
+                    );
+                    continue;
+                }
+                let Some(key) = macos_vk_to_linux(combo.key_code) else {
+                    tracing::warn!(
+                        key_code = combo.key_code,
+                        "workflow PressKey key code has no Linux mapping; step ignored"
+                    );
+                    continue;
+                };
+                press_key(&modifiers_to_keycodes(combo.modifiers), key);
+            }
+            WorkflowStep::Delay { millis } => {
+                std::thread::sleep(std::time::Duration::from_millis(*millis));
+            }
+            WorkflowStep::RunAppleScript(_) => {
+                tracing::warn!("workflow RunAppleScript is only supported on macOS");
+            }
+            WorkflowStep::RunShellCommand(cmd) => run_shell_command(cmd),
+        }
+    }
+}
+
+fn run_shell_command(cmd: &str) {
+    let _ = std::process::Command::new("/bin/sh")
+        .args(["-c", cmd])
+        .output();
 }
 
 const DEVICE_NAME: &str = "OpenLogi action injector";

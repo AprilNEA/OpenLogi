@@ -25,6 +25,7 @@ use crate::app_menu::file_url;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
+use crate::keyboard_model::function_row::FunctionRowView;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AppState, DeviceRecord};
 use crate::theme::{HEADER_H, Palette, SCREEN_PAD, SelectableStyle as _, Typography as _};
@@ -85,6 +86,7 @@ pub(super) fn detail_header(
 /// tab set, so this only has to render the chosen section.
 pub(super) fn detail_content(
     mouse_model: &gpui::Entity<MouseModelView>,
+    keyboard_model: &gpui::Entity<FunctionRowView>,
     dpi_panel: &gpui::Entity<DpiPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
     lighting_panel: &gpui::Entity<LightingPanel>,
@@ -94,6 +96,7 @@ pub(super) fn detail_content(
 ) -> impl IntoElement {
     match active {
         DetailTab::Buttons => buttons_tab(mouse_model).into_any_element(),
+        DetailTab::Keys => keys_tab(keyboard_model).into_any_element(),
         DetailTab::Pointer => pointer_tab(dpi_panel, smartshift_panel, pal, cx).into_any_element(),
         DetailTab::Lighting => lighting_tab(lighting_panel, pal).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
@@ -139,6 +142,25 @@ fn buttons_tab(mouse_model: &gpui::Entity<MouseModelView>) -> impl IntoElement {
         .justify_center()
         .p(px(SCREEN_PAD))
         .child(div().w_full().max_w(px(760.)).child(mouse_model.clone()))
+}
+
+/// Keys tab: the function-row remapper for a keyboard. Same centred,
+/// max-width column as [`buttons_tab`] so the keyboard photo + bubbles read as
+/// a sibling of the mouse-model screen.
+fn keys_tab(keyboard_model: &gpui::Entity<FunctionRowView>) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .items_center()
+        .justify_center()
+        .p(px(SCREEN_PAD))
+        .child(
+            div()
+                .w_full()
+                .max_w(px(1040.))
+                .child(keyboard_model.clone()),
+        )
 }
 
 /// Pointer tab: the DPI panel, the SmartShift wheel controls, and the

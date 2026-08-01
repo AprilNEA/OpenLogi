@@ -21,9 +21,10 @@ use tarpc::tokio_serde::formats::Bincode;
 /// Resolve the IPC endpoint name.
 ///
 /// On Unix this is the filesystem Unix-domain socket at
-/// [`agent_socket_path`](openlogi_core::paths::agent_socket_path) (preserving
-/// the existing `~/.config/openlogi/agent.sock` location, so macOS/Linux see no
-/// behavior change). On Windows it is a named pipe in the OS namespace
+/// [`agent_socket_path`](openlogi_core::paths::agent_socket_path). Production
+/// builds keep `~/.config/openlogi/agent.sock`; local macOS `.dev` bundles use
+/// the sibling `openlogi-dev` profile so development agents cannot occupy the
+/// installed app's endpoint. On Windows it is a named pipe in the OS namespace
 /// (`\\.\pipe\openlogi-agent.sock`).
 ///
 /// # Errors
