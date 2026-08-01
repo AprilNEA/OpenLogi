@@ -202,6 +202,191 @@ pub fn write_smartshift_in_background(
     });
 }
 
+/// Desired SmartShift values for a reconnect re-apply.
+#[derive(Debug, Clone, Copy)]
+pub struct SmartShiftApply {
+    /// Wheel mode to write.
+    pub mode: SmartShiftMode,
+    /// Auto-disengage threshold (`0` = preserve).
+    pub auto_disengage: u8,
+    /// Tunable torque (`0` = preserve).
+    pub tunable_torque: u8,
+}
+
+/// Re-apply every volatile mouse setting for one device on a **single**
+/// background thread, sequentially, reusing the capture channel when available.
+///
+/// Agent-start reapply used to fire DPI / SmartShift / wheel-mode each on its
+/// own thread, and each opened a fresh HID++ channel when capture was not yet
+/// ready. Concurrent opens of the same Bolt/Unifying node share the OS input
+/// stream while correlating responses only by software id — they cross-talk and
+/// produce the intermittent SmartShift `InvalidArgument` seen in #485. One
+/// sequential writer removes that self-race.
+pub fn reapply_mouse_volatile_in_background(
+    capture: Option<&CaptureChannel>,
+    target: DeviceRoute,
+    resolution: Option<ScrollResolution>,
+    inverted: Option<bool>,
+    dpi: Option<u32>,
+    smartshift: Option<SmartShiftApply>,
+) {
+    let shared = reusable_channel(capture, &target);
+    let reused = shared.is_some();
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                warn!(error = %e, "tokio runtime init failed; volatile reapply skipped");
+                return;
+            }
+        };
+        let index = target.device_index();
+        rt.block_on(async {
+            if resolution.is_some() || inverted.is_some() {
+                let result = tokio::time::timeout(WRITE_BUDGET, async {
+                    apply_wheel_mode(shared.as_ref(), &target, resolution, inverted).await
+                })
+                .await;
+                log_wheel_result(index, resolution, inverted, reused, result);
+            }
+            if let Some(dpi) = dpi {
+                match u16::try_from(dpi) {
+                    Ok(dpi_u16) => {
+                        let result = tokio::time::timeout(WRITE_BUDGET, async {
+                            match &shared {
+                                Some(shared) => openlogi_hid::set_dpi_on(shared, dpi_u16).await,
+                                None => openlogi_hid::set_dpi(&target, dpi_u16).await,
+                            }
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(())) => {
+                                debug!(index, dpi = dpi_u16, reused, "DPI written to device");
+                            }
+                            Ok(Err(e)) => warn!(error = ?e, "DPI write failed"),
+                            Err(_) => warn!(
+                                dpi = dpi_u16,
+                                "DPI write timed out (device asleep/unresponsive)"
+                            ),
+                        }
+                    }
+                    Err(_) => {
+                        warn!(dpi, "DPI exceeds the HID++ u16 wire field; write skipped");
+                    }
+                }
+            }
+            if let Some(ss) = smartshift {
+                let result = tokio::time::timeout(WRITE_BUDGET, async {
+                    match &shared {
+                        Some(shared) => {
+                            openlogi_hid::set_smartshift_on(
+                                shared,
+                                ss.mode,
+                                ss.auto_disengage,
+                                ss.tunable_torque,
+                            )
+                            .await
+                        }
+                        None => {
+                            openlogi_hid::set_smartshift(
+                                &target,
+                                ss.mode,
+                                ss.auto_disengage,
+                                ss.tunable_torque,
+                            )
+                            .await
+                        }
+                    }
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => debug!(
+                        index,
+                        mode = ?ss.mode,
+                        auto_disengage = ss.auto_disengage,
+                        tunable_torque = ss.tunable_torque,
+                        reused,
+                        "SmartShift config written"
+                    ),
+                    Ok(Err(e)) => warn!(error = ?e, "SmartShift write failed"),
+                    Err(_) => warn!(
+                        index,
+                        "SmartShift write timed out (device asleep/unresponsive)"
+                    ),
+                }
+            }
+        });
+    });
+}
+
+async fn apply_wheel_mode(
+    shared: Option<&SharedChannel>,
+    target: &DeviceRoute,
+    resolution: Option<ScrollResolution>,
+    inverted: Option<bool>,
+) -> Result<(), WriteError> {
+    match (resolution, inverted, shared) {
+        (Some(resolution), Some(inverted), Some(shared)) => {
+            openlogi_hid::set_scroll_wheel_mode_on(shared, resolution, inverted)
+                .await
+                .map(|_| ())
+        }
+        (Some(resolution), Some(inverted), None) => {
+            openlogi_hid::set_scroll_wheel_mode(target, resolution, inverted)
+                .await
+                .map(|_| ())
+        }
+        (Some(resolution), None, Some(shared)) => {
+            openlogi_hid::set_scroll_resolution_on(shared, resolution)
+                .await
+                .map(|_| ())
+        }
+        (Some(resolution), None, None) => openlogi_hid::set_scroll_resolution(target, resolution)
+            .await
+            .map(|_| ()),
+        (None, Some(inverted), Some(shared)) => {
+            openlogi_hid::set_scroll_inversion_on(shared, inverted).await
+        }
+        (None, Some(inverted), None) => openlogi_hid::set_scroll_inversion(target, inverted).await,
+        (None, None, _) => Ok(()),
+    }
+}
+
+fn log_wheel_result(
+    index: u8,
+    resolution: Option<ScrollResolution>,
+    inverted: Option<bool>,
+    reused: bool,
+    result: Result<Result<(), WriteError>, tokio::time::error::Elapsed>,
+) {
+    match result {
+        Ok(Ok(())) => debug!(
+            index,
+            ?resolution,
+            ?inverted,
+            reused,
+            "native wheel mode written"
+        ),
+        Ok(Err(WriteError::FeatureUnsupported { feature_hex })) => debug!(
+            index,
+            ?resolution,
+            ?inverted,
+            feature = format_args!("{feature_hex:#06x}"),
+            "native wheel mode unsupported"
+        ),
+        Ok(Err(e)) => warn!(error = ?e, "wheel mode write failed"),
+        Err(_) => warn!(
+            index,
+            ?resolution,
+            ?inverted,
+            "wheel mode write timed out (device asleep/unresponsive)"
+        ),
+    }
+}
+
 /// Spawn an OS thread that writes `dpi` to the device at `target` via
 /// `openlogi_hid::set_dpi`. Returns immediately; failures are logged.
 ///

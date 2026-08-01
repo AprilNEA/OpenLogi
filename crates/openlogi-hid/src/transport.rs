@@ -10,6 +10,7 @@
 
 #[cfg(not(target_os = "windows"))]
 use std::error::Error;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock};
 
 #[cfg(not(target_os = "windows"))]
@@ -17,11 +18,22 @@ use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader};
 use async_hid::{DeviceInfo, DeviceWriter, HidBackend};
 use futures_lite::StreamExt as _;
 use hidpp::channel::HidppChannel;
+use hidpp::nibble::U4;
 #[cfg(not(target_os = "windows"))]
 use hidpp::{async_trait, channel::RawHidChannel};
 #[cfg(not(target_os = "windows"))]
 use tokio::sync::Mutex;
 use tracing::debug;
+
+/// Next HID++ software id seed for a freshly opened channel (`1..=15`).
+///
+/// HID++ correlates request/response by `(device, feature, function, software_id)`.
+/// Concurrent opens of the same physical HID node (inventory + capture + one-shot
+/// writes) each get a private pending queue but share the OS input report stream,
+/// so identical software ids make responses match the wrong open. Diversifying the
+/// seed and rotating after every send (see [`configure_channel_sw_ids`]) keeps
+/// multi-open traffic distinguishable.
+static NEXT_SW_ID_SEED: AtomicU8 = AtomicU8::new(1);
 
 #[cfg(any(target_os = "windows", test))]
 mod windows;
@@ -216,6 +228,19 @@ pub(crate) async fn open_route_writer(
     Ok(None)
 }
 
+/// Stamp a channel with a unique rotating software-id sequence.
+///
+/// Software id `0` is reserved for device notifications and is never used.
+fn configure_channel_sw_ids(channel: &HidppChannel) {
+    let seed = NEXT_SW_ID_SEED
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(if current >= 15 { 1 } else { current + 1 })
+        })
+        .unwrap_or(1);
+    channel.set_sw_id(U4::from_lo(seed));
+    channel.set_rotating_sw_id(true);
+}
+
 pub(crate) async fn open_hidpp_channel(
     dev: async_hid::Device,
 ) -> Result<Option<(DeviceInfo, Arc<HidppChannel>)>, async_hid::HidError> {
@@ -230,7 +255,10 @@ pub(crate) async fn open_hidpp_channel(
     {
         let raw = WindowsHidppChannel::open(dev, info.clone()).await?;
         let channel = match HidppChannel::from_raw_channel(raw).await {
-            Ok(c) => Arc::new(c),
+            Ok(c) => {
+                configure_channel_sw_ids(&c);
+                Arc::new(c)
+            }
             Err(e) => {
                 debug!(name = %info.name, error = ?e, "not a HID++ channel");
                 return Ok(None);
@@ -247,7 +275,10 @@ pub(crate) async fn open_hidpp_channel(
         let long_only = is_long_only_collection(info.usage_page, info.usage_id);
         let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only);
         let channel = match HidppChannel::from_raw_channel(raw).await {
-            Ok(c) => Arc::new(c),
+            Ok(c) => {
+                configure_channel_sw_ids(&c);
+                Arc::new(c)
+            }
             Err(e) => {
                 debug!(name = %info.name, error = ?e, "not a HID++ channel");
                 return Ok(None);
