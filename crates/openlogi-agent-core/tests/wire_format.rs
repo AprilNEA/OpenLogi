@@ -62,7 +62,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 15);
+    assert_eq!(PROTOCOL_VERSION, 16);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -105,6 +105,9 @@ fn request_variant_order() {
         },
         "112e024869",
     );
+    // v16's `next_show_request` — appended last, so it takes the next free
+    // variant index and every earlier method keeps its own.
+    assert_wire(&AgentRequest::NextShowRequest {}, "12");
     // v13's Folder: variant index, then the BTreeMap as varint length +
     // (RingSlot variant, Action variant) pairs.
     assert_wire(

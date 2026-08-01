@@ -163,6 +163,7 @@ fn main() -> Result<()> {
         commands: ipc_commands,
         pairing: mut ipc_pairing,
         ring: mut ipc_ring,
+        show: mut ipc_show,
     } = ipc_client::spawn(std::time::Duration::from_secs(2));
 
     // Manual asset actions (Settings → Assets): Refresh / Clear cache. The
@@ -510,6 +511,15 @@ fn main() -> Result<()> {
                         cx.update(|cx| {
                             windows::add_device::apply_update(cx, update);
                         });
+                    }
+                    Some(()) = ipc_show.recv() => {
+                        // The tray asked for the main window. Routed through
+                        // `open_main_window`, which focuses an existing one or
+                        // opens a fresh one — this process may legitimately
+                        // have no window at all (`--background`, or the user
+                        // closed it while the ring overlay kept us alive).
+                        tracing::info!("tray requested the main window");
+                        cx.update(|cx| open_main_window(&[], cx));
                     }
                     Some(press) = ipc_ring.recv() => {
                         tracing::debug!(

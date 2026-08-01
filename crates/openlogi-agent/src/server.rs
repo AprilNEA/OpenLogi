@@ -186,6 +186,10 @@ impl Agent for AgentServer {
             &self.shared.capture_channel,
         );
     }
+
+    async fn next_show_request(self, _: Context) -> bool {
+        self.shared.show.next().await
+    }
 }
 
 /// Bind the agent's IPC socket and serve [`Agent`] requests until the process

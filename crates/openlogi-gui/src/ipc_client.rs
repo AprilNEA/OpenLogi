@@ -117,6 +117,9 @@ pub struct IpcClient {
     pub commands: mpsc::UnboundedSender<Command>,
     pub pairing: mpsc::UnboundedReceiver<PairingUpdate>,
     pub ring: mpsc::UnboundedReceiver<RingPress>,
+    /// "Open your main window" requests from the tray — the only way to reach
+    /// this process when it is running without a window.
+    pub show: mpsc::UnboundedReceiver<()>,
 }
 
 /// Spawn the IPC client thread. Returns immediately; the thread connects (and
@@ -127,6 +130,7 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
     let (commands, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
     let (pairing_tx, pairing) = mpsc::unbounded_channel();
     let (ring_tx, ring) = mpsc::unbounded_channel();
+    let (show_tx, show) = mpsc::unbounded_channel();
 
     let spawn_result = std::thread::Builder::new()
         .name("openlogi-ipc-client".into())
@@ -147,6 +151,7 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
                 // snapshot poll (or each other).
                 tokio::spawn(pairing_poll(pairing_tx.clone()));
                 tokio::spawn(ring_poll(ring_tx));
+                tokio::spawn(show_poll(show_tx));
                 poll_loop(poll_period, &update_tx, &pairing_tx, &mut cmd_rx).await;
             });
         });
@@ -159,6 +164,7 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
         commands,
         pairing,
         ring,
+        show,
     }
 }
 
@@ -333,6 +339,38 @@ async fn ring_poll(tx: mpsc::UnboundedSender<RingPress>) {
                 }
             }
             Ok(None) => {}
+            Err(_) => {
+                client = None; // connection dropped (agent restart) — reconnect
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+/// Long-poll the agent's "open your main window" stream on a dedicated
+/// connection, mirroring [`ring_poll`].
+///
+/// This is how the Windows tray reaches a GUI that is running with **no**
+/// window — `--background` at login, or the user closed the main window while
+/// the resident ring overlay kept the process alive. Focusing cannot help
+/// (there is nothing to focus) and a second launch exits on the singleton, so
+/// the request arrives here instead.
+async fn show_poll(tx: mpsc::UnboundedSender<()>) {
+    let mut client: Option<AgentClient> = None;
+    loop {
+        let Ok(live) = ensure(&mut client).await else {
+            tokio::time::sleep(Duration::from_secs(1)).await; // agent not up yet
+            continue;
+        };
+        let mut ctx = context::current();
+        ctx.deadline = Instant::now() + Duration::from_secs(25);
+        match live.next_show_request(ctx).await {
+            Ok(true) => {
+                if tx.send(()).is_err() {
+                    return; // GUI dropped the receiver → stop
+                }
+            }
+            Ok(false) => {}
             Err(_) => {
                 client = None; // connection dropped (agent restart) — reconnect
                 tokio::time::sleep(Duration::from_secs(1)).await;

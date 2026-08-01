@@ -151,6 +151,11 @@ async fn run(config: Config) {
     // behind an async mutex. Locks are brief (a map rebuild or a clone).
     let orchestrator = Arc::new(Mutex::new(Orchestrator::new(config)));
     let shared = orchestrator.lock().await.shared();
+    // The tray thread starts before the orchestrator exists, so hand it the
+    // show channel now — it is the tray's only way to reach a GUI that is
+    // running with no window (see `openlogi_agent_core::show`).
+    #[cfg(target_os = "windows")]
+    tray_windows::set_show_channel(shared.show.clone());
     let hook_installed = Arc::new(AtomicBool::new(false));
 
     // Live event monitor: shared between the hook callback (which mirrors events

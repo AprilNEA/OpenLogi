@@ -26,6 +26,7 @@ use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::ipc::InventoryHealth;
 use crate::receiver_access::ReceiverAccess;
 use crate::ring::RingChannel;
+use crate::show::ShowChannel;
 use crate::watchers::gesture::GestureBindings;
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -66,6 +67,11 @@ pub struct SharedRuntime {
     /// while the pad's effective binding is ring-shaped, and the IPC server's
     /// `next_ring_press` long-poll drains them for the GUI overlay.
     pub ring: RingChannel,
+    /// "Open your main window" requests from the tray. The GUI can be running
+    /// with no window at all (`--background`, or the user closed it while the
+    /// resident ring overlay kept the process alive), and on Windows the tray
+    /// has no other way to reach it — see [`crate::show`].
+    pub show: ShowChannel,
 }
 
 /// Owns the config + device selection and keeps [`SharedRuntime`] in sync.
@@ -118,6 +124,7 @@ impl Orchestrator {
             capture_channel: Arc::new(RwLock::new(None)),
             receiver_access: ReceiverAccess::default(),
             ring: RingChannel::default(),
+            show: ShowChannel::default(),
         };
         let orch = Self {
             config,

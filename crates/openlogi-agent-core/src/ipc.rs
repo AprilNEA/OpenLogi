@@ -36,7 +36,9 @@ use serde::{Deserialize, Serialize};
 /// v14: [`Action`] gains the appended `Named` variant (user action labels).
 /// v15: [`RingPress`] gains the appended `device_key` field, so the overlay
 ///      resolves slots against the pad's own device.
-pub const PROTOCOL_VERSION: u32 = 15;
+/// v16: `next_show_request` appended — the tray's only way to reach a GUI
+///      that is running with no window.
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// One Action Ring pad press, streamed to the GUI via
 /// [`Agent::next_ring_press`] so the on-screen ring opens (or confirms a
@@ -318,4 +320,10 @@ pub trait Agent {
     /// GUI's window focus). Appended for v11 — see the method-order note on
     /// [`Self::protocol_version`].
     async fn execute_action(action: Action);
+
+    /// Long-poll for a "show the main window" request (the Windows tray's
+    /// Show, which cannot reach a windowless GUI any other way — see
+    /// [`crate::show`]). Answers `true` when one is pending, `false` when the
+    /// hold elapses so the client simply polls again.
+    async fn next_show_request() -> bool;
 }
