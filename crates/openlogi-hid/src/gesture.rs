@@ -168,6 +168,23 @@ pub async fn run_capture_session(
     )
     .await?;
 
+    // `0x1b04` is what this session exists to listen on — every captured
+    // control (gesture button, DPI, side buttons, the Action Ring pad) rides
+    // it. Its absence means the device did not answer the feature query, not
+    // that it has nothing to capture: a cold or half-woken link yields an
+    // empty control table, and the session would otherwise settle in as
+    // "active" with nothing armed and simply wait for a shutdown that never
+    // comes — the pad and every diverted button dead until the agent
+    // restarts. Fail instead, so the watcher rebuilds on a fresh channel.
+    if armed.reprog.is_none() {
+        warn!(
+            index = device_index,
+            "device exposed no control feature — treating as unreachable so capture is retried"
+        );
+        armed.disarm().await;
+        return Err(GestureError::DeviceUnreachable(device_index));
+    }
+
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
     if let Ok(mut slot) = channel_slot.write() {

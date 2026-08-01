@@ -50,6 +50,58 @@ const TARGET_POLL: Duration = Duration::from_secs(1);
 
 /// Idle gap after which a partly-accumulated *custom* wheel action is forgotten,
 /// so slow intermittent nudges don't eventually cross the threshold.
+/// How long a capture session must survive to count as healthy, clearing the
+/// re-arm backoff. Comfortably longer than the instant failure of a device
+/// that cannot be reached at all.
+const HEALTHY_SESSION: Duration = Duration::from_secs(30);
+
+/// Paces capture-session rebuilds after a session ends on its own.
+///
+/// An unreachable device fails its session immediately, so re-arming every
+/// [`TARGET_POLL`] would churn a HID channel open and closed once a second
+/// for as long as it stays away — the very storm the rebuild exists to
+/// escape. Successive instant failures therefore wait 1, 2, 4, 8 … ticks
+/// (capped), while a session that held up for [`HEALTHY_SESSION`] starts the
+/// count over so a device coming back is picked up promptly.
+#[derive(Default)]
+struct RearmBackoff {
+    failures: u32,
+    skip_ticks: u32,
+    started: Option<Instant>,
+}
+
+impl RearmBackoff {
+    /// Note that a session just started (its liveness clock begins now).
+    fn session_started(&mut self) {
+        self.started = Some(Instant::now());
+    }
+
+    /// Whether this tick should be skipped while serving out a backoff.
+    fn skip_this_tick(&mut self) -> bool {
+        if self.skip_ticks == 0 {
+            return false;
+        }
+        self.skip_ticks -= 1;
+        true
+    }
+
+    /// Record a session that ended by itself; returns how many ticks until
+    /// the next rebuild attempt.
+    fn record_failure(&mut self) -> u32 {
+        if self
+            .started
+            .is_some_and(|started| started.elapsed() >= HEALTHY_SESSION)
+        {
+            self.failures = 0;
+        }
+        self.failures = self.failures.saturating_add(1);
+        // Cap the shift so the wait tops out at 32 ticks rather than growing
+        // without bound (and never overflows).
+        self.skip_ticks = (1u32 << self.failures.min(5)) - 1;
+        self.skip_ticks + 1
+    }
+}
+
 const ACTION_DECAY: Duration = Duration::from_millis(300);
 
 /// Minimum gap between two fires of the same custom wheel action, so one
@@ -172,6 +224,13 @@ async fn manage(
     // (from an already-superseded session) are ignored.
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<u64>();
     let mut epoch: u64 = 0;
+    // Consecutive sessions that ended on their own, and the tick at which the
+    // next rebuild is allowed. A device that cannot be reached at all fails
+    // its session immediately, and re-arming every `TARGET_POLL` would then
+    // churn a HID channel open/closed once a second for as long as it stays
+    // away — the same storm this watcher is meant to recover from. Back off
+    // instead, and reset the moment a session survives.
+    let mut backoff = RearmBackoff::default();
 
     loop {
         tokio::select! {
@@ -188,6 +247,9 @@ async fn manage(
                 );
             }
             _ = ticker.tick() => {
+                if backoff.skip_this_tick() {
+                    continue;
+                }
                 // While pairing is waiting or active, release the capture
                 // session so run_pairing can own the receiver's HID node (one
                 // process can't read it through two channels).
@@ -254,6 +316,7 @@ async fn manage(
                         let _ = done.send(session_epoch);
                     });
                     stop = Some(stop_tx);
+                    backoff.session_started();
                 } else {
                     current = None;
                 }
@@ -266,7 +329,11 @@ async fn manage(
                 // respawn so a permanently failing device can't hot-loop. A stale
                 // epoch or a deliberate stop-to-idle is a no-op (see `should_rearm`).
                 if should_rearm(done_epoch, epoch, current.is_some()) {
-                    warn!("capture session for the active device ended unexpectedly, re-arming");
+                    let retry_in_ticks = backoff.record_failure();
+                    warn!(
+                        retry_in_ticks,
+                        "capture session for the active device ended unexpectedly, re-arming"
+                    );
                     current = None;
                     // Keep the `stop`/`current` invariant: the session already
                     // exited, so its stop receiver is gone and dropping the sender
@@ -463,6 +530,47 @@ fn advance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Repeated instant failures must widen the gap between rebuild attempts
+    /// — the regression this guards is a device that cannot be reached being
+    /// re-armed once per second forever.
+    #[test]
+    fn repeated_instant_failures_widen_the_retry_gap() {
+        let mut backoff = RearmBackoff::default();
+        // No backoff pending: every tick is eligible.
+        assert!(!backoff.skip_this_tick());
+
+        let gaps: Vec<u32> = (0..6).map(|_| backoff.record_failure()).collect();
+        assert_eq!(gaps, vec![2, 4, 8, 16, 32, 32], "doubles, then caps");
+
+        // The gap is actually served out before the next attempt.
+        let mut backoff = RearmBackoff::default();
+        let gap = backoff.record_failure();
+        let mut skipped = 0u32;
+        while backoff.skip_this_tick() {
+            skipped += 1;
+            assert!(skipped < gap, "must stop skipping within the stated gap");
+        }
+        assert_eq!(skipped + 1, gap);
+        assert!(!backoff.skip_this_tick(), "eligible again after the wait");
+    }
+
+    /// A session that stayed up is not the same problem as one that never
+    /// starts, so it must not inherit an earlier backoff.
+    #[test]
+    fn a_long_lived_session_resets_the_backoff() {
+        let mut backoff = RearmBackoff::default();
+        for _ in 0..4 {
+            let _ = backoff.record_failure();
+        }
+        // A session that ran longer than HEALTHY_SESSION then ended.
+        backoff.started = Instant::now().checked_sub(HEALTHY_SESSION + Duration::from_secs(1));
+        assert_eq!(
+            backoff.record_failure(),
+            2,
+            "counts as a first failure again"
+        );
+    }
 
     #[test]
     fn multiplier_is_unity_at_default_sensitivity() {
