@@ -56,6 +56,23 @@ const PANEL_REARM_PERIOD: Duration = Duration::from_secs(3);
 /// with it the session's shutdown path — indefinitely.
 const PANEL_ARM_BUDGET: Duration = Duration::from_secs(2);
 
+/// Consecutive failed re-arm passes after which the capture session gives up
+/// and exits so the watcher can rebuild it on a fresh channel.
+///
+/// Without this a session can go **silently dead**: if its channel stops
+/// answering — the link dropped, or the enumerator evicted and reopened the
+/// receiver's node underneath it — the reads never return and never error, so
+/// the session stays "active" forever while the Action Ring, the gesture
+/// button and the diverted side/DPI buttons all quietly stop working. Nothing
+/// recovers it short of restarting the agent, because
+/// `watchers::gesture::manage` only re-arms a session that actually *ends*.
+///
+/// Sized to outlast an ordinary sleep: a dozing device legitimately misses
+/// re-arms, and waking it costs a session rebuild, so this waits
+/// `PANEL_REARM_PERIOD × this` (~1 min) of unbroken failure before concluding
+/// the channel is deaf rather than the device merely asleep.
+const PANEL_REARM_FAILURE_LIMIT: u32 = 20;
+
 /// Shared slot holding the active capture session's open channel, so DPI /
 /// SmartShift writes can reuse it instead of opening a fresh one. `None`
 /// whenever no session is connected.
@@ -207,24 +224,7 @@ pub async fn run_capture_session(
     // the initial arm — deliberately after the listener above, so no event
     // between arm and listen is lost.
     match (&armed.panel, &armed.reprog) {
-        (Some(panel), Some((rc, _))) => {
-            let mut shutdown = shutdown;
-            let mut cadence = tokio::time::interval(PANEL_REARM_PERIOD);
-            cadence.set_missed_tick_behavior(MissedTickBehavior::Delay);
-            loop {
-                tokio::select! {
-                    _ = &mut shutdown => break,
-                    _ = cadence.tick() => {
-                        if tokio::time::timeout(PANEL_ARM_BUDGET, panel.apply(rc))
-                            .await
-                            .is_err()
-                        {
-                            debug!("action ring re-arm timed out (link cold?)");
-                        }
-                    }
-                }
-            }
-        }
+        (Some(panel), Some((rc, _))) => hold_panel_armed(panel, rc, shutdown).await,
         _ => {
             let _ = shutdown.await;
         }
@@ -234,7 +234,20 @@ pub async fn run_capture_session(
     if let Ok(mut slot) = channel_slot.write() {
         *slot = None;
     }
-    armed.disarm().await;
+    // Restoring the diverted controls is best-effort and bounded: the session
+    // may be ending *because* the channel went deaf, and an unbounded disarm
+    // would then never return — leaving the session neither running nor
+    // finished, so the watcher never learns it should rebuild. A device that
+    // cannot hear the restore has already dropped its diversions anyway.
+    if tokio::time::timeout(PANEL_ARM_BUDGET, armed.disarm())
+        .await
+        .is_err()
+    {
+        debug!(
+            index = device_index,
+            "disarm timed out — channel already gone"
+        );
+    }
     debug!(index = device_index, "control capture stopped");
     Ok(())
 }
@@ -308,11 +321,64 @@ struct PanelArming {
     fsb: Option<Arc<ForceSensingButtonFeature>>,
 }
 
+/// Keep the Action Ring armed until `shutdown` fires, re-applying the recipe
+/// on [`PANEL_REARM_PERIOD`] because the arming does not survive the device
+/// sleeping.
+///
+/// Returns early when the device stops answering for
+/// [`PANEL_REARM_FAILURE_LIMIT`] consecutive passes: that is the session's
+/// only evidence that its channel has gone deaf, and ending is what lets the
+/// watcher rebuild it. Without that exit the session lives on with every
+/// captured control silently dead.
+async fn hold_panel_armed(
+    panel: &PanelArming,
+    rc: &ReprogControlsV4,
+    mut shutdown: oneshot::Receiver<()>,
+) {
+    let mut cadence = tokio::time::interval(PANEL_REARM_PERIOD);
+    cadence.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut failures: u32 = 0;
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = cadence.tick() => {
+                let armed_ok = tokio::time::timeout(PANEL_ARM_BUDGET, panel.apply(rc))
+                    .await
+                    .unwrap_or_else(|_| {
+                        debug!("action ring re-arm timed out (link cold?)");
+                        false
+                    });
+                if armed_ok {
+                    failures = 0;
+                    continue;
+                }
+                failures += 1;
+                if failures >= PANEL_REARM_FAILURE_LIMIT {
+                    warn!(
+                        failures,
+                        "control capture is not reaching the device — ending the session \
+                         so it can be rebuilt on a fresh channel"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+}
+
 impl PanelArming {
-    /// One arming pass. Failures are logged at debug and retried on the next
-    /// cadence tick — transient misses are expected while the BTLE link is
-    /// asleep.
-    async fn apply(&self, rc: &ReprogControlsV4) {
+    /// One arming pass. Transient misses are expected while the BTLE link is
+    /// asleep, so failures are logged at debug and retried on the next cadence
+    /// tick.
+    ///
+    /// Returns whether the pad is actually armed — i.e. whether the analytics
+    /// write landed. The caller uses that as the session's liveness signal: a
+    /// channel that has gone deaf answers nothing, and without this the
+    /// session would keep "arming" into the void forever while the pad and
+    /// the diverted buttons stayed dead (see [`PANEL_REARM_FAILURE_LIMIT`]).
+    /// The force-threshold write is not part of the verdict — it is optional
+    /// (`0x19c0` may be absent) and does not gate event delivery.
+    async fn apply(&self, rc: &ReprogControlsV4) -> bool {
         if let Some(fsb) = &self.fsb
             && let Err(e) = fsb
                 .set_force_threshold(0, ACTION_RING_FORCE_THRESHOLD)
@@ -324,11 +390,15 @@ impl PanelArming {
             analytics_key_events: Some(true),
             ..CidReportingChange::default()
         };
-        if let Err(e) = rc
+        match rc
             .set_cid_reporting_full(reprog_controls::ACTION_RING_CID, on)
             .await
         {
-            debug!(error = ?e, "action ring analytics arm failed");
+            Ok(_echo) => true,
+            Err(e) => {
+                debug!(error = ?e, "action ring analytics arm failed");
+                false
+            }
         }
     }
 }
