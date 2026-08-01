@@ -1,0 +1,61 @@
+[package]
+name = "tarpc"
+version = "0.37.0"
+rust-version = "1.65.0"
+authors = [
+    "Adam Wright <adam.austin.wright@gmail.com>",
+    "Tim Kuehn <timothy.j.kuehn@gmail.com>",
+]
+edition = "2021"
+license = "MIT"
+documentation = "https://docs.rs/tarpc"
+homepage = "https://github.com/google/tarpc"
+repository = "https://github.com/google/tarpc"
+keywords = ["rpc", "network", "server", "api", "microservices"]
+categories = ["asynchronous", "network-programming"]
+readme = "README.md"
+description = "An RPC framework for Rust with a focus on ease of use."
+
+[features]
+default = []
+
+serde1 = ["tarpc-plugins/serde1", "serde", "serde/derive", "serde/rc"]
+tokio1 = ["tokio/rt"]
+serde-transport = ["serde1", "tokio1", "tokio-serde", "tokio-util/codec"]
+serde-transport-json = ["serde-transport", "tokio-serde/json"]
+serde-transport-bincode = ["serde-transport", "tokio-serde/bincode"]
+tcp = ["tokio/net"]
+unix = ["tokio/net"]
+
+full = [
+    "serde1",
+    "tokio1",
+    "serde-transport",
+    "serde-transport-json",
+    "serde-transport-bincode",
+    "tcp",
+    "unix",
+]
+
+[dependencies]
+anyhow = "1.0"
+fnv = "1.0"
+futures = "0.3"
+humantime = "2.0"
+pin-project = "1.0"
+rand = "0.8"
+serde = { optional = true, version = "1.0", features = ["derive"] }
+static_assertions = "1.1.0"
+tarpc-plugins = "0.14"
+thiserror = "2.0"
+tokio = { version = "1", features = ["time"] }
+tokio-util = { version = "0.7.3", features = ["time"] }
+tokio-serde = { optional = true, version = "0.9" }
+tracing = { version = "0.1", default-features = false, features = [
+    "attributes",
+    "log",
+] }
+tracing-opentelemetry = { version = "0.33", default-features = false }
+opentelemetry = { version = "0.32", default-features = false }
+opentelemetry-semantic-conventions = "0.32"
+
