@@ -246,7 +246,7 @@ async fn arm_controls(
         let controls = enumerate_controls(&rc).await?;
 
         if gesture_button_mode != GestureButtonMode::Native
-            && let Some(cid) = find_gesture_cid(&controls)
+            && let Some(cid) = find_gesture_cid(&controls, gesture_button_mode)
         {
             let raw_xy = gesture_button_mode == GestureButtonMode::Gestures;
             rc.set_cid_reporting(cid, true, raw_xy)
@@ -340,16 +340,24 @@ async fn enumerate_controls(
     Ok(controls)
 }
 
-/// Pick the device's gesture-capable thumb control. Requiring diversion and
-/// raw-XY support prevents an ordinary Switch Apps key from being selected on
-/// devices where it cannot be captured safely or report swipe motion.
-fn find_gesture_cid(controls: &[reprog_controls::CtrlIdInfo]) -> Option<u16> {
+/// Pick the device's dedicated thumb control for the requested mode. Disabled
+/// mode only needs safe diversion; gesture capture additionally requires
+/// raw-XY reporting so swipe motion can be decoded.
+fn find_gesture_cid(
+    controls: &[reprog_controls::CtrlIdInfo],
+    mode: GestureButtonMode,
+) -> Option<u16> {
+    if mode == GestureButtonMode::Native {
+        return None;
+    }
     reprog_controls::GESTURE_BUTTON_CIDS
         .iter()
         .copied()
         .find(|candidate| {
             controls.iter().any(|control| {
-                control.cid == *candidate && control.is_divertable() && control.supports_raw_xy()
+                control.cid == *candidate
+                    && control.is_divertable()
+                    && (mode == GestureButtonMode::Disabled || control.supports_raw_xy())
             })
         })
 }

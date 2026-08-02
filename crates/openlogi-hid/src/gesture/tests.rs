@@ -144,7 +144,7 @@ fn m720_switch_apps_control_is_selected_as_the_gesture_button() {
     }];
 
     assert_eq!(
-        find_gesture_cid(&controls),
+        find_gesture_cid(&controls, GestureButtonMode::Gestures),
         Some(reprog_controls::M720_GESTURE_BUTTON_CID)
     );
 }
@@ -188,7 +188,7 @@ fn dedicated_gesture_cid_is_preferred_when_both_are_present() {
     });
 
     assert_eq!(
-        find_gesture_cid(&controls),
+        find_gesture_cid(&controls, GestureButtonMode::Gestures),
         Some(reprog_controls::GESTURE_BUTTON_CID)
     );
 }
@@ -201,7 +201,10 @@ fn switch_apps_without_raw_xy_is_not_treated_as_a_gesture_button() {
         flags: 0x0011,
     }];
 
-    assert_eq!(find_gesture_cid(&controls), None);
+    assert_eq!(
+        find_gesture_cid(&controls, GestureButtonMode::Gestures),
+        None
+    );
 }
 
 #[test]
@@ -212,7 +215,28 @@ fn raw_xy_control_without_diversion_is_not_treated_as_a_gesture_button() {
         flags: 0x0101,
     }];
 
-    assert_eq!(find_gesture_cid(&controls), None);
+    assert_eq!(
+        find_gesture_cid(&controls, GestureButtonMode::Gestures),
+        None
+    );
+}
+
+#[test]
+fn disabled_mode_accepts_a_divertable_control_without_raw_xy() {
+    let controls = [reprog_controls::CtrlIdInfo {
+        cid: reprog_controls::M720_GESTURE_BUTTON_CID,
+        task_id: 0x00ad,
+        flags: 0x0031,
+    }];
+
+    assert_eq!(
+        find_gesture_cid(&controls, GestureButtonMode::Disabled),
+        Some(reprog_controls::M720_GESTURE_BUTTON_CID)
+    );
+    assert_eq!(
+        find_gesture_cid(&controls, GestureButtonMode::Gestures),
+        None
+    );
 }
 
 #[test]
