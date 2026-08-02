@@ -13,9 +13,10 @@
 //! The GUI maps each [`CapturedInput`] to the user's bound action and dispatches
 //! it, mirroring how the CGEventTap hook handles the side buttons. The thumb
 //! wheel is special: diverting it stops native horizontal scroll, so the GUI
-//! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas. Its capture
-//! mode separately controls whether diverted single-tap reports are delivered;
-//! the wheel stays native while the user's thumbwheel config is at its defaults.
+//! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas. A diverted
+//! session forwards tap reports too; the agent checks the latest binding map
+//! before dispatching them. The wheel stays native while the user's thumbwheel
+//! config is at its defaults.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
@@ -147,8 +148,9 @@ pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 2] = [
 /// Which of one device's controls a capture session should divert.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CaptureSpec {
-    /// How to divert the thumb wheel over `0x2150`, including whether its
-    /// single-tap reports should be delivered.
+    /// Whether to leave the thumb wheel native or divert it over `0x2150`.
+    /// Either diverted mode arms the same physical reporting state; tap intent
+    /// is filtered against the latest binding map by the agent.
     pub thumbwheel_mode: ThumbwheelCaptureMode,
     /// Gesture-source CIDs ([`GESTURE_SOURCE_BUTTONS`] members) to divert
     /// with raw-XY — one per source in gesture mode; empty when no HID++
@@ -186,7 +188,6 @@ pub async fn run_capture_session(
         .ok_or(GestureError::DeviceNotFound)?;
     let device_index = route.device_index();
     let armed = arm_controls(&chan, device_index, &spec).await?;
-    let thumbwheel_mode = spec.thumbwheel_mode;
 
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
@@ -220,7 +221,14 @@ pub async fn run_capture_session(
             if let Some(idx) = thumb_index
                 && let Some(event) = thumbwheel::decode_event(&msg, device_index, idx)
             {
-                forward_thumbwheel_event(event, thumbwheel_mode, &sink);
+                // Once the wheel is physically diverted, forward every part of
+                // its report. The agent filters taps against the latest binding
+                // provenance without restarting this hardware session.
+                forward_thumbwheel_event(
+                    event,
+                    ThumbwheelCaptureMode::DivertedRotationAndTap,
+                    &sink,
+                );
             }
         }
     });
