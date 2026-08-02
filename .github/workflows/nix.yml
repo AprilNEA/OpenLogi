@@ -1,0 +1,40 @@
+name: Nix CI
+
+# Build the Nix package (flake `.#openlogi`) so it can't silently rot — the
+# failure mode that killed the previous flake (#262). With the importCargoLock
+# approach the only thing that can go stale is a git-pin hash in
+# nix/package.nix `outputHashes`, and that only when a git pin (gpui,
+# gpui-component, ...) is bumped in Cargo.lock. This workflow makes that
+# failure happen in the PR that bumps the pin — the error message prints the
+# correct hash to paste — instead of silently on master afterwards. Gated to
+# the files that actually affect the Nix build so it doesn't run on every
+# Rust change (Rust CI covers those).
+on:
+  push:
+    branches: [master]
+    paths:
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - "nix/**"
+      - "packaging/linux/**"
+      - "design/icon/openlogi.png"
+      - ".github/workflows/nix.yml"
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - "nix/**"
+      - "packaging/linux/**"
+      - "design/icon/openlogi.png"
+      - ".github/workflows/nix.yml"
+
+jobs:
+  build:
+    name: nix build (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - run: nix build .#openlogi -L
