@@ -20,8 +20,8 @@ pub async fn run(_args: ListArgs) -> Result<()> {
              permission: System Settings → Privacy & Security → Input Monitoring."
         );
         println!(
-            "  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548); other \
-             receivers (Unifying) aren't surfaced yet."
+            "  - Logi Bolt (PID 0xC548) and Unifying receivers (PID 0xC52B / 0xC532) \
+             are supported; make sure the paired device is powered on and awake."
         );
         std::process::exit(2);
     }
