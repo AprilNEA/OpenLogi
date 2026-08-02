@@ -205,6 +205,17 @@ fn switch_apps_without_raw_xy_is_not_treated_as_a_gesture_button() {
 }
 
 #[test]
+fn raw_xy_control_without_diversion_is_not_treated_as_a_gesture_button() {
+    let controls = [reprog_controls::CtrlIdInfo {
+        cid: reprog_controls::M720_GESTURE_BUTTON_CID,
+        task_id: 0x00ad,
+        flags: 0x0101,
+    }];
+
+    assert_eq!(find_gesture_cid(&controls), None);
+}
+
+#[test]
 fn disabled_gesture_button_emits_nothing_and_ignores_raw_motion() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();

@@ -340,17 +340,17 @@ async fn enumerate_controls(
     Ok(controls)
 }
 
-/// Pick the device's gesture-capable thumb control. Requiring raw-XY support
-/// prevents an ordinary Switch Apps key from being captured as a gesture
-/// button on devices where it cannot report swipe motion.
+/// Pick the device's gesture-capable thumb control. Requiring diversion and
+/// raw-XY support prevents an ordinary Switch Apps key from being selected on
+/// devices where it cannot be captured safely or report swipe motion.
 fn find_gesture_cid(controls: &[reprog_controls::CtrlIdInfo]) -> Option<u16> {
     reprog_controls::GESTURE_BUTTON_CIDS
         .iter()
         .copied()
         .find(|candidate| {
-            controls
-                .iter()
-                .any(|control| control.cid == *candidate && control.supports_raw_xy())
+            controls.iter().any(|control| {
+                control.cid == *candidate && control.is_divertable() && control.supports_raw_xy()
+            })
         })
 }
 
