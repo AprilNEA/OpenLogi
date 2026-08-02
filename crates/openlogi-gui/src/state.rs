@@ -505,11 +505,12 @@ impl AppState {
     /// Pair each transient direct record in the snapshot with the device it
     /// physically is. A transient key (`…:unit:00000000`) is a half-read probe
     /// of some existing device, not a new one (#482): when exactly one known
-    /// card shares its `direct:<vid>:<pid>` wire identity, the transient record
-    /// is folded into that card instead of surfacing beside it (or evicting
-    /// it). A transient record whose wire identity is already live and online
-    /// is dropped as probe noise, and an ambiguous one (two known same-model
-    /// cards) is left alone.
+    /// card sharing its `direct:<vid>:<pid>` wire identity is not live online —
+    /// so the half-read probe can only be that device — the transient record is
+    /// folded into that card instead of surfacing beside it (or evicting it).
+    /// With no such card the transient is dropped as probe noise when its wire
+    /// product is already live online, and an ambiguous one (two known
+    /// same-model cards absent) is left alone.
     fn adopt_transient_records(
         &self,
         by_key: &mut BTreeMap<String, DeviceRecord>,
@@ -527,26 +528,30 @@ impl AppState {
             let same_wire = |key: &str, record: &DeviceRecord| {
                 record.is_persistent() && direct_key_prefix(key) == Some(prefix)
             };
-            if by_key
-                .iter()
-                .any(|(k, record)| same_wire(k, record) && record.online)
-            {
-                by_key.remove(&key);
-                continue;
-            }
+            // A live online sibling is accounted for and never a candidate,
+            // but it must not discard the transient — the half-read probe may
+            // be the *other* same-model device.
             let mut candidates: Vec<String> = by_key
                 .iter()
-                .filter(|(k, record)| same_wire(k, record))
+                .filter(|(k, record)| same_wire(k, record) && !record.online)
                 .map(|(k, _)| k.clone())
                 .collect();
             for previous in &self.device_list {
                 if same_wire(&previous.config_key, previous)
+                    && !by_key.contains_key(&previous.config_key)
                     && !candidates.contains(&previous.config_key)
                 {
                     candidates.push(previous.config_key.clone());
                 }
             }
             let [known_key] = candidates.as_slice() else {
+                if candidates.is_empty()
+                    && by_key
+                        .iter()
+                        .any(|(k, record)| same_wire(k, record) && record.online)
+                {
+                    by_key.remove(&key);
+                }
                 continue;
             };
             // Last tick's record carries the freshest identity; the offline
@@ -1547,6 +1552,45 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].config_key, "direct:046d:b023:unit:a393cae0");
         assert!(merged[0].online);
+    }
+
+    #[test]
+    fn transient_probe_adopts_the_absent_sibling_of_a_live_twin() {
+        // Two same-model devices; one probes complete, the other half-reads.
+        // The live twin must not get the transient discarded as its own noise:
+        // the half-read probe can only be the sibling, which keeps its card
+        // online and routed.
+        let cache = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[
+                direct_inventory([1, 1, 1, 1]),
+                direct_inventory([2, 2, 2, 2]),
+            ],
+            &cache,
+            commands,
+        );
+
+        let snapshot = build_device_list(
+            &[direct_inventory([1, 1, 1, 1]), direct_inventory([0; 4])],
+            &cache,
+            &state.config,
+        );
+        let merged = state.merge_inventory_snapshot(snapshot);
+
+        assert_eq!(merged.len(), 2, "no third card for the half-read probe");
+        let Some(sibling) = merged
+            .iter()
+            .find(|r| r.config_key == "direct:046d:b023:unit:02020202")
+        else {
+            panic!("the sibling card must survive under its physical key");
+        };
+        assert!(
+            sibling.online,
+            "the half-read probe keeps the sibling online"
+        );
+        assert!(sibling.route.is_some(), "the live route stays usable");
     }
 
     #[test]
