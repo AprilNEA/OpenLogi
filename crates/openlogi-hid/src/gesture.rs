@@ -120,7 +120,10 @@ pub async fn run_capture_session(
 
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
     let reprog_index = armed.reprog.as_ref().map(|(_, idx)| *idx);
-    let thumb_index = armed.thumb.as_ref().map(|(_, idx)| *idx);
+    let thumb = armed
+        .thumb
+        .as_ref()
+        .map(|(_, idx, supports_single_tap)| (*idx, *supports_single_tap));
     let dpi_set = armed.dpi_cids.clone();
     let listener = chan.add_msg_listener_guarded({
         let accum = Arc::clone(&accum);
@@ -139,10 +142,10 @@ pub async fn run_capture_session(
                 handle_reprog(&mut acc, event, &dpi_set, &sink);
                 return;
             }
-            if let Some(idx) = thumb_index
+            if let Some((idx, supports_single_tap)) = thumb
                 && let Some(event) = thumbwheel::decode_event(&msg, device_index, idx)
             {
-                if event.single_tap {
+                if supports_single_tap && event.single_tap {
                     let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::Thumbwheel));
                 }
                 if event.rotation != 0 {
@@ -181,7 +184,7 @@ struct ArmedControls {
     dpi_cids: Vec<u16>,
     /// `0x2150` accessor + feature index, present when the thumb wheel is
     /// diverted.
-    thumb: Option<(Thumbwheel, u8)>,
+    thumb: Option<(Thumbwheel, u8, bool)>,
 }
 
 impl ArmedControls {
@@ -198,7 +201,7 @@ impl ArmedControls {
                 restore(rc.set_cid_reporting(cid, false, false).await, "DPI button");
             }
         }
-        if let Some((tw, _)) = self.thumb.as_ref() {
+        if let Some((tw, _, _)) = self.thumb.as_ref() {
             restore(tw.set_reporting(false, false).await, "thumb wheel");
         }
     }
@@ -206,8 +209,9 @@ impl ArmedControls {
 
 /// Resolve features off the device's root and divert the controls we capture:
 /// the gesture button (raw-XY) and DPI/ModeShift buttons over `0x1b04`, and —
-/// when `capture_thumbwheel` and the wheel reports a single tap — the thumb
-/// wheel over `0x2150`. The root-feature lookup mirrors `write::open_feature`,
+/// when `capture_thumbwheel` — the thumb wheel over `0x2150`. Single-tap
+/// capability affects tap dispatch only; rotation capture works without it.
+/// The root-feature lookup mirrors `write::open_feature`,
 /// since hidpp 0.2's registry doesn't carry the features OpenLogi reimplements.
 async fn arm_controls(
     chan: &Arc<HidppChannel>,
@@ -254,7 +258,7 @@ async fn arm_controls(
         reprog = Some((rc, info.index));
     }
 
-    let mut thumb: Option<(Thumbwheel, u8)> = None;
+    let mut thumb: Option<(Thumbwheel, u8, bool)> = None;
     if capture_thumbwheel
         && let Some(info) = device
             .root()
@@ -273,14 +277,13 @@ async fn arm_controls(
                 false
             }
         };
-        if supports_single_tap {
-            tw.set_reporting(true, false)
-                .await
-                .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-            thumb = Some((tw, info.index));
-        } else {
-            debug!("thumb wheel reports no single tap — click not capturable");
+        tw.set_reporting(true, false)
+            .await
+            .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+        if !supports_single_tap {
+            debug!("thumb wheel reports no single tap — rotation capture remains active");
         }
+        thumb = Some((tw, info.index, supports_single_tap));
     }
 
     if !gesture_diverted && dpi_cids.is_empty() && thumb.is_none() {
