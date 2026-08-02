@@ -10,6 +10,7 @@
 
 #[cfg(not(target_os = "windows"))]
 use std::error::Error;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, LazyLock};
 
 #[cfg(not(target_os = "windows"))]
@@ -17,11 +18,22 @@ use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader};
 use async_hid::{DeviceInfo, DeviceWriter, HidBackend};
 use futures_lite::StreamExt as _;
 use hidpp::channel::HidppChannel;
+use hidpp::nibble::U4;
 #[cfg(not(target_os = "windows"))]
 use hidpp::{async_trait, channel::RawHidChannel};
 #[cfg(not(target_os = "windows"))]
 use tokio::sync::Mutex;
 use tracing::debug;
+
+/// Bitmask of leased HID++ software ids (`1..=15`; bit `N` means id `N` is taken).
+///
+/// HID++ correlates request/response by `(device, feature, function, software_id)`.
+/// Concurrent opens of the same physical HID node each get a private pending
+/// queue but share the OS input report stream, so a shared software id lets a
+/// response satisfy the wrong open. Each channel leases one **fixed** id for its
+/// lifetime (no rotation — offset rotating sequences still collide across
+/// channels) and frees it on drop via [`HidppChannel::set_sw_id_lease`].
+static SW_ID_LEASES: AtomicU16 = AtomicU16::new(0);
 
 #[cfg(any(target_os = "windows", test))]
 mod windows;
@@ -216,6 +228,44 @@ pub(crate) async fn open_route_writer(
     Ok(None)
 }
 
+/// Lease one free software id in `1..=15`, or `None` if all 15 are held.
+fn try_lease_sw_id() -> Option<u8> {
+    loop {
+        let bits = SW_ID_LEASES.load(Ordering::Acquire);
+        let free = (1u8..=15).find(|&id| bits & (1u16 << id) == 0)?;
+        let next = bits | (1u16 << free);
+        if SW_ID_LEASES
+            .compare_exchange(bits, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Some(free);
+        }
+    }
+}
+
+fn free_sw_id(id: u8) {
+    if (1..=15).contains(&id) {
+        SW_ID_LEASES.fetch_and(!(1u16 << id), Ordering::Release);
+    }
+}
+
+/// Give `channel` a process-unique fixed software id for its lifetime.
+///
+/// Software id `0` is reserved for device notifications and is never leased.
+/// Rotation stays off: concurrent channels that share a rotating `1..=15`
+/// sequence eventually reuse the same id and cross-match again.
+fn configure_channel_sw_ids(channel: &mut HidppChannel) {
+    let Some(id) = try_lease_sw_id() else {
+        // More than 15 simultaneous opens is unexpected; keep the default id
+        // rather than colliding with a live lease deliberately.
+        debug!("all HID++ software ids are leased; channel keeps default id 1");
+        return;
+    };
+    channel.set_sw_id(U4::from_lo(id));
+    channel.set_rotating_sw_id(false);
+    channel.set_sw_id_lease(id, free_sw_id);
+}
+
 pub(crate) async fn open_hidpp_channel(
     dev: async_hid::Device,
 ) -> Result<Option<(DeviceInfo, Arc<HidppChannel>)>, async_hid::HidError> {
@@ -230,7 +280,10 @@ pub(crate) async fn open_hidpp_channel(
     {
         let raw = WindowsHidppChannel::open(dev, info.clone()).await?;
         let channel = match HidppChannel::from_raw_channel(raw).await {
-            Ok(c) => Arc::new(c),
+            Ok(mut c) => {
+                configure_channel_sw_ids(&mut c);
+                Arc::new(c)
+            }
             Err(e) => {
                 debug!(name = %info.name, error = ?e, "not a HID++ channel");
                 return Ok(None);
@@ -247,7 +300,10 @@ pub(crate) async fn open_hidpp_channel(
         let long_only = is_long_only_collection(info.usage_page, info.usage_id);
         let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only);
         let channel = match HidppChannel::from_raw_channel(raw).await {
-            Ok(c) => Arc::new(c),
+            Ok(mut c) => {
+                configure_channel_sw_ids(&mut c);
+                Arc::new(c)
+            }
             Err(e) => {
                 debug!(name = %info.name, error = ?e, "not a HID++ channel");
                 return Ok(None);
@@ -258,6 +314,33 @@ pub(crate) async fn open_hidpp_channel(
         // on reconnect) only — not every ~2s tick.
         debug!(name = %info.name, vid = format_args!("{:04x}", info.vendor_id), "opened HID++ channel");
         Ok(Some((info, channel)))
+    }
+}
+
+#[cfg(test)]
+mod sw_id_lease_tests {
+    use super::{free_sw_id, try_lease_sw_id};
+
+    #[test]
+    fn leases_are_unique_until_freed() {
+        // Leave any ids held by concurrent tests alone: lease two free slots,
+        // check they differ, free them, and confirm the first id is reusable.
+        let Some(a) = try_lease_sw_id() else {
+            return;
+        };
+        let Some(b) = try_lease_sw_id() else {
+            free_sw_id(a);
+            return;
+        };
+        assert_ne!(a, b);
+        free_sw_id(a);
+        let Some(c) = try_lease_sw_id() else {
+            free_sw_id(b);
+            return;
+        };
+        assert_eq!(c, a);
+        free_sw_id(b);
+        free_sw_id(c);
     }
 }
 

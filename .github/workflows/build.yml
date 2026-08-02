@@ -124,6 +124,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          # Release profile (fat LTO) — never share with CI debug keys.
+          shared-key: macos-stable-release
+          # Packaging never runs on master push; allow same-repo PRs/dispatch/release
+          # to refresh the shared release cache (few keys, not per-job thrash).
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.arch }}"
@@ -147,10 +154,19 @@ jobs:
           OPENLOGI_UPDATE_BASE_URL: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_BASE_URL
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY
 
+      - name: Cache Homebrew downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            ~/Library/Caches/Homebrew/downloads
+          key: brew-macos-${{ runner.arch }}-librsvg-create-dmg-v1
+          restore-keys: |
+            brew-macos-${{ runner.arch }}-
+
       - name: Install packaging tools
         run: |
-          brew install librsvg
-          brew install create-dmg
+          brew install librsvg create-dmg
 
       - name: Validate release secrets
         if: ${{ inputs.sign }}
@@ -325,9 +341,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # No rust-cache here: this workflow runs only on tag refs, whose saved
-      # caches no future tag can restore (and no default-branch job produces a
-      # matching key), so the save was pure overhead churning the cache quota.
+      # Release builds need their own cache (crt-static RUSTFLAGS + --release).
+      # Shared per matrix.arch so labeled PR packaging and dispatch runs warm
+      # each other; tag-only saves were pure quota churn under the old per-ref
+      # keys, but a shared-key entry is restorable across PR/dispatch/release.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: windows-stable-release-${{ matrix.arch }}
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       # Azure signing config lives in 1Password, matching the macOS job's secret flow.
       # load-secrets-action is a node action, so it runs on Windows runners too. The
@@ -676,6 +698,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: linux-stable-release
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       # The nfpm `arch` and the runner's native arch must agree — the packages
       # are built natively, not cross-compiled, so a mismatched runner would

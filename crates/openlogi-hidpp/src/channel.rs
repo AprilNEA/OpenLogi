@@ -285,10 +285,21 @@ pub struct HidppChannel {
     /// The handle to the read thread. Should be joined after signaling
     /// [`Self::read_thread_close`].
     read_thread_hdl: Option<JoinHandle<()>>,
+
+    /// Optional process-wide software-id lease: `(id, free)` run on drop.
+    ///
+    /// OpenLogi leases a unique HID++ software id per open so concurrent
+    /// channels on the same physical HID node never share a correlation id
+    /// (software id `0` is reserved for device notifications). Local addition.
+    sw_id_lease: Option<(u8, fn(u8))>,
 }
 
 impl Drop for HidppChannel {
     fn drop(&mut self) {
+        if let Some((id, free)) = self.sw_id_lease.take() {
+            free(id);
+        }
+
         if let Some(read_thread_close) = self.read_thread_close.take() {
             // This only fails if the receiving end, which is owned by the read thread in
             // this case, is dropped.
@@ -399,6 +410,7 @@ impl HidppChannel {
             message_listeners: message_listeners_rc,
             read_thread_close: Some(close_sender),
             read_thread_hdl: Some(read_thread_hdl),
+            sw_id_lease: None,
         })
     }
 
@@ -421,6 +433,16 @@ impl HidppChannel {
     /// reserved for device notifications.
     pub fn set_rotating_sw_id(&self, enable: bool) {
         self.rotate_software_id.store(enable, Ordering::SeqCst);
+    }
+
+    /// Lease software id `id` until this channel is dropped, then call `free(id)`.
+    ///
+    /// Replaces any previous lease. Used by OpenLogi so concurrent opens of the
+    /// same HID node hold distinct correlation ids for their full lifetime.
+    ///
+    /// OpenLogi local addition.
+    pub fn set_sw_id_lease(&mut self, id: u8, free: fn(u8)) {
+        self.sw_id_lease = Some((id, free));
     }
 
     /// Provides a software ID that can be used to send a HID++ message across

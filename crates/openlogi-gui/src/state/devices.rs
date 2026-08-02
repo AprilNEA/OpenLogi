@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use openlogi_agent_core::device_order::DeviceStableId;
+use openlogi_agent_core::device_order::{DeviceStableId, PhysicalDeviceKey};
 use openlogi_core::config::{Config, DeviceIdentity};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -24,8 +24,12 @@ use crate::asset::{AssetResolver, ResolvedAsset};
 /// with [`super::AppState::current_device`].
 #[derive(Debug, Clone)]
 pub struct DeviceRecord {
-    /// Stable physical-device key used for persisted settings.
+    /// Route-derived key used for runtime state and, when [`Self::persistent`]
+    /// is true, persisted settings.
     pub config_key: String,
+    /// Whether `config_key` identifies one physical device and may be written
+    /// to configuration. False for a direct/routeless all-zero unit identity.
+    pub(crate) persistent: bool,
     /// Stable model key used only for asset/model lookup and diagnostics.
     pub model_key: String,
     pub display_name: String,
@@ -47,6 +51,19 @@ pub struct DeviceRecord {
     pub battery: Option<BatteryInfo>,
 }
 
+impl DeviceRecord {
+    /// Return the configuration key only when it identifies one physical
+    /// device and is therefore safe to persist.
+    pub(super) fn persistent_config_key(&self) -> Option<&str> {
+        self.persistent.then_some(self.config_key.as_str())
+    }
+
+    /// Whether this record may participate in persistent configuration.
+    pub(super) fn is_persistent(&self) -> bool {
+        self.persistent
+    }
+}
+
 /// Build the carousel's device list as the **union** of the live inventory and
 /// the persisted set of devices we've seen before.
 ///
@@ -58,8 +75,9 @@ pub struct DeviceRecord {
 /// known device (with its Pointer/Buttons panels) is always shown, and the live
 /// probe only *enriches* it (online state, battery, asset photo) rather than
 /// *gating* whether it appears at all. See issue #159. Placeholders that are
-/// unreachable (their receiver is unplugged) or duplicate a visible same-model
-/// card are suppressed — see [`append_offline_known`] (#271/#280).
+/// unreachable (their receiver is unplugged), structurally transient, or a
+/// legacy same-model duplicate are suppressed — see [`append_offline_known`]
+/// (#271/#280/#387).
 pub(super) fn build_device_list(
     inventories: &[DeviceInventory],
     cache: &AssetResolver,
@@ -91,13 +109,16 @@ pub(super) fn build_device_list(
                     );
                     (key, None, None, paired.codename.clone(), None, [0u8; 4])
                 };
-            let config_key = DeviceStableId::from_parts(
+            let stable_id = DeviceStableId::from_parts(
                 route.as_ref(),
                 paired.slot,
                 serial_number.as_deref(),
                 unit_id,
-            )
-            .config_key();
+            );
+            let (config_key, persistent) = stable_id.physical_key().map_or_else(
+                || (stable_id.runtime_key(), false),
+                |key| (key.into_string(), true),
+            );
 
             let display_name = asset
                 .as_ref()
@@ -107,6 +128,7 @@ pub(super) fn build_device_list(
             let kind = effective_kind(paired.kind, asset.as_ref().map(|a| a.kind));
             list.push(DeviceRecord {
                 config_key,
+                persistent,
                 model_key,
                 display_name,
                 asset,
@@ -143,51 +165,69 @@ pub(super) fn build_device_list(
 }
 
 /// Append an offline placeholder for every known device not already present in
-/// `list`, skipping unreachable devices and duplicates of a visible one.
+/// `list`, skipping unreachable devices and invalid transient identities.
 ///
-/// Three gates keep phantom cards out (#271/#280):
-/// - an exact key/model match against a live record — the device is already
+/// The gates keep phantom cards out without conflating model identity with
+/// physical identity:
+/// - an exact physical key match against a live record — the device is already
 ///   in the list;
 /// - a `receiver:` key whose receiver is not plugged in — its paired devices
 ///   are unreachable until that receiver returns (e.g. the work receiver's
 ///   mouse while at home);
-/// - a wire PID already visible live or as an earlier placeholder — two units
-///   of one model render as identical cards, so a second one only confuses.
-///   The PID comparison also absorbs the flaky extended-model byte that made
-///   `0b034` and `2b034` read as different models in #271.
+/// - a historical direct/routeless all-zero unit key, which never identified a
+///   physical device;
+/// - for legacy model-scoped keys only, a model/PID already visible live or as
+///   an earlier placeholder. This preserves the #271/#280 compatibility fix
+///   without hiding a second physical device of the same model.
 fn append_offline_known<'a>(
     list: &mut Vec<DeviceRecord>,
     known: impl Iterator<Item = (&'a str, &'a DeviceIdentity)>,
     cache: &AssetResolver,
     present_receivers: &HashSet<String>,
 ) {
-    let mut blocked_keys: HashSet<String> = list
+    let mut present_keys: HashSet<String> = list
         .iter()
-        .flat_map(|r| [r.config_key.clone(), r.model_key.clone()])
+        .map(|record| record.config_key.clone())
         .collect();
-    let mut blocked_pids: HashSet<String> = list.iter().filter_map(record_wire_pid).collect();
+    let mut blocked_legacy_models: HashSet<String> =
+        list.iter().map(|record| record.model_key.clone()).collect();
+    let mut blocked_legacy_pids: HashSet<String> =
+        list.iter().filter_map(record_wire_pid).collect();
     let mut known = known.collect::<Vec<_>>();
     known.sort_by_key(|(key, identity)| (identity.model_info.is_none(), (*key).to_string()));
 
     for (key, identity) in known {
+        if PhysicalDeviceKey::is_transient(key) {
+            continue;
+        }
         if receiver_uid_of(key).is_some_and(|uid| !present_receivers.contains(&uid)) {
             continue;
         }
+        if present_keys.contains(key) {
+            continue;
+        }
+        let is_legacy_model_key = PhysicalDeviceKey::parse(key).is_none();
         let model_key = identity
             .model_info
             .as_ref()
             .map_or_else(|| key.to_string(), DeviceModelInfo::config_key);
-        if blocked_keys.contains(key) || blocked_keys.contains(&model_key) {
+        if is_legacy_model_key && blocked_legacy_models.contains(&model_key) {
             continue;
         }
         let record = offline_record(key, identity, cache);
-        if let Some(pid) = record_wire_pid(&record)
-            && !blocked_pids.insert(pid)
+        let wire_pid = record_wire_pid(&record);
+        if is_legacy_model_key
+            && wire_pid
+                .as_ref()
+                .is_some_and(|pid| blocked_legacy_pids.contains(pid))
         {
             continue;
         }
-        blocked_keys.insert(record.config_key.clone());
-        blocked_keys.insert(record.model_key.clone());
+        present_keys.insert(record.config_key.clone());
+        blocked_legacy_models.insert(record.model_key.clone());
+        if let Some(pid) = wire_pid {
+            blocked_legacy_pids.insert(pid);
+        }
         list.push(record);
     }
 }
@@ -199,7 +239,8 @@ fn receiver_uid_of(key: &str) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
-/// The record's wire product id, used to suppress same-model duplicate cards.
+/// The record's wire product id, used to suppress legacy same-model duplicate
+/// cards without conflating physical device keys.
 fn record_wire_pid(record: &DeviceRecord) -> Option<String> {
     match record.model_info.as_ref().map(|m| m.model_ids[0]) {
         Some(pid) if pid != 0 => Some(format!("{pid:04x}")),
@@ -238,6 +279,7 @@ fn offline_record(
         .map_or_else(|| config_key.to_string(), DeviceModelInfo::config_key);
     DeviceRecord {
         config_key: config_key.to_string(),
+        persistent: true,
         model_key,
         display_name: identity.display_name.clone(),
         asset,
@@ -300,6 +342,7 @@ fn device_order_key(record: &DeviceRecord) -> (DeviceStableId, String, String) {
 fn demo_keyboard() -> DeviceRecord {
     DeviceRecord {
         config_key: "demo-g513".to_string(),
+        persistent: true,
         model_key: "demo-g513".to_string(),
         display_name: "Logitech G513".to_string(),
         asset: None,
@@ -355,7 +398,10 @@ fn effective_kind(hid_kind: DeviceKind, asset_kind: Option<DeviceKind>) -> Devic
 
 pub(super) fn pick_initial_device(list: &[DeviceRecord], saved: Option<&str>) -> usize {
     saved
-        .and_then(|key| list.iter().position(|r| r.config_key == key))
+        .and_then(|key| {
+            list.iter()
+                .position(|record| record.is_persistent() && record.config_key == key)
+        })
         .unwrap_or(0)
 }
 
@@ -396,6 +442,7 @@ mod tests {
     use super::{
         Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord, DeviceTransports,
         append_offline_known, build_device_list, effective_kind, offline_record,
+        pick_initial_device,
     };
 
     fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
@@ -423,9 +470,31 @@ mod tests {
         }
     }
 
+    fn direct_inventory(model_info: DeviceModelInfo) -> DeviceInventory {
+        DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "MX Master 3S".into(),
+                vendor_id: 0x046d,
+                product_id: 0xb023,
+                unique_id: None,
+            },
+            paired: vec![PairedDevice {
+                slot: openlogi_hid::DIRECT_DEVICE_INDEX,
+                codename: Some("MX Master 3S".into()),
+                wpid: None,
+                kind: DeviceKind::Mouse,
+                online: true,
+                battery: None,
+                model_info: Some(model_info),
+                capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            }],
+        }
+    }
+
     fn online_record(key: &str) -> DeviceRecord {
         DeviceRecord {
             config_key: key.to_string(),
+            persistent: true,
             model_key: key.to_string(),
             display_name: format!("live {key}"),
             asset: None,
@@ -542,6 +611,72 @@ mod tests {
     }
 
     #[test]
+    fn zero_unit_direct_inventory_is_transient() {
+        let cache = AssetResolver::new();
+        let list = build_device_list(
+            &[direct_inventory(model_info(2, 0xb034))],
+            &cache,
+            &Config::default(),
+        );
+
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].config_key, "direct:046d:b023:unit:00000000");
+        assert!(!list[0].is_persistent());
+        assert!(list[0].persistent_config_key().is_none());
+    }
+
+    #[test]
+    fn historical_zero_unit_identity_does_not_create_offline_card() {
+        let id = mouse_identity("MX Master 3S");
+        let cache = AssetResolver::new();
+        let mut list = Vec::new();
+
+        append_offline_known(
+            &mut list,
+            [("direct:046d:b023:unit:00000000", &id)].into_iter(),
+            &cache,
+            &HashSet::new(),
+        );
+
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn same_model_physical_bluetooth_devices_remain_distinct() {
+        let mut id_a = mouse_identity("MX Master 3S");
+        id_a.model_info = Some(model_info(2, 0xb034));
+        let id_b = id_a.clone();
+        let cache = AssetResolver::new();
+        let mut list = Vec::new();
+
+        append_offline_known(
+            &mut list,
+            [
+                ("direct:046d:b023:unit:01020304", &id_a),
+                ("direct:046d:b023:unit:05060708", &id_b),
+            ]
+            .into_iter(),
+            &cache,
+            &HashSet::new(),
+        );
+
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn persisted_selection_does_not_target_transient_identity() {
+        let stable = online_record("receiver:aabb:slot:1");
+        let mut transient = online_record("direct:046d:b023:unit:00000000");
+        transient.persistent = false;
+        let list = vec![stable, transient];
+
+        assert_eq!(
+            pick_initial_device(&list, Some("direct:046d:b023:unit:00000000")),
+            0
+        );
+    }
+
+    #[test]
     fn placeholders_for_absent_receivers_are_hidden() {
         // The work receiver's mouse must not haunt the list at home: with its
         // receiver unplugged the device is unreachable, so no card is shown.
@@ -585,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn same_model_placeholders_collapse_to_one_card() {
+    fn legacy_same_model_placeholders_collapse_to_one_card() {
         // Two persisted identities of one model render identically — a second
         // offline card carries no information, only confusion.
         let id_a = mouse_identity("MX Master 3S");

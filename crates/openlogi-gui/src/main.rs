@@ -312,7 +312,7 @@ fn main() -> Result<()> {
                         // Scanning window overlaps the first sync's completion).
                         let force_refresh = inventory_ready && std::mem::take(&mut assets_dirty);
                         let (auto_download, asset_source, models) = cx.update(|cx| {
-                            let (changed, auto_download, asset_source, models) = cx.update_global::<AppState, _>(|state, _| {
+                            let (changed, merged, auto_download, asset_source, models) = cx.update_global::<AppState, _>(|state, _| {
                                 // Merge only *completed* enumerations. A not-yet-ready
                                 // agent can only serve an empty pre-enumeration list, and
                                 // counting those as misses would wipe the device list (and
@@ -334,15 +334,19 @@ fn main() -> Result<()> {
                                 let settings = state.app_settings();
                                 (
                                     changed,
+                                    merged,
                                     settings.auto_download_assets,
                                     settings.asset_source,
                                     state.asset_models(),
                                 )
                             });
                             // The steady poll mostly repeats an identical snapshot;
-                            // skip the full-window invalidation for those.
+                            // skip the full-window invalidation and menu rebuild for those.
                             if changed {
                                 cx.refresh_windows();
+                            }
+                            if merged {
+                                app_menu::rebuild(cx);
                             }
                             (auto_download, asset_source, models)
                         });

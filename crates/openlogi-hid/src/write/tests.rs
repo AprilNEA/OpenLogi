@@ -4,9 +4,12 @@ use super::*;
 use hidpp::feature::smartshift::WheelMode;
 
 use crate::SmartShiftMode;
+use crate::SmartShiftStatus;
 use crate::write::smartshift::{
-    is_missing_enhanced, smartshift_to_wheel, wheel_mode_to_smartshift,
+    is_missing_enhanced, is_transient_smartshift_error, smartshift_to_wheel,
+    status_matches_desired, wheel_mode_to_smartshift,
 };
+use crate::write::{HidppFeatureErrorKind, HidppOperation};
 
 #[test]
 fn capabilities_sort_and_deduplicate_values() -> Result<(), WriteError> {
@@ -121,4 +124,61 @@ fn transport_errors_do_not_trigger_fallback() {
         index: 0xff,
     }));
     assert!(!is_missing_enhanced(&WriteError::Hidpp("boom".into())));
+}
+
+#[test]
+fn transient_smartshift_errors_are_retryable() {
+    assert!(is_transient_smartshift_error(&WriteError::HidppFeature {
+        operation: HidppOperation::WriteSmartShift,
+        feature_hex: 0x2111,
+        kind: HidppFeatureErrorKind::InvalidArgument,
+    }));
+    assert!(is_transient_smartshift_error(&WriteError::HidppFeature {
+        operation: HidppOperation::WriteSmartShift,
+        feature_hex: 0x2110,
+        kind: HidppFeatureErrorKind::Busy,
+    }));
+    assert!(is_transient_smartshift_error(
+        &WriteError::UnsupportedResponse {
+            operation: HidppOperation::ReadSmartShift,
+            feature_hex: 0x2110,
+        }
+    ));
+}
+
+#[test]
+fn permanent_smartshift_errors_are_not_retryable() {
+    assert!(!is_transient_smartshift_error(
+        &WriteError::FeatureUnsupported {
+            feature_hex: 0x2111,
+        }
+    ));
+    assert!(!is_transient_smartshift_error(&WriteError::HidppFeature {
+        operation: HidppOperation::WriteSmartShift,
+        feature_hex: 0x2111,
+        kind: HidppFeatureErrorKind::InvalidFunctionId,
+    }));
+}
+
+#[test]
+fn status_match_ignores_zero_preserve_fields() {
+    let current = SmartShiftStatus {
+        mode: SmartShiftMode::Ratchet,
+        auto_disengage: 10,
+        tunable_torque: 33,
+    };
+    let desired = SmartShiftStatus {
+        mode: SmartShiftMode::Ratchet,
+        auto_disengage: 10,
+        // 0 = "do not change" on the write path — already-matched for reapply.
+        tunable_torque: 0,
+    };
+    assert!(status_matches_desired(current, desired));
+    assert!(!status_matches_desired(
+        current,
+        SmartShiftStatus {
+            mode: SmartShiftMode::Free,
+            ..desired
+        }
+    ));
 }

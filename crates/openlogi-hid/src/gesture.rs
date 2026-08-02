@@ -12,7 +12,9 @@
 //! The GUI maps each [`CapturedInput`] to the user's bound action and dispatches
 //! it, mirroring how the CGEventTap hook handles the side buttons. The thumb
 //! wheel is special: diverting it stops native horizontal scroll, so the GUI
-//! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas. Its capture
+//! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas — the wheel
+//! is therefore only diverted when the user's thumbwheel config leaves its
+//! defaults (click bound, rotation rebound, or sensitivity changed). Its capture
 //! mode separately controls whether diverted single-tap reports are delivered.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -55,8 +57,8 @@ pub enum CapturedInput {
     /// ([`ButtonId::Thumbwheel`]).
     ButtonPressed(ButtonId),
     /// Thumb-wheel rotation to re-synthesise as horizontal scroll, in the
-    /// wheel's `diverted_res` increments. Emitted only while the wheel is
-    /// diverted to capture its click.
+    /// wheel's `diverted_res` increments. Emitted while the wheel is diverted
+    /// (click bound, rotation rebound, or sensitivity changed).
     Scroll(i16),
 }
 
@@ -280,6 +282,23 @@ async fn arm_controls(
             .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
     {
         let tw = Thumbwheel::new(Arc::clone(chan), slot, info.index);
+        // Consume the getInfo error here, before the next await: Hidpp20Error
+        // isn't Send, so holding it across an await would make this future
+        // (spawned on tokio) non-Send.
+        let supports_single_tap = match tw.get_info().await {
+            Ok(twinfo) => twinfo.supports_single_tap,
+            Err(e) => {
+                warn!(error = ?e, "thumb wheel getInfo failed");
+                false
+            }
+        };
+        // Divert whenever capture was requested: rotation rebinds and the
+        // sensitivity multiplier need the diverted event stream even on wheels
+        // that report no single-tap capability (e.g. MX Master 4) — lacking the
+        // tap only means a bound click can never fire.
+        if !supports_single_tap {
+            debug!("thumb wheel reports no single tap — click not capturable");
+        }
         tw.set_reporting(true, false)
             .await
             .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
