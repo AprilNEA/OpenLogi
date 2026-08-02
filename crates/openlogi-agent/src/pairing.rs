@@ -270,6 +270,7 @@ mod tests {
             dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
             thumbwheel_sensitivity: Arc::new(0.into()),
             capture_channel: Arc::new(RwLock::new(None)),
+            capture_rearm_generation: Arc::new(0.into()),
             receiver_access: ReceiverAccess::default(),
         }
     }
