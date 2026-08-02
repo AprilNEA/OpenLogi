@@ -211,6 +211,14 @@ fn append_offline_known<'a>(
             .model_info
             .as_ref()
             .map_or_else(|| key.to_string(), DeviceModelInfo::config_key);
+        if stale_direct_identity_shadowed_by_live(list, key, identity) {
+            debug!(
+                key,
+                display = %identity.display_name,
+                "suppressing stale direct unit identity shadowed by a live direct device"
+            );
+            continue;
+        }
         if is_legacy_model_key && blocked_legacy_models.contains(&model_key) {
             continue;
         }
@@ -254,6 +262,56 @@ fn record_wire_pid(record: &DeviceRecord) -> Option<String> {
     }
 }
 
+fn stale_direct_identity_shadowed_by_live(
+    list: &[DeviceRecord],
+    key: &str,
+    identity: &DeviceIdentity,
+) -> bool {
+    let Some((vendor_id, product_id, key_identity)) = direct_key_parts(key) else {
+        return false;
+    };
+    if key_identity != "unit" {
+        return false;
+    }
+    if identity
+        .model_info
+        .as_ref()
+        .is_some_and(DeviceModelInfo::has_model_identity)
+    {
+        return false;
+    }
+    list.iter().any(|record| {
+        record.online
+            && record.display_name == identity.display_name
+            && record.kind == identity.kind
+            && matches!(
+                record.route,
+                Some(DeviceRoute::Direct {
+                    vendor_id: live_vid,
+                    product_id: live_pid,
+                }) if live_vid == vendor_id && live_pid == product_id
+            )
+    })
+}
+
+fn direct_key_parts(key: &str) -> Option<(u16, u16, &str)> {
+    let mut parts = key.split(':');
+    match (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) {
+        (Some("direct"), Some(vid), Some(pid), Some(identity), Some(_)) => Some((
+            u16::from_str_radix(vid, 16).ok()?,
+            u16::from_str_radix(pid, 16).ok()?,
+            identity,
+        )),
+        _ => None,
+    }
+}
+
 /// Synthesize an offline placeholder from a persisted [`DeviceIdentity`].
 ///
 /// `route: None` keeps every hardware write a no-op until the live inventory
@@ -290,9 +348,17 @@ fn offline_record(
         route: None,
         kind: identity.kind,
         capabilities: Some(identity.capabilities),
-        slot: 0,
+        slot: offline_slot_placeholder(config_key),
         online: false,
         battery: None,
+    }
+}
+
+fn offline_slot_placeholder(config_key: &str) -> u8 {
+    if config_key.starts_with("direct:") && direct_key_parts(config_key).is_some() {
+        0xff
+    } else {
+        0
     }
 }
 
@@ -433,16 +499,18 @@ fn prettify_codename(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use openlogi_core::config::Config;
-    use openlogi_core::device::{DeviceInventory, PairedDevice, ReceiverInfo};
+    use openlogi_core::device::{
+        DeviceInventory, DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+    };
+    use openlogi_hid::DeviceRoute;
 
     use crate::asset::AssetResolver;
 
     use std::collections::HashSet;
 
     use super::{
-        Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord, DeviceTransports,
-        append_offline_known, build_device_list, effective_kind, offline_record,
-        pick_initial_device,
+        Capabilities, DeviceIdentity, DeviceKind, DeviceRecord, append_offline_known,
+        build_device_list, effective_kind, offline_record, pick_initial_device,
     };
 
     fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
@@ -511,6 +579,44 @@ mod tests {
         }
     }
 
+    fn online_direct_record(
+        key: &str,
+        display_name: &str,
+        vendor_id: u16,
+        product_id: u16,
+    ) -> DeviceRecord {
+        DeviceRecord {
+            config_key: key.to_string(),
+            persistent: true,
+            model_key: "1b034".to_string(),
+            display_name: display_name.to_string(),
+            asset: None,
+            model_info: Some(DeviceModelInfo {
+                entity_count: 3,
+                serial_number: Some("2331LZ520ZQ8".to_string()),
+                unit_id: [0; 4],
+                transports: DeviceTransports {
+                    btle: true,
+                    ..DeviceTransports::default()
+                },
+                model_ids: [0xb034, 0, 0],
+                extended_model_id: 1,
+            }),
+            codename: Some(display_name.to_string()),
+            serial_number: Some("2331LZ520ZQ8".to_string()),
+            unit_id: [0; 4],
+            route: Some(DeviceRoute::Direct {
+                vendor_id,
+                product_id,
+            }),
+            kind: DeviceKind::Mouse,
+            capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            slot: 0xff,
+            online: true,
+            battery: None,
+        }
+    }
+
     fn mouse_identity(name: &str) -> DeviceIdentity {
         DeviceIdentity {
             display_name: name.to_string(),
@@ -570,6 +676,15 @@ mod tests {
         assert!(!rec.online);
         assert!(rec.route.is_none());
         assert_eq!(rec.capabilities, Some(id.capabilities));
+    }
+
+    #[test]
+    fn direct_offline_record_uses_direct_slot_placeholder() {
+        let id = mouse_identity("MX Master 3S");
+        let cache = AssetResolver::new();
+        let rec = offline_record("direct:046d:b034:serial:2331lz520zq8", &id, &cache);
+
+        assert_eq!(rec.slot, 0xff);
     }
 
     #[test]
@@ -734,6 +849,36 @@ mod tests {
             &HashSet::new(),
         );
         assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn stale_direct_unit_identity_is_suppressed_when_live_direct_serial_exists() {
+        let mut list = vec![online_direct_record(
+            "direct:046d:b034:serial:2331lz520zq8",
+            "MX Master 3S",
+            0x046d,
+            0xb034,
+        )];
+        let mut stale = mouse_identity("MX Master 3S");
+        stale.model_info = Some(DeviceModelInfo {
+            entity_count: 15,
+            serial_number: None,
+            unit_id: [0; 4],
+            transports: DeviceTransports::default(),
+            model_ids: [0, 0, 0],
+            extended_model_id: 0,
+        });
+        let cache = AssetResolver::new();
+
+        append_offline_known(
+            &mut list,
+            [("direct:046d:b034:unit:1c181800", &stale)].into_iter(),
+            &cache,
+            &HashSet::new(),
+        );
+
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].config_key, "direct:046d:b034:serial:2331lz520zq8");
     }
 
     #[test]
