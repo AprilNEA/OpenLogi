@@ -18,6 +18,16 @@ use super::AppView;
 use crate::state::AppState;
 use crate::theme::{self, Palette, Typography as _};
 
+/// True when the device is charging but still reports 0% — the MX2S `0x1000`
+/// firmware can't gauge charge under load, and on a cold start there's no
+/// pre-charge % cached to carry forward. Show "Charging" without the bogus 0%.
+pub(crate) fn battery_charging_no_reading(b: &BatteryInfo) -> bool {
+    matches!(
+        b.status,
+        BatteryStatus::Charging | BatteryStatus::ChargingSlow
+    ) && b.percentage == 0
+}
+
 /// "← Back" affordance on the detail screen; returns to the gallery without
 /// changing the active-device selection.
 pub(super) fn back_button(cx: &mut Context<AppView>) -> impl IntoElement {
@@ -147,22 +157,32 @@ pub(super) fn battery_summary(battery: &BatteryInfo, pal: Palette) -> impl IntoE
                 .text_caption()
                 .text_color(pal.text_muted)
                 .child(status)
-                .child(format!("{}%", battery.percentage)),
+                .child(if battery_charging_no_reading(battery) {
+                    String::new()
+                } else {
+                    format!("{}%", battery.percentage)
+                }),
         )
-        .child(
-            div()
+        .child({
+            let track = div()
                 .h(px(6.))
                 .w_full()
                 .rounded_full()
-                .bg(pal.surface_hover)
-                .child(
+                .bg(pal.surface_hover);
+            // Charging with no reliable %: leave the track empty rather than
+            // drawing the 1%-wide red critical sliver that percentage==0 yields.
+            if battery_charging_no_reading(battery) {
+                track
+            } else {
+                track.child(
                     div()
                         .h_full()
                         .w(relative(f32::from(battery.percentage.clamp(1, 100)) / 100.))
                         .rounded_full()
                         .bg(rgb(battery_color(battery.percentage))),
-                ),
-        )
+                )
+            }
+        })
 }
 
 fn battery_color(percentage: u8) -> u32 {

@@ -10,7 +10,7 @@ use crate::inventory::features::ProbedFeatures;
 fn cache_entry(probed_tick: u64) -> Cached {
     Cached {
         probe: ProbedFeatures::default(),
-        battery_index: None,
+        battery: None,
         probed_tick,
     }
 }
@@ -61,7 +61,7 @@ fn being_seen_resets_the_miss_counter() {
 fn cached_probe_is_reused_until_refresh_ticks() {
     let cached = Cached {
         probe: ProbedFeatures::default(),
-        battery_index: None,
+        battery: None,
         probed_tick: 10,
     };
     assert!(!is_stale(&cached, 10), "same tick is fresh");
