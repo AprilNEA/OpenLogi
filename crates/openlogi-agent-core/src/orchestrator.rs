@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 
+use openlogi_core::binding::ButtonId;
 use openlogi_core::config::{Config, ScrollResolution};
 use openlogi_core::device::{Capabilities, DeviceInventory};
 use openlogi_hid::{CaptureChannel, DeviceRoute};
@@ -150,6 +151,11 @@ impl Orchestrator {
     fn hook_maps_for(&self, key: Option<&str>, app: Option<&str>) -> HookMaps {
         HookMaps {
             bindings: bindings_for(&self.config, key, app),
+            thumbwheel_tap_bound: key.is_some_and(|key| {
+                self.config
+                    .effective_bindings(key, app)
+                    .contains_key(&ButtonId::Thumbwheel)
+            }),
             gestures: oshook_gestures_for(&self.config, key, app),
         }
     }
@@ -518,16 +524,23 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, RwLock};
+
     use super::{
         AgentDevice, InventoryHealth, Orchestrator, build_devices, configured_wheel_mode,
         plan_reapply, reapply_targets,
     };
+    use openlogi_core::binding::{Action, Binding, ButtonId, default_binding};
     use openlogi_core::config::{Config, ScrollResolution};
     use openlogi_core::device::{
         Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice,
         ReceiverInfo,
     };
-    use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+    use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, ThumbwheelCaptureMode};
+
+    use crate::watchers::gesture::{
+        capture_session_thumbwheel_mode, captured_button_action, thumbwheel_capture_mode,
+    };
 
     fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
         AgentDevice {
@@ -571,6 +584,130 @@ mod tests {
                 capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
             }],
         }
+    }
+
+    fn thumbwheel_policy(config: Config) -> (bool, ThumbwheelCaptureMode) {
+        let orchestrator = Orchestrator::new(config);
+        let maps = orchestrator.hook_maps_for(Some("mouse"), None);
+        let tap_bound = maps.thumbwheel_tap_bound;
+        let shared = Arc::new(RwLock::new(maps));
+        (
+            tap_bound,
+            thumbwheel_capture_mode(
+                &shared,
+                openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY,
+            ),
+        )
+    }
+
+    #[test]
+    fn thumbwheel_capture_policy_preserves_config_provenance() {
+        let mut rebound = Config::default();
+        rebound.set_binding(
+            "mouse",
+            ButtonId::Thumbwheel,
+            Binding::Single(Action::MissionControl),
+        );
+        assert_eq!(
+            thumbwheel_policy(rebound),
+            (true, ThumbwheelCaptureMode::DivertedRotationAndTap),
+            "an explicitly rebound tap is delivered"
+        );
+
+        let mut explicit_default = Config::default();
+        explicit_default.set_binding(
+            "mouse",
+            ButtonId::Thumbwheel,
+            Binding::Single(default_binding(ButtonId::Thumbwheel)),
+        );
+        assert_eq!(
+            thumbwheel_policy(explicit_default),
+            (true, ThumbwheelCaptureMode::DivertedRotationAndTap),
+            "an explicitly stored default retains tap intent"
+        );
+
+        assert_eq!(
+            thumbwheel_policy(Config::default()),
+            (false, ThumbwheelCaptureMode::Native),
+            "an unset tap inherits the visible default without arming tap delivery"
+        );
+    }
+
+    #[test]
+    fn live_app_switch_updates_thumbwheel_tap_delivery_in_place() {
+        const DEVICE: &str = "mouse";
+        const BOUND_APP: &str = "com.example.bound";
+        const UNBOUND_APP: &str = "com.example.unbound";
+
+        let mut config = Config::default();
+        config.set_per_app_binding(
+            DEVICE,
+            BOUND_APP,
+            ButtonId::Thumbwheel,
+            Some(Action::MissionControl),
+        );
+        config.set_binding(
+            DEVICE,
+            ButtonId::ThumbwheelScrollUp,
+            Binding::Single(Action::MissionControl),
+        );
+        let mut orchestrator = Orchestrator::new(config);
+        orchestrator.devices = vec![dev(DEVICE, 1, true)];
+        orchestrator.rebuild();
+
+        let live_maps = Arc::clone(&orchestrator.shared.hook_maps);
+        assert!(
+            orchestrator
+                .shared
+                .dpi_cycle
+                .read()
+                .is_ok_and(|state| state.target.is_some()),
+            "the capture manager has a live device target"
+        );
+
+        orchestrator.set_current_app(Some(BOUND_APP.to_string()));
+        assert!(Arc::ptr_eq(&live_maps, &orchestrator.shared.hook_maps));
+        let live_session_mode = capture_session_thumbwheel_mode(
+            &live_maps,
+            openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY,
+        );
+        assert_eq!(live_session_mode, ThumbwheelCaptureMode::DivertedRotation);
+        assert_eq!(
+            captured_button_action(&live_maps, ButtonId::Thumbwheel),
+            Some(Action::MissionControl)
+        );
+
+        orchestrator.set_current_app(Some(UNBOUND_APP.to_string()));
+        assert!(Arc::ptr_eq(&live_maps, &orchestrator.shared.hook_maps));
+        assert_eq!(
+            capture_session_thumbwheel_mode(
+                &live_maps,
+                openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY,
+            ),
+            live_session_mode,
+            "the rotation rebind keeps the same diverted capture session live"
+        );
+        assert_eq!(
+            captured_button_action(&live_maps, ButtonId::Thumbwheel),
+            None,
+            "a tap emitted by the still-live diverted session must be dropped"
+        );
+
+        orchestrator.set_current_app(Some(BOUND_APP.to_string()));
+        assert!(Arc::ptr_eq(&live_maps, &orchestrator.shared.hook_maps));
+        assert_eq!(
+            capture_session_thumbwheel_mode(
+                &live_maps,
+                openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY,
+            ),
+            live_session_mode,
+            "restoring tap intent does not restart the diverted capture session"
+        );
+        assert_eq!(
+            captured_button_action(&live_maps, ButtonId::Thumbwheel),
+            Some(Action::MissionControl),
+            "the same live consumer observes the republished bound profile"
+        );
     }
 
     #[test]

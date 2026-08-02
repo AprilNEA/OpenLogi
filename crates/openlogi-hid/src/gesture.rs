@@ -149,7 +149,11 @@ pub async fn run_capture_session(
             if let Some(idx) = thumb_index
                 && let Some(event) = thumbwheel::decode_event(&msg, device_index, idx)
             {
-                forward_thumbwheel_event(event, thumbwheel_mode, &sink);
+                forward_thumbwheel_event(
+                    event,
+                    ThumbwheelCaptureMode::DivertedRotationAndTap,
+                    &sink,
+                );
             }
         }
     });
@@ -191,6 +195,7 @@ fn forward_thumbwheel_event(
 
 /// The set of controls a session has diverted, kept so they can be handed back
 /// to the firmware on teardown.
+#[derive(Default)]
 struct ArmedControls {
     /// `0x1b04` accessor + feature index, present when the device exposes it.
     reprog: Option<(ReprogControlsV4, u8)>,
@@ -234,13 +239,32 @@ async fn arm_controls(
     thumbwheel_mode: ThumbwheelCaptureMode,
     divert_gesture_button: bool,
 ) -> Result<ArmedControls, GestureError> {
+    let mut armed = ArmedControls::default();
+    if let Err(error) = arm_controls_inner(
+        chan,
+        slot,
+        thumbwheel_mode,
+        divert_gesture_button,
+        &mut armed,
+    )
+    .await
+    {
+        armed.disarm().await;
+        return Err(error);
+    }
+    Ok(armed)
+}
+
+async fn arm_controls_inner(
+    chan: &Arc<HidppChannel>,
+    slot: u8,
+    thumbwheel_mode: ThumbwheelCaptureMode,
+    divert_gesture_button: bool,
+    armed: &mut ArmedControls,
+) -> Result<(), GestureError> {
     let device = Device::new(Arc::clone(chan), slot)
         .await
         .map_err(|_| GestureError::DeviceUnreachable(slot))?;
-
-    let mut reprog: Option<(ReprogControlsV4, u8)> = None;
-    let mut gesture_diverted = false;
-    let mut dpi_cids: Vec<u16> = Vec::new();
     if let Some(info) = device
         .root()
         .get_feature(reprog_controls::FEATURE_ID)
@@ -249,6 +273,7 @@ async fn arm_controls(
     {
         let rc = ReprogControlsV4::new(Arc::clone(chan), slot, info.index);
         let controls = enumerate_controls(&rc).await?;
+        armed.reprog = Some((rc.clone(), info.index));
 
         // Only divert the gesture button when it owns the gesture role; otherwise
         // leave it native (a non-owner HID++ control must not be captured-and-dropped).
@@ -257,23 +282,21 @@ async fn arm_controls(
                 .iter()
                 .any(|c| c.cid == reprog_controls::GESTURE_BUTTON_CID && c.supports_raw_xy())
         {
+            armed.gesture_diverted = true;
             rc.set_cid_reporting(reprog_controls::GESTURE_BUTTON_CID, true, true)
                 .await
                 .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-            gesture_diverted = true;
         }
         for &cid in &reprog_controls::DPI_MODE_SHIFT_CIDS {
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
+                armed.dpi_cids.push(cid);
                 rc.set_cid_reporting(cid, true, false)
                     .await
                     .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-                dpi_cids.push(cid);
             }
         }
-        reprog = Some((rc, info.index));
     }
 
-    let mut thumb: Option<(Thumbwheel, u8)> = None;
     if thumbwheel_mode != ThumbwheelCaptureMode::Native
         && let Some(info) = device
             .root()
@@ -299,21 +322,16 @@ async fn arm_controls(
         if !supports_single_tap {
             debug!("thumb wheel reports no single tap — click not capturable");
         }
+        armed.thumb = Some((tw.clone(), info.index));
         tw.set_reporting(true, false)
             .await
             .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-        thumb = Some((tw, info.index));
     }
 
-    if !gesture_diverted && dpi_cids.is_empty() && thumb.is_none() {
+    if !armed.gesture_diverted && armed.dpi_cids.is_empty() && armed.thumb.is_none() {
         debug!(slot, "no capturable controls — idle session");
     }
-    Ok(ArmedControls {
-        reprog,
-        gesture_diverted,
-        dpi_cids,
-        thumb,
-    })
+    Ok(())
 }
 
 /// Log (don't propagate) a failure to hand a control back to the firmware.

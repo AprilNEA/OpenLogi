@@ -110,8 +110,11 @@ pub fn spawn(
 ///
 /// Non-default sensitivity or rotation bindings require diversion so OpenLogi
 /// can re-synthesise the rotation. Tap reports are delivered only when the
-/// click binding itself differs from its seeded default.
-fn thumbwheel_capture_mode(hook_maps: &SharedHookMaps, sensitivity: i32) -> ThumbwheelCaptureMode {
+/// click binding was explicitly configured.
+pub(crate) fn thumbwheel_capture_mode(
+    hook_maps: &SharedHookMaps,
+    sensitivity: i32,
+) -> ThumbwheelCaptureMode {
     let sensitivity_changed = sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY;
     let Ok(maps) = hook_maps.read() else {
         return if sensitivity_changed {
@@ -126,7 +129,7 @@ fn thumbwheel_capture_mode(hook_maps: &SharedHookMaps, sensitivity: i32) -> Thum
             .is_some_and(|action| *action != default_binding(button))
     };
 
-    if binding_changed(ButtonId::Thumbwheel) {
+    if maps.thumbwheel_tap_bound {
         ThumbwheelCaptureMode::DivertedRotationAndTap
     } else if sensitivity_changed
         || [ButtonId::ThumbwheelScrollUp, ButtonId::ThumbwheelScrollDown]
@@ -137,6 +140,39 @@ fn thumbwheel_capture_mode(hook_maps: &SharedHookMaps, sensitivity: i32) -> Thum
     } else {
         ThumbwheelCaptureMode::Native
     }
+}
+
+/// Reduce the action-aware policy to the two physical wheel reporting states.
+///
+/// Once diverted, the HID session forwards tap reports and the latest hook maps
+/// decide whether to dispatch them. Keeping tap provenance out of the session
+/// identity lets an app/profile switch update tap intent without restarting an
+/// otherwise-required diverted session.
+pub(crate) fn capture_session_thumbwheel_mode(
+    hook_maps: &SharedHookMaps,
+    sensitivity: i32,
+) -> ThumbwheelCaptureMode {
+    match thumbwheel_capture_mode(hook_maps, sensitivity) {
+        ThumbwheelCaptureMode::Native => ThumbwheelCaptureMode::Native,
+        _ => ThumbwheelCaptureMode::DivertedRotation,
+    }
+}
+
+/// Resolve a captured button press against the latest published hook maps.
+///
+/// A diverted thumb wheel can keep reporting taps while an app/profile switch
+/// removes its click binding. The provenance bit gates those stale in-flight
+/// reports; other captured buttons use the effective action map directly.
+pub(crate) fn captured_button_action(
+    hook_maps: &SharedHookMaps,
+    button: ButtonId,
+) -> Option<Action> {
+    hook_maps.read().ok().and_then(|maps| {
+        if button == ButtonId::Thumbwheel && !maps.thumbwheel_tap_bound {
+            return None;
+        }
+        maps.bindings.get(&button).cloned()
+    })
 }
 
 /// Whether a finished capture session should make the manager re-arm.
@@ -210,7 +246,7 @@ async fn manage(
                     target.map(|t| {
                         (
                             t,
-                            thumbwheel_capture_mode(&hook_maps, sensitivity),
+                            capture_session_thumbwheel_mode(&hook_maps, sensitivity),
                             divert_gesture,
                         )
                     })
@@ -341,10 +377,7 @@ fn dispatch(
             }
         }
         CapturedInput::ButtonPressed(button) => {
-            let action = hook_maps
-                .read()
-                .ok()
-                .and_then(|maps| maps.bindings.get(&button).cloned());
+            let action = captured_button_action(hook_maps, button);
             if let Some(action) = action {
                 debug!(?button, action = %action.label(), "HID++ button → action");
                 hook_runtime::dispatch_action(&action, dpi_cycle, capture);
@@ -515,17 +548,6 @@ mod tests {
                 DEFAULT_THUMBWHEEL_SENSITIVITY + 1
             ),
             ThumbwheelCaptureMode::DivertedRotation
-        );
-    }
-
-    #[test]
-    fn rebound_thumbwheel_click_enables_tap_delivery() {
-        let hook_maps = default_thumbwheel_maps();
-        set_binding(&hook_maps, ButtonId::Thumbwheel, Action::MissionControl);
-
-        assert_eq!(
-            thumbwheel_capture_mode(&hook_maps, DEFAULT_THUMBWHEEL_SENSITIVITY),
-            ThumbwheelCaptureMode::DivertedRotationAndTap
         );
     }
 
