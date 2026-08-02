@@ -34,7 +34,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
-use crate::hook_runtime::ActionDispatcher;
+use crate::hook_runtime::{ActionDispatcher, SharedHookMaps};
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
 
 /// How often to re-read the device capture plans. It also paces the respawn of
@@ -93,12 +93,44 @@ pub fn spawn(
     });
 }
 
-/// Select how the thumb wheel is captured over HID++.
+/// Select how the selected device's thumb wheel is captured over HID++.
 ///
 /// Non-default sensitivity or rotation bindings require diversion so OpenLogi
 /// can re-synthesise the rotation. Tap reports are delivered only when the
-/// click binding itself differs from its seeded default.
-fn thumbwheel_capture_mode(plan: &DeviceCapturePlan) -> ThumbwheelCaptureMode {
+/// click binding was explicitly configured.
+pub(crate) fn thumbwheel_capture_mode(
+    hook_maps: &SharedHookMaps,
+    sensitivity: i32,
+) -> ThumbwheelCaptureMode {
+    let sensitivity_changed = sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY;
+    let Ok(maps) = hook_maps.read() else {
+        return if sensitivity_changed {
+            ThumbwheelCaptureMode::DivertedRotation
+        } else {
+            ThumbwheelCaptureMode::Native
+        };
+    };
+    let binding_changed = |button| {
+        maps.bindings
+            .get(&button)
+            .is_some_and(|action| *action != default_binding(button))
+    };
+
+    if maps.thumbwheel_tap_bound {
+        ThumbwheelCaptureMode::DivertedRotationAndTap
+    } else if sensitivity_changed
+        || [ButtonId::ThumbwheelScrollUp, ButtonId::ThumbwheelScrollDown]
+            .iter()
+            .any(|&button| binding_changed(button))
+    {
+        ThumbwheelCaptureMode::DivertedRotation
+    } else {
+        ThumbwheelCaptureMode::Native
+    }
+}
+
+/// Select the action-aware thumb-wheel mode from one per-device capture plan.
+fn thumbwheel_capture_mode_for_plan(plan: &DeviceCapturePlan) -> ThumbwheelCaptureMode {
     let binding_changed = |button| {
         plan.bindings
             .get(&button)
@@ -121,7 +153,10 @@ fn thumbwheel_capture_mode(plan: &DeviceCapturePlan) -> ThumbwheelCaptureMode {
 /// The [`CaptureSpec`] one device's session should run with right now.
 fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
     CaptureSpec {
-        thumbwheel_mode: thumbwheel_capture_mode(plan),
+        thumbwheel_mode: match thumbwheel_capture_mode_for_plan(plan) {
+            ThumbwheelCaptureMode::Native => ThumbwheelCaptureMode::Native,
+            _ => ThumbwheelCaptureMode::DivertedRotation,
+        },
         // Derived from the dispatch maps, so the armed diverts and the maps
         // resolving their events can never drift apart.
         divert_gesture_sources: GESTURE_SOURCE_BUTTONS
@@ -156,6 +191,49 @@ enum DoneAction {
     Remove { unexpected: bool },
 }
 
+/// Reduce the action-aware policy to the two physical wheel reporting states.
+///
+/// Once diverted, the HID session forwards tap reports and the latest hook maps
+/// decide whether to dispatch them. Keeping tap provenance out of the session
+/// identity lets an app/profile switch update tap intent without restarting an
+/// otherwise-required diverted session.
+pub(crate) fn capture_session_thumbwheel_mode(
+    hook_maps: &SharedHookMaps,
+    sensitivity: i32,
+) -> ThumbwheelCaptureMode {
+    match thumbwheel_capture_mode(hook_maps, sensitivity) {
+        ThumbwheelCaptureMode::Native => ThumbwheelCaptureMode::Native,
+        _ => ThumbwheelCaptureMode::DivertedRotation,
+    }
+}
+
+/// Resolve a captured button press against the latest published hook maps.
+///
+/// A diverted thumb wheel can keep reporting taps while an app/profile switch
+/// removes its click binding. The provenance bit gates those stale in-flight
+/// reports; other captured buttons use the effective action map directly.
+pub(crate) fn captured_button_action(
+    hook_maps: &SharedHookMaps,
+    button: ButtonId,
+) -> Option<Action> {
+    hook_maps.read().ok().and_then(|maps| {
+        if button == ButtonId::Thumbwheel && !maps.thumbwheel_tap_bound {
+            return None;
+        }
+        maps.bindings.get(&button).cloned()
+    })
+}
+
+/// Resolve a captured button press against one device's latest plan.
+fn captured_button_action_for_plan(plan: &DeviceCapturePlan, button: ButtonId) -> Option<Action> {
+    if button == ButtonId::Thumbwheel
+        && thumbwheel_capture_mode_for_plan(plan) != ThumbwheelCaptureMode::DivertedRotationAndTap
+    {
+        return None;
+    }
+    plan.bindings.get(&button).cloned()
+}
+
 /// Decide the [`DoneAction`] for a completion report carrying `done_epoch`,
 /// given the session the manager currently tracks for that device (if any).
 ///
@@ -164,7 +242,6 @@ enum DoneAction {
 /// gone was stopped deliberately and is merely draining — its report frees the
 /// key quietly. One still holding its stop sender exited on its own and
 /// warrants a warning alongside the re-arm.
-/// Whether a finished session should be re-armed after completion.
 pub(crate) fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -> bool {
     done_epoch == live_epoch && has_target
 }
@@ -428,9 +505,9 @@ fn dispatch(
             }
         }
         CapturedInput::ButtonPressed(button, _) => {
-            if let Some(action) = plan.bindings.get(&button) {
+            if let Some(action) = captured_button_action_for_plan(plan, button) {
                 debug!(key, ?button, action = %action.label(), "HID++ button → action");
-                dispatcher.dispatch(action, Some(key));
+                dispatcher.dispatch(&action, Some(key));
             } else {
                 debug!(key, ?button, "HID++ button with no binding — ignored");
             }
@@ -569,7 +646,7 @@ mod tests {
     #[test]
     fn default_thumbwheel_bindings_use_native_reporting() {
         assert_eq!(
-            thumbwheel_capture_mode(&default_thumbwheel_plan()),
+            thumbwheel_capture_mode_for_plan(&default_thumbwheel_plan()),
             ThumbwheelCaptureMode::Native
         );
     }
@@ -589,7 +666,7 @@ mod tests {
         );
 
         assert_eq!(
-            thumbwheel_capture_mode(&plan),
+            thumbwheel_capture_mode_for_plan(&plan),
             ThumbwheelCaptureMode::DivertedRotation
         );
     }
@@ -599,7 +676,7 @@ mod tests {
         let mut plan = default_thumbwheel_plan();
         plan.thumbwheel_sensitivity = DEFAULT_THUMBWHEEL_SENSITIVITY + 1;
         assert_eq!(
-            thumbwheel_capture_mode(&plan),
+            thumbwheel_capture_mode_for_plan(&plan),
             ThumbwheelCaptureMode::DivertedRotation
         );
     }
@@ -610,7 +687,7 @@ mod tests {
         set_binding(&mut plan, ButtonId::Thumbwheel, Action::MissionControl);
 
         assert_eq!(
-            thumbwheel_capture_mode(&plan),
+            thumbwheel_capture_mode_for_plan(&plan),
             ThumbwheelCaptureMode::DivertedRotationAndTap
         );
     }
@@ -620,7 +697,7 @@ mod tests {
         let mut plan = default_thumbwheel_plan();
         plan.bindings.clear();
         assert_eq!(
-            thumbwheel_capture_mode(&plan),
+            thumbwheel_capture_mode_for_plan(&plan),
             ThumbwheelCaptureMode::Native
         );
     }
