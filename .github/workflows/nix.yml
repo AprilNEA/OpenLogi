@@ -6,11 +6,12 @@ name: Nix CI
 # nix/package.nix `outputHashes`, and that only when a git pin (gpui,
 # gpui-component, ...) is bumped in Cargo.lock. This workflow makes that
 # failure happen in the PR that bumps the pin — the error message prints the
-# correct hash to paste — instead of silently on master afterwards. Gated to
-# the build's inputs — lockfile, manifests, build scripts, toolchain, and the
-# Nix/packaging files themselves — so it doesn't run on every .rs change
-# (Rust CI compiles those; the residual risk is a source edit that only
-# breaks inside the sandbox, which no path filter can express).
+# correct hash to paste — instead of silently on master afterwards. The path
+# filter only skips files that cannot feed the Linux build (docs, other
+# platforms' packaging, unrelated workflows); everything the build consumes —
+# lockfile, manifests, build scripts, toolchain, Rust source, and the
+# Nix/packaging files themselves — triggers it, so no change can bypass this
+# job and rot master.
 on:
   push:
     branches: [master]
@@ -19,6 +20,8 @@ on:
       - "**/Cargo.toml"
       - "**/build.rs"
       - "rust-toolchain.toml"
+      - "src/**"
+      - "crates/**"
       - "flake.nix"
       - "flake.lock"
       - "nix/**"
@@ -31,6 +34,8 @@ on:
       - "**/Cargo.toml"
       - "**/build.rs"
       - "rust-toolchain.toml"
+      - "src/**"
+      - "crates/**"
       - "flake.nix"
       - "flake.lock"
       - "nix/**"
