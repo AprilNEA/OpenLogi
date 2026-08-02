@@ -2,11 +2,12 @@
 //! four section bodies (Buttons, Pointer, Lighting, Device).
 
 use gpui::{
-    AnyElement, BorrowAppContext as _, Context, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
+    AnyElement, BorrowAppContext as _, Context, IntoElement, ParentElement, SharedString, Styled,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Icon, IconName,
+    Disableable as _, Icon, IconName, Selectable as _,
+    button::{Button, ButtonGroup},
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
     scroll::ScrollableElement as _,
@@ -27,7 +28,7 @@ use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AppState, DeviceRecord};
-use crate::theme::{HEADER_H, Palette, SCREEN_PAD, SelectableStyle as _, Typography as _};
+use crate::theme::{HEADER_H, Palette, SCREEN_PAD, Typography as _};
 
 /// Device-detail top bar, in three zones: a back affordance + device name
 /// (leading), the section tabs as a centred segmented control (middle), and the
@@ -278,78 +279,41 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
 fn wheel_resolution_control(
     selected: Option<ScrollResolution>,
     enabled: bool,
-    pal: Palette,
+    _pal: Palette,
 ) -> AnyElement {
-    h_flex()
+    let values = [
+        None,
+        Some(ScrollResolution::Low),
+        Some(ScrollResolution::High),
+    ];
+    ButtonGroup::new("wheel-resolution")
         .w_full()
-        .p_1()
-        .gap_1()
-        .rounded(pal.control_radius)
-        .border_1()
-        .border_color(pal.border)
-        .child(wheel_resolution_segment(
-            "wheel-resolution-default",
-            tr!("Device default"),
-            None,
-            selected,
-            enabled,
-            pal,
-        ))
-        .child(wheel_resolution_segment(
-            "wheel-resolution-low",
-            tr!("Standard"),
-            Some(ScrollResolution::Low),
-            selected,
-            enabled,
-            pal,
-        ))
-        .child(wheel_resolution_segment(
-            "wheel-resolution-high",
-            tr!("High resolution"),
-            Some(ScrollResolution::High),
-            selected,
-            enabled,
-            pal,
-        ))
-        .into_any_element()
-}
-
-fn wheel_resolution_segment(
-    id: &'static str,
-    label: impl IntoElement,
-    value: Option<ScrollResolution>,
-    selected: Option<ScrollResolution>,
-    enabled: bool,
-    pal: Palette,
-) -> AnyElement {
-    let active = value == selected;
-    let segment = div()
-        .id(id)
-        .flex_1()
-        .px_2()
-        .py_1()
-        .rounded(pal.control_radius)
-        .text_center()
-        .text_caption()
-        .selected_fill(active)
-        .text_color(if enabled {
-            if active {
-                pal.text_primary
-            } else {
-                pal.text_muted
-            }
-        } else {
-            pal.text_muted
-        })
-        .child(label);
-    if !enabled {
-        return segment.into_any_element();
-    }
-    segment
-        .cursor_pointer()
-        .on_click(move |_event, _window, cx| {
+        .outline()
+        .disabled(!enabled)
+        .child(
+            Button::new("wheel-resolution-default")
+                .flex_1()
+                .label(tr!("Device default"))
+                .selected(selected.is_none()),
+        )
+        .child(
+            Button::new("wheel-resolution-low")
+                .flex_1()
+                .label(tr!("Standard"))
+                .selected(selected == Some(ScrollResolution::Low)),
+        )
+        .child(
+            Button::new("wheel-resolution-high")
+                .flex_1()
+                .label(tr!("High resolution"))
+                .selected(selected == Some(ScrollResolution::High)),
+        )
+        .on_click(move |indices, _window, cx| {
+            let Some(value) = indices.first().and_then(|index| values.get(*index)) else {
+                return;
+            };
             cx.update_global::<AppState, _>(|state, _| {
-                state.commit_scroll_resolution(value);
+                state.commit_scroll_resolution(*value);
             });
             cx.refresh_windows();
         })
@@ -359,7 +323,7 @@ fn wheel_resolution_segment(
 /// On/Off pill that flips the active device's scroll-wheel inversion, mirroring
 /// the SmartShift permanent-ratchet toggle.
 fn invert_scroll_toggle(on: bool, enabled: bool, pal: Palette) -> AnyElement {
-    let label = if on { tr!("On") } else { tr!("Off") };
+    let label: SharedString = if on { tr!("On") } else { tr!("Off") };
     if !enabled {
         return div()
             .px_2()
@@ -372,17 +336,10 @@ fn invert_scroll_toggle(on: bool, enabled: bool, pal: Palette) -> AnyElement {
             .child(tr!("Unavailable"))
             .into_any_element();
     }
-    div()
-        .id("invert-scroll-toggle")
-        .px_2()
-        .py_1()
-        .rounded(pal.control_radius)
-        .selected_border(on, pal)
-        .selected_fill(on)
-        .text_caption()
-        .text_color(if on { pal.text_primary } else { pal.text_muted })
-        .cursor_pointer()
-        .child(label)
+    Button::new("invert-scroll-toggle")
+        .compact()
+        .label(label)
+        .selected(on)
         .on_click(move |_event, _window, cx| {
             cx.update_global::<AppState, _>(|state, _| {
                 state.commit_invert_scroll(!on);

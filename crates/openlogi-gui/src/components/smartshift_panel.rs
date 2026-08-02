@@ -13,11 +13,12 @@
 //! [`crate::components::dpi_panel`].
 
 use gpui::{
-    AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, div, px, rgb,
+    AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, IntoElement,
+    ParentElement, Render, SharedString, Styled, Subscription, Window, div, px, rgb,
 };
 use gpui_component::{
+    Disableable as _, Selectable as _,
+    button::Button,
     h_flex,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
@@ -28,7 +29,7 @@ use openlogi_hid::{AUTO_DISENGAGE_PERMANENT, DeviceRoute, SmartShiftMode, SmartS
 use crate::components::device_read::issue_device_read;
 use crate::components::status::{retry_line, status_line};
 use crate::state::{AppState, SmartShiftLoad};
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
+use crate::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
 /// Friendly slider range for the `autoDisengage` threshold. The wire field is
 /// `0x01`–`0xFE` (0.25 turn/s steps); the slider exposes the usable band
@@ -328,25 +329,16 @@ fn mode_pill(
     target: SmartShiftMode,
     cur_auto: u8,
     torque: u8,
-    pal: Palette,
+    _pal: Palette,
 ) -> AnyElement {
     let id = match target {
         SmartShiftMode::Free => "smartshift-mode-free",
         SmartShiftMode::Ratchet => "smartshift-mode-ratchet",
     };
-    div()
-        .id(id)
-        .px_3()
-        .py_1()
-        .rounded(pal.control_radius)
-        .selected_border(selected, pal)
-        .bg(pal.surface)
-        .selected_fill(selected)
-        .text_body()
-        .text_color(pal.text_primary)
-        .cursor_pointer()
-        .hover(|s| s.bg(pal.surface_hover))
-        .child(label)
+    Button::new(id)
+        .compact()
+        .label(label)
+        .selected(selected)
         .on_click(move |_event, _window, cx| {
             cx.update_global::<AppState, _>(|state, _| {
                 state.commit_smartshift(target, cur_auto, torque);
@@ -363,32 +355,14 @@ fn permanent_toggle(
     enabled: bool,
     restore_threshold: u8,
     torque: u8,
-    pal: Palette,
+    _pal: Palette,
 ) -> AnyElement {
     let label = if on { tr!("On") } else { tr!("Off") };
-    if !enabled {
-        return div()
-            .px_2()
-            .py_1()
-            .rounded(pal.control_radius)
-            .border_1()
-            .border_color(pal.border)
-            .text_caption()
-            .text_color(pal.text_muted)
-            .child(label)
-            .into_any_element();
-    }
-    div()
-        .id("smartshift-permanent")
-        .px_2()
-        .py_1()
-        .rounded(pal.control_radius)
-        .selected_border(on, pal)
-        .selected_fill(on)
-        .text_caption()
-        .text_color(if on { pal.text_primary } else { pal.text_muted })
-        .cursor_pointer()
-        .child(label)
+    Button::new("smartshift-permanent")
+        .compact()
+        .label(label)
+        .selected(on)
+        .disabled(!enabled)
         .on_click(move |_event, _window, cx| {
             cx.update_global::<AppState, _>(|state, _| {
                 let next = if on {
