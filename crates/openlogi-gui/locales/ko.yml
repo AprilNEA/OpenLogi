@@ -34,6 +34,7 @@ _version: 1
 "Battery error": "배터리 오류"
 "Bolt receiver": "Bolt 수신기"
 "Unifying receiver": "Unifying receiver"
+"LIGHTSPEED receiver": "LIGHTSPEED 수신기"
 "Direct connection": "직접 연결"
 "Unavailable": "사용 불가"
 "Mouse": "마우스"

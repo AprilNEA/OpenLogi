@@ -159,6 +159,7 @@ fn connection_for(
     match route {
         Some(DeviceRoute::Bolt { .. }) => ConnectionKind::BoltReceiver,
         Some(DeviceRoute::Unifying { .. }) => ConnectionKind::UnifyingReceiver,
+        Some(DeviceRoute::Lightspeed { .. }) => ConnectionKind::LightspeedReceiver,
         Some(DeviceRoute::Direct { .. }) => match transports {
             Some(t) if t.bluetooth || t.btle => ConnectionKind::BluetoothDirect,
             Some(t) if t.usb => ConnectionKind::Wired,
