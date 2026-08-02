@@ -25,19 +25,35 @@ in
   env = {
     GREET = "devenv";
     RUSTC_WRAPPER = "sccache";
-  } // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+  }
+  // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
     DEVELOPER_DIR = xcodeDeveloperDir;
     SDKROOT = xcodeSdkRoot;
   };
 
-  packages = with pkgs; [
-    git
-    cmake
-    sccache
-    prek
-    create-dmg
-    crowdin-cli
-  ];
+  packages =
+    with pkgs;
+    [
+      git
+      cmake
+      sccache
+      prek
+      crowdin-cli
+    ]
+    # create-dmg is macOS-only (meta.platforms = darwin); an unconditional entry
+    # breaks evaluation of the shell on Linux.
+    ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ create-dmg ]
+    # The Linux build links a handful of system libraries the shell must
+    # provide rather than rely on whatever the ambient user environment
+    # happens to expose: fontconfig via pkg-config (GPUI text rendering via
+    # yeslogic-fontconfig-sys), libxcb (x11rb in the hook and GPUI's X11
+    # backend), and libxkbcommon (GPUI keyboard handling).
+    ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+      pkg-config
+      fontconfig
+      xorg.libxcb
+      libxkbcommon
+    ];
 
   languages.rust = {
     enable = true;

@@ -563,6 +563,44 @@ impl Config {
             .or_default()
             .scroll_resolution = resolution;
     }
+
+    /// Whether OpenLogi manages `device_key` at all (capture + volatile
+    /// re-apply). Unconfigured devices are managed.
+    #[must_use]
+    pub fn device_enabled(&self, device_key: &str) -> bool {
+        self.devices.get(device_key).is_none_or(|d| d.enabled)
+    }
+
+    /// Enable or disable OpenLogi's management of `device_key`.
+    pub fn set_device_enabled(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .enabled = enabled;
+    }
+
+    /// The effective thumb-wheel sensitivity for `device_key`: the device's
+    /// override when set, else the app-wide default.
+    #[must_use]
+    pub fn thumbwheel_sensitivity(&self, device_key: &str) -> i32 {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.thumbwheel_sensitivity)
+            .unwrap_or(self.app_settings.thumbwheel_sensitivity)
+    }
+
+    /// Set (or clear, with `None`) `device_key`'s thumb-wheel sensitivity
+    /// override.
+    pub fn set_device_thumbwheel_sensitivity(
+        &mut self,
+        device_key: &str,
+        sensitivity: Option<i32>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .thumbwheel_sensitivity = sensitivity;
+    }
 }
 
 /// Write `bytes` to `path` atomically via a randomized temp file + rename,

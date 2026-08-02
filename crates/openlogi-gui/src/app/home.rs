@@ -56,8 +56,12 @@ const GALLERY_GAP: f32 = 24.;
 /// cards (Logi Options+ style), via [`Carousel`]'s `uniform` mode. Each card
 /// floats the device photo on the window background above its name and battery;
 /// the row centres while the cards fit the viewport and scrolls once they don't.
-/// Clicking a card opens its detail screen and makes it the active device (whose
-/// bindings the hook uses); the active card wears a faint accent ring.
+/// Clicking a card opens its detail screen and makes it the active device.
+/// A card is borderless at rest (the accent ring appears on hover) with one
+/// exception: a device the user disabled wears a persistent red ring so the
+/// unmanaged state stays visible. Capture runs per device, so which card is
+/// "current" only decides what the detail screen shows; the active card keeps
+/// upstream's faint accent fill as its marker.
 pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
     let (len, active_idx) = cx.try_global::<AppState>().map_or((0, 0), |s| {
         let len = s.device_list.len();
@@ -81,11 +85,14 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                     return div().into_any_element();
                 };
                 let key = record.config_key.clone();
+                let enabled = cx
+                    .try_global::<AppState>()
+                    .is_some_and(|s| s.device_enabled(&record.config_key));
                 let glow = cx
                     .try_global::<AppState>()
                     .and_then(|s| keyboard_glow(s, &record));
                 let view = view.clone();
-                device_card(&record, focused, glow, pal)
+                device_card(&record, enabled, focused, glow, pal)
                     .id(("device-card", idx))
                     .cursor_pointer()
                     .hover(move |s| s.border_color(rgb(theme::ACCENT_BLUE)))
@@ -169,19 +176,26 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
 
 /// A device card in the Home gallery: the device photo floating on the window
 /// background above the name, connectivity dot, kind/slot, and battery. Fixed
-/// width so cards stay equal in the scrollable row. No card shows a border at
-/// rest — the accent ring appears only on hover (wired by the gallery). The
-/// `active` device (whose bindings and DPI are live) keeps a persistent but
-/// borderless marker: a faint accent fill, which reads whether or not the
-/// carousel centres it. The 1px border is always reserved in a transparent
-/// colour so the hover ring never nudges the layout. Returns a bare [`Div`] so
-/// the gallery can wire the hover and click handlers.
+/// width so cards stay equal in the scrollable row. A managed card shows no
+/// border at rest — the accent ring appears only on hover (wired by the
+/// gallery) — while a disabled card wears a persistent red ring so the
+/// unmanaged state stays visible. The `active` device (whose bindings and DPI
+/// are live) keeps a persistent but borderless marker: a faint accent fill,
+/// which reads whether or not the carousel centres it. The 1px border is
+/// always reserved so ring changes never nudge the layout. Returns a bare
+/// [`Div`] so the gallery can wire the hover and click handlers.
 fn device_card(
     record: &DeviceRecord,
+    enabled: bool,
     active: bool,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     pal: Palette,
 ) -> Div {
+    let ring: Hsla = if enabled {
+        gpui::transparent_black()
+    } else {
+        rgb(theme::STATUS_DISABLED).into()
+    };
     v_flex()
         .w(px(theme::GALLERY_CARD_W))
         .flex_shrink_0()
@@ -190,7 +204,7 @@ fn device_card(
         .p_3()
         .rounded(pal.card_radius)
         .border_1()
-        .border_color(gpui::transparent_black())
+        .border_color(ring)
         .selected_fill(active)
         .child(
             div()

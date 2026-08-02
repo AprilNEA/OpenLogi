@@ -52,9 +52,15 @@ pub struct DeviceIdentity {
 /// `gesture_bindings` — fold into the unified [`Self::bindings`] map. Only
 /// `bindings` is ever serialized, so a migrated file self-heals to the v2 shape
 /// on its next save.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "RawDeviceConfig")]
 pub struct DeviceConfig {
+    /// Whether OpenLogi manages this device at all. `false` leaves the device
+    /// fully native: no capture session (no HID++ diversion of any control)
+    /// and no volatile-settings re-apply on reconnect. Defaults to `true` and
+    /// is only serialized when disabled.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
     /// Which button owns the device's single gesture role, once the user has
     /// chosen explicitly. Absent means "infer" (the dedicated HID++ gesture
     /// button owns gestures if present) — see
@@ -101,6 +107,11 @@ pub struct DeviceConfig {
     /// the same reason as [`Self::dpi`]. `None` until the user changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smartshift: Option<SmartShift>,
+    /// Per-device thumb-wheel sensitivity override. `None` falls back to the
+    /// app-wide
+    /// [`AppSettings::thumbwheel_sensitivity`](crate::config::AppSettings::thumbwheel_sensitivity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbwheel_sensitivity: Option<i32>,
     /// Invert this device's scroll-wheel direction relative to the OS setting
     /// (issue #126): on, a wheel tick scrolls the opposite way, so a user who
     /// keeps macOS "natural scrolling" for the trackpad can have a traditional
@@ -113,6 +124,41 @@ pub struct DeviceConfig {
     /// current resolution unmanaged and omits the field from `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll_resolution: Option<ScrollResolution>,
+}
+
+impl Default for DeviceConfig {
+    fn default() -> Self {
+        Self {
+            // A fresh entry (e.g. created by a first DPI write) must stay
+            // managed — `enabled: false` is an explicit user choice only.
+            enabled: true,
+            gesture_owner: None,
+            identity: None,
+            bindings: BTreeMap::new(),
+            per_app_bindings: BTreeMap::new(),
+            dpi_presets: Vec::new(),
+            dpi: None,
+            lighting: None,
+            smartshift: None,
+            thumbwheel_sensitivity: None,
+            invert_scroll: false,
+            scroll_resolution: None,
+        }
+    }
+}
+
+/// `serde(default)` helper for `bool` fields that default to `true`.
+fn default_true() -> bool {
+    true
+}
+
+/// `skip_serializing_if` helper for `bool` fields whose default is `true`.
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 /// `skip_serializing_if` helper for plain `bool` fields whose default is
@@ -160,9 +206,13 @@ struct RawDeviceConfig {
     #[serde(default)]
     smartshift: Option<SmartShift>,
     #[serde(default)]
+    thumbwheel_sensitivity: Option<i32>,
+    #[serde(default)]
     invert_scroll: bool,
     #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
+    #[serde(default = "default_true")]
+    enabled: bool,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -197,6 +247,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
         }
 
         DeviceConfig {
+            enabled: raw.enabled,
             gesture_owner: raw.gesture_owner,
             identity: raw.identity,
             bindings,
@@ -205,6 +256,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             dpi: raw.dpi,
             lighting: raw.lighting,
             smartshift: raw.smartshift,
+            thumbwheel_sensitivity: raw.thumbwheel_sensitivity,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
         }
