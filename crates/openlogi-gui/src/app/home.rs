@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, BorrowAppContext as _, BoxShadow, Context, Div, Hsla, InteractiveElement,
-    IntoElement, ParentElement, StatefulInteractiveElement as _, Styled, canvas, div, fill, img,
-    point, prelude::FluentBuilder as _, px, rgb, svg,
+    IntoElement, ParentElement, Role, SharedString, StatefulInteractiveElement as _, Styled,
+    canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{
     Icon, IconName,
@@ -87,6 +87,10 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                 let view = view.clone();
                 device_card(&record, focused, glow, pal)
                     .id(("device-card", idx))
+                    .role(Role::Button)
+                    .aria_label(record.display_name.clone())
+                    .aria_description(device_accessibility_description(&record))
+                    .aria_selected(focused)
                     .cursor_pointer()
                     .hover(move |s| s.border_color(rgb(theme::ACCENT_BLUE)))
                     .on_click(move |_, _, cx| {
@@ -99,6 +103,25 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                 cx.notify();
             })),
     )
+}
+
+fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
+    let status = if record.online {
+        tr!("Connected")
+    } else {
+        tr!("Offline")
+    };
+    let metadata = format!(
+        "{status}. {}. {} {}.",
+        kind_label(record.kind),
+        tr!("Slot"),
+        record.slot
+    );
+    if let Some(battery) = record.battery.as_ref() {
+        format!("{metadata} {} {}%.", tr!("Battery"), battery.percentage).into()
+    } else {
+        metadata.into()
+    }
 }
 
 /// Opacity the lighting colour is painted at over the device image, in both the

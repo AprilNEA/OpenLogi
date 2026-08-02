@@ -23,7 +23,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, BorrowAppContext as _, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, StatefulInteractiveElement as _, Styled, Window, div,
+    ParentElement, Role, StatefulInteractiveElement as _, Styled, Window, div,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Icon, IconName, h_flex, popover::PopoverState, v_flex};
@@ -194,10 +194,14 @@ fn direction_cell(
     };
     let header = format!("{}  {}", dir.glyph(), tr!(dir.label()));
     let action_label = tr!(current.label());
+    let accessible_label = format!("{}: {action_label}", tr!(dir.label()));
     let is_default = *current == default_gesture_binding(dir);
     let view = view.clone();
     v_flex()
         .id(("gesture-cell", idx))
+        .role(Role::Button)
+        .aria_label(accessible_label)
+        .aria_expanded(active)
         .w(px(GESTURE_CELL_W))
         .gap(px(2.))
         .px_2()
@@ -361,12 +365,16 @@ fn action_rows(
         for action in actions {
             let selected = current == Some(&action);
             let label = tr!(action.label());
+            let accessible_label = label.clone();
             let icon_path = action_icon_path(&action);
             let on_pick = on_pick.clone();
             let row_id = idx;
             idx += 1;
             children.push(
                 menu_row((id_prefix, row_id), pal, selected)
+                    .role(Role::MenuItem)
+                    .aria_label(accessible_label)
+                    .aria_selected(selected)
                     .child(
                         h_flex()
                             .items_center()
