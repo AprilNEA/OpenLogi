@@ -301,13 +301,20 @@ fn gui_pids() -> Vec<u32> {
         .processes()
         .values()
         .filter(|p| {
-            let name = p.name().to_string_lossy();
-            (name.eq_ignore_ascii_case("OpenLogi.exe")
-                || name.eq_ignore_ascii_case("openlogi-gui.exe"))
+            is_gui_process_name(&p.name().to_string_lossy())
                 && (own_user.is_none() || p.user_id() == own_user)
         })
         .map(|p| p.pid().as_u32())
         .collect()
+}
+
+/// Whether a process image name is one of the GUI binaries.
+///
+/// `OpenLogi.exe` is matched case-*sensitively*: the CLI is `openlogi.exe`,
+/// which `eq_ignore_ascii_case` would accept, and the dev target dir holds
+/// both. Windows reports image names with their on-disk case, so this holds.
+fn is_gui_process_name(name: &str) -> bool {
+    name == "OpenLogi.exe" || name.eq_ignore_ascii_case("openlogi-gui.exe")
 }
 
 /// Bring the first visible top-level window owned by one of `pids` to the
@@ -354,9 +361,13 @@ fn spawn_gui() {
         return;
     };
     let Some(dir) = exe.parent() else { return };
-    // Installed/portable layout first (the product name), then the cargo
-    // target-dir name (dev) — the reverse of the GUI's agent sibling lookup.
-    let gui = ["OpenLogi.exe", "openlogi-gui.exe"]
+    // Dev target dir first: it holds both `openlogi.exe` (CLI) and
+    // `openlogi-gui.exe`, and the CLI shares `OpenLogi.exe`'s name on the
+    // case-insensitive filesystem — so `dir.join("OpenLogi.exe").exists()`
+    // there resolves to the CLI and would launch it. Probing the unambiguous
+    // `openlogi-gui.exe` first avoids that; the installed layout has only
+    // `OpenLogi.exe` and falls through to it.
+    let gui = ["openlogi-gui.exe", "OpenLogi.exe"]
         .iter()
         .map(|name| dir.join(name))
         .find(|p| p.exists());
@@ -402,4 +413,16 @@ fn quit(hwnd: HWND) {
 /// NUL-terminated UTF-16 for win32 W-APIs.
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_gui_process_name;
+
+    #[test]
+    fn the_cli_binary_is_not_the_gui() {
+        assert!(is_gui_process_name("OpenLogi.exe"));
+        assert!(is_gui_process_name("openlogi-gui.exe"));
+        assert!(!is_gui_process_name("openlogi.exe")); // the CLI
+    }
 }

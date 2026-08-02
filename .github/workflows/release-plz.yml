@@ -8,6 +8,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # Match CI so shared-key linux-stable-debug restore hits the env hash.
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   # Opens/updates a release PR that bumps the shared workspace version and writes
@@ -29,6 +31,11 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: linux-stable-debug
+          # CI master is the canonical writer; release-plz only restores.
+          save-if: false
       - name: Install Linux build deps
         run: |
           sudo apt-get update
@@ -140,6 +147,11 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: linux-stable-debug
+          # CI master is the canonical writer; release-plz only restores.
+          save-if: false
       - name: Install Linux build deps
         run: |
           sudo apt-get update

@@ -7,10 +7,11 @@
     reason = "Win32 FFI uses raw pointer parameters and fixed-width message values"
 )]
 
+use std::cell::Cell;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
@@ -18,13 +19,26 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
     HC_ACTION, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostThreadMessageW,
     SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_QUIT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1,
+    XBUTTON2,
 };
 
 use crate::{ButtonId, EventDisposition, HookError, MouseEvent};
 
 const WHEEL_DELTA: f32 = 120.0;
+
+thread_local! {
+    /// Cursor position carried by the previous mouse message of any kind,
+    /// differenced into the relative delta [`MouseEvent::Moved`] carries — see
+    /// [`translate_event`] and [`motion_delta`].
+    ///
+    /// Thread-local rather than a `static`: `WH_MOUSE_LL` callbacks run on the
+    /// thread that installed the hook, so this is single-threaded by
+    /// construction and needs no synchronization on the freeze-sensitive
+    /// callback path.
+    static LAST_POINT: Cell<Option<POINT>> = const { Cell::new(None) };
+}
 
 type HookCallback = Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static>;
 
@@ -223,6 +237,11 @@ unsafe fn hook_data(lparam: LPARAM) -> Option<MSLLHOOKSTRUCT> {
 }
 
 fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
+    // Every mouse message carries the cursor point, so the baseline advances on
+    // all of them: injected motion is dropped below but still moves the cursor,
+    // and a gesture's button-down seeds the baseline for its own first move.
+    let previous = LAST_POINT.replace(Some(data.pt));
+
     if data.flags & LLMHF_INJECTED != 0 {
         return None;
     }
@@ -268,8 +287,28 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
             from_trackpad: false,
             device: None,
         }),
+        WM_MOUSEMOVE => {
+            let (delta_x, delta_y) = motion_delta(previous?, data.pt)?;
+            Some(MouseEvent::Moved { delta_x, delta_y })
+        }
         _ => None,
     }
+}
+
+/// Relative motion between two cursor points, or `None` for a report that
+/// didn't move the cursor — the accumulator downstream sums these deltas
+/// against a threshold, so a non-move must not count.
+///
+/// # Limitation
+/// `WH_MOUSE_LL` carries the cursor *position*, which the OS clamps to the
+/// desktop bounds, so a swipe that runs into an edge stops producing deltas
+/// even though the device keeps reporting counts. A gesture started near an
+/// edge can therefore fail to reach the swipe threshold. Reading the device's
+/// own counts needs raw input (`WM_INPUT`), a separate message pump.
+fn motion_delta(previous: POINT, pt: POINT) -> Option<(i32, i32)> {
+    let delta_x = pt.x - previous.x;
+    let delta_y = pt.y - previous.y;
+    (delta_x != 0 || delta_y != 0).then_some((delta_x, delta_y))
 }
 
 fn high_word(value: u32) -> u16 {
@@ -333,6 +372,33 @@ fn last_error(context: &str) -> HookError {
 mod tests {
     use super::*;
 
+    /// A gesture button pressed before the hook has seen any motion used to
+    /// leave the baseline empty, so the swipe's first move was swallowed as the
+    /// initial sample and a short swipe fell back to a click.
+    #[test]
+    fn button_down_seeds_the_baseline_for_the_first_move() {
+        let at = |x, y| MSLLHOOKSTRUCT {
+            pt: POINT { x, y },
+            ..MSLLHOOKSTRUCT::default()
+        };
+        // Explicit, so the test doesn't depend on running on a fresh thread
+        // (`--test-threads=1` shares one with every other test).
+        LAST_POINT.set(None);
+        translate_event(WM_LBUTTONDOWN as WPARAM, at(500, 400));
+
+        assert!(matches!(
+            translate_event(WM_MOUSEMOVE as WPARAM, at(560, 395)),
+            Some(MouseEvent::Moved {
+                delta_x: 60,
+                delta_y: -5
+            })
+        ));
+        assert!(
+            translate_event(WM_MOUSEMOVE as WPARAM, at(560, 395)).is_none(),
+            "a repeated point is not motion"
+        );
+    }
+
     #[test]
     fn translate_event_ignores_injected_mouse_input() {
         let data = MSLLHOOKSTRUCT {
@@ -341,6 +407,7 @@ mod tests {
         };
 
         assert!(translate_event(WM_LBUTTONDOWN as WPARAM, data).is_none());
+        assert!(translate_event(WM_MOUSEMOVE as WPARAM, data).is_none());
     }
 
     /// Wheel-forward (away from the user) must produce a positive `delta_y`, the

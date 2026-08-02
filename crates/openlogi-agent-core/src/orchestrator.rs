@@ -239,39 +239,37 @@ impl Orchestrator {
     }
 
     /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift,
-    /// native wheel mode) to one device, fire-and-forget on background threads.
-    /// Reuses the capture session's channel when it already points at the
-    /// device, like every other hardware write.
+    /// native wheel mode) to one device. Mouse settings run on one background
+    /// thread and one HID++ channel so concurrent multi-open of the same
+    /// receiver cannot cross-talk (#485); lighting stays a separate path
+    /// (keyboards / different feature).
     fn reapply_volatile_settings(&self, dev: &AgentDevice) {
         let Some(route) = dev.route.clone() else {
             return;
         };
         let key = &dev.config_key;
         let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
-        crate::hardware::write_scroll_wheel_mode_in_background(
-            Some(&self.shared.capture_channel),
-            (resolution.is_some() || inverted.is_some()).then_some(route.clone()),
-            resolution,
-            inverted,
-        );
-        if let Some(lighting) = self.config.lighting(key).filter(|l| l.enabled) {
-            crate::hardware::set_lighting_in_background(Some(route.clone()), &lighting);
-        }
-        if let Some(dpi) = self.config.dpi(key) {
-            crate::hardware::write_dpi_in_background(
+        let dpi = self.config.dpi(key);
+        let smartshift = self
+            .config
+            .smartshift(key)
+            .map(|ss| crate::hardware::SmartShiftApply {
+                mode: ss.mode.into(),
+                auto_disengage: ss.auto_disengage,
+                tunable_torque: ss.tunable_torque,
+            });
+        if resolution.is_some() || inverted.is_some() || dpi.is_some() || smartshift.is_some() {
+            crate::hardware::reapply_mouse_volatile_in_background(
                 Some(&self.shared.capture_channel),
-                Some(route.clone()),
+                route.clone(),
+                resolution,
+                inverted,
                 dpi,
+                smartshift,
             );
         }
-        if let Some(smartshift) = self.config.smartshift(key) {
-            crate::hardware::write_smartshift_in_background(
-                Some(&self.shared.capture_channel),
-                Some(route),
-                smartshift.mode.into(),
-                smartshift.auto_disengage,
-                smartshift.tunable_torque,
-            );
+        if let Some(lighting) = self.config.lighting(key).filter(|l| l.enabled) {
+            crate::hardware::set_lighting_in_background(Some(route), &lighting);
         }
     }
 
@@ -401,8 +399,11 @@ fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
                 model.serial_number.as_deref(),
                 model.unit_id,
             );
+            let Some(config_key) = stable_id.physical_key() else {
+                continue;
+            };
             devices.push(AgentDevice {
-                config_key: stable_id.config_key(),
+                config_key: config_key.into_string(),
                 model_key: model.config_key(),
                 route,
                 slot: paired.slot,
@@ -518,12 +519,15 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDevice, InventoryHealth, Orchestrator, configured_wheel_mode, plan_reapply,
-        reapply_targets,
+        AgentDevice, InventoryHealth, Orchestrator, build_devices, configured_wheel_mode,
+        plan_reapply, reapply_targets,
     };
     use openlogi_core::config::{Config, ScrollResolution};
-    use openlogi_core::device::Capabilities;
-    use openlogi_hid::DeviceRoute;
+    use openlogi_core::device::{
+        Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice,
+        ReceiverInfo,
+    };
+    use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
     fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
         AgentDevice {
@@ -539,6 +543,43 @@ mod tests {
             capabilities: None,
             online,
         }
+    }
+
+    fn direct_inventory(serial_number: Option<&str>, unit_id: [u8; 4]) -> DeviceInventory {
+        DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "MX Master 3S".to_string(),
+                vendor_id: 0x046d,
+                product_id: 0xb023,
+                unique_id: None,
+            },
+            paired: vec![PairedDevice {
+                slot: DIRECT_DEVICE_INDEX,
+                codename: Some("MX Master 3S".to_string()),
+                wpid: None,
+                kind: DeviceKind::Mouse,
+                online: true,
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: serial_number.map(str::to_string),
+                    unit_id,
+                    transports: DeviceTransports::default(),
+                    model_ids: [0xb034, 0, 0],
+                    extended_model_id: 2,
+                }),
+                capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            }],
+        }
+    }
+
+    #[test]
+    fn build_devices_skips_transient_zero_unit_direct_identity() {
+        assert!(build_devices(&[direct_inventory(None, [0; 4])]).is_empty());
+
+        let devices = build_devices(&[direct_inventory(Some("ABC123"), [0; 4])]);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].config_key, "direct:046d:b023:serial:abc123");
     }
 
     #[test]

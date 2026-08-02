@@ -39,28 +39,36 @@ sits beneath both.
 
 ## Build, run, verify
 
-The toolchain lives in a devenv (Nix) shell — **cargo is not on the bare PATH**. Run
-everything through direnv from the repo root, including git (the hooks need cargo):
+Nix/devenv is optional — rustup + `rust-toolchain.toml` is enough. If devenv is
+installed, direnv loads it; otherwise `.envrc` prints a notice and leaves PATH
+alone so system `cargo` works. With devenv active, cargo may only be on PATH
+inside the shell — run from the repo root (or `direnv exec . …`), including
+git (the hooks need cargo):
 
 ```sh
+cargo clippy --workspace --all-targets -- -D warnings
+# when cargo is only inside devenv:
 direnv exec . cargo clippy --workspace --all-targets -- -D warnings
 direnv exec . git commit …
 ```
 
-- Full local gate (same as CI): `devenv tasks run openlogi:check` = `fmt --check` +
-  `clippy -D warnings` + workspace tests. It must pass before every commit.
+- Full local gate (same as CI): `cargo fmt --all -- --check` +
+  `cargo clippy --workspace --all-targets -- -D warnings` +
+  `cargo test --workspace` (or `devenv tasks run openlogi:check`). Must
+  pass before every commit.
 - prek hooks (`prek.toml`): `cargo fmt` at commit; full-workspace clippy at push
   (rust-scoped, so non-Rust pushes skip it).
-- The macOS GUI build needs full Xcode for GPUI's Metal shaders; devenv sets
-  `DEVELOPER_DIR`/`SDKROOT`. If the shader compile fails, `direnv reload` first.
-- Dev-run the app with `cargo run -p openlogi-gui` — a cargo runner wraps it into
-  `target/dev/OpenLogi.app`. `cargo build` does NOT refresh that bundle, and a second
-  instance exits on the singleton lock: quit the old instance and re-`run` before
-  judging a UI change "not applied".
+- The macOS GUI build needs full Xcode for GPUI's Metal shaders. devenv sets
+  `DEVELOPER_DIR`/`SDKROOT` when present; without it, use system Xcode. If the
+  shader compile fails under devenv, `direnv reload` first.
+- Dev-run the app with `cargo run -p openlogi-gui` — a cargo runner wraps it
+  into `target/dev/OpenLogi.app`. `cargo build` does NOT refresh that bundle,
+  and a second instance exits on the singleton lock: quit the old instance and
+  re-`run` before judging a UI change "not applied".
 - macOS-green proves nothing about cfg-gated code. CI's linux/windows jobs are the
-  authoritative check (`RUSTFLAGS=-D warnings` globally, so plain warnings fail too);
-  `devenv tasks run openlogi:check-windows` cross-lints the ring-free subset locally.
-  Don't claim cross-platform success without CI.
+  authoritative check (`RUSTFLAGS=-D warnings` globally, so plain warnings fail
+  too); with devenv, `devenv tasks run openlogi:check-windows` cross-lints the
+  ring-free subset locally. Don't claim cross-platform success without CI.
 
 ## Rust standards
 
