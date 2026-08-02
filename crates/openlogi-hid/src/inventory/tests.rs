@@ -1,5 +1,9 @@
 use std::collections::HashSet;
 
+use hidpp::{
+    channel::{HidppMessage, LONG_REPORT_LENGTH},
+    protocol::v10::MessageType,
+};
 use openlogi_core::device::{
     DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
 };
@@ -7,7 +11,9 @@ use openlogi_core::device::{
 use super::cache::{
     CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_TICKS, backfill_identity, is_stale,
 };
-use super::probe::{NodeProbe, assemble_bolt_probe, parse_codename_unifying};
+use super::probe::{
+    NodeProbe, assemble_bolt_probe, is_unifying_codename_response, parse_codename_unifying,
+};
 use super::{Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop};
 use crate::inventory::features::ProbedFeatures;
 
@@ -372,4 +378,25 @@ fn codename_clamps_overlong_len() {
 #[test]
 fn codename_rejects_short_response() {
     assert_eq!(parse_codename_unifying(&[0x40]), None);
+}
+
+fn unifying_codename_response(sub_register: u8) -> HidppMessage {
+    let mut raw = [0u8; LONG_REPORT_LENGTH - 1];
+    raw[0] = 0xff;
+    raw[1] = MessageType::GetLongRegister.into();
+    raw[2] = 0xb5;
+    raw[3] = sub_register;
+    HidppMessage::Long(raw)
+}
+
+#[test]
+fn codename_response_matches_the_requested_slot() {
+    let response = unifying_codename_response(0x41);
+    assert!(is_unifying_codename_response(&response, 0x41));
+}
+
+#[test]
+fn late_codename_response_cannot_match_the_next_slot() {
+    let late_slot_one = unifying_codename_response(0x40);
+    assert!(!is_unifying_codename_response(&late_slot_one, 0x41));
 }

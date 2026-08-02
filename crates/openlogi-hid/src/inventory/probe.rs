@@ -2,7 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use futures_concurrency::future::Join as _;
 use hidpp::{
-    channel::HidppChannel,
+    channel::{HidppChannel, HidppMessage},
+    protocol::v10::{self, MessageType},
     receiver::{
         self, Receiver,
         bolt::{
@@ -23,7 +24,9 @@ use crate::route::DIRECT_DEVICE_INDEX;
 
 use super::cache::{CacheKey, CacheOutcome, Cached, probe_or_reuse, seen};
 use super::features::ProbedFeatures;
-use super::{ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_SLOT_PROBE};
+use super::{
+    ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_IDENTITY_PROBE, UNIFYING_SLOT_PROBE,
+};
 
 /// One probed node's contribution this tick: its inventory (if any), whether
 /// the node actually answered — the ledger replays the last snapshot when it
@@ -207,10 +210,29 @@ async fn probe_unifying_receiver(
     // channel correlates replies by register, not by the slot encoded in the
     // payload. Overlapping these reads can therefore cross-talk or leave one
     // request waiting until the outer PROBE_BUDGET expires.
+    let mut codenames = HashMap::with_capacity(connections.len());
+    let identity_reads = async {
+        for connection in &connections {
+            let slot = connection.index;
+            codenames.insert(slot, read_codename_unifying(&channel, slot).await);
+        }
+    };
+    if timeout(UNIFYING_IDENTITY_PROBE, identity_reads)
+        .await
+        .is_err()
+    {
+        debug!(
+            budget = ?UNIFYING_IDENTITY_PROBE,
+            completed = codenames.len(),
+            total = connections.len(),
+            "Unifying identity phase timed out; continuing without remaining names"
+        );
+    }
+
     let mut identities = Vec::with_capacity(connections.len());
     for connection in &connections {
         let slot = connection.index;
-        let codename = read_codename_unifying(&channel, slot).await;
+        let codename = codenames.remove(&slot).flatten();
         debug!(
             slot,
             online = connection.online,
@@ -642,11 +664,37 @@ async fn walk_unifying_slot(
 /// no chunk byte — wire-verified `40 0c "MX Master 2S"`. The name lives on the
 /// receiver, so it reads even while the device is offline (e.g. moved to BT).
 async fn read_codename_unifying(channel: &HidppChannel, slot: u8) -> Option<String> {
+    let sub_register = 0x40 + slot - 1;
     let response = channel
-        .read_long_register(0xFF, 0xB5, [0x40 + slot - 1, 0x00, 0x00])
+        .send_with_timeout(
+            v10::Message::Short(
+                v10::MessageHeader {
+                    device_index: 0xFF,
+                    sub_id: MessageType::GetLongRegister.into(),
+                },
+                [0xB5, sub_register, 0x00, 0x00],
+            )
+            .into(),
+            move |raw| is_unifying_codename_response(raw, sub_register),
+            UNIFYING_IDENTITY_PROBE,
+        )
         .await
         .ok()?;
-    parse_codename_unifying(&response)
+    let payload = v10::Message::from(response).extend_payload();
+    parse_codename_unifying(&payload[1..=16])
+}
+
+/// Match the echoed name sub-register as well as the RAP register header.
+/// This prevents a response arriving after a timed-out identity read from
+/// satisfying the following slot's request.
+pub(super) fn is_unifying_codename_response(raw: &HidppMessage, expected_sub_register: u8) -> bool {
+    let response = v10::Message::from(*raw);
+    let header = response.header();
+    let payload = response.extend_payload();
+    header.device_index == 0xFF
+        && header.sub_id == MessageType::GetLongRegister.into()
+        && payload[0] == 0xB5
+        && payload[1] == expected_sub_register
 }
 
 /// Parse a Unifying name-register response `[sub, len, data..]` into a string.
