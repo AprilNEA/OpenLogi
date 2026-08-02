@@ -10,7 +10,9 @@ use gpui::{
     Subscription, Window, div, px, rgb,
 };
 use gpui_component::{
-    Icon, IconName, h_flex,
+    Icon, IconName, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
@@ -369,8 +371,12 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
         .child(
             div()
                 .id(("dpi-preset-apply", idx))
+                .h_full()
+                .flex()
+                .items_center()
                 .text_body()
                 .text_color(pal.text_primary)
+                .cursor_pointer()
                 .child(format!("{value}"))
                 .on_click(move |_event, _window, cx| {
                     // Only apply once the supported DPI list is known, so the
@@ -387,11 +393,10 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
                 }),
         )
         .child(
-            div()
-                .id(("dpi-preset-remove", idx))
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(Icon::new(IconName::Close).size_3())
+            Button::new(("dpi-preset-remove", idx))
+                .xsmall()
+                .ghost()
+                .icon(IconName::Close)
                 .on_click(move |_event, _window, cx| {
                     let mut next = presets_for_remove.clone();
                     if idx < next.len() {

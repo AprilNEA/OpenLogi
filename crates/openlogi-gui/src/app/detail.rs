@@ -6,7 +6,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    IconName,
+    Icon, IconName,
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
     scroll::ScrollableElement as _,
@@ -66,6 +66,8 @@ pub(super) fn detail_header(
         .child(
             div()
                 .min_w_0()
+                .max_w(px(220.))
+                .truncate()
                 .text_heading()
                 .child(name),
         )
@@ -167,13 +169,13 @@ fn pointer_tab(
                 .flex_wrap()
                 .child(pointer_grid_card(panel_card_fill(
                     tr!("Pointer tuning"),
-                    IconName::Settings,
+                    Icon::empty().path("action-icons/gauge.svg"),
                     pal,
                     dpi_panel.clone().into_any_element(),
                 )))
                 .child(pointer_grid_card(panel_card_fill(
                     tr!("SmartShift"),
-                    IconName::Settings,
+                    Icon::empty().path("action-icons/refresh-cw.svg"),
                     pal,
                     smartshift_panel.clone().into_any_element(),
                 )))
@@ -263,7 +265,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         .child(wheel_resolution_control(resolution, hires_supported, pal));
     panel_card(
         tr!("Scrolling"),
-        IconName::Settings,
+        Icon::empty().path("action-icons/mouse.svg"),
         pal,
         v_flex()
             .gap_4()
@@ -403,7 +405,7 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>, pal: Palette) -> i
         .p(px(SCREEN_PAD))
         .child(div().w_full().max_w(px(560.)).child(panel_card(
             tr!("Lighting"),
-            IconName::Palette,
+            Icon::new(IconName::Palette),
             pal,
             lighting_panel.clone().into_any_element(),
         )))
@@ -458,7 +460,12 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
             },
         );
 
-    panel_card(tr!("Device details"), IconName::Info, pal, content)
+    panel_card(
+        tr!("Device details"),
+        Icon::new(IconName::Info),
+        pal,
+        content,
+    )
 }
 
 fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -517,7 +524,12 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
         )
         .into_any_element();
 
-    panel_card(tr!("Configuration"), IconName::Folder, pal, content)
+    panel_card(
+        tr!("Configuration"),
+        Icon::new(IconName::Folder),
+        pal,
+        content,
+    )
 }
 
 fn device_summary(name: &str, kind: DeviceKind, online: bool, pal: Palette) -> impl IntoElement {

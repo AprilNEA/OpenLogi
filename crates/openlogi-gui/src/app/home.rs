@@ -57,7 +57,7 @@ const GALLERY_GAP: f32 = 24.;
 /// floats the device photo on the window background above its name and battery;
 /// the row centres while the cards fit the viewport and scrolls once they don't.
 /// Clicking a card opens its detail screen and makes it the active device (whose
-/// bindings the hook uses); the active card wears a faint accent ring.
+/// bindings the hook uses); the active card wears an accent ring and tint.
 pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
     let (len, active_idx) = cx.try_global::<AppState>().map_or((0, 0), |s| {
         let len = s.device_list.len();
@@ -169,13 +169,11 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
 
 /// A device card in the Home gallery: the device photo floating on the window
 /// background above the name, connectivity dot, kind/slot, and battery. Fixed
-/// width so cards stay equal in the scrollable row. No card shows a border at
-/// rest — the accent ring appears only on hover (wired by the gallery). The
-/// `active` device (whose bindings and DPI are live) keeps a persistent but
-/// borderless marker: a faint accent fill, which reads whether or not the
-/// carousel centres it. The 1px border is always reserved in a transparent
-/// colour so the hover ring never nudges the layout. Returns a bare [`Div`] so
-/// the gallery can wire the hover and click handlers.
+/// width so cards stay equal in the scrollable row. The `active` device (whose
+/// bindings and DPI are live) keeps a persistent accent ring and faint fill;
+/// inactive cards gain the same ring on hover. The 1px border is always reserved
+/// so the hover ring never nudges the layout. Returns a bare [`Div`] so the
+/// gallery can wire the hover and click handlers.
 fn device_card(
     record: &DeviceRecord,
     active: bool,
@@ -190,7 +188,11 @@ fn device_card(
         .p_3()
         .rounded(pal.card_radius)
         .border_1()
-        .border_color(gpui::transparent_black())
+        .border_color(if active {
+            theme::accent()
+        } else {
+            gpui::transparent_black()
+        })
         .selected_fill(active)
         .child(
             div()
@@ -200,6 +202,7 @@ fn device_card(
                 .flex()
                 .items_center()
                 .justify_center()
+                .opacity(if record.online { 1. } else { 0.55 })
                 .when_some(glow, |this, (geom, color)| {
                     this.child(glow_canvas(geom, color))
                 })
