@@ -43,6 +43,16 @@ pub const FEATURE_ID: u16 = 0x1b04;
 /// bindable/capturable input.
 pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 
+/// Control ID used by the M720 Triathlon's thumb-rest "Switch Apps" button.
+/// The control advertises raw-XY reporting and is the M720 equivalent of the
+/// dedicated MX gesture button.
+pub const M720_GESTURE_BUTTON_CID: u16 = 0x00d0;
+
+/// Gesture-capable thumb controls, in preference order. Devices which expose
+/// the dedicated MX gesture CID use it; the M720 falls back to its raw-XY
+/// Switch Apps control.
+pub const GESTURE_BUTTON_CIDS: [u16; 2] = [GESTURE_BUTTON_CID, M720_GESTURE_BUTTON_CID];
+
 /// Control IDs of the "DPI / ModeShift" button family. Whichever a device
 /// exposes (and can divert) is captured and mapped to
 /// [`ButtonId::DpiToggle`](openlogi_core::binding::ButtonId::DpiToggle): the MX

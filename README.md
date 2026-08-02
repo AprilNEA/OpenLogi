@@ -61,8 +61,9 @@ Things OpenLogi does that Options+ won't:
   user unit, and `.deb` / `.rpm` / `.pkg.tar.zst` packages.
 - **Move the Gesture Button.** Pick which physical button owns the gesture
   role — the dedicated Gesture Button, middle, back, or forward — with per-direction swipe
-  bindings, or turn gestures off entirely. Options+ pins the gesture role to
-  the dedicated Gesture Button.
+  bindings. Turn OpenLogi gestures off while preserving the control's native
+  action, or disable the dedicated control entirely. Options+ pins the gesture
+  role to the dedicated Gesture Button.
 - **Keep config in plain text.** Everything is one TOML file you can read,
   diff, version-control, and copy between machines.
 - **Script it.** A real CLI: device inventory, asset prefetch, and on-device

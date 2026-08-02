@@ -108,7 +108,7 @@ enum BindingPopover {
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (device_key, asset, active, bindings, gesture_owner, glow) = cx
+        let (device_key, asset, active, bindings, gesture_owner, gesture_disabled, glow) = cx
             .try_global::<AppState>()
             .map(|s| {
                 (
@@ -117,6 +117,7 @@ impl Render for MouseModelView {
                     s.active_button,
                     s.button_bindings.clone(),
                     s.current_gesture_owner(),
+                    s.current_gesture_button_disabled(),
                     s.current_record().and_then(|r| keyboard_glow(s, r)),
                 )
             })
@@ -229,7 +230,13 @@ impl Render for MouseModelView {
             .w(px(canvas_w))
             .gap_4()
             .when(!capable.is_empty(), |col| {
-                col.child(gesture_owner_selector(&capable, gesture_owner, &view, pal))
+                col.child(gesture_owner_selector(
+                    &capable,
+                    gesture_owner,
+                    gesture_disabled,
+                    &view,
+                    pal,
+                ))
             })
             .child(canvas)
     }
@@ -309,6 +316,7 @@ fn gesture_owner_label(btn: ButtonId) -> &'static str {
 fn gesture_owner_selector(
     capable: &[ButtonId],
     owner: Option<ButtonId>,
+    disabled: bool,
     view: &Entity<MouseModelView>,
     pal: Palette,
 ) -> impl IntoElement {
@@ -323,27 +331,57 @@ fn gesture_owner_selector(
                 .child(tr!("Gesture Button")),
         )
         .children(
-            capable
-                .iter()
-                .map(|&btn| owner_chip(Some(btn), owner, view, pal)),
+            capable.iter().map(|&btn| {
+                owner_chip(GestureOwnerChoice::Button(btn), owner, disabled, view, pal)
+            }),
         )
-        .child(owner_chip(None, owner, view, pal))
+        .child(owner_chip(
+            GestureOwnerChoice::Off,
+            owner,
+            disabled,
+            view,
+            pal,
+        ))
+        .child(owner_chip(
+            GestureOwnerChoice::Disabled,
+            owner,
+            disabled,
+            view,
+            pal,
+        ))
+}
+
+#[derive(Clone, Copy)]
+enum GestureOwnerChoice {
+    Button(ButtonId),
+    Off,
+    Disabled,
 }
 
 /// One selectable chip in [`gesture_owner_selector`]. Clicking commits the new
 /// gesture owner via [`AppState::commit_gesture_owner`].
 fn owner_chip(
-    btn: Option<ButtonId>,
+    choice: GestureOwnerChoice,
     owner: Option<ButtonId>,
+    disabled: bool,
     view: &Entity<MouseModelView>,
     pal: Palette,
 ) -> AnyElement {
-    let selected = btn == owner;
-    let text = match btn {
-        Some(b) => tr!(gesture_owner_label(b)),
-        None => tr!("Off"),
+    let selected = match choice {
+        GestureOwnerChoice::Button(button) => !disabled && owner == Some(button),
+        GestureOwnerChoice::Off => !disabled && owner.is_none(),
+        GestureOwnerChoice::Disabled => disabled,
     };
-    let id_part = btn.map_or(0usize, |b| b as usize + 1);
+    let text = match choice {
+        GestureOwnerChoice::Button(button) => tr!(gesture_owner_label(button)),
+        GestureOwnerChoice::Off => tr!("Off"),
+        GestureOwnerChoice::Disabled => tr!("Disabled"),
+    };
+    let id_part = match choice {
+        GestureOwnerChoice::Off => 0,
+        GestureOwnerChoice::Disabled => 1,
+        GestureOwnerChoice::Button(button) => button as usize + 2,
+    };
     let view = view.clone();
     div()
         .id(("gesture-owner", id_part))
@@ -369,7 +407,13 @@ fn owner_chip(
         .cursor_pointer()
         .child(text)
         .on_click(move |_event, _window, cx| {
-            cx.update_global::<AppState, _>(|state, _| state.commit_gesture_owner(btn));
+            cx.update_global::<AppState, _>(|state, _| match choice {
+                GestureOwnerChoice::Button(button) => {
+                    state.commit_gesture_owner(Some(button));
+                }
+                GestureOwnerChoice::Off => state.commit_gesture_owner(None),
+                GestureOwnerChoice::Disabled => state.commit_gesture_button_disabled(),
+            });
             view.update(cx, |_, vcx| vcx.notify());
         })
         .into_any_element()

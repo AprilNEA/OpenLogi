@@ -1381,6 +1381,15 @@ impl AppState {
         self.config.gesture_owner(key)
     }
 
+    /// Whether the current device's dedicated gesture control is explicitly
+    /// disabled (diverted without raw motion and discarded).
+    #[must_use]
+    pub fn current_gesture_button_disabled(&self) -> bool {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .is_some_and(|key| self.config.gesture_button_disabled(key))
+    }
+
     /// Make `button` the current device's gesture button (or clear it with
     /// `None`), enforcing the one-gesture-button-per-device lock. Persists, tells
     /// the agent to rebuild, and refreshes the projected maps the UI reads.
@@ -1404,6 +1413,22 @@ impl AppState {
         self.button_bindings = self.bindings_for_current();
         self.gesture_bindings = self.gesture_bindings_for_current();
         self.persist_and_reload("gesture-button change");
+    }
+
+    /// Disable the dedicated gesture control without enabling raw-XY capture.
+    /// Existing gesture maps remain intact for later restoration.
+    pub fn commit_gesture_button_disabled(&mut self) {
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        self.config.disable_gesture_button(&key);
+        self.button_bindings = self.bindings_for_current();
+        self.gesture_bindings = self.gesture_bindings_for_current();
+        self.persist_and_reload("gesture-button disabled");
     }
 
     /// Update a single gesture-button sub-binding in memory, on disk, and in the

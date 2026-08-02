@@ -363,12 +363,15 @@ pub struct SmartShift {
 /// [`Binding::Gesture`](crate::binding::Binding::Gesture) — so switching the
 /// gesture button never has to collapse a button's gesture map to encode the
 /// choice: every gesture-capable button keeps its full direction map, and only
-/// the owner is dispatched. Serialized as a bare string (`"Off"` or a
+/// the owner is dispatched. Serialized as a bare string (`"Off"`, `"Disabled"`, or a
 /// [`ButtonId`] name) so it stays a TOML scalar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GestureOwner {
     /// Gestures are explicitly turned off for this device.
     Off,
+    /// The dedicated gesture control is diverted without raw motion and its
+    /// button reports are discarded.
+    Disabled,
     /// The named button owns the gesture role.
     Button(ButtonId),
 }
@@ -379,6 +382,7 @@ impl Serialize for GestureOwner {
             // "Off" can't collide with a ButtonId variant name (all CamelCase
             // control names), so the string space is unambiguous.
             GestureOwner::Off => serializer.serialize_str("Off"),
+            GestureOwner::Disabled => serializer.serialize_str("Disabled"),
             GestureOwner::Button(id) => id.serialize(serializer),
         }
     }
@@ -400,6 +404,9 @@ where
     let s = String::deserialize(deserializer)?;
     if s == "Off" {
         return Ok(Some(GestureOwner::Off));
+    }
+    if s == "Disabled" {
+        return Ok(Some(GestureOwner::Disabled));
     }
     // Parse the button name with a throwaway error type so an unknown token maps
     // to `None` (infer) rather than propagating an error.

@@ -19,14 +19,16 @@
 //! way regardless.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
+use openlogi_hid::{
+    CaptureChannel, CapturedInput, DeviceRoute, GestureButtonMode, run_capture_session,
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
@@ -77,6 +79,7 @@ fn action_threshold(sensitivity: i32) -> i32 {
 pub fn spawn(
     hook_maps: SharedHookMaps,
     gesture_bindings: GestureBindings,
+    gesture_button_disabled: Arc<AtomicBool>,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
@@ -96,6 +99,7 @@ pub fn spawn(
         runtime.block_on(manage(
             hook_maps,
             gesture_bindings,
+            gesture_button_disabled,
             dpi_cycle,
             capture_channel,
             thumbwheel_sensitivity,
@@ -147,14 +151,15 @@ fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -> bool {
 async fn manage(
     hook_maps: SharedHookMaps,
     gesture_bindings: GestureBindings,
+    gesture_button_disabled: Arc<AtomicBool>,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
-    // (route, capture_thumbwheel, divert_gesture_button)
-    let mut current: Option<(DeviceRoute, bool, bool)> = None;
+    // (route, capture_thumbwheel, gesture-button handling)
+    let mut current: Option<(DeviceRoute, bool, GestureButtonMode)> = None;
     let mut stop: Option<oneshot::Sender<()>> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut accumulators = WheelAccumulators::default();
@@ -191,17 +196,22 @@ async fn manage(
                 } else {
                     let target = dpi_cycle.read().ok().and_then(|guard| guard.target.clone());
                     let sensitivity = thumbwheel_sensitivity.load(Ordering::Relaxed);
-                    // Divert the dedicated HID++ gesture button only while it owns the gesture role. The
-                    // shared gesture map is non-empty exactly then (gesture_bindings_for
-                    // gates on the owner), so it doubles as that signal — no need to
-                    // thread the full config in. Re-evaluated each tick, so a
-                    // ReloadConfig owner change restarts the session accordingly.
-                    let divert_gesture = gesture_bindings.read().is_ok_and(|g| !g.is_empty());
+                    // A non-empty gesture map requests raw-XY gesture capture.
+                    // The explicit Disabled flag instead requests plain diversion
+                    // so firmware cannot fire its native action. Re-evaluated each
+                    // tick, so ReloadConfig restarts the session accordingly.
+                    let gesture_mode = if gesture_bindings.read().is_ok_and(|g| !g.is_empty()) {
+                        GestureButtonMode::Gestures
+                    } else if gesture_button_disabled.load(Ordering::Relaxed) {
+                        GestureButtonMode::Disabled
+                    } else {
+                        GestureButtonMode::Native
+                    };
                     target.map(|t| {
                         (
                             t,
                             thumbwheel_armed(&hook_maps, sensitivity),
-                            divert_gesture,
+                            gesture_mode,
                         )
                     })
                 };
@@ -218,12 +228,12 @@ async fn manage(
                     current = None;
                     continue;
                 }
-                if let Some((route, capture_thumbwheel, divert_gesture_button)) = want {
+                if let Some((route, capture_thumbwheel, gesture_button_mode)) = want {
                     let Some(receiver_lease) = receiver_access.try_acquire_for_capture() else {
                         current = None;
                         continue;
                     };
-                    current = Some((route.clone(), capture_thumbwheel, divert_gesture_button));
+                    current = Some((route.clone(), capture_thumbwheel, gesture_button_mode));
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
                     let slot = Arc::clone(&capture_channel);
@@ -235,7 +245,7 @@ async fn manage(
                         if let Err(e) = run_capture_session(
                             route,
                             capture_thumbwheel,
-                            divert_gesture_button,
+                            gesture_button_mode,
                             sink,
                             stop_rx,
                             slot,
