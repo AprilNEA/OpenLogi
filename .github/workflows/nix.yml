@@ -7,13 +7,18 @@ name: Nix CI
 # gpui-component, ...) is bumped in Cargo.lock. This workflow makes that
 # failure happen in the PR that bumps the pin — the error message prints the
 # correct hash to paste — instead of silently on master afterwards. Gated to
-# the files that actually affect the Nix build so it doesn't run on every
-# Rust change (Rust CI covers those).
+# the build's inputs — lockfile, manifests, build scripts, toolchain, and the
+# Nix/packaging files themselves — so it doesn't run on every .rs change
+# (Rust CI compiles those; the residual risk is a source edit that only
+# breaks inside the sandbox, which no path filter can express).
 on:
   push:
     branches: [master]
     paths:
       - "Cargo.lock"
+      - "**/Cargo.toml"
+      - "**/build.rs"
+      - "rust-toolchain.toml"
       - "flake.nix"
       - "flake.lock"
       - "nix/**"
@@ -23,6 +28,9 @@ on:
   pull_request:
     paths:
       - "Cargo.lock"
+      - "**/Cargo.toml"
+      - "**/build.rs"
+      - "rust-toolchain.toml"
       - "flake.nix"
       - "flake.lock"
       - "nix/**"
