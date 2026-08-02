@@ -28,6 +28,7 @@ _version: 1
 "Config folder": "Konfigurationsmapp"
 "Connected": "Ansluten"
 "Offline": "Frånkopplad"
+"Device offline — changes will apply when it reconnects.": "Device offline — changes will apply when it reconnects."
 "Battery": "Batteri"
 "Charging": "Laddar"
 "Full": "Fulladdat"

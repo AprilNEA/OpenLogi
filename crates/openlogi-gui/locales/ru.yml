@@ -28,6 +28,7 @@ _version: 1
 "Config folder": "Папка конфигурации"
 "Connected": "Подключено"
 "Offline": "Не в сети"
+"Device offline — changes will apply when it reconnects.": "Device offline — changes will apply when it reconnects."
 "Battery": "Батарея"
 "Charging": "Заряжается"
 "Full": "Полный заряд"

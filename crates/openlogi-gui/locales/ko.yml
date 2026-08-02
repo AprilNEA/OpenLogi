@@ -28,6 +28,7 @@ _version: 1
 "Config folder": "설정 폴더"
 "Connected": "연결됨"
 "Offline": "오프라인"
+"Device offline — changes will apply when it reconnects.": "Device offline — changes will apply when it reconnects."
 "Battery": "배터리"
 "Charging": "충전 중"
 "Full": "완충"

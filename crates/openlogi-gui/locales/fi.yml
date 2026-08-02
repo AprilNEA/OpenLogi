@@ -28,6 +28,7 @@ _version: 1
 "Config folder": "Määrityskansio"
 "Connected": "Yhdistetty"
 "Offline": "Ei yhteyttä"
+"Device offline — changes will apply when it reconnects.": "Device offline — changes will apply when it reconnects."
 "Battery": "Akku"
 "Charging": "Latautuu"
 "Full": "Täynnä"

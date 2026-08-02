@@ -28,6 +28,7 @@ _version: 1
 "Config folder": "Φάκελος διαμόρφωσης"
 "Connected": "Συνδεδεμένη"
 "Offline": "Εκτός σύνδεσης"
+"Device offline — changes will apply when it reconnects.": "Device offline — changes will apply when it reconnects."
 "Battery": "Μπαταρία"
 "Charging": "Φόρτιση"
 "Full": "Πλήρης"

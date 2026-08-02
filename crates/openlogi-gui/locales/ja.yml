@@ -28,6 +28,7 @@ _version: 1
 "Config folder": "設定フォルダー"
 "Connected": "接続済み"
 "Offline": "オフライン"
+"Device offline — changes will apply when it reconnects.": "Device offline — changes will apply when it reconnects."
 "Battery": "バッテリー"
 "Charging": "充電中"
 "Full": "フル充電"

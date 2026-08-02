@@ -28,6 +28,7 @@ _version: 1
 "Config folder": "Cartella configurazione"
 "Connected": "Connesso"
 "Offline": "Offline"
+"Device offline — changes will apply when it reconnects.": "Device offline — changes will apply when it reconnects."
 "Battery": "Batteria"
 "Charging": "In carica"
 "Full": "Carica completa"

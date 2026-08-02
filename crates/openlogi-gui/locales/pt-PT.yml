@@ -28,6 +28,7 @@ _version: 1
 "Config folder": "Pasta de configuração"
 "Connected": "Ligado"
 "Offline": "Desligado"
+"Device offline — changes will apply when it reconnects.": "Device offline — changes will apply when it reconnects."
 "Battery": "Bateria"
 "Charging": "A carregar"
 "Full": "Completa"

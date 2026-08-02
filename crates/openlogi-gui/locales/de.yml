@@ -28,6 +28,7 @@ _version: 1
 "Config folder": "Konfigurationsordner"
 "Connected": "Verbunden"
 "Offline": "Offline"
+"Device offline — changes will apply when it reconnects.": "Device offline — changes will apply when it reconnects."
 "Battery": "Akku"
 "Charging": "Wird geladen"
 "Full": "Voll"

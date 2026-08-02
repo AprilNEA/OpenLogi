@@ -28,6 +28,7 @@ _version: 1
 "Config folder": "Konfigurationsmappe"
 "Connected": "Tilsluttet"
 "Offline": "Offline"
+"Device offline — changes will apply when it reconnects.": "Device offline — changes will apply when it reconnects."
 "Battery": "Batteri"
 "Charging": "Oplader"
 "Full": "Fuldt"

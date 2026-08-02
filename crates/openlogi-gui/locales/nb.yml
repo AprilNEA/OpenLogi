@@ -28,6 +28,7 @@ _version: 1
 "Config folder": "Konfigurasjonsmappe"
 "Connected": "Tilkoblet"
 "Offline": "Frakoblet"
+"Device offline — changes will apply when it reconnects.": "Device offline — changes will apply when it reconnects."
 "Battery": "Batteri"
 "Charging": "Lader"
 "Full": "Fullt"

@@ -28,6 +28,7 @@ _version: 1
 "Config folder": "設定資料夾"
 "Connected": "已連線"
 "Offline": "離線"
+"Device offline — changes will apply when it reconnects.": "裝置離線 —— 重新連線後將套用變更。"
 "Battery": "電量"
 "Charging": "充電中"
 "Full": "已充滿"

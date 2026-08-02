@@ -28,6 +28,7 @@ _version: 1
 "Config folder": "Configuratiemap"
 "Connected": "Verbonden"
 "Offline": "Offline"
+"Device offline — changes will apply when it reconnects.": "Device offline — changes will apply when it reconnects."
 "Battery": "Batterij"
 "Charging": "Opladen"
 "Full": "Vol"

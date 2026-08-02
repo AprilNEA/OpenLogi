@@ -28,6 +28,7 @@ _version: 1
 "Config folder": "配置文件夹"
 "Connected": "已连接"
 "Offline": "离线"
+"Device offline — changes will apply when it reconnects.": "设备离线 —— 重新连接后将应用更改。"
 "Battery": "电量"
 "Charging": "充电中"
 "Full": "已充满"

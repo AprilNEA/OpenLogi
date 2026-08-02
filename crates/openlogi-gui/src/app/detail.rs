@@ -95,12 +95,41 @@ pub(super) fn detail_content(
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    match active {
+    let online = cx
+        .try_global::<AppState>()
+        .and_then(AppState::current_record)
+        .is_some_and(|record| record.online);
+    let content = match active {
         DetailTab::Buttons => buttons_tab(mouse_model).into_any_element(),
         DetailTab::Pointer => pointer_tab(dpi_panel, smartshift_panel, pal, cx).into_any_element(),
         DetailTab::Lighting => lighting_tab(lighting_panel, pal).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
-    }
+    };
+    v_flex()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .when(!online, |this| {
+            this.child(
+                h_flex()
+                    .flex_shrink_0()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(pal.border)
+                    .bg(pal.surface)
+                    .px_5()
+                    .py_2()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(Icon::new(IconName::Info).size_4())
+                    .child(tr!(
+                        "Device offline — changes will apply when it reconnects."
+                    )),
+            )
+        })
+        .child(content)
 }
 
 /// The device's sections as a compact, centred segmented control for the
