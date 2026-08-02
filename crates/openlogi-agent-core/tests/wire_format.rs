@@ -24,8 +24,9 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_agent_core::ipc::{
     AgentRequest, AgentSnapshot, AgentStatus, FoundDevice, InventoryHealth, MonitorEvent,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate, RingPress,
 };
+use openlogi_core::binding::Action;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
@@ -61,7 +62,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 10);
+    assert_eq!(PROTOCOL_VERSION, 16);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -83,6 +84,68 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::NextPairing {}, "0d");
     assert_wire(&AgentRequest::Snapshot {}, "0e");
     assert_wire(&AgentRequest::PollEventMonitor {}, "0f");
+    assert_wire(&AgentRequest::NextRingPress {}, "10");
+    assert_wire(
+        &AgentRequest::ExecuteAction {
+            action: Action::Copy,
+        },
+        "1106",
+    );
+    // The appended v12 payload variants: variant index as a varint, then the
+    // usual length-prefixed UTF-8 payload.
+    assert_wire(
+        &AgentRequest::ExecuteAction {
+            action: Action::Run("a".into()),
+        },
+        "112d0161",
+    );
+    assert_wire(
+        &AgentRequest::ExecuteAction {
+            action: Action::PasteText("Hi".into()),
+        },
+        "112e024869",
+    );
+    // v16's `next_show_request` — appended last, so it takes the next free
+    // variant index and every earlier method keeps its own.
+    assert_wire(&AgentRequest::NextShowRequest {}, "12");
+    // v13's Folder: variant index, then the BTreeMap as varint length +
+    // (RingSlot variant, Action variant) pairs.
+    assert_wire(
+        &AgentRequest::ExecuteAction {
+            action: Action::Folder(std::collections::BTreeMap::from([(
+                openlogi_core::binding::RingSlot::North,
+                Action::Copy,
+            )])),
+        },
+        "112f010006",
+    );
+    // v14's Named: variant index, the label, then the wrapped action.
+    assert_wire(
+        &AgentRequest::ExecuteAction {
+            action: Action::Copy.with_name("N"),
+        },
+        "1130014e06",
+    );
+}
+
+#[test]
+fn ring_press() {
+    // Varint seq: single byte below 251, 0xfb + u16 LE above; then the
+    // appended device key as a length-prefixed string.
+    assert_wire(
+        &RingPress {
+            seq: 3,
+            device_key: String::new(),
+        },
+        "0300",
+    );
+    assert_wire(
+        &RingPress {
+            seq: 300,
+            device_key: "ab".into(),
+        },
+        "fb2c01026162",
+    );
 }
 
 #[test]

@@ -47,12 +47,30 @@ walkdir = "2.5.0"
 fluent-langneg = "0.14.2"
 backon.workspace = true
 opener = { workspace = true }
+# The Action Ring overlay reads the raw HWND off the gpui window (same 0.6.x
+# gpui itself uses, so the resolve adds an edge, not a crate).
+raw-window-handle = "0.6"
 
 # Windows exe resources (app icon + VERSIONINFO) — see build.rs. The exact
 # version already in Cargo.lock as gpui's own build-dependency, so the resolve
 # adds an edge, not a crate, and the pinned gpui rev cannot move.
 [build-dependencies]
 embed-resource = "3.0.9"
+
+# Action Ring overlay window plumbing gpui doesn't expose: no-activate +
+# topmost styles, show/hide without activation, the global cursor, and the
+# Esc / outside-click cancel polls (see ring.rs::platform_win).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    # MonitorFromPoint / GetMonitorInfoW for the ring's work-area clamp.
+    "Win32_Graphics_Gdi",
+    # GetProcAddress for the undocumented SetWindowCompositionAttribute.
+    "Win32_System_LibraryLoader",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. objc2 gives typed,
 # `Retained<T>`-owned AppKit bindings so the status-item code can't leak (#99).

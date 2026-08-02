@@ -77,8 +77,12 @@ fn main() {
     self_restart::spawn();
 
     let config = Config::load_or_default().unwrap_or_else(|e| {
-        warn!(error = %e, "could not load config.toml; using defaults");
-        Config::default()
+        warn!(
+            error = %e,
+            "could not load config.toml; running on defaults WITHOUT persisting, \
+             so the unreadable file is left intact"
+        );
+        Config::defaults_for_unreadable()
     });
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -147,6 +151,11 @@ async fn run(config: Config) {
     // behind an async mutex. Locks are brief (a map rebuild or a clone).
     let orchestrator = Arc::new(Mutex::new(Orchestrator::new(config)));
     let shared = orchestrator.lock().await.shared();
+    // The tray thread starts before the orchestrator exists, so hand it the
+    // show channel now — it is the tray's only way to reach a GUI that is
+    // running with no window (see `openlogi_agent_core::show`).
+    #[cfg(target_os = "windows")]
+    tray_windows::set_show_channel(shared.show.clone());
     let hook_installed = Arc::new(AtomicBool::new(false));
 
     // Live event monitor: shared between the hook callback (which mirrors events
@@ -169,6 +178,7 @@ async fn run(config: Config) {
         shared.capture_channel.clone(),
         shared.thumbwheel_sensitivity.clone(),
         shared.receiver_access.clone(),
+        shared.ring.clone(),
     );
 
     let mut inventory_rx = watchers::inventory::spawn(Duration::from_secs(2));

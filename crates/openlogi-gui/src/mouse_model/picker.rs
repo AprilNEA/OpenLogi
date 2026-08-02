@@ -34,6 +34,7 @@ use crate::data::mouse_buttons::{
 use crate::mouse_model::view::MouseModelView;
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
+use crate::windows::ring_action_editor::{EditTarget, PayloadKind};
 
 /// Floor width for the [`action_picker`] popover. The action labels drive the
 /// actual width; this only stops the list from collapsing too narrow. Matches
@@ -70,14 +71,19 @@ pub fn action_picker<T: 'static>(
 
     let pal = theme::palette(cx);
     let button = rust_i18n::t!(btn.label());
+    let mut rows = action_rows("action-item", current.as_ref(), &on_pick, pal);
+    // Any button can carry a shortcut / command / snippet, not just ring
+    // slots — the DPI toggle bound to another app's hotkey, say.
+    rows.extend(payload_rows(
+        EditTarget::Button(btn),
+        current.as_ref().unwrap_or(&Action::None),
+        pal,
+    ));
     menu_card(pal)
         .min_w(px(POPOVER_W))
         .child(title(tr!("Bind %{name}", name => button), pal))
         .child(divider(pal))
-        .child(scroll_list(
-            "picker-scroll",
-            action_rows("action-item", current.as_ref(), &on_pick, pal),
-        ))
+        .child(scroll_list("picker-scroll", rows))
         .into_any_element()
 }
 
@@ -104,6 +110,66 @@ pub fn gesture_overview(
         .child(plus_card(view, active, pal, cx))
         // The flyout card only appears once a direction is activated.
         .when_some(active, |row, dir| row.child(flyout_card(dir, view, pal, cx)))
+        .into_any_element()
+}
+
+/// The CUSTOM section every binding menu ends with: the payload actions that
+/// carry free text and so open the editor dialog instead of committing
+/// straight from the list. Appended to the catalog rows so any binding
+/// surface — a ring slot, a gesture direction, a plain button — offers the
+/// same three.
+pub(crate) fn payload_rows(target: EditTarget, current: &Action, pal: Palette) -> Vec<AnyElement> {
+    let mut rows = vec![section_header(&rust_i18n::t!("CUSTOM"), pal)];
+    for (idx, kind) in [
+        PayloadKind::Run,
+        PayloadKind::PasteText,
+        PayloadKind::Shortcut,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        rows.push(payload_editor_row(target, kind, idx, current, pal));
+    }
+    rows
+}
+
+/// A "Run Command…" / "Paste Text…" action-list row. Unlike the catalog rows it
+/// commits nothing itself — it opens the payload-editor dialog seeded from
+/// the target's current action. Selection styling still mirrors the catalog
+/// so a slot bound to a payload action shows where its value lives.
+pub(crate) fn payload_editor_row(
+    target: EditTarget,
+    kind: PayloadKind,
+    idx: usize,
+    current: &Action,
+    pal: Palette,
+) -> AnyElement {
+    let selected = kind.payload_of(current).is_some();
+    let icon_path = kind.icon_path();
+    menu_row(("ring-payload", idx), pal, selected)
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    svg()
+                        .path(icon_path)
+                        .size_4()
+                        .flex_none()
+                        .text_color(pal.text_muted),
+                )
+                .child(div().child(format!("{}…", tr!(kind.title_key())))),
+        )
+        .when(selected, |s| {
+            s.child(
+                Icon::new(IconName::Check)
+                    .size_3()
+                    .text_color(rgb(ACCENT_BLUE)),
+            )
+        })
+        .on_click(move |_event, _window, cx| {
+            crate::windows::ring_action_editor::open(target, kind, cx);
+        })
         .into_any_element()
 }
 
@@ -252,14 +318,16 @@ fn flyout_card(
         view_pick.update(cx, |_, vcx| vcx.notify());
     });
 
+    let mut rows = action_rows("gesture-action", Some(&current), &on_pick, pal);
+    // Hold + swipe should reach a keyboard shortcut or a command too, not
+    // only the built-in catalog.
+    rows.extend(payload_rows(EditTarget::Gesture(dir), &current, pal));
+
     menu_card(pal)
         .min_w(px(POPOVER_W))
         .child(title(format!("{}  {}", dir.glyph(), tr!(dir.label())), pal))
         .child(divider(pal))
-        .child(scroll_list(
-            "gesture-dir-scroll",
-            action_rows("gesture-action", Some(&current), &on_pick, pal),
-        ))
+        .child(scroll_list("gesture-dir-scroll", rows))
         .into_any_element()
 }
 
@@ -268,7 +336,7 @@ fn flyout_card(
 /// Commit callback invoked when a row is clicked. Boxed so the row builder can
 /// be shared between the button picker and any future custom picker, which
 /// differ only in what they do after committing.
-type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
+pub(crate) type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
 
 /// The action catalog grouped by [`Category`], preserving catalog order within
 /// each group and first-seen order across groups.
@@ -290,13 +358,20 @@ fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
 /// bound action.
 pub(crate) const GESTURE_BUTTON_ICON: &str = "action-icons/move.svg";
 
+/// Icon for the Action Ring's label card — the dots grid echoes the pad's
+/// eight-dot ring marking; the ring has no single bound action either.
+pub(crate) const RING_BUTTON_ICON: &str = "action-icons/grid-3x3.svg";
+
 /// Asset path (served by [`crate::app_assets`]) of the vendored lucide glyph for
 /// an action — the leading icon in each action row and in the leader-line label
 /// card. Exhaustive on purpose: a new [`Action`] variant must pick an icon here
 /// (no catch-all fallback).
 pub(crate) fn action_icon_path(action: &Action) -> &'static str {
-    match action {
-        Action::None => "action-icons/ban.svg",
+    // A label doesn't change the glyph — look through it.
+    match action.inner() {
+        // `Named` is unreachable — `inner()` strips labels above — but it
+        // shares the neutral glyph rather than inventing an icon.
+        Action::None | Action::Named { .. } => "action-icons/ban.svg",
         Action::LeftClick | Action::RightClick => "action-icons/mouse-pointer-click.svg",
         Action::MiddleClick => "action-icons/mouse.svg",
         // Circled arrows: visually "back/forward as a button", distinct from
@@ -304,7 +379,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::MouseBack => "action-icons/circle-arrow-left.svg",
         Action::MouseForward => "action-icons/circle-arrow-right.svg",
         Action::Copy => "action-icons/copy.svg",
-        Action::Paste => "action-icons/clipboard-paste.svg",
+        Action::Paste | Action::PasteText(_) => "action-icons/clipboard-paste.svg",
         Action::Cut => "action-icons/scissors.svg",
         Action::Undo => "action-icons/undo-2.svg",
         Action::Redo => "action-icons/redo-2.svg",
@@ -322,7 +397,9 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::MissionControl => "action-icons/layout-grid.svg",
         Action::AppExpose => "action-icons/layers.svg",
         Action::PreviousDesktop => "action-icons/square-arrow-left.svg",
-        Action::NextDesktop => "action-icons/square-arrow-right.svg",
+        // Run shares the "launch outward" arrow — the closest glyph in the
+        // vendored set to Options+'s run icon.
+        Action::NextDesktop | Action::Run(_) => "action-icons/square-arrow-right.svg",
         Action::ShowDesktop => "action-icons/monitor.svg",
         Action::LaunchpadShow => "action-icons/grid-3x3.svg",
         Action::LockScreen => "action-icons/lock.svg",
@@ -340,6 +417,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
         Action::CustomShortcut(_) => "action-icons/keyboard.svg",
+        Action::Folder(_) => "action-icons/folder.svg",
     }
 }
 
@@ -347,7 +425,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
 /// icon, then its label; `current` adds a trailing accent check. Clicking any
 /// row invokes `on_pick`. `id_prefix` disambiguates element IDs between pickers
 /// that share this builder.
-fn action_rows(
+pub(crate) fn action_rows(
     id_prefix: &'static str,
     current: Option<&Action>,
     on_pick: &PickFn,
@@ -428,7 +506,7 @@ fn menu_row(
 }
 
 /// Small uppercase muted group header.
-fn section_header(label: &str, pal: Palette) -> AnyElement {
+pub(crate) fn section_header(label: &str, pal: Palette) -> AnyElement {
     div()
         .w_full()
         .px_2()

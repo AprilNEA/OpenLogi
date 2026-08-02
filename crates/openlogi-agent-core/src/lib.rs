@@ -15,6 +15,8 @@ pub mod hook_runtime;
 pub mod ipc;
 pub mod orchestrator;
 pub mod receiver_access;
+pub mod ring;
+pub mod show;
 pub mod transport;
 pub mod watchers;
 

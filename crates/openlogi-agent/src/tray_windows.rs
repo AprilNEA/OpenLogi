@@ -30,7 +30,10 @@
     reason = "win32 message plumbing round-trips ids through WPARAM/LPARAM by design"
 )]
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+use openlogi_agent_core::show::ShowChannel;
 
 use tracing::{info, warn};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -262,6 +265,16 @@ unsafe fn show_menu(hwnd: HWND) {
     }
 }
 
+/// The GUI's "open your main window" channel, published once the agent core
+/// is up. `None` only in the brief window before that (the tray thread starts
+/// first) — Show then falls back to focusing, as it did before.
+static SHOW: OnceLock<ShowChannel> = OnceLock::new();
+
+/// Hand the tray the channel it uses to reach a windowless GUI.
+pub fn set_show_channel(chan: ShowChannel) {
+    let _ = SHOW.set(chan);
+}
+
 /// Focus the running GUI's window, or launch the sibling GUI binary when no
 /// GUI is running (a second launch would just exit on the `openlogi.lock`
 /// singleton, so spawning blindly does nothing visible).
@@ -271,9 +284,18 @@ fn open_or_focus_gui() {
         spawn_gui();
         return;
     }
-    if !focus_window_of(&pids) {
-        // Running but windowless should not happen (the GUI always has its
-        // main window); log rather than spawn a doomed duplicate.
+    if focus_window_of(&pids) {
+        return;
+    }
+    // Running but windowless is normal: `--background` (login autostart)
+    // never opens a window, and the resident ring overlay keeps the process
+    // alive after the user closes the main one. Spawning a duplicate would
+    // exit on the singleton, and there is no `openlogi://` scheme on Windows
+    // to deliver a deeplink — so ask the running GUI over IPC instead.
+    if let Some(show) = SHOW.get() {
+        info!("GUI is running without a window — requesting it open one");
+        show.request();
+    } else {
         warn!("GUI process is running but no window was found to focus");
     }
 }

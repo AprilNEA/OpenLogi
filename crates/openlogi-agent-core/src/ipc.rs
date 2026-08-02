@@ -6,6 +6,7 @@
 //! flow long-polls [`Agent::next_pairing`], which the agent holds open until a
 //! pairing event arrives or the request deadline elapses.
 
+use openlogi_core::binding::Action;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
@@ -28,7 +29,39 @@ use serde::{Deserialize, Serialize};
 /// v8: [`WriteError`] carries typed HID++ operation failures.
 /// v9: `poll_event_monitor` appended + [`MonitorEvent`] (live event monitor).
 /// v10: `Capabilities::hires_wheel` appended.
-pub const PROTOCOL_VERSION: u32 = 10;
+/// v11: `next_ring_press` + `execute_action` appended (Action Ring overlay).
+/// v12: [`Action`] gains the appended `Run` / `PasteText` variants (they ride
+///      inside `execute_action` and config snapshots).
+/// v13: [`Action`] gains the appended `Folder` variant (ring sub-menus).
+/// v14: [`Action`] gains the appended `Named` variant (user action labels).
+/// v15: [`RingPress`] gains the appended `device_key` field, so the overlay
+///      resolves slots against the pad's own device.
+/// v16: `next_show_request` appended — the tray's only way to reach a GUI
+///      that is running with no window.
+pub const PROTOCOL_VERSION: u32 = 16;
+
+/// One Action Ring pad press, streamed to the GUI via
+/// [`Agent::next_ring_press`] so the on-screen ring opens (or confirms a
+/// selection) the moment the pad is tapped.
+///
+/// bincode encodes struct fields positionally — fields are append-only, like
+/// the [`Agent`] trait methods.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RingPress {
+    /// Monotonic press counter within one agent run. Lets the GUI drop
+    /// stale presses that queued while it had no poll outstanding (e.g.
+    /// while reconnecting) instead of replaying a burst.
+    pub seq: u64,
+    /// Config key of the device whose pad fired, so the overlay renders that
+    /// device's ring.
+    ///
+    /// Without it the GUI would resolve slots against its carousel selection,
+    /// which is a different device whenever the pad's mouse isn't the one on
+    /// screen — and a device with no ring binding falls back to the canonical
+    /// default ring, i.e. a ring the user never configured. Empty when the
+    /// agent has no active device key.
+    pub device_key: String,
+}
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep
@@ -272,7 +305,25 @@ pub trait Agent {
     /// Drain the events the hook has observed since the last poll, for the GUI's
     /// live event monitor. The first poll enables monitoring; the agent
     /// auto-disables it once polls stop (the GUI closed the panel or died), so
-    /// there is no explicit stop. Appended last — see the method-order note on
-    /// [`Agent::protocol_version`].
+    /// there is no explicit stop.
     async fn poll_event_monitor() -> Vec<MonitorEvent>;
+    /// Long-poll the next Action Ring pad press. The agent answers immediately
+    /// when a press is queued, otherwise holds the request until one arrives or
+    /// its hold window elapses (`None` — the GUI simply re-polls). Only presses
+    /// while the pad's effective binding is ring-shaped arrive here; a
+    /// single-action binding dispatches in the agent instead. Appended for
+    /// v11 — method order is wire-sensitive (see [`Self::protocol_version`]).
+    async fn next_ring_press() -> Option<RingPress>;
+    /// Execute one bound action through the agent's dispatch path — how the
+    /// ring overlay fires the sector the user selected. Runs in the agent so
+    /// synthesis works exactly like any button binding (and is not tied to the
+    /// GUI's window focus). Appended for v11 — see the method-order note on
+    /// [`Self::protocol_version`].
+    async fn execute_action(action: Action);
+
+    /// Long-poll for a "show the main window" request (the Windows tray's
+    /// Show, which cannot reach a windowless GUI any other way — see
+    /// [`crate::show`]). Answers `true` when one is pending, `false` when the
+    /// hold elapses so the client simply polls again.
+    async fn next_show_request() -> bool;
 }

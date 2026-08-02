@@ -6,4 +6,5 @@
 mod geometry;
 pub mod leader_lines;
 pub mod picker;
+pub mod ring_editor;
 pub mod view;

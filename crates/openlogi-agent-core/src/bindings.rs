@@ -77,6 +77,25 @@ pub fn gesture_bindings_for(
     bindings
 }
 
+/// Whether the Action Ring pad's effective binding opens the on-screen ring
+/// (a [`Binding::Ring`]) rather than firing a single action.
+///
+/// A device with no stored `ActionRing` binding gets the canonical default —
+/// which *is* a ring — so a fresh MX Master 4 opens the ring out of the box.
+/// A per-app overlay that demotes the pad to a single action disarms the ring
+/// for that app, mirroring how a gesture owner is demoted per app.
+#[must_use]
+pub fn ring_armed_for(config: &Config, config_key: Option<&str>, app_bundle: Option<&str>) -> bool {
+    let Some(key) = config_key else {
+        // No config key yet (no device selected) — the default binding rules.
+        return true;
+    };
+    config
+        .effective_bindings(key, app_bundle)
+        .remove(&ButtonId::ActionRing)
+        .is_none_or(|binding| binding.is_ring())
+}
+
 /// Per-direction maps for the OS-hook gesture buttons (Middle/Back/Forward in
 /// gesture mode) on `config_key`, with `app_bundle`'s per-app overlay applied,
 /// for the OS hook to resolve a hold+swipe.
@@ -157,6 +176,48 @@ mod tests {
         assert_eq!(
             projected.get(&ButtonId::GestureButton),
             Some(&Action::Paste)
+        );
+    }
+
+    #[test]
+    fn ring_stays_armed_by_default_and_disarms_on_a_single_binding() {
+        let mut cfg = Config::default();
+        // No stored binding: the canonical Ring default arms the overlay.
+        assert!(ring_armed_for(&cfg, Some("2b042"), None));
+        assert!(
+            ring_armed_for(&cfg, None, None),
+            "no selected device still means the default ring binding"
+        );
+
+        // The user demotes the pad to a plain action — taps dispatch instead.
+        cfg.set_binding("2b042", ButtonId::ActionRing, Action::Copy.into());
+        assert!(!ring_armed_for(&cfg, Some("2b042"), None));
+
+        // An explicit ring binding re-arms it.
+        cfg.set_binding(
+            "2b042",
+            ButtonId::ActionRing,
+            openlogi_core::binding::default_binding_for(ButtonId::ActionRing),
+        );
+        assert!(ring_armed_for(&cfg, Some("2b042"), None));
+    }
+
+    #[test]
+    fn per_app_single_override_disarms_the_ring_for_that_app_only() {
+        let mut cfg = Config::default();
+        cfg.set_per_app_binding(
+            "2b042",
+            "com.microsoft.VSCode",
+            ButtonId::ActionRing,
+            Some(Action::Paste),
+        );
+        assert!(
+            !ring_armed_for(&cfg, Some("2b042"), Some("com.microsoft.VSCode")),
+            "the overlay must not open where the pad is a plain action"
+        );
+        assert!(
+            ring_armed_for(&cfg, Some("2b042"), Some("com.other.App")),
+            "other apps keep the ring"
         );
     }
 

@@ -10,10 +10,18 @@ use anyhow::{Result, anyhow};
 use clap::Subcommand;
 use openlogi_hid::{DeviceRoute, dump_features};
 
+use std::fmt::Write as _;
+
+pub mod call;
 pub mod controls;
 pub mod dpi;
 pub mod features;
+pub mod fsb;
+pub mod hidden;
+pub mod hidsniff;
 pub mod lighting;
+pub mod panel;
+pub mod rawinput;
 pub mod smartshift;
 pub mod wheel;
 
@@ -31,6 +39,18 @@ pub enum DiagCmd {
     Lighting(lighting::LightingArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
+    /// Passively hex-dump raw input reports from every Logitech HID interface.
+    Hidsniff(hidsniff::HidSniffArgs),
+    /// Read or set the 0x1e00 EnableHiddenFeatures gate.
+    Hidden(hidden::HiddenArgs),
+    /// Raw-probe the 0x19c0 ForceSensingButton feature (Action Ring panel).
+    Fsb(fsb::FsbArgs),
+    /// OS-level RawInput tap: dump reports even from OS-owned HID collections.
+    Rawinput(rawinput::RawInputArgs),
+    /// Send one raw call to any HID++ 2.0 feature by ID (reverse-engineering).
+    Call(call::CallArgs),
+    /// Arm the Action Ring panel (Options+ recipe) and print its press events.
+    Panel(panel::PanelArgs),
 }
 
 impl DiagCmd {
@@ -42,8 +62,22 @@ impl DiagCmd {
             Self::Smartshift(args) => smartshift::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
+            Self::Hidsniff(args) => hidsniff::run(args).await,
+            Self::Hidden(args) => hidden::run(args).await,
+            Self::Fsb(args) => fsb::run(args).await,
+            Self::Rawinput(args) => rawinput::run(args).await,
+            Self::Call(args) => call::run(args).await,
+            Self::Panel(args) => panel::run(args).await,
         }
     }
+}
+
+/// Space-separated lowercase hex (`"0a 1b "` style) for diag report dumps.
+pub(crate) fn hex_dump(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x} ");
+        s
+    })
 }
 
 /// One online, paired device discovered during enumeration, already resolved to

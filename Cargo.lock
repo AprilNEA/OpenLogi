@@ -5061,13 +5061,16 @@ name = "openlogi-cli"
 version = "0.6.22"
 dependencies = [
  "anyhow",
+ "async-hid",
  "clap",
+ "futures-lite",
  "openlogi-assets",
  "openlogi-core",
  "openlogi-hid",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5109,6 +5112,7 @@ dependencies = [
  "openlogi-core",
  "openlogi-hid",
  "openlogi-hook",
+ "raw-window-handle",
  "rust-i18n",
  "serde",
  "serde_json",
@@ -5122,6 +5126,7 @@ dependencies = [
  "ureq",
  "url",
  "walkdir",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

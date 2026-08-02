@@ -51,13 +51,18 @@ pub enum ButtonId {
     /// The HID++ gesture button on MX-line devices. The press itself
     /// fires the bound action; swipe directions are P1.5 territory.
     GestureButton,
+    /// The MX Master 4 Action Ring pad — the force-sensitive ridged thumb pad,
+    /// captured over HID++ analytics events. With the default [`Binding::Ring`]
+    /// a tap opens the on-screen ring; bound to a [`Binding::Single`] action, a
+    /// tap fires that action directly instead.
+    ActionRing,
 }
 
 impl ButtonId {
     /// Every rebindable button in declaration (physical front-to-side) order —
     /// the iteration source for default-binding seeding and the popover
     /// trigger list.
-    pub const ALL: [ButtonId; 10] = [
+    pub const ALL: [ButtonId; 11] = [
         ButtonId::LeftClick,
         ButtonId::RightClick,
         ButtonId::MiddleClick,
@@ -68,6 +73,7 @@ impl ButtonId {
         ButtonId::ThumbwheelScrollUp,
         ButtonId::ThumbwheelScrollDown,
         ButtonId::GestureButton,
+        ButtonId::ActionRing,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -99,6 +105,7 @@ impl ButtonId {
             ButtonId::ThumbwheelScrollUp => "Thumb Wheel Up",
             ButtonId::ThumbwheelScrollDown => "Thumb Wheel Down",
             ButtonId::GestureButton => "Gesture Button",
+            ButtonId::ActionRing => "Action Ring",
         }
     }
 }
@@ -169,6 +176,102 @@ impl GestureDirection {
 }
 
 impl fmt::Display for GestureDirection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// One of the eight sectors of the on-screen Action Ring, clockwise from the
+/// top. The names are compass points — deliberately disjoint from every
+/// [`Action`] variant name *and* every [`GestureDirection`] name, because the
+/// untagged [`Binding`] routing distinguishes its arms purely by key names
+/// (see the [`Binding`] serialization notes).
+///
+/// Variant identifiers are TOML-stable: renames are migration events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RingSlot {
+    /// Straight up (12 o'clock).
+    North,
+    /// Up-right (1:30).
+    NorthEast,
+    /// Right (3 o'clock).
+    East,
+    /// Down-right (4:30).
+    SouthEast,
+    /// Straight down (6 o'clock).
+    South,
+    /// Down-left (7:30).
+    SouthWest,
+    /// Left (9 o'clock).
+    West,
+    /// Up-left (10:30).
+    NorthWest,
+}
+
+impl RingSlot {
+    /// All eight slots, clockwise from the top — the iteration source for
+    /// default seeding and the overlay's sector layout.
+    pub const ALL: [RingSlot; 8] = [
+        RingSlot::North,
+        RingSlot::NorthEast,
+        RingSlot::East,
+        RingSlot::SouthEast,
+        RingSlot::South,
+        RingSlot::SouthWest,
+        RingSlot::West,
+        RingSlot::NorthWest,
+    ];
+
+    /// Human-readable label for tooltips and the binding UI.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            RingSlot::North => "Top",
+            RingSlot::NorthEast => "Top Right",
+            RingSlot::East => "Right",
+            RingSlot::SouthEast => "Bottom Right",
+            RingSlot::South => "Bottom",
+            RingSlot::SouthWest => "Bottom Left",
+            RingSlot::West => "Left",
+            RingSlot::NorthWest => "Top Left",
+        }
+    }
+
+    /// Arrow glyph for compact list rendering, pointing at the slot's
+    /// position on the ring.
+    #[must_use]
+    pub fn glyph(self) -> &'static str {
+        match self {
+            RingSlot::North => "↑",
+            RingSlot::NorthEast => "↗",
+            RingSlot::East => "→",
+            RingSlot::SouthEast => "↘",
+            RingSlot::South => "↓",
+            RingSlot::SouthWest => "↙",
+            RingSlot::West => "←",
+            RingSlot::NorthWest => "↖",
+        }
+    }
+
+    /// The slot's centre angle in degrees, measured clockwise from straight
+    /// up — the overlay's sector geometry (each sector spans ±22.5° around
+    /// this).
+    #[must_use]
+    pub fn angle_degrees(self) -> f32 {
+        match self {
+            RingSlot::North => 0.0,
+            RingSlot::NorthEast => 45.0,
+            RingSlot::East => 90.0,
+            RingSlot::SouthEast => 135.0,
+            RingSlot::South => 180.0,
+            RingSlot::SouthWest => 225.0,
+            RingSlot::West => 270.0,
+            RingSlot::NorthWest => 315.0,
+        }
+    }
+}
+
+impl fmt::Display for RingSlot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.label())
     }
@@ -363,6 +466,197 @@ pub enum Action {
     /// The `display` field is used by [`Action::label`] so the popover
     /// shows the user-friendly chord name.
     CustomShortcut(KeyCombo),
+
+    /// Open a URL, file, or program — the Options+ "Run" action.
+    ///
+    /// The payload is the target optionally followed by `||` and an argument
+    /// string (`"C:\tool.exe||--flag value"`), the same convention Options+
+    /// documents in its Run editor; split it with [`split_run_target`].
+    /// On Windows `%VAR%` environment references in either half expand at
+    /// fire time.
+    Run(String),
+
+    /// Type a fixed text snippet wherever the caret is — the Options+
+    /// "Paste Text" action. Synthesized as Unicode key events rather than a
+    /// clipboard round-trip, so the user's clipboard is never clobbered.
+    PasteText(String),
+
+    /// A sub-ring — the Options+ ring "Folder": firing this slot swaps the
+    /// on-screen ring to the nested actions instead of executing anything
+    /// (the overlay resolves it; it never reaches the injector). Sparse maps
+    /// are fine — empty positions just don't render. One level deep by
+    /// convention: the editor only offers folders at the top level, and the
+    /// overlay treats a folder nested inside a folder as a plain (warned,
+    /// ignored) leaf.
+    Folder(BTreeMap<RingSlot, Action>),
+
+    /// A user-labelled wrapper — the Options+ card name. `Run`/`PasteText`/
+    /// `CustomShortcut` payloads are what the machine does; this is what the
+    /// user calls it ("Wispr Voice", not `⊞⌃Space`). Purely presentational:
+    /// every consumer dispatches [`Action::inner`], so a name can be added
+    /// or removed without changing behaviour.
+    Named {
+        /// Display label. Empty falls back to the wrapped action's own
+        /// label, so a blanked name is not a blank slot.
+        name: String,
+        /// What actually runs.
+        action: Box<Action>,
+    },
+}
+
+impl Action {
+    /// The action stripped of any [`Action::Named`] wrappers — what every
+    /// dispatcher should execute. Loops rather than recurses so an
+    /// accidentally double-wrapped action still resolves.
+    #[must_use]
+    pub fn inner(&self) -> &Action {
+        let mut current = self;
+        while let Action::Named { action, .. } = current {
+            current = action;
+        }
+        current
+    }
+
+    /// The user-chosen name, if this action carries one.
+    #[must_use]
+    pub fn display_name(&self) -> Option<&str> {
+        match self {
+            Action::Named { name, .. } if !name.is_empty() => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Wrap in (or, with an empty `name`, strip) a [`Action::Named`] label,
+    /// never stacking one wrapper on another.
+    #[must_use]
+    pub fn with_name(self, name: &str) -> Action {
+        let inner = self.inner().clone();
+        if name.is_empty() {
+            inner
+        } else {
+            Action::Named {
+                name: name.to_owned(),
+                action: Box::new(inner),
+            }
+        }
+    }
+}
+
+/// Split an [`Action::Run`] payload into its target and optional argument
+/// string at the first `||`, trimming whitespace around both halves. An
+/// empty argument half (`"app||"`) collapses to `None`.
+#[must_use]
+pub fn split_run_target(payload: &str) -> (&str, Option<&str>) {
+    match payload.split_once("||") {
+        Some((target, args)) => {
+            let args = args.trim();
+            (
+                target.trim(),
+                if args.is_empty() { None } else { Some(args) },
+            )
+        }
+        None => (payload.trim(), None),
+    }
+}
+
+/// Map one non-modifier chord token to its macOS virtual key code (the
+/// [`KeyCombo`] storage format) plus its canonical display spelling.
+fn parse_key_name(token: &str) -> Option<(u16, String)> {
+    let lower = token.to_ascii_lowercase();
+    // Letters and digits: canonical form is the uppercase letter / digit.
+    if lower.len() == 1 {
+        let ch = lower.chars().next()?;
+        let code = match ch {
+            'a' => 0x00,
+            's' => 0x01,
+            'd' => 0x02,
+            'f' => 0x03,
+            'h' => 0x04,
+            'g' => 0x05,
+            'z' => 0x06,
+            'x' => 0x07,
+            'c' => 0x08,
+            'v' => 0x09,
+            'b' => 0x0B,
+            'q' => 0x0C,
+            'w' => 0x0D,
+            'e' => 0x0E,
+            'r' => 0x0F,
+            'y' => 0x10,
+            't' => 0x11,
+            'u' => 0x20,
+            'i' => 0x22,
+            'o' => 0x1F,
+            'p' => 0x23,
+            'j' => 0x26,
+            'k' => 0x28,
+            'l' => 0x25,
+            'm' => 0x2E,
+            'n' => 0x2D,
+            '0' => 0x1D,
+            '1' => 0x12,
+            '2' => 0x13,
+            '3' => 0x14,
+            '4' => 0x15,
+            '5' => 0x17,
+            '6' => 0x16,
+            '7' => 0x1A,
+            '8' => 0x1C,
+            '9' => 0x19,
+            _ => return None,
+        };
+        return Some((code, ch.to_ascii_uppercase().to_string()));
+    }
+    let (code, canonical) = match lower.as_str() {
+        "space" => (0x31, "Space"),
+        "enter" | "return" => (0x24, "Enter"),
+        "tab" => (0x30, "Tab"),
+        "escape" | "esc" => (0x35, "Escape"),
+        "backspace" => (0x33, "Backspace"),
+        "delete" | "del" => (0x75, "Delete"),
+        "home" => (0x73, "Home"),
+        "end" => (0x77, "End"),
+        "pageup" => (0x74, "PageUp"),
+        "pagedown" => (0x79, "PageDown"),
+        "up" => (0x7E, "Up"),
+        "down" => (0x7D, "Down"),
+        "left" => (0x7B, "Left"),
+        "right" => (0x7C, "Right"),
+        "f1" => (0x7A, "F1"),
+        "f2" => (0x78, "F2"),
+        "f3" => (0x63, "F3"),
+        "f4" => (0x76, "F4"),
+        "f5" => (0x60, "F5"),
+        "f6" => (0x61, "F6"),
+        "f7" => (0x62, "F7"),
+        "f8" => (0x64, "F8"),
+        "f9" => (0x65, "F9"),
+        "f10" => (0x6D, "F10"),
+        "f11" => (0x67, "F11"),
+        "f12" => (0x6F, "F12"),
+        _ => return None,
+    };
+    Some((code, canonical.to_string()))
+}
+
+/// Short human name for a [`Action::Run`] target — the host for URLs, the
+/// file stem for paths, the raw target otherwise — truncated so slot labels
+/// stay readable.
+fn run_target_short_name(payload: &str) -> String {
+    let (target, _) = split_run_target(payload);
+    let short = if let Some((_, rest)) = target.split_once("://") {
+        rest.split(['/', '?']).next().unwrap_or(rest)
+    } else {
+        std::path::Path::new(target)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(target)
+    };
+    let mut out: String = short.chars().take(24).collect();
+    if short.chars().count() > 24 {
+        out.push('…');
+    }
+    out
 }
 
 /// A modifier + virtual-key keystroke captured by the P1.3 recorder UI or
@@ -391,6 +685,60 @@ pub struct KeyCombo {
 }
 
 impl KeyCombo {
+    /// Parse a human `"Win+Ctrl+Space"`-style chord: `+`-separated modifier
+    /// names (`Ctrl`/`Control`, `Shift`, `Alt`/`Option`, `Win`/`Super`/
+    /// `Meta`, `Cmd`/`Command`; case-insensitive) followed by exactly one
+    /// key — a letter, digit, `F1`–`F12`, or a named key (`Space`, `Enter`/
+    /// `Return`, `Tab`, `Escape`/`Esc`, `Backspace`, `Delete`, `Home`,
+    /// `End`, `PageUp`, `PageDown`, `Up`, `Down`, `Left`, `Right`). The
+    /// stored `display` is the canonical re-rendering of what was parsed,
+    /// so labels stay consistent regardless of input casing or order.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut modifiers = 0u8;
+        let mut key: Option<(u16, String)> = None;
+        for token in text.split('+') {
+            let token = token.trim();
+            if token.is_empty() {
+                return None;
+            }
+            match token.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => modifiers |= Self::MOD_CTRL,
+                "shift" => modifiers |= Self::MOD_SHIFT,
+                "alt" | "option" => modifiers |= Self::MOD_OPTION,
+                "win" | "windows" | "super" | "meta" => modifiers |= Self::MOD_WIN,
+                "cmd" | "command" => modifiers |= Self::MOD_CMD,
+                _ => {
+                    // Exactly one non-modifier token, and it must be last.
+                    if key.is_some() {
+                        return None;
+                    }
+                    key = Some(parse_key_name(token)?);
+                }
+            }
+        }
+        let (key_code, canonical_key) = key?;
+        let mut display = String::new();
+        for (bit, name) in [
+            (Self::MOD_WIN, "Win"),
+            (Self::MOD_CTRL, "Ctrl"),
+            (Self::MOD_OPTION, "Alt"),
+            (Self::MOD_SHIFT, "Shift"),
+            (Self::MOD_CMD, "Cmd"),
+        ] {
+            if modifiers & bit != 0 {
+                display.push_str(name);
+                display.push('+');
+            }
+        }
+        display.push_str(&canonical_key);
+        Some(Self {
+            modifiers,
+            key_code,
+            display,
+        })
+    }
+
     /// Bit for the ⌘ Command modifier in [`Self::modifiers`].
     pub const MOD_CMD: u8 = 1 << 0;
     /// Bit for the ⇧ Shift modifier in [`Self::modifiers`].
@@ -399,6 +747,12 @@ impl KeyCombo {
     pub const MOD_CTRL: u8 = 1 << 2;
     /// Bit for the ⌥ Option/Alt modifier in [`Self::modifiers`].
     pub const MOD_OPTION: u8 = 1 << 3;
+    /// Bit for the ⊞ Windows / Super modifier in [`Self::modifiers`].
+    ///
+    /// Appended for shortcuts like Win+Ctrl+Space that macOS's four
+    /// modifiers cannot express. Injection maps it to `VK_LWIN` on Windows
+    /// and Super/Meta on Linux; macOS treats it as ⌘ (the closest key).
+    pub const MOD_WIN: u8 = 1 << 4;
 
     /// Build the human-readable label from the modifier bitmask + key code.
     /// Falls back to `"⌘key 0xNN"` when the key code isn't one of the
@@ -410,6 +764,9 @@ impl KeyCombo {
             return self.display.clone();
         }
         let mut out = String::new();
+        if self.modifiers & Self::MOD_WIN != 0 {
+            out.push('⊞');
+        }
         if self.modifiers & Self::MOD_CTRL != 0 {
             out.push('⌃');
         }
@@ -466,15 +823,18 @@ impl KeyCombo {
 /// table keyed by [`GestureDirection`] names (`Up`/`Down`/`Left`/`Right`/
 /// `Click`).
 ///
-/// The two arms are disambiguated by the **zero overlap** between [`Action`]
-/// variant names and [`GestureDirection`] variant names — untagged tries
-/// `Single(Action)` first, and a table keyed by `Up` etc. cannot parse as an
-/// externally-tagged `Action`, so it falls through to `Gesture`. A payload
-/// action like `{ SetDpiPreset = 2 }` is a valid externally-tagged `Action`, so
-/// it stays `Single` and never reaches the `Gesture` arm. This invariant is the
-/// entire safety basis for untagged routing; the `binding_untagged_*` tests
-/// guard it (a future `Action` named `Up`/`Down`/`Left`/`Right`/`Click` would
-/// silently mis-route, and those tests would fail).
+/// The arms are disambiguated by the **zero overlap** between [`Action`]
+/// variant names, [`GestureDirection`] variant names, and [`RingSlot`] variant
+/// names — untagged tries `Single(Action)` first; a table keyed by `Up` etc.
+/// cannot parse as an externally-tagged `Action`, so it falls through to
+/// `Gesture`; a table keyed by compass names (`North` etc.) fails both and
+/// lands on `Ring`. A payload action like `{ SetDpiPreset = 2 }` is a valid
+/// externally-tagged `Action`, so it stays `Single` and never reaches the map
+/// arms. This invariant is the entire safety basis for untagged routing; the
+/// `binding_*_routes_*` tests guard it (a future `Action` named after a
+/// direction or compass point — or a [`RingSlot`] named like a
+/// [`GestureDirection`] — would silently mis-route, and those tests would
+/// fail).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Binding {
@@ -484,6 +844,12 @@ pub enum Binding {
     /// committed swipe direction, with [`GestureDirection::Click`] holding the
     /// plain-click (no-swipe) action.
     Gesture(BTreeMap<GestureDirection, Action>),
+    /// Per-sector sub-bindings for the Action Ring pad: a tap opens the
+    /// on-screen ring and the second tap fires the hovered sector's action.
+    /// Appended after [`Gesture`](Binding::Gesture) — untagged tries arms in
+    /// order, so an **empty** table keeps routing to `Gesture` as it always
+    /// has (ring maps are seeded with all eight slots and are never empty).
+    Ring(BTreeMap<RingSlot, Action>),
 }
 
 impl Binding {
@@ -493,6 +859,10 @@ impl Binding {
     /// when a gesture binding has no explicit `Click`.
     ///
     /// Lets the click-dispatch path stay binding-shape-agnostic.
+    ///
+    /// A [`Ring`](Binding::Ring) binding has no click action: the tap's job is
+    /// opening the on-screen ring (driven off the binding shape, not an
+    /// [`Action`]), so the single-action projection is [`Action::None`].
     #[must_use]
     pub fn click_action(&self) -> Action {
         match self {
@@ -501,16 +871,27 @@ impl Binding {
                 .get(&GestureDirection::Click)
                 .cloned()
                 .unwrap_or(Action::None),
+            Binding::Ring(_) => Action::None,
         }
     }
 
     /// The action bound to `direction`, if this is a gesture binding.
-    /// [`Single`](Binding::Single) has no directions and returns `None`.
+    /// The other arms have no directions and return `None`.
     #[must_use]
     pub fn direction_action(&self, direction: GestureDirection) -> Option<&Action> {
         match self {
-            Binding::Single(_) => None,
+            Binding::Single(_) | Binding::Ring(_) => None,
             Binding::Gesture(map) => map.get(&direction),
+        }
+    }
+
+    /// The action bound to `slot`, if this is a ring binding. The other arms
+    /// have no slots and return `None`.
+    #[must_use]
+    pub fn ring_action(&self, slot: RingSlot) -> Option<&Action> {
+        match self {
+            Binding::Single(_) | Binding::Gesture(_) => None,
+            Binding::Ring(map) => map.get(&slot),
         }
     }
 
@@ -519,6 +900,13 @@ impl Binding {
     #[must_use]
     pub fn is_gesture(&self) -> bool {
         matches!(self, Binding::Gesture(_))
+    }
+
+    /// Whether a tap on this binding's button opens the on-screen ring (the
+    /// [`Ring`](Binding::Ring) arm).
+    #[must_use]
+    pub fn is_ring(&self) -> bool {
+        matches!(self, Binding::Ring(_))
     }
 
     /// Promote a [`Single`](Binding::Single) binding in place to a
@@ -544,6 +932,19 @@ impl Binding {
             for dir in GestureDirection::ALL {
                 map.entry(dir)
                     .or_insert_with(|| default_gesture_binding(dir));
+            }
+        }
+    }
+
+    /// Fill any unbound slots of a [`Ring`](Binding::Ring) binding with their
+    /// canonical [`default_ring_binding`], so the overlay always renders a full
+    /// eight-sector ring even from a hand-edited sparse config. A no-op on the
+    /// other arms and on slots already bound.
+    pub fn fill_ring_defaults(&mut self) {
+        if let Binding::Ring(map) = self {
+            for slot in RingSlot::ALL {
+                map.entry(slot)
+                    .or_insert_with(|| default_ring_binding(slot));
             }
         }
     }
@@ -609,6 +1010,36 @@ impl Action {
             Action::HorizontalScrollLeft => "Scroll Left".into(),
             Action::HorizontalScrollRight => "Scroll Right".into(),
             Action::CustomShortcut(combo) => combo.rendered_label(),
+            Action::Run(payload) => {
+                format!("Run: {}", run_target_short_name(payload))
+            }
+            Action::PasteText(text) => {
+                let mut snippet: String = text
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(18)
+                    .collect();
+                if snippet.chars().count() < text.chars().count() {
+                    snippet.push('…');
+                }
+                format!("Paste: {snippet}")
+            }
+            Action::Folder(items) => {
+                let filled = items
+                    .values()
+                    .filter(|action| !matches!(action, Action::None))
+                    .count();
+                format!("Folder ({filled})")
+            }
+            Action::Named { name, action } => {
+                if name.is_empty() {
+                    action.label()
+                } else {
+                    name.clone()
+                }
+            }
         }
     }
 
@@ -621,8 +1052,9 @@ impl Action {
             | Action::MiddleClick
             | Action::MouseBack
             | Action::MouseForward => Category::Mouse,
-            // CustomShortcut is assigned to Editing so it doesn't need a
-            // separate arm (it's not in the picker catalog).
+            // CustomShortcut and PasteText are assigned to Editing, Run to
+            // System, so they don't need separate arms (none are in the
+            // picker catalog — they're entered via dedicated editor rows).
             Action::Copy
             | Action::Paste
             | Action::Cut
@@ -631,7 +1063,8 @@ impl Action {
             | Action::SelectAll
             | Action::Find
             | Action::Save
-            | Action::CustomShortcut(_) => Category::Editing,
+            | Action::CustomShortcut(_)
+            | Action::PasteText(_) => Category::Editing,
             Action::BrowserBack
             | Action::BrowserForward
             | Action::NewTab
@@ -646,9 +1079,12 @@ impl Action {
             | Action::NextDesktop
             | Action::ShowDesktop
             | Action::LaunchpadShow => Category::Navigation,
-            Action::None | Action::LockScreen | Action::Screenshot | Action::CaptureRegion => {
-                Category::System
-            }
+            Action::None
+            | Action::LockScreen
+            | Action::Screenshot
+            | Action::CaptureRegion
+            | Action::Run(_)
+            | Action::Folder(_) => Category::System,
             Action::PlayPause
             | Action::NextTrack
             | Action::PrevTrack
@@ -662,13 +1098,18 @@ impl Action {
             | Action::ScrollDown
             | Action::HorizontalScrollLeft
             | Action::HorizontalScrollRight => Category::Scroll,
+            // A label doesn't change what an action is.
+            Action::Named { action, .. } => action.category(),
         }
     }
 
     /// All pickable actions in a deterministic order.
     ///
-    /// [`Action::CustomShortcut`] is intentionally excluded — it is opened via
-    /// "Record shortcut…" (P1.3), not selected from the catalog.
+    /// [`Action::CustomShortcut`], [`Action::Run`], [`Action::PasteText`]
+    /// and [`Action::Folder`] are intentionally excluded — they carry
+    /// payloads and are entered via their dedicated editor rows ("Record
+    /// shortcut…", "Run…", "Paste text…", "Folder…"), not selected from the
+    /// catalog.
     #[must_use]
     pub fn catalog() -> Vec<Action> {
         vec![
@@ -758,6 +1199,10 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollRight,
         ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
         ButtonId::GestureButton => Action::MissionControl,
+        // Vestigial like GestureButton's entry: the Action Ring defaults to
+        // Binding::Ring (see default_binding_for), whose tap opens the ring
+        // rather than firing a single action.
+        ButtonId::ActionRing => Action::None,
     }
 }
 
@@ -772,6 +1217,24 @@ pub fn default_gesture_binding(direction: GestureDirection) -> Action {
         GestureDirection::Left => Action::PrevTab,
         GestureDirection::Right => Action::NextTab,
         GestureDirection::Click => Action::AppExpose,
+    }
+}
+
+/// Per-sector defaults for the Action Ring: opposing pairs (copy/paste,
+/// undo/redo) on the cardinal slots, with capture, media, and window controls
+/// on the diagonals — a productivity set in the spirit of the Options+ ring,
+/// shown on first run until the user rebinds the slots.
+#[must_use]
+pub fn default_ring_binding(slot: RingSlot) -> Action {
+    match slot {
+        RingSlot::North => Action::Copy,
+        RingSlot::NorthEast => Action::CaptureRegion,
+        RingSlot::East => Action::Redo,
+        RingSlot::SouthEast => Action::PlayPause,
+        RingSlot::South => Action::Paste,
+        RingSlot::SouthWest => Action::ShowDesktop,
+        RingSlot::West => Action::Undo,
+        RingSlot::NorthWest => Action::MissionControl,
     }
 }
 
@@ -795,6 +1258,12 @@ pub fn default_binding_for(button: ButtonId) -> Binding {
             GestureDirection::ALL
                 .into_iter()
                 .map(|d| (d, default_gesture_binding(d)))
+                .collect(),
+        ),
+        ButtonId::ActionRing => Binding::Ring(
+            RingSlot::ALL
+                .into_iter()
+                .map(|s| (s, default_ring_binding(s)))
                 .collect(),
         ),
         other => Binding::Single(default_binding(other)),
@@ -837,10 +1306,164 @@ mod tests {
         let catalog = Action::catalog();
         for action in &catalog {
             assert!(
-                !matches!(action, Action::CustomShortcut(_)),
-                "catalog must not contain CustomShortcut"
+                !matches!(
+                    action,
+                    Action::CustomShortcut(_)
+                        | Action::Run(_)
+                        | Action::PasteText(_)
+                        | Action::Folder(_)
+                        | Action::Named { .. }
+                ),
+                "catalog must not contain payload-carrying editor actions"
             );
         }
+    }
+
+    #[test]
+    fn folder_roundtrips_inside_a_ring_and_labels_by_filled_count() {
+        let folder = Action::Folder(BTreeMap::from([
+            (RingSlot::North, Action::PasteText("4 Tracks".into())),
+            (RingSlot::East, Action::Run("https://chatgpt.com/".into())),
+            (RingSlot::South, Action::None),
+        ]));
+        assert_eq!(folder.label(), "Folder (2)", "None entries are hidden");
+
+        let mut ring: BTreeMap<RingSlot, Action> = RingSlot::ALL
+            .into_iter()
+            .map(|s| (s, default_ring_binding(s)))
+            .collect();
+        ring.insert(RingSlot::NorthEast, folder.clone());
+        let mut bindings = BTreeMap::new();
+        bindings.insert(ButtonId::ActionRing, Binding::Ring(ring.clone()));
+        let back = binding_roundtrip(bindings);
+        assert_eq!(back[&ButtonId::ActionRing], Binding::Ring(ring));
+
+        // The untagged router must still land a bare `{ Folder = … }` table
+        // on Single, not mistake it for a one-entry Gesture/Ring map.
+        let parsed = toml::from_str::<BindingWrapper>(
+            "bindings.Forward = { Folder = { North = \"Copy\" } }",
+        )
+        .expect("deserialize");
+        assert!(matches!(
+            parsed.bindings[&ButtonId::Forward],
+            Binding::Single(Action::Folder(_))
+        ));
+    }
+
+    #[test]
+    fn named_labels_by_name_but_stays_the_wrapped_action() {
+        let named = Action::Run("https://gemini.google.com/".into()).with_name("Rephrase");
+        assert_eq!(named.label(), "Rephrase");
+        assert_eq!(named.display_name(), Some("Rephrase"));
+        assert_eq!(
+            named.inner(),
+            &Action::Run("https://gemini.google.com/".into()),
+            "dispatch sees through the label"
+        );
+        assert_eq!(
+            named.category(),
+            Action::Run(String::new()).category(),
+            "a label does not re-categorize"
+        );
+
+        // Renaming replaces the wrapper instead of stacking one.
+        let renamed = named.with_name("Gemini");
+        assert_eq!(renamed.display_name(), Some("Gemini"));
+        assert_eq!(
+            renamed.inner(),
+            &Action::Run("https://gemini.google.com/".into())
+        );
+        // An empty name unwraps rather than showing a blank slot.
+        assert_eq!(
+            renamed.with_name(""),
+            Action::Run("https://gemini.google.com/".into())
+        );
+        // An empty name inside a stored action still renders something.
+        let blank = Action::Named {
+            name: String::new(),
+            action: Box::new(Action::Copy),
+        };
+        assert_eq!(blank.label(), "Copy");
+        assert_eq!(blank.display_name(), None);
+    }
+
+    #[test]
+    fn named_roundtrips_through_toml() {
+        let bindings = BTreeMap::from([(
+            ButtonId::Forward,
+            Binding::Single(Action::PasteText("hi".into()).with_name("Greeting")),
+        )]);
+        let back = binding_roundtrip(bindings);
+        assert_eq!(
+            back[&ButtonId::Forward],
+            Binding::Single(Action::PasteText("hi".into()).with_name("Greeting"))
+        );
+    }
+
+    #[test]
+    fn key_combo_parse_accepts_chords_and_rejects_garbage() {
+        let combo = KeyCombo::parse("win + ctrl + space").expect("valid chord");
+        assert_eq!(combo.modifiers, KeyCombo::MOD_WIN | KeyCombo::MOD_CTRL);
+        assert_eq!(combo.key_code, 0x31);
+        assert_eq!(combo.display, "Win+Ctrl+Space");
+
+        let combo = KeyCombo::parse("Alt+Shift+z").expect("valid chord");
+        assert_eq!(combo.modifiers, KeyCombo::MOD_OPTION | KeyCombo::MOD_SHIFT);
+        assert_eq!(combo.key_code, 0x06);
+        assert_eq!(combo.display, "Alt+Shift+Z");
+
+        assert_eq!(KeyCombo::parse("F5").map(|c| c.key_code), Some(0x60));
+        // Bare modifiers, two keys, unknown names, empties: all rejected.
+        assert!(KeyCombo::parse("Ctrl+Shift").is_none());
+        assert!(KeyCombo::parse("A+B").is_none());
+        assert!(KeyCombo::parse("Ctrl+Wibble").is_none());
+        assert!(KeyCombo::parse("").is_none());
+        assert!(KeyCombo::parse("Ctrl++A").is_none());
+    }
+
+    #[test]
+    fn key_combo_win_modifier_renders_first() {
+        let combo = KeyCombo {
+            modifiers: KeyCombo::MOD_WIN | KeyCombo::MOD_CTRL,
+            key_code: 0x08,
+            display: String::new(),
+        };
+        assert_eq!(combo.rendered_label(), "⊞⌃C");
+    }
+
+    #[test]
+    fn split_run_target_handles_args_and_whitespace() {
+        assert_eq!(
+            split_run_target("https://gemini.google.com/"),
+            ("https://gemini.google.com/", None)
+        );
+        assert_eq!(
+            split_run_target(r"C:\tools\wispr.exe || --toggle voice"),
+            (r"C:\tools\wispr.exe", Some("--toggle voice"))
+        );
+        // An empty argument half collapses to None.
+        assert_eq!(split_run_target("notepad.exe||"), ("notepad.exe", None));
+        // Only the FIRST `||` splits — later ones belong to the arguments.
+        assert_eq!(split_run_target("a.exe||x||y"), ("a.exe", Some("x||y")));
+    }
+
+    #[test]
+    fn run_and_paste_labels_stay_short_and_readable() {
+        assert_eq!(
+            Action::Run("https://gemini.google.com/app?q=1".into()).label(),
+            "Run: gemini.google.com"
+        );
+        assert_eq!(
+            Action::Run(r"C:\Program Files\Wispr\wispr.exe||--paste".into()).label(),
+            "Run: wispr"
+        );
+        assert_eq!(
+            Action::PasteText("Build Phase Two".into()).label(),
+            "Paste: Build Phase Two"
+        );
+        // Long / multi-line text truncates with an ellipsis marker.
+        let long = Action::PasteText("Please write a draft response to this\nsecond line".into());
+        assert_eq!(long.label(), "Paste: Please write a dra…");
     }
 
     // ── Binding (merged model) serde routing ──────────────────────────────────
@@ -917,6 +1540,105 @@ mod tests {
                 "a {dir}-keyed table must route to Gesture, not Single"
             );
         }
+    }
+
+    #[test]
+    fn binding_ring_roundtrips() {
+        let map: BTreeMap<RingSlot, Action> = RingSlot::ALL
+            .into_iter()
+            .map(|s| (s, default_ring_binding(s)))
+            .collect();
+        let mut bindings = BTreeMap::new();
+        bindings.insert(ButtonId::ActionRing, Binding::Ring(map.clone()));
+        let back = binding_roundtrip(bindings);
+        assert_eq!(back[&ButtonId::ActionRing], Binding::Ring(map));
+    }
+
+    /// The ring-side untagged-routing guard, including the sparse case: a table
+    /// keyed by ANY single [`RingSlot`] name must land on [`Binding::Ring`] —
+    /// never parse as a valid externally-tagged [`Action`] (which would route
+    /// `Single`) and never satisfy the [`GestureDirection`]-keyed map (which
+    /// would route `Gesture`). A collision in either namespace fails here.
+    #[test]
+    fn binding_ring_slot_keyed_table_routes_to_ring() {
+        for slot in RingSlot::ALL {
+            let toml = format!("bindings.ActionRing.{slot:?} = \"None\"");
+            let parsed = toml::from_str::<BindingWrapper>(&toml).expect("deserialize");
+            assert!(
+                matches!(parsed.bindings[&ButtonId::ActionRing], Binding::Ring(_)),
+                "a {slot:?}-keyed table must route to Ring, not Single/Gesture"
+            );
+        }
+    }
+
+    /// The payload variants added for Options+ parity (`Run`, `PasteText`)
+    /// serialize as single-key tables (`{ Run = "…" }`) — the untagged router
+    /// must still land them on [`Binding::Single`], not mistake them for a
+    /// one-entry Gesture/Ring map. Their variant names live in the same
+    /// namespace as [`GestureDirection`] and [`RingSlot`] keys, so a rename
+    /// on either side shows up here.
+    #[test]
+    fn binding_payload_variant_tables_route_to_single() {
+        for toml in [
+            "bindings.Forward = { Run = \"https://gemini.google.com/\" }",
+            "bindings.Forward = { PasteText = \"Build Phase Two\" }",
+        ] {
+            let parsed = toml::from_str::<BindingWrapper>(toml).expect("deserialize");
+            assert!(
+                matches!(parsed.bindings[&ButtonId::Forward], Binding::Single(_)),
+                "{toml} must route to Single"
+            );
+        }
+        let roundtrip = binding_roundtrip(BTreeMap::from([
+            (
+                ButtonId::Back,
+                Binding::Single(Action::Run("notepad.exe||readme.txt".into())),
+            ),
+            (
+                ButtonId::Forward,
+                Binding::Single(Action::PasteText("Master Spec".into())),
+            ),
+        ]));
+        assert_eq!(
+            roundtrip[&ButtonId::Back],
+            Binding::Single(Action::Run("notepad.exe||readme.txt".into()))
+        );
+        assert_eq!(
+            roundtrip[&ButtonId::Forward],
+            Binding::Single(Action::PasteText("Master Spec".into()))
+        );
+    }
+
+    #[test]
+    fn ring_default_covers_every_slot_and_projects_no_click_action() {
+        let binding = default_binding_for(ButtonId::ActionRing);
+        let Binding::Ring(map) = &binding else {
+            panic!("ActionRing must default to a Ring binding, got {binding:?}");
+        };
+        assert_eq!(map.len(), RingSlot::ALL.len(), "all eight slots seeded");
+        // The pad's tap opens the ring — the single-action projection the
+        // agent-side dispatch reads must be a no-op, or a tap would both open
+        // the ring and fire an action.
+        assert_eq!(binding.click_action(), Action::None);
+        assert!(binding.is_ring());
+        assert_eq!(
+            binding.ring_action(RingSlot::North),
+            Some(&default_ring_binding(RingSlot::North))
+        );
+    }
+
+    #[test]
+    fn fill_ring_defaults_completes_a_sparse_map_preserving_user_choices() {
+        let mut sparse = BTreeMap::new();
+        sparse.insert(RingSlot::East, Action::LockScreen);
+        let mut binding = Binding::Ring(sparse);
+        binding.fill_ring_defaults();
+        let Binding::Ring(map) = &binding else {
+            panic!("fill_ring_defaults must not change the arm");
+        };
+        assert_eq!(map.len(), RingSlot::ALL.len());
+        assert_eq!(map[&RingSlot::East], Action::LockScreen, "user choice kept");
+        assert_eq!(map[&RingSlot::North], default_ring_binding(RingSlot::North));
     }
 
     /// The collision case: a payload [`Action`] also serializes as a single-key

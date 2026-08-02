@@ -33,6 +33,7 @@ mod app;
 mod app_assets;
 mod app_menu;
 mod asset;
+mod chord_recorder;
 mod components;
 mod data;
 mod diagnostics;
@@ -40,6 +41,7 @@ mod i18n;
 mod ipc_client;
 mod mouse_model;
 mod platform;
+mod ring;
 mod state;
 mod theme;
 mod windows;
@@ -141,8 +143,12 @@ fn main() -> Result<()> {
     let inventories: Vec<DeviceInventory> = Vec::new();
 
     let initial_config = Config::load_or_default().unwrap_or_else(|e| {
-        warn!(error = %e, "could not load config.toml; using defaults");
-        Config::default()
+        warn!(
+            error = %e,
+            "could not load config.toml; running on defaults WITHOUT persisting, \
+             so the unreadable file is left intact"
+        );
+        Config::defaults_for_unreadable()
     });
 
     // Resolve the UI locale before any menu or window is built so the first
@@ -156,6 +162,8 @@ fn main() -> Result<()> {
         updates: mut ipc_updates,
         commands: ipc_commands,
         pairing: mut ipc_pairing,
+        ring: mut ipc_ring,
+        show: mut ipc_show,
     } = ipc_client::spawn(std::time::Duration::from_secs(2));
 
     // Manual asset actions (Settings → Assets): Refresh / Clear cache. The
@@ -191,6 +199,11 @@ fn main() -> Result<()> {
     // Reopen the window when the app is relaunched with none open (dock click).
     app.on_reopen(|cx| open_main_window(&[], cx));
 
+    // `--background` (login autostart): start resident for the Action Ring
+    // and the agent's tray, but do not open the main window — the tray's
+    // "Show Main Window" deeplink opens it on demand.
+    let background = std::env::args().any(|arg| arg == "--background");
+
     app.run(move |cx| {
         gpui_component::init(cx);
         theme::register_builtin_themes(cx);
@@ -200,6 +213,11 @@ fn main() -> Result<()> {
         // through the agent over IPC; the agent's pairing long-poll feeds events
         // back into this global via the select loop below.
         cx.set_global(windows::add_device::PairingUi::Idle);
+
+        // The Action Ring overlay controller: pad presses from the agent's
+        // ring long-poll (select loop below) open it / confirm a selection,
+        // and it fires the chosen action back through the command channel.
+        ring::init(ipc_commands.clone(), cx);
 
         // The Settings → Assets buttons drive the asset sync (which lives on
         // the select loop below) through this global.
@@ -213,6 +231,9 @@ fn main() -> Result<()> {
         // On-demand GUI: quit when the last window closes. The agent stays
         // resident and keeps remapping (and hosts the menu-bar item from which
         // the GUI is reopened), so nothing needs the GUI process to linger.
+        // On Windows this never fires: the ring overlay's always-alive hidden
+        // window (created eagerly in `ring::init`) keeps the process resident,
+        // because the on-screen ring lives in this process, not the agent.
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -233,15 +254,20 @@ fn main() -> Result<()> {
                         ipc_commands,
                     ));
                 }
-                open_main_window(&inventories, cx);
+                if !background {
+                    open_main_window(&inventories, cx);
+                }
             });
 
             // First launch only: offer to opt in to the update check, since it
             // defaults to off. Marked seen either way so it shows just once.
+            // Deferred in background mode (nothing may pop over the login
+            // desktop); it stays unseen and shows on the first real open.
             cx.update(|cx| {
-                let show = cx
-                    .try_global::<AppState>()
-                    .is_some_and(|s| !s.app_settings().update_prompt_seen);
+                let show = !background
+                    && cx
+                        .try_global::<AppState>()
+                        .is_some_and(|s| !s.app_settings().update_prompt_seen);
                 if show {
                     windows::update_consent::open(cx);
                 }
@@ -485,6 +511,28 @@ fn main() -> Result<()> {
                         cx.update(|cx| {
                             windows::add_device::apply_update(cx, update);
                         });
+                    }
+                    Some(()) = ipc_show.recv() => {
+                        // The tray asked for the main window. Routed through
+                        // `open_main_window`, which focuses an existing one or
+                        // opens a fresh one — this process may legitimately
+                        // have no window at all (`--background`, or the user
+                        // closed it while the ring overlay kept us alive).
+                        tracing::info!("tray requested the main window");
+                        cx.update(|cx| open_main_window(&[], cx));
+                    }
+                    Some(press) = ipc_ring.recv() => {
+                        tracing::debug!(
+                            seq = press.seq,
+                            device = press.device_key,
+                            "action ring press received"
+                        );
+                        // An empty key means the agent had no active device;
+                        // fall back to the carousel selection rather than
+                        // rendering nothing.
+                        let device_key = (!press.device_key.is_empty())
+                            .then_some(press.device_key);
+                        cx.update(|cx| ring::on_pad_press(device_key, cx));
                     }
                     Some(cmd) = gui_cmd_rx.recv() => {
                         cx.update(|cx| dispatch_gui_command(cmd, cx));

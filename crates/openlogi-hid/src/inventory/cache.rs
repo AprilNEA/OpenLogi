@@ -21,6 +21,23 @@ pub(super) const REFRESH_TICKS: u64 = 15;
 pub(super) enum CacheKey {
     /// Bolt: the unit id from the pairing register (cheap, read every tick).
     Bolt { unit_id: [u8; 4] },
+    /// Bolt fallback for a device whose pairing register reports an all-zero
+    /// unit id — real firmware does this (an MX Master 4 over Bolt, for one).
+    /// Without a key such a device is re-probed every tick forever: a full
+    /// feature walk (tens of HID++ round-trips) every couple of seconds, on
+    /// the radio link its own input shares, for as long as the agent runs.
+    ///
+    /// Keyed on receiver + slot + model rather than the device's own
+    /// identity, so it is weaker than [`Self::Bolt`]: a *different* model
+    /// paired into the same slot yields a different key, and the same model
+    /// re-paired there would have the same feature table anyway. Volatile
+    /// state (battery) is re-read per tick regardless, and `REFRESH_TICKS`
+    /// still forces a periodic self-healing re-walk.
+    BoltSlot {
+        receiver_uid: String,
+        slot: u8,
+        wpid: Option<u16>,
+    },
     /// Unifying: keyed on the full receiver serial number + pairing slot.
     /// Using the complete serial (not just a prefix) avoids collisions between
     /// two receivers whose serials share a common prefix (e.g. "DA2699E1" and
