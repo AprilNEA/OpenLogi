@@ -32,7 +32,10 @@ use load::LazyDeviceData;
 
 use crate::asset::AssetResolver;
 use crate::data::mouse_buttons::{Action, Binding, ButtonId, GestureDirection};
-use crate::state::devices::{build_device_list, pick_initial_device, sort_device_list};
+use crate::state::devices::{
+    adopt_transient_record, build_device_list, direct_key_prefix, pick_initial_device,
+    sort_device_list,
+};
 use openlogi_agent_core::bindings::{bindings_for, gesture_bindings_for};
 use openlogi_agent_core::device_order::PhysicalDeviceKey;
 
@@ -444,10 +447,17 @@ impl AppState {
             .into_iter()
             .map(|record| (record.config_key.clone(), record))
             .collect::<BTreeMap<_, _>>();
+        let mut adopted = self.adopt_transient_records(&mut by_key);
         let mut merged = Vec::with_capacity(by_key.len().max(self.device_list.len()));
 
         for previous in &self.device_list {
             if let Some(record) = by_key.remove(&previous.config_key) {
+                self.inventory_misses.remove(&previous.config_key);
+                merged.push(record);
+                continue;
+            }
+
+            if let Some(record) = adopted.remove(&previous.config_key) {
                 self.inventory_misses.remove(&previous.config_key);
                 merged.push(record);
                 continue;
@@ -480,6 +490,9 @@ impl AppState {
             self.inventory_misses.remove(&key);
             merged.push(record);
         }
+        // Adopted records whose known card was never in the previous list
+        // (identity known only from config) still belong in the carousel.
+        merged.extend(adopted.into_values());
         self.inventory_misses
             .retain(|key, _| merged.iter().any(|record| record.config_key == *key));
         // `merged` is `previous-order + newly-appeared`, so re-apply the
@@ -487,6 +500,73 @@ impl AppState {
         // the carousel permanently.
         sort_device_list(&mut merged);
         merged
+    }
+
+    /// Pair each transient direct record in the snapshot with the device it
+    /// physically is. A transient key (`…:unit:00000000`) is a half-read probe
+    /// of some existing device, not a new one (#482): when exactly one known
+    /// card shares its `direct:<vid>:<pid>` wire identity, the transient record
+    /// is folded into that card instead of surfacing beside it (or evicting
+    /// it). A transient record whose wire identity is already live and online
+    /// is dropped as probe noise, and an ambiguous one (two known same-model
+    /// cards) is left alone.
+    fn adopt_transient_records(
+        &self,
+        by_key: &mut BTreeMap<String, DeviceRecord>,
+    ) -> BTreeMap<String, DeviceRecord> {
+        let transient_keys: Vec<String> = by_key
+            .values()
+            .filter(|record| !record.is_persistent())
+            .map(|record| record.config_key.clone())
+            .collect();
+        let mut adopted = BTreeMap::new();
+        for key in transient_keys {
+            let Some(prefix) = direct_key_prefix(&key) else {
+                continue;
+            };
+            let same_wire = |key: &str, record: &DeviceRecord| {
+                record.is_persistent() && direct_key_prefix(key) == Some(prefix)
+            };
+            if by_key
+                .iter()
+                .any(|(k, record)| same_wire(k, record) && record.online)
+            {
+                by_key.remove(&key);
+                continue;
+            }
+            let mut candidates: Vec<String> = by_key
+                .iter()
+                .filter(|(k, record)| same_wire(k, record))
+                .map(|(k, _)| k.clone())
+                .collect();
+            for previous in &self.device_list {
+                if same_wire(&previous.config_key, previous)
+                    && !candidates.contains(&previous.config_key)
+                {
+                    candidates.push(previous.config_key.clone());
+                }
+            }
+            let [known_key] = candidates.as_slice() else {
+                continue;
+            };
+            // Last tick's record carries the freshest identity; the offline
+            // placeholder built from config is the fallback.
+            let known = self
+                .device_list
+                .iter()
+                .find(|record| record.config_key == *known_key)
+                .cloned()
+                .or_else(|| by_key.get(known_key).cloned());
+            let Some(known) = known else {
+                continue;
+            };
+            let known_key = known_key.clone();
+            by_key.remove(&known_key);
+            if let Some(live) = by_key.remove(&key) {
+                adopted.insert(known_key, adopt_transient_record(&known, live));
+            }
+        }
+        adopted
     }
 
     /// Switch the carousel to `idx`. Out-of-range indices are silently
@@ -1412,6 +1492,89 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].config_key, "direct:046d:b023:unit:a393cae0");
         assert!(merged[0].is_persistent());
+    }
+
+    #[test]
+    fn transient_probe_folds_into_its_known_card() {
+        // #482: a half-read probe (all-zero unit id) of the only known device
+        // with that vid/pid must not evict the known card or appear beside it —
+        // the card keeps its identity and takes the live volatile state.
+        let cache = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+            &cache,
+            commands,
+        );
+        let stable_key = "direct:046d:b023:unit:a393cae0";
+        assert_eq!(state.device_list[0].config_key, stable_key);
+
+        let transient_list = build_device_list(&[direct_inventory([0; 4])], &cache, &state.config);
+        let merged = state.merge_inventory_snapshot(transient_list);
+
+        assert_eq!(merged.len(), 1, "no second card for the half-read probe");
+        assert_eq!(merged[0].config_key, stable_key);
+        assert!(merged[0].is_persistent());
+        assert!(merged[0].online, "the live probe supplies volatile state");
+        assert!(merged[0].route.is_some(), "the live route is kept usable");
+    }
+
+    #[test]
+    fn transient_record_beside_its_live_device_is_dropped() {
+        // Both a full and a half-read probe of the same wire product in one
+        // snapshot: the transient record is probe noise, not a second device.
+        let cache = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+            &cache,
+            commands,
+        );
+
+        let both = build_device_list(
+            &[
+                direct_inventory([0xa3, 0x93, 0xca, 0xe0]),
+                direct_inventory([0; 4]),
+            ],
+            &cache,
+            &state.config,
+        );
+        assert_eq!(both.len(), 2);
+        let merged = state.merge_inventory_snapshot(both);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].config_key, "direct:046d:b023:unit:a393cae0");
+        assert!(merged[0].online);
+    }
+
+    #[test]
+    fn ambiguous_transient_probe_is_not_adopted() {
+        // Two same-model devices are known; a half-read probe could be either,
+        // so neither card may steal it.
+        let cache = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[
+                direct_inventory([1, 1, 1, 1]),
+                direct_inventory([2, 2, 2, 2]),
+            ],
+            &cache,
+            commands,
+        );
+        assert_eq!(state.device_list.len(), 2);
+
+        let transient_list = build_device_list(&[direct_inventory([0; 4])], &cache, &state.config);
+        let merged = state.merge_inventory_snapshot(transient_list);
+
+        assert_eq!(merged.len(), 3, "both known cards survive on grace");
+        assert_eq!(
+            merged.iter().filter(|r| !r.is_persistent()).count(),
+            1,
+            "the transient card stays its own record"
+        );
     }
 
     #[test]

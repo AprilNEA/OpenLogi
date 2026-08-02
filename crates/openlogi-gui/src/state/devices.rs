@@ -312,6 +312,42 @@ fn model_info_from_legacy_model_key(key: &str) -> Option<DeviceModelInfo> {
     })
 }
 
+/// The `direct:<vid>:<pid>` prefix of a direct config key, or `None` for any
+/// other key shape. Two keys sharing a prefix name the same wire product.
+pub(super) fn direct_key_prefix(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix("direct:")?;
+    let (vid, rest) = rest.split_once(':')?;
+    let (pid, identity) = rest.split_once(':')?;
+    (!vid.is_empty() && !pid.is_empty() && !identity.is_empty())
+        .then(|| &key[..key.len() - identity.len() - 1])
+}
+
+/// Fold a transient live record into the known card it physically is: the card
+/// keeps its persisted identity while the live record supplies volatile state.
+pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -> DeviceRecord {
+    DeviceRecord {
+        config_key: known.config_key.clone(),
+        persistent: true,
+        model_key: known.model_key.clone(),
+        display_name: known.display_name.clone(),
+        asset: known.asset.clone().or(live.asset),
+        model_info: known.model_info.clone().or(live.model_info),
+        codename: known.codename.clone().or(live.codename),
+        serial_number: known.serial_number.clone(),
+        unit_id: known.unit_id,
+        route: live.route,
+        kind: if known.kind == DeviceKind::Unknown {
+            live.kind
+        } else {
+            known.kind
+        },
+        capabilities: live.capabilities.or(known.capabilities),
+        slot: live.slot,
+        online: live.online,
+        battery: live.battery.or_else(|| known.battery.clone()),
+    }
+}
+
 /// Order the carousel by physical route. HID enumeration order can change as
 /// different mice wake, sleep, or are selected; sorting by the stable route
 /// (not whichever HID node was reported first) keeps the header stable.
@@ -441,7 +477,7 @@ mod tests {
 
     use super::{
         Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord, DeviceTransports,
-        append_offline_known, build_device_list, effective_kind, offline_record,
+        append_offline_known, build_device_list, direct_key_prefix, effective_kind, offline_record,
         pick_initial_device,
     };
 
@@ -734,6 +770,32 @@ mod tests {
             &HashSet::new(),
         );
         assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn direct_key_prefix_names_the_wire_product() {
+        assert_eq!(
+            direct_key_prefix("direct:046d:c09d:unit:46002e00"),
+            Some("direct:046d:c09d")
+        );
+        assert_eq!(
+            direct_key_prefix("direct:046d:c09d:serial:abc123"),
+            Some("direct:046d:c09d")
+        );
+        assert_eq!(
+            direct_key_prefix("direct:046d:c09d:unit:00000000"),
+            Some("direct:046d:c09d"),
+            "transient keys share the prefix of their physical siblings"
+        );
+    }
+
+    #[test]
+    fn non_direct_keys_have_no_wire_prefix() {
+        assert_eq!(direct_key_prefix("receiver:da2699e1:slot:1"), None);
+        assert_eq!(direct_key_prefix("unknown:slot:0:unit:00000000"), None);
+        assert_eq!(direct_key_prefix("2b034"), None);
+        assert_eq!(direct_key_prefix("direct:046d:c09d:"), None);
+        assert_eq!(direct_key_prefix("direct:046d"), None);
     }
 
     #[test]
