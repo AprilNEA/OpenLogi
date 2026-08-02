@@ -99,8 +99,10 @@ rustPlatform.buildRustPackage {
     fi
     ln -sfn "''${assets[0]}" "$cargoDepsCopy/assets"
 
-    # The macOS-only cargo config forces `linker = /usr/bin/cc` and a cargo
-    # runner script; neither exists in the Nix sandbox.
+    # The workspace cargo config is dev-shell tooling: a macOS-scoped linker
+    # and runner (inert on Linux), a default DEVELOPER_DIR, cargo aliases.
+    # Nothing the sandboxed build needs — drop it so the build stays hermetic
+    # rather than tracking whatever dev ergonomics land there next.
     rm -f .cargo/config.toml
   '';
 
