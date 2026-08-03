@@ -2235,6 +2235,16 @@ mod tests {
         else {
             panic!("expected the power command");
         };
+        let Ok(crate::ipc_client::Command::SetLight(
+            _,
+            openlogi_hid::LightCommand::BrightnessPercent(50),
+            _,
+            brightness_request_id,
+        )) = receiver.try_recv()
+        else {
+            panic!("expected the brightness command");
+        };
+        assert_eq!(brightness_request_id, request_id);
         assert_eq!(state.light(), requested);
         assert_eq!(state.config.light(&key), None);
         assert!(matches!(
@@ -2244,14 +2254,25 @@ mod tests {
         assert!(state.apply_light_command_result(
             key.clone(),
             request_id,
+            openlogi_hid::LightCommand::Power(false),
+            Ok(()),
+        ));
+        assert_eq!(state.light(), requested);
+        assert!(state.apply_light_command_result(
+            key.clone(),
+            request_id,
+            openlogi_hid::LightCommand::BrightnessPercent(50),
             Err(WriteError::AmbiguousRawDevice),
         ));
         assert!(matches!(
             state.light_command_status(),
             Some(LightCommandStatus::Failed(message)) if message.contains("multiple raw HID")
         ));
-        assert_eq!(state.config.light(&key), None);
-        assert_eq!(state.light(), LightSettings::default());
+        assert_eq!(
+            state.light(),
+            LightSettings::new(false, LightSettings::default().brightness_percent, None)
+        );
+        assert_eq!(state.config.light(&key), Some(state.light()));
     }
 
     #[test]

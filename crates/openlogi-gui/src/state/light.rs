@@ -1,5 +1,7 @@
 //! Optimistic standalone-light state and IPC result handling.
 
+use std::collections::BTreeMap;
+
 use openlogi_core::config::LightSettings;
 use openlogi_hid::{DeviceRoute, LightCommand, WriteError};
 use tracing::debug;
@@ -30,6 +32,8 @@ pub(super) struct PendingLightCommand {
     persistent_key: Option<String>,
     previous_volatile: Option<LightSettings>,
     manual_override_rollback: Option<ManualOverrideRollback>,
+    successful_commands: Vec<LightCommand>,
+    failure: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -101,6 +105,8 @@ impl AppState {
                     persistent_key: None,
                     previous_volatile: None,
                     manual_override_rollback: None,
+                    successful_commands: Vec::new(),
+                    failure: None,
                 },
             );
             self.light_command_status =
@@ -133,6 +139,7 @@ impl AppState {
             self.apply_light_command_result(
                 key.to_string(),
                 request_id,
+                command,
                 Err(WriteError::AgentUnavailable),
             );
         }
@@ -145,6 +152,7 @@ impl AppState {
         &mut self,
         key: String,
         request_id: u64,
+        command: LightCommand,
         result: Result<(), WriteError>,
     ) -> bool {
         let Some(pending) = self.light_commands.get_mut(&key) else {
@@ -153,44 +161,79 @@ impl AppState {
         if pending.request_id != request_id {
             return false;
         }
+        pending.pending = pending.pending.saturating_sub(1);
         match result {
-            Ok(()) => {
-                pending.pending = pending.pending.saturating_sub(1);
-                if pending.pending == 0 {
-                    let settings = pending.settings;
-                    let persistent_key = pending.persistent_key.clone();
-                    self.light_commands.remove(&key);
-                    if let (Some(settings), Some(persistent_key)) = (settings, persistent_key) {
-                        self.config.set_light(&persistent_key, settings);
-                        self.volatile_light_settings.remove(&key);
-                        self.persist_and_reload("light");
-                    }
-                    self.light_command_status =
-                        Some((key, request_id, LightCommandStatus::Accepted));
-                }
-            }
+            Ok(()) => pending.successful_commands.push(command),
             Err(error) => {
-                let previous_volatile = pending.previous_volatile;
-                let manual_override_rollback = pending.manual_override_rollback;
-                self.light_commands.remove(&key);
-                if let Some(previous) = previous_volatile {
+                pending.failure.get_or_insert_with(|| error.to_string());
+            }
+        }
+        if pending.pending != 0 {
+            // A sibling may still be queued after the first failure. Keep the
+            // request alive so later successes are reflected in the reconciled
+            // GUI/config state instead of being discarded as stale.
+            return true;
+        }
+
+        let Some(pending) = self.light_commands.remove(&key) else {
+            return false;
+        };
+        let failure = pending.failure;
+        let successful_commands = pending.successful_commands;
+        let manual_override_rollback = pending.manual_override_rollback;
+        if let Some(error) = failure {
+            if successful_commands.is_empty() {
+                if let Some(previous) = pending.previous_volatile {
                     self.volatile_light_settings.insert(key.clone(), previous);
                 } else {
                     self.volatile_light_settings.remove(&key);
                 }
-                if let Some(rollback) = manual_override_rollback {
-                    if let Some(previous) = rollback.previous {
-                        self.manual_light_overrides.insert(key.clone(), previous);
-                    } else {
-                        self.manual_light_overrides.remove(&key);
-                    }
+                restore_manual_override(
+                    &mut self.manual_light_overrides,
+                    &key,
+                    manual_override_rollback,
+                );
+            } else {
+                let mut accepted = pending
+                    .previous_volatile
+                    .or_else(|| {
+                        pending
+                            .persistent_key
+                            .as_deref()
+                            .and_then(|persistent_key| self.config.light(persistent_key))
+                    })
+                    .unwrap_or_default();
+                for &command in &successful_commands {
+                    apply_light_command(&mut accepted, command);
                 }
-                self.light_command_status = Some((
-                    key,
-                    request_id,
-                    LightCommandStatus::Failed(error.to_string()),
-                ));
+                if let Some(persistent_key) = pending.persistent_key {
+                    self.volatile_light_settings.remove(&key);
+                    self.config.set_light(&persistent_key, accepted);
+                    self.persist_and_reload("partial light");
+                } else {
+                    self.volatile_light_settings.insert(key.clone(), accepted);
+                }
+                if !successful_commands
+                    .iter()
+                    .any(|command| matches!(command, LightCommand::Power(_)))
+                {
+                    restore_manual_override(
+                        &mut self.manual_light_overrides,
+                        &key,
+                        manual_override_rollback,
+                    );
+                }
             }
+            self.light_command_status = Some((key, request_id, LightCommandStatus::Failed(error)));
+        } else {
+            if let (Some(settings), Some(persistent_key)) =
+                (pending.settings, pending.persistent_key)
+            {
+                self.config.set_light(&persistent_key, settings);
+                self.volatile_light_settings.remove(&key);
+                self.persist_and_reload("light");
+            }
+            self.light_command_status = Some((key, request_id, LightCommandStatus::Accepted));
         }
         true
     }
@@ -357,6 +400,7 @@ impl AppState {
                 self.apply_light_command_result(
                     runtime_key,
                     request_id,
+                    LightCommand::Power(enabled),
                     Err(WriteError::AgentUnavailable),
                 );
             }
@@ -367,6 +411,33 @@ impl AppState {
             self.volatile_light_settings.remove(&runtime_key);
             self.config.set_light(&key, light);
             self.persist_and_reload("manual light power");
+        }
+    }
+}
+
+fn apply_light_command(settings: &mut LightSettings, command: LightCommand) {
+    match command {
+        LightCommand::Power(enabled) => settings.enabled = enabled,
+        LightCommand::BrightnessPercent(brightness_percent) => {
+            settings.brightness_percent = brightness_percent;
+        }
+        LightCommand::TemperatureKelvin(temperature_kelvin) => {
+            settings.temperature_kelvin = Some(temperature_kelvin);
+        }
+        LightCommand::BrightnessNative(_) => {}
+    }
+}
+
+fn restore_manual_override(
+    overrides: &mut BTreeMap<String, bool>,
+    key: &str,
+    rollback: Option<ManualOverrideRollback>,
+) {
+    if let Some(rollback) = rollback {
+        if let Some(previous) = rollback.previous {
+            overrides.insert(key.to_string(), previous);
+        } else {
+            overrides.remove(key);
         }
     }
 }

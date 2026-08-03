@@ -436,10 +436,11 @@ fn main() -> Result<()> {
                         Some(ipc_client::GuiUpdate::LightCommandResult {
                             key,
                             request_id,
+                            command,
                             result,
                         }) => {
                             let changed = cx.update_global::<AppState, _>(|state, _| {
-                                state.apply_light_command_result(key, request_id, result)
+                                state.apply_light_command_result(key, request_id, command, result)
                             });
                             if changed {
                                 cx.update(gpui::App::refresh_windows);
