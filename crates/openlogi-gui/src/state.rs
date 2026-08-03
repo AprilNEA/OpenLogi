@@ -460,6 +460,7 @@ impl AppState {
             self.smartshift_pending_confirm.remove(key);
             self.smartshift_write_status.remove(key);
             self.profiles_data.remove(key);
+            self.profiles_pending_confirm.remove(key);
         }
         let present = |key: &str| {
             self.device_list
@@ -472,6 +473,7 @@ impl AppState {
             .retain(|key, _| present(key));
         self.smartshift_write_status.retain(|key, _| present(key));
         self.profiles_data.retain_present(present);
+        self.profiles_pending_confirm.retain(|key| present(key));
         self.current_device = new_index;
         // The active device may have changed (selection fell back to index 0
         // when the previous one vanished); re-seed the displayed DPI so it
