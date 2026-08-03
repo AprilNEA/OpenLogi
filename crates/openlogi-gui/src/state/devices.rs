@@ -195,7 +195,9 @@ fn camera_record(camera: &Camera, cache: &AssetResolver) -> DeviceRecord {
         asset,
         model_info: None,
         codename: None,
-        serial_number: Some(camera.unique_id.clone()),
+        // UVC exposes no HID-style serial; the capture id is an OS device
+        // path, not one — the details card skips the row instead.
+        serial_number: None,
         unit_id: [0; 4],
         route: None,
         kind: DeviceKind::Camera,
