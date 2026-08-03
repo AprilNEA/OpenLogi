@@ -1,5 +1,5 @@
 //! The device-detail screen: the header (back + name + section tabs), and the
-//! four section bodies (Buttons, Pointer, Lighting, Device).
+//! section bodies (Buttons, Pointer, Lighting, Camera, Device).
 
 use gpui::{
     AnyElement, BorrowAppContext as _, Context, IntoElement, ParentElement, SharedString, Styled,
@@ -23,6 +23,8 @@ use super::widgets::{
 };
 use super::{AppView, DetailTab};
 use crate::app_menu::file_url;
+use crate::components::camera_controls::CameraControlsPanel;
+use crate::components::camera_preview::CameraPreview;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
@@ -86,11 +88,16 @@ pub(super) fn detail_header(
 /// switches them — is the header's job (see [`detail_header`] and
 /// [`DetailTab::tabs_for`]); `active` arrives pre-resolved against this device's
 /// tab set, so this only has to render the chosen section.
+// One entity per detail panel plus the active tab, palette, and context — a flat
+// dispatcher rather than a context struct that would only ever be built here.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn detail_content(
     mouse_model: &gpui::Entity<MouseModelView>,
     dpi_panel: &gpui::Entity<DpiPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
     lighting_panel: &gpui::Entity<LightingPanel>,
+    camera_preview: &gpui::Entity<CameraPreview>,
+    camera_controls: &gpui::Entity<CameraControlsPanel>,
     active: DetailTab,
     pal: Palette,
     cx: &mut Context<AppView>,
@@ -99,6 +106,7 @@ pub(super) fn detail_content(
         DetailTab::Buttons => buttons_tab(mouse_model).into_any_element(),
         DetailTab::Pointer => pointer_tab(dpi_panel, smartshift_panel, pal, cx).into_any_element(),
         DetailTab::Lighting => lighting_tab(lighting_panel, pal).into_any_element(),
+        DetailTab::Camera => camera_tab(camera_preview, camera_controls, pal).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
     }
 }
@@ -368,6 +376,46 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>, pal: Palette) -> i
         )))
 }
 
+/// Camera tab: the live webcam preview beside the device-level image controls,
+/// each in a titled card. Side by side at the default window width so every
+/// control is visible without scrolling; the cards wrap to a stacked column
+/// when the window is too narrow. The preview drives the capture session via
+/// [`CameraPreview::set_target`] (called from [`AppView::render`]); the controls
+/// panel reads/writes UVC settings directly on the device.
+fn camera_tab(
+    camera_preview: &gpui::Entity<CameraPreview>,
+    camera_controls: &gpui::Entity<CameraControlsPanel>,
+    pal: Palette,
+) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .items_center()
+        .overflow_y_scrollbar()
+        .p_6()
+        .child(
+            h_flex()
+                .w_full()
+                .flex_wrap()
+                .justify_center()
+                .items_start()
+                .gap_3()
+                .child(div().w(px(514.)).flex_shrink_0().child(panel_card(
+                    tr!("Camera"),
+                    Icon::new(IconName::Eye),
+                    pal,
+                    camera_preview.clone().into_any_element(),
+                )))
+                .child(div().w(px(500.)).flex_shrink_0().child(panel_card(
+                    tr!("Camera controls"),
+                    Icon::new(IconName::Settings),
+                    pal,
+                    camera_controls.clone().into_any_element(),
+                ))),
+        )
+}
+
 /// Device tab: device details and configuration cards stacked.
 fn device_tab(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     v_flex()
@@ -509,11 +557,19 @@ fn device_summary(name: &str, kind: DeviceKind, online: bool, pal: Palette) -> i
 }
 
 fn device_description_list(record: DeviceRecord) -> impl IntoElement {
-    let mut items = vec![
-        DescriptionItem::new(tr!("Connection")).value(route_label(record.route.as_ref())),
-        DescriptionItem::new(tr!("Slot")).value(record.slot.to_string()),
-        DescriptionItem::new(tr!("Device key")).value(record.config_key),
-    ];
+    // Cameras are plain UVC over the cable — no HID++ route, and their slot is
+    // a synthetic 0 that would only mislead next to real receiver slots.
+    let is_camera = matches!(record.kind, DeviceKind::Camera);
+    let connection = if is_camera {
+        tr!("USB").to_string()
+    } else {
+        route_label(record.route.as_ref())
+    };
+    let mut items = vec![DescriptionItem::new(tr!("Connection")).value(connection)];
+    if !is_camera {
+        items.push(DescriptionItem::new(tr!("Slot")).value(record.slot.to_string()));
+    }
+    items.push(DescriptionItem::new(tr!("Device key")).value(elided_key(&record.config_key)));
     if let Some(serial) = record.serial_number {
         items.push(DescriptionItem::new(tr!("Serial")).value(serial));
     }
@@ -523,4 +579,46 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
         .label_width(px(100.))
         .bordered(false)
         .children(items)
+}
+
+/// Show long machine keys (a camera's config key embeds the OS device path)
+/// as head…tail instead of wrapping the details card; short HID++ keys pass
+/// through whole. The full key stays in the config file for copying.
+fn elided_key(key: &str) -> String {
+    const HEAD: usize = 40;
+    const TAIL: usize = 8;
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= HEAD + TAIL + 1 {
+        return key.to_string();
+    }
+    let head: String = chars[..HEAD].iter().collect();
+    let tail: String = chars[chars.len() - TAIL..].iter().collect();
+    format!("{head}…{tail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::elided_key;
+
+    #[test]
+    fn short_hid_keys_pass_through_whole() {
+        let key = "direct:046d:b023:unit:a393cae0";
+        assert_eq!(elided_key(key), key);
+    }
+
+    #[test]
+    fn long_camera_keys_show_head_and_tail() {
+        let key = r"camera-\?\usb#vid_046d&pid_0893&mi_00#9&56d9c30&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global";
+        let shown = elided_key(key);
+        assert!(shown.contains('…'));
+        assert!(shown.starts_with(r"camera-\?\usb#vid_046d&pid_0893"));
+        assert!(shown.ends_with(r"}\global"));
+        assert!(shown.chars().count() < 55);
+    }
+
+    #[test]
+    fn exactly_at_the_threshold_is_not_elided() {
+        let key = "k".repeat(49);
+        assert_eq!(elided_key(&key), key);
+    }
 }

@@ -47,6 +47,9 @@ pub enum Permission {
     /// macOS: CoreBluetooth authorization.
     #[cfg(target_os = "macos")]
     Bluetooth,
+    /// macOS: Camera (AVFoundation) authorization for the webcam preview.
+    #[cfg(target_os = "macos")]
+    Camera,
 }
 
 /// Current Input Monitoring ("listen event") status.
@@ -61,6 +64,19 @@ pub fn input_monitoring() -> PermissionStatus {
 #[must_use]
 pub fn bluetooth() -> PermissionStatus {
     macos::bluetooth()
+}
+
+/// Current Camera (AVFoundation) authorization status. Delegates to
+/// `openlogi-camera`, which owns all the camera FFI, so the GUI doesn't
+/// duplicate the AVFoundation calls.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn camera() -> PermissionStatus {
+    match openlogi_camera::camera_authorization() {
+        openlogi_camera::CameraAuthorization::Granted => PermissionStatus::Granted,
+        openlogi_camera::CameraAuthorization::Denied => PermissionStatus::Denied,
+        openlogi_camera::CameraAuthorization::Undetermined => PermissionStatus::Unknown,
+    }
 }
 
 /// Probe Linux input-device access: `/dev/uinput` (write) and at least one
@@ -110,6 +126,7 @@ pub fn open_pane(permission: Permission) {
         Permission::Accessibility => "Privacy_Accessibility",
         Permission::InputMonitoring => "Privacy_ListenEvent",
         Permission::Bluetooth => "Privacy_Bluetooth",
+        Permission::Camera => "Privacy_Camera",
     };
     let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
     if let Err(e) = opener::open(&url) {

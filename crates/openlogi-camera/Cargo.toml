@@ -1,0 +1,49 @@
+[package]
+name = "openlogi-camera"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Generic Logitech UVC webcam discovery for OpenLogi (AVFoundation on macOS, DirectShow on Windows)."
+keywords = ["logitech", "uvc", "webcam", "camera", "avfoundation"]
+categories = ["hardware-support"]
+
+[dependencies]
+serde = { workspace = true }
+tracing = { workspace = true }
+
+# AVFoundation (AVCaptureDevice enumeration + AVCaptureSession capture) on the
+# same objc2 toolchain as the rest of the workspace's ObjC FFI (GUI menu bar /
+# permissions, the hook's NSWorkspace read): leak-proof `Retained<T>` ownership,
+# `define_class!` for the frame delegate (matching the agent tray target), and
+# `block2` for the `requestAccess…` completion block.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+block2 = "0.6"
+
+# DirectShow enumeration + IAMVideoProcAmp / IAMCameraControl UVC controls.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Media_DirectShow",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_System_Ole",
+] }
+
+# Mirrors [workspace.lints]. unsafe_code stays denied; the AVFoundation modules
+# opt in locally with #[expect(unsafe_code)]. (The `unexpected_cfgs` allow the
+# old objc 0.2 macros needed is gone — objc2 doesn't emit `cfg(cargo-clippy)`.)
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+missing_errors_doc = "allow"
+doc_markdown = "allow"

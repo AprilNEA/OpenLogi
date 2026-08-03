@@ -210,6 +210,7 @@ pub(super) fn kind_label(kind: DeviceKind) -> String {
         DeviceKind::Gamepad => tr!("Gamepad").to_string(),
         DeviceKind::Joystick => tr!("Joystick").to_string(),
         DeviceKind::Headset => tr!("Headset").to_string(),
+        DeviceKind::Camera => tr!("Camera").to_string(),
         DeviceKind::Unknown => tr!("Device").to_string(),
     }
 }
