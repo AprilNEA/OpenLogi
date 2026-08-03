@@ -9,7 +9,7 @@
 use gpui::{AnyElement, App, ElementId, IntoElement, ParentElement, SharedString, Styled, div, px};
 use gpui_component::button::{Button, ButtonVariants as _};
 
-use crate::theme::{self, Palette, Typography as _};
+use crate::theme::{Palette, Typography as _};
 
 /// Fixed height for a status / retry row, so swapping a slider out for a status
 /// message (or back) doesn't make the panel jump.
@@ -34,14 +34,14 @@ pub fn status_line(text: impl Into<SharedString>, pal: Palette) -> AnyElement {
 pub fn retry_line(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
-    _pal: Palette,
+    pal: Palette,
     on_retry: impl Fn(&mut App) + 'static,
 ) -> AnyElement {
     Button::new(id)
         .text()
         .h(px(ROW_H))
         .text_body()
-        .text_color(theme::accent())
+        .text_color(pal.text_primary)
         .label(text)
         .on_click(move |_event, _window, cx| on_retry(cx))
         .into_any_element()

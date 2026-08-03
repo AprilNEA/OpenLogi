@@ -17,7 +17,7 @@
 use gpui::{
     App, Context, FocusHandle, FontWeight, Global, InteractiveElement, IntoElement,
     ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
+    Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -259,7 +259,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
             col = col
                 .child(
                     div()
-                        .text_color(rgb(theme::STATUS_CONNECTED))
+                        .text_color(pal.text_primary)
                         .font_weight(FontWeight::MEDIUM)
                         .child(tr!("Device paired")),
                 )
@@ -276,7 +276,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
             col = col
                 .child(
                     div()
-                        .text_color(rgb(theme::STATUS_CONNECTING))
+                        .text_color(pal.text_primary)
                         .font_weight(FontWeight::MEDIUM)
                         .child(tr!("Pairing failed")),
                 )

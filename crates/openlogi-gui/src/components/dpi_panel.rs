@@ -6,7 +6,7 @@
 
 use gpui::{
     AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window, div, px, rgb,
+    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window, div, px,
 };
 use gpui_component::{
     IconName, Selectable as _, Sizable as _,
@@ -21,7 +21,7 @@ use tracing::debug;
 use crate::components::device_read::issue_device_read;
 use crate::components::status::{retry_line, status_line};
 use crate::state::{AppState, DpiStatus};
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
+use crate::theme::{self, Palette, SelectableStyle, Typography as _};
 
 pub struct DpiPanel {
     slider_state: Option<Entity<SliderState>>,
@@ -235,7 +235,7 @@ impl Render for DpiPanel {
                     .child(
                         div()
                             .text_body()
-                            .text_color(rgb(ACCENT_BLUE))
+                            .text_color(pal.text_primary)
                             .child(format!("{}", snapshot.dpi)),
                     ),
             )
