@@ -1,4 +1,4 @@
-# OpenLogi GUI nb translations.
+# OpenLogi GUI translations. Managed by Crowdin; edit source text there when possible.
 _version: 1
 "No devices connected": "Ingen enhet tilkoblet"
 "Devices": "Enheter"

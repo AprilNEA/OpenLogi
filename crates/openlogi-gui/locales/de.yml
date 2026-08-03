@@ -1,4 +1,4 @@
-# OpenLogi GUI de translations.
+# OpenLogi GUI translations. Managed by Crowdin; edit source text there when possible.
 _version: 1
 "No devices connected": "Kein Gerät verbunden"
 "Devices": "Geräte"

@@ -1,4 +1,4 @@
-# OpenLogi GUI zh-HK translations. Managed by Crowdin; edit translations there when possible.
+# OpenLogi GUI translations. Managed by Crowdin; edit source text there when possible.
 _version: 1
 "No devices connected": "未連接裝置"
 "Devices": "裝置"
