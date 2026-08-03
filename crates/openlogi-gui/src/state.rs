@@ -1684,13 +1684,16 @@ mod tests {
         let mut state = AppState::with_runtime(
             Config::default(),
             &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+            &[],
             &cache,
+            ConfigPersistence::MemoryOnly,
             commands,
         );
         let stable_key = "direct:046d:b023:unit:a393cae0";
         assert_eq!(state.device_list[0].config_key, stable_key);
 
-        let transient_list = build_device_list(&[direct_inventory([0; 4])], &cache, &state.config);
+        let transient_list =
+            build_device_list(&[direct_inventory([0; 4])], &[], &cache, &state.config);
         let merged = state.merge_inventory_snapshot(transient_list);
 
         assert_eq!(merged.len(), 1, "no second card for the half-read probe");
@@ -1709,7 +1712,9 @@ mod tests {
         let mut state = AppState::with_runtime(
             Config::default(),
             &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+            &[],
             &cache,
+            ConfigPersistence::MemoryOnly,
             commands,
         );
 
@@ -1718,6 +1723,7 @@ mod tests {
                 direct_inventory([0xa3, 0x93, 0xca, 0xe0]),
                 direct_inventory([0; 4]),
             ],
+            &[],
             &cache,
             &state.config,
         );
@@ -1743,12 +1749,15 @@ mod tests {
                 direct_inventory([1, 1, 1, 1]),
                 direct_inventory([2, 2, 2, 2]),
             ],
+            &[],
             &cache,
+            ConfigPersistence::MemoryOnly,
             commands,
         );
 
         let snapshot = build_device_list(
             &[direct_inventory([1, 1, 1, 1]), direct_inventory([0; 4])],
+            &[],
             &cache,
             &state.config,
         );
@@ -1780,12 +1789,15 @@ mod tests {
                 direct_inventory([1, 1, 1, 1]),
                 direct_inventory([2, 2, 2, 2]),
             ],
+            &[],
             &cache,
+            ConfigPersistence::MemoryOnly,
             commands,
         );
         assert_eq!(state.device_list.len(), 2);
 
-        let transient_list = build_device_list(&[direct_inventory([0; 4])], &cache, &state.config);
+        let transient_list =
+            build_device_list(&[direct_inventory([0; 4])], &[], &cache, &state.config);
         let merged = state.merge_inventory_snapshot(transient_list);
 
         assert_eq!(merged.len(), 3, "both known cards survive on grace");
@@ -1994,6 +2006,16 @@ mod tests {
         else {
             panic!("expected the power command");
         };
+        let Ok(crate::ipc_client::Command::SetLight(
+            _,
+            openlogi_hid::LightCommand::BrightnessPercent(50),
+            _,
+            brightness_request_id,
+        )) = receiver.try_recv()
+        else {
+            panic!("expected the brightness command");
+        };
+        assert_eq!(brightness_request_id, request_id);
         assert_eq!(state.light(), requested);
         assert_eq!(state.config.light(&key), None);
         assert!(matches!(
@@ -2003,14 +2025,25 @@ mod tests {
         assert!(state.apply_light_command_result(
             key.clone(),
             request_id,
+            openlogi_hid::LightCommand::Power(false),
+            Ok(()),
+        ));
+        assert_eq!(state.light(), requested);
+        assert!(state.apply_light_command_result(
+            key.clone(),
+            request_id,
+            openlogi_hid::LightCommand::BrightnessPercent(50),
             Err(WriteError::AmbiguousRawDevice),
         ));
         assert!(matches!(
             state.light_command_status(),
             Some(LightCommandStatus::Failed(message)) if message.contains("multiple raw HID")
         ));
-        assert_eq!(state.config.light(&key), None);
-        assert_eq!(state.light(), LightSettings::default());
+        assert_eq!(
+            state.light(),
+            LightSettings::new(false, LightSettings::default().brightness_percent, None)
+        );
+        assert_eq!(state.config.light(&key), Some(state.light()));
     }
 
     #[test]

@@ -73,6 +73,8 @@ pub enum GuiUpdate {
         key: String,
         /// Monotonic request id used to ignore stale results.
         request_id: u64,
+        /// The control whose write produced this result.
+        command: LightCommand,
         /// Agent acceptance or typed device failure.
         result: Result<(), WriteError>,
     },
@@ -578,6 +580,7 @@ async fn handle(
                 update_tx,
                 key,
                 request_id,
+                command,
                 client.set_light(ctx, route, command).await,
             )?;
         }
@@ -586,6 +589,7 @@ async fn handle(
                 update_tx,
                 key,
                 request_id,
+                LightCommand::Power(enabled),
                 client.set_light_manual_power(ctx, route, enabled).await,
             )?;
         }
@@ -650,12 +654,14 @@ fn send_light_result(
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     key: String,
     request_id: u64,
+    command: LightCommand,
     result: Result<Result<(), WriteError>, tarpc::client::RpcError>,
 ) -> Result<(), ()> {
     if let Ok(result) = result {
         let _ = update_tx.send(GuiUpdate::LightCommandResult {
             key,
             request_id,
+            command,
             result,
         });
         Ok(())
@@ -663,6 +669,7 @@ fn send_light_result(
         let _ = update_tx.send(GuiUpdate::LightCommandResult {
             key,
             request_id,
+            command,
             result: Err(WriteError::AgentUnavailable),
         });
         Err(())
@@ -695,11 +702,19 @@ fn reply_disconnected(
         Command::ReadSmartShift(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
-        Command::SetLight(_, _, key, request_id)
-        | Command::SetLightManualPower(_, _, key, request_id) => {
+        Command::SetLight(_, command, key, request_id) => {
             let _ = update_tx.send(GuiUpdate::LightCommandResult {
                 key,
                 request_id,
+                command,
+                result: Err(WriteError::AgentUnavailable),
+            });
+        }
+        Command::SetLightManualPower(_, enabled, key, request_id) => {
+            let _ = update_tx.send(GuiUpdate::LightCommandResult {
+                key,
+                request_id,
+                command: LightCommand::Power(enabled),
                 result: Err(WriteError::AgentUnavailable),
             });
         }
