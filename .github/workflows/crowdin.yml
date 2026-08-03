@@ -29,16 +29,19 @@ jobs:
     steps:
       # Secrets are not readable in a job-level `if`, so a gate step skips the
       # sync (with a visible warning) instead of failing every scheduled run
-      # while the Crowdin 1Password item is not configured.
+      # while the Crowdin credentials are not configured. A malformed reference
+      # or missing item field still fails loudly in the load step below — once
+      # the secrets are set, a broken reference is an error, not a skip.
       - name: Check for the Crowdin 1Password item
         id: config
         env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           OP_CROWDIN_SECRET_ITEM: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}
         run: |
-          if [[ -n "$OP_CROWDIN_SECRET_ITEM" ]]; then
+          if [[ -n "$OP_SERVICE_ACCOUNT_TOKEN" && -n "$OP_CROWDIN_SECRET_ITEM" ]]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::OP_CROWDIN_SECRET_ITEM is not set; skipping the Crowdin sync."
+            echo "::warning::OP_SERVICE_ACCOUNT_TOKEN and/or OP_CROWDIN_SECRET_ITEM is not set; skipping the Crowdin sync."
             echo "configured=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -49,7 +52,7 @@ jobs:
       - name: Load Crowdin credentials from 1Password
         if: steps.config.outputs.configured == 'true'
         id: crowdin_config
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
         with:
           export-env: false
         env:
