@@ -26,6 +26,11 @@ pub(super) struct ProbedFeatures {
     pub(super) model_info: Option<DeviceModelInfo>,
     /// Marketing type from HID++ `0x0005` — an identity hint only.
     pub(super) kind: Option<DeviceKind>,
+    /// Marketing name from HID++ `0x0005` (e.g. `"MX Master"`). Used as the
+    /// display-name fallback when the receiver has no stored codename for the
+    /// slot (Unifying never stores one; some Bolt pairings don't either), so an
+    /// otherwise-recognised device isn't shown as "Unknown device".
+    pub(super) name: Option<String>,
     /// Configuration capabilities derived from the device's feature table.
     pub(super) capabilities: Option<Capabilities>,
 }
@@ -77,6 +82,7 @@ pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Optio
 pub(super) async fn probe_features(
     channel: &Arc<HidppChannel>,
     slot: u8,
+    want_name: bool,
 ) -> (ProbedFeatures, Option<u8>) {
     let mut device = match Device::new(Arc::clone(channel), slot).await {
         Ok(d) => d,
@@ -154,15 +160,37 @@ pub(super) async fn probe_features(
     // the authoritative kind signal. On the direct path it's the only one; on
     // the Bolt path it corrects a pairing register that reported the wrong (or
     // `Unknown`) kind.
-    let kind = match device.get_feature::<DeviceTypeAndNameFeature>() {
-        Some(feature) => match feature.get_device_type().await {
-            Ok(ty) => Some(map_device_type(ty)),
-            Err(e) => {
-                debug!(slot, error = ?e, "DeviceType read failed");
+    let (kind, name) = match device.get_feature::<DeviceTypeAndNameFeature>() {
+        Some(feature) => {
+            let kind = match feature.get_device_type().await {
+                Ok(ty) => Some(map_device_type(ty)),
+                Err(e) => {
+                    debug!(slot, error = ?e, "DeviceType read failed");
+                    None
+                }
+            };
+            // The device's own marketing name, used as the display fallback
+            // when the receiver has no stored codename for this slot. Skipped
+            // on the direct path (`want_name = false`), where the HID node name
+            // is already the codename — fetching it would be several HID++
+            // round-trips whose result is discarded.
+            let name = if want_name {
+                match feature.get_whole_device_name().await {
+                    Ok(n) => {
+                        let trimmed = n.trim();
+                        (!trimmed.is_empty()).then(|| trimmed.to_string())
+                    }
+                    Err(e) => {
+                        debug!(slot, error = ?e, "device name (0x0005) read failed");
+                        None
+                    }
+                }
+            } else {
                 None
-            }
-        },
-        None => None,
+            };
+            (kind, name)
+        }
+        None => (None, None),
     };
 
     (
@@ -170,6 +198,7 @@ pub(super) async fn probe_features(
             battery,
             model_info,
             kind,
+            name,
             capabilities,
         },
         battery_index,

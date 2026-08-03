@@ -357,7 +357,7 @@ async fn walk_bolt_slot(
     // mirroring the Unifying path (#218).
     let probe_result = timeout(
         BOLT_SLOT_PROBE,
-        probe_or_reuse(channel, slot, id.clone(), cached, online, tick),
+        probe_or_reuse(channel, slot, id.clone(), cached, online, tick, true),
     )
     .await;
     let (probe, outcome) = if let Ok(r) = probe_result {
@@ -384,7 +384,9 @@ async fn walk_bolt_slot(
 
     let device = PairedDevice {
         slot,
-        codename: identity.codename.clone(),
+        // Fall back to the device's own `0x0005` marketing name when the Bolt
+        // receiver has no stored codename for this slot.
+        codename: identity.codename.clone().or_else(|| probe.name.clone()),
         wpid,
         // Prefer the device's own `0x0005` type; the register kind is the
         // offline fallback.
@@ -417,8 +419,16 @@ async fn probe_direct(
     let cached = cache.get(&id);
     // A direct device is always "present" (its HID node is the candidate), so
     // treat it as online: reuse the cached probe while fresh, otherwise probe.
-    let (probe, outcome) =
-        probe_or_reuse(&channel, DIRECT_DEVICE_INDEX, Some(id), cached, true, tick).await;
+    let (probe, outcome) = probe_or_reuse(
+        &channel,
+        DIRECT_DEVICE_INDEX,
+        Some(id),
+        cached,
+        true,
+        tick,
+        false,
+    )
+    .await;
     // Hybrid peripheral discriminator. A genuine directly-attached device is
     // either wireless/Bluetooth — which reports a battery — or exposes a
     // configuration feature (buttons / pointer / lighting). A Bolt receiver's
@@ -580,7 +590,7 @@ async fn probe_unifying_slot(
     // moved to Bluetooth answers `DeviceNotFound` and surfaces as offline.
     let probe_result = timeout(
         UNIFYING_SLOT_PROBE,
-        probe_or_reuse(channel, slot, Some(id.clone()), cached, true, tick),
+        probe_or_reuse(channel, slot, Some(id.clone()), cached, true, tick, true),
     )
     .await;
     let (probe, outcome) = if let Ok(r) = probe_result {
@@ -594,7 +604,9 @@ async fn probe_unifying_slot(
 
     let device = PairedDevice {
         slot,
-        codename,
+        // Fall back to the device's own `0x0005` marketing name when the
+        // receiver has no stored codename for this slot.
+        codename: codename.or_else(|| probe.name.clone()),
         wpid: Some(event.wpid),
         kind: resolve_device_kind(probe.kind, register_kind),
         // Reachable on this receiver iff the feature walk got through this tick.

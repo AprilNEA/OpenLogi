@@ -84,9 +84,10 @@ pub(super) async fn probe_or_reuse(
     cached: Option<&Cached>,
     online: bool,
     tick: u64,
+    want_name: bool,
 ) -> (ProbedFeatures, CacheOutcome) {
     if online && cached.is_none_or(|c| is_stale(c, tick)) {
-        let (fresh, battery_index) = probe_features(channel, index).await;
+        let (fresh, battery_index) = probe_features(channel, index, want_name).await;
         // `capabilities` is `Some` exactly when the feature-table walk succeeded;
         // only then is the probe worth caching.
         if fresh.capabilities.is_some() {
