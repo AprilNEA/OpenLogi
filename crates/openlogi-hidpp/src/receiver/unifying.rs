@@ -21,7 +21,14 @@ use crate::{
 
 /// All USB vendor & product ID pairs that are known to identify Unifying
 /// receivers.
-pub const VPID_PAIRS: &[(u16, u16)] = &[(0x046d, 0xc52b), (0x046d, 0xc532)];
+///
+/// `0xc53f` is a Lightspeed nano receiver (bundled with G-series wireless mice
+/// such as the G305). It is not a Unifying receiver, but it exposes the same
+/// HID++ 1.0 receiver registers (`0x02` connections, `0xB5/0x5N` pairing info),
+/// so device enumeration goes through this implementation unchanged. Callers
+/// that surface a user-facing receiver name label it separately (see
+/// `openlogi-hid`). Verified against a G305 (paired device wpid `0x4074`).
+pub const VPID_PAIRS: &[(u16, u16)] = &[(0x046d, 0xc52b), (0x046d, 0xc532), (0x046d, 0xc53f)];
 
 /// All known registers of the Unifying receiver.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, TryFromPrimitive)]
