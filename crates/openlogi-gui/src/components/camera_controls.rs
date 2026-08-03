@@ -400,11 +400,67 @@ impl CameraControlsPanel {
         cx.notify();
     }
 
-    /// Reset every control and auto mode to the device defaults.
+    /// Reset every control and auto mode to the device defaults, in one
+    /// batched device-open. All rows persist together or not at all — a
+    /// per-row loop would silently skip the remaining rows once a failure
+    /// invalidated the panel, leaving a mix of reset and stale saved values.
     fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for ix in 0..self.sliders.len() {
-            self.reset_control(ix, window, cx);
+        let Some(key) = self.key.clone() else {
+            return;
+        };
+        let uid = uid_of(&key).to_string();
+        let autos: Vec<(AutoToggle, bool)> = self
+            .autos
+            .iter()
+            .map(|row| (row.toggle, row.default))
+            .collect();
+        let values: Vec<(CameraControl, i32)> = self
+            .sliders
+            .iter()
+            .map(|s| (s.control, s.range.default))
+            .collect();
+        if let Err(e) = openlogi_camera::apply_settings(&uid, &autos, &values) {
+            debug!(error = %e, "camera reset failed");
+            // Partial writes may have landed; rebuild from live hardware
+            // rather than persisting a mixed reset.
+            self.resync_after_failed_write(cx);
+            return;
         }
+        self.commit_batch(&key, &autos, &values, window, cx);
+        self.sync_active_custom(cx);
+        cx.notify();
+    }
+
+    /// After a successful batched write: mirror `autos` + `values` onto the
+    /// rows, re-seat the sliders, and persist everything to the config.
+    fn commit_batch(
+        &mut self,
+        key: &str,
+        autos: &[(AutoToggle, bool)],
+        values: &[(CameraControl, i32)],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (toggle, on) in autos {
+            if let Some(row) = self.autos.iter_mut().find(|a| a.toggle == *toggle) {
+                row.on = *on;
+            }
+        }
+        for (control, value) in values {
+            if let Some(slider) = self.sliders.iter().find(|s| s.control == *control) {
+                slider.state.clone().update(cx, |s, cx| {
+                    s.set_value(*value as f32, window, cx);
+                });
+            }
+        }
+        cx.update_global::<AppState, _>(|state, _| {
+            for (toggle, on) in autos {
+                state.commit_camera_auto(key, *toggle, *on);
+            }
+            for (control, value) in values {
+                state.commit_camera_control(key, *control, *value);
+            }
+        });
     }
 
     /// Reset one control to its device default — auto mode back to the
@@ -518,25 +574,8 @@ impl CameraControlsPanel {
             self.resync_after_failed_write(cx);
             return;
         }
-        for (toggle, on) in &autos {
-            if let Some(row) = self.autos.iter_mut().find(|a| a.toggle == *toggle) {
-                row.on = *on;
-            }
-        }
-        for (control, value) in &values {
-            if let Some(slider) = self.sliders.iter().find(|s| s.control == *control) {
-                slider.state.clone().update(cx, |s, cx| {
-                    s.set_value(*value as f32, window, cx);
-                });
-            }
-        }
+        self.commit_batch(&key, &autos, &values, window, cx);
         cx.update_global::<AppState, _>(|state, _| {
-            for (toggle, on) in &autos {
-                state.commit_camera_auto(&key, *toggle, *on);
-            }
-            for (control, value) in &values {
-                state.commit_camera_control(&key, *control, *value);
-            }
             state.set_camera_active_profile(&key, Some(id.to_string()));
         });
         cx.notify();
