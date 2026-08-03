@@ -14,6 +14,15 @@ pub const HELP_URL: &str = "https://github.com/AprilNEA/OpenLogi#readme";
 /// The "latest release" page.
 pub const RELEASES_URL: &str = "https://github.com/AprilNEA/OpenLogi/releases/latest";
 
+/// The application identifier: the Wayland xdg-toplevel `app_id` (and X11
+/// `WM_CLASS`) the GUI advertises, the root of the macOS bundle-id family
+/// (`org.openlogi.agent`, `org.openlogi.openlogi.dev`), and the value the Linux
+/// `.desktop` file pins as `StartupWMClass`. Defined once here so the window the
+/// compositor sees, the launcher that groups it, and the frontmost backend that
+/// self-identifies OpenLogi can never disagree. The `.desktop` file carries its
+/// own literal copy (it can't reference Rust) — keep the two in sync.
+pub const APP_ID: &str = "org.openlogi.openlogi";
+
 /// The release page for a specific version tag (e.g. the running build).
 #[must_use]
 pub fn release_tag_url(version: &str) -> String {
