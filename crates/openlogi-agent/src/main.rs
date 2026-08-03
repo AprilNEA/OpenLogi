@@ -101,14 +101,16 @@ fn main() {
         // Read the menu-bar preference before `config` moves into the core
         // thread; the main thread hosts the tray.
         let show_in_menu_bar = config.app_settings.show_in_menu_bar;
+        let resume_pending = Arc::new(AtomicBool::new(false));
+        let core_resume_pending = Arc::clone(&resume_pending);
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
-            .spawn(move || runtime.block_on(run(config)))
+            .spawn(move || runtime.block_on(run(config, core_resume_pending)))
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
             return;
         }
-        tray::run_app_loop(show_in_menu_bar);
+        tray::run_app_loop(show_in_menu_bar, resume_pending);
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -120,7 +122,7 @@ fn main() {
     }
 }
 
-async fn run(config: Config) {
+async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<AtomicBool>) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
     // LaunchAgent, before `config` moves into the orchestrator.
     launch_agent::reconcile(config.app_settings.launch_at_login);
@@ -200,7 +202,17 @@ async fn run(config: Config) {
         tokio::select! {
             event = inventory_rx.recv(), if inventory_open => match event {
                 Some(watchers::inventory::InventoryEvent::Snapshot(inventories)) => {
-                    orchestrator.lock().await.refresh_inventory(&inventories);
+                    let mut orchestrator = orchestrator.lock().await;
+                    // The portable watcher catches long sleeps from a polling
+                    // gap. Native macOS notifications also cover short sleeps,
+                    // display wakes, and returning user sessions; consume the
+                    // coalesced signal at the exact point that can replay it.
+                    #[cfg(target_os = "macos")]
+                    if resume_pending.swap(false, Ordering::Relaxed) {
+                        info!("macOS resume notification — replaying volatile settings");
+                        orchestrator.reapply_volatile_on_next_refresh();
+                    }
+                    orchestrator.refresh_inventory(&inventories);
                 }
                 Some(watchers::inventory::InventoryEvent::Unavailable) => {
                     orchestrator.lock().await.mark_inventory_unavailable();
