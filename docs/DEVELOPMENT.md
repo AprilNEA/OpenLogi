@@ -212,4 +212,7 @@ OpenLogi project:
 - Translations — Read and Write.
 
 Missing or invalid credentials fail the workflow. Translation PRs run the
-normal CI checks, including the locale key-parity test.
+normal CI checks, including the locale key-parity test. The workflow uses the
+existing `OP_GITHUB_APP_ITEM` to mint a short-lived token for pushing its
+translation branch and opening the PR; the default `GITHUB_TOKEN` remains
+read-only.

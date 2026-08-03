@@ -13,8 +13,7 @@ on:
       - .github/workflows/crowdin.yml
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: crowdin-${{ github.ref }}
@@ -29,6 +28,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Mint GitHub App token
+        id: github_app
+        uses: ./.github/actions/github-app-token-from-1password
+        with:
+          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
 
       - name: Load Crowdin credentials from 1Password
         id: crowdin_config
@@ -58,6 +64,6 @@ jobs:
           github_user_name: Crowdin Bot
           github_user_email: support+bot@crowdin.com
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.github_app.outputs.token }}
           CROWDIN_PROJECT_ID: ${{ steps.crowdin_config.outputs.CROWDIN_PROJECT_ID }}
           CROWDIN_PERSONAL_TOKEN: ${{ steps.crowdin_config.outputs.CROWDIN_PERSONAL_TOKEN }}
