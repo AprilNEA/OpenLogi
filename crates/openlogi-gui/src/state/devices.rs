@@ -7,10 +7,12 @@ use openlogi_camera::Camera;
 use openlogi_core::config::{Config, DeviceIdentity};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
+    LightCapabilities, StandaloneDevice,
 };
 use openlogi_hid::DeviceRoute;
 use tracing::debug;
 
+use crate::app_assets::standalone_artwork;
 use crate::asset::{AssetResolver, ResolvedAsset};
 
 /// One paired device with everything the UI needs to switch to it in O(1):
@@ -39,6 +41,10 @@ pub struct DeviceRecord {
     pub codename: Option<String>,
     pub serial_number: Option<String>,
     pub unit_id: [u8; 4],
+    /// Standalone driver family, if this is a non-HID++ record.
+    pub driver_id: Option<String>,
+    /// Source-owned product artwork for a recognized standalone model.
+    pub standalone_artwork: Option<&'static str>,
     pub route: Option<DeviceRoute>,
     /// OS capture id for cameras (AVFoundation uniqueID / DirectShow path).
     /// Distinct from [`Self::config_key`], which prefers the port-stable USB
@@ -51,6 +57,8 @@ pub struct DeviceRecord {
     /// this is `None` only for a device never probed since the agent started —
     /// and the UI then falls back to [`Capabilities::presumed_from_kind`].
     pub capabilities: Option<Capabilities>,
+    /// Capabilities for standalone non-HID++ controls such as Litra lights.
+    pub light_capabilities: Option<LightCapabilities>,
     pub slot: u8,
     pub online: bool,
     pub battery: Option<BatteryInfo>,
@@ -99,6 +107,7 @@ impl DeviceRecord {
 /// (#271/#280/#387).
 pub(super) fn build_device_list(
     inventories: &[DeviceInventory],
+    standalone: &[StandaloneDevice],
     cache: &AssetResolver,
     config: &Config,
     cameras: &[Camera],
@@ -156,16 +165,20 @@ pub(super) fn build_device_list(
                 codename,
                 serial_number,
                 unit_id,
+                driver_id: None,
+                standalone_artwork: None,
                 route,
                 capture_id: None,
                 kind,
                 capabilities: paired.capabilities,
+                light_capabilities: None,
                 slot: paired.slot,
                 online: paired.online,
                 battery: paired.battery.clone(),
             });
         }
     }
+    append_standalone(&mut list, standalone);
     #[cfg(debug_assertions)]
     if std::env::var_os("OPENLOGI_DEMO_KEYBOARD").is_some() {
         list.push(demo_keyboard());
@@ -218,10 +231,13 @@ fn camera_record(camera: &Camera, cache: &AssetResolver) -> DeviceRecord {
         codename: None,
         serial_number: camera.serial_number.clone(),
         unit_id: [0; 4],
+        driver_id: None,
+        standalone_artwork: None,
         route: None,
         capture_id: Some(camera.unique_id.clone()),
         kind: DeviceKind::Camera,
         capabilities: None,
+        light_capabilities: None,
         slot: 0,
         online: true,
         battery: None,
@@ -239,6 +255,53 @@ pub(crate) fn camera_model_info(camera: &Camera) -> DeviceModelInfo {
         transports: DeviceTransports::default(),
         model_ids: [camera.product_id, 0, 0],
         extended_model_id: 0,
+    }
+}
+
+fn append_standalone(list: &mut Vec<DeviceRecord>, devices: &[StandaloneDevice]) {
+    for device in devices {
+        let route = Some(DeviceRoute::RawHid {
+            vendor_id: device.address.vendor_id,
+            product_id: device.address.product_id,
+            usage_page: device.address.usage_page,
+            usage_id: device.address.usage_id,
+            identity: device.address.identity.clone(),
+        });
+        let stable_id = DeviceStableId::from_parts(
+            route.as_ref(),
+            openlogi_hid::DIRECT_DEVICE_INDEX,
+            device.serial_number.as_deref(),
+            device.unit_id,
+        );
+        let (config_key, persistent) = stable_id.physical_key().map_or_else(
+            || (stable_id.runtime_key(), false),
+            |key| (key.into_string(), true),
+        );
+        list.push(DeviceRecord {
+            config_key,
+            persistent,
+            model_key: format!("raw:{:04x}", device.address.product_id),
+            display_name: device.display_name.clone(),
+            asset: None,
+            model_info: None,
+            codename: None,
+            serial_number: device.serial_number.clone(),
+            unit_id: device.unit_id,
+            driver_id: Some(device.driver_id.clone()),
+            standalone_artwork: standalone_artwork(
+                &device.driver_id,
+                device.address.vendor_id,
+                device.address.product_id,
+            ),
+            route,
+            capture_id: None,
+            kind: device.kind,
+            capabilities: device.capabilities,
+            light_capabilities: device.light_capabilities,
+            slot: openlogi_hid::DIRECT_DEVICE_INDEX,
+            online: device.online,
+            battery: None,
+        });
     }
 }
 
@@ -355,6 +418,10 @@ fn offline_record(
     let model_key = model_info
         .as_ref()
         .map_or_else(|| config_key.to_string(), DeviceModelInfo::config_key);
+    let artwork = identity.driver_id.as_deref().and_then(|driver_id| {
+        let (vendor_id, product_id) = raw_vendor_product_ids(config_key)?;
+        standalone_artwork(driver_id, vendor_id, product_id)
+    });
     DeviceRecord {
         config_key: config_key.to_string(),
         persistent: true,
@@ -365,14 +432,27 @@ fn offline_record(
         codename: identity.codename.clone(),
         serial_number: None,
         unit_id: [0; 4],
+        driver_id: identity.driver_id.clone(),
+        standalone_artwork: artwork,
         route: None,
         capture_id: None,
         kind: identity.kind,
         capabilities: Some(identity.capabilities),
+        light_capabilities: identity.light_capabilities,
         slot: 0,
         online: false,
         battery: None,
     }
+}
+
+fn raw_vendor_product_ids(key: &str) -> Option<(u16, u16)> {
+    let mut parts = key.split(':');
+    if parts.next()? != "raw" {
+        return None;
+    }
+    let vendor_id = u16::from_str_radix(parts.next()?, 16).ok()?;
+    let product_id = u16::from_str_radix(parts.next()?, 16).ok()?;
+    Some((vendor_id, product_id))
 }
 
 fn model_info_from_legacy_model_key(key: &str) -> Option<DeviceModelInfo> {
@@ -466,6 +546,8 @@ fn demo_keyboard() -> DeviceRecord {
         codename: None,
         serial_number: None,
         unit_id: [0; 4],
+        driver_id: None,
+        standalone_artwork: None,
         route: None,
         capture_id: None,
         kind: DeviceKind::Keyboard,
@@ -473,6 +555,7 @@ fn demo_keyboard() -> DeviceRecord {
             lighting: true,
             ..Capabilities::default()
         }),
+        light_capabilities: None,
         slot: 0,
         online: true,
         battery: None,
@@ -550,7 +633,9 @@ fn prettify_codename(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use openlogi_core::config::Config;
-    use openlogi_core::device::{DeviceInventory, PairedDevice, ReceiverInfo};
+    use openlogi_core::device::{
+        DeviceInventory, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
+    };
 
     use crate::asset::AssetResolver;
 
@@ -619,10 +704,13 @@ mod tests {
             codename: None,
             serial_number: None,
             unit_id: [1; 4],
+            driver_id: None,
+            standalone_artwork: None,
             route: None,
             capture_id: None,
             kind: DeviceKind::Mouse,
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            light_capabilities: None,
             slot: 1,
             online: true,
             battery: None,
@@ -640,16 +728,60 @@ mod tests {
                 scroll_inversion: false,
                 hires_wheel: false,
             },
+            light_capabilities: None,
             model_info: None,
             codename: None,
+            driver_id: None,
         }
+    }
+
+    #[test]
+    fn standalone_artwork_is_selected_by_driver_and_product() {
+        let device = StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: 0x046d,
+                product_id: 0xc901,
+                usage_page: 0xff43,
+                usage_id: 0x0202,
+                identity: "serial:beam-1".into(),
+            },
+            display_name: "Future Litra model".into(),
+            manufacturer: Some("Logi".into()),
+            serial_number: Some("beam-1".into()),
+            unit_id: [0; 4],
+            kind: DeviceKind::Light,
+            online: true,
+            capabilities: None,
+            light_capabilities: None,
+            driver_id: "litra".into(),
+        };
+        let list = build_device_list(
+            &[],
+            std::slice::from_ref(&device),
+            &AssetResolver::new(),
+            &Config::default(),
+        );
+
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].driver_id.as_deref(), Some("litra"));
+        assert!(list[0].asset.is_none());
+        assert!(list[0].standalone_artwork.is_none());
+
+        let mut glow = device;
+        glow.address.product_id = 0xc900;
+        glow.display_name = "Litra Glow".into();
+        let list = build_device_list(&[], &[glow], &AssetResolver::new(), &Config::default());
+        assert_eq!(
+            list[0].standalone_artwork,
+            Some(crate::app_assets::LITRA_GLOW)
+        );
     }
 
     #[test]
     fn no_model_info_uses_receiver_slot_as_config_key() {
         let inv = inventory_with(vec![paired_device_no_model_info(1, Some(0x4076))]);
         let cache = AssetResolver::new();
-        let list = build_device_list(&[inv], &cache, &Config::default(), &[]);
+        let list = build_device_list(&[inv], &[], &cache, &Config::default(), &[]);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].config_key, "receiver:da2699e1:slot:1");
         assert_eq!(list[0].model_key, "wpid4076");
@@ -661,7 +793,7 @@ mod tests {
     fn no_model_info_falls_back_to_slot_when_no_wpid() {
         let inv = inventory_with(vec![paired_device_no_model_info(3, None)]);
         let cache = AssetResolver::new();
-        let list = build_device_list(&[inv], &cache, &Config::default(), &[]);
+        let list = build_device_list(&[inv], &[], &cache, &Config::default(), &[]);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].config_key, "receiver:da2699e1:slot:3");
         assert_eq!(list[0].model_key, "slot3");
@@ -671,7 +803,7 @@ mod tests {
     fn no_model_info_display_name_falls_back_to_slot() {
         let inv = inventory_with(vec![paired_device_no_model_info(2, Some(0x4051))]);
         let cache = AssetResolver::new();
-        let list = build_device_list(&[inv], &cache, &Config::default(), &[]);
+        let list = build_device_list(&[inv], &[], &cache, &Config::default(), &[]);
         assert_eq!(list[0].display_name, "Slot 2");
     }
 
@@ -688,6 +820,29 @@ mod tests {
         assert!(!rec.online);
         assert!(rec.route.is_none());
         assert_eq!(rec.capabilities, Some(id.capabilities));
+    }
+
+    #[test]
+    fn offline_standalone_record_recovers_bundled_artwork() {
+        let id = DeviceIdentity {
+            display_name: "Litra Glow".into(),
+            kind: DeviceKind::Light,
+            capabilities: Capabilities::default(),
+            light_capabilities: None,
+            model_info: None,
+            codename: None,
+            driver_id: Some("litra".into()),
+        };
+        let record = offline_record(
+            "raw:046d:c900:ff43:0202:serial:known-light",
+            &id,
+            &AssetResolver::new(),
+        );
+
+        assert_eq!(
+            record.standalone_artwork,
+            Some(crate::app_assets::LITRA_GLOW)
+        );
     }
 
     #[test]
@@ -733,6 +888,7 @@ mod tests {
         let cache = AssetResolver::new();
         let list = build_device_list(
             &[direct_inventory(model_info(2, 0xb034))],
+            &[],
             &cache,
             &Config::default(),
             &[],

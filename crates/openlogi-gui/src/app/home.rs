@@ -14,6 +14,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
+use openlogi_core::config::LightSettings;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind, DeviceTransports,
 };
@@ -24,6 +25,7 @@ use super::status::{loading_body, notice_body};
 use super::widgets::{add_device_button, kind_label, settings_button};
 use crate::asset::GlowGeometry;
 use crate::components::carousel::Carousel;
+use crate::components::light_visual;
 use crate::state::{AppState, DeviceRecord};
 use crate::theme::{self, HEADER_H, Palette, SelectableStyle as _, Typography as _};
 
@@ -81,11 +83,19 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                     return div().into_any_element();
                 };
                 let key = record.config_key.clone();
+                let light_enabled = cx.try_global::<AppState>().is_some_and(|state| {
+                    record.kind == DeviceKind::Light && state.light_enabled_for(&record.config_key)
+                });
+                let light_settings = cx
+                    .try_global::<AppState>()
+                    .map_or_else(LightSettings::default, |state| {
+                        state.light_for(&record.config_key)
+                    });
                 let glow = cx
                     .try_global::<AppState>()
                     .and_then(|s| keyboard_glow(s, &record));
                 let view = view.clone();
-                device_card(&record, focused, glow, pal)
+                device_card(&record, focused, glow, light_enabled, light_settings, pal)
                     .id(("device-card", idx))
                     .active(gpui::Styled::shadow_2xs)
                     .role(Role::Button)
@@ -203,6 +213,8 @@ fn device_card(
     record: &DeviceRecord,
     active: bool,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
+    light_enabled: bool,
+    light_settings: LightSettings,
     pal: Palette,
 ) -> Div {
     v_flex()
@@ -232,7 +244,7 @@ fn device_card(
                 .when_some(glow, |this, (geom, color)| {
                     this.child(glow_canvas(geom, color))
                 })
-                .child(device_image(record, pal)),
+                .child(device_image(record, light_enabled, light_settings, pal)),
         )
         .child(
             v_flex()
@@ -309,13 +321,43 @@ fn device_card(
 /// fall back to the raw pixel dimensions when the box can't fully constrain it,
 /// which (with an `overflow_hidden` parent) cropped the device into a zoomed
 /// close-up. `object_fit` defaults to `Contain`, so the whole device shows.
-fn device_image(record: &DeviceRecord, pal: Palette) -> AnyElement {
+fn device_image(
+    record: &DeviceRecord,
+    light_enabled: bool,
+    light_settings: LightSettings,
+    pal: Palette,
+) -> AnyElement {
     if let Some(path) = record
         .asset
         .as_ref()
         .and_then(|a| a.hero_image_path.clone())
     {
         return img(path).max_w_full().max_h_full().into_any_element();
+    }
+    if record.kind == DeviceKind::Light {
+        return light_visual::gallery(
+            record.standalone_artwork,
+            record.online,
+            light_enabled,
+            light_settings,
+            pal,
+        );
+    }
+    // Cameras carry no depot asset, so give them a recognisable glyph on their
+    // gallery card instead of the generic chip fallback.
+    let icon = if matches!(record.kind, DeviceKind::Camera) {
+        IconName::Eye
+    } else {
+        IconName::Cpu
+    };
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(Icon::new(icon).size_8().text_color(pal.text_muted))
+        .into_any_element()
+}
     }
     // Cameras carry no depot asset, so give them a recognisable glyph on their
     // gallery card instead of the generic chip fallback.
@@ -420,6 +462,7 @@ pub(super) fn connection_icon_path(
             // keep the old default.
             _ => "action-icons/bluetooth.svg",
         },
+        Some(DeviceRoute::RawHid { .. }) => "action-icons/usb.svg",
     }
 }
 

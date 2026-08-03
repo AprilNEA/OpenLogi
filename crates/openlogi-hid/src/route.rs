@@ -63,6 +63,21 @@ pub enum DeviceRoute {
         /// USB/HID product ID of the direct device.
         product_id: u16,
     },
+    /// Standalone raw-HID device, such as a Litra light. The identity is an
+    /// opaque transport-generated value used to disambiguate duplicate HID
+    /// nodes; this route must never be passed to HID++ channel code.
+    RawHid {
+        /// HID vendor ID.
+        vendor_id: u16,
+        /// HID product ID.
+        product_id: u16,
+        /// HID usage page.
+        usage_page: u16,
+        /// HID usage ID.
+        usage_id: u16,
+        /// Stable/opaque device identity selected during enumeration.
+        identity: String,
+    },
 }
 
 /// USB product IDs that identify Logi Bolt receivers.
@@ -106,7 +121,7 @@ impl DeviceRoute {
     pub fn device_index(&self) -> u8 {
         match self {
             Self::Bolt { slot, .. } | Self::Unifying { slot, .. } => *slot,
-            Self::Direct { .. } => DIRECT_DEVICE_INDEX,
+            Self::Direct { .. } | Self::RawHid { .. } => DIRECT_DEVICE_INDEX,
         }
     }
 
@@ -162,6 +177,16 @@ impl fmt::Display for DeviceRoute {
                 vendor_id,
                 product_id,
             } => write!(f, "direct {vendor_id:04x}:{product_id:04x}"),
+            Self::RawHid {
+                vendor_id,
+                product_id,
+                usage_page,
+                usage_id,
+                identity,
+            } => write!(
+                f,
+                "raw {vendor_id:04x}:{product_id:04x} usage {usage_page:04x}:{usage_id:04x} ({identity})"
+            ),
         }
     }
 }
@@ -175,6 +200,9 @@ impl fmt::Display for DeviceRoute {
 pub(crate) async fn open_route_channel(
     route: &DeviceRoute,
 ) -> Result<Option<Arc<HidppChannel>>, async_hid::HidError> {
+    if matches!(route, DeviceRoute::RawHid { .. }) {
+        return Ok(None);
+    }
     let candidates = enumerate_hidpp_devices().await?;
     for dev in candidates {
         // A direct route's vendor/product id is on the unopened `DeviceInfo`
@@ -216,6 +244,7 @@ pub(crate) async fn open_route_channel(
                 }
             }
             DeviceRoute::Direct { .. } => return Ok(Some(channel)),
+            DeviceRoute::RawHid { .. } => unreachable!("raw HID route entered HID++ channel path"),
         }
     }
     Ok(None)

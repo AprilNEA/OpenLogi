@@ -29,11 +29,12 @@ use openlogi_agent_core::ipc::{
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
-    DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+    DeviceModelInfo, DeviceTransports, LightCapabilities, LightValueRange, LightValueUnit,
+    PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_hid::{
     Click, DeviceRoute, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
-    PasskeyMethod, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
+    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
 };
 
 /// Serialize exactly as the transport does (`tokio_serde::formats::Bincode`
@@ -61,7 +62,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 10);
+    assert_eq!(PROTOCOL_VERSION, 11);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -83,6 +84,32 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::NextPairing {}, "0d");
     assert_wire(&AgentRequest::Snapshot {}, "0e");
     assert_wire(&AgentRequest::PollEventMonitor {}, "0f");
+    assert_wire(
+        &AgentRequest::SetLight {
+            route: DeviceRoute::RawHid {
+                vendor_id: 0x046d,
+                product_id: 0xc900,
+                usage_page: 0xff43,
+                usage_id: 0x0202,
+                identity: "serial:ABC123".into(),
+            },
+            command: LightCommand::Power(true),
+        },
+        "1003fb6d04fb00c9fb43fffb02020d73657269616c3a4142433132330001",
+    );
+    assert_wire(
+        &AgentRequest::SetLightManualPower {
+            route: DeviceRoute::RawHid {
+                vendor_id: 0x046d,
+                product_id: 0xc900,
+                usage_page: 0xff43,
+                usage_id: 0x0202,
+                identity: "serial:ABC123".into(),
+            },
+            enabled: false,
+        },
+        "1103fb6d04fb00c9fb43fffb02020d73657269616c3a41424331323300",
+    );
 }
 
 #[test]
@@ -135,12 +162,17 @@ fn agent_snapshot() {
             agent_version: "0.6.6".into(),
         },
         inventory: Vec::new(),
+        standalone: Vec::new(),
+        camera_active: false,
     };
-    assert_wire(&snapshot, "010001010705302e362e3600");
+    assert_wire(&snapshot, "010001010705302e362e36000000");
 }
 
 #[test]
 fn device_inventory() {
+    // `Light` was appended after `Unknown`; preserve every existing kind's
+    // bincode discriminant.
+    assert_wire(&DeviceKind::Light, "0c");
     let inventory = vec![DeviceInventory {
         receiver: ReceiverInfo {
             name: "Bolt Receiver".into(),
@@ -244,6 +276,12 @@ fn device_settings_payloads() {
         "0804",
     );
     assert_wire(
+        &WriteError::RequestTimedOut {
+            operation: HidppOperation::Light,
+        },
+        "080a",
+    );
+    assert_wire(
         &WriteError::HidppFeature {
             operation: HidppOperation::WriteDpi,
             feature_hex: 0x2201,
@@ -291,4 +329,63 @@ fn device_settings_payloads() {
         &ReceiverSelector::BoltUid("F00DCAFE".into()),
         "01084630304443414645",
     );
+}
+
+#[test]
+fn standalone_light_dtos_commands_and_errors() {
+    let brightness =
+        LightValueRange::new(20, 250, 1, LightValueUnit::Lumens).expect("valid brightness range");
+    let temperature = LightValueRange::new(2700, 6500, 100, LightValueUnit::Kelvin)
+        .expect("valid temperature range");
+    let capabilities = LightCapabilities {
+        power: true,
+        brightness: Some(brightness),
+        temperature: Some(temperature),
+        color: false,
+        zones: false,
+    };
+    let standalone = StandaloneDevice {
+        address: RawDeviceAddress {
+            vendor_id: 0x046d,
+            product_id: 0xc900,
+            usage_page: 0xff43,
+            usage_id: 0x0202,
+            identity: "serial:glow-1".into(),
+        },
+        display_name: "Litra Glow".into(),
+        manufacturer: Some("Logi".into()),
+        serial_number: Some("glow-1".into()),
+        unit_id: [0; 4],
+        kind: DeviceKind::Light,
+        online: true,
+        capabilities: None,
+        light_capabilities: Some(capabilities),
+        driver_id: "litra".into(),
+    };
+
+    assert_wire(
+        &standalone,
+        "fb6d04fb00c9fb43fffb02020d73657269616c3a676c6f772d310a4c6974726120476c6f7701044c6f67690106676c6f772d31000000000c010001010114fa010101fb8c0afb641964020000056c69747261",
+    );
+    assert_wire(&capabilities, "010114fa010101fb8c0afb641964020000");
+    assert_wire(&brightness, "14fa0101");
+    assert_wire(&temperature, "fb8c0afb64196402");
+    assert_wire(&LightCommand::Power(true), "0001");
+    assert_wire(&LightCommand::BrightnessPercent(65), "0141");
+    assert_wire(&LightCommand::TemperatureKelvin(4600), "02fbf811");
+    assert_wire(&LightCommand::BrightnessNative(136), "0388");
+    assert_wire(
+        &WriteError::InvalidLightValue {
+            control: "temperature_kelvin".into(),
+            value: 2750,
+        },
+        "0b1274656d70657261747572655f6b656c76696efbbe0a",
+    );
+    assert_wire(
+        &WriteError::LightUnsupported {
+            control: "color".into(),
+        },
+        "0c05636f6c6f72",
+    );
+    assert_wire(&WriteError::AmbiguousRawDevice, "0d");
 }

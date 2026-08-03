@@ -9,6 +9,8 @@ pub mod camera_preview;
 pub mod carousel;
 pub mod device_read;
 pub mod dpi_panel;
+pub mod light_panel;
+pub mod light_visual;
 pub mod lighting_panel;
 pub mod smartshift_panel;
 pub mod status;

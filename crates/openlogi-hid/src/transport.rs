@@ -25,6 +25,8 @@ use hidpp::{async_trait, channel::RawHidChannel};
 use tokio::sync::Mutex;
 use tracing::debug;
 
+use crate::write::{WriteError, matches_litra};
+
 /// Bitmask of leased HID++ software ids (`1..=15`; bit `N` means id `N` is taken).
 ///
 /// HID++ correlates request/response by `(device, feature, function, software_id)`.
@@ -122,8 +124,7 @@ pub(crate) fn hid_backend() -> &'static HidBackend {
     &HID_BACKEND
 }
 
-pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError>
-{
+pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError> {
     let all: Vec<async_hid::Device> = HID_BACKEND.enumerate().await?.collect().await;
 
     // One-time visibility into what the OS actually reports for Logitech nodes,
@@ -140,14 +141,62 @@ pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, 
         );
     }
 
-    Ok(all
+    Ok(all)
+}
+
+/// Stable opaque identity used by raw-device routes. Prefer the HID serial;
+/// otherwise retain the backend's platform identifier as a runtime identity.
+/// The latter is deliberately not treated as a cross-machine portable key,
+/// but it is stronger than enumeration order and lets duplicate nodes be
+/// rejected deterministically.
+pub(crate) fn device_identity(info: &DeviceInfo) -> String {
+    info.serial_number
+        .as_deref()
+        .filter(|serial| !serial.is_empty())
+        .map_or_else(
+            // `DeviceInfo::id` is an OS-node identity (hidraw path, registry
+            // entry, or Windows device path). It is useful to re-find a node
+            // during this process lifetime, but it is intentionally marked as
+            // transient and must never become a persisted physical key.
+            || format!("id:{:?}", info.id),
+            |serial| format!("serial:{}", serial.to_ascii_lowercase()),
+        )
+}
+
+pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError>
+{
+    Ok(enumerate_devices()
+        .await?
         .into_iter()
         .filter(|d| {
-            d.vendor_id == LOGITECH_VID
-                && is_hidpp_long_collection(d.usage_page, d.usage_id)
-                && !is_receiver_child_node(&d.id)
+            is_hidpp_candidate(
+                d.vendor_id,
+                d.product_id,
+                d.usage_page,
+                d.usage_id,
+                is_receiver_child_node(&d.id),
+            )
         })
         .collect())
+}
+
+/// Whether an enumerated node belongs to the HID++ channel path.
+///
+/// Standalone drivers have precedence over the generic collection matcher. A
+/// Litra Glow intentionally uses the same BLE usage collection as Logitech
+/// HID++ peripherals, so the full product/usage tuple must be excluded here;
+/// the collection itself remains a valid HID++ candidate for other products.
+fn is_hidpp_candidate(
+    vendor_id: u16,
+    product_id: u16,
+    usage_page: u16,
+    usage_id: u16,
+    receiver_child: bool,
+) -> bool {
+    vendor_id == LOGITECH_VID
+        && is_hidpp_long_collection(usage_page, usage_id)
+        && !matches_litra(vendor_id, product_id, usage_page, usage_id)
+        && !receiver_child
 }
 
 /// Returns `true` when a HID++ node is a virtual per-device interface created by
@@ -202,6 +251,65 @@ fn is_receiver_child_sysfs_path(path: &str) -> bool {
 #[cfg(not(target_os = "linux"))]
 fn is_receiver_child_node(_id: &async_hid::DeviceId) -> bool {
     false
+}
+
+/// Open the raw HID writer for a directly-attached (USB) device, for sending
+/// reports the HID++ wrapper can't model — e.g. the 64-byte `0x12` lighting
+/// frames G-series keyboards use. Returns `None` for Bolt routes or when no
+/// matching node is connected.
+pub(crate) async fn open_route_writer(
+    route: &crate::route::DeviceRoute,
+) -> Result<Option<DeviceWriter>, WriteError> {
+    let candidates = match route {
+        crate::route::DeviceRoute::Direct { .. } => {
+            enumerate_hidpp_devices().await.map_err(WriteError::from)?
+        }
+        crate::route::DeviceRoute::RawHid { .. } => {
+            enumerate_devices().await.map_err(WriteError::from)?
+        }
+        _ => return Ok(None),
+    };
+    let mut matched = None;
+    for dev in candidates {
+        let is_match = match route {
+            crate::route::DeviceRoute::Direct {
+                vendor_id,
+                product_id,
+            } => dev.vendor_id == *vendor_id && dev.product_id == *product_id,
+            crate::route::DeviceRoute::RawHid {
+                vendor_id,
+                product_id,
+                usage_page,
+                usage_id,
+                identity,
+            } => {
+                dev.vendor_id == *vendor_id
+                    && dev.product_id == *product_id
+                    && dev.usage_page == *usage_page
+                    && dev.usage_id == *usage_id
+                    && device_identity(&dev) == *identity
+            }
+            _ => false,
+        };
+        if is_match {
+            if matches!(route, crate::route::DeviceRoute::Direct { .. }) {
+                let (_reader, writer) = dev.open().await.map_err(WriteError::from)?;
+                return Ok(Some(writer));
+            }
+            if matched.is_some() {
+                tracing::warn!("multiple raw HID nodes matched one route");
+                return Err(WriteError::AmbiguousRawDevice);
+            }
+            matched = Some(dev);
+        }
+    }
+    match matched {
+        Some(dev) => {
+            let (_reader, writer) = dev.open().await.map_err(WriteError::from)?;
+            Ok(Some(writer))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Lease one free software id in `1..=15`, or `None` if all 15 are held.

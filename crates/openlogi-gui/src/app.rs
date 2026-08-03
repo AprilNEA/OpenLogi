@@ -18,6 +18,7 @@ use crate::asset::AssetResolver;
 use crate::components::camera_controls::CameraControlsPanel;
 use crate::components::camera_preview::CameraPreview;
 use crate::components::dpi_panel::DpiPanel;
+use crate::components::light_panel::LightPanel;
 use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::mouse_model::view::MouseModelView;
@@ -73,6 +74,8 @@ enum DetailTab {
     Lighting,
     /// Live webcam preview (UVC cameras only).
     Camera,
+    /// Standalone light controls driven by a raw-HID device driver.
+    Light,
     /// Device info and configuration.
     Device,
 }
@@ -115,6 +118,9 @@ impl DetailTab {
         if caps.lighting {
             tabs.push(Self::Lighting);
         }
+        if record.light_capabilities.is_some() {
+            tabs.push(Self::Light);
+        }
         tabs.push(Self::Device);
         tabs
     }
@@ -131,7 +137,7 @@ impl DetailTab {
         match self {
             Self::Buttons => tr!("Buttons"),
             Self::Pointer => tr!("Pointer"),
-            Self::Lighting => tr!("Lighting"),
+            Self::Lighting | Self::Light => tr!("Lighting"),
             Self::Camera => tr!("Camera"),
             Self::Device => tr!("Device"),
         }
@@ -148,6 +154,7 @@ pub struct AppView {
     lighting_panel: Entity<LightingPanel>,
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
+    light_panel: Entity<LightPanel>,
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
     /// Re-renders the root when the device list changes so the empty state
@@ -194,6 +201,7 @@ impl AppView {
         let lighting_panel = cx.new(LightingPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
+        let light_panel = cx.new(LightPanel::new);
         let state_obs = cx.observe_global::<AppState>(|_, cx| cx.notify());
         Self {
             focus_handle,
@@ -204,6 +212,7 @@ impl AppView {
             lighting_panel,
             camera_preview,
             camera_controls,
+            light_panel,
             appearance_obs: None,
             state_obs,
             accessibility_dismissed: false,
@@ -470,12 +479,15 @@ impl Render for AppView {
             (
                 detail::detail_header(record.as_ref(), &tabs, active, pal, cx).into_any_element(),
                 detail::detail_content(
-                    &self.mouse_model,
-                    &self.dpi_panel,
-                    &self.smartshift_panel,
-                    &self.lighting_panel,
-                    &self.camera_preview,
-                    &self.camera_controls,
+                    &detail::DetailPanels {
+                        mouse_model: &self.mouse_model,
+                        dpi_panel: &self.dpi_panel,
+                        smartshift_panel: &self.smartshift_panel,
+                        lighting_panel: &self.lighting_panel,
+                        camera_preview: &self.camera_preview,
+                        camera_controls: &self.camera_controls,
+                        light_panel: &self.light_panel,
+                    },
                     active,
                     pal,
                     cx,
@@ -508,9 +520,17 @@ impl Render for AppView {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::expect_used,
+        reason = "capability fixture construction is intentionally asserted in tests"
+    )]
+
     use super::home::connection_icon_path;
     use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord, battery_charging_no_reading};
-    use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports};
+    use openlogi_core::device::{
+        BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities,
+        LightValueRange, LightValueUnit,
+    };
     use openlogi_hid::DeviceRoute;
 
     /// "Charging" replaces the bogus percentage only when charging *and* the
@@ -627,10 +647,13 @@ mod tests {
             codename: None,
             serial_number: None,
             unit_id: [0; 4],
+            driver_id: None,
+            standalone_artwork: None,
             route: None,
             capture_id: None,
             kind,
             capabilities,
+            light_capabilities: None,
             slot: 1,
             online: true,
             battery: None,
@@ -686,6 +709,23 @@ mod tests {
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert_eq!(tabs, vec![DetailTab::Lighting, DetailTab::Device]);
+    }
+
+    #[test]
+    fn light_tab_follows_light_capabilities() {
+        let mut device = record(DeviceKind::Light, None);
+        device.light_capabilities = Some(LightCapabilities {
+            power: true,
+            brightness: Some(
+                LightValueRange::new(20, 250, 1, LightValueUnit::Lumens)
+                    .expect("demo light range is valid"),
+            ),
+            ..LightCapabilities::default()
+        });
+        assert_eq!(
+            DetailTab::tabs_for(&device),
+            vec![DetailTab::Light, DetailTab::Device]
+        );
     }
 
     /// An unprobed (offline) device has no measured capabilities and falls back
