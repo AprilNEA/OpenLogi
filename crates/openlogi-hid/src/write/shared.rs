@@ -49,9 +49,9 @@ impl SharedChannel {
 /// Write DPI on an already-open [`SharedChannel`] — the fast path that skips
 /// enumeration and channel setup.
 ///
-/// Skipping the open does not skip [`exchange`]: sharing one channel makes the
-/// reply cross-talk it guards against more likely, not less, because both verbs
-/// then wait on the same pending queue.
+/// Skipping the open does not skip the device-exchange lock: sharing one channel
+/// makes the reply cross-talk it guards against more likely, not less, because
+/// both verbs then wait on the same pending queue.
 pub async fn set_dpi_on(shared: &SharedChannel, dpi: u16) -> Result<(), WriteError> {
     let _guard = exchange().await;
     set_dpi_on_channel(&shared.channel, shared.route.device_index(), dpi).await

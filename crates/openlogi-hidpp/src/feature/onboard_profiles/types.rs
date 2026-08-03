@@ -98,8 +98,7 @@ impl ProfilesDescription {
     }
 }
 
-/// One entry of the profile directory in sector
-/// [`DIRECTORY_SECTOR`](self::DIRECTORY_SECTOR).
+/// One entry of the profile directory in sector [`DIRECTORY_SECTOR`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]

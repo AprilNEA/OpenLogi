@@ -79,7 +79,7 @@ impl OnboardProfilesFeature {
     /// Sets the active profile by its flash sector.
     ///
     /// User profiles live in sectors `0x0001..`; ROM profiles carry
-    /// [`ROM_SECTOR_FLAG`](types::ROM_SECTOR_FLAG).
+    /// [`ROM_SECTOR_FLAG`].
     ///
     /// Only legal in [`OnboardMode::Onboard`]: in host mode the firmware
     /// rejects this with an invalid-argument error (observed on a G502 X
@@ -113,8 +113,7 @@ impl OnboardProfilesFeature {
         Ok(self.endpoint.call_long(5, args).await?.extend_payload())
     }
 
-    /// Reads and parses the profile directory from sector
-    /// [`DIRECTORY_SECTOR`](types::DIRECTORY_SECTOR).
+    /// Reads and parses the profile directory from sector [`DIRECTORY_SECTOR`].
     ///
     /// `profile_count` (from [`Self::get_description`]) bounds the number of
     /// entries; reading stops early at the directory terminator.
