@@ -108,7 +108,6 @@ _version: 1
 "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.": "在選單列保留 OpenLogi 圖示；關閉後改為停留在 Dock 中。"
 "Show in the notification area": "在通知區域顯示"
 "Keep OpenLogi's icon in the taskbar notification area. Takes effect the next time the background agent starts.": "在工作列通知區域保留 OpenLogi 圖示。將於背景代理程式下次啟動時生效。"
-"Download from GitHub": "從 GitHub 下載"
 "Assets": "資源"
 "Asset source": "資源來源"
 "Automatic (recommended)": "自動選擇（建議）"

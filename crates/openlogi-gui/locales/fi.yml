@@ -108,7 +108,6 @@ _version: 1
 "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.": "Pidä OpenLogin kuvake valikkorivillä. Kun pois päältä, se pysyy Dockissa."
 "Show in the notification area": "Näytä ilmoitusalueella"
 "Keep OpenLogi's icon in the taskbar notification area. Takes effect the next time the background agent starts.": "Pitää OpenLogin kuvakkeen tehtäväpalkin ilmoitusalueella. Tulee voimaan, kun taustaprosessi käynnistyy seuraavan kerran."
-"Download from GitHub": "Lataa GitHubista"
 "Assets": "Resurssit"
 "Asset source": "Asset source"
 "Automatic (recommended)": "Automatic (recommended)"

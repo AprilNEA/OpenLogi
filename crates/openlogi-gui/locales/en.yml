@@ -108,7 +108,6 @@ _version: 1
 "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.": "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead."
 "Show in the notification area": "Show in the notification area"
 "Keep OpenLogi's icon in the taskbar notification area. Takes effect the next time the background agent starts.": "Keep OpenLogi's icon in the taskbar notification area. Takes effect the next time the background agent starts."
-"Download from GitHub": "Download from GitHub"
 "Assets": "Assets"
 "Asset source": "Asset source"
 "Automatic (recommended)": "Automatic (recommended)"

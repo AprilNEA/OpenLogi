@@ -108,7 +108,6 @@ _version: 1
 "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.": "OpenLogi のアイコンをメニューバーに表示します。オフにすると Dock に残ります。"
 "Show in the notification area": "通知領域に表示"
 "Keep OpenLogi's icon in the taskbar notification area. Takes effect the next time the background agent starts.": "タスクバーの通知領域に OpenLogi のアイコンを表示します。バックグラウンドエージェントの次回起動時に反映されます。"
-"Download from GitHub": "GitHub からダウンロード"
 "Assets": "アセット"
 "Asset source": "アセットソース"
 "Automatic (recommended)": "自動（推奨）"
