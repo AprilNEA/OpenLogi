@@ -39,8 +39,8 @@ embed-resource = "3.0.9"
 # the GUI's so the resolve doesn't move the gpui Cargo.lock pin.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication"] }
-objc2-foundation = { workspace = true, features = ["NSString", "NSData", "NSArray"] }
+objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication", "NSWorkspace"] }
+objc2-foundation = { workspace = true, features = ["NSString", "NSData", "NSArray", "NSNotification"] }
 plist = "1.10.0"
 
 # Autostart via the HKCU Run key (launch_agent.rs); winreg also answers the
