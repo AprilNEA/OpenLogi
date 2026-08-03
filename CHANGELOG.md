@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.24](https://github.com/AprilNEA/OpenLogi/compare/v0.6.23...v0.6.24) - 2026-08-03
+
+### Fixed
+
+- *(i18n)* complete Crowdin synchronization ([#508](https://github.com/AprilNEA/OpenLogi/pull/508))
+
 ## [0.6.23](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.22...openlogi-core-v0.6.23) - 2026-08-02
 
 ### Fixed
