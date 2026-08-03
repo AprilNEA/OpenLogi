@@ -9,8 +9,8 @@
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, DpiInfo, PairingError, PasskeyMethod, ReceiverSelector, SmartShiftMode,
-    SmartShiftStatus, WriteError,
+    DeviceRoute, DpiInfo, OnboardProfilesInfo, PairingError, PasskeyMethod, ProfilesMode,
+    ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +28,10 @@ use serde::{Deserialize, Serialize};
 /// v8: [`WriteError`] carries typed HID++ operation failures.
 /// v9: `poll_event_monitor` appended + [`MonitorEvent`] (live event monitor).
 /// v10: `Capabilities::hires_wheel` appended.
-pub const PROTOCOL_VERSION: u32 = 10;
+/// v11: `set_onboard_profiles` / `read_onboard_profiles` appended,
+///      `Capabilities::onboard_profiles` appended, `HidppOperation` gains
+///      `ReadOnboardProfiles` / `WriteOnboardProfiles`.
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep
@@ -272,7 +275,18 @@ pub trait Agent {
     /// Drain the events the hook has observed since the last poll, for the GUI's
     /// live event monitor. The first poll enables monitoring; the agent
     /// auto-disables it once polls stop (the GUI closed the panel or died), so
-    /// there is no explicit stop. Appended last — see the method-order note on
-    /// [`Agent::protocol_version`].
+    /// there is no explicit stop.
     async fn poll_event_monitor() -> Vec<MonitorEvent>;
+    /// Apply an onboard-profiles config to `route` now: host mode (OpenLogi
+    /// drives the device) or onboard mode with an optional profile sector to
+    /// activate. Appended for protocol v11.
+    async fn set_onboard_profiles(
+        route: DeviceRoute,
+        mode: ProfilesMode,
+        profile: Option<u16>,
+    ) -> Result<(), WriteError>;
+    /// Read the onboard-profiles state (description, mode, active profile,
+    /// directory) from `route`. Appended last — see the method-order note on
+    /// [`Agent::protocol_version`].
+    async fn read_onboard_profiles(route: DeviceRoute) -> Result<OnboardProfilesInfo, WriteError>;
 }

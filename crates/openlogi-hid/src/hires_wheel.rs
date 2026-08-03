@@ -16,7 +16,8 @@ use tracing::debug;
 
 use crate::route::DeviceRoute;
 use crate::write::{
-    HidppOperation, SharedChannel, WriteError, classify_hidpp_error, open_feature, with_route,
+    HidppOperation, SharedChannel, WriteError, classify_hidpp_error, exchange, open_feature,
+    with_route,
 };
 
 /// Destination for vertical wheel movement reports.
@@ -62,6 +63,7 @@ pub async fn get_scroll_wheel_mode(route: &DeviceRoute) -> Result<ScrollWheelMod
 pub async fn get_scroll_wheel_mode_on(
     shared: &SharedChannel,
 ) -> Result<ScrollWheelMode, WriteError> {
+    let _guard = exchange().await;
     get_scroll_wheel_mode_on_channel(shared.channel(), shared.device_index()).await
 }
 
@@ -92,6 +94,7 @@ pub async fn set_scroll_resolution_on(
     shared: &SharedChannel,
     resolution: ScrollResolution,
 ) -> Result<ScrollWheelMode, WriteError> {
+    let _guard = exchange().await;
     change_wheel_mode_on_channel(
         shared.channel(),
         shared.device_index(),
@@ -124,6 +127,7 @@ pub async fn set_scroll_wheel_mode_on(
     resolution: ScrollResolution,
     inverted: bool,
 ) -> Result<ScrollWheelMode, WriteError> {
+    let _guard = exchange().await;
     change_wheel_mode_on_channel(
         shared.channel(),
         shared.device_index(),
@@ -154,6 +158,7 @@ pub async fn set_scroll_inversion_on(
     shared: &SharedChannel,
     inverted: bool,
 ) -> Result<(), WriteError> {
+    let _guard = exchange().await;
     change_wheel_mode_on_channel(
         shared.channel(),
         shared.device_index(),

@@ -86,6 +86,17 @@ Back = "Undo"
 enabled = true
 color = "ff0000"
 brightness = 80
+
+# Gaming mice with onboard profile memory (HID++ 0x8100, e.g. G-series).
+# mode = "onboard" runs a profile from the device's own flash; "host" lets
+# OpenLogi drive the device instead. Omit this table entirely and the device
+# keeps whatever mode it powered on in — OpenLogi never switches it for you.
+# The mode is not persistent on the device, so the agent re-applies it on
+# every reconnect. `profile` is the flash sector to activate, and only
+# applies in onboard mode; omit it to keep whichever profile is active.
+[devices.2b042.onboard_profiles]
+mode = "onboard"
+profile = 2
 ```
 
 Action names are the catalog's variant names (`LeftClick`, `MouseBack`,

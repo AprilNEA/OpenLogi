@@ -25,6 +25,7 @@ use super::{AppView, DetailTab};
 use crate::app_menu::file_url;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::lighting_panel::LightingPanel;
+use crate::components::profiles_panel::ProfilesPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AppState, DeviceRecord};
@@ -86,11 +87,16 @@ pub(super) fn detail_header(
 /// switches them — is the header's job (see [`detail_header`] and
 /// [`DetailTab::tabs_for`]); `active` arrives pre-resolved against this device's
 /// tab set, so this only has to render the chosen section.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one entity per section panel; bundling would just hide the dependency"
+)]
 pub(super) fn detail_content(
     mouse_model: &gpui::Entity<MouseModelView>,
     dpi_panel: &gpui::Entity<DpiPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
     lighting_panel: &gpui::Entity<LightingPanel>,
+    profiles_panel: &gpui::Entity<ProfilesPanel>,
     active: DetailTab,
     pal: Palette,
     cx: &mut Context<AppView>,
@@ -103,6 +109,7 @@ pub(super) fn detail_content(
         DetailTab::Buttons => buttons_tab(mouse_model).into_any_element(),
         DetailTab::Pointer => pointer_tab(dpi_panel, smartshift_panel, pal, cx).into_any_element(),
         DetailTab::Lighting => lighting_tab(lighting_panel, pal).into_any_element(),
+        DetailTab::Profiles => profiles_tab(profiles_panel, pal).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
     };
     v_flex()
@@ -397,6 +404,25 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>, pal: Palette) -> i
         )))
 }
 
+/// Profiles tab: the onboard-profiles controls (settings source + active
+/// profile) in a titled card. Shown when the device reports HID++ `0x8100` —
+/// see [`DetailTab::tabs_for`].
+fn profiles_tab(profiles_panel: &gpui::Entity<ProfilesPanel>, pal: Palette) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .items_center()
+        .overflow_y_scrollbar()
+        .p(px(SCREEN_PAD))
+        .child(div().w_full().max_w(px(560.)).child(panel_card(
+            tr!("Profiles"),
+            Icon::new(IconName::Settings),
+            pal,
+            profiles_panel.clone().into_any_element(),
+        )))
+}
+
 /// Device tab: device details and configuration cards stacked.
 fn device_tab(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     v_flex()
@@ -539,7 +565,8 @@ fn device_summary(name: &str, kind: DeviceKind, online: bool, pal: Palette) -> i
 
 fn device_description_list(record: DeviceRecord) -> impl IntoElement {
     let mut items = vec![
-        DescriptionItem::new(tr!("Connection")).value(route_label(record.route.as_ref())),
+        DescriptionItem::new(tr!("Connection"))
+            .value(route_label(record.route.as_ref(), record.receiver_pid)),
         DescriptionItem::new(tr!("Slot")).value(record.slot.to_string()),
         DescriptionItem::new(tr!("Device key")).value(record.config_key),
     ];

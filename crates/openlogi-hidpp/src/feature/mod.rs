@@ -31,6 +31,7 @@ pub mod illumination;
 pub mod mode_status;
 pub mod mouse_pointer;
 pub mod multi_platform;
+pub mod onboard_profiles;
 pub mod per_key_lighting;
 pub mod persistent_remappable_action;
 pub mod registry;

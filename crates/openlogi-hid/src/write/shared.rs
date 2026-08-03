@@ -5,9 +5,10 @@ use hidpp::channel::HidppChannel;
 use crate::route::DeviceRoute;
 use crate::smartshift::SmartShiftMode;
 
-use super::WriteError;
 use super::dpi::set_dpi_on_channel;
+use super::onboard_profiles::apply_profiles_config_on_channel;
 use super::smartshift::{set_smartshift_on_channel, toggle_smartshift_on_channel};
+use super::{WriteError, exchange};
 
 /// An open HID++ channel to a device, shared so DPI / SmartShift writes can
 /// reuse the capture session's connection instead of re-enumerating and
@@ -47,13 +48,32 @@ impl SharedChannel {
 
 /// Write DPI on an already-open [`SharedChannel`] — the fast path that skips
 /// enumeration and channel setup.
+///
+/// Skipping the open does not skip the device-exchange lock: sharing one channel
+/// makes the reply cross-talk it guards against more likely, not less, because
+/// both verbs then wait on the same pending queue.
 pub async fn set_dpi_on(shared: &SharedChannel, dpi: u16) -> Result<(), WriteError> {
+    let _guard = exchange().await;
     set_dpi_on_channel(&shared.channel, shared.route.device_index(), dpi).await
 }
 
 /// Toggle SmartShift on an already-open [`SharedChannel`].
 pub async fn toggle_smartshift_on(shared: &SharedChannel) -> Result<SmartShiftMode, WriteError> {
+    let _guard = exchange().await;
     toggle_smartshift_on_channel(&shared.channel, shared.route.device_index()).await
+}
+
+/// Apply the persisted onboard-profiles configuration on an already-open
+/// [`SharedChannel`] — the fast path that skips enumeration and channel setup.
+/// Returns whether anything was written.
+pub async fn apply_profiles_config_on(
+    shared: &SharedChannel,
+    mode: crate::onboard_profiles::ProfilesMode,
+    profile: Option<u16>,
+) -> Result<bool, WriteError> {
+    let _guard = exchange().await;
+    apply_profiles_config_on_channel(&shared.channel, shared.route.device_index(), mode, profile)
+        .await
 }
 
 /// Write a full SmartShift configuration on an already-open [`SharedChannel`]
@@ -64,6 +84,7 @@ pub async fn set_smartshift_on(
     auto_disengage: u8,
     tunable_torque: u8,
 ) -> Result<(), WriteError> {
+    let _guard = exchange().await;
     set_smartshift_on_channel(
         &shared.channel,
         shared.route.device_index(),

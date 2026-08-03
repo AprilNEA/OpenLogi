@@ -131,6 +131,27 @@ mod tests {
     }
 
     #[test]
+    fn profiles_read_only_and_device_flags_are_mapped() {
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "diag",
+            "profiles",
+            "--read-only",
+            "--device",
+            "G502",
+        ])
+        .expect("valid profiles invocation parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::Profiles(args)) => {
+                assert!(args.read_only);
+                assert_eq!(args.device.as_deref(), Some("G502"));
+            }
+            other => panic!("expected Diag(Profiles), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn wheel_resolution_and_device_flags_are_mapped() {
         let cli = Cli::try_parse_from([
             "openlogi",

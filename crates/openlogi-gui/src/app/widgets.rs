@@ -188,10 +188,20 @@ pub(super) fn sidebar_action(
         .into_any_element()
 }
 
-pub(super) fn route_label(route: Option<&DeviceRoute>) -> String {
+/// Label for the device's connection. `receiver_pid` distinguishes the two
+/// receivers that share [`DeviceRoute::Unifying`]: a Lightspeed receiver is
+/// routed as Unifying because it speaks the same HID++ 1.0 register protocol,
+/// but it is a different product and is named as one.
+pub(super) fn route_label(route: Option<&DeviceRoute>, receiver_pid: u16) -> String {
     match route {
         Some(DeviceRoute::Bolt { .. }) => tr!("Bolt receiver").to_string(),
-        Some(DeviceRoute::Unifying { .. }) => tr!("Unifying receiver").to_string(),
+        Some(DeviceRoute::Unifying { .. }) => {
+            if openlogi_hid::LIGHTSPEED_PIDS.contains(&receiver_pid) {
+                tr!("Lightspeed receiver").to_string()
+            } else {
+                tr!("Unifying receiver").to_string()
+            }
+        }
         Some(DeviceRoute::Direct { .. }) => tr!("Direct connection").to_string(),
         None => tr!("Unavailable").to_string(),
     }

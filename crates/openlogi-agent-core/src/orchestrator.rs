@@ -14,9 +14,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 
-use openlogi_core::config::{Config, ScrollResolution};
+use openlogi_core::config::{Config, ProfileSource, ScrollResolution};
 use openlogi_core::device::{Capabilities, DeviceInventory};
-use openlogi_hid::{CaptureChannel, DeviceRoute};
+use openlogi_hid::{CaptureChannel, DeviceRoute, ProfilesMode};
 use tracing::warn;
 
 use crate::DpiCycleState;
@@ -199,10 +199,10 @@ impl Orchestrator {
         self.inventory = InventoryState::Ready(inventories.to_vec());
         let devices = build_devices(inventories);
         // Volatile settings (lighting colour, sensor DPI, SmartShift, native
-        // wheel mode) live in device RAM and reset on a power cycle. Every
-        // reconnect shape re-applies the persisted values (#189): a first
-        // sighting, a replug (new route), a wake from device sleep
-        // (offline→online), or — via the
+        // wheel mode, onboard-profiles host mode) live in device RAM and reset
+        // on a power cycle. Every reconnect shape re-applies the persisted
+        // values (#189): a first sighting, a replug (new route), a wake from
+        // device sleep (offline→online), or — via the
         // flag — a system wake where none of those are observable.
         let reapply_all = std::mem::take(&mut self.reapply_all_next_refresh);
         let followup = std::mem::take(&mut self.reapply_followup);
@@ -238,16 +238,24 @@ impl Orchestrator {
         self.reapply_all_next_refresh = true;
     }
 
-    /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift,
-    /// native wheel mode) to one device. Mouse settings run on one background
-    /// thread and one HID++ channel so concurrent multi-open of the same
-    /// receiver cannot cross-talk (#485); lighting stays a separate path
-    /// (keyboards / different feature).
+    /// Push the persisted volatile settings (onboard-profiles mode, lighting,
+    /// sensor DPI, SmartShift, native wheel mode) to one device. When the
+    /// device has `0x8100`, the onboard-mode switch settles first — a mouse
+    /// still in onboard mode rejects DPI writes with `InvalidArgument`. Mouse
+    /// settings then run on one background thread and one HID++ channel so
+    /// concurrent multi-open of the same receiver cannot cross-talk (#485);
+    /// lighting stays a separate path (keyboards / different feature).
     fn reapply_volatile_settings(&self, dev: &AgentDevice) {
         let Some(route) = dev.route.clone() else {
             return;
         };
         let key = &dev.config_key;
+
+        // Resolve every configured value up front, then bundle the writes so
+        // they can run either immediately (no 0x8100) or strictly *after* the
+        // onboard-profiles apply: activating a profile reloads that profile's
+        // stored DPI from flash, so a DPI write that raced ahead of it would be
+        // silently discarded.
         let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
         let dpi = self.config.dpi(key);
         let smartshift = self
@@ -258,18 +266,34 @@ impl Orchestrator {
                 auto_disengage: ss.auto_disengage,
                 tunable_torque: ss.tunable_torque,
             });
-        if resolution.is_some() || inverted.is_some() || dpi.is_some() || smartshift.is_some() {
-            crate::hardware::reapply_mouse_volatile_in_background(
+        let lighting = self.config.lighting(key).filter(|l| l.enabled);
+        let capture = Arc::clone(&self.shared.capture_channel);
+        let profiles_route = route.clone();
+        let rest = move || {
+            if resolution.is_some() || inverted.is_some() || dpi.is_some() || smartshift.is_some() {
+                crate::hardware::reapply_mouse_volatile_in_background(
+                    Some(&capture),
+                    route.clone(),
+                    resolution,
+                    inverted,
+                    dpi,
+                    smartshift,
+                );
+            }
+            if let Some(lighting) = lighting {
+                crate::hardware::set_lighting_in_background(Some(route), &lighting);
+            }
+        };
+
+        match configured_onboard_profiles(&self.config, dev) {
+            Some((mode, profile)) => crate::hardware::apply_onboard_profiles_in_background(
                 Some(&self.shared.capture_channel),
-                route.clone(),
-                resolution,
-                inverted,
-                dpi,
-                smartshift,
-            );
-        }
-        if let Some(lighting) = self.config.lighting(key).filter(|l| l.enabled) {
-            crate::hardware::set_lighting_in_background(Some(route), &lighting);
+                Some(profiles_route),
+                mode,
+                profile,
+                rest,
+            ),
+            None => rest(),
         }
     }
 
@@ -360,6 +384,29 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
     }
+}
+
+/// The onboard-profiles mode + profile to apply to `dev`, or `None` when there
+/// is nothing to assert — no `0x8100` in the measured feature table (or it was
+/// never probed), or the user has never chosen a mode for this device.
+///
+/// The mode is device state the user changes from the mouse itself, so OpenLogi
+/// never takes it uninvited. See `.claude/rules/onboard-profiles.md`.
+fn configured_onboard_profiles(
+    config: &Config,
+    dev: &AgentDevice,
+) -> Option<(ProfilesMode, Option<u16>)> {
+    if !dev.capabilities?.onboard_profiles {
+        return None;
+    }
+    let cfg = config.onboard_profiles(&dev.config_key)?;
+    Some((
+        match cfg.mode {
+            ProfileSource::Host => ProfilesMode::Host,
+            ProfileSource::Onboard => ProfilesMode::Onboard,
+        },
+        cfg.profile,
+    ))
 }
 
 /// Resolve the two independently-gated HiResWheel settings for one device.
