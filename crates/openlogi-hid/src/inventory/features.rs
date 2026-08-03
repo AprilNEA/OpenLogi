@@ -28,6 +28,9 @@ pub(super) struct ProbedFeatures {
     pub(super) kind: Option<DeviceKind>,
     /// Configuration capabilities derived from the device's feature table.
     pub(super) capabilities: Option<Capabilities>,
+    /// A `DeviceInformation` read *failed* (vs. the feature being absent), so
+    /// the identity fields above may be missing data the device does have.
+    pub(super) identity_incomplete: bool,
 }
 
 /// Read just the battery by addressing the `UnifiedBattery` feature at its
@@ -114,6 +117,7 @@ pub(super) async fn probe_features(
         None => None,
     };
 
+    let mut identity_incomplete = false;
     let model_info = match device.get_feature::<DeviceInformationFeature>() {
         Some(feature) => match feature.get_device_info().await {
             Ok(info) => {
@@ -122,6 +126,7 @@ pub(super) async fn probe_features(
                         Ok(serial) => normalize_serial_number(&serial),
                         Err(e) => {
                             debug!(slot, error = ?e, "DeviceInformation serial read failed");
+                            identity_incomplete = true;
                             None
                         }
                     }
@@ -144,6 +149,7 @@ pub(super) async fn probe_features(
             }
             Err(e) => {
                 debug!(slot, error = ?e, "DeviceInformation read failed");
+                identity_incomplete = true;
                 None
             }
         },
@@ -171,6 +177,7 @@ pub(super) async fn probe_features(
             model_info,
             kind,
             capabilities,
+            identity_incomplete,
         },
         battery_index,
     )

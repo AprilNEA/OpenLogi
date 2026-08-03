@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.23](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.22...openlogi-core-v0.6.23) - 2026-08-02
+
+### Fixed
+
+- *(hook)* grab only relative pointer devices, never touchpads or pointing sticks ([#401](https://github.com/AprilNEA/OpenLogi/pull/401))
+
 ## [0.6.22](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.21...openlogi-core-v0.6.22) - 2026-07-21
 
 ### Added

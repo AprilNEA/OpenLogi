@@ -1,8 +1,12 @@
 use std::collections::HashSet;
 
-use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
+use openlogi_core::device::{
+    DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+};
 
-use super::cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_TICKS, is_stale};
+use super::cache::{
+    CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_TICKS, backfill_identity, is_stale,
+};
 use super::probe::{NodeProbe, assemble_bolt_probe, parse_codename_unifying};
 use super::{Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop};
 use crate::inventory::features::ProbedFeatures;
@@ -255,6 +259,95 @@ fn bolt_probe_is_incomplete_when_the_count_register_is_unanswered() {
         "no count register means we couldn't fully check"
     );
     assert!(!probe.healthy);
+}
+
+fn model(unit_id: [u8; 4], serial: Option<&str>) -> DeviceModelInfo {
+    DeviceModelInfo {
+        entity_count: 1,
+        serial_number: serial.map(str::to_string),
+        unit_id,
+        transports: DeviceTransports::default(),
+        model_ids: [0xc09d, 0, 0],
+        extended_model_id: 1,
+    }
+}
+
+fn probed(model_info: Option<DeviceModelInfo>, identity_incomplete: bool) -> ProbedFeatures {
+    ProbedFeatures {
+        model_info,
+        identity_incomplete,
+        kind: Some(DeviceKind::Mouse),
+        ..ProbedFeatures::default()
+    }
+}
+
+#[test]
+fn failed_device_info_read_backfills_from_cache() {
+    let mut fresh = probed(None, true);
+    let cached = probed(Some(model([0x46, 0, 0x2e, 0], None)), false);
+
+    backfill_identity(&mut fresh, &cached);
+
+    assert_eq!(fresh.model_info, cached.model_info);
+    assert!(
+        !fresh.identity_incomplete,
+        "a backfilled identity is complete and may be cached"
+    );
+}
+
+#[test]
+fn failed_serial_read_backfills_only_the_serial() {
+    let mut fresh = probed(Some(model([1, 2, 3, 4], None)), true);
+    let cached = probed(Some(model([9, 9, 9, 9], Some("abc123"))), false);
+
+    backfill_identity(&mut fresh, &cached);
+
+    let Some(info) = fresh.model_info else {
+        panic!("model info kept");
+    };
+    assert_eq!(info.serial_number.as_deref(), Some("abc123"));
+    assert_eq!(info.unit_id, [1, 2, 3, 4], "fresh unit id wins");
+    assert!(!fresh.identity_incomplete);
+}
+
+#[test]
+fn complete_probe_is_never_overwritten_by_cache() {
+    let mut fresh = probed(Some(model([1, 2, 3, 4], None)), false);
+    let cached = probed(Some(model([9, 9, 9, 9], Some("stale"))), false);
+
+    backfill_identity(&mut fresh, &cached);
+
+    let Some(info) = fresh.model_info else {
+        panic!("model info kept");
+    };
+    assert_eq!(info.unit_id, [1, 2, 3, 4]);
+    assert!(
+        info.serial_number.is_none(),
+        "no serial was read, none faked"
+    );
+}
+
+#[test]
+fn incomplete_probe_without_cached_identity_stays_incomplete() {
+    let mut fresh = probed(None, true);
+    let cached = probed(None, false);
+
+    backfill_identity(&mut fresh, &cached);
+
+    assert!(
+        fresh.identity_incomplete,
+        "nothing to backfill from — the caller must not memoize this probe"
+    );
+}
+
+#[test]
+fn failed_kind_read_is_carried_forward() {
+    let mut fresh = ProbedFeatures::default();
+    let cached = probed(None, false);
+
+    backfill_identity(&mut fresh, &cached);
+
+    assert_eq!(fresh.kind, Some(DeviceKind::Mouse));
 }
 
 #[test]

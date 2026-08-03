@@ -38,7 +38,7 @@ serde_json = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rust-i18n = "4"
 sys-locale = "0.3.2"
-gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.5", features = ["gpui"] }
+gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.6", features = ["gpui"] }
 # Spawn the agent under its own macOS TCC identity (see ipc_client::spawn_agent).
 # Cross-platform: a no-op pass-through to std::process::Command off macOS.
 disclaim = "0.1"
@@ -95,8 +95,3 @@ osx_minimum_system_version = "13.0"
 osx_url_schemes = ["openlogi"]
 icon = ["icon/AppIcon.icns"]
 resources = ["assets/**/*"]
-
-[package.metadata.i18n]
-available-locales = ["en", "ja", "ru", "zh-CN", "zh-HK", "zh-TW", "it"]
-default-locale = "en"
-load-path = "locales"

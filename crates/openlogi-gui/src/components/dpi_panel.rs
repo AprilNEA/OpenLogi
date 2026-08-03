@@ -6,11 +6,12 @@
 
 use gpui::{
     AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, div, px, rgb,
+    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window, div, px,
 };
 use gpui_component::{
-    Icon, IconName, h_flex,
+    IconName, Selectable as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
@@ -20,7 +21,7 @@ use tracing::debug;
 use crate::components::device_read::issue_device_read;
 use crate::components::status::{retry_line, status_line};
 use crate::state::{AppState, DpiStatus};
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
+use crate::theme::{self, Palette, SelectableStyle, Typography as _};
 
 pub struct DpiPanel {
     slider_state: Option<Entity<SliderState>>,
@@ -234,7 +235,7 @@ impl Render for DpiPanel {
                     .child(
                         div()
                             .text_body()
-                            .text_color(rgb(ACCENT_BLUE))
+                            .text_color(pal.text_primary)
                             .child(format!("{}", snapshot.dpi)),
                     ),
             )
@@ -259,7 +260,7 @@ impl Render for DpiPanel {
                             .gap_2()
                             .flex_wrap()
                             .children(preset_chips)
-                            .child(add_preset_chip(pal)),
+                            .child(add_preset_chip()),
                     ),
             )
     }
@@ -367,11 +368,14 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
         .selected_fill(active)
         .hover(|s| s.bg(pal.surface_hover))
         .child(
-            div()
-                .id(("dpi-preset-apply", idx))
-                .text_body()
-                .text_color(pal.text_primary)
-                .child(format!("{value}"))
+            Button::new(("dpi-preset-apply", idx))
+                .compact()
+                .ghost()
+                .h_full()
+                .flex()
+                .items_center()
+                .label(format!("{value}"))
+                .selected(active)
                 .on_click(move |_event, _window, cx| {
                     // Only apply once the supported DPI list is known, so the
                     // click writes a snapped, device-valid value — and can't be
@@ -387,11 +391,10 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
                 }),
         )
         .child(
-            div()
-                .id(("dpi-preset-remove", idx))
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(Icon::new(IconName::Close).size_3())
+            Button::new(("dpi-preset-remove", idx))
+                .xsmall()
+                .ghost()
+                .icon(IconName::Close)
                 .on_click(move |_event, _window, cx| {
                     let mut next = presets_for_remove.clone();
                     if idx < next.len() {
@@ -405,26 +408,13 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
 }
 
 /// "+" chip that snapshots `AppState.dpi` as a new preset.
-fn add_preset_chip(pal: Palette) -> AnyElement {
-    h_flex()
-        .id("dpi-preset-add")
+fn add_preset_chip() -> AnyElement {
+    Button::new("dpi-preset-add")
+        .compact()
+        .outline()
         .h(px(CHIP_H))
-        .px_3()
-        .items_center()
-        .rounded(pal.control_radius)
-        .border_1()
-        .border_color(pal.border)
-        .bg(pal.surface)
-        .hover(|s| s.bg(pal.surface_hover))
-        .child(
-            h_flex()
-                .gap_1()
-                .items_center()
-                .text_body()
-                .text_color(pal.text_muted)
-                .child(Icon::new(IconName::Plus).size_3())
-                .child(tr!("Add")),
-        )
+        .icon(IconName::Plus)
+        .label(tr!("Add"))
         .on_click(|_event, _window, cx| {
             // Append the current DPI to the active device's preset list.
             // Duplicates are allowed — the user might want the same value

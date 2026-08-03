@@ -13,11 +13,12 @@
 //! [`crate::components::dpi_panel`].
 
 use gpui::{
-    AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, div, px, rgb,
+    AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, IntoElement,
+    ParentElement, Render, SharedString, Styled, Subscription, Window, div, px, rgb,
 };
 use gpui_component::{
+    Disableable as _, Selectable as _,
+    button::Button,
     h_flex,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
@@ -27,8 +28,8 @@ use openlogi_hid::{AUTO_DISENGAGE_PERMANENT, DeviceRoute, SmartShiftMode, SmartS
 
 use crate::components::device_read::issue_device_read;
 use crate::components::status::{retry_line, status_line};
-use crate::state::{AppState, SmartShiftLoad};
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
+use crate::state::{AppState, SmartShiftLoad, SmartShiftWriteStatus};
+use crate::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
 /// Friendly slider range for the `autoDisengage` threshold. The wire field is
 /// `0x01`–`0xFE` (0.25 turn/s steps); the slider exposes the usable band
@@ -102,11 +103,11 @@ impl SmartShiftPanel {
     /// been queried yet — same lazy, dedicated-OS-thread pattern as
     /// [`crate::components::dpi_panel::DpiPanel`].
     fn ensure_smartshift_load(cx: &mut Context<Self>) {
-        let Some((key, route)) = smartshift_load_target(cx) else {
+        let Some((key, route, write_id)) = smartshift_load_target(cx) else {
             return;
         };
         cx.update_global::<AppState, _>(|state, _| state.mark_smartshift_loading(&key));
-        Self::issue_smartshift_read(key, route, cx);
+        Self::issue_smartshift_read(key, route, write_id, AppState::clear_smartshift_loading, cx);
     }
 
     /// Re-read once after an optimistic write to confirm the device actually
@@ -114,12 +115,18 @@ impl SmartShiftPanel {
     /// showing a setting that never applied. No Loading marker, so the
     /// optimistic value stays on screen until the real state replaces it.
     fn ensure_smartshift_confirm(cx: &mut Context<Self>) {
-        let Some((key, route)) =
+        let Some((key, route, write_id)) =
             cx.update_global::<AppState, _>(|state, _| state.take_active_smartshift_confirm())
         else {
             return;
         };
-        Self::issue_smartshift_read(key, route, cx);
+        Self::issue_smartshift_read(
+            key,
+            route,
+            Some(write_id),
+            move |state, key| state.fail_smartshift_confirm(key, write_id),
+            cx,
+        );
     }
 
     /// Send a SmartShift read over IPC and store the typed result. Shared by the
@@ -127,14 +134,22 @@ impl SmartShiftPanel {
     /// to set the Loading marker first. The agent returns the typed `WriteError`,
     /// so a permanent `FeatureUnsupported` reaches `store_smartshift_status`
     /// intact and the panel stops re-probing instead of retrying every reselect.
-    fn issue_smartshift_read(key: String, route: DeviceRoute, cx: &mut Context<Self>) {
+    fn issue_smartshift_read(
+        key: String,
+        route: DeviceRoute,
+        write_id: Option<u64>,
+        clear: impl Fn(&mut AppState, &str) + 'static,
+        cx: &mut Context<Self>,
+    ) {
         issue_device_read(
             cx,
             key,
             route,
             crate::ipc_client::Command::ReadSmartShift,
-            AppState::store_smartshift_status,
-            AppState::clear_smartshift_loading,
+            move |state, key, route, result| {
+                state.store_smartshift_status(key, route, write_id, result);
+            },
+            clear,
         );
     }
 
@@ -270,11 +285,15 @@ impl Render for SmartShiftPanel {
         let status = cx
             .try_global::<AppState>()
             .map_or(SmartShiftLoad::Unknown, AppState::current_smartshift_status);
+        let write_status = cx
+            .try_global::<AppState>()
+            .and_then(AppState::current_smartshift_write_status);
         let reachable = cx
             .try_global::<AppState>()
             .and_then(AppState::current_record)
             .is_some_and(|r| r.route.is_some());
 
+        let show_write_status = matches!(status, SmartShiftLoad::Ready(_));
         let content: AnyElement = match status {
             SmartShiftLoad::Ready(s) => self.ready_body(s, window, pal, cx),
             SmartShiftLoad::Loading | SmartShiftLoad::Unknown if !reachable => {
@@ -297,17 +316,48 @@ impl Render for SmartShiftPanel {
             }
         };
 
-        v_flex().gap_3().w_full().child(content)
+        let feedback = show_write_status
+            .then(|| smartshift_write_feedback(write_status, pal))
+            .flatten();
+        v_flex().gap_3().w_full().child(content).children(feedback)
     }
 }
 
-fn smartshift_load_target(cx: &mut Context<SmartShiftPanel>) -> Option<(String, DeviceRoute)> {
+fn smartshift_write_feedback(
+    status: Option<SmartShiftWriteStatus>,
+    pal: Palette,
+) -> Option<AnyElement> {
+    match status {
+        Some(SmartShiftWriteStatus::Applying { .. }) => {
+            Some(status_line(tr!("Reading SmartShift settings…"), pal))
+        }
+        Some(SmartShiftWriteStatus::Confirmed) => Some(status_line(tr!("Done"), pal)),
+        Some(SmartShiftWriteStatus::Failed) => Some(retry_line(
+            "smartshift-confirm-retry",
+            tr!("Couldn't read SmartShift — click to retry."),
+            pal,
+            |cx| {
+                cx.update_global::<AppState, _>(|state, _| state.retry_active_smartshift());
+                cx.refresh_windows();
+            },
+        )),
+        None => None,
+    }
+}
+
+fn smartshift_load_target(
+    cx: &mut Context<SmartShiftPanel>,
+) -> Option<(String, DeviceRoute, Option<u64>)> {
     cx.try_global::<AppState>().and_then(|state| {
         if !state.current_smartshift_unqueried() {
             return None;
         }
         let record = state.current_record()?;
-        Some((record.config_key.clone(), record.route.clone()?))
+        let write_id = match state.current_smartshift_write_status() {
+            Some(SmartShiftWriteStatus::Applying { write_id, .. }) => Some(write_id),
+            Some(SmartShiftWriteStatus::Confirmed | SmartShiftWriteStatus::Failed) | None => None,
+        };
+        Some((record.config_key.clone(), record.route.clone()?, write_id))
     })
 }
 
@@ -328,25 +378,16 @@ fn mode_pill(
     target: SmartShiftMode,
     cur_auto: u8,
     torque: u8,
-    pal: Palette,
+    _pal: Palette,
 ) -> AnyElement {
     let id = match target {
         SmartShiftMode::Free => "smartshift-mode-free",
         SmartShiftMode::Ratchet => "smartshift-mode-ratchet",
     };
-    div()
-        .id(id)
-        .px_3()
-        .py_1()
-        .rounded(pal.control_radius)
-        .selected_border(selected, pal)
-        .bg(pal.surface)
-        .selected_fill(selected)
-        .text_body()
-        .text_color(pal.text_primary)
-        .cursor_pointer()
-        .hover(|s| s.bg(pal.surface_hover))
-        .child(label)
+    Button::new(id)
+        .compact()
+        .label(label)
+        .selected(selected)
         .on_click(move |_event, _window, cx| {
             cx.update_global::<AppState, _>(|state, _| {
                 state.commit_smartshift(target, cur_auto, torque);
@@ -363,32 +404,14 @@ fn permanent_toggle(
     enabled: bool,
     restore_threshold: u8,
     torque: u8,
-    pal: Palette,
+    _pal: Palette,
 ) -> AnyElement {
     let label = if on { tr!("On") } else { tr!("Off") };
-    if !enabled {
-        return div()
-            .px_2()
-            .py_1()
-            .rounded(pal.control_radius)
-            .border_1()
-            .border_color(pal.border)
-            .text_caption()
-            .text_color(pal.text_muted)
-            .child(label)
-            .into_any_element();
-    }
-    div()
-        .id("smartshift-permanent")
-        .px_2()
-        .py_1()
-        .rounded(pal.control_radius)
-        .selected_border(on, pal)
-        .selected_fill(on)
-        .text_caption()
-        .text_color(if on { pal.text_primary } else { pal.text_muted })
-        .cursor_pointer()
-        .child(label)
+    Button::new("smartshift-permanent")
+        .compact()
+        .label(label)
+        .selected(on)
+        .disabled(!enabled)
         .on_click(move |_event, _window, cx| {
             cx.update_global::<AppState, _>(|state, _| {
                 let next = if on {

@@ -12,7 +12,7 @@
 //!   own widgets — which is what keeps a popover from rendering white under
 //!   an otherwise dark UI (see `main.rs`'s appearance wiring).
 
-use gpui::{App, FontWeight, Hsla, Pixels, Styled, Window, hsla, px, relative, rgb};
+use gpui::{App, FontWeight, Hsla, Pixels, Rgba, Styled, Window, hsla, px, relative, rgb};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 use openlogi_core::config::Appearance;
 
@@ -42,6 +42,9 @@ pub const FOOTER_H: f32 = 50.;
 pub const SCREEN_PAD: f32 = 20.;
 pub const CARD_PAD: f32 = 16.;
 pub const CARD_GAP: f32 = 12.;
+
+/// Apple HIG / WCAG minimum contrast for normal text up to 17pt.
+const MIN_TEXT_CONTRAST: f32 = 4.5;
 
 /// Fixed footprint of a device card in the Home gallery. Equal-width cards lay
 /// out in a horizontally scrollable row (centred when they fit, scrollable when
@@ -91,21 +94,78 @@ pub struct Palette {
     pub control_radius: Pixels,
 }
 
+fn contrast_ratio(foreground: Hsla, background: Hsla) -> f32 {
+    fn luminance(color: Rgba) -> f32 {
+        let linear = |channel: f32| {
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+    }
+
+    let background = background.to_rgb();
+    let foreground = background.blend(foreground.to_rgb());
+    let (lighter, darker) = {
+        let foreground = luminance(foreground);
+        let background = luminance(background);
+        if foreground > background {
+            (foreground, background)
+        } else {
+            (background, foreground)
+        }
+    };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+fn minimum_text_contrast(color: Hsla, background: Hsla, surface: Hsla) -> f32 {
+    contrast_ratio(color, background).min(contrast_ratio(color, surface))
+}
+
+fn accessible_muted_text(muted: Hsla, foreground: Hsla, background: Hsla, surface: Hsla) -> Hsla {
+    if minimum_text_contrast(muted, background, surface) >= MIN_TEXT_CONTRAST {
+        return muted;
+    }
+
+    let softened = foreground.opacity(0.6);
+    if minimum_text_contrast(softened, background, surface) >= MIN_TEXT_CONTRAST {
+        return softened;
+    }
+
+    [foreground, Hsla::black(), Hsla::white()]
+        .into_iter()
+        .max_by(|a, b| {
+            minimum_text_contrast(*a, background, surface)
+                .total_cmp(&minimum_text_contrast(*b, background, surface))
+        })
+        .unwrap_or(foreground)
+}
+
+fn normalize_theme_text_contrast(theme: &mut Theme) {
+    theme.muted_foreground = accessible_muted_text(
+        theme.muted_foreground,
+        theme.foreground,
+        theme.background,
+        theme.group_box,
+    );
+}
+
 /// Derive the app palette from the active gpui-component theme's semantic
 /// tokens, so the hand-painted surfaces (window, cards, mouse model) re-skin
 /// with the selected theme exactly as the framework widgets do.
 ///
 /// - `bg` ← `background` (window)
-/// - `surface` / `surface_hover` ← `secondary` / `secondary_hover` (cards). The
-///   bundled OpenLogi theme sets `group_box` to the same colour, so the Fill
-///   group-box cards and the bespoke `pal.surface` cards match.
+/// - `surface` ← `group_box` (content cards), while `surface_hover` keeps the
+///   theme's interactive `secondary_hover` state.
 /// - `border`, `text_primary` ← `foreground`, `text_muted` ← `muted_foreground`.
 #[must_use]
 pub fn palette(cx: &App) -> Palette {
     let t = cx.theme();
     Palette {
         bg: t.background,
-        surface: t.secondary,
+        surface: t.group_box,
         surface_hover: t.secondary_hover,
         border: t.border,
         text_primary: t.foreground,
@@ -214,8 +274,10 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
     };
     Theme::change(mode, window, cx);
 
+    let theme = Theme::global_mut(cx);
+    normalize_theme_text_contrast(theme);
     if let Some(radius) = radius {
-        Theme::global_mut(cx).radius = px(f32::from(radius));
+        theme.radius = px(f32::from(radius));
     }
     cx.refresh_windows();
 }
@@ -327,6 +389,75 @@ impl<E: Styled> Typography for E {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openlogi_theme_text_pairs_meet_normal_text_contrast() {
+        let Ok(theme_set) = serde_json::from_str::<serde_json::Value>(OPENLOGI_THEME_JSON) else {
+            panic!("OpenLogi theme JSON should parse");
+        };
+        let Some(themes) = theme_set["themes"].as_array() else {
+            panic!("OpenLogi theme JSON should contain themes");
+        };
+
+        for theme in themes {
+            let name = theme["name"].as_str().unwrap_or("unnamed theme");
+            let colors = &theme["colors"];
+            for (foreground, background) in [
+                ("primary.foreground", "primary.background"),
+                ("danger.foreground", "danger.background"),
+                ("info.foreground", "info.background"),
+                ("success.foreground", "success.background"),
+                ("warning.foreground", "warning.background"),
+            ] {
+                let foreground = theme_color(colors, foreground);
+                let background = theme_color(colors, background);
+                assert!(
+                    contrast_ratio(foreground, background) >= MIN_TEXT_CONTRAST,
+                    "{name}: {foreground:?} on {background:?} is below {MIN_TEXT_CONTRAST}:1"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn muted_text_is_adjusted_for_page_and_content_surfaces() {
+        let background: Hsla = rgb(0xff_ffff).into();
+        let surface: Hsla = rgb(0xf5_f5f5).into();
+        let muted: Hsla = rgb(0x73_7373).into();
+        let foreground: Hsla = rgb(0x0a_0a0a).into();
+
+        let adjusted = accessible_muted_text(muted, foreground, background, surface);
+
+        assert!(contrast_ratio(adjusted, background) >= MIN_TEXT_CONTRAST);
+        assert!(contrast_ratio(adjusted, surface) >= MIN_TEXT_CONTRAST);
+        assert_ne!(
+            adjusted, foreground,
+            "muted hierarchy should remain visible"
+        );
+    }
+
+    #[test]
+    fn compliant_muted_text_is_preserved() {
+        let background: Hsla = rgb(0xf4_f4f6).into();
+        let surface: Hsla = rgb(0xff_ffff).into();
+        let muted: Hsla = rgb(0x6b_6b73).into();
+        let foreground: Hsla = rgb(0x1a_1a1d).into();
+
+        assert_eq!(
+            accessible_muted_text(muted, foreground, background, surface),
+            muted
+        );
+    }
+
+    fn theme_color(colors: &serde_json::Value, key: &str) -> Hsla {
+        let Some(value) = colors[key].as_str() else {
+            panic!("{key} should be a color string");
+        };
+        let Ok(color) = Rgba::try_from(value) else {
+            panic!("{key} should be a six-digit hex color");
+        };
+        color.into()
+    }
 
     /// `accent_tint` is hand-written `hsla` (gpui's `rgb→hsla` isn't `const`),
     /// so pin that it stays derived from `ACCENT_BLUE` rather than drifting into

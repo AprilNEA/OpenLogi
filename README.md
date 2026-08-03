@@ -95,6 +95,8 @@ Things OpenLogi does that Options+ won't:
 | Middle / mode-shift / thumbwheel button capture | ✅ middle on all platforms; mode-shift / thumbwheel device dependent |
 | Windows (agent, GUI, event hook, installer) | ✅ Windows 11 hardware validated; newer port with ongoing compatibility polish |
 
+Help improve the interface translations on [Crowdin](https://crowdin.com/project/openlogi).
+
 ¹ Media key actions use D-Bus MPRIS on Linux; a handful of macOS-specific actions have no universal Linux equivalent and are no-ops. Windows maps platform actions to native equivalents where available.
 
 ## Install

@@ -6,12 +6,10 @@
 //! rendering of those rows so they read identically across panels; only the
 //! retry action differs, injected by the caller.
 
-use gpui::{
-    AnyElement, App, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement as _, Styled, div, px,
-};
+use gpui::{AnyElement, App, ElementId, IntoElement, ParentElement, SharedString, Styled, div, px};
+use gpui_component::button::{Button, ButtonVariants as _};
 
-use crate::theme::{self, Palette, Typography as _};
+use crate::theme::{Palette, Typography as _};
 
 /// Fixed height for a status / retry row, so swapping a slider out for a status
 /// message (or back) doesn't make the panel jump.
@@ -39,13 +37,12 @@ pub fn retry_line(
     pal: Palette,
     on_retry: impl Fn(&mut App) + 'static,
 ) -> AnyElement {
-    div()
-        .id(id)
+    Button::new(id)
+        .text()
         .h(px(ROW_H))
         .text_body()
-        .text_color(theme::accent())
-        .hover(|s| s.text_color(pal.text_primary))
-        .child(text.into())
+        .text_color(pal.text_primary)
+        .label(text)
         .on_click(move |_event, _window, cx| on_retry(cx))
         .into_any_element()
 }

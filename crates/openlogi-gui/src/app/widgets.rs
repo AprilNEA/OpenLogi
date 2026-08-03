@@ -62,7 +62,7 @@ pub(super) fn main_window_title(show_device: bool, cx: &Context<AppView>) -> Sha
 
 pub(super) fn panel_card(
     title: SharedString,
-    icon: IconName,
+    icon: Icon,
     pal: Palette,
     content: AnyElement,
 ) -> impl IntoElement {
@@ -71,7 +71,7 @@ pub(super) fn panel_card(
 
 pub(super) fn panel_card_fill(
     title: SharedString,
-    icon: IconName,
+    icon: Icon,
     pal: Palette,
     content: AnyElement,
 ) -> impl IntoElement {
@@ -80,7 +80,7 @@ pub(super) fn panel_card_fill(
 
 fn panel_card_inner(
     title: SharedString,
-    icon: IconName,
+    icon: Icon,
     pal: Palette,
     content: AnyElement,
     fill_height: bool,
@@ -104,7 +104,7 @@ fn panel_card_inner(
                             .items_center()
                             .gap_2()
                             .text_color(pal.text_primary)
-                            .child(Icon::new(icon).size_4().text_color(pal.text_muted))
+                            .child(icon.size_4().text_color(pal.text_muted))
                             .child(div().text_subheading().child(title)),
                     )
                 })

@@ -292,13 +292,12 @@ jobs:
           release_prefix="s3://${R2_BUCKET}/releases/${GITHUB_REF_NAME}"
           channel_manifest="s3://${R2_BUCKET}/channels/stable/latest.json"
 
-          # latest.json now carries the Windows msi/zip entries (notify-only:
-          # a Windows check resolves and routes to the GitHub Release for the
-          # download — the client's install flow stays off, INSTALL_SUPPORTED
-          # is false). Their asset + signature URLs point into this prefix, so
-          # the zip/msi and their minisigs must ship here too or the manifest
-          # would reference 404s. *.exe stays excluded defensively — no bare
-          # exe ships anymore.
+          # latest.json carries the Windows msi/zip entries; the client
+          # downloads the msi and installs it via gpui-updater's staged
+          # msiexec flow. Their asset + signature URLs point into this
+          # prefix, so the zip/msi and their minisigs must ship here too or
+          # the manifest would reference 404s. *.exe stays excluded
+          # defensively — no bare exe ships anymore.
           aws s3 cp dist/ "$release_prefix/" \
             --recursive \
             --exclude latest.json \
