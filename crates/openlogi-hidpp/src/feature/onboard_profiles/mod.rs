@@ -3,8 +3,7 @@
 //!
 //! In onboard mode the device runs a profile stored in its own flash; in host
 //! mode that profile lies dormant and the host drives the device — but the host
-//! must then supply what the profile used to (a G502 X LIGHTSPEED in host mode
-//! has no DPI stages and a dark LED until something writes them).
+//! must then supply whatever the profile used to, such as the DPI stage list.
 //! This implementation covers reading the memory description, getting
 //! and setting the mode and the active profile, and reading flash sectors —
 //! enough to parse the profile directory. The flash *write* session

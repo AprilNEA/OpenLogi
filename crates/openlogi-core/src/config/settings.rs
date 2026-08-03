@@ -363,7 +363,8 @@ pub struct SmartShift {
 #[serde(rename_all = "snake_case")]
 pub enum ProfileSource {
     /// Host mode: OpenLogi drives the device; onboard profiles are dormant.
-    /// The default — onboard mode would shadow every software setting.
+    /// Never chosen on the user's behalf — a device with no configured mode is
+    /// left in whatever mode it powered on in (see `configured_onboard_profiles`).
     #[default]
     Host,
     /// Onboard mode: the device applies a profile from its own flash.
