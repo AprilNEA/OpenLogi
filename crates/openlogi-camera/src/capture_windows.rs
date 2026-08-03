@@ -30,13 +30,13 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFMediaSource, IMFSourceReader, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+    IMFActivate, IMFMediaSource, IMFMediaType, IMFSourceReader, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_MT_DEFAULT_STRIDE,
     MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
     MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION, MFCreateAttributes, MFCreateMediaType,
     MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video, MFSTARTUP_LITE,
-    MFStartup, MFVideoFormat_RGB32,
+    MFStartup, MFVideoFormat_NV12, MFVideoFormat_RGB24, MFVideoFormat_RGB32, MFVideoFormat_YUY2,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
 
@@ -256,19 +256,43 @@ unsafe fn open_reader(unique_id: &str) -> Result<(IMFSourceReader, StrideHint), 
 
         // Prefer the native type closest to the preview's target width, so a
         // 4K-capable camera doesn't stream (and we don't convert) 8x the
-        // pixels the preview can show.
+        // pixels the preview can show. Only formats the reader's (legacy)
+        // processor can convert to RGB32 count — a compressed 720p mode it
+        // can't decode would fail below, while a convertible mode at another
+        // 16:9 size still previews fine.
         let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
-        let mut best: Option<(u32, u64)> = None;
+        let mut best: Option<(u32, IMFMediaType)> = None;
         let mut index = 0u32;
         while let Ok(native) = reader.GetNativeMediaType(stream, index) {
+            index += 1;
+            let convertible = native.GetGUID(&MF_MT_SUBTYPE).is_ok_and(|subtype| {
+                [
+                    MFVideoFormat_NV12,
+                    MFVideoFormat_YUY2,
+                    MFVideoFormat_RGB24,
+                    MFVideoFormat_RGB32,
+                ]
+                .contains(&subtype)
+            });
+            if !convertible {
+                continue;
+            }
             if let Ok(size) = native.GetUINT64(&MF_MT_FRAME_SIZE) {
                 let width = (size >> 32) as u32;
                 let score = width.abs_diff(TARGET_WIDTH);
-                if best.is_none_or(|(s, _)| score < s) {
-                    best = Some((score, size));
+                if best.as_ref().is_none_or(|(s, _)| score < *s) {
+                    best = Some((score, native));
                 }
             }
-            index += 1;
+        }
+        // Selecting the native type switches the device to that mode — a size
+        // hint on the RGB32 output type alone is quietly dropped (the legacy
+        // processor converts but never scales), leaving whatever mode the
+        // device was in.
+        if let Some((_, native)) = &best {
+            reader
+                .SetCurrentMediaType(stream, None, native)
+                .map_err(setup_err)?;
         }
 
         let output = MFCreateMediaType().map_err(setup_err)?;
@@ -278,11 +302,6 @@ unsafe fn open_reader(unique_id: &str) -> Result<(IMFSourceReader, StrideHint), 
         output
             .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)
             .map_err(setup_err)?;
-        if let Some((_, size)) = best {
-            output
-                .SetUINT64(&MF_MT_FRAME_SIZE, size)
-                .map_err(setup_err)?;
-        }
         reader
             .SetCurrentMediaType(stream, None, &output)
             .map_err(setup_err)?;
