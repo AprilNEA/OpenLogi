@@ -145,8 +145,19 @@ pub async fn run_host_switch_session(
 async fn arm_host_controls(
     controls: &ReprogControlsV4,
 ) -> Result<Vec<ArmedControl>, HostSwitchError> {
-    let count = controls.get_count().await.map_err(hidpp_error)?;
     let mut armed = Vec::new();
+    if let Err(error) = arm_host_controls_inner(controls, &mut armed).await {
+        restore_host_controls(controls, armed).await;
+        return Err(error);
+    }
+    Ok(armed)
+}
+
+async fn arm_host_controls_inner(
+    controls: &ReprogControlsV4,
+    armed: &mut Vec<ArmedControl>,
+) -> Result<(), HostSwitchError> {
+    let count = controls.get_count().await.map_err(hidpp_error)?;
     for index in 0..count {
         let info = controls
             .get_ctrl_id_info(index)
@@ -192,7 +203,7 @@ async fn arm_host_controls(
             });
         }
     }
-    Ok(armed)
+    Ok(())
 }
 
 async fn restore_host_controls(controls: &ReprogControlsV4, armed: Vec<ArmedControl>) {
