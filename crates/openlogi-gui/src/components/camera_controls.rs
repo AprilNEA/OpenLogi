@@ -335,12 +335,11 @@ impl CameraControlsPanel {
         };
         if let Err(e) = written {
             debug!(?control, value = v, error = %e, "camera control write failed");
-            // A plain set_control is atomic (the panel still matches the
-            // device); a takeover batches auto-off + value, so a partial
-            // failure needs a live resync rather than the stale panel state.
-            if takeover.is_some() {
-                self.resync_after_failed_write(cx);
-            }
+            // The slider already moved to `v` on release, but the camera kept its
+            // old register (a plain write is atomic; a takeover can land auto-off
+            // before the value fails). Rebuild from live hardware so the panel
+            // never shows a value the device didn't take.
+            self.resync_after_failed_write(cx);
             return;
         }
         if let Some((toggle, ix)) = takeover {
