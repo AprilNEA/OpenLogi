@@ -569,7 +569,7 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
     if !is_camera {
         items.push(DescriptionItem::new(tr!("Slot")).value(record.slot.to_string()));
     }
-    items.push(DescriptionItem::new(tr!("Device key")).value(record.config_key));
+    items.push(DescriptionItem::new(tr!("Device key")).value(elided_key(&record.config_key)));
     if let Some(serial) = record.serial_number {
         items.push(DescriptionItem::new(tr!("Serial")).value(serial));
     }
@@ -579,4 +579,46 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
         .label_width(px(100.))
         .bordered(false)
         .children(items)
+}
+
+/// Show long machine keys (a camera's config key embeds the OS device path)
+/// as head…tail instead of wrapping the details card; short HID++ keys pass
+/// through whole. The full key stays in the config file for copying.
+fn elided_key(key: &str) -> String {
+    const HEAD: usize = 40;
+    const TAIL: usize = 8;
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= HEAD + TAIL + 1 {
+        return key.to_string();
+    }
+    let head: String = chars[..HEAD].iter().collect();
+    let tail: String = chars[chars.len() - TAIL..].iter().collect();
+    format!("{head}…{tail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::elided_key;
+
+    #[test]
+    fn short_hid_keys_pass_through_whole() {
+        let key = "direct:046d:b023:unit:a393cae0";
+        assert_eq!(elided_key(key), key);
+    }
+
+    #[test]
+    fn long_camera_keys_show_head_and_tail() {
+        let key = r"camera-\?\usb#vid_046d&pid_0893&mi_00#9&56d9c30&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global";
+        let shown = elided_key(key);
+        assert!(shown.contains('…'));
+        assert!(shown.starts_with(r"camera-\?\usb#vid_046d&pid_0893"));
+        assert!(shown.ends_with(r"}\global"));
+        assert!(shown.chars().count() < 55);
+    }
+
+    #[test]
+    fn exactly_at_the_threshold_is_not_elided() {
+        let key = "k".repeat(49);
+        assert_eq!(elided_key(&key), key);
+    }
 }
