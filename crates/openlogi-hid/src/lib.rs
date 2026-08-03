@@ -10,6 +10,7 @@
 #![deny(rustdoc::bare_urls)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+mod channel_pool;
 mod channel_registry;
 pub mod host_switch;
 mod mappings;
@@ -33,6 +34,7 @@ pub mod thumbwheel;
 pub mod write;
 
 pub use backlight::{BacklightMode, BacklightState, BacklightStatus};
+pub use channel_pool::ChannelPool;
 pub use channel_registry::ChannelRegistry;
 pub use gesture::{
     CaptureChannel, CaptureStop, CapturedInput, GestureError, run_capture_session,

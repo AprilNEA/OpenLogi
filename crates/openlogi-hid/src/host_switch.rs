@@ -19,8 +19,9 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::{
+    ChannelPool,
     reprog_controls::{self, ReprogControlsV4},
-    route::{DeviceRoute, open_route_channel},
+    route::DeviceRoute,
 };
 
 const HOST_CONTROL_IDS: [(reprog_controls::ControlId, u8); 3] = [
@@ -73,8 +74,10 @@ pub async fn run_host_switch_session(
     keyboard: DeviceRoute,
     targets: Vec<DeviceRoute>,
     shutdown: oneshot::Receiver<()>,
+    channel_pool: ChannelPool,
 ) -> Result<(), HostSwitchError> {
-    let channel = open_route_channel(&keyboard)
+    let channel = channel_pool
+        .open(&keyboard)
         .await?
         .ok_or(HostSwitchError::KeyboardNotFound)?;
     let keyboard_index = keyboard.device_index();
@@ -122,7 +125,7 @@ pub async fn run_host_switch_session(
         _ = shutdown => Ok(()),
         Some(host) = press_rx.recv() => {
             for target in &targets {
-                if let Err(error) = set_host(target, host, &keyboard, &channel).await {
+                if let Err(error) = set_host(target, host, &keyboard, &channel, &channel_pool).await {
                     warn!(%error, route = %target, host, "linked device host switch failed");
                 }
             }
@@ -236,11 +239,13 @@ async fn set_host(
     host: u8,
     keyboard: &DeviceRoute,
     keyboard_channel: &Arc<HidppChannel>,
+    channel_pool: &ChannelPool,
 ) -> Result<(), HostSwitchError> {
     if shares_channel(target, keyboard) {
         set_host_on(keyboard_channel, target.device_index(), host).await
     } else {
-        let channel = open_route_channel(target)
+        let channel = channel_pool
+            .open(target)
             .await?
             .ok_or(HostSwitchError::TargetNotFound)?;
         set_host_on(&channel, target.device_index(), host).await
@@ -276,27 +281,7 @@ async fn set_host_on(
 }
 
 fn shares_channel(left: &DeviceRoute, right: &DeviceRoute) -> bool {
-    match (left, right) {
-        (
-            DeviceRoute::Bolt {
-                receiver_uid: left, ..
-            },
-            DeviceRoute::Bolt {
-                receiver_uid: right,
-                ..
-            },
-        )
-        | (
-            DeviceRoute::Unifying {
-                receiver_uid: left, ..
-            },
-            DeviceRoute::Unifying {
-                receiver_uid: right,
-                ..
-            },
-        ) => left.eq_ignore_ascii_case(right),
-        _ => false,
-    }
+    left.shares_transport(right)
 }
 
 fn hidpp_error(error: impl std::fmt::Debug) -> HostSwitchError {

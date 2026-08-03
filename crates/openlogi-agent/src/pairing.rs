@@ -271,6 +271,7 @@ mod tests {
             thumbwheel_sensitivity: Arc::new(0.into()),
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: openlogi_hid::ChannelRegistry::default(),
+            channel_pool: openlogi_hid::ChannelPool::default(),
             receiver_access: ReceiverAccess::default(),
             host_switch_links: Arc::new(RwLock::new(Vec::new())),
         }
@@ -303,7 +304,7 @@ mod tests {
             manager
                 .shared
                 .receiver_access
-                .try_acquire_for_capture()
+                .try_acquire_for_session()
                 .is_some()
         );
     }
@@ -344,7 +345,7 @@ mod tests {
             manager
                 .shared
                 .receiver_access
-                .try_acquire_for_capture()
+                .try_acquire_for_session()
                 .is_some()
         );
     }

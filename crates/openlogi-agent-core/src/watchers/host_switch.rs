@@ -4,9 +4,11 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use openlogi_hid::{DeviceRoute, run_host_switch_session};
+use openlogi_hid::{ChannelPool, DeviceRoute, run_host_switch_session};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
+
+use crate::receiver_access::ReceiverAccess;
 
 /// One resolved link. Config keys are converted to live routes by the
 /// orchestrator so the transport watcher never needs to understand inventory.
@@ -22,7 +24,7 @@ pub struct HostSwitchLink {
 pub type HostSwitchLinks = Arc<RwLock<Vec<HostSwitchLink>>>;
 
 /// Spawn the host switch session manager.
-pub fn spawn(links: HostSwitchLinks) {
+pub fn spawn(links: HostSwitchLinks, channel_pool: ChannelPool, receiver_access: ReceiverAccess) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -34,11 +36,15 @@ pub fn spawn(links: HostSwitchLinks) {
                 return;
             }
         };
-        runtime.block_on(manage(links));
+        runtime.block_on(manage(links, channel_pool, receiver_access));
     });
 }
 
-async fn manage(links: HostSwitchLinks) {
+async fn manage(
+    links: HostSwitchLinks,
+    channel_pool: ChannelPool,
+    receiver_access: ReceiverAccess,
+) {
     let mut current = Vec::new();
     let mut stops = Vec::new();
     let (done_tx, mut done_rx) = mpsc::unbounded_channel();
@@ -47,7 +53,11 @@ async fn manage(links: HostSwitchLinks) {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                let wanted = links.read().map_or_else(|_| Vec::new(), |guard| guard.clone());
+                let wanted = if receiver_access.pairing_requested() {
+                    Vec::new()
+                } else {
+                    links.read().map_or_else(|_| Vec::new(), |guard| guard.clone())
+                };
                 if wanted == current {
                     continue;
                 }
@@ -57,10 +67,16 @@ async fn manage(links: HostSwitchLinks) {
                     let (stop_tx, stop_rx) = oneshot::channel();
                     stops.push(stop_tx);
                     let done = done_tx.clone();
+                    let pool = channel_pool.clone();
+                    let Some(receiver_lease) = receiver_access.try_acquire_for_session() else {
+                        current.clear();
+                        break;
+                    };
                     tokio::spawn(async move {
+                        let _receiver_lease = receiver_lease;
                         let keyboard = link.keyboard.clone();
                         if let Err(error) =
-                            run_host_switch_session(link.keyboard, link.targets, stop_rx).await
+                            run_host_switch_session(link.keyboard, link.targets, stop_rx, pool).await
                         {
                             debug!(%error, route = %keyboard, "host switch session ended");
                         }

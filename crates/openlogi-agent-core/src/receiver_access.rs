@@ -1,15 +1,13 @@
 //! Exclusive receiver access coordination between HID++ capture and pairing.
 //!
-//! The active-device capture session and a pairing session cannot both open the
-//! same receiver HID node. This small arbiter makes that ownership explicit: the
-//! capture watcher may run only while it holds a capture lease, and pairing first
-//! announces its intent (so capture stops) before awaiting an exclusive pairing
-//! lease.
+//! Long-running HID++ sessions share pooled receiver channels under read leases.
+//! Pairing first announces its intent so those sessions stop, then waits for an
+//! exclusive write lease before opening the receiver itself.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 /// Coordinates exclusive access to the receiver HID node.
 #[derive(Clone, Default)]
@@ -19,18 +17,18 @@ pub struct ReceiverAccess {
 
 #[derive(Default)]
 struct ReceiverAccessInner {
-    lease: Arc<Mutex<()>>,
+    lease: Arc<RwLock<()>>,
     pairing_requested: Arc<AtomicBool>,
 }
 
-/// Exclusive receiver lease held by the capture watcher.
-pub struct CaptureReceiverLease {
-    _guard: OwnedMutexGuard<()>,
+/// Shared receiver lease held by a long-running HID++ session.
+pub struct SessionReceiverLease {
+    _guard: OwnedRwLockReadGuard<()>,
 }
 
 /// Exclusive receiver lease held by a pairing session.
 pub struct PairingReceiverLease {
-    _guard: OwnedMutexGuard<()>,
+    _guard: OwnedRwLockWriteGuard<()>,
     pairing_requested: Arc<AtomicBool>,
 }
 
@@ -47,20 +45,20 @@ impl ReceiverAccess {
         self.inner.pairing_requested.load(Ordering::Acquire)
     }
 
-    /// Try to acquire receiver access for the capture watcher.
+    /// Try to acquire receiver access for a pooled HID++ session.
     ///
     /// Capture is opportunistic: if pairing is waiting or active, capture should
     /// stay idle and retry on its next management tick.
     #[must_use]
-    pub fn try_acquire_for_capture(&self) -> Option<CaptureReceiverLease> {
+    pub fn try_acquire_for_session(&self) -> Option<SessionReceiverLease> {
         if self.pairing_requested() {
             return None;
         }
-        let guard = Arc::clone(&self.inner.lease).try_lock_owned().ok()?;
+        let guard = Arc::clone(&self.inner.lease).try_read_owned().ok()?;
         if self.pairing_requested() {
             return None;
         }
-        Some(CaptureReceiverLease { _guard: guard })
+        Some(SessionReceiverLease { _guard: guard })
     }
 
     /// Request and acquire exclusive receiver access for pairing.
@@ -69,7 +67,7 @@ impl ReceiverAccess {
     /// withdrawn automatically so capture can resume.
     pub async fn acquire_for_pairing(&self) -> PairingReceiverLease {
         let request = PairingRequest::new(Arc::clone(&self.inner.pairing_requested));
-        let guard = Arc::clone(&self.inner.lease).lock_owned().await;
+        let guard = Arc::clone(&self.inner.lease).write_owned().await;
         request.disarm();
         PairingReceiverLease {
             _guard: guard,
@@ -116,18 +114,32 @@ mod tests {
         let pairing = access.acquire_for_pairing().await;
 
         assert!(access.pairing_requested());
-        assert!(access.try_acquire_for_capture().is_none());
+        assert!(access.try_acquire_for_session().is_none());
 
         drop(pairing);
 
         assert!(!access.pairing_requested());
-        assert!(access.try_acquire_for_capture().is_some());
+        assert!(access.try_acquire_for_session().is_some());
+    }
+
+    #[tokio::test]
+    async fn pooled_sessions_share_access_before_pairing() {
+        let access = ReceiverAccess::default();
+
+        let first = access.try_acquire_for_session().unwrap_or_else(|| {
+            panic!("fresh receiver access should grant first session lease");
+        });
+        let second = access.try_acquire_for_session().unwrap_or_else(|| {
+            panic!("pooled sessions should share receiver access");
+        });
+
+        drop((first, second));
     }
 
     #[tokio::test]
     async fn cancelled_pairing_wait_withdraws_request() {
         let access = ReceiverAccess::default();
-        let capture = access.try_acquire_for_capture().unwrap_or_else(|| {
+        let capture = access.try_acquire_for_session().unwrap_or_else(|| {
             panic!("fresh receiver access should grant capture lease");
         });
 
@@ -142,6 +154,6 @@ mod tests {
         let _ = waiting.await;
         assert!(!access.pairing_requested());
         drop(capture);
-        assert!(access.try_acquire_for_capture().is_some());
+        assert!(access.try_acquire_for_session().is_some());
     }
 }

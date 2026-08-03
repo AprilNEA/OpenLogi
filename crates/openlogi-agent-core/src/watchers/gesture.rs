@@ -35,7 +35,7 @@ use tracing::{debug, warn};
 
 use crate::DpiCycleState;
 use crate::hook_runtime::{self, SharedHookMaps};
-use crate::receiver_access::{CaptureReceiverLease, ReceiverAccess};
+use crate::receiver_access::{SessionReceiverLease, ReceiverAccess};
 
 /// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
 /// direction). The watcher reads it to map a captured swipe to a bound action.
@@ -228,7 +228,7 @@ struct CaptureLaunch {
     divert_gesture_button: bool,
     sink: mpsc::UnboundedSender<CapturedInput>,
     channel_slot: CaptureChannel,
-    receiver_lease: CaptureReceiverLease,
+    receiver_lease: SessionReceiverLease,
     registry: Option<ChannelRegistry>,
     done: mpsc::UnboundedSender<u64>,
     epoch: u64,
@@ -362,7 +362,7 @@ async fn manage(
                     continue;
                 }
                 if let Some((route, capture_thumbwheel, divert_gesture_button)) = want {
-                    let Some(receiver_lease) = receiver_access.try_acquire_for_capture() else {
+                    let Some(receiver_lease) = receiver_access.try_acquire_for_session() else {
                         current = None;
                         continue;
                     };
