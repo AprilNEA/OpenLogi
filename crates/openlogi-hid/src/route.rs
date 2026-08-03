@@ -70,7 +70,11 @@ pub const BOLT_PIDS: &[u16] = &[0xc548];
 
 /// USB product IDs that identify Logi Unifying receivers. Used by callers that
 /// need to construct the correct [`DeviceRoute`] variant from a raw inventory.
-pub const UNIFYING_PIDS: &[u16] = &[0xc52b, 0xc532];
+///
+/// `0xc539` is the Lightspeed gaming receiver: a distinct product line, but it
+/// answers the same HID++ 1.0 enumeration and pairing-information registers as
+/// Unifying, so it routes as [`DeviceRoute::Unifying`].
+pub const UNIFYING_PIDS: &[u16] = &[0xc52b, 0xc532, 0xc539];
 
 impl DeviceRoute {
     /// The HID++ device index features are addressed at for this route: the
