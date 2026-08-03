@@ -574,6 +574,7 @@ mod tests {
             serial_number: None,
             unit_id: [0; 4],
             route: None,
+            receiver_pid: 0,
             kind,
             capabilities,
             slot: 1,

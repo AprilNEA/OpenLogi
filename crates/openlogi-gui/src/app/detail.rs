@@ -565,7 +565,8 @@ fn device_summary(name: &str, kind: DeviceKind, online: bool, pal: Palette) -> i
 
 fn device_description_list(record: DeviceRecord) -> impl IntoElement {
     let mut items = vec![
-        DescriptionItem::new(tr!("Connection")).value(route_label(record.route.as_ref())),
+        DescriptionItem::new(tr!("Connection"))
+            .value(route_label(record.route.as_ref(), record.receiver_pid)),
         DescriptionItem::new(tr!("Slot")).value(record.slot.to_string()),
         DescriptionItem::new(tr!("Device key")).value(record.config_key),
     ];

@@ -39,6 +39,12 @@ pub struct DeviceRecord {
     pub serial_number: Option<String>,
     pub unit_id: [u8; 4],
     pub route: Option<DeviceRoute>,
+    /// USB product ID of the receiver this device is reached through, kept so
+    /// the UI can name it. Lightspeed receivers are routed as
+    /// [`DeviceRoute::Unifying`], so the route alone cannot tell them apart —
+    /// see [`openlogi_hid::receiver_display_name`]. Synthetic (the device's own
+    /// product ID) for a direct attachment, where it is unused.
+    pub receiver_pid: u16,
     pub kind: DeviceKind,
     /// Configuration capabilities from the device's HID++ feature table.
     /// Continuity across sleep lives in the hid layer: its probe cache keeps
@@ -137,6 +143,7 @@ pub(super) fn build_device_list(
                 serial_number,
                 unit_id,
                 route,
+                receiver_pid: inv.receiver.product_id,
                 kind,
                 capabilities: paired.capabilities,
                 slot: paired.slot,
@@ -288,6 +295,8 @@ fn offline_record(
         serial_number: None,
         unit_id: [0; 4],
         route: None,
+        // Routeless until live inventory arrives, so nothing reads this.
+        receiver_pid: 0,
         kind: identity.kind,
         capabilities: Some(identity.capabilities),
         slot: 0,
@@ -336,6 +345,7 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
         serial_number: known.serial_number.clone(),
         unit_id: known.unit_id,
         route: live.route,
+        receiver_pid: live.receiver_pid,
         kind: if known.kind == DeviceKind::Unknown {
             live.kind
         } else {
@@ -387,6 +397,7 @@ fn demo_keyboard() -> DeviceRecord {
         serial_number: None,
         unit_id: [0; 4],
         route: None,
+        receiver_pid: 0,
         kind: DeviceKind::Keyboard,
         capabilities: Some(Capabilities {
             lighting: true,
@@ -476,9 +487,9 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord, DeviceTransports,
-        append_offline_known, build_device_list, direct_key_prefix, effective_kind, offline_record,
-        pick_initial_device,
+        Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord, DeviceRoute,
+        DeviceTransports, append_offline_known, build_device_list, direct_key_prefix,
+        effective_kind, offline_record, pick_initial_device,
     };
 
     fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
@@ -539,6 +550,7 @@ mod tests {
             serial_number: None,
             unit_id: [1; 4],
             route: None,
+            receiver_pid: 0,
             kind: DeviceKind::Mouse,
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
             slot: 1,
@@ -592,6 +604,22 @@ mod tests {
         let cache = AssetResolver::new();
         let list = build_device_list(&[inv], &cache, &Config::default());
         assert_eq!(list[0].display_name, "Slot 2");
+    }
+
+    /// A Lightspeed receiver is routed as [`DeviceRoute::Unifying`], so the
+    /// record must carry the receiver's product ID for the UI to name it
+    /// correctly — the route alone cannot tell the two apart.
+    #[test]
+    fn record_carries_receiver_product_id() {
+        let cache = AssetResolver::new();
+        let mut inv = inventory_with(vec![paired_device_no_model_info(1, Some(0x4093))]);
+        inv.receiver.product_id = 0xc547;
+        inv.receiver.name = "Lightspeed Receiver".into();
+
+        let list = build_device_list(&[inv], &cache, &Config::default());
+        assert_eq!(list[0].receiver_pid, 0xc547);
+        assert!(openlogi_hid::LIGHTSPEED_PIDS.contains(&list[0].receiver_pid));
+        assert!(matches!(list[0].route, Some(DeviceRoute::Unifying { .. })));
     }
 
     #[test]
