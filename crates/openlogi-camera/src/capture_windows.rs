@@ -307,8 +307,10 @@ unsafe fn open_reader(unique_id: &str) -> Result<(IMFSourceReader, StrideHint), 
 }
 
 /// Activate the video-capture device whose Media Foundation symbolic link
-/// matches `unique_id` (the DirectShow device path — the same device-interface
-/// string, compared case-insensitively).
+/// identifies the same physical device as `unique_id` (the stored DirectShow
+/// device path). The two APIs register the camera under different
+/// interface-class GUIDs, so they are matched on the shared device-instance
+/// portion (see [`device_instance`]).
 unsafe fn activate_source(unique_id: &str) -> Result<IMFMediaSource, CaptureError> {
     unsafe {
         let mut enum_attrs = None;
@@ -337,11 +339,9 @@ unsafe fn activate_source(unique_id: &str) -> Result<IMFMediaSource, CaptureErro
             {
                 continue;
             }
-            let matches = link
-                .to_string()
-                .is_ok_and(|s| s.eq_ignore_ascii_case(unique_id));
+            let link_str = link.to_string().unwrap_or_default();
             CoTaskMemFree(Some(link.as_ptr().cast()));
-            if matches {
+            if device_instance(&link_str).eq_ignore_ascii_case(device_instance(unique_id)) {
                 chosen = Some(activate.clone());
                 break;
             }
@@ -355,6 +355,15 @@ unsafe fn activate_source(unique_id: &str) -> Result<IMFMediaSource, CaptureErro
         CoTaskMemFree(Some(devices.cast()));
         result
     }
+}
+
+/// The device-instance portion of a Windows device-interface path, dropping the
+/// trailing `#{interface-class-guid}\reference`. DirectShow (the id we enumerate
+/// and persist) tags a camera under `KSCATEGORY_VIDEO`, while Media Foundation
+/// tags the same physical device under `KSCATEGORY_VIDEO_CAMERA` — so the paths
+/// differ only by that GUID, and comparing the instance links the two.
+fn device_instance(interface_path: &str) -> &str {
+    interface_path.split("#{").next().unwrap_or(interface_path)
 }
 
 /// Copy one locked RGB32 sample into a tightly-packed BGRA [`Frame`] in the
@@ -401,5 +410,40 @@ fn access_or_setup(e: &windows::core::Error) -> CaptureError {
         CaptureError::AccessDenied
     } else {
         CaptureError::Setup(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::device_instance;
+
+    // The same StreamCam function, as DirectShow enumerates it (KSCATEGORY_VIDEO)
+    // vs. as Media Foundation enumerates it (KSCATEGORY_VIDEO_CAMERA): identical
+    // but for the trailing interface-class GUID.
+    const DIRECTSHOW: &str = r"\\?\usb#vid_046d&pid_0893&mi_00#9&56d9c30&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global";
+    const MEDIA_FOUNDATION: &str = r"\\?\usb#vid_046d&pid_0893&mi_00#9&56d9c30&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\global";
+
+    #[test]
+    fn instance_matches_across_interface_class_guids() {
+        assert_eq!(
+            device_instance(DIRECTSHOW),
+            device_instance(MEDIA_FOUNDATION),
+            "the stored DirectShow id must match MF's symbolic link"
+        );
+        assert_eq!(
+            device_instance(DIRECTSHOW),
+            r"\\?\usb#vid_046d&pid_0893&mi_00#9&56d9c30&0&0000"
+        );
+    }
+
+    #[test]
+    fn distinct_devices_stay_distinct() {
+        let other = r"\\?\usb#vid_046d&pid_0825&mi_00#7&1a2b3c&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\global";
+        assert_ne!(device_instance(DIRECTSHOW), device_instance(other));
+    }
+
+    #[test]
+    fn path_without_interface_guid_is_returned_whole() {
+        assert_eq!(device_instance("not-a-device-path"), "not-a-device-path");
     }
 }
