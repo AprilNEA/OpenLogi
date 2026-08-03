@@ -581,7 +581,7 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDevice, InventoryHealth, Orchestrator, configured_wheel_mode, host_switch_links,
+        AgentDevice, InventoryHealth, Orchestrator, build_devices, configured_wheel_mode, host_switch_links,
         plan_reapply, reapply_targets,
     };
     use openlogi_core::config::{Config, ScrollResolution};
