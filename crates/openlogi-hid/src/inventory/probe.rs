@@ -2,7 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use futures_concurrency::future::Join as _;
 use hidpp::{
-    channel::HidppChannel,
+    channel::{HidppChannel, HidppMessage},
+    protocol::v10::{self, MessageType},
     receiver::{
         self, Receiver,
         bolt::{
@@ -23,7 +24,9 @@ use crate::route::DIRECT_DEVICE_INDEX;
 
 use super::cache::{CacheKey, CacheOutcome, Cached, probe_or_reuse, seen};
 use super::features::ProbedFeatures;
-use super::{ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_SLOT_PROBE};
+use super::{
+    ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_IDENTITY_PROBE, UNIFYING_SLOT_PROBE,
+};
 
 /// One probed node's contribution this tick: its inventory (if any), whether
 /// the node actually answered — the ledger replays the last snapshot when it
@@ -202,11 +205,55 @@ async fn probe_unifying_receiver(
     // across probe cycles instead of jittering.
     connections.sort_by_key(|c| c.index);
 
-    // Probe all online slots concurrently so a slow HID++ 2.0 feature walk on
-    // one device doesn't push the next slot past the PROBE_BUDGET deadline.
-    // Pass the receiver UID so each slot's cache key is scoped to this specific
-    // receiver — two Unifying receivers sharing a slot number must not share a
-    // cache entry (different devices, different capabilities).
+    // Phase 1 — read each slot's name from the receiver sequentially. Like the
+    // Bolt pairing/name registers, every request addresses device 0xff and the
+    // channel correlates replies by register, not by the slot encoded in the
+    // payload. Overlapping these reads can therefore cross-talk or leave one
+    // request waiting until the outer PROBE_BUDGET expires.
+    let mut codenames = HashMap::with_capacity(connections.len());
+    let identity_reads = async {
+        for connection in &connections {
+            let slot = connection.index;
+            codenames.insert(slot, read_codename_unifying(&channel, slot).await);
+        }
+    };
+    if timeout(UNIFYING_IDENTITY_PROBE, identity_reads)
+        .await
+        .is_err()
+    {
+        debug!(
+            budget = ?UNIFYING_IDENTITY_PROBE,
+            completed = codenames.len(),
+            total = connections.len(),
+            "Unifying identity phase timed out; continuing without remaining names"
+        );
+    }
+
+    let mut identities = Vec::with_capacity(connections.len());
+    for connection in &connections {
+        let slot = connection.index;
+        let codename = codenames.remove(&slot).flatten();
+        debug!(
+            slot,
+            online = connection.online,
+            wpid = format_args!("{:04x}", connection.wpid),
+            kind = ?connection.kind,
+            codename = ?codename,
+            "unifying paired slot"
+        );
+        identities.push(UnifyingSlotIdentity {
+            slot,
+            codename,
+            wpid: connection.wpid,
+            register_kind: map_unifying_kind(connection.kind),
+        });
+    }
+
+    // Phase 2 — walk the devices concurrently. These requests address their
+    // individual slot indices, so they can be correlated safely and a slow
+    // HID++ 2.0 feature walk cannot hold every other device behind it. Pass the
+    // receiver UID so two Unifying receivers sharing a slot number cannot share
+    // a cache entry (different devices, different capabilities).
     let receiver_uid_fallback;
     let receiver_uid = if let Some(uid) = unique_id.as_deref() {
         uid
@@ -218,14 +265,14 @@ async fn probe_unifying_receiver(
         receiver_uid_fallback = format!("pid:{:04x}", info.product_id);
         &receiver_uid_fallback
     };
-    let slot_results = connections
+    let slot_results = identities
         .iter()
-        .map(|conn| probe_unifying_slot(&channel, conn, receiver_uid, cache, tick))
+        .map(|identity| walk_unifying_slot(&channel, identity, receiver_uid, cache, tick))
         .collect::<Vec<_>>()
         .join()
         .await;
 
-    let (paired, outcomes): (Vec<_>, Vec<_>) = slot_results.into_iter().flatten().unzip();
+    let (paired, outcomes): (Vec<_>, Vec<_>) = slot_results.into_iter().unzip();
 
     if let Some(count) = pairing_count
         && paired.len() != usize::from(count)
@@ -536,7 +583,17 @@ async fn drain_device_arrival_unifying(
     Some(out)
 }
 
-/// Probe a Unifying slot from a live device-connection event.
+/// Identity read from the receiver's registers for one occupied Unifying slot.
+/// The receiver-backed name reads that create these values must be serialized;
+/// see [`probe_unifying_receiver`].
+struct UnifyingSlotIdentity {
+    slot: u8,
+    codename: Option<String>,
+    wpid: u16,
+    register_kind: DeviceKind,
+}
+
+/// Walk a Unifying slot identified from a live device-connection event.
 ///
 /// Device-arrival events carry the slot index, kind, wpid, and online status —
 /// enough to surface an entry for every currently-connected device. The
@@ -544,23 +601,14 @@ async fn drain_device_arrival_unifying(
 /// working `get_device_pairing_information` call; we derive a stable cache key
 /// from the receiver UID + slot so the feature-table walk is amortised at ~30s
 /// and two receivers sharing a slot number don't collide in the cache.
-async fn probe_unifying_slot(
+async fn walk_unifying_slot(
     channel: &Arc<HidppChannel>,
-    event: &UnifyingDeviceConnection,
+    identity: &UnifyingSlotIdentity,
     receiver_uid: &str,
     cache: &HashMap<CacheKey, Cached>,
     tick: u64,
-) -> Option<(PairedDevice, CacheOutcome)> {
-    let slot = event.index;
-    let codename = read_codename_unifying(channel, slot).await;
-    debug!(
-        slot,
-        online = event.online,
-        wpid = format_args!("{:04x}", event.wpid),
-        kind = ?event.kind,
-        codename = ?codename,
-        "unifying paired slot"
-    );
+) -> (PairedDevice, CacheOutcome) {
+    let slot = identity.slot;
 
     // Cache key: full receiver serial + slot so two Unifying receivers with
     // a device on the same slot number never share a cache entry.
@@ -569,7 +617,7 @@ async fn probe_unifying_slot(
         slot,
     };
     let cached = cache.get(&id);
-    let register_kind = map_unifying_kind(event.kind);
+    let register_kind = identity.register_kind;
 
     // `trigger_device_arrival` re-broadcasts a 0x41 for *every* paired slot,
     // online or not, and the crate's `event.online` reads the wrong notification
@@ -594,8 +642,8 @@ async fn probe_unifying_slot(
 
     let device = PairedDevice {
         slot,
-        codename,
-        wpid: Some(event.wpid),
+        codename: identity.codename.clone(),
+        wpid: Some(identity.wpid),
         kind: resolve_device_kind(probe.kind, register_kind),
         // Reachable on this receiver iff the feature walk got through this tick.
         // Caveat: a GUI cache hit can serve stale capabilities for up to
@@ -607,7 +655,7 @@ async fn probe_unifying_slot(
         model_info: probe.model_info,
         capabilities: probe.capabilities,
     };
-    Some((device, outcome))
+    (device, outcome)
 }
 
 /// Reads a Unifying paired device's name. Unifying stores names at
@@ -616,11 +664,37 @@ async fn probe_unifying_slot(
 /// no chunk byte — wire-verified `40 0c "MX Master 2S"`. The name lives on the
 /// receiver, so it reads even while the device is offline (e.g. moved to BT).
 async fn read_codename_unifying(channel: &HidppChannel, slot: u8) -> Option<String> {
+    let sub_register = 0x40 + slot - 1;
     let response = channel
-        .read_long_register(0xFF, 0xB5, [0x40 + slot - 1, 0x00, 0x00])
+        .send_with_timeout(
+            v10::Message::Short(
+                v10::MessageHeader {
+                    device_index: 0xFF,
+                    sub_id: MessageType::GetLongRegister.into(),
+                },
+                [0xB5, sub_register, 0x00, 0x00],
+            )
+            .into(),
+            move |raw| is_unifying_codename_response(raw, sub_register),
+            UNIFYING_IDENTITY_PROBE,
+        )
         .await
         .ok()?;
-    parse_codename_unifying(&response)
+    let payload = v10::Message::from(response).extend_payload();
+    parse_codename_unifying(&payload[1..=16])
+}
+
+/// Match the echoed name sub-register as well as the RAP register header.
+/// This prevents a response arriving after a timed-out identity read from
+/// satisfying the following slot's request.
+pub(super) fn is_unifying_codename_response(raw: &HidppMessage, expected_sub_register: u8) -> bool {
+    let response = v10::Message::from(*raw);
+    let header = response.header();
+    let payload = response.extend_payload();
+    header.device_index == 0xFF
+        && header.sub_id == MessageType::GetLongRegister.into()
+        && payload[0] == 0xB5
+        && payload[1] == expected_sub_register
 }
 
 /// Parse a Unifying name-register response `[sub, len, data..]` into a string.

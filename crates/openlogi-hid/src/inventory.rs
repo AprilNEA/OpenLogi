@@ -58,6 +58,13 @@ const PROBE_BUDGET: Duration = Duration::from_secs(6);
 /// just lacks capabilities / battery until the next tick.
 const UNIFYING_SLOT_PROBE: Duration = Duration::from_millis(3500);
 
+/// Total budget for receiver-backed Unifying slot-name reads.
+///
+/// These requests must be serialized because they share the receiver address
+/// and register. Names are optional, so do not let an unresponsive slot consume
+/// the six-second node budget before the per-device feature walks begin.
+const UNIFYING_IDENTITY_PROBE: Duration = Duration::from_millis(750);
+
 /// Per-slot budget for the HID++ 2.0 feature walk on a Bolt paired device.
 ///
 /// Without a per-slot cap a single online device that stops answering its
