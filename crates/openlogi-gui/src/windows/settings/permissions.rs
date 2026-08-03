@@ -2,13 +2,13 @@
 
 #[cfg(target_os = "macos")]
 use super::{
-    App, AppState, InteractiveElement, Permission, SharedString, StatefulInteractiveElement, h_flex,
+    App, AppState, InteractiveElement, Permission, SharedString, StatefulInteractiveElement,
 };
 use super::{IconName, Palette, SettingPage};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::{
     IntoElement, ParentElement, PermissionStatus, SettingField, SettingGroup, SettingItem, Styled,
-    div, rgb, theme,
+    div, h_flex, px, rgb, theme,
 };
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::platform::permissions;
@@ -69,7 +69,9 @@ pub(super) fn permissions_page(pal: Palette) -> SettingPage {
             tr!("Input device access"),
             SettingField::render(move |_, _, _| {
                 let status = permissions::input_device_access();
-                let field = gpui_component::v_flex().gap_1().child(status_badge(status));
+                let field = gpui_component::v_flex()
+                    .gap_1()
+                    .child(status_badge(status, pal));
                 let hint = match status {
                     PermissionStatus::Denied => Some(tr!(
                         "OpenLogi needs write access to /dev/uinput (for button \
@@ -111,15 +113,21 @@ fn permission_item(
     .description(description)
 }
 
-/// A coloured status word for a permission row.
+/// A readable status word with colour retained as a supplemental marker.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn status_badge(status: PermissionStatus) -> impl IntoElement {
+fn status_badge(status: PermissionStatus, pal: Palette) -> impl IntoElement {
     let (label, color) = match status {
         PermissionStatus::Granted => (tr!("Granted"), theme::STATUS_CONNECTED),
         PermissionStatus::Denied => (tr!("Not granted"), theme::STATUS_CONNECTING),
         PermissionStatus::Unknown => (tr!("Unknown"), theme::STATUS_OFFLINE),
     };
-    div().text_caption().text_color(rgb(color)).child(label)
+    h_flex()
+        .items_center()
+        .gap_1()
+        .text_caption()
+        .text_color(pal.text_primary)
+        .child(div().size(px(6.)).rounded_full().bg(rgb(color)))
+        .child(label)
 }
 
 /// The right-side field for one permission row: live status, plus (macOS only)
@@ -135,7 +143,7 @@ fn permission_field(
         .flex_shrink_0()
         .items_center()
         .gap_3()
-        .child(status_badge(status));
+        .child(status_badge(status, pal));
 
     #[cfg(target_os = "macos")]
     let row = row.child(

@@ -10,7 +10,7 @@ use openlogi_hook::Hook;
 use super::AppState;
 use super::{
     AnyElement, App, Axis, IconName, IntoElement, Palette, ParentElement, SettingField,
-    SettingGroup, SettingItem, SettingPage, Styled, div, rgb, theme, v_flex,
+    SettingGroup, SettingItem, SettingPage, Styled, div, v_flex,
 };
 
 /// The Diagnostics page: the curated input-conflict check, plus (debug) the raw
@@ -59,14 +59,14 @@ fn input_conflict_field(pal: Palette, cx: &mut App) -> AnyElement {
         col = col.child(
             div()
                 .text_caption()
-                .text_color(rgb(theme::STATUS_CONNECTED))
+                .text_color(pal.text_muted)
                 .child(tr!("No other app is intercepting mouse input.")),
         );
     } else {
         col = col.child(
             div()
                 .text_body()
-                .text_color(rgb(theme::STATUS_CONNECTING))
+                .text_color(pal.text_primary)
                 .child(tr!(
                     "Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}",
                     apps => conflicts.join(", ")
@@ -183,7 +183,7 @@ fn debug_tap_list(taps: &[openlogi_hook::EventTapInfo], pal: Palette) -> impl In
         );
         let row = div().text_caption().child(line);
         let row = if tap.gates_input() {
-            row.text_color(rgb(theme::STATUS_CONNECTING))
+            row.text_color(pal.text_primary)
         } else {
             row.text_color(pal.text_muted)
         };

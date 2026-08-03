@@ -28,11 +28,30 @@ mod load;
 pub use devices::DeviceRecord;
 pub use load::{DpiStatus, Load, SmartShiftLoad};
 
+/// Result of confirming a SmartShift write by reading the value back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmartShiftWriteStatus {
+    /// The optimistic value is visible while the confirming read runs.
+    Applying {
+        /// Value written optimistically.
+        expected: SmartShiftStatus,
+        /// Identity used to reject replies from older writes.
+        write_id: u64,
+    },
+    /// The device returned the value that was written.
+    Confirmed,
+    /// The confirming read failed, closed, or returned a different value.
+    Failed,
+}
+
 use load::LazyDeviceData;
 
 use crate::asset::AssetResolver;
 use crate::data::mouse_buttons::{Action, Binding, ButtonId, GestureDirection};
-use crate::state::devices::{build_device_list, pick_initial_device, sort_device_list};
+use crate::state::devices::{
+    adopt_transient_record, build_device_list, direct_key_prefix, pick_initial_device,
+    sort_device_list,
+};
 use openlogi_agent_core::bindings::{bindings_for, gesture_bindings_for};
 use openlogi_agent_core::device_order::PhysicalDeviceKey;
 
@@ -116,7 +135,11 @@ pub struct AppState {
     /// forget write can be rejected/timed-out by a sleeping device, so the panel
     /// re-reads (without a Loading flicker) to replace the optimistic value with
     /// the device's actual state. See [`Self::commit_smartshift`].
-    smartshift_pending_confirm: std::collections::BTreeSet<String>,
+    smartshift_pending_confirm: BTreeMap<String, u64>,
+    /// Monotonic identity assigned to the next confirmable SmartShift write.
+    next_smartshift_write_id: u64,
+    /// Visible outcome of the post-write SmartShift confirmation.
+    smartshift_write_status: BTreeMap<String, SmartShiftWriteStatus>,
     /// All paired devices, in carousel order. Each entry caches the per-
     /// device data the views need so a switch is a pure index update.
     pub device_list: Vec<DeviceRecord>,
@@ -180,7 +203,9 @@ impl AppState {
             dpi_data: LazyDeviceData::default(),
             inventory_misses: BTreeMap::new(),
             smartshift_data: LazyDeviceData::default(),
-            smartshift_pending_confirm: std::collections::BTreeSet::new(),
+            smartshift_pending_confirm: BTreeMap::new(),
+            next_smartshift_write_id: 0,
+            smartshift_write_status: BTreeMap::new(),
             device_list,
             config,
             ipc_commands,
@@ -419,6 +444,8 @@ impl AppState {
         for key in &rerouted {
             self.dpi_data.remove(key);
             self.smartshift_data.remove(key);
+            self.smartshift_pending_confirm.remove(key);
+            self.smartshift_write_status.remove(key);
         }
         let present = |key: &str| {
             self.device_list
@@ -427,6 +454,9 @@ impl AppState {
         };
         self.dpi_data.retain_present(present);
         self.smartshift_data.retain_present(present);
+        self.smartshift_pending_confirm
+            .retain(|key, _| present(key));
+        self.smartshift_write_status.retain(|key, _| present(key));
         self.current_device = new_index;
         // The active device may have changed (selection fell back to index 0
         // when the previous one vanished); re-seed the displayed DPI so it
@@ -444,10 +474,17 @@ impl AppState {
             .into_iter()
             .map(|record| (record.config_key.clone(), record))
             .collect::<BTreeMap<_, _>>();
+        let mut adopted = self.adopt_transient_records(&mut by_key);
         let mut merged = Vec::with_capacity(by_key.len().max(self.device_list.len()));
 
         for previous in &self.device_list {
             if let Some(record) = by_key.remove(&previous.config_key) {
+                self.inventory_misses.remove(&previous.config_key);
+                merged.push(record);
+                continue;
+            }
+
+            if let Some(record) = adopted.remove(&previous.config_key) {
                 self.inventory_misses.remove(&previous.config_key);
                 merged.push(record);
                 continue;
@@ -480,6 +517,9 @@ impl AppState {
             self.inventory_misses.remove(&key);
             merged.push(record);
         }
+        // Adopted records whose known card was never in the previous list
+        // (identity known only from config) still belong in the carousel.
+        merged.extend(adopted.into_values());
         self.inventory_misses
             .retain(|key, _| merged.iter().any(|record| record.config_key == *key));
         // `merged` is `previous-order + newly-appeared`, so re-apply the
@@ -487,6 +527,78 @@ impl AppState {
         // the carousel permanently.
         sort_device_list(&mut merged);
         merged
+    }
+
+    /// Pair each transient direct record in the snapshot with the device it
+    /// physically is. A transient key (`…:unit:00000000`) is a half-read probe
+    /// of some existing device, not a new one (#482): when exactly one known
+    /// card sharing its `direct:<vid>:<pid>` wire identity is not live online —
+    /// so the half-read probe can only be that device — the transient record is
+    /// folded into that card instead of surfacing beside it (or evicting it).
+    /// With no such card the transient is dropped as probe noise when its wire
+    /// product is already live online, and an ambiguous one (two known
+    /// same-model cards absent) is left alone.
+    fn adopt_transient_records(
+        &self,
+        by_key: &mut BTreeMap<String, DeviceRecord>,
+    ) -> BTreeMap<String, DeviceRecord> {
+        let transient_keys: Vec<String> = by_key
+            .values()
+            .filter(|record| !record.is_persistent())
+            .map(|record| record.config_key.clone())
+            .collect();
+        let mut adopted = BTreeMap::new();
+        for key in transient_keys {
+            let Some(prefix) = direct_key_prefix(&key) else {
+                continue;
+            };
+            let same_wire = |key: &str, record: &DeviceRecord| {
+                record.is_persistent() && direct_key_prefix(key) == Some(prefix)
+            };
+            // A live online sibling is accounted for and never a candidate,
+            // but it must not discard the transient — the half-read probe may
+            // be the *other* same-model device.
+            let mut candidates: Vec<String> = by_key
+                .iter()
+                .filter(|(k, record)| same_wire(k, record) && !record.online)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for previous in &self.device_list {
+                if same_wire(&previous.config_key, previous)
+                    && !by_key.contains_key(&previous.config_key)
+                    && !candidates.contains(&previous.config_key)
+                {
+                    candidates.push(previous.config_key.clone());
+                }
+            }
+            let [known_key] = candidates.as_slice() else {
+                if candidates.is_empty()
+                    && by_key
+                        .iter()
+                        .any(|(k, record)| same_wire(k, record) && record.online)
+                {
+                    by_key.remove(&key);
+                }
+                continue;
+            };
+            // Last tick's record carries the freshest identity; the offline
+            // placeholder built from config is the fallback.
+            let known = self
+                .device_list
+                .iter()
+                .find(|record| record.config_key == *known_key)
+                .cloned()
+                .or_else(|| by_key.get(known_key).cloned());
+            let Some(known) = known else {
+                continue;
+            };
+            let known_key = known_key.clone();
+            by_key.remove(&known_key);
+            if let Some(live) = by_key.remove(&key) {
+                adopted.insert(known_key, adopt_transient_record(&known, live));
+            }
+        }
+        adopted
     }
 
     /// Switch the carousel to `idx`. Out-of-range indices are silently
@@ -507,6 +619,7 @@ impl AppState {
             }
             if matches!(self.smartshift_data.get(&key), Some(Load::Failed(_))) {
                 self.smartshift_data.retry(&key);
+                self.smartshift_write_status.remove(&key);
             }
         }
         // `self.dpi` is the active device's value; adopt the newly-selected
@@ -700,6 +813,16 @@ impl AppState {
             })
     }
 
+    /// Post-write confirmation status for the active device.
+    #[must_use]
+    pub fn current_smartshift_write_status(&self) -> Option<SmartShiftWriteStatus> {
+        self.current_record().and_then(|record| {
+            self.smartshift_write_status
+                .get(&record.config_key)
+                .copied()
+        })
+    }
+
     /// Mark SmartShift discovery as in flight for `key`.
     pub fn mark_smartshift_loading(&mut self, key: &str) {
         self.smartshift_data.mark_loading(key);
@@ -717,18 +840,24 @@ impl AppState {
     pub fn retry_active_smartshift(&mut self) {
         if let Some(key) = self.current_record().map(|r| r.config_key.clone()) {
             self.smartshift_data.retry(&key);
+            self.smartshift_write_status.remove(&key);
         }
     }
 
     /// Store a SmartShift read result if it still matches the known device
-    /// route, with the same transient-retry / permanent-unsupported handling
-    /// as [`Self::store_dpi_info`].
+    /// route and write identity, with the same transient-retry /
+    /// permanent-unsupported handling as [`Self::store_dpi_info`].
     pub fn store_smartshift_status(
         &mut self,
         key: String,
         route: &DeviceRoute,
+        write_id: Option<u64>,
         result: Result<SmartShiftStatus, WriteError>,
     ) {
+        if !smartshift_read_is_current(write_id, self.smartshift_write_status.get(&key)) {
+            debug!(key, ?write_id, "stale SmartShift read result ignored");
+            return;
+        }
         let matches_route = self
             .device_list
             .iter()
@@ -737,6 +866,7 @@ impl AppState {
             .device_list
             .iter()
             .any(|record| record.config_key == key);
+        let status_key = key.clone();
         self.smartshift_data.store(
             key,
             result,
@@ -745,6 +875,15 @@ impl AppState {
             still_present,
             "SmartShift",
         );
+        let expected = match self.smartshift_write_status.get(&status_key) {
+            Some(SmartShiftWriteStatus::Applying { expected, .. }) => Some(*expected),
+            Some(SmartShiftWriteStatus::Confirmed | SmartShiftWriteStatus::Failed) | None => None,
+        };
+        if let Some(status) = expected.and_then(|expected| {
+            smartshift_write_outcome(expected, self.smartshift_data.get(&status_key))
+        }) {
+            self.smartshift_write_status.insert(status_key, status);
+        }
     }
 
     /// Write a full SmartShift configuration to the active device (best-effort,
@@ -765,6 +904,7 @@ impl AppState {
         let key = record.config_key.clone();
         let persistent_key = record.persistent_config_key().map(str::to_string);
         let route = record.route.clone();
+        let can_confirm = route.is_some();
         if let Some(route) = route {
             self.send_ipc(crate::ipc_client::Command::SetSmartShift(
                 route,
@@ -789,15 +929,26 @@ impl AppState {
         // re-read: the write is fire-and-forget, so a sleeping device that
         // rejected or timed it out would otherwise leave this optimistic value
         // showing as "applied" forever (Ready blocks any further read).
-        self.smartshift_data.set_ready(
-            key.clone(),
-            SmartShiftStatus {
-                mode,
-                auto_disengage,
-                tunable_torque,
+        let expected = SmartShiftStatus {
+            mode,
+            auto_disengage,
+            tunable_torque,
+        };
+        self.smartshift_data.set_ready(key.clone(), expected);
+        let write_id = can_confirm.then(|| {
+            let write_id = self.next_smartshift_write_id;
+            self.next_smartshift_write_id = self.next_smartshift_write_id.saturating_add(1);
+            self.smartshift_pending_confirm
+                .insert(key.clone(), write_id);
+            write_id
+        });
+        self.smartshift_write_status.insert(
+            key,
+            match write_id {
+                Some(write_id) => SmartShiftWriteStatus::Applying { expected, write_id },
+                None => SmartShiftWriteStatus::Failed,
             },
         );
-        self.smartshift_pending_confirm.insert(key);
     }
 
     /// Whether the active device's scroll wheel is inverted (issue #126).
@@ -881,15 +1032,30 @@ impl AppState {
     }
 
     /// Take the active device's pending SmartShift confirm, if any. Returns the
-    /// `(config_key, route)` for a one-shot re-read that replaces the optimistic
-    /// value with the device's real state; consumed once so it doesn't re-fire.
-    pub fn take_active_smartshift_confirm(&mut self) -> Option<(String, DeviceRoute)> {
+    /// `(config_key, route, write_id)` for a one-shot re-read that replaces the
+    /// optimistic value with the device's real state; consumed once so it
+    /// doesn't re-fire.
+    pub fn take_active_smartshift_confirm(&mut self) -> Option<(String, DeviceRoute, u64)> {
         let record = self.current_record()?;
         let key = record.config_key.clone();
         let route = record.route.clone()?;
         self.smartshift_pending_confirm
             .remove(&key)
-            .then_some((key, route))
+            .map(|write_id| (key, route, write_id))
+    }
+
+    /// Mark a post-write confirmation as failed when its reply channel closes.
+    pub fn fail_smartshift_confirm(&mut self, key: &str, write_id: u64) {
+        if matches!(
+            self.smartshift_write_status.get(key),
+            Some(SmartShiftWriteStatus::Applying {
+                write_id: current,
+                ..
+            }) if *current == write_id
+        ) {
+            self.smartshift_write_status
+                .insert(key.to_string(), SmartShiftWriteStatus::Failed);
+        }
     }
 
     /// The lighting config for the active device, or the default when none is
@@ -1333,6 +1499,38 @@ fn smartshift_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
+fn smartshift_write_outcome(
+    expected: SmartShiftStatus,
+    load: Option<&SmartShiftLoad>,
+) -> Option<SmartShiftWriteStatus> {
+    match load {
+        Some(SmartShiftLoad::Ready(actual)) if *actual == expected => {
+            Some(SmartShiftWriteStatus::Confirmed)
+        }
+        Some(SmartShiftLoad::Ready(_)) => Some(SmartShiftWriteStatus::Failed),
+        Some(SmartShiftLoad::Failed(_) | SmartShiftLoad::Unsupported(_)) => {
+            Some(SmartShiftWriteStatus::Failed)
+        }
+        None | Some(SmartShiftLoad::Unknown | SmartShiftLoad::Loading) => None,
+    }
+}
+
+fn smartshift_read_is_current(
+    read_id: Option<u64>,
+    write_status: Option<&SmartShiftWriteStatus>,
+) -> bool {
+    match (read_id, write_status) {
+        (
+            Some(read_id),
+            Some(SmartShiftWriteStatus::Applying {
+                write_id: current, ..
+            }),
+        ) => read_id == *current,
+        (None, Some(SmartShiftWriteStatus::Applying { .. })) | (Some(_), _) => false,
+        (None, _) => true,
+    }
+}
+
 fn set_scroll_resolution_if_supported(
     config: &mut Config,
     key: &str,
@@ -1358,7 +1556,12 @@ mod tests {
 
     use crate::asset::AssetResolver;
 
-    use super::{AppState, build_device_list, set_scroll_resolution_if_supported};
+    use openlogi_hid::{SmartShiftMode, SmartShiftStatus};
+
+    use super::{
+        AppState, Load, SmartShiftWriteStatus, build_device_list,
+        set_scroll_resolution_if_supported, smartshift_read_is_current, smartshift_write_outcome,
+    };
 
     fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
         DeviceInventory {
@@ -1415,6 +1618,128 @@ mod tests {
     }
 
     #[test]
+    fn transient_probe_folds_into_its_known_card() {
+        // #482: a half-read probe (all-zero unit id) of the only known device
+        // with that vid/pid must not evict the known card or appear beside it —
+        // the card keeps its identity and takes the live volatile state.
+        let cache = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+            &cache,
+            commands,
+        );
+        let stable_key = "direct:046d:b023:unit:a393cae0";
+        assert_eq!(state.device_list[0].config_key, stable_key);
+
+        let transient_list = build_device_list(&[direct_inventory([0; 4])], &cache, &state.config);
+        let merged = state.merge_inventory_snapshot(transient_list);
+
+        assert_eq!(merged.len(), 1, "no second card for the half-read probe");
+        assert_eq!(merged[0].config_key, stable_key);
+        assert!(merged[0].is_persistent());
+        assert!(merged[0].online, "the live probe supplies volatile state");
+        assert!(merged[0].route.is_some(), "the live route is kept usable");
+    }
+
+    #[test]
+    fn transient_record_beside_its_live_device_is_dropped() {
+        // Both a full and a half-read probe of the same wire product in one
+        // snapshot: the transient record is probe noise, not a second device.
+        let cache = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+            &cache,
+            commands,
+        );
+
+        let both = build_device_list(
+            &[
+                direct_inventory([0xa3, 0x93, 0xca, 0xe0]),
+                direct_inventory([0; 4]),
+            ],
+            &cache,
+            &state.config,
+        );
+        assert_eq!(both.len(), 2);
+        let merged = state.merge_inventory_snapshot(both);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].config_key, "direct:046d:b023:unit:a393cae0");
+        assert!(merged[0].online);
+    }
+
+    #[test]
+    fn transient_probe_adopts_the_absent_sibling_of_a_live_twin() {
+        // Two same-model devices; one probes complete, the other half-reads.
+        // The live twin must not get the transient discarded as its own noise:
+        // the half-read probe can only be the sibling, which keeps its card
+        // online and routed.
+        let cache = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[
+                direct_inventory([1, 1, 1, 1]),
+                direct_inventory([2, 2, 2, 2]),
+            ],
+            &cache,
+            commands,
+        );
+
+        let snapshot = build_device_list(
+            &[direct_inventory([1, 1, 1, 1]), direct_inventory([0; 4])],
+            &cache,
+            &state.config,
+        );
+        let merged = state.merge_inventory_snapshot(snapshot);
+
+        assert_eq!(merged.len(), 2, "no third card for the half-read probe");
+        let Some(sibling) = merged
+            .iter()
+            .find(|r| r.config_key == "direct:046d:b023:unit:02020202")
+        else {
+            panic!("the sibling card must survive under its physical key");
+        };
+        assert!(
+            sibling.online,
+            "the half-read probe keeps the sibling online"
+        );
+        assert!(sibling.route.is_some(), "the live route stays usable");
+    }
+
+    #[test]
+    fn ambiguous_transient_probe_is_not_adopted() {
+        // Two same-model devices are known; a half-read probe could be either,
+        // so neither card may steal it.
+        let cache = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[
+                direct_inventory([1, 1, 1, 1]),
+                direct_inventory([2, 2, 2, 2]),
+            ],
+            &cache,
+            commands,
+        );
+        assert_eq!(state.device_list.len(), 2);
+
+        let transient_list = build_device_list(&[direct_inventory([0; 4])], &cache, &state.config);
+        let merged = state.merge_inventory_snapshot(transient_list);
+
+        assert_eq!(merged.len(), 3, "both known cards survive on grace");
+        assert_eq!(
+            merged.iter().filter(|r| !r.is_persistent()).count(),
+            1,
+            "the transient card stays its own record"
+        );
+    }
+
+    #[test]
     fn historical_transient_lighting_is_not_exposed_without_a_live_record() {
         let transient_key = "direct:046d:b023:unit:00000000";
         let mut config = Config::default();
@@ -1425,6 +1750,59 @@ mod tests {
 
         assert!(state.device_list.is_empty());
         assert!(state.lighting_for(transient_key).is_none());
+    }
+
+    #[test]
+    fn smartshift_write_feedback_requires_the_written_value() {
+        let expected = SmartShiftStatus {
+            mode: SmartShiftMode::Ratchet,
+            auto_disengage: 12,
+            tunable_torque: 0,
+        };
+        assert_eq!(smartshift_write_outcome(expected, None), None);
+        assert_eq!(
+            smartshift_write_outcome(expected, Some(&Load::Ready(expected))),
+            Some(SmartShiftWriteStatus::Confirmed)
+        );
+        assert_eq!(
+            smartshift_write_outcome(
+                expected,
+                Some(&Load::Ready(SmartShiftStatus {
+                    auto_disengage: 13,
+                    ..expected
+                })),
+            ),
+            Some(SmartShiftWriteStatus::Failed)
+        );
+        assert_eq!(
+            smartshift_write_outcome(
+                expected,
+                Some(&Load::<SmartShiftStatus>::Failed("timeout".to_string(),))
+            ),
+            Some(SmartShiftWriteStatus::Failed)
+        );
+    }
+
+    #[test]
+    fn stale_smartshift_reads_do_not_resolve_newer_writes() {
+        let expected = SmartShiftStatus {
+            mode: SmartShiftMode::Ratchet,
+            auto_disengage: 12,
+            tunable_torque: 0,
+        };
+        let applying = SmartShiftWriteStatus::Applying {
+            expected,
+            write_id: 2,
+        };
+
+        assert!(smartshift_read_is_current(Some(2), Some(&applying)));
+        assert!(!smartshift_read_is_current(Some(1), Some(&applying)));
+        assert!(!smartshift_read_is_current(None, Some(&applying)));
+        assert!(!smartshift_read_is_current(
+            Some(2),
+            Some(&SmartShiftWriteStatus::Confirmed)
+        ));
+        assert!(smartshift_read_is_current(None, None));
     }
 
     #[test]

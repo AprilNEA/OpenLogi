@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ElementId, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, RenderOnce, SharedString,
+    IntoElement, ParentElement as _, Pixels, RenderOnce, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled, Window, div, ease_in_out, prelude::FluentBuilder as _,
     px, relative,
 };
@@ -38,8 +38,7 @@ use gpui_component::{
 type SelectHandler = Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
 type ItemRenderer = Rc<dyn Fn(usize, bool, &mut Window, &mut App) -> AnyElement + 'static>;
 
-/// Side padding of the uniform-mode row (also used in its fits-the-viewport
-/// check, so the two stay in step).
+/// Side padding of the uniform-mode row.
 const UNIFORM_PAD: f32 = 24.;
 
 /// A centre-stage carousel. See the module docs.
@@ -190,6 +189,7 @@ impl Carousel {
     /// dropped.
     fn render_uniform(self, card_w: Pixels, window: &mut Window, cx: &mut App) -> AnyElement {
         let Self {
+            id,
             len,
             selected,
             render_item,
@@ -208,27 +208,45 @@ impl Carousel {
         let accent = accent.unwrap_or(cx.theme().primary);
         let dot_idle = cx.theme().border;
 
-        let count = u16::try_from(len).map_or(f32::MAX, f32::from);
-        let content_w =
-            count * f32::from(card_w) + (count - 1.).max(0.) * f32::from(gap) + 2. * UNIFORM_PAD;
-        let centered = content_w <= f32::from(window.viewport_size().width);
-        let mut items = Vec::with_capacity(len);
-        for i in 0..len {
-            items.push(render_item(i, i == selected, window, cx));
+        let scroll_state =
+            window.use_keyed_state(SharedString::from(format!("{id}-scroll")), cx, |_, _| {
+                (usize::MAX, ScrollHandle::new())
+            });
+        let previous = scroll_state.read(cx).0;
+        let scroll_handle = scroll_state.read(cx).1.clone();
+        if previous != selected {
+            scroll_handle.scroll_to_item(selected + 1);
+            scroll_state.update(cx, |state, _| state.0 = selected);
         }
 
+        let mut items = Vec::with_capacity(len);
+        for i in 0..len {
+            items.push(
+                div()
+                    .w(card_w)
+                    .flex_shrink_0()
+                    .child(render_item(i, i == selected, window, cx))
+                    .into_any_element(),
+            );
+        }
+
+        // Flexible edge spacers centre short rows without putting overflowing
+        // cards at a negative, unreachable offset. They are immediate children,
+        // so the scroll handle targets cards at `selected + 1`.
+        let edge_spacer = px((UNIFORM_PAD - f32::from(gap)).max(0.));
         let row = h_flex()
             .id("carousel-uniform")
             .flex_1()
             .min_w_0()
             .h_full()
             .overflow_x_scroll()
+            .track_scroll(&scroll_handle)
             .items_center()
             .gap(gap)
-            .px(px(UNIFORM_PAD))
             .py_4()
-            .map(|row| if centered { row.justify_center() } else { row })
-            .children(items);
+            .child(div().flex_1().min_w(edge_spacer))
+            .children(items)
+            .child(div().flex_1().min_w(edge_spacer));
 
         // Prev/next arrows hug the left and right edges (vertically centred),
         // flanking the scrollable row; the page dots sit centred underneath.

@@ -36,9 +36,11 @@ pub(super) fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPa
                     },
                 ),
             )
-            .description(tr!(
-                "Automatically start OpenLogi when you log in."
-            )),
+            .description(if cfg!(target_os = "macos") {
+                tr!("Automatically start OpenLogi when you log in to macOS.")
+            } else {
+                tr!("Automatically start OpenLogi when you log in.")
+            }),
         );
 
     // The same `show_in_menu_bar` setting drives the macOS status item and

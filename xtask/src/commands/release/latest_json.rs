@@ -31,9 +31,8 @@ pub(crate) struct Args {
     /// Also emit the per-arch Windows `.msi`/`.zip` entries. Off by default so
     /// the manifest can never reference objects the release workflow's R2
     /// upload step doesn't ship. The release workflow passes it and ships the
-    /// zip/msi to the `releases/` prefix; the entries are notify-only (the
-    /// Windows client resolves a check but installs from the GitHub Release —
-    /// `INSTALL_SUPPORTED` is false).
+    /// zip/msi to the `releases/` prefix; the Windows client downloads the
+    /// `.msi` and installs it via gpui-updater's staged msiexec flow.
     #[arg(long)]
     include_windows: bool,
 }

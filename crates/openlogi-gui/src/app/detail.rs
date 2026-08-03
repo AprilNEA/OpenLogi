@@ -2,11 +2,12 @@
 //! four section bodies (Buttons, Pointer, Lighting, Device).
 
 use gpui::{
-    AnyElement, BorrowAppContext as _, Context, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
+    AnyElement, BorrowAppContext as _, Context, IntoElement, ParentElement, SharedString, Styled,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    IconName,
+    Disableable as _, Icon, IconName, Selectable as _,
+    button::{Button, ButtonGroup},
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
     scroll::ScrollableElement as _,
@@ -27,7 +28,7 @@ use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AppState, DeviceRecord};
-use crate::theme::{HEADER_H, Palette, SCREEN_PAD, SelectableStyle as _, Typography as _};
+use crate::theme::{HEADER_H, Palette, SCREEN_PAD, Typography as _};
 
 /// Device-detail top bar, in three zones: a back affordance + device name
 /// (leading), the section tabs as a centred segmented control (middle), and the
@@ -66,6 +67,8 @@ pub(super) fn detail_header(
         .child(
             div()
                 .min_w_0()
+                .max_w(px(220.))
+                .truncate()
                 .text_heading()
                 .child(name),
         )
@@ -92,12 +95,41 @@ pub(super) fn detail_content(
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    match active {
+    let online = cx
+        .try_global::<AppState>()
+        .and_then(AppState::current_record)
+        .is_some_and(|record| record.online);
+    let content = match active {
         DetailTab::Buttons => buttons_tab(mouse_model).into_any_element(),
         DetailTab::Pointer => pointer_tab(dpi_panel, smartshift_panel, pal, cx).into_any_element(),
         DetailTab::Lighting => lighting_tab(lighting_panel, pal).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
-    }
+    };
+    v_flex()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .when(!online, |this| {
+            this.child(
+                h_flex()
+                    .flex_shrink_0()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(pal.border)
+                    .bg(pal.surface)
+                    .px_5()
+                    .py_2()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(Icon::new(IconName::Info).size_4())
+                    .child(tr!(
+                        "Device offline — changes will apply when it reconnects."
+                    )),
+            )
+        })
+        .child(content)
 }
 
 /// The device's sections as a compact, centred segmented control for the
@@ -167,13 +199,13 @@ fn pointer_tab(
                 .flex_wrap()
                 .child(pointer_grid_card(panel_card_fill(
                     tr!("Pointer tuning"),
-                    IconName::Settings,
+                    Icon::empty().path("action-icons/gauge.svg"),
                     pal,
                     dpi_panel.clone().into_any_element(),
                 )))
                 .child(pointer_grid_card(panel_card_fill(
                     tr!("SmartShift"),
-                    IconName::Settings,
+                    Icon::empty().path("action-icons/refresh-cw.svg"),
                     pal,
                     smartshift_panel.clone().into_any_element(),
                 )))
@@ -263,7 +295,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         .child(wheel_resolution_control(resolution, hires_supported, pal));
     panel_card(
         tr!("Scrolling"),
-        IconName::Settings,
+        Icon::empty().path("action-icons/mouse.svg"),
         pal,
         v_flex()
             .gap_4()
@@ -276,78 +308,41 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
 fn wheel_resolution_control(
     selected: Option<ScrollResolution>,
     enabled: bool,
-    pal: Palette,
+    _pal: Palette,
 ) -> AnyElement {
-    h_flex()
+    let values = [
+        None,
+        Some(ScrollResolution::Low),
+        Some(ScrollResolution::High),
+    ];
+    ButtonGroup::new("wheel-resolution")
         .w_full()
-        .p_1()
-        .gap_1()
-        .rounded(pal.control_radius)
-        .border_1()
-        .border_color(pal.border)
-        .child(wheel_resolution_segment(
-            "wheel-resolution-default",
-            tr!("Device default"),
-            None,
-            selected,
-            enabled,
-            pal,
-        ))
-        .child(wheel_resolution_segment(
-            "wheel-resolution-low",
-            tr!("Standard"),
-            Some(ScrollResolution::Low),
-            selected,
-            enabled,
-            pal,
-        ))
-        .child(wheel_resolution_segment(
-            "wheel-resolution-high",
-            tr!("High resolution"),
-            Some(ScrollResolution::High),
-            selected,
-            enabled,
-            pal,
-        ))
-        .into_any_element()
-}
-
-fn wheel_resolution_segment(
-    id: &'static str,
-    label: impl IntoElement,
-    value: Option<ScrollResolution>,
-    selected: Option<ScrollResolution>,
-    enabled: bool,
-    pal: Palette,
-) -> AnyElement {
-    let active = value == selected;
-    let segment = div()
-        .id(id)
-        .flex_1()
-        .px_2()
-        .py_1()
-        .rounded(pal.control_radius)
-        .text_center()
-        .text_caption()
-        .selected_fill(active)
-        .text_color(if enabled {
-            if active {
-                pal.text_primary
-            } else {
-                pal.text_muted
-            }
-        } else {
-            pal.text_muted
-        })
-        .child(label);
-    if !enabled {
-        return segment.into_any_element();
-    }
-    segment
-        .cursor_pointer()
-        .on_click(move |_event, _window, cx| {
+        .outline()
+        .disabled(!enabled)
+        .child(
+            Button::new("wheel-resolution-default")
+                .flex_1()
+                .label(tr!("Device default"))
+                .selected(selected.is_none()),
+        )
+        .child(
+            Button::new("wheel-resolution-low")
+                .flex_1()
+                .label(tr!("Standard"))
+                .selected(selected == Some(ScrollResolution::Low)),
+        )
+        .child(
+            Button::new("wheel-resolution-high")
+                .flex_1()
+                .label(tr!("High resolution"))
+                .selected(selected == Some(ScrollResolution::High)),
+        )
+        .on_click(move |indices, _window, cx| {
+            let Some(value) = indices.first().and_then(|index| values.get(*index)) else {
+                return;
+            };
             cx.update_global::<AppState, _>(|state, _| {
-                state.commit_scroll_resolution(value);
+                state.commit_scroll_resolution(*value);
             });
             cx.refresh_windows();
         })
@@ -357,7 +352,7 @@ fn wheel_resolution_segment(
 /// On/Off pill that flips the active device's scroll-wheel inversion, mirroring
 /// the SmartShift permanent-ratchet toggle.
 fn invert_scroll_toggle(on: bool, enabled: bool, pal: Palette) -> AnyElement {
-    let label = if on { tr!("On") } else { tr!("Off") };
+    let label: SharedString = if on { tr!("On") } else { tr!("Off") };
     if !enabled {
         return div()
             .px_2()
@@ -370,17 +365,10 @@ fn invert_scroll_toggle(on: bool, enabled: bool, pal: Palette) -> AnyElement {
             .child(tr!("Unavailable"))
             .into_any_element();
     }
-    div()
-        .id("invert-scroll-toggle")
-        .px_2()
-        .py_1()
-        .rounded(pal.control_radius)
-        .selected_border(on, pal)
-        .selected_fill(on)
-        .text_caption()
-        .text_color(if on { pal.text_primary } else { pal.text_muted })
-        .cursor_pointer()
-        .child(label)
+    Button::new("invert-scroll-toggle")
+        .compact()
+        .label(label)
+        .selected(on)
         .on_click(move |_event, _window, cx| {
             cx.update_global::<AppState, _>(|state, _| {
                 state.commit_invert_scroll(!on);
@@ -403,7 +391,7 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>, pal: Palette) -> i
         .p(px(SCREEN_PAD))
         .child(div().w_full().max_w(px(560.)).child(panel_card(
             tr!("Lighting"),
-            IconName::Palette,
+            Icon::new(IconName::Palette),
             pal,
             lighting_panel.clone().into_any_element(),
         )))
@@ -458,7 +446,12 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
             },
         );
 
-    panel_card(tr!("Device details"), IconName::Info, pal, content)
+    panel_card(
+        tr!("Device details"),
+        Icon::new(IconName::Info),
+        pal,
+        content,
+    )
 }
 
 fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
@@ -517,7 +510,12 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
         )
         .into_any_element();
 
-    panel_card(tr!("Configuration"), IconName::Folder, pal, content)
+    panel_card(
+        tr!("Configuration"),
+        Icon::new(IconName::Folder),
+        pal,
+        content,
+    )
 }
 
 fn device_summary(name: &str, kind: DeviceKind, online: bool, pal: Palette) -> impl IntoElement {

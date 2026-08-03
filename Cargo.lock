@@ -2780,8 +2780,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-updater"
-version = "0.0.5"
-source = "git+https://github.com/AprilNEA/gpui-updater?tag=v0.0.5#dd592ac89c45a061ddc3a40160eecf1dfe7302fe"
+version = "0.0.6"
+source = "git+https://github.com/AprilNEA/gpui-updater?tag=v0.0.6#e8a85768793ac3238b0c1bc1f32d6a1544667ec3"
 dependencies = [
  "gpui",
  "minisign-verify",
@@ -4991,7 +4991,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "anyhow",
  "openlogi-cli",
@@ -5000,7 +5000,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-agent"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "embed-resource",
  "futures",
@@ -5025,7 +5025,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-agent-core"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "async-hid",
  "bincode",
@@ -5043,7 +5043,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-assets"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "atomic-write-file",
  "backon",
@@ -5058,7 +5058,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-cli"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "anyhow",
  "clap",
@@ -5072,7 +5072,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-core"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "atomic-write-file",
  "etcetera",
@@ -5086,7 +5086,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-gui"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "anyhow",
  "backon",
@@ -5126,7 +5126,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hid"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "async-hid",
  "futures-concurrency",
@@ -5143,7 +5143,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hidpp"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -5162,7 +5162,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hook"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "core-foundation 0.10.0",
  "core-graphics 0.25.0",
@@ -5183,7 +5183,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-inject"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "core-foundation 0.10.0",
  "core-graphics 0.25.0",
@@ -9479,7 +9479,7 @@ checksum = "32ac00cd3f8ec9c1d33fb3e7958a82df6989c42d747bd326c822b1d625283547"
 
 [[package]]
 name = "xtask"
-version = "0.6.22"
+version = "0.6.23"
 dependencies = [
  "anyhow",
  "clap",

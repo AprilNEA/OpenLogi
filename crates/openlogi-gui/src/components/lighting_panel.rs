@@ -18,7 +18,7 @@ use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
+use crate::theme::{self, Palette, SelectableStyle, Typography as _};
 
 const SWATCH: f32 = 28.;
 
@@ -137,7 +137,7 @@ impl Render for LightingPanel {
                     .child(
                         div()
                             .text_caption()
-                            .text_color(rgb(ACCENT_BLUE))
+                            .text_color(pal.text_primary)
                             .child(format!("{}%", lighting.brightness)),
                     ),
             )
