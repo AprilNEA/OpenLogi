@@ -27,30 +27,10 @@ jobs:
     if: github.repository == 'AprilNEA/OpenLogi'
 
     steps:
-      # Secrets are not readable in a job-level `if`, so a gate step skips the
-      # sync (with a visible warning) instead of failing every scheduled run
-      # while the Crowdin credentials are not configured. A malformed reference
-      # or missing item field still fails loudly in the load step below — once
-      # the secrets are set, a broken reference is an error, not a skip.
-      - name: Check for the Crowdin 1Password item
-        id: config
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          OP_CROWDIN_SECRET_ITEM: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}
-        run: |
-          if [[ -n "$OP_SERVICE_ACCOUNT_TOKEN" && -n "$OP_CROWDIN_SECRET_ITEM" ]]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::OP_SERVICE_ACCOUNT_TOKEN and/or OP_CROWDIN_SECRET_ITEM is not set; skipping the Crowdin sync."
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Checkout
-        if: steps.config.outputs.configured == 'true'
         uses: actions/checkout@v6
 
       - name: Load Crowdin credentials from 1Password
-        if: steps.config.outputs.configured == 'true'
         id: crowdin_config
         uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
         with:
@@ -61,15 +41,14 @@ jobs:
           CROWDIN_PERSONAL_TOKEN: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PERSONAL_TOKEN
 
       - name: Synchronize with Crowdin
-        if: steps.config.outputs.configured == 'true'
-        uses: crowdin/github-action@v2
+        uses: crowdin/github-action@c7af9bc98b01694653031fef2a0dc6c7888ce9bc # v2.17.0
         with:
           config: crowdin.yml
           upload_sources: true
           upload_translations: false
           download_translations: true
           localization_branch_name: crowdin/i18n
-          commit_message: "chore(i18n): sync Crowdin translations [skip ci]"
+          commit_message: "chore(i18n): sync Crowdin translations"
           create_pull_request: true
           pull_request_title: "chore(i18n): sync Crowdin translations"
           pull_request_body: |

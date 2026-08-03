@@ -191,13 +191,25 @@ cargo run -p xtask -- release latest-json \
 ## Crowdin translation sync
 
 `.github/workflows/crowdin.yml` uploads `crates/openlogi-gui/locales/en.yml` to
-Crowdin and opens a `crowdin/i18n` PR with fresh translations — nightly, and on
-master pushes touching the source strings. Like the release workflow, it reads
-its credentials from one 1Password item referenced by the GitHub secret
-`OP_CROWDIN_SECRET_ITEM`. The item must contain:
+[Crowdin](https://crowdin.com/project/openlogi) and opens a `crowdin/i18n` PR
+with fresh translations — nightly, and on master pushes touching the source
+strings. `crowdin.yml` limits exports to the locales shipped by the app and
+maps Crowdin language identifiers to their repository filenames.
+
+Like the release workflow, the job reads its credentials from one 1Password
+item referenced by the GitHub secret `OP_CROWDIN_SECRET_ITEM`. The item must
+contain:
 
 - `CROWDIN_PROJECT_ID` — the numeric Crowdin project id.
 - `CROWDIN_PERSONAL_TOKEN` — a Crowdin API token with access to the project.
 
-While `OP_CROWDIN_SECRET_ITEM` is unset, the workflow skips the sync with a
-warning instead of failing.
+Grant the token only these scopes and restrict its granular access to the
+OpenLogi project:
+
+- Projects (List, Get, Create, Edit) — Read.
+- Translation Status — Read Only.
+- Source files & strings — Read and Write.
+- Translations — Read and Write.
+
+Missing or invalid credentials fail the workflow. Translation PRs run the
+normal CI checks, including the locale key-parity test.
