@@ -4,8 +4,9 @@
 //! A dedicated reader thread owns the whole Media Foundation object graph —
 //! device activation, `IMFSourceReader`, format negotiation — and pulls
 //! samples synchronously, decoding into the same tightly-packed BGRA
-//! [`Frame`]s the macOS backend produces (RGB32 sample memory is BGRA in
-//! little-endian byte order, so gpui uploads them without a channel swap).
+//! [`Frame`]s the macOS backend produces. RGB32 sample memory is BGRX in
+//! little-endian byte order — the channel order gpui wants, but with an
+//! undefined fourth byte that is forced opaque during the copy.
 //! Dropping the [`CameraStream`] stops the thread, which releases the device
 //! (camera LED off).
 //!
@@ -387,6 +388,12 @@ fn store_frame(shared: &Shared, data: *mut u8, len: usize, hint: StrideHint) {
                 row_bytes,
             );
         }
+    }
+    // RGB32 is really BGRX: Media Foundation leaves the fourth byte undefined
+    // (zero in practice), which gpui would alpha-blend into an invisible frame.
+    // Force every pixel opaque to make the buffer true BGRA.
+    for px in bgra.chunks_exact_mut(4) {
+        px[3] = 0xFF;
     }
     if let Ok(mut slot) = shared.latest.lock() {
         *slot = Some(Arc::new(Frame {
