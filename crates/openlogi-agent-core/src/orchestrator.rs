@@ -16,7 +16,7 @@ use std::sync::{Arc, RwLock};
 
 use openlogi_core::config::{Config, ScrollResolution};
 use openlogi_core::device::{Capabilities, DeviceInventory};
-use openlogi_hid::{CaptureChannel, DeviceRoute};
+use openlogi_hid::{CaptureChannel, ChannelPool, DeviceRoute};
 use tracing::warn;
 
 use crate::DpiCycleState;
@@ -59,8 +59,10 @@ pub struct SharedRuntime {
     pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
     pub thumbwheel_sensitivity: Arc<AtomicI32>,
     pub capture_channel: CaptureChannel,
-    /// Exclusive receiver access shared by HID++ capture and pairing. Capture
-    /// and pairing must never open the same receiver HID node concurrently.
+    /// Shared transport pool used by long-running HID++ sessions.
+    pub channel_pool: ChannelPool,
+    /// Receiver access shared by pooled HID++ sessions and pairing. Pairing is
+    /// exclusive; normal sessions share the pool under read leases.
     pub receiver_access: ReceiverAccess,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
@@ -114,6 +116,7 @@ impl Orchestrator {
                 config.app_settings.thumbwheel_sensitivity,
             )),
             capture_channel: Arc::new(RwLock::new(None)),
+            channel_pool: ChannelPool::default(),
             receiver_access: ReceiverAccess::default(),
             host_switch_links: Arc::new(RwLock::new(Vec::new())),
         };
@@ -581,8 +584,8 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDevice, InventoryHealth, Orchestrator, build_devices, configured_wheel_mode, host_switch_links,
-        plan_reapply, reapply_targets,
+        AgentDevice, InventoryHealth, Orchestrator, build_devices, configured_wheel_mode,
+        host_switch_links, plan_reapply, reapply_targets,
     };
     use openlogi_core::config::{Config, ScrollResolution};
     use openlogi_core::device::{

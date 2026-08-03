@@ -167,10 +167,15 @@ async fn run(config: Config) {
         shared.gesture_bindings.clone(),
         shared.dpi_cycle.clone(),
         shared.capture_channel.clone(),
+        shared.channel_pool.clone(),
         shared.thumbwheel_sensitivity.clone(),
         shared.receiver_access.clone(),
     );
-    watchers::host_switch::spawn(shared.host_switch_links.clone());
+    watchers::host_switch::spawn(
+        shared.host_switch_links.clone(),
+        shared.channel_pool.clone(),
+        shared.receiver_access.clone(),
+    );
 
     let mut inventory_rx = watchers::inventory::spawn(Duration::from_secs(2));
     let mut app_rx = watchers::foreground_app::spawn(Duration::from_secs(1));

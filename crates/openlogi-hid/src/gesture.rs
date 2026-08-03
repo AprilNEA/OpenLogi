@@ -25,8 +25,9 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use crate::ChannelPool;
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
-use crate::route::{DeviceRoute, open_route_channel};
+use crate::route::DeviceRoute;
 use crate::thumbwheel::{self, Thumbwheel};
 use crate::write::SharedChannel;
 
@@ -100,8 +101,10 @@ pub async fn run_capture_session(
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
+    channel_pool: ChannelPool,
 ) -> Result<(), GestureError> {
-    let chan = open_route_channel(&route)
+    let chan = channel_pool
+        .open(&route)
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
     let device_index = route.device_index();

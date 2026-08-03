@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
+use openlogi_hid::{CaptureChannel, CapturedInput, ChannelPool, DeviceRoute, run_capture_session};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
@@ -79,6 +79,7 @@ pub fn spawn(
     gesture_bindings: GestureBindings,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
+    channel_pool: ChannelPool,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
 ) {
@@ -98,6 +99,7 @@ pub fn spawn(
             gesture_bindings,
             dpi_cycle,
             capture_channel,
+            channel_pool,
             thumbwheel_sensitivity,
             receiver_access,
         ));
@@ -149,6 +151,7 @@ async fn manage(
     gesture_bindings: GestureBindings,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
+    channel_pool: ChannelPool,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
 ) {
@@ -219,7 +222,7 @@ async fn manage(
                     continue;
                 }
                 if let Some((route, capture_thumbwheel, divert_gesture_button)) = want {
-                    let Some(receiver_lease) = receiver_access.try_acquire_for_capture() else {
+                    let Some(receiver_lease) = receiver_access.try_acquire_for_session() else {
                         current = None;
                         continue;
                     };
@@ -227,6 +230,7 @@ async fn manage(
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
                     let slot = Arc::clone(&capture_channel);
+                    let pool = channel_pool.clone();
                     epoch = epoch.wrapping_add(1);
                     let session_epoch = epoch;
                     let done = done_tx.clone();
@@ -239,6 +243,7 @@ async fn manage(
                             sink,
                             stop_rx,
                             slot,
+                            pool,
                         )
                         .await
                         {
