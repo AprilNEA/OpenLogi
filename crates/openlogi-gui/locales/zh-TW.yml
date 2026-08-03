@@ -327,7 +327,6 @@ _version: 1
 "The mouse runs the profile stored in its memory; OpenLogi settings do not apply.": "The mouse runs the profile stored in its memory; OpenLogi settings do not apply."
 "Active onboard profile": "Active onboard profile"
 "Profile %{n}": "Profile %{n}"
-"ROM profile %{n}": "ROM profile %{n}"
 "No enabled profiles in the device's memory.": "No enabled profiles in the device's memory."
 "Reading onboard profiles…": "Reading onboard profiles…"
 "Device offline — onboard profiles unavailable.": "Device offline — onboard profiles unavailable."

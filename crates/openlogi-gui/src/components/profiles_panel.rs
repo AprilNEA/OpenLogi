@@ -109,11 +109,13 @@ impl ProfilesPanel {
         let mut body = v_flex().gap_4().w_full().child(source_row);
         if onboard {
             // Number by directory position: a disabled slot must not renumber later ones.
+            // ROM entries are skipped: the firmware rejects `setCurrentProfile` on a
+            // ROM sector, so offering one would be an action that cannot succeed.
             let enabled: Vec<(usize, &ProfileEntry)> = info
                 .directory
                 .iter()
                 .enumerate()
-                .filter(|(_, e)| e.enabled)
+                .filter(|(_, e)| e.enabled && !e.is_rom())
                 .collect();
             let profile_row = v_flex()
                 .gap_2()
@@ -187,17 +189,21 @@ fn profiles_load_target(cx: &mut Context<ProfilesPanel>) -> Option<(String, Devi
 
 /// The profile sector a mode switch should carry: the currently active one
 /// when it is a real, enabled entry, otherwise the first enabled entry (a
-/// device that has never run onboard reports `0x0000`).
+/// device that has never run onboard reports `0x0000`). ROM sectors are never
+/// chosen — the firmware rejects `setCurrentProfile` on them.
 fn keep_profile_for(info: &OnboardProfilesInfo) -> Option<u16> {
     let enabled = |sector: u16| {
         info.directory
             .iter()
-            .any(|e| e.enabled && e.sector == sector)
+            .any(|e| e.enabled && !e.is_rom() && e.sector == sector)
     };
     if info.active_profile != 0 && enabled(info.active_profile) {
         Some(info.active_profile)
     } else {
-        info.directory.iter().find(|e| e.enabled).map(|e| e.sector)
+        info.directory
+            .iter()
+            .find(|e| e.enabled && !e.is_rom())
+            .map(|e| e.sector)
     }
 }
 
@@ -242,15 +248,10 @@ fn source_pill(
         .into_any_element()
 }
 
-/// One enabled directory entry as a selectable pill, labeled by its position
-/// (ROM profiles are labeled as such).
+/// One selectable user profile as a pill, labeled by its directory position.
 fn profile_pill(index: usize, entry: ProfileEntry, selected: bool, pal: Palette) -> AnyElement {
     let n = (index + 1).to_string();
-    let label = if entry.is_rom() {
-        tr!("ROM profile %{n}", n => n)
-    } else {
-        tr!("Profile %{n}", n => n)
-    };
+    let label = tr!("Profile %{n}", n => n);
     let sector = entry.sector;
     div()
         .id(SharedString::from(format!("profile-pill-{sector}")))
