@@ -73,6 +73,23 @@ pub enum WriteError {
     /// Background agent write path is unavailable.
     #[error("background agent is unavailable")]
     AgentUnavailable,
+    /// A standalone light value is outside the driver's supported range.
+    #[error("invalid light value for {control}: {value}")]
+    InvalidLightValue {
+        /// Semantic control name.
+        control: String,
+        /// Rejected value in the semantic/native unit supplied by the caller.
+        value: u16,
+    },
+    /// The selected light driver does not implement a requested control.
+    #[error("light control is unsupported: {control}")]
+    LightUnsupported {
+        /// Semantic control name.
+        control: String,
+    },
+    /// Multiple raw HID nodes matched one physical route.
+    #[error("multiple raw HID devices matched the route")]
+    AmbiguousRawDevice,
 }
 
 /// HID++ operation being performed when a device write/read failed.
@@ -100,6 +117,8 @@ pub enum HidppOperation {
     ReadWheelMode,
     /// Write and verify the native HiResWheel mode.
     WriteWheelMode,
+    /// Write a standalone-light command.
+    Light,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

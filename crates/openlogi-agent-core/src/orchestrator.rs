@@ -14,10 +14,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 
-use openlogi_core::config::{Config, ScrollResolution};
-use openlogi_core::device::{Capabilities, DeviceInventory};
-use openlogi_hid::{CaptureChannel, DeviceRoute};
-use tracing::warn;
+use openlogi_core::config::{Config, LightSettings, ScrollResolution};
+use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
+use openlogi_hid::{CaptureChannel, DIRECT_DEVICE_INDEX, DeviceRoute};
+use tracing::{info, warn};
 
 use crate::DpiCycleState;
 use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
@@ -39,6 +39,7 @@ struct AgentDevice {
     serial: Option<String>,
     unit_id: [u8; 4],
     capabilities: Option<Capabilities>,
+    light_capabilities: Option<LightCapabilities>,
     /// Live link state from the inventory snapshot. An offline→online
     /// transition is a reconnect — the device may have power-cycled, so its
     /// volatile settings need re-applying (#189).
@@ -83,6 +84,12 @@ pub struct Orchestrator {
     /// Config keys of devices first sighted last refresh, due one confirming
     /// re-apply: the first write can race the device's own boot and be lost.
     reapply_followup: HashSet<String>,
+    /// Last successful aggregate camera-use sample. `None` means the macOS
+    /// watcher has not produced its first usable observation yet.
+    camera_active: Option<bool>,
+    /// Transient manual power choices for camera-linked lights. A camera-use
+    /// transition clears them; they are never written to the config.
+    manual_light_overrides: BTreeMap<String, bool>,
     shared: SharedRuntime,
 }
 
@@ -92,7 +99,10 @@ enum InventoryState {
     /// No enumeration has completed yet; the device set is unknown.
     Pending,
     /// The latest completed snapshot — empty means "checked, no devices".
-    Ready(Vec<DeviceInventory>),
+    Ready {
+        inventories: Vec<DeviceInventory>,
+        standalone: Vec<StandaloneDevice>,
+    },
     /// Enumeration has never succeeded (broken HID backend / dead watcher).
     Unavailable,
 }
@@ -121,6 +131,8 @@ impl Orchestrator {
             inventory: InventoryState::Pending,
             reapply_all_next_refresh: false,
             reapply_followup: HashSet::new(),
+            camera_active: None,
+            manual_light_overrides: BTreeMap::new(),
             shared,
         };
         orch.rebuild();
@@ -136,11 +148,15 @@ impl Orchestrator {
     fn current_key(&self) -> Option<&str> {
         self.devices
             .get(self.current)
+            .filter(|device| is_hidpp_device(device))
             .map(|d| d.config_key.as_str())
     }
 
     fn current_route(&self) -> Option<DeviceRoute> {
-        self.devices.get(self.current).and_then(|d| d.route.clone())
+        self.devices
+            .get(self.current)
+            .filter(|device| is_hidpp_device(device))
+            .and_then(|d| d.route.clone())
     }
 
     /// Build the OS-hook callback's maps for `key` + foreground `app`. Both hook
@@ -192,12 +208,19 @@ impl Orchestrator {
     /// driven solely by `config_key` + route and resets the live DPI-cycle
     /// index, so running it every 2s tick on an unchanged set would snap DPI
     /// back to `preset[0]` (and burn three `RwLock` writes) for nothing.
-    pub fn refresh_inventory(&mut self, inventories: &[DeviceInventory]) {
+    pub fn refresh_inventory(
+        &mut self,
+        inventories: &[DeviceInventory],
+        standalone: &[StandaloneDevice],
+    ) {
         // Even an empty snapshot is a *completed* enumeration — the watcher
         // skips failed ticks — so the device set is now known either way (and
         // a recovered backend upgrades `Unavailable` back to live data).
-        self.inventory = InventoryState::Ready(inventories.to_vec());
-        let devices = build_devices(inventories);
+        self.inventory = InventoryState::Ready {
+            inventories: inventories.to_vec(),
+            standalone: standalone.to_vec(),
+        };
+        let devices = build_devices(inventories, standalone);
         // Volatile settings (lighting colour, sensor DPI, SmartShift, native
         // wheel mode) live in device RAM and reset on a power cycle. Every
         // reconnect shape re-applies the persisted values (#189): a first
@@ -217,6 +240,7 @@ impl Orchestrator {
                 a.config_key != b.config_key
                     || a.route != b.route
                     || a.capabilities != b.capabilities
+                    || a.light_capabilities != b.light_capabilities
             });
         if !changed {
             // Same set and routes — but keep the fresh `online` flags, or a
@@ -269,8 +293,74 @@ impl Orchestrator {
             );
         }
         if let Some(lighting) = self.config.lighting(key).filter(|l| l.enabled) {
-            crate::hardware::set_lighting_in_background(Some(route), &lighting);
+            crate::hardware::set_lighting_in_background(Some(route.clone()), &lighting);
         }
+        if let Some(capabilities) = dev.light_capabilities
+            && let Some(light) = self.effective_light_settings(key)
+        {
+            crate::hardware::set_light_in_background(Some(route), &light, capabilities);
+        }
+    }
+
+    /// Apply an aggregate camera-use transition to every opted-in online
+    /// light. Only effective power is transient; persisted manual power and
+    /// the remaining light settings are unchanged.
+    pub fn set_camera_active(&mut self, active: bool) {
+        if self.camera_active == Some(active) {
+            return;
+        }
+        let previous = self.camera_active;
+        self.camera_active = Some(active);
+        self.manual_light_overrides.clear();
+        let mut applied = 0;
+        for dev in self
+            .devices
+            .iter()
+            .filter(|dev| dev.online && dev.route.is_some())
+        {
+            let (Some(capabilities), Some(mut light)) = (
+                dev.light_capabilities,
+                self.config
+                    .light(&dev.config_key)
+                    .filter(|light| light.auto_camera),
+            ) else {
+                continue;
+            };
+            light.enabled = active;
+            crate::hardware::set_light_in_background(dev.route.clone(), &light, capabilities);
+            applied += 1;
+        }
+        info!(previous = ?previous, active, lights = applied, "applied camera-linked light state");
+    }
+
+    /// Resolve settings for reconnect/config re-application. Camera policy and
+    /// a transient manual override replace only the effective power field.
+    fn effective_light_settings(&self, key: &str) -> Option<LightSettings> {
+        let mut light = self.config.light(key)?;
+        if light.auto_camera {
+            if let Some(override_enabled) = self.manual_light_overrides.get(key) {
+                light.enabled = *override_enabled;
+            } else if let Some(active) = self.camera_active {
+                light.enabled = active;
+            }
+        }
+        Some(light)
+    }
+
+    /// Store a transient manual power choice for a known light route. The IPC
+    /// write can race the config reload that first enabled camera automation,
+    /// so route/capability identity—not the possibly-stale config bit—is the
+    /// acceptance condition. A reload retains it only while the new config is
+    /// camera-linked.
+    pub fn set_manual_light_power(&mut self, route: &DeviceRoute, enabled: bool) -> bool {
+        let Some(device) = self.devices.iter().find(|device| {
+            device.route.as_ref() == Some(route) && device.light_capabilities.is_some()
+        }) else {
+            return false;
+        };
+        self.manual_light_overrides
+            .insert(device.config_key.clone(), enabled);
+        true
     }
 
     /// Push the saved native wheel resolution/inversion to every currently online
@@ -304,9 +394,25 @@ impl Orchestrator {
     #[must_use]
     pub fn inventory(&self) -> Vec<DeviceInventory> {
         match &self.inventory {
-            InventoryState::Ready(inventories) => inventories.clone(),
+            InventoryState::Ready { inventories, .. } => inventories.clone(),
             InventoryState::Pending | InventoryState::Unavailable => Vec::new(),
         }
+    }
+
+    /// The latest standalone raw-HID inventory snapshot.
+    #[must_use]
+    pub fn standalone(&self) -> Vec<StandaloneDevice> {
+        match &self.inventory {
+            InventoryState::Ready { standalone, .. } => standalone.clone(),
+            InventoryState::Pending | InventoryState::Unavailable => Vec::new(),
+        }
+    }
+
+    /// The latest aggregate camera-use sample, or `false` before the first
+    /// successful macOS observation.
+    #[must_use]
+    pub fn camera_active(&self) -> bool {
+        self.camera_active.unwrap_or(false)
     }
 
     /// Where enumeration stands, for the IPC `status` poll.
@@ -314,7 +420,7 @@ impl Orchestrator {
     pub fn inventory_health(&self) -> InventoryHealth {
         match self.inventory {
             InventoryState::Pending => InventoryHealth::Scanning,
-            InventoryState::Ready(_) => InventoryHealth::Ready,
+            InventoryState::Ready { .. } => InventoryHealth::Ready,
             InventoryState::Unavailable => InventoryHealth::Unavailable,
         }
     }
@@ -355,10 +461,41 @@ impl Orchestrator {
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.
     pub fn reload_config(&mut self, config: Config) {
+        // Parameter-only edits must not erase a transient manual choice while
+        // the light remains camera-linked. Changing the policy invalidates it.
         self.config = config;
+        let retained_overrides: HashSet<String> = self
+            .manual_light_overrides
+            .keys()
+            .filter(|key| {
+                self.config
+                    .light(key)
+                    .is_some_and(|light| light.auto_camera)
+            })
+            .cloned()
+            .collect();
+        self.manual_light_overrides
+            .retain(|key, _| retained_overrides.contains(key));
         self.current = pick_current(&self.devices, self.config.selected_device());
         self.rebuild();
         self.apply_native_wheel_modes();
+        self.reapply_light_settings();
+    }
+
+    /// Re-apply standalone-light settings after a config reload.
+    fn reapply_light_settings(&self) {
+        for dev in self
+            .devices
+            .iter()
+            .filter(|dev| dev.online && dev.route.is_some() && dev.light_capabilities.is_some())
+        {
+            if let (Some(light), Some(capabilities)) = (
+                self.effective_light_settings(&dev.config_key),
+                dev.light_capabilities,
+            ) {
+                crate::hardware::set_light_in_background(dev.route.clone(), &light, capabilities);
+            }
+        }
     }
 }
 
@@ -385,7 +522,10 @@ fn configured_wheel_mode(
 /// `build_device_list` minus the asset/display fields: a device is included
 /// only once its HID++ DeviceInformation (`model_info`) has resolved, since the
 /// model key is derived from it.
-fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
+fn build_devices(
+    inventories: &[DeviceInventory],
+    standalone: &[StandaloneDevice],
+) -> Vec<AgentDevice> {
     let mut devices = Vec::new();
     for inv in inventories {
         for paired in &inv.paired {
@@ -410,9 +550,39 @@ fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
                 serial: model.serial_number.clone(),
                 unit_id: model.unit_id,
                 capabilities: paired.capabilities,
+                light_capabilities: None,
                 online: paired.online,
             });
         }
+    }
+    for device in standalone {
+        let route = DeviceRoute::RawHid {
+            vendor_id: device.address.vendor_id,
+            product_id: device.address.product_id,
+            usage_page: device.address.usage_page,
+            usage_id: device.address.usage_id,
+            identity: device.address.identity.clone(),
+        };
+        let stable_id = DeviceStableId::from_parts(
+            Some(&route),
+            DIRECT_DEVICE_INDEX,
+            device.serial_number.as_deref(),
+            device.unit_id,
+        );
+        let Some(config_key) = stable_id.physical_key() else {
+            continue;
+        };
+        devices.push(AgentDevice {
+            config_key: config_key.into_string(),
+            model_key: device.display_name.clone(),
+            route: Some(route),
+            slot: DIRECT_DEVICE_INDEX,
+            serial: device.serial_number.clone(),
+            unit_id: device.unit_id,
+            capabilities: device.capabilities,
+            light_capabilities: device.light_capabilities,
+            online: device.online,
+        });
     }
     // Order by the same canonical key the GUI carousel uses, so the
     // no-saved-selection fallback (`pick_current` -> index 0) targets the device
@@ -496,14 +666,23 @@ fn plan_reapply(
     (targets, next_followup)
 }
 
-/// Index of the selected device: the one whose `config_key` matches the saved
-/// selection, else the first. `build_devices` sorts by the same canonical key
-/// the GUI carousel uses, so "the first" is the same physical device in both
-/// processes even when nothing is persisted yet.
+/// Index of the selected HID++ input device: the saved selection when it is an
+/// input route, otherwise the first input route. Standalone raw-HID devices
+/// participate in inventory and settings re-apply but must never replace the
+/// mouse/keyboard capture target when selected in the GUI.
 fn pick_current(devices: &[AgentDevice], saved: Option<&str>) -> usize {
     saved
-        .and_then(|key| devices.iter().position(|d| d.config_key == key))
+        .and_then(|key| {
+            devices
+                .iter()
+                .position(|device| device.config_key == key && is_hidpp_device(device))
+        })
+        .or_else(|| devices.iter().position(is_hidpp_device))
         .unwrap_or(0)
+}
+
+fn is_hidpp_device(device: &AgentDevice) -> bool {
+    !matches!(device.route, Some(DeviceRoute::RawHid { .. }))
 }
 
 /// Replace the value behind an `RwLock`, logging (not panicking) on poison so a
@@ -520,12 +699,12 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 mod tests {
     use super::{
         AgentDevice, InventoryHealth, Orchestrator, build_devices, configured_wheel_mode,
-        plan_reapply, reapply_targets,
+        pick_current, plan_reapply, reapply_targets,
     };
-    use openlogi_core::config::{Config, ScrollResolution};
+    use openlogi_core::config::{Config, LightSettings, ScrollResolution};
     use openlogi_core::device::{
-        Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice,
-        ReceiverInfo,
+        Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
+        LightCapabilities, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
     };
     use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
@@ -541,7 +720,31 @@ mod tests {
             serial: None,
             unit_id: [0; 4],
             capabilities: None,
+            light_capabilities: None,
             online,
+        }
+    }
+
+    fn raw_light_dev(key: &str) -> AgentDevice {
+        AgentDevice {
+            config_key: key.to_string(),
+            model_key: "Litra Glow".to_string(),
+            route: Some(DeviceRoute::RawHid {
+                vendor_id: 0x046d,
+                product_id: 0xc900,
+                usage_page: 0xff43,
+                usage_id: 0x0202,
+                identity: "serial:glow-1".to_string(),
+            }),
+            slot: DIRECT_DEVICE_INDEX,
+            serial: Some("glow-1".to_string()),
+            unit_id: [0; 4],
+            capabilities: None,
+            light_capabilities: Some(openlogi_core::device::LightCapabilities {
+                power: true,
+                ..openlogi_core::device::LightCapabilities::default()
+            }),
+            online: true,
         }
     }
 
@@ -575,11 +778,58 @@ mod tests {
 
     #[test]
     fn build_devices_skips_transient_zero_unit_direct_identity() {
-        assert!(build_devices(&[direct_inventory(None, [0; 4])]).is_empty());
+        assert!(build_devices(&[direct_inventory(None, [0; 4])], &[]).is_empty());
 
-        let devices = build_devices(&[direct_inventory(Some("ABC123"), [0; 4])]);
+        let devices = build_devices(&[direct_inventory(Some("ABC123"), [0; 4])], &[]);
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].config_key, "direct:046d:b023:serial:abc123");
+    }
+
+    #[test]
+    fn build_devices_keeps_serial_backed_standalone_lights_beside_hidpp_devices() {
+        let light_capabilities = openlogi_core::device::LightCapabilities {
+            power: true,
+            ..openlogi_core::device::LightCapabilities::default()
+        };
+        let standalone = StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: 0x046d,
+                product_id: 0xc900,
+                usage_page: 0xff43,
+                usage_id: 0x0202,
+                identity: "serial:glow-1".to_string(),
+            },
+            display_name: "Litra Glow".to_string(),
+            manufacturer: Some("Logitech".to_string()),
+            serial_number: Some("Glow-1".to_string()),
+            unit_id: [0; 4],
+            kind: DeviceKind::Light,
+            online: true,
+            capabilities: None,
+            light_capabilities: Some(light_capabilities),
+            driver_id: "litra".to_string(),
+        };
+
+        let devices = build_devices(&[direct_inventory(Some("ABC123"), [0; 4])], &[standalone]);
+
+        assert_eq!(devices.len(), 2);
+        let Some(light) = devices
+            .iter()
+            .find(|device| device.model_key == "Litra Glow")
+        else {
+            panic!("standalone light should be retained");
+        };
+        assert_eq!(light.config_key, "raw:046d:c900:ff43:0202:serial:glow-1");
+        assert_eq!(light.light_capabilities, Some(light_capabilities));
+        assert!(matches!(light.route, Some(DeviceRoute::RawHid { .. })));
+    }
+
+    #[test]
+    fn standalone_selection_never_replaces_the_hidpp_capture_target() {
+        let devices = [raw_light_dev("light"), dev("mouse", 1, true)];
+
+        assert_eq!(pick_current(&devices, Some("light")), 1);
+        assert_eq!(pick_current(&devices, None), 1);
     }
 
     #[test]
@@ -728,7 +978,7 @@ mod tests {
     fn empty_refresh_marks_inventory_ready() {
         let mut orch = Orchestrator::new(Config::default());
         assert_eq!(orch.inventory_health(), InventoryHealth::Scanning);
-        orch.refresh_inventory(&[]);
+        orch.refresh_inventory(&[], &[]);
         assert_eq!(orch.inventory_health(), InventoryHealth::Ready);
     }
 
@@ -741,9 +991,174 @@ mod tests {
         let mut orch = Orchestrator::new(Config::default());
         orch.mark_inventory_unavailable();
         assert_eq!(orch.inventory_health(), InventoryHealth::Unavailable);
-        orch.refresh_inventory(&[]);
+        orch.refresh_inventory(&[], &[]);
         assert_eq!(orch.inventory_health(), InventoryHealth::Ready);
         orch.mark_inventory_unavailable();
         assert_eq!(orch.inventory_health(), InventoryHealth::Ready);
+    }
+
+    #[test]
+    fn camera_automation_overrides_only_effective_power() {
+        let key = "raw:046d:c900:ff43:0202:serial:glow";
+        let mut config = Config::default();
+        config.set_light(
+            key,
+            LightSettings {
+                enabled: true,
+                auto_camera: true,
+                brightness_percent: 65,
+                temperature_kelvin: Some(4600),
+                color: None,
+            },
+        );
+        let mut orch = Orchestrator::new(config);
+
+        orch.set_camera_active(false);
+        assert_eq!(
+            orch.effective_light_settings(key).map(|light| (
+                light.enabled,
+                light.brightness_percent,
+                light.temperature_kelvin
+            )),
+            Some((false, 65, Some(4600)))
+        );
+
+        orch.set_camera_active(true);
+        assert_eq!(
+            orch.effective_light_settings(key).map(|light| (
+                light.enabled,
+                light.brightness_percent,
+                light.temperature_kelvin
+            )),
+            Some((true, 65, Some(4600)))
+        );
+    }
+
+    #[test]
+    fn manual_camera_light_override_is_transient() {
+        let key = "raw:046d:c900:ff43:0202:serial:glow";
+        let route = DeviceRoute::Bolt {
+            receiver_uid: "AA00".to_string(),
+            slot: 1,
+        };
+        let mut config = Config::default();
+        config.set_light(
+            key,
+            LightSettings {
+                enabled: true,
+                auto_camera: true,
+                brightness_percent: 65,
+                temperature_kelvin: Some(4600),
+                color: None,
+            },
+        );
+        let mut orch = Orchestrator::new(config);
+        orch.set_camera_active(true);
+        let mut device = dev(key, 1, true);
+        device.light_capabilities = Some(LightCapabilities {
+            power: true,
+            ..LightCapabilities::default()
+        });
+        orch.devices.push(AgentDevice {
+            config_key: key.to_string(),
+            route: Some(route.clone()),
+            ..device
+        });
+
+        assert!(orch.set_manual_light_power(&route, false));
+        assert_eq!(
+            orch.effective_light_settings(key)
+                .map(|light| light.enabled),
+            Some(false)
+        );
+
+        orch.devices.clear();
+        orch.set_camera_active(false);
+        orch.set_camera_active(true);
+        assert_eq!(
+            orch.effective_light_settings(key)
+                .map(|light| light.enabled),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn config_reload_keeps_manual_override_for_parameter_edits() {
+        let key = "raw:046d:c900:ff43:0202:serial:glow";
+        let mut config = Config::default();
+        config.set_light(
+            key,
+            LightSettings {
+                enabled: false,
+                auto_camera: true,
+                brightness_percent: 65,
+                temperature_kelvin: Some(4600),
+                color: None,
+            },
+        );
+        let mut orch = Orchestrator::new(config.clone());
+        orch.set_camera_active(false);
+        orch.manual_light_overrides.insert(key.to_string(), true);
+
+        let mut updated = config;
+        updated.set_light(
+            key,
+            LightSettings {
+                enabled: false,
+                auto_camera: true,
+                brightness_percent: 80,
+                temperature_kelvin: Some(6500),
+                color: None,
+            },
+        );
+        orch.reload_config(updated);
+
+        assert_eq!(
+            orch.effective_light_settings(key).map(|light| (
+                light.enabled,
+                light.brightness_percent,
+                light.temperature_kelvin
+            )),
+            Some((true, 80, Some(6500)))
+        );
+        assert_eq!(orch.manual_light_overrides.get(key), Some(&true));
+    }
+
+    #[test]
+    fn config_reload_clears_override_when_camera_mode_changes() {
+        let key = "raw:046d:c900:ff43:0202:serial:glow";
+        let mut config = Config::default();
+        config.set_light(
+            key,
+            LightSettings {
+                enabled: true,
+                auto_camera: true,
+                brightness_percent: 65,
+                temperature_kelvin: Some(4600),
+                color: None,
+            },
+        );
+        let mut orch = Orchestrator::new(config.clone());
+        orch.manual_light_overrides.insert(key.to_string(), false);
+
+        let mut updated = config;
+        updated.set_light(
+            key,
+            LightSettings {
+                enabled: true,
+                auto_camera: false,
+                brightness_percent: 65,
+                temperature_kelvin: Some(4600),
+                color: None,
+            },
+        );
+        orch.reload_config(updated);
+
+        assert_eq!(orch.manual_light_overrides.get(key), None);
+        assert_eq!(
+            orch.effective_light_settings(key)
+                .map(|light| light.enabled),
+            Some(true)
+        );
     }
 }

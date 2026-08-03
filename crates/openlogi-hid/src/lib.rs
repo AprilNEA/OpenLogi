@@ -13,6 +13,7 @@
 mod mappings;
 mod node_ledger;
 mod route;
+mod standalone;
 mod transport;
 // Native Win32 HID report-write fallback, used by the Windows composite channel
 // in `transport` when async-hid's async write path fails.
@@ -43,10 +44,12 @@ pub use pairing::{
 };
 pub use route::{BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, UNIFYING_PIDS};
 pub use smartshift::{AUTO_DISENGAGE_PERMANENT, SmartShiftMode, SmartShiftStatus};
+pub use standalone::enumerate_standalone;
 pub use write::{
-    DpiCapabilities, DpiInfo, FeatureEntry, HidppFeatureErrorKind, HidppOperation, LightingMethod,
-    ReprogControlEntry, SharedChannel, WriteError, dump_features, dump_reprog_controls, get_dpi,
-    get_dpi_info, get_smartshift_status, set_dpi, set_dpi_on, set_keyboard_color,
-    set_keyboard_color_with, set_smartshift, set_smartshift_on, set_smartshift_sensitivity,
-    toggle_smartshift, toggle_smartshift_on,
+    DpiCapabilities, DpiInfo, FeatureEntry, HidppFeatureErrorKind, HidppOperation, LightCommand,
+    LightingMethod, LitraModel, ReprogControlEntry, SharedChannel, WriteError, apply_litra,
+    commands_for_light_settings, dump_features, dump_reprog_controls, encode_litra_command,
+    get_dpi, get_dpi_info, get_smartshift_status, matches_litra, set_dpi, set_dpi_on,
+    set_keyboard_color, set_keyboard_color_with, set_smartshift, set_smartshift_on,
+    set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
 };

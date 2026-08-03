@@ -20,6 +20,7 @@ mod device;
 mod settings;
 
 pub use device::{DeviceConfig, DeviceIdentity};
+pub use settings::LightSettings;
 pub use settings::{
     AppSettings, Appearance, AssetSourcePreference, DEFAULT_THUMBWHEEL_SENSITIVITY, GestureOwner,
     Lighting, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
@@ -497,6 +498,20 @@ impl Config {
             .lighting = Some(lighting);
     }
 
+    /// The standalone-light config for `device_key`, or `None` if unset.
+    #[must_use]
+    pub fn light(&self, device_key: &str) -> Option<LightSettings> {
+        self.devices.get(device_key).and_then(|d| d.light)
+    }
+
+    /// Replace the standalone-light config for `device_key`.
+    pub fn set_light(&mut self, device_key: &str, light: LightSettings) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .light = Some(light);
+    }
+
     /// The committed sensor DPI for `device_key`, or `None` if never set.
     #[must_use]
     pub fn dpi(&self, device_key: &str) -> Option<u32> {
@@ -630,6 +645,73 @@ mod tests {
             })
         );
         assert_eq!(restored.lighting("absent"), None);
+    }
+
+    #[test]
+    fn standalone_light_settings_roundtrip_per_device() {
+        let mut cfg = Config::default();
+        cfg.set_light(
+            "raw:046d:c900:ff43:0202:serial:glow",
+            LightSettings {
+                enabled: false,
+                auto_camera: false,
+                brightness_percent: 65,
+                temperature_kelvin: Some(4600),
+                color: None,
+            },
+        );
+        let restored = write_and_read(&cfg);
+        assert_eq!(
+            restored.light("raw:046d:c900:ff43:0202:serial:glow"),
+            Some(LightSettings {
+                enabled: false,
+                auto_camera: false,
+                brightness_percent: 65,
+                temperature_kelvin: Some(4600),
+                color: None,
+            })
+        );
+        assert_eq!(restored.light("absent"), None);
+    }
+
+    #[test]
+    fn standalone_light_brightness_is_clamped_on_load() {
+        let cfg: Config = toml::from_str(
+            r"
+                schema_version = 3
+                [devices.glow.light]
+                enabled = true
+                brightness_percent = 255
+            ",
+        )
+        .expect("light config loads");
+        assert_eq!(
+            cfg.light("glow").map(|light| light.brightness_percent),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn standalone_light_camera_automation_roundtrips() {
+        let mut cfg = Config::default();
+        cfg.set_light(
+            "raw:046d:c900:ff43:0202:serial:glow",
+            LightSettings {
+                enabled: true,
+                auto_camera: true,
+                brightness_percent: 80,
+                temperature_kelvin: Some(5000),
+                color: None,
+            },
+        );
+
+        let restored = write_and_read(&cfg);
+        assert_eq!(
+            restored
+                .light("raw:046d:c900:ff43:0202:serial:glow")
+                .map(|light| light.auto_camera),
+            Some(true)
+        );
     }
 
     #[test]
@@ -896,6 +978,8 @@ mod tests {
                 scroll_inversion: false,
                 hires_wheel: true,
             },
+            light_capabilities: None,
+            driver_id: None,
         };
         cfg.set_device_identity("2b034", mouse.clone());
         // Recording an identity must not disturb unrelated per-device state.

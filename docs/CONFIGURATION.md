@@ -30,6 +30,10 @@ MX Master 4):
   without changing the system trackpad direction.
 - `lighting` — static RGB colour, brightness (0–100), and on/off for wired
   RGB keyboards.
+- `light` — standalone-light power, normalized brightness, and temperature.
+  Set `auto_camera = true` on macOS to turn the light on while any camera is in
+  use and off when camera use stops; the manual power preference and the other
+  light settings remain independent.
 - `gesture_owner` — which button owns the gesture role, when chosen
   explicitly (otherwise inferred).
 
@@ -86,6 +90,19 @@ Back = "Undo"
 enabled = true
 color = "ff0000"
 brightness = 80
+
+# Standalone light (for example, a Litra Glow). The GUI writes this block under
+# the serial-backed physical key; `openlogi light list` shows its HID tuple and
+# identity when diagnosing discovery.
+# A serial-bearing Litra key looks like:
+# [devices."raw:046d:c900:ff43:0202:serial:YOUR-SERIAL".light]
+# If the HID backend exposes only a transient OS-node identity, OpenLogi does
+# not persist that key; reconnect persistence then requires a device serial.
+[devices."<raw-device-key>".light]
+enabled = true
+auto_camera = true
+brightness_percent = 65
+temperature_kelvin = 4600
 ```
 
 Action names are the catalog's variant names (`LeftClick`, `MouseBack`,

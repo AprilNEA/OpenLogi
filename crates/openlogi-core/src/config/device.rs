@@ -7,10 +7,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::settings::{
-    GestureOwner, Lighting, ScrollResolution, SmartShift, deserialize_gesture_owner,
+    GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift, deserialize_gesture_owner,
 };
 use crate::binding::{Action, Binding, ButtonId, GestureDirection};
-use crate::device::{Capabilities, DeviceKind, DeviceModelInfo};
+use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -43,6 +43,14 @@ pub struct DeviceIdentity {
     /// Configuration capabilities measured from the device's HID++ feature
     /// table. This is the field that keeps a sleeping mouse's panels visible.
     pub capabilities: Capabilities,
+    /// Standalone-light controls measured by its protocol driver, if this is
+    /// a non-HID++ light. Old configs omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_capabilities: Option<LightCapabilities>,
+    /// Standalone driver family that produced this identity, when applicable.
+    /// Old configs and HID++ devices omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_id: Option<String>,
 }
 
 /// Settings scoped to a single physical device.
@@ -97,6 +105,10 @@ pub struct DeviceConfig {
     /// until the user changes it, so it stays out of `config.toml` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lighting: Option<Lighting>,
+    /// Per-device standalone-light settings. Separate from [`Self::lighting`],
+    /// which is the existing HID++ keyboard RGB configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<LightSettings>,
     /// Per-device SmartShift wheel configuration, re-applied on reconnect for
     /// the same reason as [`Self::dpi`]. `None` until the user changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,6 +170,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     lighting: Option<Lighting>,
     #[serde(default)]
+    light: Option<LightSettings>,
+    #[serde(default)]
     smartshift: Option<SmartShift>,
     #[serde(default)]
     invert_scroll: bool,
@@ -204,6 +218,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             dpi_presets: raw.dpi_presets,
             dpi: raw.dpi,
             lighting: raw.lighting,
+            light: raw.light,
             smartshift: raw.smartshift,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,

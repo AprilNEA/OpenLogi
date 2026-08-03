@@ -125,7 +125,9 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
                 battery: record.battery.clone(),
                 capabilities: record.capabilities,
                 dpi: dpi_summary(state.dpi_status_for(&record.config_key)),
-                config_key: record.config_key.clone(),
+                // Diagnostics are model-level by contract. The runtime config
+                // key may contain a receiver UID or raw-device serial.
+                config_key: record.model_key.clone(),
                 wpid: paired.and_then(|p| p.wpid),
                 model_ids: model.map(|m| m.model_ids),
                 extended_model_id: model.map(|m| m.extended_model_id),
@@ -164,6 +166,7 @@ fn connection_for(
             Some(t) if t.usb => ConnectionKind::Wired,
             _ => ConnectionKind::Unknown,
         },
+        Some(DeviceRoute::RawHid { .. }) => ConnectionKind::Wired,
         None => ConnectionKind::Unknown,
     }
 }

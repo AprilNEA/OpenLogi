@@ -13,9 +13,9 @@ use std::collections::BTreeMap;
 
 use gpui::{App, Global};
 use openlogi_core::config::{
-    AppSettings, Appearance, AssetSourcePreference, Config, DeviceIdentity, Lighting,
+    AppSettings, Appearance, AssetSourcePreference, Config, DeviceIdentity, LightSettings, Lighting,
 };
-use openlogi_core::device::{DeviceInventory, DeviceModelInfo};
+use openlogi_core::device::{DeviceInventory, DeviceModelInfo, StandaloneDevice};
 use openlogi_hid::{
     DeviceRoute, DpiCapabilities, DpiInfo, SmartShiftMode, SmartShiftStatus, WriteError,
 };
@@ -23,11 +23,14 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 mod devices;
+mod light;
 mod load;
 
 pub use devices::DeviceRecord;
+pub use light::LightCommandStatus;
 pub use load::{DpiStatus, Load, SmartShiftLoad};
 
+use light::PendingLightCommand;
 use load::LazyDeviceData;
 
 use crate::asset::AssetResolver;
@@ -64,6 +67,19 @@ pub enum AgentLink {
     Ready(openlogi_agent_core::ipc::AgentStatus),
 }
 
+/// Where [`AppState`] may persist configuration mutations.
+///
+/// Runtime state uses [`Self::UserFile`]. Tests opt into
+/// [`Self::MemoryOnly`] so realistic device fixtures can never modify the
+/// developer's actual `config.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigPersistence {
+    /// Persist to OpenLogi's default per-user configuration file.
+    UserFile,
+    /// Keep changes in the in-memory [`Config`] only.
+    MemoryOnly,
+}
+
 /// Inventory snapshots can briefly miss a real device while another HID++
 /// request is in flight. Keep the previous record through this many
 /// consecutive misses so a transient probe timeout does not make the carousel
@@ -79,6 +95,17 @@ pub struct AppState {
     /// non-macOS / no frontmost app. Used to overlay per-app bindings on
     /// top of the per-device global map.
     pub current_app_bundle: Option<String>,
+    /// Aggregate host-camera activity reported by the agent. Runtime only.
+    camera_active: bool,
+    /// Transient manual power choices for camera-linked lights. Cleared on
+    /// the next camera-state transition and never persisted as an override.
+    manual_light_overrides: BTreeMap<String, bool>,
+    /// Session-only settings for raw devices whose OS-node identity is not
+    /// stable enough to persist in `config.toml`.
+    volatile_light_settings: BTreeMap<String, LightSettings>,
+    light_commands: BTreeMap<String, PendingLightCommand>,
+    light_command_status: Option<(String, u64, LightCommandStatus)>,
+    next_light_request_id: u64,
     /// The hotspot the user most recently armed by clicking. Drives the
     /// "selected button" outline on the mouse model and the popover content.
     pub active_button: Option<ButtonId>,
@@ -130,6 +157,8 @@ pub struct AppState {
     /// rebuild, and "apply now" device changes (DPI / SmartShift / lighting)
     /// go out as their own commands. The GUI never opens a device itself.
     ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
+    /// Explicit persistence boundary; tests use an in-memory-only state.
+    config_persistence: ConfigPersistence,
     /// Raw inventory from the last *completed* enumeration, kept for the
     /// diagnostics report (receivers + transports). The poll path only stores
     /// [`InventoryHealth::Ready`](openlogi_agent_core::ipc::InventoryHealth)
@@ -159,16 +188,24 @@ impl AppState {
     pub fn with_runtime(
         mut config: Config,
         inventories: &[DeviceInventory],
+        standalone: &[StandaloneDevice],
         cache: &AssetResolver,
+        config_persistence: ConfigPersistence,
         ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
     ) -> Self {
-        let device_list = build_device_list(inventories, cache, &config);
+        let device_list = build_device_list(inventories, standalone, cache, &config);
         // Record any device probed at launch so it survives the next cold start.
-        persist_identities(&mut config, &device_list);
+        let identities_changed = persist_identities(&mut config, &device_list);
         let current_device = pick_initial_device(&device_list, config.selected_device());
         let mut state = Self {
             current_device,
             current_app_bundle: None,
+            camera_active: false,
+            manual_light_overrides: BTreeMap::new(),
+            volatile_light_settings: BTreeMap::new(),
+            light_commands: BTreeMap::new(),
+            light_command_status: None,
+            next_light_request_id: 0,
             active_button: None,
             // Updated from the agent's IPC poll; the GUI no longer runs the
             // hook, so it can't meaningfully query Accessibility (or devices)
@@ -184,12 +221,16 @@ impl AppState {
             device_list,
             config,
             ipc_commands,
+            config_persistence,
             last_inventory: Vec::new(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             monitor_events: std::collections::VecDeque::new(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             event_taps: Vec::new(),
         };
+        if identities_changed {
+            state.persist_config("device identity");
+        }
         state.button_bindings = state.bindings_for_current();
         state.gesture_bindings = state.gesture_bindings_for_current();
         state
@@ -197,10 +238,12 @@ impl AppState {
 
     /// Send a device command to the agent over IPC, logging a dropped channel
     /// (the client thread is gone) rather than surfacing it.
-    fn send_ipc(&self, command: crate::ipc_client::Command) {
+    fn send_ipc(&self, command: crate::ipc_client::Command) -> bool {
         if self.ipc_commands.send(command).is_err() {
             warn!("IPC client thread is gone — device command dropped");
+            return false;
         }
+        true
     }
 
     /// Persist the in-memory config and — only if the write actually landed —
@@ -212,11 +255,20 @@ impl AppState {
     /// next reconnect or wake. Skipping the reload keeps the agent on whatever
     /// it already runs; the GUI keeps the new value in memory either way.
     fn persist_and_reload(&self, what: &str) {
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, what, "could not persist to config.toml — agent reload skipped");
-            return;
+        if self.persist_config(what) {
+            self.send_ipc(crate::ipc_client::Command::ReloadConfig);
         }
-        self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+    }
+
+    fn persist_config(&self, what: &str) -> bool {
+        if self.config_persistence == ConfigPersistence::MemoryOnly {
+            return true;
+        }
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, what, "could not persist to config.toml");
+            return false;
+        }
+        true
     }
 
     /// A clone of the IPC command sender, so views (the DPI / SmartShift panels)
@@ -358,15 +410,18 @@ impl AppState {
     pub fn refresh_inventories(
         &mut self,
         inventories: &[DeviceInventory],
+        standalone: &[StandaloneDevice],
         cache: &AssetResolver,
         force: bool,
     ) -> bool {
-        let new_list = build_device_list(inventories, cache, &self.config);
+        let new_list = build_device_list(inventories, standalone, cache, &self.config);
         let merged_list = self.merge_inventory_snapshot(new_list);
         // Capture any newly-probed identity before the unchanged-check can early
         // out: a device whose capabilities just resolved keeps the same
         // config_key + route, so that guard would otherwise skip the write.
-        persist_identities(&mut self.config, &merged_list);
+        if persist_identities(&mut self.config, &merged_list) {
+            self.persist_config("device identity");
+        }
         // Compare more than config_key: a device can reconnect on a new HID++
         // index while keeping its physical config key, and the fresh route must
         // replace the stale one so reads/writes don't target a dead index.
@@ -383,6 +438,9 @@ impl AppState {
                         && a.route == b.route
                         && a.online == b.online
                         && a.capabilities == b.capabilities
+                        && a.light_capabilities == b.light_capabilities
+                        && a.driver_id == b.driver_id
+                        && a.kind == b.kind
                 });
         if unchanged && !force {
             return false;
@@ -1015,9 +1073,7 @@ impl AppState {
             return;
         }
         self.config.app_settings.check_for_updates = enabled;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist update-check setting");
-        }
+        self.persist_config("update-check setting");
     }
 
     /// Toggle opt-in automatic install and persist it. The launch-time updater
@@ -1029,9 +1085,7 @@ impl AppState {
             return;
         }
         self.config.app_settings.auto_install_updates = enabled;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist auto-install setting");
-        }
+        self.persist_config("auto-install setting");
     }
 
     /// Persist the light/dark appearance preference. The caller re-applies the
@@ -1042,9 +1096,7 @@ impl AppState {
             return;
         }
         self.config.app_settings.appearance = appearance;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist appearance setting");
-        }
+        self.persist_config("appearance setting");
     }
 
     /// Persist the chosen theme name for one mode (`None` = the OpenLogi brand
@@ -1059,9 +1111,7 @@ impl AppState {
             return;
         }
         *slot = name;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist theme setting");
-        }
+        self.persist_config("theme setting");
     }
 
     /// Persist the UI corner-radius override (`None` = each theme's own radius).
@@ -1071,9 +1121,7 @@ impl AppState {
             return;
         }
         self.config.app_settings.ui_radius = radius;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist UI radius setting");
-        }
+        self.persist_config("UI radius setting");
     }
 
     /// Set the thumb-wheel sensitivity (clamped to the valid range), publish it
@@ -1096,9 +1144,7 @@ impl AppState {
             return;
         }
         self.config.app_settings.auto_download_assets = enabled;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist auto-download-assets setting");
-        }
+        self.persist_config("auto-download-assets setting");
     }
 
     /// Persist the preferred device-asset source. The Settings view requests a
@@ -1109,9 +1155,7 @@ impl AppState {
             return;
         }
         self.config.app_settings.asset_source = source;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist asset-source setting");
-        }
+        self.persist_config("asset-source setting");
     }
 
     /// Record the answer to the first-run update-check prompt: enable (or leave
@@ -1120,9 +1164,7 @@ impl AppState {
     pub fn record_update_consent(&mut self, enabled: bool) {
         self.config.app_settings.check_for_updates = enabled;
         self.config.app_settings.update_prompt_seen = true;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist update-check consent");
-        }
+        self.persist_config("update-check consent");
     }
 
     /// The stored UI-language preference: `Some(code)` for an explicit choice,
@@ -1142,9 +1184,7 @@ impl AppState {
             return;
         }
         self.config.app_settings.language = language;
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist language setting");
-        }
+        self.persist_config("language setting");
         crate::i18n::activate(self.config.app_settings.language.as_deref());
         cx.refresh_windows();
         crate::app_menu::rebuild(cx);
@@ -1274,8 +1314,8 @@ impl AppState {
 }
 
 /// Record the identity (name / kind / capabilities) of every currently online,
-/// fully-probed device into `config`, persisting to disk only when something
-/// actually changed.
+/// fully-probed device into `config`, returning whether the caller needs to
+/// persist the updated document.
 ///
 /// This is the write half of the identity-driven device list: it is what lets
 /// [`build_device_list`] resurrect a sleeping device on the next launch. Only
@@ -1283,7 +1323,7 @@ impl AppState {
 /// or carried-forward `None` — so a placeholder never persists empty panels.
 /// The change-guard keeps quiet inventory ticks off the disk; the agent does
 /// not consume identities, so no `ReloadConfig` is sent.
-fn persist_identities(config: &mut Config, list: &[DeviceRecord]) {
+fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> bool {
     let mut changed = false;
     for record in list {
         if !record.online {
@@ -1292,28 +1332,29 @@ fn persist_identities(config: &mut Config, list: &[DeviceRecord]) {
         let Some(config_key) = record.persistent_config_key() else {
             continue;
         };
-        let Some(capabilities) = record.capabilities else {
+        let capabilities = record.capabilities.unwrap_or_default();
+        if record.light_capabilities.is_none() && record.capabilities.is_none() {
             continue;
-        };
+        }
         let identity = DeviceIdentity {
             display_name: record.display_name.clone(),
             kind: record.kind,
             capabilities,
+            light_capabilities: record.light_capabilities,
             model_info: record.model_info.clone().map(|mut model| {
                 model.serial_number = None;
                 model.unit_id = [0; 4];
                 model
             }),
             codename: record.codename.clone(),
+            driver_id: record.driver_id.clone(),
         };
         if config.device_identity(config_key) != Some(&identity) {
             config.set_device_identity(config_key, identity);
             changed = true;
         }
     }
-    if changed && let Err(e) = config.save_atomic() {
-        warn!(error = %e, "could not persist device identities to config.toml");
-    }
+    changed
 }
 
 /// Whether a DPI discovery error is permanent (the device genuinely lacks the
@@ -1350,15 +1391,27 @@ impl Global for AppState {}
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::config::{Config, DeviceIdentity, Lighting, ScrollResolution};
-    use openlogi_core::device::{
-        Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice,
-        ReceiverInfo,
+    #![allow(
+        clippy::expect_used,
+        reason = "state fixture construction is intentionally asserted in tests"
+    )]
+
+    use openlogi_core::config::{
+        Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution,
     };
+    use openlogi_core::device::{
+        Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
+        LightCapabilities, LightValueRange, LightValueUnit, PairedDevice, RawDeviceAddress,
+        ReceiverInfo, StandaloneDevice,
+    };
+    use openlogi_hid::WriteError;
 
     use crate::asset::AssetResolver;
 
-    use super::{AppState, build_device_list, set_scroll_resolution_if_supported};
+    use super::{
+        AppState, ConfigPersistence, LightCommandStatus, build_device_list,
+        set_scroll_resolution_if_supported,
+    };
 
     fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
         DeviceInventory {
@@ -1393,8 +1446,14 @@ mod tests {
         let cache = AssetResolver::new();
         let transient_inventory = direct_inventory([0; 4]);
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut state =
-            AppState::with_runtime(Config::default(), &[transient_inventory], &cache, commands);
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[transient_inventory],
+            &[],
+            &cache,
+            ConfigPersistence::MemoryOnly,
+            commands,
+        );
         let transient_key = "direct:046d:b023:unit:00000000";
 
         assert_eq!(state.device_list.len(), 1);
@@ -1404,6 +1463,7 @@ mod tests {
 
         let stable_list = build_device_list(
             &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+            &[],
             &cache,
             &state.config,
         );
@@ -1421,7 +1481,14 @@ mod tests {
         config.set_lighting(transient_key, Lighting::default());
         assert!(config.lighting(transient_key).is_some());
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        let state = AppState::with_runtime(config, &[], &AssetResolver::new(), commands);
+        let state = AppState::with_runtime(
+            config,
+            &[],
+            &[],
+            &AssetResolver::new(),
+            ConfigPersistence::MemoryOnly,
+            commands,
+        );
 
         assert!(state.device_list.is_empty());
         assert!(state.lighting_for(transient_key).is_none());
@@ -1444,12 +1511,21 @@ mod tests {
                 display_name: "MX Anywhere 3S".to_string(),
                 kind: DeviceKind::Mouse,
                 capabilities: Capabilities::presumed_from_kind(DeviceKind::Mouse),
+                light_capabilities: None,
                 model_info: Some(model.clone()),
                 codename: Some("MX Anywhere 3S".to_string()),
+                driver_id: None,
             },
         );
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        let state = AppState::with_runtime(config, &[], &AssetResolver::new(), commands);
+        let state = AppState::with_runtime(
+            config,
+            &[],
+            &[],
+            &AssetResolver::new(),
+            ConfigPersistence::MemoryOnly,
+            commands,
+        );
 
         assert_eq!(
             state.asset_models(),
@@ -1490,5 +1566,253 @@ mod tests {
             Some(ScrollResolution::High),
         ));
         assert_eq!(config.scroll_resolution("mouse"), None);
+    }
+
+    #[test]
+    fn light_write_failure_reaches_the_gui_state() {
+        let light = StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: 0x046d,
+                product_id: 0xc900,
+                usage_page: 0xff43,
+                usage_id: 0x0202,
+                identity: "serial:glow-1".into(),
+            },
+            display_name: "Litra Glow".into(),
+            manufacturer: Some("Logi".into()),
+            serial_number: Some("glow-1".into()),
+            unit_id: [0; 4],
+            kind: DeviceKind::Light,
+            online: true,
+            capabilities: None,
+            light_capabilities: Some(LightCapabilities {
+                power: true,
+                brightness: Some(
+                    LightValueRange::new(20, 250, 1, LightValueUnit::Lumens).expect("valid range"),
+                ),
+                ..LightCapabilities::default()
+            }),
+            driver_id: "litra".into(),
+        };
+        let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[],
+            &[light],
+            &AssetResolver::new(),
+            ConfigPersistence::MemoryOnly,
+            commands,
+        );
+        let key = state
+            .current_record()
+            .expect("light record")
+            .config_key
+            .clone();
+        let requested = LightSettings::new(false, 50, None);
+        state.commit_light(requested);
+        let Ok(crate::ipc_client::Command::SetLight(
+            _,
+            openlogi_hid::LightCommand::Power(false),
+            _,
+            request_id,
+        )) = receiver.try_recv()
+        else {
+            panic!("expected the power command");
+        };
+        assert_eq!(state.light(), requested);
+        assert_eq!(state.config.light(&key), None);
+        assert!(matches!(
+            state.light_command_status(),
+            Some(LightCommandStatus::Pending)
+        ));
+        assert!(state.apply_light_command_result(
+            key.clone(),
+            request_id,
+            Err(WriteError::AmbiguousRawDevice),
+        ));
+        assert!(matches!(
+            state.light_command_status(),
+            Some(LightCommandStatus::Failed(message)) if message.contains("multiple raw HID")
+        ));
+        assert_eq!(state.config.light(&key), None);
+        assert_eq!(state.light(), LightSettings::default());
+    }
+
+    #[test]
+    fn transient_light_state_is_kept_in_memory_and_only_supported_commands_are_sent() {
+        let light = StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: 0x046d,
+                product_id: 0xc900,
+                usage_page: 0xff43,
+                usage_id: 0x0202,
+                identity: "id:session-node".into(),
+            },
+            display_name: "Brightness-only light".into(),
+            manufacturer: Some("Test".into()),
+            serial_number: None,
+            unit_id: [0; 4],
+            kind: DeviceKind::Light,
+            online: true,
+            capabilities: None,
+            light_capabilities: Some(LightCapabilities {
+                power: false,
+                brightness: Some(
+                    LightValueRange::new(0, 100, 1, LightValueUnit::Percent).expect("valid range"),
+                ),
+                ..LightCapabilities::default()
+            }),
+            driver_id: "test-light".into(),
+        };
+        let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[],
+            &[light],
+            &AssetResolver::new(),
+            ConfigPersistence::MemoryOnly,
+            commands,
+        );
+        let settings = LightSettings::new(false, 37, None);
+
+        state.commit_light(settings);
+
+        assert_eq!(state.light(), settings);
+        assert!(!state.light_enabled());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(crate::ipc_client::Command::SetLight(
+                _,
+                openlogi_hid::LightCommand::BrightnessPercent(37),
+                _,
+                _
+            ))
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn camera_automation_preserves_manual_power_and_clears_transient_override() {
+        let light = StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: 0x046d,
+                product_id: 0xc900,
+                usage_page: 0xff43,
+                usage_id: 0x0202,
+                identity: "serial:glow-camera".into(),
+            },
+            display_name: "Litra Glow".into(),
+            manufacturer: Some("Logi".into()),
+            serial_number: Some("glow-camera".into()),
+            unit_id: [0; 4],
+            kind: DeviceKind::Light,
+            online: true,
+            capabilities: None,
+            light_capabilities: Some(LightCapabilities {
+                power: true,
+                ..LightCapabilities::default()
+            }),
+            driver_id: "litra".into(),
+        };
+        let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[],
+            &[light],
+            &AssetResolver::new(),
+            ConfigPersistence::MemoryOnly,
+            commands,
+        );
+        let key = state
+            .current_record()
+            .expect("light record")
+            .config_key
+            .clone();
+        state.config.set_light(
+            &key,
+            LightSettings {
+                enabled: false,
+                auto_camera: true,
+                brightness_percent: 70,
+                temperature_kelvin: None,
+                color: None,
+            },
+        );
+
+        assert!(!state.light_enabled());
+        assert!(state.set_camera_active(true));
+        assert!(state.light_enabled());
+        assert!(!state.light().enabled);
+
+        state.commit_manual_light_power(false);
+        assert!(!state.light_enabled());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(crate::ipc_client::Command::SetLightManualPower(
+                _,
+                false,
+                _,
+                _
+            ))
+        ));
+
+        assert!(state.set_camera_active(false));
+        assert!(state.set_camera_active(true));
+        assert!(state.light_enabled());
+        assert!(!state.light().enabled);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn enabling_camera_automation_queues_effective_camera_power() {
+        let light = StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: 0x046d,
+                product_id: 0xc900,
+                usage_page: 0xff43,
+                usage_id: 0x0202,
+                identity: "serial:glow-effective".into(),
+            },
+            display_name: "Litra Glow".into(),
+            manufacturer: Some("Logi".into()),
+            serial_number: Some("glow-effective".into()),
+            unit_id: [0; 4],
+            kind: DeviceKind::Light,
+            online: true,
+            capabilities: None,
+            light_capabilities: Some(LightCapabilities {
+                power: true,
+                ..LightCapabilities::default()
+            }),
+            driver_id: "litra".into(),
+        };
+        let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[],
+            &[light],
+            &AssetResolver::new(),
+            ConfigPersistence::MemoryOnly,
+            commands,
+        );
+        state.set_camera_active(true);
+        let mut settings = state.light();
+        settings.enabled = false;
+        settings.auto_camera = true;
+
+        state.commit_light(settings);
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(crate::ipc_client::Command::SetLight(
+                _,
+                openlogi_hid::LightCommand::Power(true),
+                _,
+                _
+            ))
+        ));
+        assert!(!state.light().enabled);
+        assert!(state.light_enabled());
     }
 }

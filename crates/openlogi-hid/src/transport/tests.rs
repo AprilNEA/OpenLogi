@@ -10,6 +10,14 @@ fn matches_usb_ble_and_keyboard_hidpp_collections() {
 }
 
 #[test]
+fn litra_ble_collection_is_not_a_hidpp_candidate() {
+    assert!(!is_hidpp_candidate(0x046d, 0xc900, 0xff43, 0x0202, false));
+    // The same BLE collection remains valid for ordinary directly-paired HID++
+    // devices; filtering by usage page alone would regress those devices.
+    assert!(is_hidpp_candidate(0x046d, 0xb023, 0xff43, 0x0202, false));
+}
+
+#[test]
 fn only_ble_collection_is_long_only() {
     assert!(is_long_only_collection(0xff43, 0x0202)); // BLE-direct → short-unsupported
     assert!(!is_long_only_collection(0xff00, 0x0002)); // USB / receiver carries both reports

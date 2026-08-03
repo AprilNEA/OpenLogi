@@ -231,6 +231,73 @@ pub struct Lighting {
     pub brightness: u8,
 }
 
+/// Persisted settings for a standalone light such as Logitech Litra.
+///
+/// Brightness is stored as a normalized percentage so the same config shape
+/// works for lumen-based, percentage-based, and stepped light protocols. The
+/// selected driver maps it to its native range when applying the setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LightSettings {
+    /// Whether the light should be on.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Link power to aggregate host-camera activity. This is a policy setting:
+    /// brightness, colour temperature, and the persisted manual power choice
+    /// remain independent from the transient effective power state.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_camera: bool,
+    /// Brightness across the device's advertised range.
+    #[serde(
+        default = "default_light_brightness",
+        deserialize_with = "deserialize_brightness"
+    )]
+    pub brightness_percent: u8,
+    /// Desired colour temperature, when the device supports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature_kelvin: Option<u16>,
+    /// Optional colour for a driver that exposes RGB controls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Rgb>,
+}
+
+const fn default_light_brightness() -> u8 {
+    100
+}
+
+impl Default for LightSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_camera: false,
+            brightness_percent: default_light_brightness(),
+            temperature_kelvin: None,
+            color: None,
+        }
+    }
+}
+
+impl LightSettings {
+    /// Create settings with a normalized brightness percentage.
+    #[must_use]
+    pub fn new(enabled: bool, brightness_percent: u8, temperature_kelvin: Option<u16>) -> Self {
+        Self {
+            enabled,
+            auto_camera: false,
+            brightness_percent,
+            temperature_kelvin,
+            color: None,
+        }
+    }
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 impl Default for Lighting {
     fn default() -> Self {
         Self {

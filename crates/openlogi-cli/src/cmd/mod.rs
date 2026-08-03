@@ -3,6 +3,7 @@ use clap::Subcommand;
 
 pub mod assets;
 pub mod diag;
+pub mod light;
 pub mod list;
 
 #[derive(Debug, Subcommand)]
@@ -15,6 +16,9 @@ pub enum Command {
     /// Real-device round-trip smoke tests against the HID++ write path.
     #[command(subcommand)]
     Diag(diag::DiagCmd),
+    /// Inspect and control standalone Logitech lights.
+    #[command(subcommand)]
+    Light(light::LightCmd),
 }
 
 impl Command {
@@ -24,6 +28,7 @@ impl Command {
             // `assets sync` is blocking HTTP — no need for the async runtime.
             Self::Assets(cmd) => cmd.run(),
             Self::Diag(cmd) => cmd.run().await,
+            Self::Light(cmd) => cmd.run().await,
         }
     }
 }

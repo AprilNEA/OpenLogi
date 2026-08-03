@@ -83,6 +83,9 @@ pub enum InventoryError {
     /// Underlying HID backend error.
     #[error("HID transport error")]
     Hid(#[from] async_hid::HidError),
+    /// More than one indistinguishable standalone raw-HID node was found.
+    #[error("multiple indistinguishable standalone raw HID devices found")]
+    AmbiguousRawDevice,
 }
 
 /// Stateful device enumerator: holds the per-device probe cache so the polling
