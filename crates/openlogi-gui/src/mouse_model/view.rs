@@ -55,6 +55,7 @@ const MODEL_MIN_CONTENT_W: f32 = 320.;
 
 /// Interactive mouse model with button hotspots.
 pub struct MouseModelView {
+    current_device_key: Option<String>,
     hovered: Option<ButtonId>,
     open_binding_popover: Option<BindingPopover>,
     /// Which gesture direction the open gesture menu has activated (so its
@@ -71,6 +72,7 @@ impl MouseModelView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let state_obs = cx.observe_global::<AppState>(|_view, cx| cx.notify());
         Self {
+            current_device_key: None,
             hovered: None,
             open_binding_popover: None,
             gesture_active_dir: None,
@@ -106,10 +108,11 @@ enum BindingPopover {
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (asset, active, bindings, gesture_owner, glow) = cx
+        let (device_key, asset, active, bindings, gesture_owner, glow) = cx
             .try_global::<AppState>()
             .map(|s| {
                 (
+                    s.current_record().map(|r| r.config_key.clone()),
                     s.current_record().and_then(|r| r.asset.clone()),
                     s.active_button,
                     s.button_bindings.clone(),
@@ -118,6 +121,13 @@ impl Render for MouseModelView {
                 )
             })
             .unwrap_or_default();
+
+        if self.current_device_key != device_key {
+            self.current_device_key = device_key;
+            self.hovered = None;
+            self.open_binding_popover = None;
+            self.gesture_active_dir = None;
+        }
 
         // Scale the model to fit the content area in *both* axes. A tall mouse
         // is bound by the viewport height (capped at the design height, floored
