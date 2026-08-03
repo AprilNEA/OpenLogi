@@ -1588,7 +1588,7 @@ mod tests {
         let transient_inventory = direct_inventory([0; 4]);
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = AppState::with_runtime(
-            Config::default(),
+            Config::ephemeral(),
             &[transient_inventory],
             &cache,
             &[],
@@ -1622,7 +1622,7 @@ mod tests {
         let cache = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = AppState::with_runtime(
-            Config::default(),
+            Config::ephemeral(),
             &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
             &cache,
             &[],
@@ -1649,7 +1649,7 @@ mod tests {
         let cache = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = AppState::with_runtime(
-            Config::default(),
+            Config::ephemeral(),
             &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
             &cache,
             &[],
@@ -1682,7 +1682,7 @@ mod tests {
         let cache = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = AppState::with_runtime(
-            Config::default(),
+            Config::ephemeral(),
             &[
                 direct_inventory([1, 1, 1, 1]),
                 direct_inventory([2, 2, 2, 2]),
@@ -1721,7 +1721,7 @@ mod tests {
         let cache = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = AppState::with_runtime(
-            Config::default(),
+            Config::ephemeral(),
             &[
                 direct_inventory([1, 1, 1, 1]),
                 direct_inventory([2, 2, 2, 2]),
@@ -1747,7 +1747,7 @@ mod tests {
     #[test]
     fn historical_transient_lighting_is_not_exposed_without_a_live_record() {
         let transient_key = "direct:046d:b023:unit:00000000";
-        let mut config = Config::default();
+        let mut config = Config::ephemeral();
         config.set_lighting(transient_key, Lighting::default());
         assert!(config.lighting(transient_key).is_some());
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -1767,7 +1767,7 @@ mod tests {
             model_ids: [0xb034, 0, 0],
             extended_model_id: 2,
         };
-        let mut config = Config::default();
+        let mut config = Config::ephemeral();
         config.set_device_identity(
             "2b034",
             DeviceIdentity {
@@ -1789,7 +1789,7 @@ mod tests {
 
     #[test]
     fn gui_state_saves_and_clears_supported_wheel_resolution() {
-        let mut config = Config::default();
+        let mut config = Config::ephemeral();
         assert!(set_scroll_resolution_if_supported(
             &mut config,
             "mouse",
@@ -1812,7 +1812,7 @@ mod tests {
 
     #[test]
     fn gui_state_ignores_unsupported_wheel_resolution() {
-        let mut config = Config::default();
+        let mut config = Config::ephemeral();
         assert!(!set_scroll_resolution_if_supported(
             &mut config,
             "mouse",

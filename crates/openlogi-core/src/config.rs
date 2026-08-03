@@ -60,6 +60,11 @@ pub struct Config {
     /// first paired device. `None` means "fall back to the first device".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_device: Option<String>,
+    /// When set (see [`Self::ephemeral`]), [`Self::save_atomic`] is a no-op:
+    /// this config never writes the on-disk file. Never true for a loaded or
+    /// default-constructed config.
+    #[serde(skip)]
+    ephemeral: bool,
     /// Per-device state, keyed by the stable physical-device identifier
     /// (e.g. `"receiver:abc123:slot:2"`) so two identical models never share
     /// an entry.
@@ -74,6 +79,7 @@ impl Default for Config {
             app_settings: AppSettings::default(),
             selected_device: None,
             devices: BTreeMap::new(),
+            ephemeral: false,
         }
     }
 }
@@ -176,10 +182,25 @@ impl Config {
         }
     }
 
+    /// A config that never touches the on-disk file: [`Self::save_atomic`] is
+    /// a no-op. For tests that drive the state layer's persistence paths —
+    /// with a default config those would overwrite the developer's real
+    /// `config.toml` with test fixtures.
+    #[must_use]
+    pub fn ephemeral() -> Self {
+        Self {
+            ephemeral: true,
+            ..Self::default()
+        }
+    }
+
     /// Writes the config atomically to the default user path: serialize to a
     /// sibling temp file, then rename over the target. On Unix the temp file
-    /// is created with mode 0600.
+    /// is created with mode 0600. No-op for an [`Self::ephemeral`] config.
     pub fn save_atomic(&self) -> Result<(), ConfigError> {
+        if self.ephemeral {
+            return Ok(());
+        }
         self.save_to_path(&paths::config_path()?)
     }
 
