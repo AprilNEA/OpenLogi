@@ -187,3 +187,17 @@ cargo run -p xtask -- release latest-json \
   --base-url https://updates.openlogi.org \
   --output dist/latest.json
 ```
+
+## Crowdin translation sync
+
+`.github/workflows/crowdin.yml` uploads `crates/openlogi-gui/locales/en.yml` to
+Crowdin and opens a `crowdin/i18n` PR with fresh translations — nightly, and on
+master pushes touching the source strings. Like the release workflow, it reads
+its credentials from one 1Password item referenced by the GitHub secret
+`OP_CROWDIN_SECRET_ITEM`. The item must contain:
+
+- `CROWDIN_PROJECT_ID` — the numeric Crowdin project id.
+- `CROWDIN_PERSONAL_TOKEN` — a Crowdin API token with access to the project.
+
+While `OP_CROWDIN_SECRET_ITEM` is unset, the workflow skips the sync with a
+warning instead of failing.

@@ -27,10 +27,38 @@ jobs:
     if: github.repository == 'AprilNEA/OpenLogi'
 
     steps:
+      # Secrets are not readable in a job-level `if`, so a gate step skips the
+      # sync (with a visible warning) instead of failing every scheduled run
+      # while the Crowdin 1Password item is not configured.
+      - name: Check for the Crowdin 1Password item
+        id: config
+        env:
+          OP_CROWDIN_SECRET_ITEM: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}
+        run: |
+          if [[ -n "$OP_CROWDIN_SECRET_ITEM" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::OP_CROWDIN_SECRET_ITEM is not set; skipping the Crowdin sync."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout
-        uses: actions/checkout@v4
+        if: steps.config.outputs.configured == 'true'
+        uses: actions/checkout@v6
+
+      - name: Load Crowdin credentials from 1Password
+        if: steps.config.outputs.configured == 'true'
+        id: crowdin_config
+        uses: 1password/load-secrets-action@v4
+        with:
+          export-env: false
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          CROWDIN_PROJECT_ID: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PROJECT_ID
+          CROWDIN_PERSONAL_TOKEN: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PERSONAL_TOKEN
 
       - name: Synchronize with Crowdin
+        if: steps.config.outputs.configured == 'true'
         uses: crowdin/github-action@v2
         with:
           config: crowdin.yml
@@ -49,5 +77,5 @@ jobs:
           github_user_email: support+bot@crowdin.com
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
-          CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}
+          CROWDIN_PROJECT_ID: ${{ steps.crowdin_config.outputs.CROWDIN_PROJECT_ID }}
+          CROWDIN_PERSONAL_TOKEN: ${{ steps.crowdin_config.outputs.CROWDIN_PERSONAL_TOKEN }}
