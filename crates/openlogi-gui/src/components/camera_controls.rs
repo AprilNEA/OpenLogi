@@ -276,11 +276,18 @@ impl CameraControlsPanel {
         cx: &mut Context<Self>,
     ) {
         let state = cx.new(|_| {
-            SliderState::new()
-                .max(range.max as f32)
-                .min(range.min as f32)
-                .step(1.0)
-                .default_value(shown as f32)
+            let (lo, hi) = (range.min as f32, range.max as f32);
+            // `SliderState` defaults to [0, 100] and re-clamps its value on every
+            // builder call, panicking if min > max even transiently. A fully
+            // negative range (UVC exposure reports e.g. -11..-2) would make
+            // `.max(-2)` clamp against the default min of 0 — so set the min
+            // first for negative ranges, and the max first otherwise.
+            let bounded = if lo < 0.0 {
+                SliderState::new().min(lo).max(hi)
+            } else {
+                SliderState::new().max(hi).min(lo)
+            };
+            bounded.step(1.0).default_value(shown as f32)
         });
         let uid_for_event = uid.to_string();
         let key_for_event = key.to_string();
