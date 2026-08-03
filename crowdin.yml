@@ -11,7 +11,7 @@ export_languages:
   - fr
   - it
   - nl
-  - no
+  - "no"
   - pl
   - pt-PT
   - pt-BR
@@ -38,7 +38,7 @@ files:
         fr: "fr"
         it: "it"
         nl: "nl"
-        no: "nb"
+        "no": "nb"
         pl: "pl"
         pt-PT: "pt-PT"
         pt-BR: "pt-BR"
