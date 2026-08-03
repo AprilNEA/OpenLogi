@@ -167,7 +167,7 @@ before editing that area.
 | `crates/openlogi-gui/locales/**`, `src/i18n.rs` | `.claude/rules/i18n.md` |
 | `crates/openlogi-agent-core/**`, `crates/openlogi-agent/**` (IPC wire) | `.claude/rules/ipc-protocol.md` |
 | `crates/openlogi-hidpp/**`, `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |
-| Onboard profiles (`0x8100`) across hidpp/hid/agent/gui/cli | `.claude/rules/onboard-profiles.md` |
+| `**/onboard_profiles*`, `**/diag/profiles.rs`, `**/profiles_panel.rs` (`0x8100`) | `.claude/rules/onboard-profiles.md` |
 | `crates/openlogi-hook/**` (event taps) | `.claude/rules/hook.md` |
 | `xtask/**`, `packaging/**`, `scripts/**` | `.claude/rules/xtask.md` (+ `xtask/README.md`) |
 | `crates/openlogi-gui/src/platform/**` (ObjC FFI) | `crates/openlogi-gui/src/platform/AGENTS.md` |
