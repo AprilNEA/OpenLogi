@@ -55,6 +55,7 @@ struct ArmedControl {
     cid: u16,
     host: u8,
     mode: ReportingMode,
+    original: reprog_controls::CidReporting,
 }
 
 /// Failure while arming or running a host-switch link.
@@ -208,6 +209,10 @@ async fn arm_host_controls_inner(
             None
         };
         if let Some(mode) = mode {
+            let original = controls
+                .get_cid_reporting(info.cid)
+                .await
+                .map_err(hidpp_error)?;
             // Record the rollback before issuing the write: a transport timeout
             // can mean that the device applied the request but its response was
             // lost, so the failing control must be restored as well.
@@ -215,6 +220,7 @@ async fn arm_host_controls_inner(
                 cid: info.cid,
                 host,
                 mode,
+                original,
             });
             match mode {
                 ReportingMode::Diverted => controls
@@ -241,19 +247,10 @@ async fn arm_host_controls_inner(
 
 async fn restore_host_controls(controls: &ReprogControlsV4, armed: Vec<ArmedControl>) {
     for control in armed {
-        let restored = match control.mode {
-            ReportingMode::Diverted => controls.set_cid_reporting(control.cid, false, false).await,
-            ReportingMode::Analytics => controls
-                .set_cid_reporting_full(
-                    control.cid,
-                    reprog_controls::CidReportingChange {
-                        analytics_key_events: Some(false),
-                        ..reprog_controls::CidReportingChange::default()
-                    },
-                )
-                .await
-                .map(|_echo| ()),
-        };
+        let restored = controls
+            .set_cid_reporting_full(control.cid, restoration_change(control))
+            .await
+            .map(|_echo| ());
         if let Err(error) = restored {
             debug!(
                 ?error,
@@ -261,6 +258,20 @@ async fn restore_host_controls(controls: &ReprogControlsV4, armed: Vec<ArmedCont
                 "could not restore host switch control"
             );
         }
+    }
+}
+
+fn restoration_change(control: ArmedControl) -> reprog_controls::CidReportingChange {
+    match control.mode {
+        ReportingMode::Diverted => reprog_controls::CidReportingChange {
+            diverted: Some(control.original.diverted),
+            raw_xy: Some(control.original.raw_xy),
+            ..reprog_controls::CidReportingChange::default()
+        },
+        ReportingMode::Analytics => reprog_controls::CidReportingChange {
+            analytics_key_events: Some(control.original.analytics_key_events),
+            ..reprog_controls::CidReportingChange::default()
+        },
     }
 }
 
@@ -369,10 +380,26 @@ fn event_host(
 #[cfg(test)]
 mod tests {
     use super::{
-        ArmedControl, ReportingMode, event_host, host_change_required, host_channel, shares_channel,
+        ArmedControl, ReportingMode, event_host, host_change_required, host_channel,
+        restoration_change, shares_channel,
     };
     use crate::DeviceRoute;
-    use crate::reprog_controls::{AnalyticsKeyEvent, ControlId, CtrlIdInfo, ReprogControlsEvent};
+    use crate::reprog_controls::{
+        AnalyticsKeyEvent, CidReporting, ControlId, CtrlIdInfo, ReprogControlsEvent,
+    };
+
+    fn reporting(diverted: bool, raw_xy: bool, analytics_key_events: bool) -> CidReporting {
+        CidReporting {
+            cid: ControlId(0x00d3),
+            diverted,
+            persistently_diverted: true,
+            force_raw_xy: true,
+            raw_xy,
+            remap: Some(ControlId(0x1234)),
+            analytics_key_events,
+            raw_wheel: true,
+        }
+    }
 
     #[test]
     fn receiver_slots_share_one_channel() {
@@ -412,6 +439,7 @@ mod tests {
             cid: 0x00d3,
             host: 2,
             mode: ReportingMode::Analytics,
+            original: reporting(false, false, false),
         }];
         let mut events = [AnalyticsKeyEvent::default(); 5];
         events[0] = AnalyticsKeyEvent {
@@ -437,5 +465,35 @@ mod tests {
     #[test]
     fn host_outside_device_range_is_rejected() {
         assert!(host_change_required(0, 2, 2).is_err());
+    }
+
+    #[test]
+    fn diverted_cleanup_restores_only_the_original_temporary_bits() {
+        let change = restoration_change(ArmedControl {
+            cid: 0x00d3,
+            host: 2,
+            mode: ReportingMode::Diverted,
+            original: reporting(true, true, false),
+        });
+
+        assert_eq!(change.diverted, Some(true));
+        assert_eq!(change.raw_xy, Some(true));
+        assert_eq!(change.analytics_key_events, None);
+        assert_eq!(change.persistently_diverted, None);
+        assert_eq!(change.remap, None);
+    }
+
+    #[test]
+    fn analytics_cleanup_restores_the_original_analytics_bit() {
+        let change = restoration_change(ArmedControl {
+            cid: 0x00d3,
+            host: 2,
+            mode: ReportingMode::Analytics,
+            original: reporting(false, false, true),
+        });
+
+        assert_eq!(change.analytics_key_events, Some(true));
+        assert_eq!(change.diverted, None);
+        assert_eq!(change.raw_xy, None);
     }
 }
