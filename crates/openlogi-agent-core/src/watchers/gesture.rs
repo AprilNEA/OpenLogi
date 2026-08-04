@@ -190,7 +190,7 @@ async fn manage(
                 // While pairing is waiting or active, release the capture
                 // session so run_pairing can own the receiver's HID node (one
                 // process can't read it through two channels).
-                let want = if receiver_access.pairing_requested() {
+                let want = if receiver_access.exclusive_requested() {
                     None
                 } else {
                     let target = dpi_cycle.read().ok().and_then(|guard| guard.target.clone());
@@ -216,7 +216,7 @@ async fn manage(
                 // old session and start one for the new state. Sending on the
                 // oneshot lets the old session restore the diverted controls.
                 if current.is_some() {
-                    let reason = if want.is_none() && !receiver_access.pairing_requested() {
+                    let reason = if want.is_none() && !receiver_access.exclusive_requested() {
                         CaptureStopReason::DeviceLost
                     } else {
                         CaptureStopReason::Graceful

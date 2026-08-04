@@ -1,11 +1,11 @@
-//! Exclusive receiver access coordination between HID++ capture and pairing.
+//! Shared and exclusive access coordination for receiver HID++ sessions.
 //!
 //! Long-running HID++ sessions share pooled receiver channels under read leases.
-//! Pairing first announces its intent so those sessions stop, then waits for an
-//! exclusive write lease before opening the receiver itself.
+//! Pairing and coordinated host transitions announce their intent so those
+//! sessions stop, then wait for an exclusive write lease.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
@@ -18,7 +18,25 @@ pub struct ReceiverAccess {
 #[derive(Default)]
 struct ReceiverAccessInner {
     lease: Arc<RwLock<()>>,
-    pairing_requested: Arc<AtomicBool>,
+    exclusive_requests: Arc<AtomicU8>,
+}
+
+/// Operation requiring sole ownership of a receiver transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclusiveAccessReason {
+    /// Receiver discovery and pairing.
+    Pairing,
+    /// Coordinated movement of linked devices to another host.
+    HostTransition,
+}
+
+impl ExclusiveAccessReason {
+    const fn bit(self) -> u8 {
+        match self {
+            Self::Pairing => 1 << 0,
+            Self::HostTransition => 1 << 1,
+        }
+    }
 }
 
 /// Shared receiver lease held by a long-running HID++ session.
@@ -26,23 +44,23 @@ pub struct SessionReceiverLease {
     _guard: OwnedRwLockReadGuard<()>,
 }
 
-/// Exclusive receiver lease held by a pairing session.
-pub struct PairingReceiverLease {
+/// Exclusive receiver lease held by a pairing or host-transition operation.
+pub struct ExclusiveReceiverLease {
     _guard: OwnedRwLockWriteGuard<()>,
-    pairing_requested: Arc<AtomicBool>,
-}
-
-impl Drop for PairingReceiverLease {
-    fn drop(&mut self) {
-        self.pairing_requested.store(false, Ordering::Release);
-    }
+    _request: ExclusiveRequest,
 }
 
 impl ReceiverAccess {
-    /// Whether a pairing session is waiting for or holding receiver access.
+    /// Whether any exclusive operation is waiting for or holding receiver access.
     #[must_use]
-    pub fn pairing_requested(&self) -> bool {
-        self.inner.pairing_requested.load(Ordering::Acquire)
+    pub fn exclusive_requested(&self) -> bool {
+        self.inner.exclusive_requests.load(Ordering::Acquire) != 0
+    }
+
+    /// Whether `reason` is waiting for or holding receiver access.
+    #[must_use]
+    pub fn requested(&self, reason: ExclusiveAccessReason) -> bool {
+        self.inner.exclusive_requests.load(Ordering::Acquire) & reason.bit() != 0
     }
 
     /// Try to acquire receiver access for a pooled HID++ session.
@@ -51,55 +69,46 @@ impl ReceiverAccess {
     /// stay idle and retry on its next management tick.
     #[must_use]
     pub fn try_acquire_for_session(&self) -> Option<SessionReceiverLease> {
-        if self.pairing_requested() {
+        if self.exclusive_requested() {
             return None;
         }
         let guard = Arc::clone(&self.inner.lease).try_read_owned().ok()?;
-        if self.pairing_requested() {
+        if self.exclusive_requested() {
             return None;
         }
         Some(SessionReceiverLease { _guard: guard })
     }
 
-    /// Request and acquire exclusive receiver access for pairing.
+    /// Request and acquire exclusive receiver access for `reason`.
     ///
     /// If the returned future is cancelled while waiting, the pairing request is
     /// withdrawn automatically so capture can resume.
-    pub async fn acquire_for_pairing(&self) -> PairingReceiverLease {
-        let request = PairingRequest::new(Arc::clone(&self.inner.pairing_requested));
+    pub async fn acquire_exclusive(&self, reason: ExclusiveAccessReason) -> ExclusiveReceiverLease {
+        let request = ExclusiveRequest::new(Arc::clone(&self.inner.exclusive_requests), reason);
         let guard = Arc::clone(&self.inner.lease).write_owned().await;
-        request.disarm();
-        PairingReceiverLease {
+        ExclusiveReceiverLease {
             _guard: guard,
-            pairing_requested: Arc::clone(&self.inner.pairing_requested),
+            _request: request,
         }
     }
 }
 
-struct PairingRequest {
-    pairing_requested: Arc<AtomicBool>,
-    armed: bool,
+struct ExclusiveRequest {
+    requests: Arc<AtomicU8>,
+    reason: ExclusiveAccessReason,
 }
 
-impl PairingRequest {
-    fn new(pairing_requested: Arc<AtomicBool>) -> Self {
-        pairing_requested.store(true, Ordering::Release);
-        Self {
-            pairing_requested,
-            armed: true,
-        }
-    }
-
-    fn disarm(mut self) {
-        self.armed = false;
+impl ExclusiveRequest {
+    fn new(requests: Arc<AtomicU8>, reason: ExclusiveAccessReason) -> Self {
+        requests.fetch_or(reason.bit(), Ordering::AcqRel);
+        Self { requests, reason }
     }
 }
 
-impl Drop for PairingRequest {
+impl Drop for ExclusiveRequest {
     fn drop(&mut self) {
-        if self.armed {
-            self.pairing_requested.store(false, Ordering::Release);
-        }
+        self.requests
+            .fetch_and(!self.reason.bit(), Ordering::AcqRel);
     }
 }
 
@@ -111,14 +120,17 @@ mod tests {
     async fn pairing_request_blocks_new_capture_until_pairing_lease_drops() {
         let access = ReceiverAccess::default();
 
-        let pairing = access.acquire_for_pairing().await;
+        let pairing = access
+            .acquire_exclusive(ExclusiveAccessReason::Pairing)
+            .await;
 
-        assert!(access.pairing_requested());
+        assert!(access.requested(ExclusiveAccessReason::Pairing));
+        assert!(access.exclusive_requested());
         assert!(access.try_acquire_for_session().is_none());
 
         drop(pairing);
 
-        assert!(!access.pairing_requested());
+        assert!(!access.exclusive_requested());
         assert!(access.try_acquire_for_session().is_some());
     }
 
@@ -145,15 +157,33 @@ mod tests {
 
         let waiting = tokio::spawn({
             let access = access.clone();
-            async move { access.acquire_for_pairing().await }
+            async move {
+                access
+                    .acquire_exclusive(ExclusiveAccessReason::Pairing)
+                    .await
+            }
         });
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        assert!(access.pairing_requested());
+        assert!(access.requested(ExclusiveAccessReason::Pairing));
 
         waiting.abort();
         let _ = waiting.await;
-        assert!(!access.pairing_requested());
+        assert!(!access.exclusive_requested());
         drop(capture);
+        assert!(access.try_acquire_for_session().is_some());
+    }
+
+    #[tokio::test]
+    async fn host_transition_blocks_shared_sessions() {
+        let access = ReceiverAccess::default();
+
+        let transition = access
+            .acquire_exclusive(ExclusiveAccessReason::HostTransition)
+            .await;
+
+        assert!(access.requested(ExclusiveAccessReason::HostTransition));
+        assert!(access.try_acquire_for_session().is_none());
+        drop(transition);
         assert!(access.try_acquire_for_session().is_some());
     }
 }

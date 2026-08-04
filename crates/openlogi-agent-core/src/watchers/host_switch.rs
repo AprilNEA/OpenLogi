@@ -54,7 +54,7 @@ async fn manage(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                let wanted = if receiver_access.pairing_requested() {
+                let wanted = if receiver_access.exclusive_requested() {
                     Vec::new()
                 } else {
                     links.read().map_or_else(|_| Vec::new(), |guard| guard.clone())
