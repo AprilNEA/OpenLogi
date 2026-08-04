@@ -73,6 +73,33 @@ pub const BOLT_PIDS: &[u16] = &[0xc548];
 pub const UNIFYING_PIDS: &[u16] = &[0xc52b, 0xc532];
 
 impl DeviceRoute {
+    /// Whether two receiver routes use the same physical HID transport.
+    /// Direct routes cannot prove identity because they carry only VID/PID.
+    #[must_use]
+    pub fn shares_transport(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Bolt {
+                    receiver_uid: left, ..
+                },
+                Self::Bolt {
+                    receiver_uid: right,
+                    ..
+                },
+            )
+            | (
+                Self::Unifying {
+                    receiver_uid: left, ..
+                },
+                Self::Unifying {
+                    receiver_uid: right,
+                    ..
+                },
+            ) => left.eq_ignore_ascii_case(right),
+            _ => false,
+        }
+    }
+
     /// The HID++ device index features are addressed at for this route: the
     /// pairing slot for a Bolt device, the self-index for a direct one.
     #[must_use]

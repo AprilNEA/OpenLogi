@@ -167,7 +167,13 @@ async fn run(config: Config) {
         shared.gesture_bindings.clone(),
         shared.dpi_cycle.clone(),
         shared.capture_channel.clone(),
+        shared.channel_pool.clone(),
         shared.thumbwheel_sensitivity.clone(),
+        shared.receiver_access.clone(),
+    );
+    watchers::host_switch::spawn(
+        shared.host_switch_links.clone(),
+        shared.channel_pool.clone(),
         shared.receiver_access.clone(),
     );
 
@@ -233,6 +239,7 @@ async fn run(config: Config) {
                             shared.hook_maps.clone(),
                             shared.dpi_cycle.clone(),
                             shared.capture_channel.clone(),
+                            shared.receiver_access.clone(),
                             Arc::clone(&event_monitor),
                         );
                         hook_installed.store(hook.is_some(), Ordering::Relaxed);

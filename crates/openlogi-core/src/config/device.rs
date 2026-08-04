@@ -113,6 +113,12 @@ pub struct DeviceConfig {
     /// current resolution unmanaged and omits the field from `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll_resolution: Option<ScrollResolution>,
+    /// Physical config keys of pointing devices that follow this keyboard's
+    /// host switch channel. The relationship is keyboard-initiated: pressing
+    /// one of this device's host keys switches every listed target first, then
+    /// lets the keyboard leave the current host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_switch_targets: Vec<String>,
 }
 
 /// `skip_serializing_if` helper for plain `bool` fields whose default is
@@ -163,6 +169,8 @@ struct RawDeviceConfig {
     invert_scroll: bool,
     #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
+    #[serde(default)]
+    host_switch_targets: Vec<String>,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -207,6 +215,30 @@ impl From<RawDeviceConfig> for DeviceConfig {
             smartshift: raw.smartshift,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
+            host_switch_targets: raw.host_switch_targets,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeviceConfig;
+
+    #[test]
+    fn host_switch_targets_round_trip_as_physical_keys() -> Result<(), Box<dyn std::error::Error>> {
+        let config: DeviceConfig = toml::from_str(
+            r#"host_switch_targets = [
+  "receiver:keyboard:slot:1",
+  "receiver:mouse:slot:2",
+]"#,
+        )?;
+
+        assert_eq!(
+            config.host_switch_targets,
+            ["receiver:keyboard:slot:1", "receiver:mouse:slot:2"]
+        );
+        let serialized = toml::to_string(&config)?;
+        assert!(serialized.contains("host_switch_targets"));
+        Ok(())
     }
 }

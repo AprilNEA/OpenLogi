@@ -25,8 +25,9 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use crate::ChannelPool;
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
-use crate::route::{DeviceRoute, open_route_channel};
+use crate::route::DeviceRoute;
 use crate::thumbwheel::{self, Thumbwheel};
 use crate::write::SharedChannel;
 
@@ -34,6 +35,15 @@ use crate::write::SharedChannel;
 /// SmartShift writes can reuse it instead of opening a fresh one. `None`
 /// whenever no session is connected.
 pub type CaptureChannel = Arc<RwLock<Option<SharedChannel>>>;
+
+/// Why a live capture session is being stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureStopReason {
+    /// The device is still reachable, so diverted controls must be restored.
+    Graceful,
+    /// The device disappeared; only local resources can be released safely.
+    DeviceLost,
+}
 
 /// One input captured from the active device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,10 +108,12 @@ pub async fn run_capture_session(
     capture_thumbwheel: bool,
     divert_gesture_button: bool,
     sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
+    shutdown: oneshot::Receiver<CaptureStopReason>,
     channel_slot: CaptureChannel,
+    channel_pool: ChannelPool,
 ) -> Result<(), GestureError> {
-    let chan = open_route_channel(&route)
+    let chan = channel_pool
+        .open(&route)
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
     let device_index = route.device_index();
@@ -160,14 +172,24 @@ pub async fn run_capture_session(
         thumbwheel = armed.thumb.is_some(),
         "control capture active"
     );
-    let _ = shutdown.await;
+    let stop_reason = shutdown.await.unwrap_or(CaptureStopReason::DeviceLost);
 
     drop(listener);
-    if let Ok(mut slot) = channel_slot.write() {
+    if let Ok(mut slot) = channel_slot.write()
+        && slot
+            .as_ref()
+            .is_some_and(|shared| shared.same_channel(&chan))
+    {
         *slot = None;
     }
-    armed.disarm().await;
-    debug!(index = device_index, "control capture stopped");
+    if stop_reason == CaptureStopReason::Graceful {
+        armed.disarm().await;
+    }
+    debug!(
+        index = device_index,
+        ?stop_reason,
+        "control capture stopped"
+    );
     Ok(())
 }
 

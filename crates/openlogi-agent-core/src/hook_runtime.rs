@@ -19,6 +19,7 @@ use tracing::{info, warn};
 use crate::DpiCycleState;
 use crate::event_monitor::SharedEventMonitor;
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
+use crate::receiver_access::ReceiverAccess;
 
 /// The two button maps the OS-hook callback reads, kept behind ONE lock so a
 /// config rebuild publishes both atomically — a press during an owner switch can
@@ -102,6 +103,7 @@ pub fn start(
     hooks: SharedHookMaps,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture: CaptureChannel,
+    receiver_access: ReceiverAccess,
     monitor: SharedEventMonitor,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
@@ -157,7 +159,7 @@ pub fn start(
                                 .map(|m| resolve_gesture_click(&m.gestures, id));
                             if let Some(action) = action {
                                 info!(button = %id, action = %action.label(), "gesture click → executing bound action");
-                                dispatch_action(&action, &dpi_cycle, &capture);
+                                dispatch_action(&action, &dpi_cycle, &capture, &receiver_access);
                             }
                         }
                         return EventDisposition::Suppress;
@@ -180,7 +182,7 @@ pub fn start(
 
                 if pressed {
                     info!(button = %id, action = %action.label(), "button → executing bound action");
-                    dispatch_action(&action, &dpi_cycle, &capture);
+                    dispatch_action(&action, &dpi_cycle, &capture, &receiver_access);
                 }
                 EventDisposition::Suppress
             }
@@ -206,7 +208,7 @@ pub fn start(
                     });
                     if let Some(action) = action {
                         info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
-                        dispatch_action(&action, &dpi_cycle, &capture);
+                        dispatch_action(&action, &dpi_cycle, &capture, &receiver_access);
                     }
                 }
                 EventDisposition::PassThrough
@@ -276,6 +278,7 @@ pub fn dispatch_action(
     action: &Action,
     dpi_cycle: &Arc<RwLock<DpiCycleState>>,
     capture: &CaptureChannel,
+    receiver_access: &ReceiverAccess,
 ) {
     let next = match action {
         Action::CycleDpiPresets => match dpi_cycle.write() {
@@ -295,7 +298,7 @@ pub fn dispatch_action(
         Action::ToggleSmartShift => {
             let target = dpi_cycle.read().ok().and_then(|g| g.target.clone());
             info!("SmartShift toggle → flipping wheel mode");
-            toggle_smartshift_in_background(Some(capture), target);
+            toggle_smartshift_in_background(Some(capture), receiver_access, target);
             return;
         }
         other => {
@@ -305,7 +308,7 @@ pub fn dispatch_action(
     };
     if let Some((dpi, target)) = next {
         info!(dpi, "DPI action → writing to device");
-        write_dpi_in_background(Some(capture), target, dpi);
+        write_dpi_in_background(Some(capture), receiver_access, target, dpi);
     } else if matches!(action, Action::CycleDpiPresets | Action::SetDpiPreset(_)) {
         info!(
             action = %action.label(),

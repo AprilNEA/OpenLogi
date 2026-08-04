@@ -10,6 +10,8 @@
 #![deny(rustdoc::bare_urls)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+mod channel_pool;
+pub mod host_switch;
 mod mappings;
 mod node_ledger;
 mod route;
@@ -29,11 +31,17 @@ pub mod smartshift;
 pub mod thumbwheel;
 pub mod write;
 
-pub use gesture::{CaptureChannel, CapturedInput, GestureError, run_capture_session};
+pub use channel_pool::ChannelPool;
+pub use gesture::{
+    CaptureChannel, CaptureStopReason, CapturedInput, GestureError, run_capture_session,
+};
 pub use hires_wheel::{
     ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode,
     get_scroll_wheel_mode_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
     set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on,
+};
+pub use host_switch::{
+    HostSwitchError, HostSwitchStopReason, run_host_switch_session, switch_linked_hosts,
 };
 pub use hotplug::{HotplugEvent, watch_hotplug};
 pub use inventory::{Enumerator, InventoryError, enumerate};
