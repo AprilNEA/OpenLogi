@@ -437,6 +437,24 @@ async fn probe_direct(
     let walk_succeeded = capabilities.is_some();
     let caps = capabilities.unwrap_or_default();
     let is_peripheral = probe.battery.is_some() || caps.buttons || caps.pointer || caps.lighting;
+    // A walk that never completed says nothing about what this node is: the
+    // discriminator below would read "no battery, no config feature" off an
+    // empty probe and reject a real mouse as a receiver's secondary interface.
+    // Settle it as a transient failure and keep the node's cache entry, so the
+    // last-good inventory is replayed while the link recovers.
+    if !walk_succeeded {
+        debug!(
+            vid = format_args!("{:04x}", info.vendor_id),
+            pid = format_args!("{:04x}", info.product_id),
+            "feature walk did not complete — transient probe failure, keeping last-known identity"
+        );
+        return NodeProbe {
+            inventory: None,
+            healthy: false,
+            complete: false,
+            outcomes: vec![seen(Some(CacheKey::Direct(info.id.clone())))],
+        };
+    }
     if !is_peripheral {
         debug!(
             vid = format_args!("{:04x}", info.vendor_id),
