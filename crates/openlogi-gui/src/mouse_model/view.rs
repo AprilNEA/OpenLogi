@@ -278,10 +278,12 @@ fn scaled_model(
 }
 
 /// The gesture-capable buttons present on this device, in a stable display
-/// order: the HID++ gesture button first, then the OS-hook Middle/Back/Forward.
+/// order: the HID++ sources (gesture button, haptic panel) first, then the
+/// OS-hook Middle/Back/Forward.
 fn gesture_capable_buttons(labels: &[Label]) -> Vec<ButtonId> {
-    const ORDER: [ButtonId; 4] = [
+    const ORDER: [ButtonId; 5] = [
         ButtonId::GestureButton,
+        ButtonId::HapticPanel,
         ButtonId::MiddleClick,
         ButtonId::Back,
         ButtonId::Forward,

@@ -1359,8 +1359,10 @@ impl AppState {
             return BTreeMap::new();
         };
         match self.config.gesture_owner(key) {
-            // The HID++ gesture button seeds every direction from the defaults.
-            Some(ButtonId::GestureButton) => gesture_bindings_for(&self.config, Some(key)),
+            // HID++ gesture sources seed every direction from the defaults.
+            Some(owner) if owner.is_hidpp_gesture_source() => {
+                gesture_bindings_for(&self.config, Some(key))
+            }
             // A promoted OS-hook button is shown from its raw stored map (which
             // `set_gesture_owner` seeds with full defaults), so the menu matches
             // exactly what `oshook_gestures_for` dispatches — no seeding here.

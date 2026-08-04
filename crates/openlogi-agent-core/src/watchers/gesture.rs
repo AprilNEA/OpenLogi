@@ -38,9 +38,15 @@ use crate::receiver_access::ReceiverAccess;
 /// direction). The watcher reads it to map a captured swipe to a bound action.
 pub type GestureBindings = Arc<RwLock<BTreeMap<GestureDirection, Action>>>;
 
+/// The active device's HID++ gesture owner. `None` means gestures are off or
+/// owned by an OS-hook button.
+pub type HidppGestureOwner = Arc<RwLock<Option<ButtonId>>>;
+
 /// Shared thumb-wheel sensitivity, mirrored from `AppState`. Read on every wheel
 /// event; written only by `AppState::set_thumbwheel_sensitivity`.
 pub type ThumbwheelSensitivity = Arc<AtomicI32>;
+
+type CaptureTarget = (DeviceRoute, bool, Option<u16>, Vec<(u16, ButtonId)>);
 
 /// How often to re-read the active device target + thumb-wheel arming so a
 /// carousel switch or a binding/sensitivity edit re-points / re-arms capture.
@@ -77,6 +83,7 @@ fn action_threshold(sensitivity: i32) -> i32 {
 pub fn spawn(
     hook_maps: SharedHookMaps,
     gesture_bindings: GestureBindings,
+    hidpp_gesture_owner: HidppGestureOwner,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
@@ -96,6 +103,7 @@ pub fn spawn(
         runtime.block_on(manage(
             hook_maps,
             gesture_bindings,
+            hidpp_gesture_owner,
             dpi_cycle,
             capture_channel,
             thumbwheel_sensitivity,
@@ -129,6 +137,22 @@ fn thumbwheel_armed(hook_maps: &SharedHookMaps, sensitivity: i32) -> bool {
     })
 }
 
+fn plain_hidpp_buttons(
+    hook_maps: &SharedHookMaps,
+    gesture_source: Option<u16>,
+) -> Vec<(u16, ButtonId)> {
+    let panel = openlogi_hid::reprog_controls::HAPTIC_PANEL_CID;
+    if gesture_source == Some(panel) {
+        return Vec::new();
+    }
+    hook_maps
+        .read()
+        .ok()
+        .and_then(|maps| maps.bindings.get(&ButtonId::HapticPanel).cloned())
+        .filter(|action| *action != default_binding(ButtonId::HapticPanel))
+        .map_or_else(Vec::new, |_| vec![(panel, ButtonId::HapticPanel)])
+}
+
 /// Whether a finished capture session should make the manager re-arm.
 ///
 /// `done_epoch` identifies the session that signalled completion; `live_epoch`
@@ -147,14 +171,15 @@ fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -> bool {
 async fn manage(
     hook_maps: SharedHookMaps,
     gesture_bindings: GestureBindings,
+    hidpp_gesture_owner: HidppGestureOwner,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
-    // (route, capture_thumbwheel, divert_gesture_button)
-    let mut current: Option<(DeviceRoute, bool, bool)> = None;
+    // (route, capture_thumbwheel, gesture-source CID, plain HID++ buttons)
+    let mut current: Option<CaptureTarget> = None;
     let mut stop: Option<oneshot::Sender<()>> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut accumulators = WheelAccumulators::default();
@@ -191,17 +216,17 @@ async fn manage(
                 } else {
                     let target = dpi_cycle.read().ok().and_then(|guard| guard.target.clone());
                     let sensitivity = thumbwheel_sensitivity.load(Ordering::Relaxed);
-                    // Divert the dedicated HID++ gesture button only while it owns the gesture role. The
-                    // shared gesture map is non-empty exactly then (gesture_bindings_for
-                    // gates on the owner), so it doubles as that signal — no need to
-                    // thread the full config in. Re-evaluated each tick, so a
-                    // ReloadConfig owner change restarts the session accordingly.
-                    let divert_gesture = gesture_bindings.read().is_ok_and(|g| !g.is_empty());
+                    let gesture_source = hidpp_gesture_owner
+                        .read()
+                        .ok()
+                        .and_then(|owner| owner.and_then(gesture_source_cid));
+                    let plain_buttons = plain_hidpp_buttons(&hook_maps, gesture_source);
                     target.map(|t| {
                         (
                             t,
                             thumbwheel_armed(&hook_maps, sensitivity),
-                            divert_gesture,
+                            gesture_source,
+                            plain_buttons,
                         )
                     })
                 };
@@ -218,12 +243,17 @@ async fn manage(
                     current = None;
                     continue;
                 }
-                if let Some((route, capture_thumbwheel, divert_gesture_button)) = want {
+                if let Some((route, capture_thumbwheel, gesture_source_cid, plain_buttons)) = want {
                     let Some(receiver_lease) = receiver_access.try_acquire_for_capture() else {
                         current = None;
                         continue;
                     };
-                    current = Some((route.clone(), capture_thumbwheel, divert_gesture_button));
+                    current = Some((
+                        route.clone(),
+                        capture_thumbwheel,
+                        gesture_source_cid,
+                        plain_buttons.clone(),
+                    ));
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
                     let slot = Arc::clone(&capture_channel);
@@ -235,7 +265,8 @@ async fn manage(
                         if let Err(e) = run_capture_session(
                             route,
                             capture_thumbwheel,
-                            divert_gesture_button,
+                            gesture_source_cid,
+                            plain_buttons,
                             sink,
                             stop_rx,
                             slot,
@@ -271,6 +302,14 @@ async fn manage(
                 }
             }
         }
+    }
+}
+
+fn gesture_source_cid(button: ButtonId) -> Option<u16> {
+    match button {
+        ButtonId::GestureButton => Some(openlogi_hid::reprog_controls::GESTURE_BUTTON_CID),
+        ButtonId::HapticPanel => Some(openlogi_hid::reprog_controls::HAPTIC_PANEL_CID),
+        _ => None,
     }
 }
 
@@ -597,5 +636,41 @@ mod tests {
         // The session was stopped on purpose (pairing took the receiver, or no
         // device is targeted): no target means there is nothing to re-arm.
         assert!(!should_rearm(7, 7, false));
+    }
+
+    #[test]
+    fn maps_each_hidpp_gesture_owner_to_its_physical_cid() {
+        assert_eq!(
+            gesture_source_cid(ButtonId::GestureButton),
+            Some(openlogi_hid::reprog_controls::GESTURE_BUTTON_CID)
+        );
+        assert_eq!(
+            gesture_source_cid(ButtonId::HapticPanel),
+            Some(openlogi_hid::reprog_controls::HAPTIC_PANEL_CID)
+        );
+        assert_eq!(gesture_source_cid(ButtonId::Back), None);
+    }
+
+    #[test]
+    fn plain_haptic_panel_is_armed_only_for_a_non_default_single_binding() {
+        let maps = Arc::new(RwLock::new(crate::hook_runtime::HookMaps::default()));
+        assert!(plain_hidpp_buttons(&maps, None).is_empty());
+
+        maps.write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bindings
+            .insert(ButtonId::HapticPanel, Action::Copy);
+        assert_eq!(
+            plain_hidpp_buttons(&maps, None),
+            vec![(
+                openlogi_hid::reprog_controls::HAPTIC_PANEL_CID,
+                ButtonId::HapticPanel
+            )]
+        );
+        assert!(
+            plain_hidpp_buttons(&maps, Some(openlogi_hid::reprog_controls::HAPTIC_PANEL_CID))
+                .is_empty(),
+            "the gesture divert owns the panel while it is the gesture source"
+        );
     }
 }
