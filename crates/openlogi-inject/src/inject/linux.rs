@@ -64,6 +64,8 @@ pub(super) fn execute(action: &Action) {
         // ── System ────────────────────────────────────────────────────────
         // logind LockSessions() via the system bus; falls back to Super+L.
         Action::LockScreen => lock_screen(),
+        // logind Suspend() via the system bus.
+        Action::Sleep => sleep_system(),
         // Region vs full-screen capture depends on the desktop environment's
         // screenshot handler for Print Screen, so both map to the same key.
         Action::Screenshot | Action::CaptureRegion => press_key(&[], KeyCode::KEY_SYSRQ),
@@ -412,6 +414,27 @@ fn lock_screen() {
     // Super+L is the standard lock shortcut on GNOME and KDE.
     tracing::debug!("LockScreen via Super+L key combo");
     press_key(&[KeyCode::KEY_LEFTMETA], KeyCode::KEY_L);
+}
+
+/// Suspend the system via logind's `Suspend()` on the system bus. The
+/// `false` argument declines the "interactive" polkit prompt — if the
+/// session isn't allowed to suspend, the call fails and is logged rather
+/// than popping an authentication dialog from a background agent.
+fn sleep_system() {
+    let Some(conn) = SYSTEM_BUS.as_ref() else {
+        tracing::warn!("no system bus — Sleep skipped");
+        return;
+    };
+    match conn.call_method(
+        Some("org.freedesktop.login1"),
+        "/org/freedesktop/login1",
+        Some("org.freedesktop.login1.Manager"),
+        "Suspend",
+        &(false,),
+    ) {
+        Ok(_) => tracing::debug!("Sleep via logind Suspend"),
+        Err(e) => tracing::warn!("logind Suspend failed: {e}"),
+    }
 }
 
 /// Send `command` to the first MPRIS-capable media player on the session bus,

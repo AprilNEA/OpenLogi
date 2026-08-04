@@ -100,6 +100,9 @@ pub enum HidppOperation {
     ReadWheelMode,
     /// Write and verify the native HiResWheel mode.
     WriteWheelMode,
+    /// Write keyboard Fn-lock (fn inversion). Appended last — variant order
+    /// is wire format.
+    WriteFnLock,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

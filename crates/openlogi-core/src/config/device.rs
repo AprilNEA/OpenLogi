@@ -113,6 +113,12 @@ pub struct DeviceConfig {
     /// current resolution unmanaged and omits the field from `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll_resolution: Option<ScrollResolution>,
+    /// Keyboard Fn-lock state (HID++ fn inversion, `0x40a2`/`0x40a3`): `true`
+    /// means the F-row sends F1–F12 without holding Fn. The state lives in
+    /// device RAM per host, so the agent re-applies it on reconnect like
+    /// [`Self::dpi`]. `None` means "never set — leave the keyboard alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fn_lock: Option<bool>,
 }
 
 /// `skip_serializing_if` helper for plain `bool` fields whose default is
@@ -163,6 +169,8 @@ struct RawDeviceConfig {
     invert_scroll: bool,
     #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
+    #[serde(default)]
+    fn_lock: Option<bool>,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -207,6 +215,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             smartshift: raw.smartshift,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
+            fn_lock: raw.fn_lock,
         }
     }
 }

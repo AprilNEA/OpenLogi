@@ -96,6 +96,10 @@ pub(super) fn execute(action: &Action) {
         Action::Screenshot => post_key(0x14, cmd | shift),
         // Capture region to clipboard = Cmd+Shift+Ctrl+4 (kVK_ANSI_4 = 0x15)
         Action::CaptureRegion => post_key(0x15, cmd | shift | ctrl),
+        // Sleep has no CGEvent equivalent (the WindowServer ignores a
+        // synthesised power key), so ask powermanagement directly. `pmset
+        // sleepnow` works for the console user without privileges.
+        Action::Sleep => sleep_system(),
         // ── Media ─────────────────────────────────────────────────────────
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
@@ -282,6 +286,26 @@ fn post_media_key(nx_key: i32) {
             CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&cg_event));
         }
     });
+}
+
+/// Put the system to sleep via `pmset sleepnow` — sleep has no CGEvent
+/// equivalent, and `pmset` performs the console user's sleep request
+/// without privileges. Fire-and-forget; a spawn failure is logged. The
+/// child is reaped on a detached thread so it can't linger as a zombie
+/// in this long-running agent.
+fn sleep_system() {
+    match std::process::Command::new("/usr/bin/pmset")
+        .arg("sleepnow")
+        .spawn()
+    {
+        Ok(mut child) => {
+            tracing::debug!("Sleep via pmset sleepnow");
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => tracing::warn!(error = %e, "pmset sleepnow spawn failed"),
+    }
 }
 
 /// Post a synthetic scroll event for `action` (one of the `Scroll*` variants).

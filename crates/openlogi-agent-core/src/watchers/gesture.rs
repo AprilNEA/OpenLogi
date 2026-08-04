@@ -137,7 +137,7 @@ fn thumbwheel_armed(hook_maps: &SharedHookMaps, sensitivity: i32) -> bool {
 /// respawn when it is the *current* one (not a stale session already superseded
 /// by a deliberate restart, whose epoch no longer matches) and a target is still
 /// set (not a deliberate stop-to-idle, e.g. while pairing owns the receiver).
-fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -> bool {
+pub(crate) fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -> bool {
     done_epoch == live_epoch && has_target
 }
 
