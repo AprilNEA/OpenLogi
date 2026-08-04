@@ -50,10 +50,9 @@ async fn manage(
     channel_pool: ChannelPool,
     receiver_access: ReceiverAccess,
 ) {
-    let mut current = Vec::new();
     let mut sessions = Vec::new();
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<SessionCompletion>();
-    let mut generation = 0_u64;
+    let mut next_generation = 0_u64;
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
 
     loop {
@@ -64,21 +63,20 @@ async fn manage(
                 } else {
                     links.read().map_or_else(|_| Vec::new(), |guard| guard.clone())
                 };
-                if wanted == current {
-                    continue;
-                }
-                stop_all(&mut sessions, HostSwitchStopReason::Graceful).await;
-                current.clone_from(&wanted);
-                generation = generation.wrapping_add(1);
+                stop_unwanted(&mut sessions, &wanted).await;
                 for link in wanted {
+                    if sessions.iter().any(|session| session.link == link) {
+                        continue;
+                    }
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let done = done_tx.clone();
                     let pool = channel_pool.clone();
                     let Some(receiver_lease) = receiver_access.try_acquire_for_session() else {
-                        current.clear();
                         break;
                     };
-                    let session_generation = generation;
+                    next_generation = next_generation.wrapping_add(1);
+                    let session_generation = next_generation;
+                    let session_link = link.clone();
                     let task = tokio::spawn(async move {
                         let _receiver_lease = receiver_lease;
                         let keyboard = link.keyboard.clone();
@@ -101,19 +99,22 @@ async fn manage(
                         });
                     });
                     sessions.push(RunningSession {
+                        link: session_link,
+                        generation: session_generation,
                         stop: stop_tx,
                         task,
                     });
                 }
             }
             Some(completion) = done_rx.recv() => {
-                // A host switch intentionally disconnects the keyboard. Clear
-                // the local snapshot so the next tick attempts to arm it again;
-                // this also recovers transient setup/read failures.
-                if completion.generation == generation && !sessions.is_empty() {
-                    stop_all(&mut sessions, HostSwitchStopReason::Graceful).await;
-                    current.clear();
+                if let Some(index) = sessions
+                    .iter()
+                    .position(|session| session.generation == completion.generation)
+                {
+                    let completed = sessions.remove(index);
+                    let _ = completed.task.await;
                     if let Some((link, host)) = completion.request {
+                        stop_all(&mut sessions, HostSwitchStopReason::Graceful).await;
                         run_transition(&links, &channel_pool, &receiver_access, link, host).await;
                     }
                 }
@@ -123,6 +124,8 @@ async fn manage(
 }
 
 struct RunningSession {
+    link: HostSwitchLink,
+    generation: u64,
     stop: oneshot::Sender<HostSwitchStopReason>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -135,11 +138,24 @@ struct SessionCompletion {
 async fn stop_all(sessions: &mut Vec<RunningSession>, reason: HostSwitchStopReason) {
     let running = std::mem::take(sessions);
     let mut tasks = Vec::with_capacity(running.len());
-    for RunningSession { stop, task } in running {
+    for RunningSession { stop, task, .. } in running {
         let _ = stop.send(reason);
         tasks.push(task);
     }
     for task in tasks {
+        let _ = task.await;
+    }
+}
+
+async fn stop_unwanted(sessions: &mut Vec<RunningSession>, wanted: &[HostSwitchLink]) {
+    let mut index = 0;
+    while index < sessions.len() {
+        if wanted.contains(&sessions[index].link) {
+            index += 1;
+            continue;
+        }
+        let RunningSession { stop, task, .. } = sessions.remove(index);
+        let _ = stop.send(HostSwitchStopReason::Graceful);
         let _ = task.await;
     }
 }

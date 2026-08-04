@@ -167,15 +167,19 @@ pub async fn switch_linked_hosts(
     let channel = open_channel(channel_pool, keyboard, "opening keyboard channel")
         .await?
         .ok_or(HostSwitchError::KeyboardNotFound)?;
-    let mut prepared_targets = Vec::with_capacity(targets.len());
     for target in targets {
-        prepared_targets
-            .push(prepare_host_change(target, host, keyboard, &channel, channel_pool).await?);
+        match prepare_host_change(target, host, keyboard, &channel, channel_pool).await {
+            Ok(change) => {
+                if let Err(error) = apply_host_change(change).await {
+                    debug!(%error, route = %target, host, "linked device host switch failed");
+                }
+            }
+            Err(error) => {
+                debug!(%error, route = %target, host, "linked device host switch preparation failed");
+            }
+        }
     }
     let keyboard_change = prepare_host_change_on(&channel, keyboard.device_index(), host).await?;
-    for change in prepared_targets {
-        apply_host_change(change).await?;
-    }
     let changed = apply_host_change(keyboard_change).await?;
     if changed {
         debug!(host, route = %keyboard, "keyboard host switched");
@@ -267,12 +271,10 @@ async fn arm_host_controls_inner(
 
 async fn restore_host_controls(controls: &ReprogControlsV4, armed: Vec<ArmedControl>) {
     for control in armed {
-        let restored = timed_hidpp(
-            "restoring host control reporting",
-            controls.set_cid_reporting_full(control.cid, restoration_change(control)),
-        )
-        .await
-        .map(|_echo| ());
+        let mut restored = restore_host_control(controls, control).await;
+        if restored.is_err() {
+            restored = restore_host_control(controls, control).await;
+        }
         if let Err(error) = restored {
             debug!(
                 ?error,
@@ -281,6 +283,18 @@ async fn restore_host_controls(controls: &ReprogControlsV4, armed: Vec<ArmedCont
             );
         }
     }
+}
+
+async fn restore_host_control(
+    controls: &ReprogControlsV4,
+    control: ArmedControl,
+) -> Result<(), HostSwitchError> {
+    timed_hidpp(
+        "restoring host control reporting",
+        controls.set_cid_reporting_full(control.cid, restoration_change(control)),
+    )
+    .await
+    .map(|_echo| ())
 }
 
 fn restoration_change(control: ArmedControl) -> reprog_controls::CidReportingChange {
@@ -385,7 +399,7 @@ where
     timeout(HIDPP_OPERATION_TIMEOUT, future)
         .await
         .map_err(|_| HostSwitchError::TimedOut { operation })?
-        .map_err(hidpp_error)
+        .map_err(|error| hidpp_error(operation, error))
 }
 
 fn host_change_required(
@@ -405,8 +419,8 @@ fn shares_channel(left: &DeviceRoute, right: &DeviceRoute) -> bool {
     left.shares_transport(right)
 }
 
-fn hidpp_error(error: impl std::fmt::Debug) -> HostSwitchError {
-    HostSwitchError::Hidpp(format!("{error:?}"))
+fn hidpp_error(operation: &'static str, error: impl std::fmt::Debug) -> HostSwitchError {
+    HostSwitchError::Hidpp(format!("{operation}: {error:?}"))
 }
 
 fn host_channel(info: reprog_controls::CtrlIdInfo) -> Option<u8> {
