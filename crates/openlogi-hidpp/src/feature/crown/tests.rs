@@ -64,10 +64,32 @@ fn ignores_unknown_event_sub_id() {
 }
 
 #[test]
-fn ignores_event_with_unknown_enum() {
+fn keeps_event_with_unknown_enum_field() {
     let mut payload = [0; 16];
+    payload[1] = 0xfb; // -5 slots — a valid sibling field that must survive
     payload[6] = 0x09; // out-of-range button state
-    assert!(decode_event(0, &payload).is_none());
+    let CrownEvent::Update(update) = decode_event(0, &payload).expect("event kept");
+    assert_eq!(update.button, ButtonState::Other(0x09));
+    assert_eq!(update.relative_slot_rotation, -5);
+}
+
+/// Totality: for a known sub-id, no single field byte value may drop the whole
+/// event. Sweeps every value of each enum-typed field position.
+#[test]
+fn known_sub_id_survives_any_field_byte() {
+    for byte in 0..=u8::MAX {
+        for pos in [0usize, 3, 4, 5, 6] {
+            let mut payload = [0; 16];
+            payload[1] = 0xfb; // sibling that must always survive
+            payload[pos] = byte;
+            let CrownEvent::Update(update) = decode_event(0, &payload)
+                .unwrap_or_else(|| panic!("dropped event for payload[{pos}]={byte:#04x}"));
+            assert_eq!(
+                update.relative_slot_rotation, -5,
+                "sibling lost for payload[{pos}]={byte:#04x}"
+            );
+        }
+    }
 }
 
 #[test]

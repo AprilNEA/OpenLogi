@@ -39,7 +39,7 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<Illuminatio
             payload, 0,
         ))),
         4 => Some(IlluminationEvent::BrightnessClamped {
-            source: BrightnessClampedSource::try_from(payload[0]).ok()?,
+            source: BrightnessClampedSource::from(payload[0]),
             brightness: be16(payload, 1),
         }),
         _ => None,
