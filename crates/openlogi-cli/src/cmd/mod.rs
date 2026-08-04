@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Subcommand;
 
 pub mod assets;
+pub mod backlight;
 pub mod diag;
 pub mod list;
 
@@ -9,6 +10,8 @@ pub mod list;
 pub enum Command {
     /// List connected Logitech HID++ devices.
     List(list::ListArgs),
+    /// Read or persistently set the keyboard backlight (HID++ 0x1982).
+    Backlight(backlight::BacklightArgs),
     /// Manage assets fetched from OpenLogi's asset mirrors.
     #[command(subcommand)]
     Assets(assets::AssetsCmd),
@@ -21,6 +24,7 @@ impl Command {
     pub async fn run(self) -> Result<()> {
         match self {
             Self::List(args) => list::run(args).await,
+            Self::Backlight(args) => backlight::run(args).await,
             // `assets sync` is blocking HTTP — no need for the async runtime.
             Self::Assets(cmd) => cmd.run(),
             Self::Diag(cmd) => cmd.run().await,

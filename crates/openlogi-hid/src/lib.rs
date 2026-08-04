@@ -19,6 +19,7 @@ mod transport;
 #[cfg(target_os = "windows")]
 mod windows_hid;
 
+pub mod backlight;
 pub mod gesture;
 mod hires_wheel;
 pub mod hotplug;
@@ -29,6 +30,7 @@ pub mod smartshift;
 pub mod thumbwheel;
 pub mod write;
 
+pub use backlight::{BacklightMode, BacklightState, BacklightStatus};
 pub use gesture::{CaptureChannel, CapturedInput, GestureError, run_capture_session};
 pub use hires_wheel::{
     ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode,
@@ -45,8 +47,8 @@ pub use route::{BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, UNIFYING_PIDS};
 pub use smartshift::{AUTO_DISENGAGE_PERMANENT, SmartShiftMode, SmartShiftStatus};
 pub use write::{
     DpiCapabilities, DpiInfo, FeatureEntry, HidppFeatureErrorKind, HidppOperation, LightingMethod,
-    ReprogControlEntry, SharedChannel, WriteError, dump_features, dump_reprog_controls, get_dpi,
-    get_dpi_info, get_smartshift_status, set_dpi, set_dpi_on, set_keyboard_color,
-    set_keyboard_color_with, set_smartshift, set_smartshift_on, set_smartshift_sensitivity,
-    toggle_smartshift, toggle_smartshift_on,
+    ReprogControlEntry, SharedChannel, WriteError, dump_features, dump_reprog_controls,
+    get_backlight, get_dpi, get_dpi_info, get_smartshift_status, set_backlight_enabled, set_dpi,
+    set_dpi_on, set_keyboard_color, set_keyboard_color_with, set_smartshift, set_smartshift_on,
+    set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
 };
