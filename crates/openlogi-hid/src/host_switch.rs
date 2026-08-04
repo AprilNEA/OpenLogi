@@ -6,7 +6,7 @@
 //! this host its HID++ channel can no longer command a mouse sharing the same
 //! receiver.
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc, time::Duration};
 
 use hidpp::{
     channel::HidppChannel,
@@ -15,7 +15,10 @@ use hidpp::{
     protocol::v20,
 };
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::timeout,
+};
 use tracing::{debug, info};
 
 use crate::{
@@ -43,6 +46,7 @@ const HOST_TASK_IDS: [(reprog_controls::TaskId, u8); 3] = [
     (reprog_controls::task_ids::HOST_SWITCH_CHANNEL_2, 1),
     (reprog_controls::task_ids::HOST_SWITCH_CHANNEL_3, 2),
 ];
+const HIDPP_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 enum ReportingMode {
@@ -73,6 +77,12 @@ pub enum HostSwitchError {
     /// A required HID++ operation failed.
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+    /// A required HID++ operation did not complete within its budget.
+    #[error("HID++ operation timed out while {operation}")]
+    TimedOut {
+        /// Description of the operation that exceeded its budget.
+        operation: &'static str,
+    },
     /// The keyboard cannot report its host switch controls to software.
     #[error("keyboard exposes no reportable host switch controls")]
     UnsupportedKeyboard,
@@ -85,20 +95,21 @@ pub async fn run_host_switch_session(
     shutdown: oneshot::Receiver<HostSwitchStopReason>,
     channel_pool: ChannelPool,
 ) -> Result<Option<u8>, HostSwitchError> {
-    let channel = channel_pool
-        .open(&keyboard)
+    let channel = open_channel(&channel_pool, &keyboard, "opening keyboard channel")
         .await?
         .ok_or(HostSwitchError::KeyboardNotFound)?;
     let keyboard_index = keyboard.device_index();
-    let device = Device::new(Arc::clone(&channel), keyboard_index)
-        .await
-        .map_err(hidpp_error)?;
-    let feature = device
-        .root()
-        .get_feature(reprog_controls::FEATURE_ID)
-        .await
-        .map_err(hidpp_error)?
-        .ok_or(HostSwitchError::UnsupportedKeyboard)?;
+    let device = timed_hidpp(
+        "opening keyboard device",
+        Device::new(Arc::clone(&channel), keyboard_index),
+    )
+    .await?;
+    let feature = timed_hidpp(
+        "locating host controls",
+        device.root().get_feature(reprog_controls::FEATURE_ID),
+    )
+    .await?
+    .ok_or(HostSwitchError::UnsupportedKeyboard)?;
     let controls = ReprogControlsV4::new(Arc::clone(&channel), keyboard_index, feature.index);
 
     let armed = arm_host_controls(&controls).await?;
@@ -153,16 +164,19 @@ pub async fn switch_linked_hosts(
     host: u8,
     channel_pool: &ChannelPool,
 ) -> Result<bool, HostSwitchError> {
-    let channel = channel_pool
-        .open(keyboard)
+    let channel = open_channel(channel_pool, keyboard, "opening keyboard channel")
         .await?
         .ok_or(HostSwitchError::KeyboardNotFound)?;
+    let mut prepared_targets = Vec::with_capacity(targets.len());
     for target in targets {
-        if let Err(error) = set_host(target, host, keyboard, &channel, channel_pool).await {
-            debug!(%error, route = %target, host, "linked device host switch failed");
-        }
+        prepared_targets
+            .push(prepare_host_change(target, host, keyboard, &channel, channel_pool).await?);
     }
-    let changed = set_host_on(&channel, keyboard.device_index(), host).await?;
+    let keyboard_change = prepare_host_change_on(&channel, keyboard.device_index(), host).await?;
+    for change in prepared_targets {
+        apply_host_change(change).await?;
+    }
+    let changed = apply_host_change(keyboard_change).await?;
     if changed {
         debug!(host, route = %keyboard, "keyboard host switched");
     }
@@ -184,12 +198,13 @@ async fn arm_host_controls_inner(
     controls: &ReprogControlsV4,
     armed: &mut Vec<ArmedControl>,
 ) -> Result<(), HostSwitchError> {
-    let count = controls.get_count().await.map_err(hidpp_error)?;
+    let count = timed_hidpp("reading host control count", controls.get_count()).await?;
     for index in 0..count {
-        let info = controls
-            .get_ctrl_id_info(index)
-            .await
-            .map_err(hidpp_error)?;
+        let info = timed_hidpp(
+            "reading host control information",
+            controls.get_ctrl_id_info(index),
+        )
+        .await?;
         let Some(host) = host_channel(info) else {
             continue;
         };
@@ -209,10 +224,11 @@ async fn arm_host_controls_inner(
             None
         };
         if let Some(mode) = mode {
-            let original = controls
-                .get_cid_reporting(info.cid)
-                .await
-                .map_err(hidpp_error)?;
+            let original = timed_hidpp(
+                "reading host control reporting",
+                controls.get_cid_reporting(info.cid),
+            )
+            .await?;
             // Record the rollback before issuing the write: a transport timeout
             // can mean that the device applied the request but its response was
             // lost, so the failing control must be restored as well.
@@ -223,21 +239,25 @@ async fn arm_host_controls_inner(
                 original,
             });
             match mode {
-                ReportingMode::Diverted => controls
-                    .set_cid_reporting(info.cid, true, false)
-                    .await
-                    .map_err(hidpp_error)?,
+                ReportingMode::Diverted => {
+                    timed_hidpp(
+                        "diverting host control",
+                        controls.set_cid_reporting(info.cid, true, false),
+                    )
+                    .await?;
+                }
                 ReportingMode::Analytics => {
-                    controls
-                        .set_cid_reporting_full(
+                    timed_hidpp(
+                        "enabling host control analytics",
+                        controls.set_cid_reporting_full(
                             info.cid,
                             reprog_controls::CidReportingChange {
                                 analytics_key_events: Some(true),
                                 ..reprog_controls::CidReportingChange::default()
                             },
-                        )
-                        .await
-                        .map_err(hidpp_error)?;
+                        ),
+                    )
+                    .await?;
                 }
             }
         }
@@ -247,10 +267,12 @@ async fn arm_host_controls_inner(
 
 async fn restore_host_controls(controls: &ReprogControlsV4, armed: Vec<ArmedControl>) {
     for control in armed {
-        let restored = controls
-            .set_cid_reporting_full(control.cid, restoration_change(control))
-            .await
-            .map(|_echo| ());
+        let restored = timed_hidpp(
+            "restoring host control reporting",
+            controls.set_cid_reporting_full(control.cid, restoration_change(control)),
+        )
+        .await
+        .map(|_echo| ());
         if let Err(error) = restored {
             debug!(
                 ?error,
@@ -275,53 +297,95 @@ fn restoration_change(control: ArmedControl) -> reprog_controls::CidReportingCha
     }
 }
 
-async fn set_host(
+struct PreparedHostChange {
+    feature: Arc<ChangeHostFeature>,
+    device_index: u8,
+    host: u8,
+    required: bool,
+}
+
+async fn prepare_host_change(
     target: &DeviceRoute,
     host: u8,
     keyboard: &DeviceRoute,
     keyboard_channel: &Arc<HidppChannel>,
     channel_pool: &ChannelPool,
-) -> Result<(), HostSwitchError> {
+) -> Result<PreparedHostChange, HostSwitchError> {
     if shares_channel(target, keyboard) {
-        set_host_on(keyboard_channel, target.device_index(), host)
-            .await
-            .map(|_| ())
+        prepare_host_change_on(keyboard_channel, target.device_index(), host).await
     } else {
-        let channel = channel_pool
-            .open(target)
+        let channel = open_channel(channel_pool, target, "opening linked device channel")
             .await?
             .ok_or(HostSwitchError::TargetNotFound)?;
-        set_host_on(&channel, target.device_index(), host)
-            .await
-            .map(|_| ())
+        prepare_host_change_on(&channel, target.device_index(), host).await
     }
 }
 
-async fn set_host_on(
+async fn prepare_host_change_on(
     channel: &Arc<HidppChannel>,
     device_index: u8,
     host: u8,
-) -> Result<bool, HostSwitchError> {
-    let mut device = Device::new(Arc::clone(channel), device_index)
-        .await
-        .map_err(hidpp_error)?;
-    let info = device
-        .root()
-        .get_feature(ChangeHostFeature::ID)
-        .await
-        .map_err(hidpp_error)?
-        .ok_or_else(|| HostSwitchError::Hidpp("ChangeHost is unsupported".into()))?;
+) -> Result<PreparedHostChange, HostSwitchError> {
+    let mut device = timed_hidpp(
+        "opening host-change device",
+        Device::new(Arc::clone(channel), device_index),
+    )
+    .await?;
+    let info = timed_hidpp(
+        "locating host-change feature",
+        device.root().get_feature(ChangeHostFeature::ID),
+    )
+    .await?
+    .ok_or_else(|| HostSwitchError::Hidpp("ChangeHost is unsupported".into()))?;
     let change_host = device.add_feature::<ChangeHostFeature>(info.index);
-    let state = change_host.get_host_info().await.map_err(hidpp_error)?;
-    if !host_change_required(state.current_host, state.host_count, host)? {
+    let state = timed_hidpp("reading current host", change_host.get_host_info()).await?;
+    let required = host_change_required(state.current_host, state.host_count, host)?;
+    Ok(PreparedHostChange {
+        feature: change_host,
+        device_index,
+        host,
+        required,
+    })
+}
+
+async fn apply_host_change(change: PreparedHostChange) -> Result<bool, HostSwitchError> {
+    if !change.required {
+        let PreparedHostChange {
+            device_index, host, ..
+        } = change;
         debug!(device_index, host, "device already uses requested host");
         return Ok(false);
     }
-    change_host
-        .set_current_host(host)
-        .await
-        .map_err(hidpp_error)?;
+    timed_hidpp(
+        "writing current host",
+        change.feature.set_current_host(change.host),
+    )
+    .await?;
     Ok(true)
+}
+
+async fn open_channel(
+    channel_pool: &ChannelPool,
+    route: &DeviceRoute,
+    operation: &'static str,
+) -> Result<Option<Arc<HidppChannel>>, HostSwitchError> {
+    timeout(HIDPP_OPERATION_TIMEOUT, channel_pool.open(route))
+        .await
+        .map_err(|_| HostSwitchError::TimedOut { operation })?
+        .map_err(HostSwitchError::Hid)
+}
+
+async fn timed_hidpp<T, E>(
+    operation: &'static str,
+    future: impl Future<Output = Result<T, E>>,
+) -> Result<T, HostSwitchError>
+where
+    E: std::fmt::Debug,
+{
+    timeout(HIDPP_OPERATION_TIMEOUT, future)
+        .await
+        .map_err(|_| HostSwitchError::TimedOut { operation })?
+        .map_err(hidpp_error)
 }
 
 fn host_change_required(
