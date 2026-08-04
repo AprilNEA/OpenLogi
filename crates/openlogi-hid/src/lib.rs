@@ -45,7 +45,9 @@ pub use hires_wheel::{
     get_scroll_wheel_mode_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
     set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on,
 };
-pub use host_switch::{HostSwitchError, run_host_switch_session};
+pub use host_switch::{
+    HostSwitchError, HostSwitchStopReason, run_host_switch_session, switch_linked_hosts,
+};
 pub use hotplug::{HotplugEvent, watch_hotplug};
 pub use inventory::{Enumerator, InventoryError, enumerate};
 pub use pairing::{

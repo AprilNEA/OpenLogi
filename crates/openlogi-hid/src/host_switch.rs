@@ -24,6 +24,15 @@ use crate::{
     route::DeviceRoute,
 };
 
+/// Why an armed host-switch session is being stopped externally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostSwitchStopReason {
+    /// The keyboard remains reachable, so its controls must be restored.
+    Graceful,
+    /// The keyboard disappeared, so only local resources can be released.
+    DeviceLost,
+}
+
 const HOST_CONTROL_IDS: [(reprog_controls::ControlId, u8); 3] = [
     (reprog_controls::control_ids::HOST_SWITCH_CHANNEL_1, 0),
     (reprog_controls::control_ids::HOST_SWITCH_CHANNEL_2, 1),
@@ -68,14 +77,13 @@ pub enum HostSwitchError {
     UnsupportedKeyboard,
 }
 
-/// Capture host switch keys on `keyboard` and make `targets` follow it until
-/// `shutdown` resolves.
+/// Capture host switch keys on `keyboard` until one is pressed or `shutdown`
+/// resolves. Controls are restored before a requested host is returned.
 pub async fn run_host_switch_session(
     keyboard: DeviceRoute,
-    targets: Vec<DeviceRoute>,
-    shutdown: oneshot::Receiver<()>,
+    shutdown: oneshot::Receiver<HostSwitchStopReason>,
     channel_pool: ChannelPool,
-) -> Result<(), HostSwitchError> {
+) -> Result<Option<u8>, HostSwitchError> {
     let channel = channel_pool
         .open(&keyboard)
         .await?
@@ -118,31 +126,46 @@ pub async fn run_host_switch_session(
     info!(
         route = %keyboard,
         controls = armed.len(),
-        targets = targets.len(),
         "host switch link active"
     );
-    let result = tokio::select! {
-        _ = shutdown => Ok(()),
-        Some(host) = press_rx.recv() => {
-            for target in &targets {
-                if let Err(error) = set_host(target, host, &keyboard, &channel, &channel_pool).await {
-                    debug!(%error, route = %target, host, "linked device host switch failed");
-                }
-            }
-            // Always switch the keyboard last. This normally severs the channel,
-            // so the session ends and the manager reconnects if this host becomes
-            // active again.
-            let result = set_host_on(&channel, keyboard_index, host).await;
-            if result.is_ok() {
-                debug!(host, route = %keyboard, "keyboard host switched");
-            }
-            result
-        }
+    let outcome = tokio::select! {
+        reason = shutdown => {
+            let reason = reason.unwrap_or(HostSwitchStopReason::DeviceLost);
+            (None, reason == HostSwitchStopReason::Graceful)
+        },
+        Some(host) = press_rx.recv() => (Some(host), true),
     };
 
     drop(listener);
-    restore_host_controls(&controls, armed).await;
-    result
+    if outcome.1 {
+        restore_host_controls(&controls, armed).await;
+    }
+    Ok(outcome.0)
+}
+
+/// Move reachable targets to `host`, then move the keyboard last.
+///
+/// Returns whether the keyboard actually changed hosts.
+pub async fn switch_linked_hosts(
+    keyboard: &DeviceRoute,
+    targets: &[DeviceRoute],
+    host: u8,
+    channel_pool: &ChannelPool,
+) -> Result<bool, HostSwitchError> {
+    let channel = channel_pool
+        .open(keyboard)
+        .await?
+        .ok_or(HostSwitchError::KeyboardNotFound)?;
+    for target in targets {
+        if let Err(error) = set_host(target, host, keyboard, &channel, channel_pool).await {
+            debug!(%error, route = %target, host, "linked device host switch failed");
+        }
+    }
+    let changed = set_host_on(&channel, keyboard.device_index(), host).await?;
+    if changed {
+        debug!(host, route = %keyboard, "keyboard host switched");
+    }
+    Ok(changed)
 }
 
 async fn arm_host_controls(
@@ -242,13 +265,17 @@ async fn set_host(
     channel_pool: &ChannelPool,
 ) -> Result<(), HostSwitchError> {
     if shares_channel(target, keyboard) {
-        set_host_on(keyboard_channel, target.device_index(), host).await
+        set_host_on(keyboard_channel, target.device_index(), host)
+            .await
+            .map(|_| ())
     } else {
         let channel = channel_pool
             .open(target)
             .await?
             .ok_or(HostSwitchError::TargetNotFound)?;
-        set_host_on(&channel, target.device_index(), host).await
+        set_host_on(&channel, target.device_index(), host)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -256,7 +283,7 @@ async fn set_host_on(
     channel: &Arc<HidppChannel>,
     device_index: u8,
     host: u8,
-) -> Result<(), HostSwitchError> {
+) -> Result<bool, HostSwitchError> {
     let mut device = Device::new(Arc::clone(channel), device_index)
         .await
         .map_err(hidpp_error)?;
@@ -270,12 +297,13 @@ async fn set_host_on(
     let state = change_host.get_host_info().await.map_err(hidpp_error)?;
     if !host_change_required(state.current_host, state.host_count, host)? {
         debug!(device_index, host, "device already uses requested host");
-        return Ok(());
+        return Ok(false);
     }
     change_host
         .set_current_host(host)
         .await
-        .map_err(hidpp_error)
+        .map_err(hidpp_error)?;
+    Ok(true)
 }
 
 fn host_change_required(
