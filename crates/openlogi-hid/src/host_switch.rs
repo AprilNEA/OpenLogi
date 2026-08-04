@@ -16,7 +16,7 @@ use hidpp::{
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::{
     ChannelPool,
@@ -126,7 +126,7 @@ pub async fn run_host_switch_session(
         Some(host) = press_rx.recv() => {
             for target in &targets {
                 if let Err(error) = set_host(target, host, &keyboard, &channel, &channel_pool).await {
-                    warn!(%error, route = %target, host, "linked device host switch failed");
+                    debug!(%error, route = %target, host, "linked device host switch failed");
                 }
             }
             // Always switch the keyboard last. This normally severs the channel,
@@ -268,16 +268,27 @@ async fn set_host_on(
         .ok_or_else(|| HostSwitchError::Hidpp("ChangeHost is unsupported".into()))?;
     let change_host = device.add_feature::<ChangeHostFeature>(info.index);
     let state = change_host.get_host_info().await.map_err(hidpp_error)?;
-    if host >= state.host_count {
-        return Err(HostSwitchError::Hidpp(format!(
-            "host {host} is outside device host count {}",
-            state.host_count
-        )));
+    if !host_change_required(state.current_host, state.host_count, host)? {
+        debug!(device_index, host, "device already uses requested host");
+        return Ok(());
     }
     change_host
         .set_current_host(host)
         .await
         .map_err(hidpp_error)
+}
+
+fn host_change_required(
+    current_host: u8,
+    host_count: u8,
+    requested_host: u8,
+) -> Result<bool, HostSwitchError> {
+    if requested_host >= host_count {
+        return Err(HostSwitchError::Hidpp(format!(
+            "host {requested_host} is outside device host count {host_count}"
+        )));
+    }
+    Ok(current_host != requested_host)
 }
 
 fn shares_channel(left: &DeviceRoute, right: &DeviceRoute) -> bool {
@@ -322,7 +333,9 @@ fn event_host(
 
 #[cfg(test)]
 mod tests {
-    use super::{ArmedControl, ReportingMode, event_host, host_channel, shares_channel};
+    use super::{
+        ArmedControl, ReportingMode, event_host, host_change_required, host_channel, shares_channel,
+    };
     use crate::DeviceRoute;
     use crate::reprog_controls::{AnalyticsKeyEvent, ControlId, CtrlIdInfo, ReprogControlsEvent};
 
@@ -374,5 +387,20 @@ mod tests {
             event_host(&controls, ReprogControlsEvent::AnalyticsKeyEvents(events)),
             Some(2)
         );
+    }
+
+    #[test]
+    fn current_host_does_not_require_a_change() {
+        assert!(matches!(host_change_required(1, 3, 1), Ok(false)));
+    }
+
+    #[test]
+    fn different_valid_host_requires_a_change() {
+        assert!(matches!(host_change_required(0, 3, 2), Ok(true)));
+    }
+
+    #[test]
+    fn host_outside_device_range_is_rejected() {
+        assert!(host_change_required(0, 2, 2).is_err());
     }
 }
