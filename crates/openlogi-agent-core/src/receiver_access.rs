@@ -79,6 +79,16 @@ impl ReceiverAccess {
         Some(SessionReceiverLease { _guard: guard })
     }
 
+    /// Wait for shared access for a bounded device-I/O operation.
+    ///
+    /// Unlike long-running sessions, ordinary reads and writes must not be
+    /// dropped merely because an exclusive operation is queued. Tokio's fair
+    /// lock ordering makes them wait behind that operation instead.
+    pub async fn acquire_for_io(&self) -> SessionReceiverLease {
+        let guard = Arc::clone(&self.inner.lease).read_owned().await;
+        SessionReceiverLease { _guard: guard }
+    }
+
     /// Request and acquire exclusive receiver access for `reason`.
     ///
     /// If the returned future is cancelled while waiting, the pairing request is
@@ -185,5 +195,22 @@ mod tests {
         assert!(access.try_acquire_for_session().is_none());
         drop(transition);
         assert!(access.try_acquire_for_session().is_some());
+    }
+
+    #[tokio::test]
+    async fn bounded_io_waits_for_host_transition() {
+        let access = ReceiverAccess::default();
+        let transition = access
+            .acquire_exclusive(ExclusiveAccessReason::HostTransition)
+            .await;
+        let waiting = tokio::spawn({
+            let access = access.clone();
+            async move { access.acquire_for_io().await }
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        drop(transition);
+        assert!(waiting.await.is_ok());
     }
 }

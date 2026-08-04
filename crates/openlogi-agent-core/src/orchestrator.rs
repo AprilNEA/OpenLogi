@@ -301,6 +301,7 @@ impl Orchestrator {
         if resolution.is_some() || inverted.is_some() || dpi.is_some() || smartshift.is_some() {
             crate::hardware::reapply_mouse_volatile_in_background(
                 Some(&self.shared.capture_channel),
+                &self.shared.receiver_access,
                 route.clone(),
                 resolution,
                 inverted,
@@ -309,7 +310,11 @@ impl Orchestrator {
             );
         }
         if let Some(lighting) = self.config.lighting(key).filter(|l| l.enabled) {
-            crate::hardware::set_lighting_in_background(Some(route), &lighting);
+            crate::hardware::set_lighting_in_background(
+                &self.shared.receiver_access,
+                Some(route),
+                &lighting,
+            );
         }
     }
 
@@ -329,6 +334,7 @@ impl Orchestrator {
             let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
             crate::hardware::write_scroll_wheel_mode_in_background(
                 Some(&self.shared.capture_channel),
+                &self.shared.receiver_access,
                 (resolution.is_some() || inverted.is_some())
                     .then(|| dev.route.clone())
                     .flatten(),

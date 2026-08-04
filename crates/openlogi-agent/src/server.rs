@@ -80,7 +80,13 @@ impl Agent for AgentServer {
     }
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: u32) -> Result<(), WriteError> {
-        hardware::apply_dpi(&self.shared.capture_channel, &route, dpi).await
+        hardware::apply_dpi(
+            &self.shared.capture_channel,
+            &self.shared.receiver_access,
+            &route,
+            dpi,
+        )
+        .await
     }
 
     async fn set_lighting(
@@ -89,7 +95,7 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         lighting: Lighting,
     ) -> Result<(), WriteError> {
-        hardware::apply_lighting(&route, &lighting).await
+        hardware::apply_lighting(&self.shared.receiver_access, &route, &lighting).await
     }
 
     async fn set_smartshift(
@@ -102,6 +108,7 @@ impl Agent for AgentServer {
     ) -> Result<(), WriteError> {
         hardware::apply_smartshift(
             &self.shared.capture_channel,
+            &self.shared.receiver_access,
             &route,
             mode,
             auto_disengage,
@@ -111,7 +118,7 @@ impl Agent for AgentServer {
     }
 
     async fn read_dpi(self, _: Context, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
-        hardware::read_dpi(&route).await
+        hardware::read_dpi(&self.shared.receiver_access, &route).await
     }
 
     async fn read_smartshift(
@@ -119,7 +126,7 @@ impl Agent for AgentServer {
         _: Context,
         route: DeviceRoute,
     ) -> Result<SmartShiftStatus, WriteError> {
-        hardware::read_smartshift(&route).await
+        hardware::read_smartshift(&self.shared.receiver_access, &route).await
     }
 
     async fn request_accessibility_prompt(self, _: Context) {
