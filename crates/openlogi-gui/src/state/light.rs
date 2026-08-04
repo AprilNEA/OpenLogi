@@ -30,8 +30,17 @@ pub(super) struct PendingLightCommand {
     pending: u16,
     settings: Option<LightSettings>,
     persistent_key: Option<String>,
+    rollback_settings: LightSettings,
     previous_volatile: Option<LightSettings>,
     manual_override_rollback: Option<ManualOverrideRollback>,
+    successful_commands: Vec<LightCommand>,
+    failure: Option<String>,
+    superseded: Vec<SupersededLightCommand>,
+}
+
+struct SupersededLightCommand {
+    request_id: u64,
+    pending: u16,
     successful_commands: Vec<LightCommand>,
     failure: Option<String>,
 }
@@ -103,10 +112,12 @@ impl AppState {
                     pending: 0,
                     settings: None,
                     persistent_key: None,
+                    rollback_settings: LightSettings::default(),
                     previous_volatile: None,
                     manual_override_rollback: None,
                     successful_commands: Vec::new(),
                     failure: None,
+                    superseded: Vec::new(),
                 },
             );
             self.light_command_status =
@@ -145,6 +156,20 @@ impl AppState {
         }
     }
 
+    fn supersede_light_command(&mut self, key: &str) -> Vec<SupersededLightCommand> {
+        let Some(pending) = self.light_commands.remove(key) else {
+            return Vec::new();
+        };
+        let mut superseded = pending.superseded;
+        superseded.push(SupersededLightCommand {
+            request_id: pending.request_id,
+            pending: pending.pending,
+            successful_commands: pending.successful_commands,
+            failure: pending.failure,
+        });
+        superseded
+    }
+
     /// Consume an asynchronous light-write result from the IPC client.
     /// Results from an older request are ignored so a slow failed write cannot
     /// overwrite the status of a newer slider release.
@@ -158,17 +183,30 @@ impl AppState {
         let Some(pending) = self.light_commands.get_mut(&key) else {
             return false;
         };
-        if pending.request_id != request_id {
+        if pending.request_id == request_id {
+            pending.pending = pending.pending.saturating_sub(1);
+            match result {
+                Ok(()) => pending.successful_commands.push(command),
+                Err(error) => {
+                    pending.failure.get_or_insert_with(|| error.to_string());
+                }
+            }
+        } else if let Some(superseded) = pending
+            .superseded
+            .iter_mut()
+            .find(|superseded| superseded.request_id == request_id)
+        {
+            superseded.pending = superseded.pending.saturating_sub(1);
+            match result {
+                Ok(()) => superseded.successful_commands.push(command),
+                Err(error) => {
+                    superseded.failure.get_or_insert_with(|| error.to_string());
+                }
+            }
+        } else {
             return false;
         }
-        pending.pending = pending.pending.saturating_sub(1);
-        match result {
-            Ok(()) => pending.successful_commands.push(command),
-            Err(error) => {
-                pending.failure.get_or_insert_with(|| error.to_string());
-            }
-        }
-        if pending.pending != 0 {
+        if pending.pending != 0 || pending.superseded.iter().any(|batch| batch.pending != 0) {
             // A sibling may still be queued after the first failure. Keep the
             // request alive so later successes are reflected in the reconciled
             // GUI/config state instead of being discarded as stale.
@@ -178,8 +216,18 @@ impl AppState {
         let Some(pending) = self.light_commands.remove(&key) else {
             return false;
         };
-        let failure = pending.failure;
-        let successful_commands = pending.successful_commands;
+        let failure = pending.failure.clone().or_else(|| {
+            pending
+                .superseded
+                .iter()
+                .find_map(|batch| batch.failure.clone())
+        });
+        let successful_commands = pending
+            .superseded
+            .iter()
+            .flat_map(|batch| batch.successful_commands.iter().copied())
+            .chain(pending.successful_commands.iter().copied())
+            .collect::<Vec<_>>();
         let manual_override_rollback = pending.manual_override_rollback;
         if let Some(error) = failure {
             if successful_commands.is_empty() {
@@ -194,15 +242,7 @@ impl AppState {
                     manual_override_rollback,
                 );
             } else {
-                let mut accepted = pending
-                    .previous_volatile
-                    .or_else(|| {
-                        pending
-                            .persistent_key
-                            .as_deref()
-                            .and_then(|persistent_key| self.config.light(persistent_key))
-                    })
-                    .unwrap_or_default();
+                let mut accepted = pending.rollback_settings;
                 for &command in &successful_commands {
                     apply_light_command(&mut accepted, command);
                 }
@@ -307,22 +347,34 @@ impl AppState {
         });
         // If this request supersedes another optimistic write, both must roll
         // back to the last accepted value—not to the superseded pending value.
-        let previous_volatile = self
-            .light_commands
-            .get(&runtime_key)
-            .and_then(|pending| pending.previous_volatile)
-            .or_else(|| self.volatile_light_settings.get(&runtime_key).copied());
+        let (rollback_settings, previous_volatile) =
+            self.light_commands.get(&runtime_key).map_or_else(
+                || {
+                    (
+                        previous,
+                        self.volatile_light_settings.get(&runtime_key).copied(),
+                    )
+                },
+                |pending| (pending.rollback_settings, pending.previous_volatile),
+            );
         self.volatile_light_settings
             .insert(runtime_key.clone(), light);
         if !commands.is_empty() {
             let can_apply = online && route.is_some();
+            let superseded = if can_apply {
+                self.supersede_light_command(&runtime_key)
+            } else {
+                Vec::new()
+            };
             let request_id = self.begin_light_command(&runtime_key, can_apply);
             if can_apply && let Some(route) = route {
                 if let Some(pending) = self.light_commands.get_mut(&runtime_key) {
                     pending.settings = Some(light);
                     pending.persistent_key.clone_from(&key);
+                    pending.rollback_settings = rollback_settings;
                     pending.previous_volatile = previous_volatile;
                     pending.manual_override_rollback = manual_override_rollback;
+                    pending.superseded = superseded;
                 }
                 for command in commands {
                     self.queue_light_command(&runtime_key, request_id, route.clone(), command);
@@ -361,11 +413,16 @@ impl AppState {
             return;
         }
 
-        let previous_volatile = self
-            .light_commands
-            .get(&runtime_key)
-            .and_then(|pending| pending.previous_volatile)
-            .or_else(|| self.volatile_light_settings.get(&runtime_key).copied());
+        let (rollback_settings, previous_volatile) =
+            self.light_commands.get(&runtime_key).map_or_else(
+                || {
+                    (
+                        light,
+                        self.volatile_light_settings.get(&runtime_key).copied(),
+                    )
+                },
+                |pending| (pending.rollback_settings, pending.previous_volatile),
+            );
         let manual_override_rollback = self
             .light_commands
             .get(&runtime_key)
@@ -382,14 +439,21 @@ impl AppState {
             .insert(runtime_key.clone(), light);
 
         let can_apply = online && route.is_some();
+        let superseded = if can_apply {
+            self.supersede_light_command(&runtime_key)
+        } else {
+            Vec::new()
+        };
         let request_id = self.begin_light_command(&runtime_key, can_apply);
         if can_apply && let Some(route) = route {
             if let Some(pending) = self.light_commands.get_mut(&runtime_key) {
                 pending.pending = 1;
                 pending.settings = Some(light);
                 pending.persistent_key.clone_from(&key);
+                pending.rollback_settings = rollback_settings;
                 pending.previous_volatile = previous_volatile;
                 pending.manual_override_rollback = manual_override_rollback;
+                pending.superseded = superseded;
             }
             if !self.send_ipc(crate::ipc_client::Command::SetLightManualPower(
                 route,
