@@ -20,6 +20,8 @@ use openlogi_hid::{
 };
 use tracing::{debug, warn};
 
+use crate::receiver_access::ReceiverAccess;
+
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
 /// own, so without this an asleep / unresponsive device would hang (and leak)
 /// this background thread forever; a write to a live device completes in well
@@ -88,6 +90,7 @@ fn choose_authoritative<T>(
 pub fn toggle_smartshift_in_background(
     capture: Option<&CaptureChannel>,
     registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
     target: Option<DeviceRoute>,
 ) {
     let Some(target) = target else {
@@ -98,6 +101,7 @@ pub fn toggle_smartshift_in_background(
         debug!(route = %target, "no inventory channel — SmartShift toggle skipped");
         return;
     };
+    let receiver_access = receiver_access.clone();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -110,6 +114,7 @@ pub fn toggle_smartshift_in_background(
             }
         };
         let result = rt.block_on(async {
+            let _lease = receiver_access.acquire_for_io().await;
             tokio::time::timeout(WRITE_BUDGET, async {
                 openlogi_hid::toggle_smartshift_on(&shared).await
             })
@@ -166,6 +171,7 @@ pub fn read_smartshift_status_blocking(
 pub fn write_smartshift_in_background(
     capture: Option<&CaptureChannel>,
     registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
     target: Option<DeviceRoute>,
     mode: SmartShiftMode,
     auto_disengage: u8,
@@ -179,6 +185,7 @@ pub fn write_smartshift_in_background(
         debug!(route = %target, "no inventory channel — SmartShift write skipped");
         return;
     };
+    let receiver_access = receiver_access.clone();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -191,6 +198,7 @@ pub fn write_smartshift_in_background(
             }
         };
         let result = rt.block_on(async {
+            let _lease = receiver_access.acquire_for_io().await;
             tokio::time::timeout(WRITE_BUDGET, async {
                 openlogi_hid::set_smartshift_on(&shared, mode, auto_disengage, tunable_torque).await
             })
@@ -237,6 +245,7 @@ pub struct SmartShiftApply {
 pub fn reapply_mouse_volatile_in_background(
     capture: Option<&CaptureChannel>,
     registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
     target: DeviceRoute,
     resolution: Option<ScrollResolution>,
     inverted: Option<bool>,
@@ -247,6 +256,7 @@ pub fn reapply_mouse_volatile_in_background(
         debug!(route = %target, "no inventory channel — volatile reapply skipped");
         return;
     };
+    let receiver_access = receiver_access.clone();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -260,6 +270,7 @@ pub fn reapply_mouse_volatile_in_background(
         };
         let index = target.device_index();
         rt.block_on(async {
+            let _lease = receiver_access.acquire_for_io().await;
             if resolution.is_some() || inverted.is_some() {
                 let result = tokio::time::timeout(WRITE_BUDGET, async {
                     apply_wheel_mode(&shared, resolution, inverted).await
@@ -371,6 +382,7 @@ fn log_wheel_result(
 pub fn write_dpi_in_background(
     capture: Option<&CaptureChannel>,
     registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
     target: Option<DeviceRoute>,
     dpi: u32,
 ) {
@@ -382,6 +394,7 @@ pub fn write_dpi_in_background(
         debug!(route = %target, "no inventory channel — DPI write skipped");
         return;
     };
+    let receiver_access = receiver_access.clone();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -400,6 +413,7 @@ pub fn write_dpi_in_background(
             return;
         };
         let result = rt.block_on(async {
+            let _lease = receiver_access.acquire_for_io().await;
             tokio::time::timeout(WRITE_BUDGET, async {
                 openlogi_hid::set_dpi_on(&shared, dpi_u16).await
             })
@@ -439,6 +453,7 @@ enum ScrollWheelModeChange {
 pub fn write_scroll_wheel_mode_in_background(
     capture: Option<&CaptureChannel>,
     registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
     target: Option<DeviceRoute>,
     resolution: Option<ScrollResolution>,
     inverted: Option<bool>,
@@ -467,6 +482,7 @@ pub fn write_scroll_wheel_mode_in_background(
         debug!(route = %target, "no inventory channel — wheel mode write skipped");
         return;
     };
+    let receiver_access = receiver_access.clone();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -479,6 +495,7 @@ pub fn write_scroll_wheel_mode_in_background(
             }
         };
         let result = rt.block_on(async {
+            let _lease = receiver_access.acquire_for_io().await;
             tokio::time::timeout(WRITE_BUDGET, async {
                 match change {
                     ScrollWheelModeChange::ResolutionAndInversion {
@@ -530,6 +547,7 @@ pub fn write_scroll_wheel_mode_in_background(
 pub fn set_lighting_in_background(
     capture: Option<&CaptureChannel>,
     registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
     target: Option<DeviceRoute>,
     lighting: &Lighting,
 ) {
@@ -542,6 +560,7 @@ pub fn set_lighting_in_background(
         return;
     };
     let (r, g, b) = lighting_rgb(lighting);
+    let receiver_access = receiver_access.clone();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -553,7 +572,11 @@ pub fn set_lighting_in_background(
                 return;
             }
         };
-        match rt.block_on(openlogi_hid::set_keyboard_color_on(&shared, r, g, b)) {
+        let result = rt.block_on(async {
+            let _lease = receiver_access.acquire_for_io().await;
+            openlogi_hid::set_keyboard_color_on(&shared, r, g, b).await
+        });
+        match result {
             Ok(()) => debug!(r, g, b, "lighting written to keyboard"),
             Err(e) => warn!(error = ?e, "lighting write failed"),
         }
@@ -582,6 +605,7 @@ fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
 pub async fn apply_dpi(
     capture: &CaptureChannel,
     registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
     route: &DeviceRoute,
     dpi: u32,
 ) -> Result<(), WriteError> {
@@ -592,6 +616,7 @@ pub async fn apply_dpi(
         feature_hex: 0x2201,
         kind: HidppFeatureErrorKind::OutOfRange,
     })?;
+    let _lease = receiver_access.acquire_for_io().await;
     let shared = authoritative_channel(Some(capture), registry, route)?;
     timed(
         HidppOperation::WriteDpi,
@@ -604,11 +629,13 @@ pub async fn apply_dpi(
 pub async fn apply_smartshift(
     capture: &CaptureChannel,
     registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
     route: &DeviceRoute,
     mode: SmartShiftMode,
     auto_disengage: u8,
     tunable_torque: u8,
 ) -> Result<(), WriteError> {
+    let _lease = receiver_access.acquire_for_io().await;
     let shared = authoritative_channel(Some(capture), registry, route)?;
     timed(
         HidppOperation::WriteSmartShift,
@@ -621,9 +648,11 @@ pub async fn apply_smartshift(
 pub async fn apply_lighting(
     capture: &CaptureChannel,
     registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
     route: &DeviceRoute,
     lighting: &Lighting,
 ) -> Result<(), WriteError> {
+    let _lease = receiver_access.acquire_for_io().await;
     let shared = authoritative_channel(Some(capture), registry, route)?;
     let (r, g, b) = lighting_rgb(lighting);
     timed(
@@ -637,8 +666,10 @@ pub async fn apply_lighting(
 pub async fn read_dpi(
     capture: &CaptureChannel,
     registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
     route: &DeviceRoute,
 ) -> Result<DpiInfo, WriteError> {
+    let _lease = receiver_access.acquire_for_io().await;
     let shared = authoritative_channel(Some(capture), registry, route)?;
     timed(
         HidppOperation::ReadDpiCapabilities,
@@ -651,8 +682,10 @@ pub async fn read_dpi(
 pub async fn read_smartshift(
     capture: &CaptureChannel,
     registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
     route: &DeviceRoute,
 ) -> Result<SmartShiftStatus, WriteError> {
+    let _lease = receiver_access.acquire_for_io().await;
     let shared = authoritative_channel(Some(capture), registry, route)?;
     timed(
         HidppOperation::ReadSmartShift,

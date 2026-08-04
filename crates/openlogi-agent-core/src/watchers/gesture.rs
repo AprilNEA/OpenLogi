@@ -35,7 +35,7 @@ use tracing::{debug, warn};
 
 use crate::DpiCycleState;
 use crate::hook_runtime::{self, SharedHookMaps};
-use crate::receiver_access::{SessionReceiverLease, ReceiverAccess};
+use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
 
 /// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
 /// direction). The watcher reads it to map a captured swipe to a bound action.
@@ -316,6 +316,7 @@ async fn manage(
                         dpi_cycle: &dpi_cycle,
                         capture: &capture_channel,
                         registry: registry.as_ref(),
+                        receiver_access: &receiver_access,
                     },
                     &thumbwheel_sensitivity,
                 );
@@ -450,6 +451,7 @@ struct DispatchHardware<'a> {
     dpi_cycle: &'a Arc<RwLock<DpiCycleState>>,
     capture: &'a CaptureChannel,
     registry: Option<&'a ChannelRegistry>,
+    receiver_access: &'a ReceiverAccess,
 }
 
 fn dispatch(
@@ -473,6 +475,7 @@ fn dispatch(
                     hardware.dpi_cycle,
                     hardware.capture,
                     hardware.registry,
+                    hardware.receiver_access,
                 );
             } else {
                 debug!(?direction, "gesture with no binding — ignored");
@@ -500,6 +503,7 @@ fn dispatch(
                         hardware.dpi_cycle,
                         hardware.capture,
                         hardware.registry,
+                        hardware.receiver_access,
                     );
                 }
             } else {
@@ -538,6 +542,7 @@ fn dispatch(
                         hardware.dpi_cycle,
                         hardware.capture,
                         hardware.registry,
+                        hardware.receiver_access,
                     );
                 }
             }

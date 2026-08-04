@@ -243,6 +243,7 @@ async fn run(config: Config) {
                             shared.dpi_cycle.clone(),
                             shared.capture_channel.clone(),
                             shared.channel_registry.clone(),
+                            shared.receiver_access.clone(),
                             Arc::clone(&event_monitor),
                         );
                         hook_installed.store(hook.is_some(), Ordering::Relaxed);

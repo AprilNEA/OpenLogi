@@ -305,6 +305,7 @@ impl Orchestrator {
             crate::hardware::reapply_mouse_volatile_in_background(
                 Some(&self.shared.capture_channel),
                 &self.shared.channel_registry,
+                &self.shared.receiver_access,
                 route.clone(),
                 resolution,
                 inverted,
@@ -316,6 +317,7 @@ impl Orchestrator {
             crate::hardware::set_lighting_in_background(
                 Some(&self.shared.capture_channel),
                 &self.shared.channel_registry,
+                &self.shared.receiver_access,
                 Some(route),
                 &lighting,
             );
@@ -339,6 +341,7 @@ impl Orchestrator {
             crate::hardware::write_scroll_wheel_mode_in_background(
                 Some(&self.shared.capture_channel),
                 &self.shared.channel_registry,
+                &self.shared.receiver_access,
                 (resolution.is_some() || inverted.is_some())
                     .then(|| dev.route.clone())
                     .flatten(),

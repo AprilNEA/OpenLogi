@@ -83,6 +83,7 @@ impl Agent for AgentServer {
         hardware::apply_dpi(
             &self.shared.capture_channel,
             &self.shared.channel_registry,
+            &self.shared.receiver_access,
             &route,
             dpi,
         )
@@ -98,6 +99,7 @@ impl Agent for AgentServer {
         hardware::apply_lighting(
             &self.shared.capture_channel,
             &self.shared.channel_registry,
+            &self.shared.receiver_access,
             &route,
             &lighting,
         )
@@ -115,6 +117,7 @@ impl Agent for AgentServer {
         hardware::apply_smartshift(
             &self.shared.capture_channel,
             &self.shared.channel_registry,
+            &self.shared.receiver_access,
             &route,
             mode,
             auto_disengage,
@@ -127,6 +130,7 @@ impl Agent for AgentServer {
         hardware::read_dpi(
             &self.shared.capture_channel,
             &self.shared.channel_registry,
+            &self.shared.receiver_access,
             &route,
         )
         .await
@@ -140,6 +144,7 @@ impl Agent for AgentServer {
         hardware::read_smartshift(
             &self.shared.capture_channel,
             &self.shared.channel_registry,
+            &self.shared.receiver_access,
             &route,
         )
         .await
