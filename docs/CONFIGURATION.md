@@ -31,7 +31,10 @@ MX Master 4):
 - `lighting` — static RGB colour, brightness (0–100), and on/off for wired
   RGB keyboards.
 - `gesture_owner` — which button owns the gesture role, when chosen
-  explicitly (otherwise inferred).
+  explicitly (otherwise inferred). Set it to `"Off"` to stop OpenLogi gesture
+  handling while leaving the dedicated control's native firmware action
+  intact, or `"Disabled"` to divert and discard that control so pressing it
+  has no effect.
 
 The app-wide `[app_settings]` block holds `launch_at_login`,
 `check_for_updates`, and `auto_install_updates` (all off by default);
@@ -65,6 +68,8 @@ appearance = "system"
 
 [devices.2b042]
 dpi_presets = [800, 1600, 3200]
+# Keep the dedicated control inactive instead of restoring its native action.
+gesture_owner = "Disabled"
 
 [devices.2b042.bindings]
 Back = "BrowserBack"

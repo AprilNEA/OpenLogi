@@ -291,7 +291,7 @@ impl Config {
             return Some(ButtonId::GestureButton);
         };
         match device.gesture_owner {
-            Some(GestureOwner::Off) => None,
+            Some(GestureOwner::Off | GestureOwner::Disabled) => None,
             Some(GestureOwner::Button(id)) => Some(id),
             None => Self::infer_gesture_owner(&device.bindings),
         }
@@ -349,6 +349,25 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .gesture_owner = Some(GestureOwner::Off);
+    }
+
+    /// Disable the dedicated gesture control completely. Unlike
+    /// [`Self::disable_gestures`], this asks the runtime to divert and discard
+    /// the control's button reports so its native firmware action cannot fire.
+    pub fn disable_gesture_button(&mut self, device_key: &str) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gesture_owner = Some(GestureOwner::Disabled);
+    }
+
+    /// Whether the dedicated gesture control is explicitly disabled and should
+    /// be diverted without raw-XY reporting.
+    #[must_use]
+    pub fn gesture_button_disabled(&self, device_key: &str) -> bool {
+        self.devices
+            .get(device_key)
+            .is_some_and(|device| device.gesture_owner == Some(GestureOwner::Disabled))
     }
 
     /// Resolve the effective binding map for `device_key`, overlaying the
@@ -1389,6 +1408,30 @@ Back = \"BrowserBack\"
             }
             other => panic!("expected the gesture map preserved while off, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn disabled_gesture_button_is_distinct_from_native_off_and_preserves_maps() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_direction(
+            "2b042",
+            ButtonId::GestureButton,
+            GestureDirection::Up,
+            Action::Copy,
+        );
+        cfg.disable_gesture_button("2b042");
+
+        assert_eq!(cfg.gesture_owner("2b042"), None);
+        assert!(cfg.gesture_button_disabled("2b042"));
+        assert!(matches!(
+            cfg.bindings_for("2b042").get(&ButtonId::GestureButton),
+            Some(Binding::Gesture(map)) if map.get(&GestureDirection::Up) == Some(&Action::Copy)
+        ));
+
+        let parsed = write_and_read(&cfg);
+        assert!(parsed.gesture_button_disabled("2b042"));
+        let body = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(body.contains("gesture_owner = \"Disabled\""), "got: {body}");
     }
 
     #[test]

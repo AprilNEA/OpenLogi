@@ -11,7 +11,7 @@
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::config::{Config, ScrollResolution};
@@ -55,6 +55,9 @@ pub struct SharedRuntime {
     /// gesture watcher for the thumb-wheel/DPI-button single actions.
     pub hook_maps: SharedHookMaps,
     pub gesture_bindings: GestureBindings,
+    /// Whether the dedicated gesture control should be diverted and discarded
+    /// without enabling raw-XY motion.
+    pub gesture_button_disabled: Arc<AtomicBool>,
     pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
     pub thumbwheel_sensitivity: Arc<AtomicI32>,
     pub capture_channel: CaptureChannel,
@@ -106,6 +109,7 @@ impl Orchestrator {
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
+            gesture_button_disabled: Arc::new(AtomicBool::new(false)),
             dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
             thumbwheel_sensitivity: Arc::new(AtomicI32::new(
                 config.app_settings.thumbwheel_sensitivity,
@@ -163,6 +167,10 @@ impl Orchestrator {
             &self.shared.hook_maps,
             self.hook_maps_for(key, self.current_app.as_deref()),
             "hook_maps",
+        );
+        self.shared.gesture_button_disabled.store(
+            key.is_some_and(|key| self.config.gesture_button_disabled(key)),
+            Ordering::Relaxed,
         );
         write_value(
             &self.shared.gesture_bindings,
