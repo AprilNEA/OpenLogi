@@ -20,7 +20,7 @@ use openlogi_hid::{CaptureChannel, DeviceRoute};
 use tracing::warn;
 
 use crate::DpiCycleState;
-use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
+use crate::bindings::{bindings_for, gesture_bindings_for_app, oshook_gestures_for};
 use crate::device_order::DeviceStableId;
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::ipc::InventoryHealth;
@@ -166,7 +166,7 @@ impl Orchestrator {
         );
         write_value(
             &self.shared.gesture_bindings,
-            gesture_bindings_for(&self.config, key),
+            gesture_bindings_for_app(&self.config, key, self.current_app.as_deref()),
             "gesture_bindings",
         );
         write_value(
@@ -336,11 +336,10 @@ impl Orchestrator {
         self.config.app_settings.launch_at_login
     }
 
-    /// Foreground-app change → re-overlay per-app bindings on the hook maps (DPI
-    /// and the dedicated HID++ gesture map are not app-scoped, so they're untouched).
-    /// Both hook maps are recomputed: a per-app override of the gesture owner
-    /// turns it into a single action for that app, dropping it from the OS-hook
-    /// gesture set — so the gesture map is app-scoped too.
+    /// Foreground-app change → re-overlay per-app bindings on the hook maps and
+    /// the dedicated HID++ gesture button's plain-click action. Both hook maps
+    /// are recomputed: a per-app override of the gesture owner turns it into a
+    /// single action for that app, dropping it from the OS-hook gesture set.
     pub fn set_current_app(&mut self, bundle: Option<String>) {
         if bundle == self.current_app {
             return;
@@ -350,6 +349,15 @@ impl Orchestrator {
             &self.shared.hook_maps,
             self.hook_maps_for(self.current_key(), self.current_app.as_deref()),
             "hook_maps",
+        );
+        write_value(
+            &self.shared.gesture_bindings,
+            gesture_bindings_for_app(
+                &self.config,
+                self.current_key(),
+                self.current_app.as_deref(),
+            ),
+            "gesture_bindings",
         );
     }
 
@@ -522,6 +530,7 @@ mod tests {
         AgentDevice, InventoryHealth, Orchestrator, build_devices, configured_wheel_mode,
         plan_reapply, reapply_targets,
     };
+    use openlogi_core::binding::{Action, ButtonId, GestureDirection};
     use openlogi_core::config::{Config, ScrollResolution};
     use openlogi_core::device::{
         Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice,
@@ -580,6 +589,14 @@ mod tests {
         let devices = build_devices(&[direct_inventory(Some("ABC123"), [0; 4])]);
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].config_key, "direct:046d:b023:serial:abc123");
+    }
+
+    fn gesture_click(orch: &Orchestrator) -> Option<Action> {
+        orch.shared
+            .gesture_bindings
+            .read()
+            .ok()
+            .and_then(|bindings| bindings.get(&GestureDirection::Click).cloned())
     }
 
     #[test]
@@ -745,5 +762,37 @@ mod tests {
         assert_eq!(orch.inventory_health(), InventoryHealth::Ready);
         orch.mark_inventory_unavailable();
         assert_eq!(orch.inventory_health(), InventoryHealth::Ready);
+    }
+
+    #[test]
+    fn foreground_app_updates_dedicated_gesture_click() {
+        let mut config = Config::default();
+        config.set_gesture_owner("2b042", ButtonId::GestureButton);
+        config.set_per_app_binding(
+            "2b042",
+            "com.apple.Safari",
+            ButtonId::GestureButton,
+            Some(Action::BrowserBack),
+        );
+        let mut orch = Orchestrator::new(config);
+        orch.devices.push(AgentDevice {
+            config_key: "2b042".into(),
+            model_key: "2b042".into(),
+            route: None,
+            slot: 0,
+            serial: None,
+            unit_id: [0; 4],
+            capabilities: None,
+            online: true,
+        });
+        orch.rebuild();
+
+        assert_eq!(gesture_click(&orch), Some(Action::AppExpose));
+
+        orch.set_current_app(Some("com.apple.Safari".into()));
+        assert_eq!(gesture_click(&orch), Some(Action::BrowserBack));
+
+        orch.set_current_app(Some("com.other.App".into()));
+        assert_eq!(gesture_click(&orch), Some(Action::AppExpose));
     }
 }
