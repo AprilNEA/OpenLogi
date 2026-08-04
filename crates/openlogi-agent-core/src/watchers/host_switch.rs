@@ -46,8 +46,9 @@ async fn manage(
     receiver_access: ReceiverAccess,
 ) {
     let mut current = Vec::new();
-    let mut stops = Vec::new();
-    let (done_tx, mut done_rx) = mpsc::unbounded_channel();
+    let mut sessions = Vec::new();
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<u64>();
+    let mut generation = 0_u64;
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
 
     loop {
@@ -61,18 +62,19 @@ async fn manage(
                 if wanted == current {
                     continue;
                 }
-                stop_all(&mut stops);
+                stop_all(&mut sessions).await;
                 current.clone_from(&wanted);
+                generation = generation.wrapping_add(1);
                 for link in wanted {
                     let (stop_tx, stop_rx) = oneshot::channel();
-                    stops.push(stop_tx);
                     let done = done_tx.clone();
                     let pool = channel_pool.clone();
                     let Some(receiver_lease) = receiver_access.try_acquire_for_session() else {
                         current.clear();
                         break;
                     };
-                    tokio::spawn(async move {
+                    let session_generation = generation;
+                    let task = tokio::spawn(async move {
                         let _receiver_lease = receiver_lease;
                         let keyboard = link.keyboard.clone();
                         if let Err(error) =
@@ -80,23 +82,40 @@ async fn manage(
                         {
                             debug!(%error, route = %keyboard, "host switch session ended");
                         }
-                        let _ = done.send(());
+                        let _ = done.send(session_generation);
+                    });
+                    sessions.push(RunningSession {
+                        stop: stop_tx,
+                        task,
                     });
                 }
             }
-            Some(()) = done_rx.recv() => {
+            Some(done_generation) = done_rx.recv() => {
                 // A host switch intentionally disconnects the keyboard. Clear
                 // the local snapshot so the next tick attempts to arm it again;
                 // this also recovers transient setup/read failures.
-                stop_all(&mut stops);
-                current.clear();
+                if done_generation == generation && !sessions.is_empty() {
+                    stop_all(&mut sessions).await;
+                    current.clear();
+                }
             }
         }
     }
 }
 
-fn stop_all(stops: &mut Vec<oneshot::Sender<()>>) {
-    for stop in stops.drain(..) {
+struct RunningSession {
+    stop: oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+async fn stop_all(sessions: &mut Vec<RunningSession>) {
+    let running = std::mem::take(sessions);
+    let mut tasks = Vec::with_capacity(running.len());
+    for RunningSession { stop, task } in running {
         let _ = stop.send(());
+        tasks.push(task);
+    }
+    for task in tasks {
+        let _ = task.await;
     }
 }

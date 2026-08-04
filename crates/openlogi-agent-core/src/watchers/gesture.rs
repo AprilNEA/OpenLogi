@@ -26,7 +26,9 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
-use openlogi_hid::{CaptureChannel, CapturedInput, ChannelPool, DeviceRoute, run_capture_session};
+use openlogi_hid::{
+    CaptureChannel, CaptureStopReason, CapturedInput, ChannelPool, DeviceRoute, run_capture_session,
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
@@ -157,8 +159,7 @@ async fn manage(
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
     // (route, capture_thumbwheel, divert_gesture_button)
-    let mut current: Option<(DeviceRoute, bool, bool)> = None;
-    let mut stop: Option<oneshot::Sender<()>> = None;
+    let mut current: Option<RunningSession> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut accumulators = WheelAccumulators::default();
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
@@ -208,25 +209,26 @@ async fn manage(
                         )
                     })
                 };
-                if want == current {
+                if current.as_ref().is_some_and(|session| Some(&session.spec) == want.as_ref()) {
                     continue;
                 }
                 // Target or thumb-wheel arming changed (or first tick): stop the
                 // old session and start one for the new state. Sending on the
                 // oneshot lets the old session restore the diverted controls.
-                if let Some(stop) = stop.take() {
-                    let _ = stop.send(());
-                }
                 if current.is_some() {
-                    current = None;
-                    continue;
+                    let reason = if want.is_none() && !receiver_access.pairing_requested() {
+                        CaptureStopReason::DeviceLost
+                    } else {
+                        CaptureStopReason::Graceful
+                    };
+                    stop_session(&mut current, reason).await;
                 }
                 if let Some((route, capture_thumbwheel, divert_gesture_button)) = want {
                     let Some(receiver_lease) = receiver_access.try_acquire_for_session() else {
                         current = None;
                         continue;
                     };
-                    current = Some((route.clone(), capture_thumbwheel, divert_gesture_button));
+                    let spec = (route.clone(), capture_thumbwheel, divert_gesture_button);
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
                     let slot = Arc::clone(&capture_channel);
@@ -234,7 +236,7 @@ async fn manage(
                     epoch = epoch.wrapping_add(1);
                     let session_epoch = epoch;
                     let done = done_tx.clone();
-                    tokio::spawn(async move {
+                    let task = tokio::spawn(async move {
                         let _receiver_lease = receiver_lease;
                         if let Err(e) = run_capture_session(
                             route,
@@ -253,9 +255,12 @@ async fn manage(
                         // was unexpected rather than a deliberate stop.
                         let _ = done.send(session_epoch);
                     });
-                    stop = Some(stop_tx);
-                } else {
-                    current = None;
+                    current = Some(RunningSession {
+                        spec,
+                        epoch: session_epoch,
+                        stop: stop_tx,
+                        task,
+                    });
                 }
             }
             Some(done_epoch) = done_rx.recv() => {
@@ -265,17 +270,32 @@ async fn manage(
                 // The tick fires at most once per `TARGET_POLL`, which paces the
                 // respawn so a permanently failing device can't hot-loop. A stale
                 // epoch or a deliberate stop-to-idle is a no-op (see `should_rearm`).
-                if should_rearm(done_epoch, epoch, current.is_some()) {
+                if should_rearm(
+                    done_epoch,
+                    current.as_ref().map_or(epoch, |session| session.epoch),
+                    current.is_some(),
+                ) {
                     warn!("capture session for the active device ended unexpectedly, re-arming");
-                    current = None;
-                    // Keep the `stop`/`current` invariant: the session already
-                    // exited, so its stop receiver is gone and dropping the sender
-                    // here is a no-op, but it stops the next tick from signalling a
-                    // session that no longer exists.
-                    stop = None;
+                    if let Some(session) = current.take() {
+                        let _ = session.task.await;
+                    }
                 }
             }
         }
+    }
+}
+
+struct RunningSession {
+    spec: (DeviceRoute, bool, bool),
+    epoch: u64,
+    stop: oneshot::Sender<CaptureStopReason>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+async fn stop_session(current: &mut Option<RunningSession>, reason: CaptureStopReason) {
+    if let Some(session) = current.take() {
+        let _ = session.stop.send(reason);
+        let _ = session.task.await;
     }
 }
 
