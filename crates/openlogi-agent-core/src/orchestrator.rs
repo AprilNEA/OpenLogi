@@ -25,7 +25,7 @@ use crate::device_order::DeviceStableId;
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::ipc::InventoryHealth;
 use crate::receiver_access::ReceiverAccess;
-use crate::watchers::gesture::GestureBindings;
+use crate::watchers::gesture::{GestureBindings, HidppGestureOwner};
 
 /// The minimal per-device facts the agent needs: the config key (binding /
 /// preset lookup), the HID++ route (DPI/SmartShift writes + capture target), and
@@ -55,6 +55,7 @@ pub struct SharedRuntime {
     /// gesture watcher for the thumb-wheel/DPI-button single actions.
     pub hook_maps: SharedHookMaps,
     pub gesture_bindings: GestureBindings,
+    pub hidpp_gesture_owner: HidppGestureOwner,
     pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
     pub thumbwheel_sensitivity: Arc<AtomicI32>,
     pub capture_channel: CaptureChannel,
@@ -106,6 +107,7 @@ impl Orchestrator {
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
+            hidpp_gesture_owner: Arc::new(RwLock::new(None)),
             dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
             thumbwheel_sensitivity: Arc::new(AtomicI32::new(
                 config.app_settings.thumbwheel_sensitivity,
@@ -168,6 +170,12 @@ impl Orchestrator {
             &self.shared.gesture_bindings,
             gesture_bindings_for(&self.config, key),
             "gesture_bindings",
+        );
+        write_value(
+            &self.shared.hidpp_gesture_owner,
+            key.and_then(|k| self.config.gesture_owner(k))
+                .filter(|owner| owner.is_hidpp_gesture_source()),
+            "hidpp_gesture_owner",
         );
         write_value(
             &self.shared.dpi_cycle,

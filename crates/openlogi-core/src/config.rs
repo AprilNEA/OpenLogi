@@ -226,10 +226,13 @@ impl Config {
     /// per-direction adapter.
     #[must_use]
     pub fn gesture_bindings_for(&self, device_key: &str) -> BTreeMap<GestureDirection, Action> {
+        let Some(owner) = self.gesture_owner(device_key) else {
+            return BTreeMap::new();
+        };
         match self
             .devices
             .get(device_key)
-            .and_then(|d| d.bindings.get(&ButtonId::GestureButton))
+            .and_then(|d| d.bindings.get(&owner))
         {
             Some(Binding::Gesture(map)) => map.clone(),
             _ => BTreeMap::new(),

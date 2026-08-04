@@ -43,6 +43,12 @@ pub const FEATURE_ID: u16 = 0x1b04;
 /// bindable/capturable input.
 pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 
+/// Control ID of the MX Master 4 Haptic Sense Panel. It is a separate
+/// raw-XY-capable control from [`GESTURE_BUTTON_CID`]. Its first raw-XY report
+/// after contact is an absolute-position jump and must not enter the swipe
+/// accumulator.
+pub const HAPTIC_PANEL_CID: u16 = 0x01a0;
+
 /// Control IDs of the "DPI / ModeShift" button family. Whichever a device
 /// exposes (and can divert) is captured and mapped to
 /// [`ButtonId::DpiToggle`](openlogi_core::binding::ButtonId::DpiToggle): the MX

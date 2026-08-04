@@ -165,6 +165,7 @@ async fn run(config: Config) {
     watchers::gesture::spawn(
         shared.hook_maps.clone(),
         shared.gesture_bindings.clone(),
+        shared.hidpp_gesture_owner.clone(),
         shared.dpi_cycle.clone(),
         shared.capture_channel.clone(),
         shared.thumbwheel_sensitivity.clone(),

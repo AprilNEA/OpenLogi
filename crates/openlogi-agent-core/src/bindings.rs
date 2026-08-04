@@ -54,13 +54,12 @@ pub fn gesture_bindings_for(
     config: &Config,
     config_key: Option<&str>,
 ) -> BTreeMap<GestureDirection, Action> {
-    // The dedicated HID++ gesture button (CID 0x00c3) only gestures while it is the device's gesture
-    // owner. When the user moves the role to an OS-hook button (Middle/Back/
-    // Forward) or turns gestures off, return an empty map so the gesture watcher
-    // dispatches nothing — otherwise the always-seeded defaults would keep the
-    // HID++ gesture button firing regardless of the selection.
+    // A HID++ gesture source (the dedicated button or the MX Master 4 haptic
+    // panel) only gestures while it owns the device's gesture role. When the
+    // user moves the role to an OS-hook button or turns gestures off, return an
+    // empty map so the capture watcher dispatches nothing.
     let owner = config_key.and_then(|key| config.gesture_owner(key));
-    if owner != Some(ButtonId::GestureButton) {
+    if !owner.is_some_and(ButtonId::is_hidpp_gesture_source) {
         return BTreeMap::new();
     }
     let stored = config_key
@@ -239,6 +238,25 @@ mod tests {
         assert!(
             gesture_bindings_for(&cfg, Some("2b042")).is_empty(),
             "HID++ gesture button must dispatch nothing once another button owns gestures"
+        );
+    }
+
+    #[test]
+    fn haptic_panel_owner_uses_its_own_gesture_map() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_owner("2b042", ButtonId::HapticPanel);
+        cfg.set_gesture_direction(
+            "2b042",
+            ButtonId::HapticPanel,
+            GestureDirection::Click,
+            Action::Copy,
+        );
+
+        let bindings = gesture_bindings_for(&cfg, Some("2b042"));
+        assert_eq!(bindings.get(&GestureDirection::Click), Some(&Action::Copy));
+        assert!(
+            oshook_gestures_for(&cfg, Some("2b042"), None).is_empty(),
+            "the haptic panel is captured over HID++, never the OS hook"
         );
     }
 }
