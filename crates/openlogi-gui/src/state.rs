@@ -1792,6 +1792,44 @@ mod tests {
         }
     }
 
+    fn superseded_litra_light() -> StandaloneDevice {
+        StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: 0x046d,
+                product_id: 0xc900,
+                usage_page: 0xff43,
+                usage_id: 0x0202,
+                identity: "serial:glow-superseded".into(),
+            },
+            display_name: "Litra Glow".into(),
+            manufacturer: Some("Logi".into()),
+            serial_number: Some("glow-superseded".into()),
+            unit_id: [0; 4],
+            kind: DeviceKind::Light,
+            online: true,
+            capabilities: None,
+            light_capabilities: Some(LightCapabilities {
+                power: true,
+                brightness: Some(
+                    LightValueRange::new(20, 250, 1, LightValueUnit::Lumens).expect("valid range"),
+                ),
+                ..LightCapabilities::default()
+            }),
+            driver_id: "litra".into(),
+        }
+    }
+
+    fn next_light_command(
+        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<crate::ipc_client::Command>,
+    ) -> (openlogi_hid::LightCommand, u64) {
+        let Ok(crate::ipc_client::Command::SetLight(_, command, _, request_id)) =
+            receiver.try_recv()
+        else {
+            panic!("expected a light command");
+        };
+        (command, request_id)
+    }
+
     #[test]
     fn transient_identity_is_not_persisted_or_retained_after_resolution() {
         let cache = AssetResolver::new();
@@ -2272,6 +2310,84 @@ mod tests {
             state.light(),
             LightSettings::new(false, LightSettings::default().brightness_percent, None)
         );
+        assert_eq!(state.config.light(&key), Some(state.light()));
+    }
+
+    #[test]
+    fn superseded_light_write_keeps_prior_successes_for_reconciliation() {
+        let light = superseded_litra_light();
+        let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[],
+            &[light],
+            &AssetResolver::new(),
+            ConfigPersistence::MemoryOnly,
+            commands,
+        );
+        let key = state
+            .current_record()
+            .expect("light record")
+            .config_key
+            .clone();
+
+        state.commit_light(LightSettings::new(false, 40, None));
+        let (first_power, first_request_id) = next_light_command(&mut receiver);
+        let (first_brightness, first_brightness_request_id) = next_light_command(&mut receiver);
+        assert_eq!(first_power, openlogi_hid::LightCommand::Power(false));
+        assert_eq!(
+            first_brightness,
+            openlogi_hid::LightCommand::BrightnessPercent(40)
+        );
+        assert_eq!(first_brightness_request_id, first_request_id);
+
+        state.commit_light(LightSettings::new(true, 60, None));
+        let (second_power, second_request_id) = next_light_command(&mut receiver);
+        let (second_brightness, second_brightness_request_id) = next_light_command(&mut receiver);
+        assert_eq!(second_power, openlogi_hid::LightCommand::Power(true));
+        assert_eq!(
+            second_brightness,
+            openlogi_hid::LightCommand::BrightnessPercent(60)
+        );
+        assert_ne!(second_request_id, first_request_id);
+        assert_eq!(second_brightness_request_id, second_request_id);
+
+        assert!(state.apply_light_command_result(
+            key.clone(),
+            second_request_id,
+            openlogi_hid::LightCommand::Power(true),
+            Ok(()),
+        ));
+        assert!(state.apply_light_command_result(
+            key.clone(),
+            second_request_id,
+            openlogi_hid::LightCommand::BrightnessPercent(60),
+            Err(WriteError::AmbiguousRawDevice),
+        ));
+        assert_eq!(state.light(), LightSettings::new(true, 60, None));
+        assert!(matches!(
+            state.light_command_status(),
+            Some(LightCommandStatus::Pending)
+        ));
+
+        assert!(state.apply_light_command_result(
+            key.clone(),
+            first_request_id,
+            openlogi_hid::LightCommand::Power(false),
+            Ok(()),
+        ));
+        assert!(state.apply_light_command_result(
+            key.clone(),
+            first_request_id,
+            openlogi_hid::LightCommand::BrightnessPercent(40),
+            Ok(()),
+        ));
+
+        assert!(matches!(
+            state.light_command_status(),
+            Some(LightCommandStatus::Failed(message)) if message.contains("multiple raw HID")
+        ));
+        assert_eq!(state.light(), LightSettings::new(true, 40, None));
         assert_eq!(state.config.light(&key), Some(state.light()));
     }
 
