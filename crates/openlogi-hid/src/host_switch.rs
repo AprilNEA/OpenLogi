@@ -201,32 +201,39 @@ async fn arm_host_controls_inner(
             "host switch control discovered"
         );
         let mode = if info.is_divertable() {
-            controls
-                .set_cid_reporting(info.cid, true, false)
-                .await
-                .map_err(hidpp_error)?;
             Some(ReportingMode::Diverted)
         } else if info.supports_analytics_events() {
-            controls
-                .set_cid_reporting_full(
-                    info.cid,
-                    reprog_controls::CidReportingChange {
-                        analytics_key_events: Some(true),
-                        ..reprog_controls::CidReportingChange::default()
-                    },
-                )
-                .await
-                .map_err(hidpp_error)?;
             Some(ReportingMode::Analytics)
         } else {
             None
         };
         if let Some(mode) = mode {
+            // Record the rollback before issuing the write: a transport timeout
+            // can mean that the device applied the request but its response was
+            // lost, so the failing control must be restored as well.
             armed.push(ArmedControl {
                 cid: info.cid,
                 host,
                 mode,
             });
+            match mode {
+                ReportingMode::Diverted => controls
+                    .set_cid_reporting(info.cid, true, false)
+                    .await
+                    .map_err(hidpp_error)?,
+                ReportingMode::Analytics => {
+                    controls
+                        .set_cid_reporting_full(
+                            info.cid,
+                            reprog_controls::CidReportingChange {
+                                analytics_key_events: Some(true),
+                                ..reprog_controls::CidReportingChange::default()
+                            },
+                        )
+                        .await
+                        .map_err(hidpp_error)?;
+                }
+            }
         }
     }
     Ok(())
