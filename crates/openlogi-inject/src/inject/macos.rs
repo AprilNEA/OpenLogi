@@ -7,7 +7,7 @@ use core_graphics::event::{
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
-use openlogi_core::binding::Action;
+use openlogi_core::binding::{Action, KeyCombo};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -31,11 +31,56 @@ const VK_W: u16 = 0x0D;
 const VK_X: u16 = 0x07;
 const VK_Z: u16 = 0x06;
 const VK_TAB: u16 = 0x30;
+const VK_HOME: u16 = 0x73;
+const VK_PAGE_UP: u16 = 0x74;
+const VK_END: u16 = 0x77;
+const VK_PAGE_DOWN: u16 = 0x79;
+const VK_LEFT_ARROW: u16 = 0x7B;
+const VK_RIGHT_ARROW: u16 = 0x7C;
+const VK_DOWN_ARROW: u16 = 0x7D;
+const VK_UP_ARROW: u16 = 0x7E;
+
+/// Translate a stored shortcut into the virtual key and flags macOS expects.
+///
+/// macOS reports Fn+Arrow as the corresponding Home/End/Page Up/Page Down
+/// virtual key with the SecondaryFn flag, rather than as a flagged arrow-key
+/// event. Reproduce both parts of that representation so apps receive native
+/// navigation behavior instead of treating the event like an ordinary arrow.
+fn custom_shortcut_event(combo: &KeyCombo) -> (u16, CGEventFlags) {
+    let mut flags = CGEventFlags::CGEventFlagNull;
+    if combo.modifiers & KeyCombo::MOD_CMD != 0 {
+        flags |= CGEventFlags::CGEventFlagCommand;
+    }
+    if combo.modifiers & KeyCombo::MOD_SHIFT != 0 {
+        flags |= CGEventFlags::CGEventFlagShift;
+    }
+    if combo.modifiers & KeyCombo::MOD_CTRL != 0 {
+        flags |= CGEventFlags::CGEventFlagControl;
+    }
+    if combo.modifiers & KeyCombo::MOD_OPTION != 0 {
+        flags |= CGEventFlags::CGEventFlagAlternate;
+    }
+    if combo.modifiers & KeyCombo::MOD_FN != 0
+        || matches!(combo.key_code, VK_PAGE_UP | VK_PAGE_DOWN)
+    {
+        flags |= CGEventFlags::CGEventFlagSecondaryFn;
+    }
+    let key_code = if combo.modifiers & KeyCombo::MOD_FN != 0 {
+        match combo.key_code {
+            VK_LEFT_ARROW => VK_HOME,
+            VK_RIGHT_ARROW => VK_END,
+            VK_UP_ARROW => VK_PAGE_UP,
+            VK_DOWN_ARROW => VK_PAGE_DOWN,
+            key_code => key_code,
+        }
+    } else {
+        combo.key_code
+    };
+    (key_code, flags)
+}
 
 /// macOS implementation: dispatch to the appropriate event helper.
 pub(super) fn execute(action: &Action) {
-    use openlogi_core::binding::KeyCombo;
-
     // Modifier bit shorthands.
     let cmd = CGEventFlags::CGEventFlagCommand;
     let shift = CGEventFlags::CGEventFlagShift;
@@ -131,20 +176,8 @@ pub(super) fn execute(action: &Action) {
                 );
                 return;
             }
-            let mut flags = CGEventFlags::CGEventFlagNull;
-            if combo.modifiers & KeyCombo::MOD_CMD != 0 {
-                flags |= CGEventFlags::CGEventFlagCommand;
-            }
-            if combo.modifiers & KeyCombo::MOD_SHIFT != 0 {
-                flags |= CGEventFlags::CGEventFlagShift;
-            }
-            if combo.modifiers & KeyCombo::MOD_CTRL != 0 {
-                flags |= CGEventFlags::CGEventFlagControl;
-            }
-            if combo.modifiers & KeyCombo::MOD_OPTION != 0 {
-                flags |= CGEventFlags::CGEventFlagAlternate;
-            }
-            post_key(combo.key_code, flags);
+            let (key_code, flags) = custom_shortcut_event(combo);
+            post_key(key_code, flags);
         }
     }
 }
@@ -430,6 +463,59 @@ mod dock {
         let sym = app_services_symbol(c"CoreDockSendNotification")?;
         // SAFETY: the symbol, when present, has the documented signature.
         Some(unsafe { std::mem::transmute::<*mut c_void, CoreDockSendNotificationFn>(sym) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_core::binding::KeyCombo;
+
+    use super::custom_shortcut_event;
+
+    #[test]
+    fn fn_arrows_use_navigation_keycodes_and_the_secondary_fn_flag() {
+        for (arrow, navigation_key) in [(0x7B, 0x73), (0x7C, 0x77), (0x7E, 0x74), (0x7D, 0x79)] {
+            let combo = KeyCombo {
+                modifiers: KeyCombo::MOD_FN,
+                key_code: arrow,
+                display: String::new(),
+            };
+
+            let (key_code, flags) = custom_shortcut_event(&combo);
+
+            assert_eq!(key_code, navigation_key);
+            assert!(flags.contains(core_graphics::event::CGEventFlags::CGEventFlagSecondaryFn));
+        }
+    }
+
+    #[test]
+    fn fn_modifier_preserves_non_arrow_keycodes() {
+        let combo = KeyCombo {
+            modifiers: KeyCombo::MOD_FN,
+            key_code: 0x23, // kVK_ANSI_P
+            display: String::new(),
+        };
+
+        let (key_code, flags) = custom_shortcut_event(&combo);
+
+        assert_eq!(key_code, 0x23);
+        assert!(flags.contains(core_graphics::event::CGEventFlags::CGEventFlagSecondaryFn));
+    }
+
+    #[test]
+    fn page_keys_preserve_the_secondary_fn_flag_used_by_macos() {
+        for key_code in [0x74, 0x79] {
+            let combo = KeyCombo {
+                modifiers: 0,
+                key_code,
+                display: String::new(),
+            };
+
+            let (actual_key_code, flags) = custom_shortcut_event(&combo);
+
+            assert_eq!(actual_key_code, key_code);
+            assert!(flags.contains(core_graphics::event::CGEventFlags::CGEventFlagSecondaryFn));
+        }
     }
 }
 

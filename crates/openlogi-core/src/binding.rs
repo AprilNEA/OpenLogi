@@ -399,6 +399,8 @@ impl KeyCombo {
     pub const MOD_CTRL: u8 = 1 << 2;
     /// Bit for the ⌥ Option/Alt modifier in [`Self::modifiers`].
     pub const MOD_OPTION: u8 = 1 << 3;
+    /// Bit for the macOS Fn/Globe modifier in [`Self::modifiers`].
+    pub const MOD_FN: u8 = 1 << 4;
 
     /// Build the human-readable label from the modifier bitmask + key code.
     /// Falls back to `"⌘key 0xNN"` when the key code isn't one of the
@@ -410,6 +412,9 @@ impl KeyCombo {
             return self.display.clone();
         }
         let mut out = String::new();
+        if self.modifiers & Self::MOD_FN != 0 {
+            out.push_str("fn");
+        }
         if self.modifiers & Self::MOD_CTRL != 0 {
             out.push('⌃');
         }
@@ -442,6 +447,12 @@ impl KeyCombo {
             0x22 => out.push('I'),
             0x1F => out.push('O'),
             0x23 => out.push('P'),
+            0x74 => out.push_str("Page Up"),
+            0x79 => out.push_str("Page Down"),
+            0x7B => out.push('←'),
+            0x7C => out.push('→'),
+            0x7D => out.push('↓'),
+            0x7E => out.push('↑'),
             _ => {
                 use std::fmt::Write as _;
                 let _ = write!(out, "key 0x{:02X}", self.key_code);
@@ -1003,6 +1014,40 @@ mod tests {
             display: String::new(),
         };
         assert_eq!(combo.rendered_label(), "⇧⌘P");
+    }
+
+    #[test]
+    fn key_combo_rendered_label_includes_fn_and_navigation_key() {
+        let combo = KeyCombo {
+            modifiers: KeyCombo::MOD_FN,
+            key_code: 0x7D, // Down Arrow
+            display: String::new(),
+        };
+        assert_eq!(combo.rendered_label(), "fn↓");
+    }
+
+    #[test]
+    fn key_combo_rendered_label_places_fn_before_other_modifiers() {
+        let combo = KeyCombo {
+            modifiers: KeyCombo::MOD_FN
+                | KeyCombo::MOD_CTRL
+                | KeyCombo::MOD_OPTION
+                | KeyCombo::MOD_SHIFT
+                | KeyCombo::MOD_CMD,
+            key_code: 0x7D, // Down Arrow
+            display: String::new(),
+        };
+        assert_eq!(combo.rendered_label(), "fn⌃⌥⇧⌘↓");
+    }
+
+    #[test]
+    fn fn_custom_shortcut_roundtrips_toml() {
+        let action = Action::CustomShortcut(KeyCombo {
+            modifiers: KeyCombo::MOD_FN,
+            key_code: 0x7E, // Up Arrow
+            display: String::new(),
+        });
+        assert_eq!(roundtrip(&action), action);
     }
 
     // ── Category tests ────────────────────────────────────────────────────────
