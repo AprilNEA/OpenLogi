@@ -155,15 +155,18 @@ fn light_worker_loop(
             &target,
             &request.settings,
             request.capabilities,
+            &generation,
+            request.generation,
         ));
         match result {
-            Ok(()) => info!(
+            Ok(true) => info!(
                 route = %target,
                 enabled = request.settings.enabled,
                 brightness = request.settings.brightness_percent,
                 temperature = ?request.settings.temperature_kelvin,
                 "light re-apply completed"
             ),
+            Ok(false) => debug!(route = %target, "skipping canceled light re-apply"),
             Err(error) => warn!(route = %target, error = ?error, "light settings re-apply failed"),
         }
     }
@@ -173,13 +176,21 @@ async fn apply_light_settings(
     target: &DeviceRoute,
     light: &LightSettings,
     capabilities: LightCapabilities,
-) -> Result<(), WriteError> {
+    generation: &AtomicU64,
+    expected_generation: u64,
+) -> Result<bool, WriteError> {
     let lock = light_write_lock(target);
     let _guard = lock.lock().await;
+    // The request may have passed the queue check while an explicit command
+    // held the route lock. Re-check under that lock before writing anything so
+    // a canceled re-apply cannot overwrite the newer explicit state.
+    if generation.load(Ordering::Acquire) != expected_generation {
+        return Ok(false);
+    }
     for command in commands_for_light_settings(*light, capabilities) {
         apply_light_unlocked(target, command).await?;
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Apply a semantic command to a supported standalone light.
