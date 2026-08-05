@@ -26,13 +26,16 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
+use openlogi_hid::{
+    CaptureChannel, CaptureStop, CapturedInput, ChannelRegistry, DeviceRoute, run_capture_session,
+    run_capture_session_with_registry,
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use crate::DpiCycleState;
 use crate::hook_runtime::{self, SharedHookMaps};
-use crate::receiver_access::ReceiverAccess;
+use crate::receiver_access::{CaptureReceiverLease, ReceiverAccess};
 
 /// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
 /// direction). The watcher reads it to map a captured swipe to a bound action.
@@ -82,6 +85,47 @@ pub fn spawn(
     thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
 ) {
+    spawn_inner(
+        hook_maps,
+        gesture_bindings,
+        dpi_cycle,
+        capture_channel,
+        thumbwheel_sensitivity,
+        receiver_access,
+        None,
+    );
+}
+
+/// Spawn capture in Agent mode, reusing only inventory-published channels.
+pub fn spawn_with_registry(
+    hook_maps: SharedHookMaps,
+    gesture_bindings: GestureBindings,
+    dpi_cycle: Arc<RwLock<DpiCycleState>>,
+    capture_channel: CaptureChannel,
+    thumbwheel_sensitivity: ThumbwheelSensitivity,
+    receiver_access: ReceiverAccess,
+    registry: ChannelRegistry,
+) {
+    spawn_inner(
+        hook_maps,
+        gesture_bindings,
+        dpi_cycle,
+        capture_channel,
+        thumbwheel_sensitivity,
+        receiver_access,
+        Some(registry),
+    );
+}
+
+fn spawn_inner(
+    hook_maps: SharedHookMaps,
+    gesture_bindings: GestureBindings,
+    dpi_cycle: Arc<RwLock<DpiCycleState>>,
+    capture_channel: CaptureChannel,
+    thumbwheel_sensitivity: ThumbwheelSensitivity,
+    receiver_access: ReceiverAccess,
+    registry: Option<ChannelRegistry>,
+) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -100,6 +144,7 @@ pub fn spawn(
             capture_channel,
             thumbwheel_sensitivity,
             receiver_access,
+            registry,
         ));
     });
 }
@@ -141,6 +186,94 @@ fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -> bool {
     done_epoch == live_epoch && has_target
 }
 
+fn stop_reason<T: PartialEq>(
+    want: Option<&T>,
+    current: Option<&T>,
+    connection_is_current: bool,
+) -> Option<CaptureStop> {
+    current?;
+    if want == current {
+        (!connection_is_current).then_some(CaptureStop::Revoked)
+    } else {
+        Some(CaptureStop::Graceful)
+    }
+}
+
+fn acknowledge_stopping(stopping_epoch: &mut Option<u64>, done_epoch: u64) -> bool {
+    if *stopping_epoch == Some(done_epoch) {
+        *stopping_epoch = None;
+        true
+    } else {
+        false
+    }
+}
+
+fn capture_connection_is_current(
+    registry: Option<&ChannelRegistry>,
+    capture_channel: &CaptureChannel,
+) -> bool {
+    let Some(registry) = registry else {
+        return true;
+    };
+    capture_channel
+        .read()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .is_some_and(|shared| registry.is_current(&shared))
+}
+
+struct CaptureLaunch {
+    route: DeviceRoute,
+    capture_thumbwheel: bool,
+    divert_gesture_button: bool,
+    sink: mpsc::UnboundedSender<CapturedInput>,
+    channel_slot: CaptureChannel,
+    receiver_lease: CaptureReceiverLease,
+    registry: Option<ChannelRegistry>,
+    done: mpsc::UnboundedSender<u64>,
+    epoch: u64,
+}
+
+fn spawn_capture_session(launch: CaptureLaunch) -> oneshot::Sender<CaptureStop> {
+    let (stop_tx, stop_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let result = {
+            let receiver_lease = launch.receiver_lease;
+            let result = if let Some(registry) = launch.registry.as_ref() {
+                run_capture_session_with_registry(
+                    launch.route,
+                    launch.capture_thumbwheel,
+                    launch.divert_gesture_button,
+                    launch.sink,
+                    stop_rx,
+                    launch.channel_slot,
+                    registry,
+                )
+                .await
+            } else {
+                run_capture_session(
+                    launch.route,
+                    launch.capture_thumbwheel,
+                    launch.divert_gesture_button,
+                    launch.sink,
+                    stop_rx,
+                    launch.channel_slot,
+                )
+                .await
+            };
+            drop(receiver_lease);
+            result
+        };
+        if let Err(error) = result {
+            debug!(%error, "capture session ended");
+        }
+        // Completion is sent only after the capture future released its channel
+        // and the receiver lease above, so the manager can safely replace it.
+        let _ = launch.done.send(launch.epoch);
+    });
+    stop_tx
+}
+
 /// Keep one capture session alive for the active device, restarting it when the
 /// device or the thumb-wheel arming changes, and dispatch incoming inputs. Runs
 /// for the lifetime of the process.
@@ -151,11 +284,13 @@ async fn manage(
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
+    registry: Option<ChannelRegistry>,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
     // (route, capture_thumbwheel, divert_gesture_button)
     let mut current: Option<(DeviceRoute, bool, bool)> = None;
-    let mut stop: Option<oneshot::Sender<()>> = None;
+    let mut stop: Option<oneshot::Sender<CaptureStop>> = None;
+    let mut stopping_epoch: Option<u64> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
     let mut accumulators = WheelAccumulators::default();
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
@@ -205,17 +340,22 @@ async fn manage(
                         )
                     })
                 };
-                if want == current {
+                if stopping_epoch.is_some() {
                     continue;
                 }
-                // Target or thumb-wheel arming changed (or first tick): stop the
-                // old session and start one for the new state. Sending on the
-                // oneshot lets the old session restore the diverted controls.
-                if let Some(stop) = stop.take() {
-                    let _ = stop.send(());
-                }
-                if current.is_some() {
+                let connection_is_current =
+                    capture_connection_is_current(registry.as_ref(), &capture_channel);
+                if let Some(reason) =
+                    stop_reason(want.as_ref(), current.as_ref(), connection_is_current)
+                {
+                    if let Some(stop) = stop.take() {
+                        let _ = stop.send(reason);
+                    }
+                    stopping_epoch = Some(epoch);
                     current = None;
+                    continue;
+                }
+                if want == current {
                     continue;
                 }
                 if let Some((route, capture_thumbwheel, divert_gesture_button)) = want {
@@ -224,36 +364,30 @@ async fn manage(
                         continue;
                     };
                     current = Some((route.clone(), capture_thumbwheel, divert_gesture_button));
-                    let (stop_tx, stop_rx) = oneshot::channel();
-                    let sink = tx.clone();
-                    let slot = Arc::clone(&capture_channel);
                     epoch = epoch.wrapping_add(1);
-                    let session_epoch = epoch;
-                    let done = done_tx.clone();
-                    tokio::spawn(async move {
-                        let _receiver_lease = receiver_lease;
-                        if let Err(e) = run_capture_session(
-                            route,
-                            capture_thumbwheel,
-                            divert_gesture_button,
-                            sink,
-                            stop_rx,
-                            slot,
-                        )
-                        .await
-                        {
-                            debug!(error = %e, "capture session ended");
-                        }
-                        // Report completion so the manager can re-arm if this exit
-                        // was unexpected rather than a deliberate stop.
-                        let _ = done.send(session_epoch);
-                    });
-                    stop = Some(stop_tx);
+                    stop = Some(spawn_capture_session(CaptureLaunch {
+                        route,
+                        capture_thumbwheel,
+                        divert_gesture_button,
+                        sink: tx.clone(),
+                        channel_slot: Arc::clone(&capture_channel),
+                        receiver_lease,
+                        registry: registry.clone(),
+                        done: done_tx.clone(),
+                        epoch,
+                    }));
                 } else {
                     current = None;
                 }
             }
             Some(done_epoch) = done_rx.recv() => {
+                if acknowledge_stopping(&mut stopping_epoch, done_epoch) {
+                    // The stopped task has cleared its slot, dropped the
+                    // listener/channel and released any receiver lease. A later
+                    // poll may now arm the desired replacement.
+                    stop = None;
+                    continue;
+                }
                 // A capture session ended on its own. Re-arm only when it is the
                 // session we currently believe is live for an active target;
                 // clearing `current` lets the next tick start a fresh session.
@@ -445,6 +579,9 @@ fn advance(
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::PoisonError;
+
     use super::*;
 
     #[test]
@@ -597,5 +734,59 @@ mod tests {
         // The session was stopped on purpose (pairing took the receiver, or no
         // device is targeted): no target means there is nothing to re-arm.
         assert!(!should_rearm(7, 7, false));
+    }
+
+    #[test]
+    fn unchanged_target_keeps_the_current_connection() {
+        assert_eq!(
+            stop_reason(Some(&"device-a"), Some(&"device-a"), true),
+            None
+        );
+    }
+
+    #[test]
+    fn revoked_connection_stops_without_disarming_it() {
+        assert_eq!(
+            stop_reason(Some(&"device-a"), Some(&"device-a"), false),
+            Some(CaptureStop::Revoked)
+        );
+    }
+
+    #[test]
+    fn target_change_stops_gracefully_while_connection_is_current() {
+        assert_eq!(
+            stop_reason(Some(&"device-b"), Some(&"device-a"), true),
+            Some(CaptureStop::Graceful)
+        );
+        assert_eq!(
+            stop_reason::<&str>(None, Some(&"device-a"), true),
+            Some(CaptureStop::Graceful)
+        );
+    }
+
+    #[test]
+    fn replacement_waits_for_the_stopped_epochs_acknowledgement() {
+        let mut stopping_epoch = Some(7);
+
+        assert!(!acknowledge_stopping(&mut stopping_epoch, 6));
+        assert_eq!(stopping_epoch, Some(7));
+
+        assert!(acknowledge_stopping(&mut stopping_epoch, 7));
+        assert_eq!(stopping_epoch, None);
+    }
+
+    #[test]
+    fn poisoned_capture_slot_fails_the_current_connection_check_closed() {
+        let capture: CaptureChannel = Arc::new(RwLock::new(None));
+        let poison = Arc::clone(&capture);
+        let _ = catch_unwind(AssertUnwindSafe(move || {
+            let _guard = poison.write().unwrap_or_else(PoisonError::into_inner);
+            panic!("poison capture slot");
+        }));
+
+        assert!(!capture_connection_is_current(
+            Some(&ChannelRegistry::default()),
+            &capture
+        ));
     }
 }

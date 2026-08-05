@@ -4,7 +4,9 @@
 //!
 //! [`run_capture_session`] holds a single HID++ channel open for one device,
 //! enables diversion on whichever of those controls it exposes, registers one
-//! message listener, and restores every control's default mapping on shutdown.
+//! message listener, and restores every control's default mapping on graceful
+//! shutdown. Registry revocation instead releases the stale channel without
+//! sending cleanup traffic through it.
 //! Using one channel matters: a second channel to the same device would split
 //! its input-report stream, so all captured controls share this session.
 //!
@@ -25,6 +27,7 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use crate::channel_registry::ChannelRegistry;
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::route::{DeviceRoute, open_route_channel};
 use crate::thumbwheel::{self, Thumbwheel};
@@ -34,6 +37,17 @@ use crate::write::SharedChannel;
 /// SmartShift writes can reuse it instead of opening a fresh one. `None`
 /// whenever no session is connected.
 pub type CaptureChannel = Arc<RwLock<Option<SharedChannel>>>;
+
+/// Why an active capture session is stopping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureStop {
+    /// The target/configuration changed while the channel is still current, so
+    /// diverted controls must be restored before the session exits.
+    Graceful,
+    /// Inventory revoked or replaced the underlying connection. Clear local
+    /// ownership without sending restoration requests through the stale channel.
+    Revoked,
+}
 
 /// One input captured from the active device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,34 +104,92 @@ struct CaptureAccum {
 /// are independent of this.
 ///
 /// Opens and holds one HID++ channel, diverts whichever of those controls the
-/// device exposes, and listens. Returns once `shutdown` fires (or its sender is
-/// dropped), after restoring every diverted control. Setup errors are returned;
-/// failures to restore on the way out are logged, not propagated.
+/// device exposes, and listens. A [`CaptureStop::Graceful`] shutdown restores
+/// every diverted control; [`CaptureStop::Revoked`] clears local ownership
+/// without writing through the stale connection. Dropping the shutdown sender
+/// is treated as graceful. Setup errors are returned; failures to restore on
+/// the way out are logged, not propagated.
 pub async fn run_capture_session(
     route: DeviceRoute,
     capture_thumbwheel: bool,
     divert_gesture_button: bool,
     sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
+    shutdown: oneshot::Receiver<CaptureStop>,
     channel_slot: CaptureChannel,
 ) -> Result<(), GestureError> {
     let chan = open_route_channel(&route)
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
+    let shared = SharedChannel::new(chan, route.clone());
+    run_capture_session_on(
+        route,
+        shared,
+        capture_thumbwheel,
+        divert_gesture_button,
+        sink,
+        shutdown,
+        channel_slot,
+    )
+    .await
+}
+
+/// Run capture on the exact channel currently published by `registry`.
+///
+/// A registry miss returns [`GestureError::DeviceNotFound`] without falling
+/// back to route enumeration/opening; the Agent watcher retries after a later
+/// inventory publication.
+pub async fn run_capture_session_with_registry(
+    route: DeviceRoute,
+    capture_thumbwheel: bool,
+    divert_gesture_button: bool,
+    sink: mpsc::UnboundedSender<CapturedInput>,
+    shutdown: oneshot::Receiver<CaptureStop>,
+    channel_slot: CaptureChannel,
+    registry: &ChannelRegistry,
+) -> Result<(), GestureError> {
+    let shared = registry
+        .lookup(&route)
+        .ok_or(GestureError::DeviceNotFound)?;
+    run_capture_session_on(
+        route,
+        shared,
+        capture_thumbwheel,
+        divert_gesture_button,
+        sink,
+        shutdown,
+        channel_slot,
+    )
+    .await
+}
+
+async fn run_capture_session_on(
+    route: DeviceRoute,
+    shared: SharedChannel,
+    capture_thumbwheel: bool,
+    divert_gesture_button: bool,
+    sink: mpsc::UnboundedSender<CapturedInput>,
+    shutdown: oneshot::Receiver<CaptureStop>,
+    channel_slot: CaptureChannel,
+) -> Result<(), GestureError> {
+    let chan = Arc::clone(shared.channel());
     let device_index = route.device_index();
+    // Publish before the first setup await so the watcher can validate exact
+    // channel identity on its next poll, even while arming is still in flight.
+    replace_capture_slot(&channel_slot, Some(shared));
     let armed = arm_controls(
         &chan,
         device_index,
         capture_thumbwheel,
         divert_gesture_button,
     )
-    .await?;
-
-    // Publish this device's open channel so DPI/SmartShift writes reuse it
-    // instead of opening their own. Cleared on the way out.
-    if let Ok(mut slot) = channel_slot.write() {
-        *slot = Some(SharedChannel::new(Arc::clone(&chan), route.clone()));
-    }
+    .await;
+    let armed = match armed {
+        Ok(armed) => armed,
+        Err(error) => {
+            replace_capture_slot(&channel_slot, None);
+            return Err(error);
+        }
+    };
 
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
     let reprog_index = armed.reprog.as_ref().map(|(_, idx)| *idx);
@@ -160,15 +232,38 @@ pub async fn run_capture_session(
         thumbwheel = armed.thumb.is_some(),
         "control capture active"
     );
-    let _ = shutdown.await;
+    let stop = shutdown.await.unwrap_or(CaptureStop::Graceful);
 
-    drop(listener);
-    if let Ok(mut slot) = channel_slot.write() {
-        *slot = None;
-    }
-    armed.disarm().await;
+    teardown_capture(
+        || replace_capture_slot(&channel_slot, None),
+        listener,
+        stop,
+        || armed.disarm(),
+    )
+    .await;
     debug!(index = device_index, "control capture stopped");
     Ok(())
+}
+
+fn replace_capture_slot(slot: &CaptureChannel, value: Option<SharedChannel>) {
+    *slot.write().unwrap_or_else(PoisonError::into_inner) = value;
+}
+
+async fn teardown_capture<Listener, Clear, Disarm, DisarmFuture>(
+    clear: Clear,
+    listener: Listener,
+    stop: CaptureStop,
+    disarm: Disarm,
+) where
+    Clear: FnOnce(),
+    Disarm: FnOnce() -> DisarmFuture,
+    DisarmFuture: std::future::Future<Output = ()>,
+{
+    clear();
+    drop(listener);
+    if stop == CaptureStop::Graceful {
+        disarm().await;
+    }
 }
 
 /// The set of controls a session has diverted, kept so they can be handed back

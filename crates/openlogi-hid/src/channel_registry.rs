@@ -209,6 +209,7 @@ impl ChannelRegistry {
 mod tests {
     use std::collections::HashSet;
     use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::Arc;
 
     use crate::DeviceRoute;
 
@@ -280,6 +281,22 @@ mod tests {
         assert!(
             !registry.any_current(|candidate, channel| { candidate == &route && *channel == "b" })
         );
+    }
+
+    #[test]
+    fn same_route_with_a_different_arc_is_not_current() {
+        let route = direct(0xb35b);
+        let published = Arc::new(());
+        let stale = Arc::new(());
+        let registry = Registry::<u8, Arc<()>>::default();
+        registry.replace_node(1, [route.clone()], Arc::clone(&published));
+
+        assert!(registry.any_current(|candidate, channel| {
+            candidate == &route && Arc::ptr_eq(channel, &published)
+        }));
+        assert!(!registry.any_current(|candidate, channel| {
+            candidate == &route && Arc::ptr_eq(channel, &stale)
+        }));
     }
 
     #[test]
