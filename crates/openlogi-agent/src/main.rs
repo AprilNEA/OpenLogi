@@ -162,16 +162,20 @@ async fn run(config: Config) {
     // wheel) needs no Accessibility permission — start it up front. It reads the
     // shared maps and dispatches bound actions itself; the two pairing flags let
     // it release its capture session while a pairing session owns the receiver.
-    watchers::gesture::spawn(
+    watchers::gesture::spawn_with_registry(
         shared.hook_maps.clone(),
         shared.gesture_bindings.clone(),
         shared.dpi_cycle.clone(),
         shared.capture_channel.clone(),
         shared.thumbwheel_sensitivity.clone(),
         shared.receiver_access.clone(),
+        shared.channel_registry.clone(),
     );
 
-    let mut inventory_rx = watchers::inventory::spawn(Duration::from_secs(2));
+    let mut inventory_rx = watchers::inventory::spawn_with_registry(
+        Duration::from_secs(2),
+        shared.channel_registry.clone(),
+    );
     let mut app_rx = watchers::foreground_app::spawn(Duration::from_secs(1));
     let mut accessibility_rx = watchers::accessibility::spawn(Duration::from_millis(1200));
 

@@ -270,6 +270,7 @@ mod tests {
             dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
             thumbwheel_sensitivity: Arc::new(0.into()),
             capture_channel: Arc::new(RwLock::new(None)),
+            channel_registry: openlogi_hid::ChannelRegistry::default(),
             receiver_access: ReceiverAccess::default(),
         }
     }

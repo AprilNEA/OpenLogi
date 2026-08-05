@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime};
 
 use futures_lite::StreamExt as _;
 use openlogi_core::device::DeviceInventory;
+use openlogi_hid::ChannelRegistry;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -110,7 +111,25 @@ impl WatchState {
 /// the loop exits cleanly. The watcher dying instead (a panic inside the HID
 /// backend) closes the channel — the agent select loop maps that closure to
 /// `Unavailable` too.
+#[must_use]
 pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<InventoryEvent> {
+    spawn_inner(period, None)
+}
+
+/// Spawn the persistent watcher and publish its inventory-owned HID++ channels
+/// into `registry` for Agent capture and hardware operations.
+#[must_use]
+pub fn spawn_with_registry(
+    period: Duration,
+    registry: ChannelRegistry,
+) -> mpsc::UnboundedReceiver<InventoryEvent> {
+    spawn_inner(period, Some(registry))
+}
+
+fn spawn_inner(
+    period: Duration,
+    registry: Option<ChannelRegistry>,
+) -> mpsc::UnboundedReceiver<InventoryEvent> {
     let (tx, rx) = mpsc::unbounded_channel();
     let worker_tx = tx.clone();
     let spawn_result = thread::Builder::new()
@@ -129,7 +148,10 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<InventoryEvent> {
             // A persistent enumerator so its per-device probe cache survives
             // across ticks — a known device's immutable data (model, features)
             // is reused instead of being re-handshaked every poll.
-            let mut enumerator = openlogi_hid::Enumerator::default();
+            let mut enumerator = registry.map_or_else(
+                openlogi_hid::Enumerator::default,
+                openlogi_hid::Enumerator::with_registry,
+            );
             let mut state = WatchState::default();
             let mut last_tick = SystemTime::now();
             // `block_on` installs runtime context so a backend that registers an

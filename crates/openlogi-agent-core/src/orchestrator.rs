@@ -16,7 +16,7 @@ use std::sync::{Arc, RwLock};
 
 use openlogi_core::config::{Config, ScrollResolution};
 use openlogi_core::device::{Capabilities, DeviceInventory};
-use openlogi_hid::{CaptureChannel, DeviceRoute};
+use openlogi_hid::{CaptureChannel, ChannelRegistry, DeviceRoute};
 use tracing::warn;
 
 use crate::DpiCycleState;
@@ -58,6 +58,8 @@ pub struct SharedRuntime {
     pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
     pub thumbwheel_sensitivity: Arc<AtomicI32>,
     pub capture_channel: CaptureChannel,
+    /// Exact-route channels owned and published by the inventory enumerator.
+    pub channel_registry: ChannelRegistry,
     /// Exclusive receiver access shared by HID++ capture and pairing. Capture
     /// and pairing must never open the same receiver HID node concurrently.
     pub receiver_access: ReceiverAccess,
@@ -111,6 +113,7 @@ impl Orchestrator {
                 config.app_settings.thumbwheel_sensitivity,
             )),
             capture_channel: Arc::new(RwLock::new(None)),
+            channel_registry: ChannelRegistry::default(),
             receiver_access: ReceiverAccess::default(),
         };
         let orch = Self {

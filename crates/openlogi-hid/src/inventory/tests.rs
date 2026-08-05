@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use openlogi_core::device::{
     DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
@@ -8,8 +9,12 @@ use super::cache::{
     CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_TICKS, backfill_identity, is_stale,
 };
 use super::probe::{NodeProbe, assemble_bolt_probe, parse_codename_unifying};
-use super::{Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop};
+use super::{
+    ChannelCache, Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop, routes_for_inventories,
+    settle_unhealthy_node,
+};
 use crate::inventory::features::ProbedFeatures;
+use crate::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
 fn cache_entry(probed_tick: u64) -> Cached {
     Cached {
@@ -102,6 +107,138 @@ fn inventory(slots: &[u8]) -> Vec<DeviceInventory> {
             })
             .collect(),
     }]
+}
+
+#[test]
+fn settled_inventories_publish_exact_receiver_routes() {
+    assert_eq!(
+        routes_for_inventories(&inventory(&[1, 4])),
+        vec![
+            DeviceRoute::Unifying {
+                receiver_uid: "receiver-1".into(),
+                slot: 1,
+            },
+            DeviceRoute::Unifying {
+                receiver_uid: "receiver-1".into(),
+                slot: 4,
+            },
+        ]
+    );
+
+    assert_eq!(
+        routes_for_inventories(&inventory(&[4])),
+        vec![DeviceRoute::Unifying {
+            receiver_uid: "receiver-1".into(),
+            slot: 4,
+        }],
+        "a vanished slot must not survive the next atomic node replacement"
+    );
+}
+
+#[test]
+fn settled_direct_inventory_publishes_one_direct_route() {
+    let direct = vec![DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "MX Keys".into(),
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+            unique_id: None,
+        },
+        paired: vec![PairedDevice {
+            slot: DIRECT_DEVICE_INDEX,
+            codename: Some("MX Keys".into()),
+            wpid: Some(0xb35b),
+            kind: DeviceKind::Keyboard,
+            online: true,
+            battery: None,
+            model_info: None,
+            capabilities: None,
+        }],
+    }];
+
+    assert_eq!(
+        routes_for_inventories(&direct),
+        vec![DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        }]
+    );
+}
+
+#[test]
+fn channel_cache_retires_and_defers_reopen_until_a_later_tick() {
+    let mut cache = ChannelCache::<u8, Arc<()>>::default();
+    let channel = Arc::new(());
+    cache.insert(1, Arc::clone(&channel));
+
+    assert!(cache.retire_node(&1).is_some());
+    assert!(cache.get(&1).is_none());
+    assert!(!cache.prepare_open(&1, |channel| Arc::strong_count(channel) == 1));
+
+    drop(channel);
+    assert!(cache.is_retiring(&1));
+    assert!(
+        !cache.prepare_open(&1, |channel| Arc::strong_count(channel) == 1),
+        "the tick that drops retirement still skips opening"
+    );
+    assert!(!cache.is_retiring(&1));
+    assert!(
+        cache.prepare_open(&1, |channel| Arc::strong_count(channel) == 1),
+        "only a later tick may reopen"
+    );
+}
+
+#[test]
+fn absent_channels_retire_and_quiescent_absent_retirement_is_reaped() {
+    let mut cache = ChannelCache::<u8, Arc<()>>::default();
+    cache.insert(1, Arc::new(()));
+    cache.insert(2, Arc::new(()));
+
+    cache.retire_absent(&HashSet::from([2]));
+    assert!(cache.is_retiring(&1));
+    assert!(cache.get(&2).is_some());
+
+    cache.reap_absent(&HashSet::from([2]), |channel| {
+        Arc::strong_count(channel) == 1
+    });
+    assert!(!cache.is_retiring(&1));
+}
+
+#[test]
+fn retiring_node_replays_ledger_and_marks_tick_unhealthy() {
+    let mut ledger = crate::node_ledger::NodeLedger::<u8>::default();
+    let expected = inventory(&[1]);
+    let settled = ledger.settle(&1, true, Some(expected[0].clone()));
+    assert_eq!(settled.inventory, Some(expected[0].clone()));
+
+    let mut complete = true;
+    let mut healthy = true;
+    let replay = settle_unhealthy_node(&mut ledger, &1, &mut complete, &mut healthy);
+
+    assert_eq!(replay, Some(expected[0].clone()));
+    assert!(!complete);
+    assert!(!healthy);
+}
+
+#[test]
+fn retiring_node_inventory_expires_after_the_existing_ledger_grace() {
+    let mut ledger = crate::node_ledger::NodeLedger::<u8>::default();
+    let expected = inventory(&[1]);
+    ledger.settle(&1, true, Some(expected[0].clone()));
+
+    let mut complete = true;
+    let mut healthy = true;
+    for _ in 0..3 {
+        assert_eq!(
+            settle_unhealthy_node(&mut ledger, &1, &mut complete, &mut healthy),
+            Some(expected[0].clone())
+        );
+    }
+    assert_eq!(
+        settle_unhealthy_node(&mut ledger, &1, &mut complete, &mut healthy),
+        None,
+        "retirement must not extend stale inventory beyond ledger policy"
+    );
 }
 
 #[test]
