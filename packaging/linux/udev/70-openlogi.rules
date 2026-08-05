@@ -1,8 +1,8 @@
 # OpenLogi udev rules
 #
-# Grants the active-seat user read/write access to Logitech HID devices and the
-# uinput kernel module — no group membership required on systems running
-# systemd-logind (uaccess tag).
+# Grants the active-seat user access to Logitech HID devices, Logitech input
+# event nodes, and the uinput kernel module — no group membership required on
+# systems running systemd-logind (uaccess tag).
 #
 # Install:
 #   sudo cp 70-openlogi.rules /etc/udev/rules.d/
@@ -20,6 +20,11 @@
 #     kernel name format "bus:VID:PID.iface" whose VID field is always uppercase.
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", TAG+="uaccess"
 SUBSYSTEM=="hidraw", KERNELS=="*:046D:*", TAG+="uaccess"
+
+# Logitech mouse event nodes — needed for the evdev hook to grab side-button
+# events before the desktop sees them. Bluetooth devices expose vendor/product
+# on the parent input device, so match through ATTRS rather than ID_VENDOR_ID.
+SUBSYSTEM=="input", ENV{ID_INPUT_MOUSE}=="1", ATTRS{id/vendor}=="046d", TAG+="uaccess"
 
 # uinput virtual device node — needed for the evdev/uinput input hook.
 # OPTIONS+="static_node=uinput" creates the node at boot even before any device

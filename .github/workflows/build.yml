@@ -750,6 +750,10 @@ jobs:
           mkdir -p dist
           ref_name="${GITHUB_REF_NAME:-dev}"
           ref_name="${ref_name//\//-}"
+          for pkg in target/release/*.tar.gz; do
+            [ -f "$pkg" ] || continue
+            cp "$pkg" "dist/openlogi-${ref_name}-linux-${PKG_ARCH}.tar.gz"
+          done
           for pkg in target/release/*.deb target/release/*.rpm; do
             [ -f "$pkg" ] || continue
             ext="${pkg##*.}"
