@@ -31,6 +31,10 @@ const MAX_REPORT_DESCRIPTOR_LENGTH: usize = 4096;
 /// As we only care about HID++ reports, this equals to [`LONG_REPORT_LENGTH`].
 const MAX_REPORT_LENGTH: usize = LONG_REPORT_LENGTH;
 
+/// Largest output report accepted by [`HidppChannel::write_raw_report`].
+/// Logitech's very-long HID++ lighting report (`0x12`) is 64 bytes.
+const MAX_RAW_REPORT_LENGTH: usize = 64;
+
 /// The default time budget for a [`HidppChannel::send`] request: the report
 /// write plus the wait for a matching response. Callers that need a different
 /// budget can use [`HidppChannel::send_with_timeout`].
@@ -619,6 +623,34 @@ impl HidppChannel {
             .map_err(ChannelError::Implementation)
     }
 
+    /// Write one raw HID report through this channel's already-owned transport.
+    ///
+    /// Reports must contain `1..=64` bytes, including their report ID. The
+    /// operation is bounded by [`SEND_RESPONSE_TIMEOUT`] and returns the exact
+    /// byte count reported by the transport. This is intended for HID++ report
+    /// widths such as the 64-byte `0x12` lighting frame that [`HidppMessage`]
+    /// cannot represent.
+    pub async fn write_raw_report(&self, report: &[u8]) -> Result<usize, ChannelError> {
+        self.write_raw_report_with_timeout(report, SEND_RESPONSE_TIMEOUT)
+            .await
+    }
+
+    async fn write_raw_report_with_timeout(
+        &self,
+        report: &[u8],
+        timeout: Duration,
+    ) -> Result<usize, ChannelError> {
+        if !(1..=MAX_RAW_REPORT_LENGTH).contains(&report.len()) {
+            return Err(ChannelError::InvalidRawReportLength(report.len()));
+        }
+
+        let mut write = std::pin::pin!(self.raw_channel.write_report(report).fuse());
+        select! {
+            result = write => result.map_err(ChannelError::Implementation),
+            _ = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
+        }
+    }
+
     /// Registers a listener that will be called for every incoming message.
     ///
     /// Returns a handle that can be used to remove the listener using a call to
@@ -687,14 +719,20 @@ pub enum ChannelError {
     #[error("the channel does not support the given HID++ message type")]
     MessageTypeNotSupported,
 
+    /// Indicates that a raw output report was empty or exceeded 64 bytes.
+    #[error("raw HID reports must contain 1..=64 bytes, got {0}")]
+    InvalidRawReportLength(usize),
+
     /// Indicates that no response was received following a request.
     #[error("the device did not respond to the request")]
     NoResponse,
 
-    /// Indicates that a request did not complete within its time budget —
-    /// typically the device is asleep, out of range or connected to another
-    /// host. See [`HidppChannel::send_with_timeout`].
-    #[error("the request timed out before the device responded")]
+    /// Indicates that a bounded channel operation did not complete — typically
+    /// because the device is asleep, out of range, connected to another host,
+    /// or its transport write is wedged. See
+    /// [`HidppChannel::send_with_timeout`] and
+    /// [`HidppChannel::write_raw_report`].
+    #[error("the HID channel operation timed out")]
     Timeout,
 }
 
@@ -716,7 +754,7 @@ mod tests {
         io,
         sync::{
             Arc, Mutex,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::{Duration, Instant},
     };
@@ -879,6 +917,59 @@ mod tests {
 
             assert_eq!(handle.written_reports().len(), 1);
             assert_pending_empty(&channel);
+        });
+    }
+
+    #[test]
+    fn raw_report_write_forwards_exact_bytes_and_length() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+            let report = [0x12; MAX_RAW_REPORT_LENGTH];
+
+            let written = channel.write_raw_report(&report).await.unwrap();
+
+            assert_eq!(written, report.len());
+            assert_eq!(handle.written_reports(), [report.to_vec()]);
+        });
+    }
+
+    #[test]
+    fn raw_report_write_rejects_empty_and_oversized_inputs_without_io() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+
+            let empty = channel.write_raw_report(&[]).await.unwrap_err();
+            let oversized = channel
+                .write_raw_report(&[0; MAX_RAW_REPORT_LENGTH + 1])
+                .await
+                .unwrap_err();
+
+            assert!(matches!(empty, ChannelError::InvalidRawReportLength(0)));
+            assert!(matches!(
+                oversized,
+                ChannelError::InvalidRawReportLength(65)
+            ));
+            assert!(handle.written_reports().is_empty());
+        });
+    }
+
+    #[test]
+    fn raw_report_write_times_out_when_the_transport_parks() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            handle.park_writes();
+            let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+            let started = Instant::now();
+
+            let error = channel
+                .write_raw_report_with_timeout(&[LONG_REPORT_ID], Duration::from_millis(25))
+                .await
+                .unwrap_err();
+
+            assert!(matches!(error, ChannelError::Timeout));
+            assert!(started.elapsed() < Duration::from_secs(1));
         });
     }
 
@@ -1133,6 +1224,7 @@ mod tests {
         incoming_tx: async_channel::Sender<Vec<u8>>,
         written_reports: Arc<Mutex<Vec<Vec<u8>>>>,
         responses_on_write: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        park_writes: Arc<AtomicBool>,
     }
 
     impl MockRawHidHandle {
@@ -1150,6 +1242,10 @@ mod tests {
         fn written_reports(&self) -> Vec<Vec<u8>> {
             self.written_reports.lock().unwrap().clone()
         }
+
+        fn park_writes(&self) {
+            self.park_writes.store(true, Ordering::SeqCst);
+        }
     }
 
     struct MockRawHidChannel {
@@ -1157,6 +1253,7 @@ mod tests {
         incoming_rx: async_channel::Receiver<Vec<u8>>,
         written_reports: Arc<Mutex<Vec<Vec<u8>>>>,
         responses_on_write: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        park_writes: Arc<AtomicBool>,
     }
 
     impl MockRawHidChannel {
@@ -1164,11 +1261,13 @@ mod tests {
             let (incoming_tx, incoming_rx) = async_channel::unbounded();
             let written_reports = Arc::new(Mutex::new(Vec::new()));
             let responses_on_write = Arc::new(Mutex::new(VecDeque::new()));
+            let park_writes = Arc::new(AtomicBool::new(false));
 
             let handle = MockRawHidHandle {
                 incoming_tx: incoming_tx.clone(),
                 written_reports: Arc::clone(&written_reports),
                 responses_on_write: Arc::clone(&responses_on_write),
+                park_writes: Arc::clone(&park_writes),
             };
 
             (
@@ -1177,6 +1276,7 @@ mod tests {
                     incoming_rx,
                     written_reports,
                     responses_on_write,
+                    park_writes,
                 },
                 handle,
             )
@@ -1195,6 +1295,9 @@ mod tests {
 
         async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Sync + Send>> {
             self.written_reports.lock().unwrap().push(src.to_vec());
+            if self.park_writes.load(Ordering::SeqCst) {
+                return std::future::pending().await;
+            }
             let response = self.responses_on_write.lock().unwrap().pop_front();
             if let Some(response) = response {
                 self.incoming_tx.send(response).await.unwrap();
