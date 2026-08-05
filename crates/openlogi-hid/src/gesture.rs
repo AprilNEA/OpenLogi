@@ -104,12 +104,40 @@ struct CaptureAccum {
 /// are independent of this.
 ///
 /// Opens and holds one HID++ channel, diverts whichever of those controls the
-/// device exposes, and listens. A [`CaptureStop::Graceful`] shutdown restores
-/// every diverted control; [`CaptureStop::Revoked`] clears local ownership
-/// without writing through the stale connection. Dropping the shutdown sender
-/// is treated as graceful. Setup errors are returned; failures to restore on
-/// the way out are logged, not propagated.
+/// device exposes, and listens. Returns once `shutdown` fires (or its sender is
+/// dropped), after restoring every diverted control. Setup errors are returned;
+/// failures to restore on the way out are logged, not propagated.
 pub async fn run_capture_session(
+    route: DeviceRoute,
+    capture_thumbwheel: bool,
+    divert_gesture_button: bool,
+    sink: mpsc::UnboundedSender<CapturedInput>,
+    shutdown: oneshot::Receiver<()>,
+    channel_slot: CaptureChannel,
+) -> Result<(), GestureError> {
+    let chan = open_route_channel(&route)
+        .await?
+        .ok_or(GestureError::DeviceNotFound)?;
+    let shared = SharedChannel::new(chan, route.clone());
+    run_capture_session_on(
+        route,
+        shared,
+        capture_thumbwheel,
+        divert_gesture_button,
+        sink,
+        graceful_shutdown(shutdown),
+        channel_slot,
+    )
+    .await
+}
+
+/// Run standalone capture with an explicit graceful-or-revoked stop reason.
+///
+/// This is the reason-aware counterpart to [`run_capture_session`]. A
+/// [`CaptureStop::Graceful`] shutdown restores diverted controls;
+/// [`CaptureStop::Revoked`] releases local ownership without writing through
+/// the stale connection. Dropping the shutdown sender is treated as graceful.
+pub async fn run_capture_session_with_stop_reason(
     route: DeviceRoute,
     capture_thumbwheel: bool,
     divert_gesture_button: bool,
@@ -127,7 +155,7 @@ pub async fn run_capture_session(
         capture_thumbwheel,
         divert_gesture_button,
         sink,
-        shutdown,
+        explicit_shutdown(shutdown),
         channel_slot,
     )
     .await
@@ -156,21 +184,33 @@ pub async fn run_capture_session_with_registry(
         capture_thumbwheel,
         divert_gesture_button,
         sink,
-        shutdown,
+        explicit_shutdown(shutdown),
         channel_slot,
     )
     .await
 }
 
-async fn run_capture_session_on(
+async fn graceful_shutdown(shutdown: oneshot::Receiver<()>) -> CaptureStop {
+    let _ = shutdown.await;
+    CaptureStop::Graceful
+}
+
+async fn explicit_shutdown(shutdown: oneshot::Receiver<CaptureStop>) -> CaptureStop {
+    shutdown.await.unwrap_or(CaptureStop::Graceful)
+}
+
+async fn run_capture_session_on<Shutdown>(
     route: DeviceRoute,
     shared: SharedChannel,
     capture_thumbwheel: bool,
     divert_gesture_button: bool,
     sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<CaptureStop>,
+    shutdown: Shutdown,
     channel_slot: CaptureChannel,
-) -> Result<(), GestureError> {
+) -> Result<(), GestureError>
+where
+    Shutdown: std::future::Future<Output = CaptureStop>,
+{
     let chan = Arc::clone(shared.channel());
     let device_index = route.device_index();
     // Publish before the first setup await so the watcher can validate exact
@@ -232,7 +272,7 @@ async fn run_capture_session_on(
         thumbwheel = armed.thumb.is_some(),
         "control capture active"
     );
-    let stop = shutdown.await.unwrap_or(CaptureStop::Graceful);
+    let stop = shutdown.await;
 
     teardown_capture(
         || replace_capture_slot(&channel_slot, None),

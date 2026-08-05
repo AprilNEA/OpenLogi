@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
 use openlogi_hid::{
-    CaptureChannel, CaptureStop, CapturedInput, ChannelRegistry, DeviceRoute, run_capture_session,
-    run_capture_session_with_registry,
+    CaptureChannel, CaptureStop, CapturedInput, ChannelRegistry, DeviceRoute,
+    run_capture_session_with_registry, run_capture_session_with_stop_reason,
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
@@ -251,7 +251,7 @@ fn spawn_capture_session(launch: CaptureLaunch) -> oneshot::Sender<CaptureStop> 
                 )
                 .await
             } else {
-                run_capture_session(
+                run_capture_session_with_stop_reason(
                     launch.route,
                     launch.capture_thumbwheel,
                     launch.divert_gesture_button,
