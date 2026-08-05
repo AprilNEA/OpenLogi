@@ -125,16 +125,23 @@ pub struct DpiInfo {
 pub async fn get_dpi(route: &DeviceRoute) -> Result<u16, WriteError> {
     let index = route.device_index();
     with_route(route, move |channel| async move {
-        let mut device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        let feature = open_feature::<AdjustableDpiFeature>(&mut device).await?;
-        feature
-            .get_sensor_dpi(0)
-            .await
-            .map_err(|e| classify_hidpp_error(e, HidppOperation::ReadDpi, AdjustableDpiFeature::ID))
+        get_dpi_on_channel(&channel, index).await
     })
     .await
+}
+
+async fn get_dpi_on_channel(
+    channel: &Arc<hidpp::channel::HidppChannel>,
+    index: u8,
+) -> Result<u16, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let feature = open_feature::<AdjustableDpiFeature>(&mut device).await?;
+    feature
+        .get_sensor_dpi(0)
+        .await
+        .map_err(|e| classify_hidpp_error(e, HidppOperation::ReadDpi, AdjustableDpiFeature::ID))
 }
 
 /// Classify a HID++ error from the AdjustableDpi functions. A device that
@@ -162,35 +169,42 @@ fn classify_dpi_error(error: Hidpp20Error) -> WriteError {
 pub async fn get_dpi_info(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
     let index = route.device_index();
     with_route(route, move |channel| async move {
-        let mut device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        let feature = open_feature::<AdjustableDpiFeature>(&mut device).await?;
-        let sensor_count = feature
-            .get_sensor_count()
-            .await
-            .map_err(classify_dpi_error)?;
-        if sensor_count == 0 {
-            // The device claims AdjustableDpi but exposes no sensor — it cannot
-            // report DPI, and that won't change on retry.
-            return Err(WriteError::FeatureUnsupported {
-                feature_hex: AdjustableDpiFeature::ID,
-            });
-        }
-        let current = feature
-            .get_sensor_dpi(0)
-            .await
-            .map_err(classify_dpi_error)?;
-        let values = feature
-            .get_sensor_dpi_list(0)
-            .await
-            .map_err(classify_dpi_error)?;
-        Ok(DpiInfo {
-            current,
-            capabilities: DpiCapabilities::new(values)?,
-        })
+        get_dpi_info_on_channel(&channel, index).await
     })
     .await
+}
+
+pub(super) async fn get_dpi_info_on_channel(
+    channel: &Arc<hidpp::channel::HidppChannel>,
+    index: u8,
+) -> Result<DpiInfo, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let feature = open_feature::<AdjustableDpiFeature>(&mut device).await?;
+    let sensor_count = feature
+        .get_sensor_count()
+        .await
+        .map_err(classify_dpi_error)?;
+    if sensor_count == 0 {
+        // The device claims AdjustableDpi but exposes no sensor — it cannot
+        // report DPI, and that won't change on retry.
+        return Err(WriteError::FeatureUnsupported {
+            feature_hex: AdjustableDpiFeature::ID,
+        });
+    }
+    let current = feature
+        .get_sensor_dpi(0)
+        .await
+        .map_err(classify_dpi_error)?;
+    let values = feature
+        .get_sensor_dpi_list(0)
+        .await
+        .map_err(classify_dpi_error)?;
+    Ok(DpiInfo {
+        current,
+        capabilities: DpiCapabilities::new(values)?,
+    })
 }
 
 /// Set sensor 0's DPI for the device addressed by `route`.

@@ -3,9 +3,9 @@
 //! Each entry point takes a [`DeviceRoute`] and resolves it to an open channel
 //! through `open_route_channel`, so the same call works whether the device is
 //! behind a Bolt receiver or attached directly (USB cable / Bluetooth). Each
-//! call re-enumerates and re-opens — fine at the frequency this is invoked
-//! (once per slider release) — unless a [`SharedChannel`] from the capture
-//! session is reused.
+//! route-addressed call re-enumerates and re-opens, while the corresponding
+//! `_on` entry points reuse a [`SharedChannel`] already owned by inventory or a
+//! standalone capture session.
 
 use std::sync::Arc;
 
@@ -24,7 +24,10 @@ pub use diagnostics::{FeatureEntry, ReprogControlEntry, dump_features, dump_repr
 pub use dpi::{DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, set_dpi};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use lighting::{LightingMethod, set_keyboard_color, set_keyboard_color_with};
-pub use shared::{SharedChannel, set_dpi_on, set_smartshift_on, toggle_smartshift_on};
+pub use shared::{
+    SharedChannel, get_dpi_info_on, get_smartshift_status_on, set_dpi_on, set_keyboard_color_on,
+    set_keyboard_color_with_on, set_smartshift_on, toggle_smartshift_on,
+};
 pub use smartshift::{
     get_smartshift_status, set_smartshift, set_smartshift_sensitivity, toggle_smartshift,
 };

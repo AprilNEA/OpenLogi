@@ -241,13 +241,20 @@ impl SmartShift {
 pub async fn get_smartshift_status(route: &DeviceRoute) -> Result<SmartShiftStatus, WriteError> {
     let index = route.device_index();
     with_route(route, move |channel| async move {
-        let mut device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        let smartshift = SmartShift::open(&mut device).await?;
-        smartshift.status().await
+        get_smartshift_status_on_channel(&channel, index).await
     })
     .await
+}
+
+pub(super) async fn get_smartshift_status_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<SmartShiftStatus, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let smartshift = SmartShift::open(&mut device).await?;
+    smartshift.status().await
 }
 
 /// Set the SmartShift auto-disengage sensitivity on `route`, preserving the
