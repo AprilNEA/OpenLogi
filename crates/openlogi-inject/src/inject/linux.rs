@@ -28,6 +28,10 @@ pub(super) fn execute(action: &Action) {
         // buttons ("back"/"forward") browsers handle natively.
         Action::MouseBack => click(KeyCode::BTN_SIDE),
         Action::MouseForward => click(KeyCode::BTN_EXTRA),
+        Action::MouseButton6 => click(KeyCode::BTN_FORWARD),
+        Action::MouseButton7 => click(KeyCode::BTN_BACK),
+        Action::MouseButton8 => click(KeyCode::BTN_TASK),
+        Action::MouseButton9 => click(KeyCode::BTN_0),
         // ── Editing ───────────────────────────────────────────────────────
         Action::Copy => press_key(&[ctrl], KeyCode::KEY_C),
         Action::Paste => press_key(&[ctrl], KeyCode::KEY_V),
@@ -155,10 +159,11 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     // Multimedia
     KeyCode::KEY_PLAYPAUSE, KeyCode::KEY_NEXTSONG, KeyCode::KEY_PREVIOUSSONG,
     KeyCode::KEY_VOLUMEUP,  KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_MUTE,
-    // Mouse buttons (injected as EV_KEY with BTN_* codes). The side pair
+    // Mouse buttons (injected as EV_KEY with BTN_* codes). Extra codes
     // must be registered here or the kernel silently drops their events.
     KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE,
     KeyCode::BTN_SIDE, KeyCode::BTN_EXTRA,
+    KeyCode::BTN_FORWARD, KeyCode::BTN_BACK, KeyCode::BTN_TASK, KeyCode::BTN_0,
 ];
 
 fn build() -> io::Result<VirtualDevice> {
