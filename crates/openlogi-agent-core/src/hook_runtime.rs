@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{
     Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
-use openlogi_hid::CaptureChannel;
+use openlogi_hid::{CaptureChannel, ChannelRegistry};
 use openlogi_hook::{EventDisposition, Hook, MouseEvent};
 use tracing::{info, warn};
 
@@ -103,6 +103,7 @@ pub fn start(
     hooks: SharedHookMaps,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture: CaptureChannel,
+    registry: ChannelRegistry,
     monitor: SharedEventMonitor,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
@@ -158,7 +159,7 @@ pub fn start(
                                 .map(|m| resolve_gesture_click(&m.gestures, id));
                             if let Some(action) = action {
                                 info!(button = %id, action = %action.label(), "gesture click → executing bound action");
-                                dispatch_action(&action, &dpi_cycle, &capture);
+                                dispatch_action(&action, &dpi_cycle, &capture, Some(&registry));
                             }
                         }
                         return EventDisposition::Suppress;
@@ -181,7 +182,7 @@ pub fn start(
 
                 if pressed {
                     info!(button = %id, action = %action.label(), "button → executing bound action");
-                    dispatch_action(&action, &dpi_cycle, &capture);
+                    dispatch_action(&action, &dpi_cycle, &capture, Some(&registry));
                 }
                 EventDisposition::Suppress
             }
@@ -207,7 +208,7 @@ pub fn start(
                     });
                     if let Some(action) = action {
                         info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
-                        dispatch_action(&action, &dpi_cycle, &capture);
+                        dispatch_action(&action, &dpi_cycle, &capture, Some(&registry));
                     }
                 }
                 EventDisposition::PassThrough
@@ -306,11 +307,14 @@ fn browser_nav_debounce_ok(action: &Action) -> bool {
 /// `dpi_cycle` is held across a write lock long enough to advance the index
 /// and snapshot the new DPI + target; the actual HID write spawns its own
 /// thread via [`write_dpi_in_background`] to keep event callbacks non-blocking.
-/// `capture` lets those writes reuse the capture session's open channel.
+/// `registry` confirms that `capture` is still current or supplies the current
+/// inventory channel. Hardware actions are skipped when standalone callers do
+/// not provide a registry.
 pub fn dispatch_action(
     action: &Action,
     dpi_cycle: &Arc<RwLock<DpiCycleState>>,
     capture: &CaptureChannel,
+    registry: Option<&ChannelRegistry>,
 ) {
     let next = match action {
         Action::CycleDpiPresets => match dpi_cycle.write() {
@@ -330,7 +334,11 @@ pub fn dispatch_action(
         Action::ToggleSmartShift => {
             let target = dpi_cycle.read().ok().and_then(|g| g.target.clone());
             info!("SmartShift toggle → flipping wheel mode");
-            toggle_smartshift_in_background(Some(capture), target);
+            if let Some(registry) = registry {
+                toggle_smartshift_in_background(Some(capture), registry, target);
+            } else {
+                warn!("no inventory registry — SmartShift toggle skipped");
+            }
             return;
         }
         // BrowserBack/BrowserForward fall through to the keyboard shortcut
@@ -356,7 +364,11 @@ pub fn dispatch_action(
     };
     if let Some((dpi, target)) = next {
         info!(dpi, "DPI action → writing to device");
-        write_dpi_in_background(Some(capture), target, dpi);
+        if let Some(registry) = registry {
+            write_dpi_in_background(Some(capture), registry, target, dpi);
+        } else {
+            warn!("no inventory registry — DPI action skipped");
+        }
     } else if matches!(action, Action::CycleDpiPresets | Action::SetDpiPreset(_)) {
         info!(
             action = %action.label(),

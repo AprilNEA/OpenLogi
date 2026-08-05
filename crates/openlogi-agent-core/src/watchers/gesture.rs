@@ -312,8 +312,11 @@ async fn manage(
                     &mut accumulators,
                     &hook_maps,
                     &gesture_bindings,
-                    &dpi_cycle,
-                    &capture_channel,
+                    DispatchHardware {
+                        dpi_cycle: &dpi_cycle,
+                        capture: &capture_channel,
+                        registry: registry.as_ref(),
+                    },
                     &thumbwheel_sensitivity,
                 );
             }
@@ -442,13 +445,19 @@ enum WheelOutput {
 }
 
 /// Route one captured input to its bound action (or re-synthesised scroll).
+#[derive(Clone, Copy)]
+struct DispatchHardware<'a> {
+    dpi_cycle: &'a Arc<RwLock<DpiCycleState>>,
+    capture: &'a CaptureChannel,
+    registry: Option<&'a ChannelRegistry>,
+}
+
 fn dispatch(
     input: CapturedInput,
     accumulators: &mut WheelAccumulators,
     hook_maps: &SharedHookMaps,
     gesture_bindings: &GestureBindings,
-    dpi_cycle: &Arc<RwLock<DpiCycleState>>,
-    capture: &CaptureChannel,
+    hardware: DispatchHardware<'_>,
     thumbwheel_sensitivity: &ThumbwheelSensitivity,
 ) {
     match input {
@@ -459,7 +468,12 @@ fn dispatch(
                 .and_then(|guard| guard.get(&direction).cloned());
             if let Some(action) = action {
                 debug!(?direction, action = %action.label(), "gesture → action");
-                hook_runtime::dispatch_action(&action, dpi_cycle, capture);
+                hook_runtime::dispatch_action(
+                    &action,
+                    hardware.dpi_cycle,
+                    hardware.capture,
+                    hardware.registry,
+                );
             } else {
                 debug!(?direction, "gesture with no binding — ignored");
             }
@@ -481,7 +495,12 @@ fn dispatch(
                         )
                     });
                 if !ax_handled {
-                    hook_runtime::dispatch_action(&action, dpi_cycle, capture);
+                    hook_runtime::dispatch_action(
+                        &action,
+                        hardware.dpi_cycle,
+                        hardware.capture,
+                        hardware.registry,
+                    );
                 }
             } else {
                 debug!(?button, "HID++ button with no binding — ignored");
@@ -514,7 +533,12 @@ fn dispatch(
                 }
                 WheelOutput::FireAction => {
                     debug!(?button, action = %action.label(), "thumb wheel → action");
-                    hook_runtime::dispatch_action(&action, dpi_cycle, capture);
+                    hook_runtime::dispatch_action(
+                        &action,
+                        hardware.dpi_cycle,
+                        hardware.capture,
+                        hardware.registry,
+                    );
                 }
             }
         }
