@@ -10,6 +10,7 @@
 #![deny(rustdoc::bare_urls)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+mod channel_registry;
 mod mappings;
 mod node_ledger;
 mod route;
@@ -29,6 +30,7 @@ pub mod smartshift;
 pub mod thumbwheel;
 pub mod write;
 
+pub use channel_registry::ChannelRegistry;
 pub use gesture::{CaptureChannel, CapturedInput, GestureError, run_capture_session};
 pub use hires_wheel::{
     ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode,

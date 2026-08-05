@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    hash::Hash,
     sync::Arc,
     time::Duration,
 };
@@ -13,7 +14,9 @@ use thiserror::Error;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
+use crate::channel_registry::ChannelRegistry;
 use crate::node_ledger::NodeLedger;
+use crate::route::DeviceRoute;
 use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
 mod cache;
@@ -100,11 +103,14 @@ pub struct Enumerator {
     /// each open also leaks an `io_service_t` in async-hid's macOS backend — so a
     /// steadily-connected node is opened once here and reused until it
     /// disconnects.
-    channels: HashMap<async_hid::DeviceId, CachedChannel>,
+    channels: ChannelCache<async_hid::DeviceId, CachedChannel>,
     /// Per-node last-good inventory + consecutive-failure counts: replays a
     /// node's snapshot through transient probe failures and decides when its
     /// cached channel must be dropped and reopened (see [`crate::node_ledger`]).
     ledger: NodeLedger<async_hid::DeviceId>,
+    /// Optional publication sink used by the persistent Agent watcher. One-shot
+    /// callers keep this `None` and retain the route-opening library behavior.
+    registry: Option<ChannelRegistry>,
     tick: u64,
 }
 
@@ -115,6 +121,102 @@ pub struct Enumerator {
 struct CachedChannel {
     info: async_hid::DeviceInfo,
     channel: Arc<HidppChannel>,
+}
+
+struct PreparedNodes {
+    active: Vec<(async_hid::DeviceInfo, Arc<HidppChannel>)>,
+    open_failures: Vec<async_hid::DeviceId>,
+    retiring: Vec<async_hid::DeviceId>,
+}
+
+/// Disjoint active and retiring channels, generic so ownership transitions can
+/// be tested without constructing a platform HID node.
+struct ChannelCache<Node, Channel> {
+    active: HashMap<Node, Channel>,
+    retiring: HashMap<Node, Channel>,
+}
+
+impl<Node, Channel> Default for ChannelCache<Node, Channel> {
+    fn default() -> Self {
+        Self {
+            active: HashMap::new(),
+            retiring: HashMap::new(),
+        }
+    }
+}
+
+impl<Node: Eq + Hash + Clone, Channel> ChannelCache<Node, Channel> {
+    fn get(&self, node: &Node) -> Option<&Channel> {
+        self.active.get(node)
+    }
+
+    fn insert(&mut self, node: Node, channel: Channel) {
+        debug_assert!(!self.retiring.contains_key(&node));
+        self.active.insert(node, channel);
+    }
+
+    fn retire_node(&mut self, node: &Node) -> Option<()> {
+        let channel = self.active.remove(node)?;
+        self.retiring.insert(node.clone(), channel);
+        Some(())
+    }
+
+    /// Whether this node may be opened during the current tick. A quiescent
+    /// retirement is dropped here, but opening remains deferred to a later tick.
+    fn prepare_open(&mut self, node: &Node, is_quiescent: impl FnOnce(&Channel) -> bool) -> bool {
+        let Some(channel) = self.retiring.get(node) else {
+            return true;
+        };
+        if is_quiescent(channel) {
+            self.retiring.remove(node);
+        }
+        false
+    }
+
+    fn retire_absent(&mut self, seen: &HashSet<Node>) {
+        let absent = self
+            .active
+            .keys()
+            .filter(|node| !seen.contains(*node))
+            .cloned()
+            .collect::<Vec<_>>();
+        for node in absent {
+            let _ = self.retire_node(&node);
+        }
+    }
+
+    fn reap_absent(&mut self, seen: &HashSet<Node>, is_quiescent: impl Fn(&Channel) -> bool) {
+        self.retiring
+            .retain(|node, channel| seen.contains(node) || !is_quiescent(channel));
+    }
+
+    #[cfg(test)]
+    fn is_retiring(&self, node: &Node) -> bool {
+        self.retiring.contains_key(node)
+    }
+}
+
+fn routes_for_inventories(inventories: &[DeviceInventory]) -> Vec<DeviceRoute> {
+    inventories
+        .iter()
+        .flat_map(|inventory| {
+            inventory
+                .paired
+                .iter()
+                .filter_map(|paired| DeviceRoute::device_route_for(inventory, paired.slot))
+        })
+        .collect()
+}
+
+fn settle_unhealthy_node<Node: Eq + Hash + Clone>(
+    ledger: &mut NodeLedger<Node>,
+    node: &Node,
+    all_complete: &mut bool,
+    all_healthy: &mut bool,
+) -> Option<DeviceInventory> {
+    *all_complete = false;
+    *all_healthy = false;
+    ledger.settle(node, false, None).inventory
 }
 
 /// Enumerate all Logitech HID++ receivers visible to the current process and
@@ -204,6 +306,70 @@ const ONESHOT_ATTEMPTS: u8 = 4;
 const ONESHOT_RETRY_DELAY: Duration = Duration::from_millis(300);
 
 impl Enumerator {
+    /// Build a persistent enumerator that publishes its already-open channels
+    /// into `registry` after each settled inventory tick.
+    #[must_use]
+    pub fn with_registry(registry: ChannelRegistry) -> Self {
+        Self {
+            registry: Some(registry),
+            ..Self::default()
+        }
+    }
+
+    async fn prepare_nodes(&mut self, candidates: Vec<async_hid::Device>) -> PreparedNodes {
+        let mut active = Vec::new();
+        let mut seen_nodes = HashSet::new();
+        let mut open_failures = Vec::new();
+        let mut retiring = Vec::new();
+        for dev in candidates {
+            let node = dev.id.clone();
+            seen_nodes.insert(node.clone());
+            if !self
+                .channels
+                .prepare_open(&node, |cached| Arc::strong_count(&cached.channel) == 1)
+            {
+                retiring.push(node);
+                continue;
+            }
+            if let Some(open) = self.channels.get(&node) {
+                active.push((open.info.clone(), Arc::clone(&open.channel)));
+                continue;
+            }
+            match open_hidpp_channel(dev).await {
+                Ok(Some((info, channel))) => {
+                    self.channels.insert(
+                        node,
+                        CachedChannel {
+                            info: info.clone(),
+                            channel: Arc::clone(&channel),
+                        },
+                    );
+                    active.push((info, channel));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(error = ?e, "failed to open HID++ channel — retrying next tick");
+                    open_failures.push(node);
+                }
+            }
+        }
+
+        if let Some(registry) = &self.registry {
+            registry.retain_nodes(&seen_nodes);
+        }
+        self.channels.retire_absent(&seen_nodes);
+        self.channels.reap_absent(&seen_nodes, |cached| {
+            Arc::strong_count(&cached.channel) == 1
+        });
+        self.ledger.retain_nodes(&seen_nodes);
+
+        PreparedNodes {
+            active,
+            open_failures,
+            retiring,
+        }
+    }
+
     /// One enumeration pass, reusing the cache from prior passes. Probes every
     /// HID candidate concurrently (so one asleep node that burns the whole
     /// `PROBE_BUDGET` can't stall the others), reusing each device's cached
@@ -236,48 +402,13 @@ impl Enumerator {
         let candidates = enumerate_hidpp_devices().await?;
         debug!(count = candidates.len(), "HID++ candidate interfaces");
 
-        // Reuse an open channel per node, opening one only for a node seen for
-        // the first time. Sequential because opening mutates the channel cache,
-        // but in steady state every node is already cached so this is just
-        // lookups — an actual open happens only when a new device appears.
-        let mut active: Vec<(async_hid::DeviceInfo, Arc<HidppChannel>)> = Vec::new();
-        let mut seen_nodes: HashSet<async_hid::DeviceId> = HashSet::new();
-        let mut open_failures: Vec<async_hid::DeviceId> = Vec::new();
-        for dev in candidates {
-            let node = dev.id.clone();
-            seen_nodes.insert(node.clone());
-            if let Some(open) = self.channels.get(&node) {
-                active.push((open.info.clone(), Arc::clone(&open.channel)));
-                continue;
-            }
-            match open_hidpp_channel(dev).await {
-                Ok(Some((info, channel))) => {
-                    self.channels.insert(
-                        node,
-                        CachedChannel {
-                            info: info.clone(),
-                            channel: Arc::clone(&channel),
-                        },
-                    );
-                    active.push((info, channel));
-                }
-                Ok(None) => {} // speaks HID but not HID++ — not one of ours
-                // The node is listed but unreachable right now — settled as a
-                // failed probe below, so its last inventory is replayed.
-                Err(e) => {
-                    warn!(error = ?e, "failed to open HID++ channel — retrying next tick");
-                    open_failures.push(node);
-                }
-            }
-        }
-        // Drop channels for nodes that vanished this tick. A node missing from
-        // the enumeration is a real disconnect (the IOHIDManager device set is
-        // authoritative, unlike a HID++ probe timeout), so close the device and
-        // join its read thread now instead of leaving a dead channel behind; a
-        // reconnect re-opens under a fresh node id. The ledger forgets vanished
-        // nodes for the same reason — a true disconnect must not be replayed.
-        self.channels.retain(|node, _| seen_nodes.contains(node));
-        self.ledger.retain_nodes(&seen_nodes);
+        // Reuse an open channel per node, opening only when no active or
+        // retiring connection owns that OS node.
+        let PreparedNodes {
+            active,
+            open_failures,
+            retiring: retiring_nodes,
+        } = self.prepare_nodes(candidates).await;
 
         // Probe each open channel concurrently, sharing `&cache` read-only;
         // updates are collected and applied afterwards (no `RefCell`).
@@ -287,8 +418,12 @@ impl Enumerator {
                 .into_iter()
                 .map(|(info, channel)| async move {
                     let node = info.id.clone();
-                    let probe = timeout(PROBE_BUDGET, probe_one(info, channel, cache, tick)).await;
-                    (node, probe)
+                    let probe = timeout(
+                        PROBE_BUDGET,
+                        probe_one(info, Arc::clone(&channel), cache, tick),
+                    )
+                    .await;
+                    (node, channel, probe)
                 })
                 .collect::<Vec<_>>()
                 .join()
@@ -303,7 +438,7 @@ impl Enumerator {
         // governed by `probe.healthy`.
         let mut all_complete = true;
         let mut all_healthy = true;
-        for (node, result) in results {
+        for (node, channel, result) in results {
             let probe = if let Ok(probe) = result {
                 probe
             } else {
@@ -318,18 +453,47 @@ impl Enumerator {
             all_healthy &= probe.healthy;
             outcomes.extend(probe.outcomes);
             let settled = self.ledger.settle(&node, probe.healthy, probe.inventory);
-            if settled.evict_channel && self.channels.remove(&node).is_some() {
-                warn!("node probe keeps failing — dropping its channel to reopen next tick");
+            if settled.evict_channel {
+                if let Some(registry) = &self.registry {
+                    registry.remove_node(&node);
+                }
+                if self.channels.retire_node(&node).is_some() {
+                    warn!("node probe keeps failing — retiring its channel before reopen");
+                }
+            } else if let Some(registry) = &self.registry {
+                let routes = settled
+                    .inventory
+                    .as_ref()
+                    .map_or_else(Vec::new, |inventory| {
+                        routes_for_inventories(std::slice::from_ref(inventory))
+                    });
+                if routes.is_empty() {
+                    registry.remove_node(&node);
+                } else {
+                    registry.replace_node(node.clone(), routes, channel);
+                }
             }
             inventories.extend(settled.inventory);
+        }
+        // A listed node whose old connection is still retiring is an unhealthy
+        // probe, not a disconnect: preserve the ledger's normal replay grace.
+        for node in retiring_nodes {
+            inventories.extend(settle_unhealthy_node(
+                &mut self.ledger,
+                &node,
+                &mut all_complete,
+                &mut all_healthy,
+            ));
         }
         // Nodes that wouldn't open this tick still replay their last snapshot
         // (they have no cached channel to evict).
         for node in open_failures {
-            all_complete = false;
-            all_healthy = false;
-            let settled = self.ledger.settle(&node, false, None);
-            inventories.extend(settled.inventory);
+            inventories.extend(settle_unhealthy_node(
+                &mut self.ledger,
+                &node,
+                &mut all_complete,
+                &mut all_healthy,
+            ));
         }
 
         // Apply fresh probes and record which devices were seen this tick.
