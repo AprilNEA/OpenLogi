@@ -62,6 +62,7 @@ impl CameraDebouncer {
 /// immediately; later samples are emitted only after a debounced state change.
 /// Dropping the receiver stops the worker on its next attempted send.
 #[cfg(target_os = "macos")]
+#[must_use]
 pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<bool> {
     let (tx, rx) = mpsc::unbounded_channel();
     let spawn_result = thread::Builder::new()
@@ -96,6 +97,7 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<bool> {
 /// Return an inert watcher on platforms that do not yet expose a supported
 /// aggregate camera-use provider. Camera-linked settings retain manual power.
 #[cfg(not(target_os = "macos"))]
+#[must_use]
 pub fn spawn(_period: Duration) -> mpsc::UnboundedReceiver<bool> {
     let (_tx, rx) = mpsc::unbounded_channel();
     rx
