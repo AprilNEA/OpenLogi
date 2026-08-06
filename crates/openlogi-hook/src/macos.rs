@@ -417,6 +417,177 @@ fn usable_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
     event.get_integer_value_field(axis.line) as f64
 }
 
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGEventCreateCopy(event: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+}
+
+fn inverted_scroll_event(event: &CGEvent) -> Result<CGEvent, ()> {
+    // SAFETY: `event.as_ptr()` is a live CGEventRef. A non-null return is a
+    // distinct +1 retained copy which `CGEvent::from_ptr` takes ownership of.
+    let copy = unsafe { CGEventCreateCopy(event.as_ptr().cast()) };
+    if copy.is_null() {
+        return Err(());
+    }
+    // SAFETY: `copy` is a non-null, +1 retained CGEventRef returned above.
+    let replacement = unsafe { CGEvent::from_ptr(copy.cast()) };
+    replacement.set_integer_value_field(
+        VERTICAL.line,
+        event
+            .get_integer_value_field(VERTICAL.line)
+            .saturating_neg(),
+    );
+    replacement.set_double_value_field(
+        VERTICAL.fixed,
+        -event.get_double_value_field(VERTICAL.fixed),
+    );
+    replacement.set_double_value_field(
+        VERTICAL.point,
+        -event.get_double_value_field(VERTICAL.point),
+    );
+    replacement.set_integer_value_field(
+        EventField::EVENT_SOURCE_USER_DATA,
+        openlogi_inject::SYNTHETIC_EVENT_USER_DATA,
+    );
+    Ok(replacement)
+}
+
+fn callback_result(disposition: EventDisposition, event: &CGEvent) -> CallbackResult {
+    match disposition {
+        EventDisposition::PassThrough => CallbackResult::Keep,
+        EventDisposition::Suppress => CallbackResult::Drop,
+        EventDisposition::InvertScroll => {
+            if let Ok(replacement) = inverted_scroll_event(event) {
+                CallbackResult::Replace(replacement)
+            } else {
+                warn!("failed to copy scroll event for inversion; preserving original event");
+                CallbackResult::Keep
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use core_graphics::event::{CGEvent, CallbackResult, ScrollEventUnit};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use foreign_types_shared::ForeignType as _;
+
+    use super::{
+        HORIZONTAL, MOMENTUM_PHASE, SCROLL_COUNT, SCROLL_PHASE, VERTICAL, callback_result,
+        inverted_scroll_event, translate,
+    };
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventGetTimestamp(event: *const std::ffi::c_void) -> u64;
+        fn CGEventSetTimestamp(event: *mut std::ffi::c_void, timestamp: u64);
+    }
+
+    fn scroll_event(unit: u32, vertical: i32, horizontal: i32) -> CGEvent {
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .unwrap_or_else(|()| panic!("test event source should be available"));
+        CGEvent::new_scroll_event(source, unit, 2, vertical, horizontal, 0)
+            .unwrap_or_else(|()| panic!("test scroll event should be available"))
+    }
+
+    #[test]
+    fn inverted_scroll_event_is_marked_and_does_not_reenter_translation() {
+        let event = scroll_event(ScrollEventUnit::LINE, 7, -3);
+
+        let inverted = inverted_scroll_event(&event)
+            .unwrap_or_else(|()| panic!("replacement should be created"));
+
+        assert_eq!(
+            inverted
+                .get_integer_value_field(core_graphics::event::EventField::EVENT_SOURCE_USER_DATA),
+            openlogi_inject::SYNTHETIC_EVENT_USER_DATA
+        );
+        assert!(translate(core_graphics::event::CGEventType::ScrollWheel, &inverted).is_none());
+    }
+
+    #[test]
+    fn inverted_scroll_event_preserves_fractional_axes_and_metadata() {
+        let event = scroll_event(ScrollEventUnit::PIXEL, 12, -7);
+        event.set_integer_value_field(VERTICAL.line, 3);
+        event.set_double_value_field(VERTICAL.fixed, 1.25);
+        event.set_double_value_field(VERTICAL.point, 12.5);
+        event.set_integer_value_field(HORIZONTAL.line, -2);
+        event.set_double_value_field(HORIZONTAL.fixed, -0.75);
+        event.set_double_value_field(HORIZONTAL.point, -7.5);
+        event.set_integer_value_field(SCROLL_PHASE, 2);
+        event.set_integer_value_field(MOMENTUM_PHASE, 3);
+        event.set_integer_value_field(SCROLL_COUNT, 4);
+        // SAFETY: `event.as_ptr()` is a live CGEvent for the duration of this call.
+        unsafe { CGEventSetTimestamp(event.as_ptr().cast(), 0x1234_5678_9ABC_DEF0) };
+        let vertical_line = event.get_integer_value_field(VERTICAL.line);
+        let vertical_fixed = event.get_double_value_field(VERTICAL.fixed);
+        let vertical_point = event.get_double_value_field(VERTICAL.point);
+        let horizontal_line = event.get_integer_value_field(HORIZONTAL.line);
+        let horizontal_fixed = event.get_double_value_field(HORIZONTAL.fixed);
+        let horizontal_point = event.get_double_value_field(HORIZONTAL.point);
+
+        let inverted = inverted_scroll_event(&event)
+            .unwrap_or_else(|()| panic!("replacement should be copied"));
+
+        assert_ne!(inverted.as_ptr(), event.as_ptr());
+        assert_eq!(
+            inverted.get_integer_value_field(VERTICAL.line),
+            vertical_line.saturating_neg()
+        );
+        assert!(
+            (inverted.get_double_value_field(VERTICAL.fixed) + vertical_fixed).abs() < f64::EPSILON
+        );
+        assert!(
+            (inverted.get_double_value_field(VERTICAL.point) + vertical_point).abs() < f64::EPSILON
+        );
+        assert_eq!(
+            inverted.get_integer_value_field(HORIZONTAL.line),
+            horizontal_line
+        );
+        assert!(
+            (inverted.get_double_value_field(HORIZONTAL.fixed) - horizontal_fixed).abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (inverted.get_double_value_field(HORIZONTAL.point) - horizontal_point).abs()
+                < f64::EPSILON
+        );
+        assert_eq!(inverted.get_integer_value_field(SCROLL_PHASE), 2);
+        assert_eq!(inverted.get_integer_value_field(MOMENTUM_PHASE), 3);
+        assert_eq!(inverted.get_integer_value_field(SCROLL_COUNT), 4);
+        // SAFETY: both pointers are live CGEvents for the duration of these calls.
+        assert_eq!(
+            unsafe { CGEventGetTimestamp(inverted.as_ptr().cast()) },
+            unsafe { CGEventGetTimestamp(event.as_ptr().cast()) }
+        );
+        assert_eq!(event.get_integer_value_field(VERTICAL.line), vertical_line);
+        assert!(
+            (event.get_double_value_field(VERTICAL.fixed) - vertical_fixed).abs() < f64::EPSILON
+        );
+        assert!(
+            (event.get_double_value_field(VERTICAL.point) - vertical_point).abs() < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn invert_disposition_returns_replacement_event() {
+        let event = scroll_event(ScrollEventUnit::PIXEL, 5, -2);
+
+        let result = callback_result(crate::EventDisposition::InvertScroll, &event);
+
+        let CallbackResult::Replace(replacement) = result else {
+            panic!("invert disposition should replace the captured event");
+        };
+        assert!((replacement.get_double_value_field(VERTICAL.point) + 5.0).abs() < f64::EPSILON);
+        assert_eq!(
+            replacement
+                .get_integer_value_field(core_graphics::event::EventField::EVENT_SOURCE_USER_DATA),
+            openlogi_inject::SYNTHETIC_EVENT_USER_DATA
+        );
+    }
+}
+
 /// Create the event tap and run loop on a dedicated thread.
 pub(crate) fn start(
     cb: impl Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static,
@@ -494,10 +665,7 @@ fn thread_main(
             let Some(mouse_event) = translate(etype, event) else {
                 return CallbackResult::Keep;
             };
-            match cb(mouse_event) {
-                EventDisposition::PassThrough => CallbackResult::Keep,
-                EventDisposition::Suppress => CallbackResult::Drop,
-            }
+            callback_result(cb(mouse_event), event)
         },
     );
 
