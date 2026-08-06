@@ -275,6 +275,7 @@ thread_local! {
 /// granted or on an unsupported platform — the app continues without crashing.
 pub fn start(
     hooks: SharedHookMaps,
+    scroll_inversions: SharedScrollInversions,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture: CaptureChannel,
     monitor: SharedEventMonitor,
@@ -392,7 +393,12 @@ pub fn start(
                 HOLD.with_borrow_mut(HoldState::cancel);
                 EventDisposition::PassThrough
             }
-            MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
+            MouseEvent::Scroll {
+                delta_y,
+                from_trackpad,
+                device,
+                ..
+            } => scroll_disposition(delta_y, from_trackpad, device.as_ref(), &scroll_inversions),
         }
     });
 
@@ -495,15 +501,15 @@ mod tests {
     use openlogi_core::binding::GESTURE_SWIPE_THRESHOLD;
     use openlogi_hook::EventDevice;
 
-    fn accepts_existing_start_signature(
-        _start: fn(
-            SharedHookMaps,
-            Arc<RwLock<DpiCycleState>>,
-            CaptureChannel,
-            SharedEventMonitor,
-        ) -> Option<Hook>,
-    ) {
-    }
+    type StartFn = fn(
+        SharedHookMaps,
+        SharedScrollInversions,
+        Arc<RwLock<DpiCycleState>>,
+        CaptureChannel,
+        SharedEventMonitor,
+    ) -> Option<Hook>;
+
+    fn accepts_existing_start_signature(_start: StartFn) {}
 
     // The mid-swipe gate itself is unit-tested on `SwipeAccumulator` in
     // `openlogi-core`; these cover only what `HoldState` adds on top — tagging a
@@ -540,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn start_keeps_the_existing_four_argument_contract() {
+    fn start_accepts_scroll_inversions() {
         accepts_existing_start_signature(start);
     }
 
