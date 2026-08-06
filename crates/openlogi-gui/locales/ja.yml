@@ -271,6 +271,7 @@ _version: 1
 "Scrolling": "スクロール"
 "Invert scroll direction": "スクロール方向を反転"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "このマウスのスクロールホイールを反転します。トラックパッドはシステムのスクロール方向を維持します。"
+"Reverse this mouse's scroll wheel in macOS. Your trackpad keeps the system scroll direction.": "macOSでこのマウスのスクロールホイールを反転します。トラックパッドはシステムのスクロール方向を維持します。"
 "This device does not report native HID++ scroll inversion support.": "This device does not report native HID++ scroll inversion support."
 "Wheel resolution": "ホイール解像度"
 "Device default": "デバイスのデフォルト"

@@ -271,6 +271,7 @@ _version: 1
 "Scrolling": "滚动"
 "Invert scroll direction": "反转滚动方向"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "反转这只鼠标的滚轮方向。触控板仍保持系统的滚动方向。"
+"Reverse this mouse's scroll wheel in macOS. Your trackpad keeps the system scroll direction.": "在 macOS 中反转这只鼠标的滚轮方向。触控板仍保持系统的滚动方向。"
 "This device does not report native HID++ scroll inversion support.": "此设备未报告原生 HID++ 滚动反转支持。"
 "Wheel resolution": "滚轮分辨率"
 "Device default": "设备默认值"

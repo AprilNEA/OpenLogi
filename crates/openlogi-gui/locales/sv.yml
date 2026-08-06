@@ -271,6 +271,7 @@ _version: 1
 "Scrolling": "Rullning"
 "Invert scroll direction": "Invertera rullningsriktning"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "Inverterar mushjulet på den här musen. Din styrplatta behåller systemets rullningsriktning."
+"Reverse this mouse's scroll wheel in macOS. Your trackpad keeps the system scroll direction.": "Inverterar mushjulet på den här musen i macOS. Din styrplatta behåller systemets rullningsriktning."
 "This device does not report native HID++ scroll inversion support.": "This device does not report native HID++ scroll inversion support."
 "Wheel resolution": "Hjulupplösning"
 "Device default": "Enhetsstandard"

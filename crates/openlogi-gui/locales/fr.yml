@@ -271,6 +271,7 @@ _version: 1
 "Scrolling": "Défilement"
 "Invert scroll direction": "Inverser le sens de défilement"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "Inverse la molette de cette souris. Votre trackpad conserve le sens de défilement du système."
+"Reverse this mouse's scroll wheel in macOS. Your trackpad keeps the system scroll direction.": "Inverse la molette de cette souris sous macOS. Votre trackpad conserve le sens de défilement du système."
 "This device does not report native HID++ scroll inversion support.": "This device does not report native HID++ scroll inversion support."
 "Wheel resolution": "Résolution de la molette"
 "Device default": "Réglage par défaut de l’appareil"

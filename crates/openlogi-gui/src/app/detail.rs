@@ -229,18 +229,23 @@ fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
 /// Pure config — no hardware read — so it is a plain settings block rather than
 /// an `Entity` panel like DPI / SmartShift.
 fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let (inverted, inversion_supported, resolution, hires_supported) = cx
+    let (inverted, native_inversion, inversion_supported, resolution, hires_supported) = cx
         .try_global::<AppState>()
-        .map_or((false, false, None, false), |state| {
+        .map_or((false, false, false, None, false), |state| {
             (
                 state.current_invert_scroll(),
+                state.current_native_scroll_inversion_supported(),
                 state.current_scroll_inversion_supported(),
                 state.current_scroll_resolution(),
                 state.current_hires_wheel_supported(),
             )
         });
-    let inversion_description = if inversion_supported {
+    let inversion_description = if native_inversion {
         tr!("Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.")
+    } else if inversion_supported {
+        tr!(
+            "Reverse this mouse's scroll wheel in macOS. Your trackpad keeps the system scroll direction."
+        )
     } else {
         tr!("This device does not report native HID++ scroll inversion support.")
     };
