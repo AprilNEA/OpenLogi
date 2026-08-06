@@ -13,7 +13,7 @@ use openlogi_core::binding::{
     Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
 use openlogi_hid::CaptureChannel;
-use openlogi_hook::{EventDisposition, Hook, MouseEvent};
+use openlogi_hook::{EventDevice, EventDisposition, Hook, MouseEvent};
 use tracing::{info, warn};
 
 use crate::DpiCycleState;
@@ -38,6 +38,181 @@ pub struct HookMaps {
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
 /// (orchestrator), the OS-hook callback, and the gesture watcher.
 pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
+
+/// Device identity fields used to match a physical scroll source to its
+/// software inversion setting.
+#[derive(Default)]
+pub struct ScrollDeviceKey {
+    /// USB/Bluetooth/HID vendor id, when known.
+    pub vendor_id: Option<u32>,
+    /// USB/Bluetooth/HID product id, when known.
+    pub product_id: Option<u32>,
+    /// Human-readable HID product name, when known.
+    pub product_name: Option<String>,
+}
+
+/// Per-device software scroll inversion settings.
+///
+/// Product ids are matched exactly before normalized product names. Conflicting
+/// settings for the same identity are retained as ambiguous and never match.
+#[derive(Default)]
+pub struct ScrollInversions {
+    by_product_id: BTreeMap<(u32, u32), Option<bool>>,
+    by_product_name: BTreeMap<(Option<u32>, String), Option<bool>>,
+}
+
+impl ScrollInversions {
+    /// Build the lookup from the product identities known to the orchestrator.
+    #[must_use]
+    pub fn new(entries: impl IntoIterator<Item = (ScrollDeviceKey, bool)>) -> Self {
+        let mut by_product_id = BTreeMap::new();
+        let mut by_product_name = BTreeMap::new();
+        for (key, invert) in entries {
+            if let (Some(vendor_id), Some(product_id)) = (key.vendor_id, key.product_id) {
+                merge_inversion(&mut by_product_id, (vendor_id, product_id), invert);
+            }
+            if let Some(product_name) = key
+                .product_name
+                .and_then(|name| normalize_product_name(&name))
+            {
+                merge_inversion(&mut by_product_name, (key.vendor_id, product_name), invert);
+            }
+        }
+        Self {
+            by_product_id,
+            by_product_name,
+        }
+    }
+
+    /// Resolve the inversion setting for an event source, or `None` when the
+    /// source is unknown or its matching identities are ambiguous.
+    #[must_use]
+    pub fn inversion_for(&self, device: Option<&EventDevice>) -> Option<bool> {
+        let device = device?;
+        if let (Some(vendor_id), Some(product_id)) = (device.vendor_id, device.product_id)
+            && let Some(invert) = self.by_product_id.get(&(vendor_id, product_id))
+        {
+            return *invert;
+        }
+
+        let product_name = device
+            .product_name
+            .as_deref()
+            .and_then(normalize_product_name)?;
+        match consistent_inversion(
+            self.by_product_name
+                .iter()
+                .filter(|((known_vendor, known_name), _)| {
+                    vendors_compatible(*known_vendor, device.vendor_id)
+                        && known_name == &product_name
+                })
+                .map(|(_, invert)| invert),
+        ) {
+            InversionConsensus::NoCandidates => {}
+            InversionConsensus::Ambiguous => return None,
+            InversionConsensus::Matched(invert) => return Some(invert),
+        }
+
+        match consistent_inversion(
+            self.by_product_name
+                .iter()
+                .filter(|((known_vendor, known_name), _)| {
+                    vendors_compatible(*known_vendor, device.vendor_id)
+                        && product_names_match(known_name, &product_name)
+                })
+                .map(|(_, invert)| invert),
+        ) {
+            InversionConsensus::Matched(invert) => Some(invert),
+            InversionConsensus::NoCandidates | InversionConsensus::Ambiguous => None,
+        }
+    }
+}
+
+fn merge_inversion<K: Ord>(map: &mut BTreeMap<K, Option<bool>>, key: K, invert: bool) {
+    map.entry(key)
+        .and_modify(|existing| {
+            if *existing != Some(invert) {
+                *existing = None;
+            }
+        })
+        .or_insert(Some(invert));
+}
+
+fn normalize_product_name(name: &str) -> Option<String> {
+    let normalized = name.trim().to_lowercase();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn product_names_match(known: &str, event: &str) -> bool {
+    known.chars().count() >= 4
+        && event.chars().count() >= 4
+        && (known.contains(event) || event.contains(known))
+}
+
+fn vendors_compatible(known: Option<u32>, event: Option<u32>) -> bool {
+    !matches!((known, event), (Some(known), Some(event)) if known != event)
+}
+
+enum InversionConsensus {
+    NoCandidates,
+    Ambiguous,
+    Matched(bool),
+}
+
+fn consistent_inversion<'a>(
+    candidates: impl IntoIterator<Item = &'a Option<bool>>,
+) -> InversionConsensus {
+    let mut matched = None;
+    for invert in candidates {
+        let Some(invert) = *invert else {
+            return InversionConsensus::Ambiguous;
+        };
+        if matched.is_some_and(|existing| existing != invert) {
+            return InversionConsensus::Ambiguous;
+        }
+        matched = Some(invert);
+    }
+    matched.map_or(
+        InversionConsensus::NoCandidates,
+        InversionConsensus::Matched,
+    )
+}
+
+/// Decide whether a vertical wheel event should be inverted on this platform.
+///
+/// Unknown or ambiguous devices, disabled settings, trackpad events, and zero
+/// vertical deltas always pass through unchanged.
+#[must_use]
+pub fn scroll_disposition(
+    delta_y: f32,
+    from_trackpad: bool,
+    device: Option<&EventDevice>,
+    scroll_inversions: &SharedScrollInversions,
+) -> EventDisposition {
+    let should_invert = scroll_inversions
+        .read()
+        .ok()
+        .and_then(|inversions| inversions.inversion_for(device))
+        .unwrap_or(false);
+    if should_invert && !from_trackpad && delta_y != 0.0 {
+        inverted_scroll_disposition()
+    } else {
+        EventDisposition::PassThrough
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn inverted_scroll_disposition() -> EventDisposition {
+    EventDisposition::InvertScroll
+}
+
+#[cfg(not(target_os = "macos"))]
+fn inverted_scroll_disposition() -> EventDisposition {
+    EventDisposition::PassThrough
+}
+
+/// Shared, atomically published per-device scroll inversion settings.
+pub type SharedScrollInversions = Arc<RwLock<ScrollInversions>>;
 
 /// Tracks which OS-hook button (Middle/Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
@@ -318,6 +493,17 @@ pub fn dispatch_action(
 mod tests {
     use super::*;
     use openlogi_core::binding::GESTURE_SWIPE_THRESHOLD;
+    use openlogi_hook::EventDevice;
+
+    fn accepts_existing_start_signature(
+        _start: fn(
+            SharedHookMaps,
+            Arc<RwLock<DpiCycleState>>,
+            CaptureChannel,
+            SharedEventMonitor,
+        ) -> Option<Hook>,
+    ) {
+    }
 
     // The mid-swipe gate itself is unit-tested on `SwipeAccumulator` in
     // `openlogi-core`; these cover only what `HoldState` adds on top — tagging a
@@ -351,6 +537,357 @@ mod tests {
         assert_eq!(hold.end(ButtonId::Forward), None);
         // ...and ending the held button with no swipe is a plain click.
         assert_eq!(hold.end(ButtonId::Back), Some(true));
+    }
+
+    #[test]
+    fn start_keeps_the_existing_four_argument_contract() {
+        accepts_existing_start_signature(start);
+    }
+
+    #[test]
+    fn scroll_inversions_prefer_exact_product_id_over_name() {
+        let inversions = ScrollInversions::new([
+            (
+                ScrollDeviceKey {
+                    vendor_id: Some(0x046d),
+                    product_id: Some(0xb037),
+                    product_name: Some("MX Anywhere 3S".to_string()),
+                },
+                true,
+            ),
+            (
+                ScrollDeviceKey {
+                    vendor_id: Some(0x046d),
+                    product_id: Some(0xb042),
+                    product_name: Some("MX Master 4".to_string()),
+                },
+                false,
+            ),
+        ]);
+        let event = EventDevice {
+            vendor_id: Some(0x046d),
+            product_id: Some(0xb037),
+            product_name: Some("MX Master 4".to_string()),
+        };
+
+        assert_eq!(inversions.inversion_for(Some(&event)), Some(true));
+    }
+
+    #[test]
+    fn scroll_inversions_scope_product_ids_to_vendor() {
+        let inversions = ScrollInversions::new([(
+            ScrollDeviceKey {
+                vendor_id: Some(0x046d),
+                product_id: Some(0xb037),
+                product_name: None,
+            },
+            true,
+        )]);
+
+        assert_eq!(
+            inversions.inversion_for(Some(&EventDevice {
+                vendor_id: Some(0x1234),
+                product_id: Some(0xb037),
+                product_name: None,
+            })),
+            None,
+            "the same product id from another vendor must not match"
+        );
+        assert_eq!(
+            inversions.inversion_for(Some(&EventDevice {
+                vendor_id: None,
+                product_id: Some(0xb037),
+                product_name: None,
+            })),
+            None,
+            "a missing event vendor must not guess a product-id match"
+        );
+        assert_eq!(
+            inversions.inversion_for(Some(&EventDevice {
+                vendor_id: Some(0x046d),
+                product_id: Some(0xb037),
+                product_name: None,
+            })),
+            Some(true),
+            "the exact Logitech vendor/product pair still matches"
+        );
+
+        let missing_known_vendor = ScrollInversions::new([(
+            ScrollDeviceKey {
+                vendor_id: None,
+                product_id: Some(0xb037),
+                product_name: None,
+            },
+            true,
+        )]);
+        assert_eq!(
+            missing_known_vendor.inversion_for(Some(&EventDevice {
+                vendor_id: Some(0x046d),
+                product_id: Some(0xb037),
+                product_name: None,
+            })),
+            None,
+            "a missing known vendor must not create a product-id match"
+        );
+    }
+
+    #[test]
+    fn scroll_inversions_scope_product_names_to_vendor() {
+        let inversions = ScrollInversions::new([(
+            ScrollDeviceKey {
+                vendor_id: Some(0x046d),
+                product_id: None,
+                product_name: Some("M650".to_string()),
+            },
+            true,
+        )]);
+
+        assert_eq!(
+            inversions.inversion_for(Some(&EventDevice {
+                vendor_id: Some(0x1234),
+                product_id: None,
+                product_name: Some("M650".to_string()),
+            })),
+            None,
+            "the same product name from another known vendor must not match"
+        );
+        assert_eq!(
+            inversions.inversion_for(Some(&EventDevice {
+                vendor_id: Some(0x046d),
+                product_id: None,
+                product_name: Some("Logitech Signature M650 L".to_string()),
+            })),
+            Some(true),
+            "the Logitech name containment fallback still matches"
+        );
+
+        let missing_known_vendor = ScrollInversions::new([(
+            ScrollDeviceKey {
+                vendor_id: None,
+                product_id: None,
+                product_name: Some("M650".to_string()),
+            },
+            true,
+        )]);
+        assert_eq!(
+            missing_known_vendor.inversion_for(Some(&EventDevice {
+                vendor_id: Some(0x046d),
+                product_id: None,
+                product_name: Some("Logitech Signature M650 L".to_string()),
+            })),
+            Some(true),
+            "a sole unknown-vendor name may be used as a fallback"
+        );
+    }
+
+    #[test]
+    fn scroll_inversions_fall_back_to_normalized_product_name() {
+        let inversions = ScrollInversions::new([
+            (
+                ScrollDeviceKey {
+                    vendor_id: Some(0x046d),
+                    product_id: None,
+                    product_name: Some("  MX Anywhere 3S  ".to_string()),
+                },
+                true,
+            ),
+            (
+                ScrollDeviceKey {
+                    vendor_id: Some(0x046d),
+                    product_id: None,
+                    product_name: Some("M650".to_string()),
+                },
+                false,
+            ),
+        ]);
+
+        assert_eq!(
+            inversions.inversion_for(Some(&EventDevice {
+                vendor_id: Some(0x046d),
+                product_id: None,
+                product_name: Some("mx anywhere 3s".to_string()),
+            })),
+            Some(true),
+            "trimmed lowercase exact names match"
+        );
+        assert_eq!(
+            inversions.inversion_for(Some(&EventDevice {
+                vendor_id: Some(0x046d),
+                product_id: None,
+                product_name: Some("Logitech Signature M650 L".to_string()),
+            })),
+            Some(false),
+            "names of at least four characters may match by containment"
+        );
+        assert_eq!(
+            inversions.inversion_for(Some(&EventDevice {
+                vendor_id: Some(0x046d),
+                product_id: None,
+                product_name: Some("650".to_string()),
+            })),
+            None,
+            "short names must not match by containment"
+        );
+    }
+
+    #[test]
+    fn scroll_inversions_drop_conflicting_identities() {
+        let key = || ScrollDeviceKey {
+            vendor_id: Some(0x046d),
+            product_id: Some(0xc548),
+            product_name: Some("USB Receiver".to_string()),
+        };
+        let inversions = ScrollInversions::new([(key(), true), (key(), false)]);
+
+        assert_eq!(
+            inversions.inversion_for(Some(&EventDevice {
+                vendor_id: Some(0x046d),
+                product_id: Some(0xc548),
+                product_name: Some("USB Receiver".to_string()),
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn scroll_inversions_drop_conflicting_normalized_names_without_product_id() {
+        let key = || ScrollDeviceKey {
+            vendor_id: None,
+            product_id: None,
+            product_name: Some("  USB Receiver  ".to_string()),
+        };
+        let inversions = Arc::new(RwLock::new(ScrollInversions::new([
+            (key(), true),
+            (key(), false),
+        ])));
+        let event = EventDevice {
+            vendor_id: Some(0x046d),
+            product_id: None,
+            product_name: Some("usb receiver".to_string()),
+        };
+
+        assert_eq!(
+            inversions
+                .read()
+                .ok()
+                .and_then(|settings| settings.inversion_for(Some(&event))),
+            None
+        );
+        assert_eq!(
+            scroll_disposition(1.0, false, Some(&event), &inversions),
+            EventDisposition::PassThrough
+        );
+    }
+
+    #[test]
+    fn scroll_inversions_reject_conflicting_containment_candidates() {
+        let inversions = Arc::new(RwLock::new(ScrollInversions::new([
+            (
+                ScrollDeviceKey {
+                    vendor_id: Some(0x046d),
+                    product_id: None,
+                    product_name: Some("M650".to_string()),
+                },
+                true,
+            ),
+            (
+                ScrollDeviceKey {
+                    vendor_id: Some(0x046d),
+                    product_id: None,
+                    product_name: Some("Signature M650".to_string()),
+                },
+                false,
+            ),
+        ])));
+        let event = EventDevice {
+            vendor_id: Some(0x046d),
+            product_id: None,
+            product_name: Some("Logitech Signature M650 L".to_string()),
+        };
+
+        assert_eq!(
+            inversions
+                .read()
+                .ok()
+                .and_then(|settings| settings.inversion_for(Some(&event))),
+            None
+        );
+        assert_eq!(
+            scroll_disposition(1.0, false, Some(&event), &inversions),
+            EventDisposition::PassThrough
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scroll_disposition_inverts_an_enabled_known_mouse_wheel() {
+        let inversions = Arc::new(RwLock::new(ScrollInversions::new([(
+            ScrollDeviceKey {
+                vendor_id: Some(0x046d),
+                product_id: Some(0xb037),
+                product_name: None,
+            },
+            true,
+        )])));
+        let event = EventDevice {
+            vendor_id: Some(0x046d),
+            product_id: Some(0xb037),
+            product_name: None,
+        };
+
+        assert_eq!(
+            scroll_disposition(1.0, false, Some(&event), &inversions),
+            EventDisposition::InvertScroll
+        );
+    }
+
+    #[test]
+    fn scroll_disposition_passes_disabled_trackpad_unknown_and_zero_delta() {
+        let inversions = Arc::new(RwLock::new(ScrollInversions::new([
+            (
+                ScrollDeviceKey {
+                    vendor_id: Some(0x046d),
+                    product_id: Some(0xb037),
+                    product_name: None,
+                },
+                true,
+            ),
+            (
+                ScrollDeviceKey {
+                    vendor_id: Some(0x046d),
+                    product_id: Some(0xb042),
+                    product_name: None,
+                },
+                false,
+            ),
+        ])));
+        let enabled = EventDevice {
+            vendor_id: Some(0x046d),
+            product_id: Some(0xb037),
+            product_name: None,
+        };
+        let disabled = EventDevice {
+            vendor_id: Some(0x046d),
+            product_id: Some(0xb042),
+            product_name: None,
+        };
+
+        assert_eq!(
+            scroll_disposition(1.0, false, Some(&disabled), &inversions),
+            EventDisposition::PassThrough
+        );
+        assert_eq!(
+            scroll_disposition(1.0, true, Some(&enabled), &inversions),
+            EventDisposition::PassThrough
+        );
+        assert_eq!(
+            scroll_disposition(1.0, false, None, &inversions),
+            EventDisposition::PassThrough
+        );
+        assert_eq!(
+            scroll_disposition(0.0, false, Some(&enabled), &inversions),
+            EventDisposition::PassThrough
+        );
     }
 
     #[test]
