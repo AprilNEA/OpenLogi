@@ -38,7 +38,18 @@ impl From<Method> for LightingMethod {
 #[derive(Debug, Args)]
 pub struct LightingArgs {
     /// Colour as `RRGGBB` hex (e.g. `ff0000` for red).
-    pub color: String,
+    #[arg(required_unless_present_any = ["info", "release_control"])]
+    pub color: Option<String>,
+
+    /// Dump the device's 0x8071 clusters and their effects, then exit without
+    /// writing a colour.
+    #[arg(long)]
+    pub info: bool,
+
+    /// Hand the 0x8071 clusters back to the device's own effect engine and
+    /// exit, undoing the software control a colour write takes.
+    #[arg(long, conflicts_with = "info")]
+    pub release_control: bool,
 
     /// Run against the device whose name contains this string
     /// (case-insensitive). Useful when several lit devices are connected.
@@ -51,17 +62,70 @@ pub struct LightingArgs {
 }
 
 pub async fn run(args: LightingArgs) -> Result<()> {
-    let color: Rgb = args.color.trim_start_matches('#').parse()?;
-    let (r, g, b) = color.components();
+    // Parse before touching hardware so a typo fails fast rather than after a
+    // device round-trip.
+    let color = args
+        .color
+        .as_deref()
+        .map(|c| c.trim_start_matches('#').parse::<Rgb>())
+        .transpose()?;
 
     // The three features `set_keyboard_color` can drive — auto-skip devices with
     // no LEDs to paint.
     let (route, name) = select_device(args.device.as_deref(), &[0x8071, 0x8070, 0x8080]).await?;
+    println!("device: {name} ({route})");
 
+    if args.info {
+        return print_rgb_info(&route).await;
+    }
+
+    if args.release_control {
+        openlogi_hid::release_rgb_control(&route).await?;
+        println!("released software control — the device drives its own RGB again");
+        return Ok(());
+    }
+
+    let Some(color) = color else {
+        // Unreachable via clap (`required_unless_present`), but the type is an
+        // Option either way.
+        anyhow::bail!("a colour is required unless --info is given");
+    };
+    let (r, g, b) = color.components();
     let method: LightingMethod = args.method.into();
-    println!("setting {name} ({route}) to #{r:02x}{g:02x}{b:02x} via {method:?}");
+    println!("setting {name} to #{r:02x}{g:02x}{b:02x} via {method:?}");
     openlogi_hid::set_keyboard_color_with(&route, method, r, g, b).await?;
     println!("done — {name} should now be solid #{r:02x}{g:02x}{b:02x}");
+    Ok(())
+}
+
+/// Dump the `0x8071` cluster/effect table so a device whose LEDs don't all
+/// respond can be told apart from one OpenLogi simply isn't addressing.
+async fn print_rgb_info(route: &openlogi_hid::DeviceRoute) -> Result<()> {
+    let (control, clusters) = openlogi_hid::dump_rgb_clusters(route).await?;
+    println!(
+        "  software control: all_clusters={} power_modes={}",
+        control.all_clusters, control.power_modes
+    );
+    if clusters.is_empty() {
+        println!("  no 0x8071 clusters reported");
+        return Ok(());
+    }
+    for cluster in &clusters {
+        println!(
+            "  cluster {} location={:#06x} effect_persistency={} multiled_pattern={} effects={}",
+            cluster.index,
+            cluster.location,
+            cluster.effect_persistency,
+            cluster.multiled_pattern,
+            cluster.effects.len()
+        );
+        for effect in &cluster.effects {
+            println!(
+                "    effect {:>2}  id={:#06x} caps={:#06x} period={}ms",
+                effect.index, effect.effect_id, effect.effect_capabilities, effect.effect_period
+            );
+        }
+    }
     Ok(())
 }
 
@@ -78,7 +142,9 @@ mod color_validation_tests {
 
     fn args(color: &str) -> LightingArgs {
         LightingArgs {
-            color: color.to_string(),
+            color: Some(color.to_string()),
+            info: false,
+            release_control: false,
             device: None,
             method: Method::Auto,
         }

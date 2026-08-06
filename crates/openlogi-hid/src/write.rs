@@ -23,7 +23,10 @@ mod smartshift;
 pub use diagnostics::{FeatureEntry, ReprogControlEntry, dump_features, dump_reprog_controls};
 pub use dpi::{DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, set_dpi};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
-pub use lighting::{LightingMethod, set_keyboard_color, set_keyboard_color_with};
+pub use lighting::{
+    LightingMethod, RgbClusterEntry, RgbControlState, RgbEffectEntry, dump_rgb_clusters,
+    release_rgb_control, set_keyboard_color, set_keyboard_color_with,
+};
 pub use shared::{SharedChannel, set_dpi_on, set_smartshift_on, toggle_smartshift_on};
 pub use smartshift::{
     get_smartshift_status, set_smartshift, set_smartshift_sensitivity, toggle_smartshift,

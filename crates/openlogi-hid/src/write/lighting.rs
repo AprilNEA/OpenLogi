@@ -61,10 +61,15 @@ const MAX_COLOR_LED_EFFECT_ZONES: u8 = 4;
 // Zones are paced apart because the controller can drop closely-spaced reports.
 const FRAME_GAP: Duration = Duration::from_millis(8);
 
-// 0x8071 `RgbEffects`: `effectID` 0x0001 is the fixed/solid-colour effect. Only
-// the *id* is stable — the effect *index* passed to `setRgbClusterEffect` is
-// per-cluster and firmware-ordered, so it's located by id at runtime rather than
-// assumed (a device's clusters need not agree on ordering).
+// 0x8071 `RgbEffects`: `effectID` 0x0001 is the fixed/solid-colour effect. The
+// `0x8071` spec is not public — this id follows the `0x8070` effect vocabulary
+// and was confirmed on a G903 LIGHTSPEED, where writing it to the logo cluster
+// produces the requested solid colour. Treat it as a verified observation, not
+// as a documented constant.
+//
+// Only the *id* is stable — the effect *index* passed to `setRgbClusterEffect`
+// is per-cluster and firmware-ordered, so it's located by id at runtime rather
+// than assumed (a device's clusters need not agree on ordering).
 const RGB_EFFECT_ID_FIXED: u16 = 0x0001;
 // Same reasoning as `MAX_COLOR_LED_EFFECT_ZONES`: bound the per-apply work so a
 // malformed cluster count can't stall a colour pick. A G903 reports 2 clusters
@@ -242,6 +247,126 @@ fn classify_rgb_error(error: hidpp::protocol::v20::Hidpp20Error) -> WriteError {
     classify_hidpp_error(error, HidppOperation::Lighting, RgbEffectsFeature::ID)
 }
 
+/// Whether software currently holds `RgbEffects` (`0x8071`) control, and from
+/// which subsystems. Read by [`dump_rgb_clusters`].
+///
+/// Control is volatile: it is dropped on a power cycle, which hands the clusters
+/// back to the firmware's own effect engine.
+#[derive(Debug, Clone, Copy)]
+pub struct RgbControlState {
+    /// Software drives all RGB clusters.
+    pub all_clusters: bool,
+    /// Software drives the RGB power modes.
+    pub power_modes: bool,
+}
+
+/// Snapshot of one `RgbEffects` (`0x8071`) cluster. Returned by
+/// [`dump_rgb_clusters`] so a device whose LEDs don't all respond can be
+/// identified before OpenLogi decides how to drive them.
+#[derive(Debug, Clone)]
+pub struct RgbClusterEntry {
+    /// Cluster index, as reported by the device rather than as requested.
+    pub index: u8,
+    /// Raw physical-location code of the cluster.
+    pub location: u16,
+    /// Whether the cluster can persist an effect to EEPROM.
+    pub effect_persistency: bool,
+    /// Whether the cluster supports multi-LED patterns.
+    pub multiled_pattern: bool,
+    /// The effects the cluster offers, in firmware order.
+    pub effects: Vec<RgbEffectEntry>,
+}
+
+/// One effect offered by an `RgbEffects` cluster.
+#[derive(Debug, Clone, Copy)]
+pub struct RgbEffectEntry {
+    /// Effect index within its cluster — what `setRgbClusterEffect` takes.
+    pub index: u8,
+    /// Effect type identifier (`effectID`).
+    pub effect_id: u16,
+    /// Effect capability bitmask (meaning depends on `effect_id`).
+    pub effect_capabilities: u16,
+    /// Effect period in milliseconds, or `0` when not available.
+    pub effect_period: u16,
+}
+
+/// Hand the `RgbEffects` (`0x8071`) clusters back to the device's own effect
+/// engine, dropping any software control OpenLogi took to paint them.
+///
+/// `FeatureUnsupported` when the device exposes no `0x8071`.
+pub async fn release_rgb_control(route: &DeviceRoute) -> Result<(), WriteError> {
+    let index = route.device_index();
+    with_route(route, move |channel| async move {
+        let mut device = Device::new(std::sync::Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let feature = open_feature::<RgbEffectsFeature>(&mut device).await?;
+        feature
+            .set_sw_control(SwControlFlags::empty(), EventsNotificationFlags::empty())
+            .await
+            .map_err(classify_rgb_error)?;
+        debug!(index, "released 0x8071 software control");
+        Ok(())
+    })
+    .await
+}
+
+/// Walk a device's `RgbEffects` (`0x8071`) clusters and the effects each offers.
+///
+/// Read-only: takes no software control and writes no effect.
+/// `FeatureUnsupported` when the device exposes no `0x8071`.
+pub async fn dump_rgb_clusters(
+    route: &DeviceRoute,
+) -> Result<(RgbControlState, Vec<RgbClusterEntry>), WriteError> {
+    let index = route.device_index();
+    with_route(route, move |channel| async move {
+        let mut device = Device::new(std::sync::Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let feature = open_feature::<RgbEffectsFeature>(&mut device).await?;
+        let sw = feature.get_sw_control().await.map_err(classify_rgb_error)?;
+        let control = RgbControlState {
+            all_clusters: sw.control.contains(SwControlFlags::ALL_CLUSTERS),
+            power_modes: sw.control.contains(SwControlFlags::POWER_MODES),
+        };
+        let cluster_count = feature
+            .get_device_info()
+            .await
+            .map_err(classify_rgb_error)?
+            .cluster_count;
+
+        let mut out = Vec::new();
+        for cluster in 0..cluster_count.min(MAX_RGB_CLUSTERS) {
+            let info = feature
+                .get_cluster_info(cluster)
+                .await
+                .map_err(classify_rgb_error)?;
+            let mut effects = Vec::new();
+            for effect in 0..info.effects_number {
+                let e = feature
+                    .get_effect_info(cluster, effect)
+                    .await
+                    .map_err(classify_rgb_error)?;
+                effects.push(RgbEffectEntry {
+                    index: e.cluster_effect_index,
+                    effect_id: e.effect_id,
+                    effect_capabilities: e.effect_capabilities,
+                    effect_period: e.effect_period,
+                });
+            }
+            out.push(RgbClusterEntry {
+                index: info.cluster_index,
+                location: info.location,
+                effect_persistency: info.effect_persistency,
+                multiled_pattern: info.multiled_pattern,
+                effects,
+            });
+        }
+        Ok((control, out))
+    })
+    .await
+}
+
 /// Set a solid colour via `RgbEffects` (`0x8071`): the fixed effect on every
 /// cluster, in RAM only. `FeatureUnsupported` when the device exposes no
 /// `0x8071`.
@@ -253,6 +378,27 @@ fn classify_rgb_error(error: hidpp::protocol::v20::Hidpp20Error) -> WriteError {
 /// Volatile like the `0x8070` path — the effect shows live and overrides the
 /// running onboard effect without touching EEPROM, and the agent re-applies the
 /// saved colour on device arrival rather than spending flash cycles per pick.
+///
+/// # Software control is taken and kept
+///
+/// `setRgbClusterEffect` is refused until software claims the clusters, and the
+/// claim is what *holds* the colour: releasing it hands every cluster back to
+/// the device's own effect engine, which immediately resumes its onboard effect
+/// and discards the colour (observed on a G903 LIGHTSPEED). So the claim can't
+/// be scoped to the write — it lasts until [`release_rgb_control`], a power
+/// cycle, or the next colour.
+///
+/// The claim is all-or-nothing (`SwControlFlags::ALL_CLUSTERS`), and that has a
+/// cost on hardware with a cluster this path can't light. On a G903 the
+/// `Primary` cluster (the DPI indicator) accepts every write without error and
+/// never lights — not with the fixed effect, not even with the cycling effect
+/// the firmware itself runs there. Claiming control therefore *extinguishes* it:
+/// the firmware stops driving it and OpenLogi cannot take over. Its logo cluster
+/// is unaffected and takes the colour normally.
+///
+/// There is no reliable way to detect this before writing — the device reports
+/// the cluster, lists a fixed effect for it, and acknowledges the write. Callers
+/// that need the device's own lighting back must call [`release_rgb_control`].
 async fn set_color_rgb_effects(route: &DeviceRoute, r: u8, g: u8, b: u8) -> Result<(), WriteError> {
     let index = route.device_index();
     with_route(route, move |channel| async move {
