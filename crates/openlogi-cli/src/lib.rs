@@ -115,11 +115,32 @@ mod tests {
 
         match cli.cmd.expect("subcommand present") {
             Command::Diag(DiagCmd::Lighting(args)) => {
-                assert_eq!(args.color, "ff0000");
+                assert_eq!(args.color.as_deref(), Some("ff0000"));
                 assert!(matches!(args.method, Method::Effects));
             }
             other => panic!("expected Diag(Lighting), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lighting_info_makes_the_colour_optional() {
+        let cli = Cli::try_parse_from(["openlogi", "diag", "lighting", "--info"])
+            .expect("--info parses without a colour");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::Lighting(args)) => {
+                assert!(args.info);
+                assert!(args.color.is_none());
+            }
+            other => panic!("expected Diag(Lighting), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lighting_without_colour_or_info_is_rejected() {
+        // The colour stays mandatory for a write — `--info` and
+        // `--release-control` are the only flags that excuse it.
+        assert!(Cli::try_parse_from(["openlogi", "diag", "lighting"]).is_err());
     }
 
     #[test]
