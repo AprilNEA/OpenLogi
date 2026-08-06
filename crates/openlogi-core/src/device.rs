@@ -91,9 +91,10 @@ pub struct Capabilities {
     /// Adjustable pointer resolution — HID++ `0x2201` / `0x2202` (AdjustableDpi).
     pub pointer: bool,
     /// Solid-colour RGB the lighting panel can actually drive — HID++
-    /// `ColorLedEffects` (`0x8070`) or `PerKeyLighting` (`0x8080`), the features
-    /// `set_keyboard_color` writes. Backlight-only families aren't driven by the
-    /// panel, so they don't flip this and don't earn an inert Lighting tab.
+    /// `RgbEffects` (`0x8071`), `ColorLedEffects` (`0x8070`) or `PerKeyLighting`
+    /// (`0x8080`), the features `set_keyboard_color` writes. Backlight-only
+    /// families aren't driven by the panel, so they don't flip this and don't
+    /// earn an inert Lighting tab.
     pub lighting: bool,
     /// Native vertical wheel inversion — HID++ `0x2121 HiResWheel` with the
     /// firmware-reported `has_invert` capability.
@@ -111,11 +112,13 @@ impl Capabilities {
     pub fn from_feature_ids(ids: &[u16]) -> Self {
         const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
-        // PerKeyLighting (0x8080) and ColorLedEffects (0x8070) — both now driven
-        // by `set_keyboard_color` (it prefers 0x8070's fixed effect to override a
-        // running onboard profile, falling back to 0x8080 per-key). Other families
+        // RgbEffects (0x8071), ColorLedEffects (0x8070) and PerKeyLighting
+        // (0x8080) — all three driven by `set_keyboard_color`, which walks them
+        // in that order (0x8071 is the modern per-cluster engine G-series *mice*
+        // expose instead of 0x8070; both fixed-effect paths override a running
+        // onboard profile, and 0x8080 per-key is the last resort). Other families
         // (backlight 0x198x) stay out so they don't earn a tab the panel can't drive.
-        const LIGHTING: [u16; 2] = [0x8080, 0x8070];
+        const LIGHTING: [u16; 3] = [0x8080, 0x8070, 0x8071];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
             buttons: has(&BUTTONS),
@@ -436,6 +439,10 @@ mod tests {
                 hires_wheel: true,
             }
         );
+        // A G903 LIGHTSPEED: RgbEffects (0x8071) is the only lighting feature it
+        // reports — no 0x8070, no 0x8080 — so it must still earn a Lighting tab.
+        let g903 = Capabilities::from_feature_ids(&[0x1b04, 0x2201, 0x2121, 0x8071]);
+        assert!(g903.lighting, "0x8071-only device should offer lighting");
         // A wired G-series keyboard: PerKeyLighting (0x8080), no DPI/buttons.
         let keyboard = Capabilities::from_feature_ids(&[0x0001, 0x8080]);
         assert_eq!(

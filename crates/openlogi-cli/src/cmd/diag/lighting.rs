@@ -1,19 +1,24 @@
-//! `openlogi diag lighting <RRGGBB>` — set a wired RGB keyboard to a solid
-//! colour via HID++ `PerKeyLighting` (0x8080).
+//! `openlogi diag lighting <RRGGBB>` — set a device's RGB LEDs to a solid
+//! colour via HID++ `RgbEffects` (0x8071), `ColorLedEffects` (0x8070) or
+//! `PerKeyLighting` (0x8080).
 //!
-//! Targets the first online direct-attached (USB) Logitech device — i.e. a
-//! wired G-series keyboard — by VID/PID, so it isn't tied to one model.
+//! Picks the first online device exposing one of those, so it reaches a wireless
+//! mouse behind a receiver as well as a wired keyboard.
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use clap::{Args, ValueEnum};
 use openlogi_core::color::Rgb;
-use openlogi_hid::{DeviceRoute, LightingMethod};
+use openlogi_hid::LightingMethod;
+
+use crate::cmd::diag::select_device;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Method {
-    /// Prefer 0x8070 ColorLedEffects, fall back to 0x8080 per-key (default).
+    /// Walk 0x8071 → 0x8070 → 0x8080, taking the first exposed (default).
     Auto,
-    /// Force 0x8070 ColorLedEffects (the fixed-effect onboard override).
+    /// Force 0x8071 RgbEffects (the per-cluster fixed-effect override).
+    Rgb,
+    /// Force 0x8070 ColorLedEffects (the per-zone fixed-effect override).
     Effects,
     /// Force 0x8080 PerKeyLighting (the per-key stream).
     Perkey,
@@ -23,6 +28,7 @@ impl From<Method> for LightingMethod {
     fn from(m: Method) -> Self {
         match m {
             Method::Auto => Self::Auto,
+            Method::Rgb => Self::RgbEffects,
             Method::Effects => Self::Effects,
             Method::Perkey => Self::PerKey,
         }
@@ -34,8 +40,8 @@ pub struct LightingArgs {
     /// Colour as `RRGGBB` hex (e.g. `ff0000` for red).
     pub color: String,
 
-    /// Run against the wired device whose name contains this string
-    /// (case-insensitive). Useful when several keyboards are connected.
+    /// Run against the device whose name contains this string
+    /// (case-insensitive). Useful when several lit devices are connected.
     #[arg(long, value_name = "NAME")]
     pub device: Option<String>,
 
@@ -48,42 +54,9 @@ pub async fn run(args: LightingArgs) -> Result<()> {
     let color: Rgb = args.color.trim_start_matches('#').parse()?;
     let (r, g, b) = color.components();
 
-    let device_query = args.device;
-    let needle = device_query.as_deref().map(str::to_lowercase);
-
-    let inventories = openlogi_hid::enumerate().await?;
-    let (route, name) = inventories
-        .iter()
-        .find_map(|inv| {
-            // Direct (USB-wired) devices carry no receiver UID — that's the
-            // wired keyboard. Bolt/Unifying receivers (mice) are skipped.
-            if inv.receiver.unique_id.is_some() {
-                return None;
-            }
-            let paired = inv.paired.iter().find(|p| p.online)?;
-            let name = paired.codename.clone().unwrap_or_else(|| {
-                format!(
-                    "{:04x}:{:04x}",
-                    inv.receiver.vendor_id, inv.receiver.product_id
-                )
-            });
-            if let Some(ref n) = needle
-                && !name.to_lowercase().contains(n.as_str())
-            {
-                return None;
-            }
-            let route = DeviceRoute::Direct {
-                vendor_id: inv.receiver.vendor_id,
-                product_id: inv.receiver.product_id,
-            };
-            Some((route, name))
-        })
-        .ok_or_else(|| match &device_query {
-            Some(q) => anyhow!("no wired device matches `--device {q}`"),
-            None => {
-                anyhow!("no wired (direct-USB) Logitech device found — is the keyboard plugged in?")
-            }
-        })?;
+    // The three features `set_keyboard_color` can drive — auto-skip devices with
+    // no LEDs to paint.
+    let (route, name) = select_device(args.device.as_deref(), &[0x8071, 0x8070, 0x8080]).await?;
 
     let method: LightingMethod = args.method.into();
     println!("setting {name} ({route}) to #{r:02x}{g:02x}{b:02x} via {method:?}");
