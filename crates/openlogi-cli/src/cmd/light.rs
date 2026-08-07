@@ -226,6 +226,7 @@ mod tests {
             capabilities: None,
             light_capabilities: None,
             driver_id: "litra".into(),
+            registry_model_id: None,
         }
     }
 

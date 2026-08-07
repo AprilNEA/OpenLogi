@@ -765,8 +765,7 @@ Primary file: `crates/openlogi-cli/src/cmd/light.rs`.
   model lookup, separate from the HID++ asset resolver. The source and license
   status are documented beside the tracked image, outside the generated asset
   cache that packaging may clean.
-- The Glow renderer derives its powered diffuser overlay from the product
-  pixels. Daylight stays neutral, warmer temperatures shift toward amber, and
+- The registry-backed Glow renderer uses the verified front image directly;
   offline devices retain the existing reduced-opacity treatment.
 
 Primary files:
@@ -775,7 +774,7 @@ Primary files:
 - `crates/openlogi-gui/src/components/light_panel.rs`
 - `crates/openlogi-gui/src/state/light.rs`
 - `crates/openlogi-gui/src/app_assets.rs`
-- `crates/openlogi-gui/product-art/litra-glow/`
+- `crates/openlogi-gui/src/asset.rs` and the shared registry cache
 
 ### 8. Adding a future Litra model
 
@@ -819,8 +818,8 @@ Added or extended tests cover:
 - orchestrator camera transitions and transient manual overrides;
 - camera debounce cancellation and inactive confirmation;
 - CLI selection and validation;
-- GUI capability gating, light controls, locale parity, and diffuser-mask
-  boundary behaviour;
+- GUI capability gating, light controls, locale parity, and registry image
+  rendering;
 - GUI test fixtures use an explicit memory-only configuration persistence mode,
   so realistic standalone identities cannot be written to the developer's real
   `config.toml` during `cargo test`.

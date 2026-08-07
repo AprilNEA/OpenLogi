@@ -17,8 +17,6 @@ const fn camera_policy_applies(light: LightSettings) -> bool {
 pub enum LightCommandStatus {
     /// The command has been queued for the agent.
     Pending,
-    /// The agent completed the device write successfully.
-    Accepted,
     /// The device or agent rejected the command.
     Failed(String),
     /// No route is available because the device is offline.
@@ -273,7 +271,9 @@ impl AppState {
                 self.volatile_light_settings.remove(&key);
                 self.persist_and_reload("light");
             }
-            self.light_command_status = Some((key, request_id, LightCommandStatus::Accepted));
+            // Successful writes are reflected by the controls themselves; do
+            // not leave a persistent success banner in the panel.
+            self.light_command_status = None;
         }
         true
     }

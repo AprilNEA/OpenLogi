@@ -51,10 +51,42 @@ pub fn should_run(has_bundle: bool) -> bool {
 /// Each entry pairs a device's HID++ model info with its firmware `codename`,
 /// so the depot match can fall back to the registry `displayName` for devices
 /// whose live PID isn't in the registry (e.g. an MX Master 3S over BTLE).
-pub fn sync(
-    source: Option<AssetSource>,
-    models: &[(DeviceModelInfo, Option<String>)],
-) -> Result<()> {
+/// One model-level asset lookup requested by the GUI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AssetTarget {
+    /// HID++ lookup, retaining the existing codename/variant behavior.
+    Hidpp {
+        /// HID++ model information used for registry matching.
+        model: DeviceModelInfo,
+        /// Firmware codename used as the final matching fallback.
+        codename: Option<String>,
+    },
+    /// Standalone raw-HID lookup by the driver-provided registry identity.
+    Standalone {
+        /// Exact model-level registry id, never a physical-device key.
+        registry_model_id: String,
+    },
+}
+
+/// Stable session key for one model-level asset target.
+#[must_use]
+pub(crate) fn model_key(target: &AssetTarget) -> String {
+    match target {
+        AssetTarget::Hidpp { model, codename } => format!(
+            "hidpp:{:02x}:{:04x}:{:04x}:{:04x}:{}",
+            model.extended_model_id,
+            model.model_ids[0],
+            model.model_ids[1],
+            model.model_ids[2],
+            codename.as_deref().unwrap_or_default()
+        ),
+        AssetTarget::Standalone { registry_model_id } => {
+            format!("standalone:model:{registry_model_id}")
+        }
+    }
+}
+
+pub fn sync(source: Option<AssetSource>, targets: &[AssetTarget]) -> Result<()> {
     let cache_root = super::paths::user_cache_root();
     fs::create_dir_all(&cache_root)
         .with_context(|| format!("create cache root {}", cache_root.display()))?;
@@ -71,31 +103,45 @@ pub fn sync(
     // depot sync can fetch the right colour variant. `OPENLOGI_FORCE_DEPOT`
     // doesn't correspond to a physical device, so we pass `ext = 0`
     // and end up with the base PNG.
-    let mut targets: Vec<(String, DeviceEntry, u8)> = Vec::new();
+    let mut depot_targets: Vec<(String, DeviceEntry, u8)> = Vec::new();
     if let Ok(forced) = std::env::var("OPENLOGI_FORCE_DEPOT")
         && let Some(entry) = index.devices.get(&forced)
     {
-        targets.push((forced, entry.clone(), 0));
+        depot_targets.push((forced, entry.clone(), 0));
     }
-    for (model, codename) in models {
-        if let Some((depot, entry)) = super::resolve_in_index(index, model, codename.as_deref()) {
-            targets.push((depot.to_string(), entry.clone(), model.extended_model_id));
+    for target in targets {
+        let match_result = match target {
+            AssetTarget::Hidpp { model, codename } => {
+                super::resolve_in_index(index, model, codename.as_deref())
+                    .map(|(depot, entry)| (depot, entry, model.extended_model_id))
+            }
+            AssetTarget::Standalone { registry_model_id } => index
+                .find_by_model_id(registry_model_id)
+                .map(|(depot, entry)| (depot, entry, 0)),
+        };
+        if let Some((depot, entry, ext)) = match_result {
+            depot_targets.push((depot.to_string(), entry.clone(), ext));
+        } else if let AssetTarget::Standalone { registry_model_id } = target {
+            info!(
+                registry_model_id,
+                "standalone model is not registered — using fallback art"
+            );
         }
     }
-    targets.sort_by(|a, b| a.0.cmp(&b.0));
-    targets.dedup_by(|a, b| a.0 == b.0);
+    depot_targets.sort_by(|a, b| a.0.cmp(&b.0));
+    depot_targets.dedup_by(|a, b| a.0 == b.0);
 
-    if targets.is_empty() {
+    if depot_targets.is_empty() {
         debug!("sync: no matching depots for known devices");
         return Ok(());
     }
 
-    for (depot, entry, ext) in &targets {
+    for (depot, entry, ext) in &depot_targets {
         if let Err(e) = sync_depot(client, &cache_root, depot, entry, *ext) {
             warn!(depot, error = %e, "depot sync failed");
         }
     }
-    info!(devices = targets.len(), "asset sync complete");
+    info!(devices = depot_targets.len(), "asset sync complete");
     Ok(())
 }
 
@@ -217,17 +263,6 @@ pub(crate) struct SyncOutcome {
 /// extended-model byte (the colour-variant selector) and the codename the
 /// depot match falls back on. Models that collapse to one key would resolve
 /// to the same depot files anyway.
-pub(crate) fn model_key((model, codename): &(DeviceModelInfo, Option<String>)) -> String {
-    format!(
-        "{:02x}:{:04x}:{:04x}:{:04x}:{}",
-        model.extended_model_id,
-        model.model_ids[0],
-        model.model_ids[1],
-        model.model_ids[2],
-        codename.as_deref().unwrap_or_default()
-    )
-}
-
 /// A manual asset action requested from the Settings → Assets tab, pushed to
 /// the main event loop via [`AssetControl`].
 pub enum AssetCommand {
@@ -265,13 +300,10 @@ pub(crate) fn sync_retry_delay(attempts: u32) -> Duration {
 /// startup plus the auto-download setting; the Settings → Assets manual
 /// actions always fetch, even in a release build that would otherwise serve
 /// only bundled art.)
-pub(crate) fn run_asset_sync(
-    preference: AssetSourcePreference,
-    models: &[(DeviceModelInfo, Option<String>)],
-) -> bool {
+pub(crate) fn run_asset_sync(preference: AssetSourcePreference, targets: &[AssetTarget]) -> bool {
     let server = std::env::var("OPENLOGI_ASSETS").ok();
     let source = source_for_sync(preference, server.as_deref());
-    match sync(source, models) {
+    match sync(source, targets) {
         Ok(()) => true,
         Err(e) => {
             warn!(error = ?e, "asset sync failed — will retry with backoff");
@@ -297,7 +329,7 @@ fn source_for_sync(
 
 #[cfg(test)]
 mod tests {
-    use super::{source_for_sync, sync_retry_delay};
+    use super::{AssetTarget, model_key, source_for_sync, sync_retry_delay};
     use openlogi_assets::AssetSource;
     use openlogi_core::config::AssetSourcePreference;
     use std::time::Duration;
@@ -347,6 +379,16 @@ mod tests {
             Some(AssetSource::Override(
                 "https://assets.example.test".to_owned()
             ))
+        );
+    }
+
+    #[test]
+    fn standalone_target_key_is_model_scoped_not_physical() {
+        assert_eq!(
+            model_key(&AssetTarget::Standalone {
+                registry_model_id: "8c900".into(),
+            }),
+            "standalone:model:8c900"
         );
     }
 }

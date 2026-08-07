@@ -460,7 +460,7 @@ fn light_tab(
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    let (artwork, online, enabled, settings) = cx.try_global::<AppState>().map_or(
+    let (asset, online, enabled, settings) = cx.try_global::<AppState>().map_or(
         (
             None,
             false,
@@ -470,7 +470,7 @@ fn light_tab(
         |state| {
             let record = state.current_record();
             (
-                record.and_then(|record| record.standalone_artwork),
+                record.and_then(|record| record.asset.as_ref()),
                 record.is_some_and(|record| record.online),
                 state.light_enabled(),
                 state.light(),
@@ -491,9 +491,7 @@ fn light_tab(
                 .gap_4()
                 .flex_wrap()
                 .items_start()
-                .child(light_visual::detail(
-                    artwork, online, enabled, settings, pal,
-                ))
+                .child(light_visual::detail(asset, online, enabled, settings, pal))
                 .child(div().w(px(400.)).min_w(px(360.)).child(panel_card(
                     tr!("Lighting"),
                     Icon::new(IconName::Sun),

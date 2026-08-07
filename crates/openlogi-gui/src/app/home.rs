@@ -240,6 +240,7 @@ fn device_card(
                 .flex()
                 .items_center()
                 .justify_center()
+                .overflow_hidden()
                 .opacity(if record.online { 1. } else { 0.55 })
                 .when_some(glow, |this, (geom, color)| {
                     this.child(glow_canvas(geom, color))
@@ -327,37 +328,21 @@ fn device_image(
     light_settings: LightSettings,
     pal: Palette,
 ) -> AnyElement {
-    if let Some(path) = record
-        .asset
-        .as_ref()
-        .and_then(|a| a.hero_image_path.clone())
-    {
-        return img(path).max_w_full().max_h_full().into_any_element();
-    }
     if record.kind == DeviceKind::Light {
         return light_visual::gallery(
-            record.standalone_artwork,
+            record.asset.as_ref(),
             record.online,
             light_enabled,
             light_settings,
             pal,
         );
     }
-    // Cameras carry no depot asset, so give them a recognisable glyph on their
-    // gallery card instead of the generic chip fallback.
-    let icon = if matches!(record.kind, DeviceKind::Camera) {
-        IconName::Eye
-    } else {
-        IconName::Cpu
-    };
-    div()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(Icon::new(icon).size_8().text_color(pal.text_muted))
-        .into_any_element()
-}
+    if let Some(path) = record
+        .asset
+        .as_ref()
+        .and_then(|a| a.hero_image_path.clone())
+    {
+        return img(path).max_w_full().max_h_full().into_any_element();
     }
     // Cameras carry no depot asset, so give them a recognisable glyph on their
     // gallery card instead of the generic chip fallback.

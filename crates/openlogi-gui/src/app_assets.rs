@@ -12,37 +12,11 @@ use gpui::{AssetSource, Result, SharedString};
 /// Asset path [`AppAssets`] resolves to the embedded app logo.
 pub const LOGO: &str = "openlogi.png";
 
-/// Embedded product-art path for a Logitech Litra Glow.
-pub const LITRA_GLOW: &str = "product-art/litra-glow/front.png";
-
 /// The 1024×1024 app icon, embedded into the binary.
 const LOGO_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../design/icon/openlogi.png"
 ));
-
-/// Litra Glow artwork bytes, also used to derive the powered diffuser overlay.
-pub(crate) const LITRA_GLOW_BYTES: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/product-art/litra-glow/front.png"
-));
-
-/// Resolve bundled artwork for a standalone driver/model tuple.
-///
-/// Standalone devices do not have HID++ model metadata, so their artwork uses
-/// the owning driver plus USB identity instead of entering the HID++ asset
-/// resolver. Unknown models deliberately return `None` and keep the generic
-/// light visual.
-pub(crate) fn standalone_artwork(
-    driver_id: &str,
-    vendor_id: u16,
-    product_id: u16,
-) -> Option<&'static str> {
-    match (driver_id, vendor_id, product_id) {
-        ("litra", 0x046d, 0xc900) => Some(LITRA_GLOW),
-        _ => None,
-    }
-}
 
 /// Vendored [lucide](https://lucide.dev) icons (ISC license) for the binding
 /// menus, embedded so they resolve identically in a packaged `.app` and a dev
@@ -113,9 +87,6 @@ impl AssetSource for AppAssets {
         if path == LOGO {
             return Ok(Some(Cow::Borrowed(LOGO_BYTES)));
         }
-        if path == LITRA_GLOW {
-            return Ok(Some(Cow::Borrowed(LITRA_GLOW_BYTES)));
-        }
         if let Some((_, bytes)) = ACTION_ICONS.iter().find(|(p, _)| *p == path) {
             return Ok(Some(Cow::Borrowed(*bytes)));
         }
@@ -124,20 +95,5 @@ impl AssetSource for AppAssets {
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         gpui_component_assets::Assets.list(path)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{LITRA_GLOW, standalone_artwork};
-
-    #[test]
-    fn standalone_artwork_is_model_specific() {
-        assert_eq!(
-            standalone_artwork("litra", 0x046d, 0xc900),
-            Some(LITRA_GLOW)
-        );
-        assert_eq!(standalone_artwork("litra", 0x046d, 0xc901), None);
-        assert_eq!(standalone_artwork("future-driver", 0x046d, 0xc900), None);
     }
 }

@@ -648,7 +648,7 @@ mod tests {
             serial_number: None,
             unit_id: [0; 4],
             driver_id: None,
-            standalone_artwork: None,
+            registry_model_id: None,
             route: None,
             capture_id: None,
             kind,
