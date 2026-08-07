@@ -356,11 +356,11 @@ impl Render for SettingsView {
         let pal = theme::palette(cx);
         let view = cx.entity();
 
-        // Outline group boxes give every page bordered cards (depth /
-        // definition that the flat Fill variant lacked); the hero /
-        // source / config blocks are custom rows inside them.
+        // Filled group boxes use the theme's content-surface token, keeping
+        // settings groups distinct from the page without borrowing a control
+        // colour for a large card.
         let settings = Settings::new("settings")
-            .with_group_variant(GroupBoxVariant::Outline)
+            .with_group_variant(GroupBoxVariant::Fill)
             .sidebar_width(px(210.))
             .default_selected_index(SelectIndex {
                 page_ix: self.initial_page.index(),

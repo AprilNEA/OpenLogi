@@ -13,8 +13,7 @@ on:
       - .github/workflows/crowdin.yml
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: crowdin-${{ github.ref }}
@@ -28,17 +27,34 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Mint GitHub App token
+        id: github_app
+        uses: ./.github/actions/github-app-token-from-1password
+        with:
+          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+
+      - name: Load Crowdin credentials from 1Password
+        id: crowdin_config
+        uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
+        with:
+          export-env: false
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          CROWDIN_PROJECT_ID: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PROJECT_ID
+          CROWDIN_PERSONAL_TOKEN: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PERSONAL_TOKEN
 
       - name: Synchronize with Crowdin
-        uses: crowdin/github-action@v2
+        uses: crowdin/github-action@c7af9bc98b01694653031fef2a0dc6c7888ce9bc # v2.17.0
         with:
           config: crowdin.yml
           upload_sources: true
           upload_translations: false
           download_translations: true
           localization_branch_name: crowdin/i18n
-          commit_message: "chore(i18n): sync Crowdin translations [skip ci]"
+          commit_message: "chore(i18n): sync Crowdin translations"
           create_pull_request: true
           pull_request_title: "chore(i18n): sync Crowdin translations"
           pull_request_body: |
@@ -48,6 +64,6 @@ jobs:
           github_user_name: Crowdin Bot
           github_user_email: support+bot@crowdin.com
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
-          CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.github_app.outputs.token }}
+          CROWDIN_PROJECT_ID: ${{ steps.crowdin_config.outputs.CROWDIN_PROJECT_ID }}
+          CROWDIN_PERSONAL_TOKEN: ${{ steps.crowdin_config.outputs.CROWDIN_PERSONAL_TOKEN }}

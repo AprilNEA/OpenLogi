@@ -7,7 +7,9 @@ use openlogi_core::device::{
 use super::cache::{
     CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_TICKS, backfill_identity, is_stale,
 };
-use super::probe::{NodeProbe, assemble_bolt_probe, parse_codename_unifying};
+use super::probe::{
+    NodeProbe, assemble_bolt_probe, parse_codename_unifying, preferred_direct_codename,
+};
 use super::{Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop};
 use crate::inventory::features::ProbedFeatures;
 
@@ -18,6 +20,16 @@ fn cache_entry(probed_tick: u64) -> Cached {
         probed_tick,
     }
 }
+
+#[test]
+fn direct_codename_prefers_hidpp_marketing_name_over_generic_os_name() {
+    assert_eq!(
+        preferred_direct_codename(Some("Wireless Mouse MX Master 2S"), "Mouse"),
+        "Wireless Mouse MX Master 2S"
+    );
+    assert_eq!(preferred_direct_codename(None, "Mouse"), "Mouse");
+}
+
 
 #[test]
 fn cache_entry_survives_grace_then_evicts() {

@@ -18,7 +18,12 @@
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
-use hidpp::{channel::HidppChannel, device::Device, protocol::v20};
+use hidpp::{
+    channel::HidppChannel,
+    device::Device,
+    feature::{CreatableFeature, gestures2::Gestures2Feature},
+    protocol::v20,
+};
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -105,11 +110,13 @@ pub async fn run_capture_session(
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
     let device_index = route.device_index();
+    let trace_legacy_thumbwheel = std::env::var_os("OPENLOGI_TRACE_GESTURE2_THUMBWHEEL").is_some();
     let armed = arm_controls(
         &chan,
         device_index,
         capture_thumbwheel,
         divert_gesture_button,
+        trace_legacy_thumbwheel,
     )
     .await?;
 
@@ -122,6 +129,7 @@ pub async fn run_capture_session(
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
     let reprog_index = armed.reprog.as_ref().map(|(_, idx)| *idx);
     let thumb_index = armed.thumb.as_ref().map(|(_, idx)| *idx);
+    let legacy_thumb_index = armed.legacy_thumb.as_ref().map(|legacy| legacy.index);
     let dpi_set = armed.dpi_cids.clone();
     let listener = chan.add_msg_listener_guarded({
         let accum = Arc::clone(&accum);
@@ -131,6 +139,21 @@ pub async fn run_capture_session(
                 return;
             }
             let msg = v20::Message::from(raw);
+            if trace_legacy_thumbwheel
+                && let Some(idx) = legacy_thumb_index
+                && msg.header().device_index == device_index
+                && msg.header().feature_index == idx
+            {
+                let header = msg.header();
+                info!(
+                    feature_index = header.feature_index,
+                    function_id = header.function_id.to_lo(),
+                    software_id = header.software_id.to_lo(),
+                    payload = ?msg.extend_payload(),
+                    "legacy Gestures2 thumbwheel raw event"
+                );
+                return;
+            }
             if let Some(idx) = reprog_index
                 && let Some(event) = reprog_controls::decode_event(&msg, device_index, idx)
             {
@@ -158,6 +181,7 @@ pub async fn run_capture_session(
         gesture = armed.gesture_diverted,
         dpi_buttons = armed.dpi_cids.len(),
         thumbwheel = armed.thumb.is_some(),
+        legacy_thumbwheel_trace = armed.legacy_thumb.is_some(),
         "control capture active"
     );
     let _ = shutdown.await;
@@ -183,6 +207,18 @@ struct ArmedControls {
     /// `0x2150` accessor + feature index, present when the thumb wheel is
     /// diverted.
     thumb: Option<(Thumbwheel, u8)>,
+    /// Diagnostic-only `0x6501` diversion for old MX thumb wheels. The packet
+    /// format is not decoded yet; this exists only while collecting real-device
+    /// traces needed to replace the unsafe source-less OS-hook fallback.
+    legacy_thumb: Option<LegacyThumbwheelTrace>,
+}
+
+struct LegacyThumbwheelTrace {
+    feature: Gestures2Feature,
+    index: u8,
+    /// We only restore when this process changed the state. If another tool had
+    /// already diverted the gesture, leave that ownership untouched.
+    restore_native: bool,
 }
 
 impl ArmedControls {
@@ -202,6 +238,18 @@ impl ArmedControls {
         if let Some((tw, _)) = self.thumb.as_ref() {
             restore(tw.set_reporting(false, false).await, "thumb wheel");
         }
+        if let Some(legacy) = self.legacy_thumb.as_ref()
+            && legacy.restore_native
+        {
+            restore(
+                legacy
+                    .feature
+                    .set_thumbwheel_diverted(false)
+                    .await
+                    .map(|_| ()),
+                "legacy Gestures2 thumb wheel",
+            );
+        }
     }
 }
 
@@ -215,6 +263,7 @@ async fn arm_controls(
     slot: u8,
     capture_thumbwheel: bool,
     divert_gesture_button: bool,
+    trace_legacy_thumbwheel: bool,
 ) -> Result<ArmedControls, GestureError> {
     let device = Device::new(Arc::clone(chan), slot)
         .await
@@ -287,7 +336,55 @@ async fn arm_controls(
         thumb = Some((tw, info.index));
     }
 
-    if !gesture_diverted && dpi_cids.is_empty() && thumb.is_none() {
+    // The MX Master 2S does not expose 0x2150. Its wheel is Gestures2 gesture
+    // 46, whose diverted notification layout is not publicly documented. Do
+    // not guess at that wire format: an explicit trace mode diverts only that
+    // gesture and records its raw HID++ notifications so a decoder can be
+    // written from real packets. Normal builds keep the current native path.
+    let mut legacy_thumb: Option<LegacyThumbwheelTrace> = None;
+    if capture_thumbwheel
+        && thumb.is_none()
+        && trace_legacy_thumbwheel
+        && let Some(info) = device
+            .root()
+            .get_feature(Gestures2Feature::ID)
+            .await
+            .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
+    {
+        let feature = Gestures2Feature::new(Arc::clone(chan), slot, info.index);
+        match feature.thumbwheel_diverted().await {
+            Ok(Some(already_diverted)) => {
+                if !already_diverted {
+                    feature
+                        .set_thumbwheel_diverted(true)
+                        .await
+                        .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+                }
+                info!(
+                    slot,
+                    feature_index = info.index,
+                    "legacy Gestures2 thumbwheel trace armed; rotate both directions now"
+                );
+                legacy_thumb = Some(LegacyThumbwheelTrace {
+                    feature,
+                    index: info.index,
+                    restore_native: !already_diverted,
+                });
+            }
+            Ok(None) => {
+                debug!(slot, "Gestures2 thumbwheel is absent or not divertable");
+            }
+            Err(e) => {
+                warn!(error = ?e, "failed to inspect legacy Gestures2 thumbwheel diversion");
+            }
+        }
+    }
+
+    if !gesture_diverted
+        && dpi_cids.is_empty()
+        && thumb.is_none()
+        && legacy_thumb.is_none()
+    {
         debug!(slot, "no capturable controls — idle session");
     }
     Ok(ArmedControls {
@@ -295,6 +392,7 @@ async fn arm_controls(
         gesture_diverted,
         dpi_cids,
         thumb,
+        legacy_thumb,
     })
 }
 

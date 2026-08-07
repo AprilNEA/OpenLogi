@@ -6,7 +6,7 @@
 
 use gpui::{Bounds, PathBuilder, Pixels, Point, Window, hsla, point, px, rgb};
 
-use crate::data::mouse_buttons::{ButtonId, Hotspot};
+use crate::data::mouse_buttons::{Hotspot, MouseControlId};
 use crate::theme::ACCENT_BLUE;
 
 /// Length of the horizontal stub before turning toward the label.
@@ -29,7 +29,7 @@ pub enum Side {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Label {
-    pub id: ButtonId,
+    pub(crate) id: MouseControlId,
     pub side: Side,
     /// Y of the label anchor, in mouse-canvas coords (i.e. relative to the
     /// canvas's top-left, not the mouse silhouette's top-left).
@@ -58,7 +58,7 @@ pub fn paint(
     geometry: Geometry,
     hotspots: &[Hotspot],
     labels: &[Label],
-    highlighted: Option<ButtonId>,
+    highlighted: Option<MouseControlId>,
     window: &mut Window,
 ) {
     for label in labels {

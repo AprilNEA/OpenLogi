@@ -40,7 +40,7 @@ pub enum ButtonId {
     DpiToggle,
     /// The horizontal thumb wheel's click. Kept in [`ButtonId::ALL`] so its
     /// default still seeds and dispatches when the wheel is diverted, even
-    /// though the mouse model surfaces the two rotation directions instead of
+    /// though the mouse model surfaces one paired rotation control instead of
     /// the click (see `mouse_model::geometry`).
     Thumbwheel,
     /// Rotating the thumb wheel "up" (positive rotation). Bound, by default, to

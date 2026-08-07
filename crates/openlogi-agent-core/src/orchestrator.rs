@@ -591,6 +591,7 @@ mod tests {
 
         device.capabilities = Some(Capabilities {
             hires_wheel: true,
+            thumbwheel: false,
             scroll_inversion: false,
             ..Capabilities::default()
         });
@@ -601,6 +602,7 @@ mod tests {
 
         device.capabilities = Some(Capabilities {
             hires_wheel: false,
+            thumbwheel: false,
             scroll_inversion: true,
             ..Capabilities::default()
         });
@@ -616,6 +618,7 @@ mod tests {
         let mut device = dev("a", 1, true);
         device.capabilities = Some(Capabilities {
             hires_wheel: true,
+            thumbwheel: false,
             scroll_inversion: false,
             ..Capabilities::default()
         });

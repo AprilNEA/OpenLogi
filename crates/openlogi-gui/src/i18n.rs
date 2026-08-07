@@ -217,6 +217,22 @@ mod tests {
         assert_eq!(rust_i18n::t!("No devices connected"), "未连接设备"); // menu-bar device line
         assert_eq!(rust_i18n::t!("Lighting"), "灯光"); // keyboard lighting tab
         assert_eq!(rust_i18n::t!("BRIGHTNESS"), "亮度"); // lighting panel label
+        assert_eq!(
+            rust_i18n::t!("Automatically start OpenLogi when you log in to macOS."),
+            "登录 macOS 时自动启动 OpenLogi。"
+        );
+        assert_eq!(
+            rust_i18n::t!("No supported pairing-capable receiver was found."),
+            "未找到支持配对的接收器。"
+        );
+        assert_eq!(
+            rust_i18n::t!("Device offline — DPI unavailable."),
+            "设备离线 —— DPI 不可用。"
+        );
+        assert_eq!(
+            rust_i18n::t!("This device does not report native HID++ scroll inversion support."),
+            "此设备未报告原生 HID++ 滚动反转支持。"
+        );
         assert_ne!(
             rust_i18n::t!(BLURB),
             BLURB,
@@ -254,6 +270,14 @@ mod tests {
         assert_eq!(rust_i18n::t!("Settings"), "設定");
         assert_eq!(rust_i18n::t!("Left Click"), "左鍵按一下");
         assert_eq!(rust_i18n::t!("Bind %{name}", name => "X"), "設定 X");
+        assert_eq!(
+            rust_i18n::t!("No supported pairing-capable receiver was found."),
+            "找不到支援配對的接收器。"
+        );
+        assert_eq!(
+            rust_i18n::t!("Device offline — DPI unavailable."),
+            "裝置離線 —— DPI 無法使用。"
+        );
         assert_ne!(
             rust_i18n::t!(BLURB),
             BLURB,
