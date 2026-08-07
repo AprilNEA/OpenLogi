@@ -1609,14 +1609,19 @@ mod tests {
 
     use crate::asset::AssetResolver;
     use crate::data::mouse_buttons::{Action, ButtonId};
+    use openlogi_hid::{SmartShiftMode, SmartShiftStatus};
+
     use openlogi_core::binding::Binding;
     use crate::mouse_model::thumbwheel::ThumbwheelPreset;
 
     use openlogi_hid::{SmartShiftMode, SmartShiftStatus};
 
     use super::{
-        AppState, Load, SmartShiftWriteStatus, apply_thumbwheel_pair, build_device_list,
+        
+        AppState, Load, SmartShiftWriteStatus, apply_thumbwheel_pair, Load, SmartShiftWriteStatus, build_device_list,
+       
         set_scroll_resolution_if_supported, smartshift_read_is_current, smartshift_write_outcome,
+    , smartshift_read_is_current, smartshift_write_outcome,
     };
 
     fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {

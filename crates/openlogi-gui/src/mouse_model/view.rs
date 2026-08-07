@@ -57,7 +57,7 @@ const MODEL_MIN_CONTENT_W: f32 = 320.;
 /// Interactive mouse model with button hotspots.
 pub struct MouseModelView {
     current_device_key: Option<String>,
-    hovered: Option<MouseControlId>,
+hovered: Option<MouseControlId>,
     open_binding_popover: Option<BindingPopover>,
     /// Which gesture direction the open gesture menu has activated (so its
     /// level-2 flyout card shows), or `None` for the plus-only state. Scratch UI
@@ -103,13 +103,13 @@ impl MouseModelView {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BindingPopover {
-    Label(MouseControlId),
+Label(MouseControlId),
     Hotspot(MouseControlId),
 }
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (device_key, asset, active, bindings, gesture_owner, glow, thumbwheel) = cx
+let (device_key, asset, active, bindings, gesture_owner, glow, thumbwheel) = cx
             .try_global::<AppState>()
             .map(|s| {
                 (
@@ -527,6 +527,7 @@ fn label_popover(
         binding,
         highlighted: highlighted || hovered == Some(label.id) || active == Some(label.id),
         selected: false,
+        binding_popover,
         view: view.clone(),
     };
     let popover: AnyElement = if label
@@ -560,7 +561,7 @@ fn label_popover(
                     vcx.notify();
                 });
             })
-            .content(move |_state, _window, cx| match label.id {
+.content(move |_state, _window, cx| match label.id {
                 MouseControlId::Button(button) => action_picker(button, &view_content, cx),
                 MouseControlId::ThumbwheelRotation => thumbwheel_picker(&view, cx),
             })
@@ -591,6 +592,7 @@ struct LabelTrigger {
     binding: BindingLabel,
     highlighted: bool,
     selected: bool,
+    binding_popover: BindingPopover,
     view: Entity<MouseModelView>,
 }
 
@@ -611,6 +613,8 @@ impl RenderOnce for LabelTrigger {
         let selected = self.selected;
         let btn = self.label.id;
         let view = self.view;
+        let view_click = view.clone();
+        let binding_popover = self.binding_popover;
         let pal = theme::palette(cx);
         let binding_color = if highlighted {
             rgb(ACCENT_BLUE).into()
@@ -835,6 +839,7 @@ fn hotspot_popover(
         id: ("hotspot-trigger", idx).into(),
         hotspot,
         hovered: hovered == Some(hotspot.id) || active == Some(hotspot.id),
+        binding_popover,
         view: view.clone(),
         selected: false,
     };
@@ -873,7 +878,7 @@ fn hotspot_popover(
                     vcx.notify();
                 });
             })
-            .content(move |_state, _window, cx| match hotspot.id {
+.content(move |_state, _window, cx| match hotspot.id {
                 MouseControlId::Button(button) => action_picker(button, &view_content, cx),
                 MouseControlId::ThumbwheelRotation => thumbwheel_picker(&view, cx),
             })
@@ -894,6 +899,7 @@ struct HotspotTrigger {
     id: ElementId,
     hotspot: Hotspot,
     hovered: bool,
+    binding_popover: BindingPopover,
     view: Entity<MouseModelView>,
     selected: bool,
 }
@@ -914,6 +920,8 @@ impl RenderOnce for HotspotTrigger {
         let highlighted = self.hovered || self.selected;
         let selected = self.selected;
         let view = self.view;
+        let view_click = view.clone();
+        let binding_popover = self.binding_popover;
         let hotspot = self.hotspot;
         let btn = hotspot.id;
 
