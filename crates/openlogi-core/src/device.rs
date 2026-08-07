@@ -6,6 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 
+mod light;
+
+pub use light::{LightCapabilities, LightValueRange, LightValueRangeError, LightValueUnit};
+
 /// What a paired peripheral is. Mirrors `hidpp::receiver::bolt::BoltDeviceKind`
 /// but is owned by us so consumers don't depend on `hidpp`.
 ///
@@ -45,6 +49,11 @@ pub enum DeviceKind {
     /// Not classified by any source — also the "no asset opinion" value
     /// [`DeviceKind::from_registry_type`] returns for unmodelled strings.
     Unknown,
+    /// Standalone light or other illumination device controlled outside HID++.
+    ///
+    /// This is an identity hint only. UI controls are gated by the dedicated
+    /// light capability descriptor, never by this variant alone.
+    Light,
 }
 
 impl DeviceKind {
@@ -68,6 +77,7 @@ impl DeviceKind {
             "gamepad" => Self::Gamepad,
             "joystick" => Self::Joystick,
             "headset" => Self::Headset,
+            "light" | "lighting" | "illumination_light" => Self::Light,
             _ => Self::Unknown,
         }
     }
@@ -308,6 +318,65 @@ pub struct PairedDevice {
     pub capabilities: Option<Capabilities>,
 }
 
+/// Address of a standalone raw-HID interface.
+///
+/// The identity is an opaque transport-generated string. It is deliberately
+/// kept separate from the HID++ receiver/slot address so a raw device cannot
+/// accidentally enter the HID++ `Direct` path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RawDeviceAddress {
+    /// HID vendor ID.
+    pub vendor_id: u16,
+    /// HID product ID.
+    pub product_id: u16,
+    /// HID usage page.
+    pub usage_page: u16,
+    /// HID usage ID.
+    pub usage_id: u16,
+    /// Identity chosen by the transport: a serial when available, otherwise
+    /// an explicitly transient OS-node identity. It is never an enumeration
+    /// index and a transient value is not persisted as a physical key.
+    pub identity: String,
+}
+
+/// A standalone device that is not a HID++ receiver pairing slot.
+///
+/// This is the inventory bridge for Litra and future non-HID++ categories.
+/// Receiver-backed devices continue to use [`PairedDevice`] inside
+/// [`DeviceInventory`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandaloneDevice {
+    /// Raw HID address used to re-find the interface.
+    pub address: RawDeviceAddress,
+    /// Human-readable name supplied by the OS/HID descriptor.
+    pub display_name: String,
+    /// Human-readable manufacturer, when available.
+    pub manufacturer: Option<String>,
+    /// Device serial, when the HID backend exposes one.
+    pub serial_number: Option<String>,
+    /// Stable four-byte identity when the protocol/driver provides one.
+    /// Raw HID drivers may use zeroes when no such field exists.
+    pub unit_id: [u8; 4],
+    /// Identity classification. Capability fields gate controls.
+    pub kind: DeviceKind,
+    /// Whether this interface was present in the latest completed scan.
+    pub online: bool,
+    /// HID++ capabilities are absent for a non-HID++ device.
+    pub capabilities: Option<Capabilities>,
+    /// Standalone capability descriptor, if the selected driver recognizes it.
+    pub light_capabilities: Option<LightCapabilities>,
+    /// Stable identifier of the driver family that owns this raw interface.
+    /// This is deliberately separate from the product ID so a future family
+    /// can share a protocol driver across several product variants.
+    pub driver_id: String,
+    /// Optional model-level identity in the OpenLogi asset registry.
+    ///
+    /// This is deliberately appended: `StandaloneDevice` crosses the
+    /// append-only GUI↔agent bincode wire format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_model_id: Option<String>,
+}
+
 /// One receiver and its paired devices — the unit the agent's inventory
 /// snapshot is made of.
 ///
@@ -328,9 +397,15 @@ pub struct DeviceInventory {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::expect_used,
+        reason = "range fixture construction is intentionally asserted in tests"
+    )]
+
     use super::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
-        DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, PairedDevice,
+        ReceiverInfo,
     };
 
     fn inventory(slot: u8, wpid: Option<u16>, battery_percentage: u8) -> DeviceInventory {
@@ -485,5 +560,31 @@ mod tests {
             Capabilities::presumed_from_kind(DeviceKind::Unknown),
             Capabilities::default()
         );
+    }
+
+    #[test]
+    fn light_ranges_reject_invalid_grids_and_units() {
+        assert!(LightValueRange::new(10, 1, 1, LightValueUnit::Lumens).is_err());
+        assert!(LightValueRange::new(0, 10, 0, LightValueUnit::Lumens).is_err());
+        assert!(LightValueRange::new(0, 10, 3, LightValueUnit::Lumens).is_err());
+        assert!(LightValueRange::new(0, 101, 1, LightValueUnit::Percent).is_err());
+    }
+
+    #[test]
+    fn light_ranges_quantize_without_leaving_the_advertised_grid() {
+        let range = LightValueRange::new(20, 250, 10, LightValueUnit::Lumens).expect("valid range");
+        assert_eq!(range.native_for_percent(0), Some(20));
+        assert_eq!(range.native_for_percent(50), Some(140));
+        assert_eq!(range.native_for_percent(100), Some(250));
+        assert_eq!(range.quantize(249), 250);
+        assert!(range.contains(range.native_for_percent(65).expect("mapped value")));
+    }
+
+    #[test]
+    fn invalid_light_ranges_fail_toml_deserialization() {
+        let result = toml::from_str::<LightValueRange>(
+            "min = 2700\nmax = 6500\nstep = 0\nunit = 'kelvin'\n",
+        );
+        assert!(result.is_err());
     }
 }

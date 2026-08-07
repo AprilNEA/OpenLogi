@@ -11,11 +11,12 @@
 //! the reconciliation pass (battery refresh, missed events, platforms where
 //! the hotplug stream is unavailable).
 
+use std::collections::{BTreeMap, HashSet};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 use futures_lite::StreamExt as _;
-use openlogi_core::device::DeviceInventory;
+use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -25,6 +26,12 @@ use tracing::{debug, info, warn};
 /// the error arm below), and a later success upgrades `Unavailable` back to a
 /// live inventory.
 const INITIAL_FAILURE_LIMIT: u8 = 3;
+
+/// Number of successful raw-HID snapshots an omitted node may miss before it
+/// is treated as a real detach. OS enumeration can briefly omit a registered
+/// interface during unplug/replug and hotplug bursts, so a successful empty
+/// snapshot is not immediately destructive for standalone lights.
+const RAW_NODE_MISS_GRACE: u8 = 2;
 
 /// Pause between a hotplug event and the early enumerate, so a just-connected
 /// node finishes registering with the OS before the probe opens it.
@@ -41,7 +48,12 @@ const WAKE_GAP: Duration = Duration::from_mins(1);
 #[derive(Debug)]
 pub enum InventoryEvent {
     /// A completed enumeration — empty means "checked, no devices".
-    Snapshot(Vec<DeviceInventory>),
+    Snapshot {
+        /// HID++ receiver/direct inventory.
+        inventories: Vec<DeviceInventory>,
+        /// Recognized standalone raw-HID devices.
+        standalone: Vec<StandaloneDevice>,
+    },
     /// Enumeration has never succeeded and won't be treated as "still
     /// starting" any longer; without this the GUI would show its scanning
     /// state forever on a broken HID backend.
@@ -64,9 +76,103 @@ struct WatchState {
     succeeded: bool,
     /// Consecutive failures, counted only before the first success.
     initial_failures: u8,
+    raw_nodes: RawNodeLedger,
+}
+
+#[derive(Default)]
+struct RawNodeLedger {
+    entries: BTreeMap<String, RawNodeEntry>,
+}
+
+struct RawNodeEntry {
+    device: StandaloneDevice,
+    misses: u8,
+}
+
+impl RawNodeLedger {
+    /// Reconcile one successful raw enumeration with the last good per-node
+    /// records. Omitted nodes stay offline for a bounded grace; a node seen
+    /// again is replaced by its fresh descriptor and its miss count resets.
+    fn reconcile(&mut self, live: Vec<StandaloneDevice>) -> Vec<StandaloneDevice> {
+        let live_keys: HashSet<String> = live.iter().map(raw_node_key).collect();
+        for device in live {
+            self.entries
+                .insert(raw_node_key(&device), RawNodeEntry { device, misses: 0 });
+        }
+
+        let missing: Vec<String> = self
+            .entries
+            .keys()
+            .filter(|key| !live_keys.contains(*key))
+            .cloned()
+            .collect();
+        for key in missing {
+            let Some(entry) = self.entries.get_mut(&key) else {
+                continue;
+            };
+            entry.misses = entry.misses.saturating_add(1);
+            if entry.misses > RAW_NODE_MISS_GRACE {
+                self.entries.remove(&key);
+            } else {
+                entry.device.online = false;
+            }
+        }
+
+        self.entries
+            .values()
+            .map(|entry| entry.device.clone())
+            .collect()
+    }
+
+    /// Return the last completed raw-HID snapshot without counting a miss.
+    /// Used when standalone enumeration itself fails: absence was not
+    /// observed, so advancing detach grace would manufacture a disconnect.
+    fn snapshot(&self) -> Vec<StandaloneDevice> {
+        self.entries
+            .values()
+            .map(|entry| entry.device.clone())
+            .collect()
+    }
+}
+
+fn raw_node_key(device: &StandaloneDevice) -> String {
+    let address = &device.address;
+    format!(
+        "{:04x}:{:04x}:{:04x}:{:04x}:{}",
+        address.vendor_id,
+        address.product_id,
+        address.usage_page,
+        address.usage_id,
+        address.identity
+    )
 }
 
 impl WatchState {
+    /// Combine a successful HID++ enumeration with the independently fallible
+    /// raw-HID pass. A raw backend failure must not suppress fresh mouse and
+    /// keyboard inventory, nor count every remembered light as detached.
+    fn classify_parts(
+        &mut self,
+        inventories: Vec<DeviceInventory>,
+        standalone: Result<Vec<StandaloneDevice>, openlogi_hid::InventoryError>,
+    ) -> InventoryEvent {
+        self.succeeded = true;
+        let standalone = match standalone {
+            Ok(devices) => self.raw_nodes.reconcile(devices),
+            Err(e) => {
+                warn!(
+                    error = ?e,
+                    "standalone enumerate failed during watch tick — keeping last raw snapshot"
+                );
+                self.raw_nodes.snapshot()
+            }
+        };
+        InventoryEvent::Snapshot {
+            inventories,
+            standalone,
+        }
+    }
+
     /// Decide what (if anything) a watch tick emits.
     ///
     /// - `Ok(snapshot)` — a completed enumeration (an empty one included: that's
@@ -82,13 +188,10 @@ impl WatchState {
     ///   retrying and a later success recovers.
     fn classify(
         &mut self,
-        result: Result<Vec<DeviceInventory>, openlogi_hid::InventoryError>,
+        result: Result<(Vec<DeviceInventory>, Vec<StandaloneDevice>), openlogi_hid::InventoryError>,
     ) -> Option<InventoryEvent> {
         match result {
-            Ok(inv) => {
-                self.succeeded = true;
-                Some(InventoryEvent::Snapshot(inv))
-            }
+            Ok((inventories, standalone)) => Some(self.classify_parts(inventories, Ok(standalone))),
             Err(e) => {
                 warn!(error = ?e, "enumerate failed during watch tick — keeping last snapshot");
                 if self.succeeded {
@@ -156,8 +259,14 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<InventoryEvent> {
                     }
                 }
                 last_tick = now;
-                let result = rt.block_on(enumerator.enumerate());
-                if let Some(event) = state.classify(result)
+                let event = match rt.block_on(enumerator.enumerate()) {
+                    Ok(inventories) => {
+                        let standalone = rt.block_on(openlogi_hid::enumerate_standalone());
+                        Some(state.classify_parts(inventories, standalone))
+                    }
+                    Err(error) => state.classify(Err(error)),
+                };
+                if let Some(event) = event
                     && worker_tx.send(event).is_err()
                 {
                     debug!("inventory watcher receiver dropped — exiting");
@@ -212,6 +321,7 @@ pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<InventoryEvent> {
 mod tests {
     use std::assert_matches;
 
+    use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
     use openlogi_hid::InventoryError;
 
     use super::{INITIAL_FAILURE_LIMIT, InventoryEvent, WatchState};
@@ -228,8 +338,8 @@ mod tests {
         // A genuine "checked, nothing there" still propagates as a disconnect —
         // the resilience must not swallow a real empty.
         assert_matches!(
-            state.classify(Ok(vec![])),
-            Some(InventoryEvent::Snapshot(snap)) if snap.is_empty()
+            state.classify(Ok((vec![], vec![]))),
+            Some(InventoryEvent::Snapshot { inventories, standalone }) if inventories.is_empty() && standalone.is_empty()
         );
         assert!(state.succeeded);
     }
@@ -239,13 +349,27 @@ mod tests {
         let mut state = WatchState::default();
         // A good tick first, so there is a last-known-good set to preserve.
         assert_matches!(
-            state.classify(Ok(vec![])),
-            Some(InventoryEvent::Snapshot(_))
+            state.classify(Ok((vec![], vec![]))),
+            Some(InventoryEvent::Snapshot { .. })
         );
         // Then transient enumerate failures emit nothing — the agent keeps the
         // last snapshot instead of flapping to "No devices" (#218).
         assert!(state.classify(Err(enumerate_failed())).is_none());
         assert!(state.classify(Err(enumerate_failed())).is_none());
+    }
+
+    #[test]
+    fn standalone_failure_keeps_raw_nodes_without_suppressing_the_snapshot() {
+        let mut state = WatchState::default();
+        let _ = state.classify(Ok((vec![], vec![raw_light("serial:glow-1")])));
+
+        assert_matches!(
+            state.classify_parts(vec![], Err(enumerate_failed())),
+            InventoryEvent::Snapshot { inventories, standalone }
+                if inventories.is_empty()
+                    && standalone.len() == 1
+                    && standalone[0].online
+        );
     }
 
     #[test]
@@ -264,8 +388,59 @@ mod tests {
         assert!(state.classify(Err(enumerate_failed())).is_none());
         // …and a later success recovers with a live snapshot.
         assert_matches!(
-            state.classify(Ok(vec![])),
-            Some(InventoryEvent::Snapshot(_))
+            state.classify(Ok((vec![], vec![]))),
+            Some(InventoryEvent::Snapshot { .. })
+        );
+    }
+
+    fn raw_light(identity: &str) -> StandaloneDevice {
+        StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: 0x046d,
+                product_id: 0xc900,
+                usage_page: 0xff43,
+                usage_id: 0x0202,
+                identity: identity.into(),
+            },
+            display_name: "Litra Glow".into(),
+            manufacturer: Some("Logi".into()),
+            serial_number: None,
+            unit_id: [0; 4],
+            kind: DeviceKind::Light,
+            online: true,
+            capabilities: None,
+            light_capabilities: None,
+            driver_id: "litra".into(),
+            registry_model_id: None,
+        }
+    }
+
+    #[test]
+    fn raw_node_omission_is_graced_and_recovers() {
+        let mut state = WatchState::default();
+        assert_matches!(
+            state.classify(Ok((vec![], vec![raw_light("id:node")]))) ,
+            Some(InventoryEvent::Snapshot { standalone, .. }) if standalone.len() == 1 && standalone[0].online
+        );
+        assert_matches!(
+            state.classify(Ok((vec![], vec![]))),
+            Some(InventoryEvent::Snapshot { standalone, .. }) if standalone.len() == 1 && !standalone[0].online
+        );
+        assert_matches!(
+            state.classify(Ok((vec![], vec![raw_light("id:node")]))) ,
+            Some(InventoryEvent::Snapshot { standalone, .. }) if standalone.len() == 1 && standalone[0].online
+        );
+    }
+
+    #[test]
+    fn raw_node_is_removed_after_grace_is_exhausted() {
+        let mut state = WatchState::default();
+        let _ = state.classify(Ok((vec![], vec![raw_light("id:node")])));
+        let _ = state.classify(Ok((vec![], vec![])));
+        let _ = state.classify(Ok((vec![], vec![])));
+        assert_matches!(
+            state.classify(Ok((vec![], vec![]))),
+            Some(InventoryEvent::Snapshot { standalone, .. }) if standalone.is_empty()
         );
     }
 }

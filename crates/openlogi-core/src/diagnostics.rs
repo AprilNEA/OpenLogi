@@ -412,6 +412,7 @@ fn kind_label(kind: DeviceKind) -> &'static str {
         DeviceKind::Joystick => "joystick",
         DeviceKind::Headset => "headset",
         DeviceKind::Unknown => "unknown",
+        DeviceKind::Light => "light",
     }
 }
 

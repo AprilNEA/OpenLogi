@@ -243,6 +243,33 @@ mod tests {
     }
 
     #[test]
+    fn illumination_light_entries_use_the_same_bundle_baseline() {
+        let mut e = entry("8c900", "Litra Glow");
+        e.kind = "ILLUMINATION_LIGHT".into();
+        e.files = vec![
+            FileEntry {
+                name: "front.png".into(),
+                sha256: "front".into(),
+                bytes: 1,
+            },
+            FileEntry {
+                name: "manifest.json".into(),
+                sha256: "manifest".into(),
+                bytes: 1,
+            },
+            FileEntry {
+                name: "metadata.json".into(),
+                sha256: "metadata".into(),
+                bytes: 1,
+            },
+        ];
+        assert_eq!(
+            e.baseline_files(),
+            vec!["metadata.json", "manifest.json", "front.png"]
+        );
+    }
+
+    #[test]
     fn find_by_model_id_suffix_matches_secondary_id() {
         // The BTLE MX Master 3S reports bolt pid `b034`; listing it next to
         // `b043` lets the suffix match resolve the depot by pid alone.

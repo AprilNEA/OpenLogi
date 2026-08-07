@@ -24,9 +24,10 @@ use openlogi_agent_core::ipc::{
     PairingFailure, PairingUpdate,
 };
 use openlogi_core::config::Lighting;
-use openlogi_core::device::DeviceInventory;
+use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hid::{
-    DeviceRoute, DpiInfo, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
+    DeviceRoute, DpiInfo, LightCommand, ReceiverSelector, SmartShiftMode, SmartShiftStatus,
+    WriteError,
 };
 use tarpc::client;
 use tarpc::context;
@@ -65,20 +66,36 @@ pub enum GuiUpdate {
     /// updated on disk while this GUI kept running, and only a relaunch
     /// helps. Sent once per episode.
     OutdatedGui,
+    /// Result of an agent-owned standalone-light command. The typed failure
+    /// reaches the GPUI state model instead of being reduced to a log line.
+    LightCommandResult {
+        /// Runtime/config key of the light that issued the command.
+        key: String,
+        /// Monotonic request id used to ignore stale results.
+        request_id: u64,
+        /// The control whose write produced this result.
+        command: LightCommand,
+        /// Agent acceptance or typed device failure.
+        result: Result<(), WriteError>,
+    },
 }
 
 /// A poll snapshot pushed to the GPUI loop on every successful poll round.
 pub struct PollUpdate {
     pub inventory: Vec<DeviceInventory>,
+    pub standalone: Vec<StandaloneDevice>,
     pub status: AgentStatus,
+    pub camera_active: bool,
 }
 
 /// A device command sent from the GPUI thread to the client thread. Reads carry
-/// a `oneshot` for the reply; "apply now" writes are fire-and-forget (the GUI
-/// updates its display optimistically and the client logs any device failure).
+/// a `oneshot` for the reply; standalone-light writes return a result event so
+/// the GUI can surface device failures after an optimistic update.
 pub enum Command {
     SetDpi(DeviceRoute, u32),
     SetLighting(DeviceRoute, Lighting),
+    SetLight(DeviceRoute, LightCommand, String, u64),
+    SetLightManualPower(DeviceRoute, bool, String, u64),
     SetSmartShift(DeviceRoute, SmartShiftMode, u8, u8),
     ReadDpi(DeviceRoute, oneshot::Sender<Result<DpiInfo, WriteError>>),
     ReadSmartShift(
@@ -224,7 +241,7 @@ async fn poll_loop(
             }
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break }; // GUI dropped the sender → shut down
-                if handle(&mut client, pairing_tx, cmd).await.is_err() {
+                if handle(&mut client, update_tx, pairing_tx, cmd).await.is_err() {
                     // Same as a poll-detected drop: back to the fast cadence
                     // so the reconnect (agent self-exec, crash) re-converges
                     // just as quickly as at startup.
@@ -527,8 +544,15 @@ async fn poll(
     let snapshot = client.snapshot(context::current()).await.map_err(|_| ())?;
     let status = snapshot.status;
     let inventory = snapshot.inventory;
+    let standalone = snapshot.standalone;
+    let camera_active = snapshot.camera_active;
     let ready = status.inventory == InventoryHealth::Ready;
-    let _ = update_tx.send(GuiUpdate::Snapshot(PollUpdate { inventory, status }));
+    let _ = update_tx.send(GuiUpdate::Snapshot(PollUpdate {
+        inventory,
+        standalone,
+        status,
+        camera_active,
+    }));
     Ok(PollOutcome::Delivered { ready })
 }
 
@@ -536,12 +560,13 @@ async fn poll(
 /// reconnects; the command's own failure is reported back over its oneshot.
 async fn handle(
     client: &mut Option<AgentClient>,
+    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     pairing_tx: &mpsc::UnboundedSender<PairingUpdate>,
     cmd: Command,
 ) -> Result<(), ()> {
     // keep `client` None on connect failure; that's not a dropped live connection
     let Ok(client) = ensure(client).await else {
-        reply_disconnected(pairing_tx, cmd);
+        reply_disconnected(update_tx, pairing_tx, cmd);
         return Ok(());
     };
     let ctx = context::current();
@@ -549,6 +574,24 @@ async fn handle(
         Command::SetDpi(route, dpi) => log_apply(client.set_dpi(ctx, route, dpi).await)?,
         Command::SetLighting(route, lighting) => {
             log_apply(client.set_lighting(ctx, route, lighting).await)?;
+        }
+        Command::SetLight(route, command, key, request_id) => {
+            send_light_result(
+                update_tx,
+                key,
+                request_id,
+                command,
+                client.set_light(ctx, route, command).await,
+            )?;
+        }
+        Command::SetLightManualPower(route, enabled, key, request_id) => {
+            send_light_result(
+                update_tx,
+                key,
+                request_id,
+                LightCommand::Power(enabled),
+                client.set_light_manual_power(ctx, route, enabled).await,
+            )?;
         }
         Command::SetSmartShift(route, mode, auto, torque) => {
             log_apply(client.set_smartshift(ctx, route, mode, auto, torque).await)?;
@@ -607,6 +650,32 @@ fn log_apply(r: Result<Result<(), WriteError>, tarpc::client::RpcError>) -> Resu
     }
 }
 
+fn send_light_result(
+    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
+    key: String,
+    request_id: u64,
+    command: LightCommand,
+    result: Result<Result<(), WriteError>, tarpc::client::RpcError>,
+) -> Result<(), ()> {
+    if let Ok(result) = result {
+        let _ = update_tx.send(GuiUpdate::LightCommandResult {
+            key,
+            request_id,
+            command,
+            result,
+        });
+        Ok(())
+    } else {
+        let _ = update_tx.send(GuiUpdate::LightCommandResult {
+            key,
+            request_id,
+            command,
+            result: Err(WriteError::AgentUnavailable),
+        });
+        Err(())
+    }
+}
+
 /// Unwrap a tarpc transport result: `Err(())` (connection dropped) propagates so
 /// the caller reconnects; the inner application `Result` is returned for the reply.
 fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
@@ -619,7 +688,11 @@ fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
     clippy::match_same_arms,
     reason = "the two read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
 )]
-fn reply_disconnected(pairing_tx: &mpsc::UnboundedSender<PairingUpdate>, cmd: Command) {
+fn reply_disconnected(
+    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
+    pairing_tx: &mpsc::UnboundedSender<PairingUpdate>,
+    cmd: Command,
+) {
     // Transient, not a permanent feature error: the agent is just restarting,
     // so the panel should keep retrying, not latch "unsupported".
     match cmd {
@@ -628,6 +701,22 @@ fn reply_disconnected(pairing_tx: &mpsc::UnboundedSender<PairingUpdate>, cmd: Co
         }
         Command::ReadSmartShift(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
+        }
+        Command::SetLight(_, command, key, request_id) => {
+            let _ = update_tx.send(GuiUpdate::LightCommandResult {
+                key,
+                request_id,
+                command,
+                result: Err(WriteError::AgentUnavailable),
+            });
+        }
+        Command::SetLightManualPower(_, enabled, key, request_id) => {
+            let _ = update_tx.send(GuiUpdate::LightCommandResult {
+                key,
+                request_id,
+                command: LightCommand::Power(enabled),
+                result: Err(WriteError::AgentUnavailable),
+            });
         }
         Command::StartPairing(_) | Command::PairDevice(_) => {
             let _ = pairing_tx.send(PairingUpdate::Failed(PairingFailure::AgentRestarted));

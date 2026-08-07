@@ -10,6 +10,8 @@
 use std::sync::Arc;
 
 use hidpp::{channel::HidppChannel, device::Device, feature::CreatableFeature};
+use openlogi_core::config::LightSettings;
+use openlogi_core::device::LightCapabilities;
 
 use crate::route::{DeviceRoute, open_route_channel};
 
@@ -17,6 +19,7 @@ mod diagnostics;
 mod dpi;
 mod error;
 mod lighting;
+mod litra;
 mod shared;
 mod smartshift;
 
@@ -24,10 +27,37 @@ pub use diagnostics::{FeatureEntry, ReprogControlEntry, dump_features, dump_repr
 pub use dpi::{DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, set_dpi};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use lighting::{LightingMethod, set_keyboard_color, set_keyboard_color_with};
+pub use litra::{
+    LightCommand, LitraModel, apply as apply_litra, encode_command as encode_litra_command,
+    matches_litra,
+};
 pub use shared::{SharedChannel, set_dpi_on, set_smartshift_on, toggle_smartshift_on};
 pub use smartshift::{
     get_smartshift_status, set_smartshift, set_smartshift_sensitivity, toggle_smartshift,
 };
+
+/// Expand protocol-neutral saved settings into only the controls advertised
+/// by a standalone light. Unsupported controls are omitted rather than sent
+/// speculatively, which keeps power-only and brightness-only drivers usable.
+#[must_use]
+pub fn commands_for_light_settings(
+    settings: LightSettings,
+    capabilities: LightCapabilities,
+) -> Vec<LightCommand> {
+    let mut commands = Vec::new();
+    if capabilities.power {
+        commands.push(LightCommand::Power(settings.enabled));
+    }
+    if capabilities.brightness.is_some() {
+        commands.push(LightCommand::BrightnessPercent(settings.brightness_percent));
+    }
+    if capabilities.temperature.is_some()
+        && let Some(kelvin) = settings.temperature_kelvin
+    {
+        commands.push(LightCommand::TemperatureKelvin(kelvin));
+    }
+    commands
+}
 
 pub(crate) use error::classify_hidpp_error;
 

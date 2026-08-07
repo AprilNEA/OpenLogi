@@ -172,6 +172,7 @@ async fn run(config: Config) {
     );
 
     let mut inventory_rx = watchers::inventory::spawn(Duration::from_secs(2));
+    let mut camera_rx = watchers::camera::spawn(Duration::from_secs(1));
     let mut app_rx = watchers::foreground_app::spawn(Duration::from_secs(1));
     let mut accessibility_rx = watchers::accessibility::spawn(Duration::from_millis(1200));
 
@@ -196,11 +197,15 @@ async fn run(config: Config) {
     // Set once the inventory channel closes (the watcher thread died), so the
     // select stops polling a permanently-ready closed receiver.
     let mut inventory_open = true;
+    let mut camera_open = true;
     loop {
         tokio::select! {
             event = inventory_rx.recv(), if inventory_open => match event {
-                Some(watchers::inventory::InventoryEvent::Snapshot(inventories)) => {
-                    orchestrator.lock().await.refresh_inventory(&inventories);
+                Some(watchers::inventory::InventoryEvent::Snapshot { inventories, standalone }) => {
+                    orchestrator
+                        .lock()
+                        .await
+                        .refresh_inventory(&inventories, &standalone);
                 }
                 Some(watchers::inventory::InventoryEvent::Unavailable) => {
                     orchestrator.lock().await.mark_inventory_unavailable();
@@ -217,6 +222,13 @@ async fn run(config: Config) {
                     orchestrator.lock().await.mark_inventory_unavailable();
                     inventory_open = false;
                 }
+            },
+            event = camera_rx.recv(), if camera_open => if let Some(active) = event {
+                orchestrator.lock().await.set_camera_active(active);
+            } else {
+                #[cfg(target_os = "macos")]
+                warn!("camera watcher channel closed — disabling camera automation updates");
+                camera_open = false;
             },
             Some(bundle) = app_rx.recv() => {
                 orchestrator.lock().await.set_current_app(bundle);

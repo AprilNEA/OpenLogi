@@ -19,7 +19,8 @@ use openlogi_agent_core::{hardware, transport};
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, DpiInfo, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
+    DeviceRoute, DpiInfo, LightCommand, ReceiverSelector, SmartShiftMode, SmartShiftStatus,
+    WriteError,
 };
 
 use crate::pairing::PairingManager;
@@ -147,12 +148,14 @@ impl Agent for AgentServer {
     }
 
     async fn snapshot(self, _: Context) -> AgentSnapshot {
-        let (launch_at_login, inventory_health, inventory) = {
+        let (launch_at_login, inventory_health, inventory, standalone, camera_active) = {
             let orch = self.orchestrator.lock().await;
             (
                 orch.launch_at_login(),
                 orch.inventory_health(),
                 orch.inventory(),
+                orch.standalone(),
+                orch.camera_active(),
             )
         };
         AgentSnapshot {
@@ -165,11 +168,42 @@ impl Agent for AgentServer {
                 agent_version: env!("CARGO_PKG_VERSION").to_string(),
             },
             inventory,
+            standalone,
+            camera_active,
         }
     }
 
     async fn poll_event_monitor(self, _: Context) -> Vec<MonitorEvent> {
         self.event_monitor.poll()
+    }
+
+    async fn set_light(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        command: LightCommand,
+    ) -> Result<(), WriteError> {
+        hardware::cancel_light_reapply(&route);
+        hardware::apply_light(&route, command).await
+    }
+
+    async fn set_light_manual_power(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        enabled: bool,
+    ) -> Result<(), WriteError> {
+        hardware::cancel_light_reapply(&route);
+        hardware::apply_light(&route, LightCommand::Power(enabled)).await?;
+        if !self
+            .orchestrator
+            .lock()
+            .await
+            .set_manual_light_power(&route, enabled)
+        {
+            warn!(?route, "manual light power applied without camera override");
+        }
+        Ok(())
     }
 }
 

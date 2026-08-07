@@ -1,10 +1,9 @@
 //! The app's GPUI [`AssetSource`].
 //!
-//! Serves the embedded OpenLogi logo and delegates every other path to
+//! Serves source-owned embedded artwork and delegates every other path to
 //! gpui-component's icon assets (the lucide SVGs behind `IconName`). Embedding
-//! the logo via `include_bytes!` means `img("openlogi.png")` resolves the same
-//! inside a packaged `.app` as it does from a dev build — a filesystem path
-//! would not.
+//! these files via `include_bytes!` means they resolve the same inside a
+//! packaged `.app` as they do from a dev build — a filesystem path would not.
 
 use std::borrow::Cow;
 

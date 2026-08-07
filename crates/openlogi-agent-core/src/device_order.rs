@@ -3,9 +3,9 @@
 //!
 //! HID enumeration order shifts as devices wake, sleep, or are reselected, so
 //! both processes order devices by a stable, route-derived identity instead.
-//! Sharing the key here is what keeps them agreeing on "the first device": when
-//! no `selected_device` is persisted, the GUI shows index 0 of its sorted list
-//! and the agent targets index 0 of its own — they must be the same device.
+//! Sharing the key keeps device order deterministic. The agent additionally
+//! excludes standalone raw-HID devices when choosing its input-capture target;
+//! they remain ordered here for inventory, display, and settings re-apply.
 
 use openlogi_hid::DeviceRoute;
 
@@ -16,10 +16,10 @@ pub struct PhysicalDeviceKey(String);
 
 /// A route-derived identity used to order devices deterministically.
 ///
-/// Receiver UID + slot and direct serial/non-zero unit identities are stable
-/// and unique. A direct all-zero unit identity is deliberately retained here
-/// only so a transient inventory record can still be ordered; it cannot become
-/// a [`PhysicalDeviceKey`].
+/// Receiver UID + slot and serial/non-zero unit identities are stable and
+/// unique. OS-node identities on raw HID routes are deliberately retained here
+/// only so a transient inventory record can still be ordered; they cannot
+/// become a [`PhysicalDeviceKey`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DeviceStableId {
     Bolt {
@@ -30,6 +30,13 @@ pub enum DeviceStableId {
         vendor_id: u16,
         product_id: u16,
         identity: DeviceIdentity,
+    },
+    RawHid {
+        vendor_id: u16,
+        product_id: u16,
+        usage_page: u16,
+        usage_id: u16,
+        identity: String,
     },
     Unknown {
         slot: u8,
@@ -83,6 +90,19 @@ impl DeviceStableId {
                 product_id: *product_id,
                 identity: DeviceIdentity::from_parts(serial, unit_id),
             },
+            Some(DeviceRoute::RawHid {
+                vendor_id,
+                product_id,
+                usage_page,
+                usage_id,
+                identity,
+            }) => Self::RawHid {
+                vendor_id: *vendor_id,
+                product_id: *product_id,
+                usage_page: *usage_page,
+                usage_id: *usage_id,
+                identity: identity.to_ascii_lowercase(),
+            },
             None => Self::Unknown {
                 slot,
                 identity: DeviceIdentity::from_parts(serial, unit_id),
@@ -109,6 +129,15 @@ impl DeviceStableId {
                 product_id,
                 identity,
             } => format!("direct:{vendor_id:04x}:{product_id:04x}:{}", identity.key()),
+            Self::RawHid {
+                vendor_id,
+                product_id,
+                usage_page,
+                usage_id,
+                identity,
+            } => format!(
+                "raw:{vendor_id:04x}:{product_id:04x}:{usage_page:04x}:{usage_id:04x}:{identity}"
+            ),
             Self::Unknown { slot, identity } => format!("unknown:slot:{slot}:{}", identity.key()),
         }
     }
@@ -117,8 +146,9 @@ impl DeviceStableId {
     ///
     /// Receiver-connected devices are identified by receiver UID + pairing
     /// slot. Direct and routeless devices require either a non-empty serial
-    /// number or a non-zero unit id; an all-zero unit id is a transient probe
-    /// result, not a physical identity.
+    /// number or a non-zero unit id. Raw HID devices require a serial-backed
+    /// route identity; OS node identities and all-zero unit ids are transient
+    /// probe results, not physical identities.
     #[must_use]
     pub fn physical_key(&self) -> Option<PhysicalDeviceKey> {
         match self {
@@ -126,6 +156,9 @@ impl DeviceStableId {
             Self::Direct { identity, .. } | Self::Unknown { identity, .. } => identity
                 .is_physical()
                 .then(|| PhysicalDeviceKey(self.runtime_key())),
+            Self::RawHid { identity, .. } => {
+                raw_identity_is_physical(identity).then(|| PhysicalDeviceKey(self.runtime_key()))
+            }
         }
     }
 }
@@ -156,6 +189,7 @@ impl PhysicalDeviceKey {
     pub fn parse(value: &str) -> Option<Self> {
         if receiver_key_is_valid(value)
             || direct_identity_fragment(value).is_some_and(identity_fragment_is_physical)
+            || raw_identity_fragment(value).is_some_and(raw_identity_is_physical)
             || unknown_identity_fragment(value).is_some_and(identity_fragment_is_physical)
         {
             Some(Self(value.to_string()))
@@ -171,6 +205,8 @@ impl PhysicalDeviceKey {
         direct_identity_fragment(value)
             .or_else(|| unknown_identity_fragment(value))
             .is_some_and(|identity| identity == "unit:00000000")
+            || raw_identity_fragment(value)
+                .is_some_and(|identity| identity.starts_with("id:") || identity.is_empty())
     }
 
     /// Borrow the serialized configuration key.
@@ -201,6 +237,21 @@ fn direct_identity_fragment(value: &str) -> Option<&str> {
     (is_hex_word(vendor_id) && is_hex_word(product_id)).then_some(identity)
 }
 
+fn raw_identity_fragment(value: &str) -> Option<&str> {
+    let mut parts = value.strip_prefix("raw:")?.splitn(5, ':');
+    let vendor_id = parts.next()?;
+    let product_id = parts.next()?;
+    let usage_page = parts.next()?;
+    let usage_id = parts.next()?;
+    let identity = parts.next()?;
+    (is_hex_word(vendor_id)
+        && is_hex_word(product_id)
+        && is_hex_word(usage_page)
+        && is_hex_word(usage_id)
+        && !identity.is_empty())
+    .then_some(identity)
+}
+
 fn unknown_identity_fragment(value: &str) -> Option<&str> {
     let (slot, identity) = value.strip_prefix("unknown:slot:")?.split_once(':')?;
     slot.parse::<u8>().ok().map(|_| identity)
@@ -215,6 +266,15 @@ fn identity_fragment_is_physical(value: &str) -> bool {
                 && unit.bytes().all(|byte| byte.is_ascii_hexdigit())
                 && unit != "00000000"
         })
+}
+
+fn raw_identity_is_physical(value: &str) -> bool {
+    value
+        .strip_prefix("serial:")
+        .is_some_and(|serial| !serial.is_empty())
+        || value
+            .strip_prefix("stable:")
+            .is_some_and(|identity| !identity.is_empty())
 }
 
 fn is_hex_word(value: &str) -> bool {
@@ -326,5 +386,43 @@ mod tests {
         assert!(PhysicalDeviceKey::parse("receiver:d0289db2:slot:1").is_some());
         assert!(PhysicalDeviceKey::parse("direct:046d:b023:unit:a393cae0").is_some());
         assert!(PhysicalDeviceKey::parse("2b034").is_none());
+    }
+
+    #[test]
+    fn raw_os_identity_is_transient_across_reconnects() {
+        let old = DeviceRoute::RawHid {
+            vendor_id: 0x046d,
+            product_id: 0xc900,
+            usage_page: 0xff43,
+            usage_id: 0x0202,
+            identity: "id:old-node".into(),
+        };
+        let new = DeviceRoute::RawHid {
+            vendor_id: 0x046d,
+            product_id: 0xc900,
+            usage_page: 0xff43,
+            usage_id: 0x0202,
+            identity: "id:new-node".into(),
+        };
+        let old_id = DeviceStableId::from_parts(Some(&old), 0xff, None, [0; 4]);
+        let new_id = DeviceStableId::from_parts(Some(&new), 0xff, None, [0; 4]);
+        assert_ne!(old_id.runtime_key(), new_id.runtime_key());
+        assert!(old_id.physical_key().is_none());
+        assert!(new_id.physical_key().is_none());
+    }
+
+    #[test]
+    fn raw_serial_identity_survives_a_changed_os_node() {
+        let route = DeviceRoute::RawHid {
+            vendor_id: 0x046d,
+            product_id: 0xc900,
+            usage_page: 0xff43,
+            usage_id: 0x0202,
+            identity: "serial:glow-1".into(),
+        };
+        let key = DeviceStableId::from_parts(Some(&route), 0xff, Some("glow-1"), [0; 4])
+            .physical_key()
+            .map(PhysicalDeviceKey::into_string);
+        assert_eq!(key, Some("raw:046d:c900:ff43:0202:serial:glow-1".into()));
     }
 }

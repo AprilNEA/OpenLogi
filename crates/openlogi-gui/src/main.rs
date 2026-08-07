@@ -60,7 +60,7 @@ use gpui::{
 use gpui_component::{ActiveTheme, Root};
 use openlogi_core::brand::DeeplinkCommand;
 use openlogi_core::config::Config;
-use openlogi_core::device::DeviceInventory;
+use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -68,7 +68,7 @@ use crate::app::AppView;
 use crate::asset::sync::{
     AssetCommand, AssetControl, SyncOutcome, model_key, run_asset_sync, sync_retry_delay,
 };
-use crate::state::AppState;
+use crate::state::{AppState, ConfigPersistence};
 
 fn dispatch_gui_command(command: DeeplinkCommand, cx: &mut gpui::App) {
     use DeeplinkCommand as Cmd;
@@ -139,6 +139,7 @@ fn main() -> Result<()> {
     // bindings, and the hook live; asset sync is kicked off in the background
     // when the first devices appear (see the `inventory_rx` arm).
     let inventories: Vec<DeviceInventory> = Vec::new();
+    let standalone = Vec::new();
 
     let initial_config = Config::load_or_default().unwrap_or_else(|e| {
         warn!(error = %e, "could not load config.toml; using defaults");
@@ -229,7 +230,9 @@ fn main() -> Result<()> {
                     cx.set_global(AppState::with_runtime(
                         initial_config,
                         &inventories,
+                        &standalone,
                         &cache,
+                        ConfigPersistence::UserFile,
                         ipc_commands,
                     ));
                 }
@@ -278,6 +281,7 @@ fn main() -> Result<()> {
             // Clear (the AssetControl arm below) can sync the current devices
             // without waiting for the next snapshot.
             let mut latest_inv: Vec<DeviceInventory> = Vec::new();
+            let mut latest_standalone: Vec<StandaloneDevice> = Vec::new();
             // A manual Refresh / Clear that arrived while a sync was in
             // flight: stashed here and run by the sync-outcome arm the moment
             // that sync finishes, so a Clear's cache wipe never races the
@@ -297,6 +301,7 @@ fn main() -> Result<()> {
                             == openlogi_agent_core::ipc::InventoryHealth::Ready;
                         if inventory_ready {
                             latest_inv.clone_from(&update.inventory);
+                            latest_standalone.clone_from(&update.standalone);
                         }
                         // A completed sync may have put real photos where
                         // silhouettes were resolved: the resolver was rebuilt
@@ -313,24 +318,24 @@ fn main() -> Result<()> {
                         let force_refresh = inventory_ready && std::mem::take(&mut assets_dirty);
                         let (auto_download, asset_source, models) = cx.update(|cx| {
                             let (changed, merged, auto_download, asset_source, models) = cx.update_global::<AppState, _>(|state, _| {
-                                // Merge only *completed* enumerations. A not-yet-ready
-                                // agent can only serve an empty pre-enumeration list, and
-                                // counting those as misses would wipe the device list (and
-                                // pop an open detail page) on every agent restart: at the
-                                // 250 ms reconnect cadence the miss grace burns in ~750 ms
-                                // while a fresh enumeration takes 1.5–5 s. The diagnostics
-                                // snapshot shares the gate so a report copied during that
-                                // window keeps the receivers the UI is still showing; the
-                                // manual-sync arm reuses `inventory_ready` above.
+                                // Merge only completed enumerations. A scanning agent serves
+                                // an empty pre-enumeration list, which must not burn the GUI's
+                                // miss grace or replace the last known device set.
                                 let merged = inventory_ready
-                                    && state.refresh_inventories(&update.inventory, &cache, force_refresh);
+                                    && state.refresh_inventories(
+                                        &update.inventory,
+                                        &update.standalone,
+                                        &cache,
+                                        force_refresh,
+                                    );
                                 if inventory_ready {
                                     state.store_inventory_snapshot(&update.inventory);
                                 }
                                 // Bitwise `|`: the link must be set even when the
                                 // merge already reported a change.
                                 let changed = merged
-                                    | state.set_agent_link(state::AgentLink::Ready(update.status));
+                                    | state.set_agent_link(state::AgentLink::Ready(update.status))
+                                    | state.set_camera_active(update.camera_active);
                                 let settings = state.app_settings();
                                 (
                                     changed,
@@ -387,6 +392,19 @@ fn main() -> Result<()> {
                         Some(ipc_client::GuiUpdate::OutdatedGui) => {
                             cx.update(|cx| set_agent_link(state::AgentLink::OutdatedGui, cx));
                         }
+                        Some(ipc_client::GuiUpdate::LightCommandResult {
+                            key,
+                            request_id,
+                            command,
+                            result,
+                        }) => {
+                            let changed = cx.update_global::<AppState, _>(|state, _| {
+                                state.apply_light_command_result(key, request_id, command, result)
+                            });
+                            if changed {
+                                cx.update(gpui::App::refresh_windows);
+                            }
+                        }
                         // The IPC client thread is gone (runtime / thread spawn
                         // failure) — without this the window would show its
                         // connecting spinner forever.
@@ -433,7 +451,12 @@ fn main() -> Result<()> {
                                 cache = asset::AssetResolver::new();
                                 cx.update(|cx| {
                                     let changed = cx.update_global::<AppState, _>(|state, _| {
-                                        state.refresh_inventories(&latest_inv, &cache, true)
+                                        state.refresh_inventories(
+                                            &latest_inv,
+                                            &latest_standalone,
+                                            &cache,
+                                            true,
+                                        )
                                     });
                                     if changed {
                                         cx.refresh_windows();

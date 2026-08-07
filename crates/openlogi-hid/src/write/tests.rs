@@ -2,6 +2,8 @@ use std::assert_matches;
 
 use super::*;
 use hidpp::feature::smartshift::WheelMode;
+use openlogi_core::config::LightSettings;
+use openlogi_core::device::{LightCapabilities, LightValueRange, LightValueUnit};
 
 use crate::SmartShiftMode;
 use crate::SmartShiftStatus;
@@ -10,6 +12,23 @@ use crate::write::smartshift::{
     status_matches_desired, wheel_mode_to_smartshift,
 };
 use crate::write::{HidppFeatureErrorKind, HidppOperation};
+
+#[test]
+fn light_settings_expand_only_to_advertised_controls() {
+    let Ok(brightness) = LightValueRange::new(0, 100, 1, LightValueUnit::Percent) else {
+        panic!("valid brightness fixture");
+    };
+    let settings = LightSettings::new(false, 37, Some(4600));
+    let commands = commands_for_light_settings(
+        settings,
+        LightCapabilities {
+            brightness: Some(brightness),
+            ..LightCapabilities::default()
+        },
+    );
+
+    assert_eq!(commands, vec![LightCommand::BrightnessPercent(37)]);
+}
 
 #[test]
 fn capabilities_sort_and_deduplicate_values() -> Result<(), WriteError> {

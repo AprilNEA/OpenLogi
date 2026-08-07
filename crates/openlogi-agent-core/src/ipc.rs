@@ -7,10 +7,10 @@
 //! pairing event arrives or the request deadline elapses.
 
 use openlogi_core::config::Lighting;
-use openlogi_core::device::DeviceInventory;
+use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hid::{
-    DeviceRoute, DpiInfo, PairingError, PasskeyMethod, ReceiverSelector, SmartShiftMode,
-    SmartShiftStatus, WriteError,
+    DeviceRoute, DpiInfo, LightCommand, PairingError, PasskeyMethod, ReceiverSelector,
+    SmartShiftMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +28,9 @@ use serde::{Deserialize, Serialize};
 /// v8: [`WriteError`] carries typed HID++ operation failures.
 /// v9: `poll_event_monitor` appended + [`MonitorEvent`] (live event monitor).
 /// v10: `Capabilities::hires_wheel` appended.
-pub const PROTOCOL_VERSION: u32 = 10;
+/// v11: standalone raw-HID inventory, camera state, and light methods appended.
+/// v12: standalone registry model identity appended to `StandaloneDevice`.
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep
@@ -71,6 +73,12 @@ pub struct AgentStatus {
 pub struct AgentSnapshot {
     pub status: AgentStatus,
     pub inventory: Vec<DeviceInventory>,
+    /// Recognized standalone raw-HID devices, kept separate from receiver
+    /// pairing inventories.
+    pub standalone: Vec<StandaloneDevice>,
+    /// Whether at least one host camera stream is currently in use.
+    /// Runtime-only state used by camera-linked light rendering.
+    pub camera_active: bool,
 }
 
 /// A nearby unpaired device surfaced during Bolt discovery, in the minimal form
@@ -275,4 +283,9 @@ pub trait Agent {
     /// there is no explicit stop. Appended last — see the method-order note on
     /// [`Agent::protocol_version`].
     async fn poll_event_monitor() -> Vec<MonitorEvent>;
+    /// Apply a semantic standalone-light command to a raw HID route.
+    async fn set_light(route: DeviceRoute, command: LightCommand) -> Result<(), WriteError>;
+    /// Manually override effective power for a camera-linked light until the
+    /// next aggregate camera-use transition.
+    async fn set_light_manual_power(route: DeviceRoute, enabled: bool) -> Result<(), WriteError>;
 }
