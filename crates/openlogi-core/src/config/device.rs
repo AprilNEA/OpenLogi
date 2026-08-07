@@ -51,6 +51,10 @@ pub struct DeviceIdentity {
     /// Old configs and HID++ devices omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driver_id: Option<String>,
+    /// Optional model-level identity in the OpenLogi asset registry. This is
+    /// not a physical-device key and never contains a serial or OS node id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_model_id: Option<String>,
 }
 
 /// Settings scoped to a single physical device.

@@ -808,6 +808,7 @@ mod tests {
             capabilities: None,
             light_capabilities: Some(light_capabilities),
             driver_id: "litra".to_string(),
+            registry_model_id: Some("8c900".to_string()),
         };
 
         let devices = build_devices(&[direct_inventory(Some("ABC123"), [0; 4])], &[standalone]);

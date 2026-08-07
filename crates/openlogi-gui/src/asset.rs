@@ -23,6 +23,7 @@ pub(crate) use self::glow::GlowGeometry;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use openlogi_assets::http::safe_component_path;
 use openlogi_assets::{
     BUTTONS_RENDER_FILES, DeviceEntry, FRONT_RENDER_FILES, Index, METADATA_FILES, Metadata,
 };
@@ -200,6 +201,19 @@ impl AssetResolver {
         self.load_files(depot, entry, model)
     }
 
+    /// Resolve a standalone device directly by its registry model id.
+    ///
+    /// Standalone raw-HID devices do not expose a HID++ `DeviceModelInfo`, so
+    /// constructing one just to reuse [`Self::resolve`] would conflate a
+    /// physical protocol identity with a model-level asset identity. The
+    /// registry lookup remains exact and case-insensitive, while all local
+    /// filenames still pass through the same safe component checks.
+    pub fn resolve_registry_model(&self, registry_model_id: &str) -> Option<ResolvedAsset> {
+        let index = self.index.as_ref()?;
+        let (depot, entry) = index.find_by_model_id(registry_model_id)?;
+        self.load_standalone_files(depot, entry, registry_model_id)
+    }
+
     fn load_files(
         &self,
         depot: &str,
@@ -207,7 +221,13 @@ impl AssetResolver {
         model: &DeviceModelInfo,
     ) -> Option<ResolvedAsset> {
         for root in &self.read_roots {
-            let dir = root.join(depot);
+            let Ok(dir) = safe_component_path(root, depot, "asset depot") else {
+                warn!(
+                    depot,
+                    "unsafe asset depot component — ignoring registry entry"
+                );
+                continue;
+            };
             // Hotspot metadata in whichever schema this depot cached:
             // `core_metadata.json` (newer) or `metadata.json` (older).
             let Some(&meta_name) = METADATA_FILES.iter().find(|n| dir.join(n).exists()) else {
@@ -246,7 +266,7 @@ impl AssetResolver {
                 .clone()
                 .into_iter()
                 .chain(FRONT_RENDER_FILES.map(str::to_string))
-                .map(|n| dir.join(n))
+                .filter_map(|n| safe_component_path(&dir, &n, "asset file").ok())
                 .find(|p| p.exists());
             let image_name = buttons_name
                 .clone()
@@ -261,7 +281,10 @@ impl AssetResolver {
             candidates.extend(BUTTONS_RENDER_FILES.map(str::to_string));
             candidates.extend(variant_front_name);
             candidates.extend(FRONT_RENDER_FILES.map(str::to_string));
-            let Some(image_path) = candidates.iter().map(|n| dir.join(n)).find(|p| p.exists())
+            let Some(image_path) = candidates
+                .iter()
+                .filter_map(|n| safe_component_path(&dir, n, "asset file").ok())
+                .find(|p| p.exists())
             else {
                 continue;
             };
@@ -310,6 +333,58 @@ impl AssetResolver {
             });
         }
         debug!(depot, "asset cache miss across all roots");
+        None
+    }
+
+    fn load_standalone_files(
+        &self,
+        depot: &str,
+        entry: &DeviceEntry,
+        registry_model_id: &str,
+    ) -> Option<ResolvedAsset> {
+        for root in &self.read_roots {
+            let Ok(dir) = safe_component_path(root, depot, "asset depot") else {
+                continue;
+            };
+            let manifest = load_manifest(&dir);
+            let Some(image_name) = manifest
+                .as_ref()
+                .and_then(|manifest| manifest.device_image_for(registry_model_id))
+                .or_else(|| entry.preferred_file(&FRONT_RENDER_FILES))
+            else {
+                continue;
+            };
+            let Ok(image_path) = safe_component_path(&dir, image_name, "asset file") else {
+                continue;
+            };
+            if !image_path.is_file() {
+                continue;
+            }
+            let Ok((png_width, png_height)) = read_png_dimensions(&image_path) else {
+                continue;
+            };
+            debug!(
+                depot,
+                root = %root.display(),
+                image = image_name,
+                "standalone asset hit"
+            );
+            return Some(ResolvedAsset {
+                depot: depot.to_owned(),
+                display_name: entry.display_name.clone(),
+                kind: DeviceKind::from_registry_type(&entry.kind),
+                image_path: image_path.clone(),
+                hero_image_path: Some(image_path),
+                glow: None,
+                // Standalone-light rendering intentionally consumes only the
+                // verified front image; shared metadata remains for HID++
+                // button hotspots in `load_files`.
+                metadata: Metadata::default(),
+                png_width,
+                png_height,
+            });
+        }
+        debug!(depot, "standalone asset cache miss across all roots");
         None
     }
 }
@@ -544,6 +619,180 @@ mod tests {
         );
         assert_eq!((asset.png_width, asset.png_height), (100, 200));
         assert_eq!(asset.metadata.assignments().count(), 1);
+    }
+
+    #[test]
+    fn resolves_standalone_registry_model_without_synthetic_hidpp_info() {
+        let root = tempfile::tempdir().expect("create temp dir");
+        let depot = root.path().join("litra_glow");
+        std::fs::create_dir_all(&depot).expect("create depot dir");
+        std::fs::write(
+            depot.join("manifest.json"),
+            r#"{"devices":[{"modelId":"8c900","resources":[{"key":"device_image","src":"front.png"}]}],"resources":[]}"#,
+        )
+        .expect("write manifest");
+        std::fs::write(depot.join("front.png"), png_header(396, 396)).expect("write front");
+
+        let index = index_of(
+            "litra_glow",
+            DeviceEntry {
+                model_id: "8c900".into(),
+                model_ids: vec![],
+                display_name: "Litra Glow".into(),
+                kind: "ILLUMINATION_LIGHT".into(),
+                asset_path: "v1/devices/litra_glow/".into(),
+                files: vec![],
+            },
+        );
+        let resolver = AssetResolver {
+            read_roots: vec![root.path().to_path_buf()],
+            write_root: root.path().to_path_buf(),
+            has_bundle: false,
+            index: Some(index),
+        };
+
+        let asset = resolver
+            .resolve_registry_model("8c900")
+            .expect("standalone registry model should resolve");
+        assert_eq!(asset.display_name, "Litra Glow");
+        assert_eq!(asset.kind, DeviceKind::Light);
+        assert_eq!(asset.image_path, depot.join("front.png"));
+        assert_eq!((asset.png_width, asset.png_height), (396, 396));
+    }
+
+    #[test]
+    fn standalone_registry_lookup_does_not_cross_model_depots() {
+        let root = tempfile::tempdir().expect("create temp dir");
+        let depot = root.path().join("litra_beam");
+        std::fs::create_dir_all(&depot).expect("create depot dir");
+        std::fs::write(
+            depot.join("manifest.json"),
+            r#"{"devices":[{"modelId":"8c901","resources":[{"key":"device_image","src":"front.png"}]}],"resources":[]}"#,
+        )
+        .expect("write manifest");
+        std::fs::write(depot.join("front.png"), png_header(120, 240)).expect("write front");
+        let index = Index {
+            schema_version: 1,
+            devices: HashMap::from([
+                (
+                    "litra_glow".into(),
+                    DeviceEntry {
+                        model_id: "8c900".into(),
+                        model_ids: vec![],
+                        display_name: "Litra Glow".into(),
+                        kind: "ILLUMINATION_LIGHT".into(),
+                        asset_path: "v1/devices/litra_glow/".into(),
+                        files: vec![],
+                    },
+                ),
+                (
+                    "litra_beam".into(),
+                    DeviceEntry {
+                        model_id: "8c901".into(),
+                        model_ids: vec![],
+                        display_name: "Litra Beam".into(),
+                        kind: "ILLUMINATION_LIGHT".into(),
+                        asset_path: "v1/devices/litra_beam/".into(),
+                        files: vec![],
+                    },
+                ),
+            ]),
+        };
+        let resolver = AssetResolver {
+            read_roots: vec![root.path().to_path_buf()],
+            write_root: root.path().to_path_buf(),
+            has_bundle: false,
+            index: Some(index),
+        };
+
+        assert!(resolver.resolve_registry_model("8c900").is_none());
+        assert_eq!(
+            resolver
+                .resolve_registry_model("8c901")
+                .expect("beam should resolve")
+                .display_name,
+            "Litra Beam"
+        );
+    }
+
+    #[test]
+    fn unsafe_standalone_manifest_filename_is_rejected() {
+        let root = tempfile::tempdir().expect("create temp dir");
+        let depot = root.path().join("litra_glow");
+        std::fs::create_dir_all(&depot).expect("create depot dir");
+        std::fs::write(
+            depot.join("manifest.json"),
+            r#"{"devices":[{"modelId":"8c900","resources":[{"key":"device_image","src":"../front.png"}]}],"resources":[]}"#,
+        )
+        .expect("write manifest");
+        std::fs::write(root.path().join("front.png"), png_header(1, 1)).expect("write escape");
+        let resolver = AssetResolver {
+            read_roots: vec![root.path().to_path_buf()],
+            write_root: root.path().to_path_buf(),
+            has_bundle: false,
+            index: Some(index_of(
+                "litra_glow",
+                DeviceEntry {
+                    model_id: "8c900".into(),
+                    model_ids: vec![],
+                    display_name: "Litra Glow".into(),
+                    kind: "ILLUMINATION_LIGHT".into(),
+                    asset_path: "v1/devices/litra_glow/".into(),
+                    files: vec![openlogi_assets::FileEntry {
+                        name: "front.png".into(),
+                        sha256: String::new(),
+                        bytes: 0,
+                    }],
+                },
+            )),
+        };
+        assert!(resolver.resolve_registry_model("8c900").is_none());
+    }
+
+    #[test]
+    fn standalone_resolution_prefers_the_first_read_root() {
+        let roots = [
+            tempfile::tempdir().expect("create bundle root"),
+            tempfile::tempdir().expect("create cache root"),
+        ];
+        for (root, dimensions) in roots.iter().zip([(10, 10), (20, 20)]) {
+            let depot = root.path().join("litra_glow");
+            std::fs::create_dir_all(&depot).expect("create depot dir");
+            std::fs::write(
+                depot.join("front.png"),
+                png_header(dimensions.0, dimensions.1),
+            )
+            .expect("write front");
+        }
+        let resolver = AssetResolver {
+            read_roots: roots.iter().map(|root| root.path().to_path_buf()).collect(),
+            write_root: roots[1].path().to_path_buf(),
+            has_bundle: true,
+            index: Some(index_of(
+                "litra_glow",
+                DeviceEntry {
+                    model_id: "8c900".into(),
+                    model_ids: vec![],
+                    display_name: "Litra Glow".into(),
+                    kind: "ILLUMINATION_LIGHT".into(),
+                    asset_path: "v1/devices/litra_glow/".into(),
+                    files: vec![openlogi_assets::FileEntry {
+                        name: "front.png".into(),
+                        sha256: String::new(),
+                        bytes: 0,
+                    }],
+                },
+            )),
+        };
+
+        let asset = resolver
+            .resolve_registry_model("8c900")
+            .expect("bundle asset should resolve");
+        assert_eq!((asset.png_width, asset.png_height), (10, 10));
+        assert_eq!(
+            asset.image_path,
+            roots[0].path().join("litra_glow/front.png")
+        );
     }
 
     #[test]

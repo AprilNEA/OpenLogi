@@ -240,6 +240,7 @@ fn device_card(
                 .flex()
                 .items_center()
                 .justify_center()
+                .overflow_hidden()
                 .opacity(if record.online { 1. } else { 0.55 })
                 .when_some(glow, |this, (geom, color)| {
                     this.child(glow_canvas(geom, color))
@@ -320,19 +321,21 @@ fn device_image(
     light_settings: LightSettings,
     pal: Palette,
 ) -> AnyElement {
+    if record.kind == DeviceKind::Light {
+        return light_visual::gallery(
+            record.asset.as_ref(),
+            record.online,
+            light_enabled,
+            light_settings,
+            pal,
+        );
+    }
     match record
         .asset
         .as_ref()
         .and_then(|a| a.hero_image_path.clone())
     {
         Some(path) => img(path).max_w_full().max_h_full().into_any_element(),
-        None if record.kind == DeviceKind::Light => light_visual::gallery(
-            record.standalone_artwork,
-            record.online,
-            light_enabled,
-            light_settings,
-            pal,
-        ),
         None => div()
             .size_full()
             .flex()

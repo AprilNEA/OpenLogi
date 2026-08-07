@@ -9,13 +9,13 @@
 //! target up front so views can switch instantly when the carousel selection
 //! changes — no synchronous I/O during the device switch.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use gpui::{App, Global};
 use openlogi_core::config::{
     AppSettings, Appearance, AssetSourcePreference, Config, DeviceIdentity, LightSettings, Lighting,
 };
-use openlogi_core::device::{DeviceInventory, DeviceModelInfo, StandaloneDevice};
+use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hid::{
     DeviceRoute, DpiCapabilities, DpiInfo, SmartShiftMode, SmartShiftStatus, WriteError,
 };
@@ -50,6 +50,7 @@ pub enum SmartShiftWriteStatus {
 use load::LazyDeviceData;
 
 use crate::asset::AssetResolver;
+use crate::asset::sync::{AssetTarget, model_key};
 use crate::data::mouse_buttons::{Action, Binding, ButtonId, GestureDirection};
 use crate::state::devices::{
     adopt_transient_record, build_device_list, direct_key_prefix, pick_initial_device,
@@ -381,14 +382,22 @@ impl AppState {
     /// This reads the UI's merged device list rather than only the latest live
     /// inventory, so a temporarily incomplete probe can still download art for
     /// a device restored from its persisted identity.
-    pub(crate) fn asset_models(&self) -> Vec<(DeviceModelInfo, Option<String>)> {
+    pub(crate) fn asset_models(&self) -> Vec<AssetTarget> {
+        let mut seen = HashSet::new();
         self.device_list
             .iter()
             .filter_map(|record| {
-                record
-                    .model_info
+                let target = record
+                    .registry_model_id
                     .clone()
-                    .map(|model| (model, record.codename.clone()))
+                    .map(|registry_model_id| AssetTarget::Standalone { registry_model_id })
+                    .or_else(|| {
+                        record.model_info.clone().map(|model| AssetTarget::Hidpp {
+                            model,
+                            codename: record.codename.clone(),
+                        })
+                    })?;
+                seen.insert(model_key(&target)).then_some(target)
             })
             .collect()
     }
@@ -465,6 +474,7 @@ impl AppState {
                         && a.capabilities == b.capabilities
                         && a.light_capabilities == b.light_capabilities
                         && a.driver_id == b.driver_id
+                        && a.registry_model_id == b.registry_model_id
                         && a.kind == b.kind
                 });
         if unchanged && !force {
@@ -1514,6 +1524,7 @@ fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> bool {
             }),
             codename: record.codename.clone(),
             driver_id: record.driver_id.clone(),
+            registry_model_id: record.registry_model_id.clone(),
         };
         if config.device_identity(config_key) != Some(&identity) {
             config.set_device_identity(config_key, identity);
@@ -1665,6 +1676,7 @@ mod tests {
                 ..LightCapabilities::default()
             }),
             driver_id: "litra".into(),
+            registry_model_id: Some("8c900".into()),
         }
     }
 
@@ -1940,6 +1952,7 @@ mod tests {
                 model_info: Some(model.clone()),
                 codename: Some("MX Anywhere 3S".to_string()),
                 driver_id: None,
+                registry_model_id: None,
             },
         );
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -1954,7 +1967,34 @@ mod tests {
 
         assert_eq!(
             state.asset_models(),
-            vec![(model, Some("MX Anywhere 3S".to_string()))]
+            vec![crate::asset::sync::AssetTarget::Hidpp {
+                model,
+                codename: Some("MX Anywhere 3S".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn identical_standalone_units_share_one_model_asset_target() {
+        let first = superseded_litra_light();
+        let mut second = first.clone();
+        second.address.identity = "serial:glow-second".into();
+        second.serial_number = Some("glow-second".into());
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState::with_runtime(
+            Config::default(),
+            &[],
+            &[first, second],
+            &AssetResolver::new(),
+            ConfigPersistence::MemoryOnly,
+            commands,
+        );
+
+        assert_eq!(
+            state.asset_models(),
+            vec![crate::asset::sync::AssetTarget::Standalone {
+                registry_model_id: "8c900".into(),
+            }]
         );
     }
 
@@ -2018,6 +2058,7 @@ mod tests {
                 ..LightCapabilities::default()
             }),
             driver_id: "litra".into(),
+            registry_model_id: Some("8c900".into()),
         };
         let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = AppState::with_runtime(
@@ -2187,6 +2228,7 @@ mod tests {
                 ..LightCapabilities::default()
             }),
             driver_id: "test-light".into(),
+            registry_model_id: None,
         };
         let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = AppState::with_runtime(
@@ -2238,6 +2280,7 @@ mod tests {
                 ..LightCapabilities::default()
             }),
             driver_id: "litra".into(),
+            registry_model_id: Some("8c900".into()),
         };
         let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = AppState::with_runtime(
@@ -2310,6 +2353,7 @@ mod tests {
                 ..LightCapabilities::default()
             }),
             driver_id: "litra".into(),
+            registry_model_id: Some("8c900".into()),
         };
         let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = AppState::with_runtime(

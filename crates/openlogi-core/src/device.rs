@@ -77,7 +77,7 @@ impl DeviceKind {
             "gamepad" => Self::Gamepad,
             "joystick" => Self::Joystick,
             "headset" => Self::Headset,
-            "light" | "lighting" => Self::Light,
+            "light" | "lighting" | "illumination_light" => Self::Light,
             _ => Self::Unknown,
         }
     }
@@ -369,6 +369,12 @@ pub struct StandaloneDevice {
     /// This is deliberately separate from the product ID so a future family
     /// can share a protocol driver across several product variants.
     pub driver_id: String,
+    /// Optional model-level identity in the OpenLogi asset registry.
+    ///
+    /// This is deliberately appended: `StandaloneDevice` crosses the
+    /// append-only GUI↔agent bincode wire format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_model_id: Option<String>,
 }
 
 /// One receiver and its paired devices — the unit the agent's inventory

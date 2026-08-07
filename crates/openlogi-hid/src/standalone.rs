@@ -45,6 +45,7 @@ pub async fn enumerate_standalone() -> Result<Vec<StandaloneDevice>, InventoryEr
                 capabilities: None,
                 light_capabilities: Some(model.capabilities()),
                 driver_id: model.driver_id().to_owned(),
+                registry_model_id: model.registry_model_id().map(str::to_owned),
             })
         })
         .collect();
@@ -122,6 +123,7 @@ mod tests {
             capabilities: None,
             light_capabilities: None,
             driver_id: "litra".into(),
+            registry_model_id: None,
         }
     }
 

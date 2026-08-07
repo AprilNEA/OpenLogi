@@ -25,6 +25,8 @@ pub const LOGITECH_VENDOR_ID: u16 = 0x046d;
 pub const LITRA_DRIVER_ID: &str = "litra";
 /// Litra Glow product ID.
 pub const LITRA_GLOW_PRODUCT_ID: u16 = 0xc900;
+/// Litra Beam product ID.
+pub const LITRA_BEAM_PRODUCT_ID: u16 = 0xc901;
 /// Litra vendor usage page.
 pub const LITRA_USAGE_PAGE: u16 = 0xff43;
 /// Litra Glow usage ID.
@@ -68,6 +70,8 @@ const GLOW_TEMPERATURE_RANGE: LightValueRange = validated_range(
 pub enum LitraModel {
     /// Logitech Litra Glow.
     Glow,
+    /// Logitech Litra Beam.
+    Beam,
 }
 
 impl LitraModel {
@@ -76,6 +80,7 @@ impl LitraModel {
     pub const fn from_product_id(product_id: u16) -> Option<Self> {
         match product_id {
             LITRA_GLOW_PRODUCT_ID => Some(Self::Glow),
+            LITRA_BEAM_PRODUCT_ID => Some(Self::Beam),
             _ => None,
         }
     }
@@ -106,11 +111,20 @@ impl LitraModel {
         LITRA_DRIVER_ID
     }
 
+    /// Exact model identifier used by the OpenLogi asset registry.
+    #[must_use]
+    pub const fn registry_model_id(self) -> Option<&'static str> {
+        match self {
+            Self::Glow => Some("8c900"),
+            Self::Beam => Some("8c901"),
+        }
+    }
+
     /// Static capabilities exposed by the model.
     #[must_use]
     pub const fn capabilities(self) -> LightCapabilities {
         match self {
-            Self::Glow => LightCapabilities {
+            Self::Glow | Self::Beam => LightCapabilities {
                 power: true,
                 brightness: Some(GLOW_BRIGHTNESS_RANGE),
                 temperature: Some(GLOW_TEMPERATURE_RANGE),
@@ -269,8 +283,8 @@ mod tests {
     use std::assert_matches;
 
     use super::{
-        COMMAND_BRIGHTNESS, COMMAND_POWER, COMMAND_TEMPERATURE, LightCommand, LitraModel,
-        REPORT_ID, encode_command, matches_litra,
+        COMMAND_BRIGHTNESS, COMMAND_POWER, COMMAND_TEMPERATURE, LITRA_BEAM_PRODUCT_ID,
+        LightCommand, LitraModel, REPORT_ID, encode_command, matches_litra,
     };
     use crate::{DeviceRoute, WriteError};
 
@@ -348,13 +362,28 @@ mod tests {
     fn matcher_requires_the_full_identity_tuple() {
         assert!(matches_litra(0x046d, 0xc900, 0xff43, 0x0202));
         assert!(!matches_litra(0x046d, 0xc900, 0xff43, 0x0203));
-        assert!(!matches_litra(0x046d, 0xc901, 0xff43, 0x0202));
+        assert!(!matches_litra(0x046d, 0xc902, 0xff43, 0x0202));
         assert!(!matches_litra(0x1234, 0xc900, 0xff43, 0x0202));
     }
 
     #[test]
     fn glow_descriptor_exposes_driver_identity() {
         assert_eq!(LitraModel::Glow.driver_id(), "litra");
+    }
+
+    #[test]
+    fn registry_model_ids_match_the_asset_registry() {
+        assert_eq!(LitraModel::Glow.registry_model_id(), Some("8c900"));
+        assert_eq!(LitraModel::Beam.registry_model_id(), Some("8c901"));
+    }
+
+    #[test]
+    fn beam_is_matched_by_its_complete_route_tuple() {
+        assert!(matches_litra(0x046d, 0xc901, 0xff43, 0x0202));
+        assert_eq!(
+            LitraModel::from_product_id(LITRA_BEAM_PRODUCT_ID),
+            Some(LitraModel::Beam)
+        );
     }
 
     #[test]

@@ -62,7 +62,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 11);
+    assert_eq!(PROTOCOL_VERSION, 12);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -361,10 +361,17 @@ fn standalone_light_dtos_commands_and_errors() {
         capabilities: None,
         light_capabilities: Some(capabilities),
         driver_id: "litra".into(),
+        registry_model_id: Some("8c900".into()),
     };
 
     assert_wire(
         &standalone,
+        "fb6d04fb00c9fb43fffb02020d73657269616c3a676c6f772d310a4c6974726120476c6f7701044c6f67690106676c6f772d31000000000c010001010114fa010101fb8c0afb641964020000056c6974726101053863393030",
+    );
+    let mut legacy = standalone.clone();
+    legacy.registry_model_id = None;
+    assert_wire(
+        &legacy,
         "fb6d04fb00c9fb43fffb02020d73657269616c3a676c6f772d310a4c6974726120476c6f7701044c6f67690106676c6f772d31000000000c010001010114fa010101fb8c0afb641964020000056c69747261",
     );
     assert_wire(&capabilities, "010114fa010101fb8c0afb641964020000");

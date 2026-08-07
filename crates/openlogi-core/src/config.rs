@@ -980,6 +980,7 @@ mod tests {
             },
             light_capabilities: None,
             driver_id: None,
+            registry_model_id: None,
         };
         cfg.set_device_identity("2b034", mouse.clone());
         // Recording an identity must not disturb unrelated per-device state.

@@ -491,10 +491,6 @@ fn round_u16(raw: f32) -> u16 {
 fn light_command_status(status: LightCommandStatus, pal: Palette) -> impl IntoElement {
     let (label, color) = match status {
         LightCommandStatus::Pending => (tr!("Applying light setting…").to_string(), pal.text_muted),
-        LightCommandStatus::Accepted => (
-            tr!("Light setting applied").to_string(),
-            Hsla::from(rgb(theme::STATUS_CONNECTED)),
-        ),
         LightCommandStatus::Failed(error) => (
             format!("{}: {error}", tr!("Unavailable")),
             Hsla::from(rgb(theme::STATUS_OFFLINE)),
