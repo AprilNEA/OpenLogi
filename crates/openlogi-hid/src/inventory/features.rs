@@ -6,7 +6,8 @@ use hidpp::{
     feature::hires_wheel::HiResWheelFeature,
     feature::{
         CreatableFeature, device_information::DeviceInformationFeature,
-        device_type_and_name::DeviceTypeAndNameFeature, unified_battery::UnifiedBatteryFeature,
+        device_type_and_name::DeviceTypeAndNameFeature, gestures2::Gestures2Feature,
+        unified_battery::UnifiedBatteryFeature,
     },
 };
 use openlogi_core::device::{
@@ -26,6 +27,9 @@ pub(super) struct ProbedFeatures {
     pub(super) model_info: Option<DeviceModelInfo>,
     /// Marketing type from HID++ `0x0005` — an identity hint only.
     pub(super) kind: Option<DeviceKind>,
+    /// Marketing name from HID++ `0x0005`; preferred over generic OS HID names
+    /// such as Windows Bluetooth's plain `"Mouse"`.
+    pub(super) marketing_name: Option<String>,
     /// Configuration capabilities derived from the device's feature table.
     pub(super) capabilities: Option<Capabilities>,
     /// A `DeviceInformation` read *failed* (vs. the feature being absent), so
@@ -103,13 +107,22 @@ pub(super) async fn probe_features(
             return (ProbedFeatures::default(), None);
         }
     };
-    if let Some(caps) = capabilities.as_mut()
-        && let Some(feature) = device.get_feature::<HiResWheelFeature>()
-    {
-        caps.scroll_inversion = feature
-            .get_wheel_capabilities()
-            .await
-            .is_ok_and(|wheel| wheel.has_invert);
+    if let Some(caps) = capabilities.as_mut() {
+        if let Some(feature) = device.get_feature::<HiResWheelFeature>() {
+            caps.scroll_inversion = feature
+                .get_wheel_capabilities()
+                .await
+                .is_ok_and(|wheel| wheel.has_invert);
+        }
+        // Older MX mice (notably MX Master 2S) expose the horizontal wheel as
+        // Gestures2 gesture id 46 instead of the newer dedicated 0x2150
+        // Thumbwheel feature. Inspect the descriptor table so a generic 0x6501
+        // touch device does not become a false-positive thumbwheel device.
+        if !caps.thumbwheel
+            && let Some(feature) = device.get_feature::<Gestures2Feature>()
+        {
+            caps.thumbwheel = feature.has_thumbwheel().await.unwrap_or(false);
+        }
     }
 
     let battery = match battery_index {
@@ -156,19 +169,29 @@ pub(super) async fn probe_features(
         None => None,
     };
 
-    // `0x0005` reports the device's own marketing type (mouse, keyboard, …) —
-    // the authoritative kind signal. On the direct path it's the only one; on
-    // the Bolt path it corrects a pairing register that reported the wrong (or
-    // `Unknown`) kind.
-    let kind = match device.get_feature::<DeviceTypeAndNameFeature>() {
-        Some(feature) => match feature.get_device_type().await {
-            Ok(ty) => Some(map_device_type(ty)),
-            Err(e) => {
-                debug!(slot, error = ?e, "DeviceType read failed");
-                None
-            }
-        },
-        None => None,
+    // `0x0005` reports the device's own marketing type and name. The type is
+    // the authoritative kind signal; the marketing name matters especially on
+    // Windows Bluetooth, where the OS HID collection is often just `"Mouse"`.
+    let (kind, marketing_name) = match device.get_feature::<DeviceTypeAndNameFeature>() {
+        Some(feature) => {
+            let kind = match feature.get_device_type().await {
+                Ok(ty) => Some(map_device_type(ty)),
+                Err(e) => {
+                    debug!(slot, error = ?e, "DeviceType read failed");
+                    None
+                }
+            };
+            let name = match feature.get_whole_device_name().await {
+                Ok(name) if !name.trim().is_empty() => Some(name),
+                Ok(_) => None,
+                Err(e) => {
+                    debug!(slot, error = ?e, "DeviceName read failed");
+                    None
+                }
+            };
+            (kind, name)
+        }
+        None => (None, None),
     };
 
     (
@@ -176,6 +199,7 @@ pub(super) async fn probe_features(
             battery,
             model_info,
             kind,
+            marketing_name,
             capabilities,
             identity_incomplete,
         },

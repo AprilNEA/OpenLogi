@@ -397,6 +397,16 @@ async fn walk_bolt_slot(
     (device, outcome)
 }
 
+/// Prefer the device's own HID++ marketing name over the host HID collection
+/// label. Windows Bluetooth frequently exposes only a generic `"Mouse"`, while
+/// feature `0x0005` carries the real model name (for example MX Master 2S).
+pub(super) fn preferred_direct_codename(marketing_name: Option<&str>, os_name: &str) -> String {
+    marketing_name
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(os_name)
+        .to_string()
+}
+
 /// Probe a HID++ channel that doesn't host a Bolt receiver — for
 /// Bluetooth-direct, USB-C, or otherwise wired devices that present
 /// themselves as a HID++ device rather than a receiver (P2.4).
@@ -455,10 +465,11 @@ async fn probe_direct(
         };
     }
 
-    // Without a Bolt receiver we don't have a wpid, codename, or pairing
-    // info — those live on the receiver registers. Use the HID name as
-    // the display fallback and leave wpid empty.
-    debug!(name = %info.name, "BT-direct / wired device recognised");
+    // Direct devices have no receiver codename register. Prefer the device's
+    // own 0x0005 marketing name; the Windows Bluetooth HID collection often
+    // calls every pointing device simply `"Mouse"`.
+    let codename = preferred_direct_codename(probe.marketing_name.as_deref(), &info.name);
+    debug!(os_name = %info.name, name = %codename, "BT-direct / wired device recognised");
     let inventory = DeviceInventory {
         receiver: ReceiverInfo {
             name: info.name.clone(),
@@ -468,7 +479,7 @@ async fn probe_direct(
         },
         paired: vec![PairedDevice {
             slot: DIRECT_DEVICE_INDEX,
-            codename: Some(info.name.clone()),
+            codename: Some(codename),
             wpid: None,
             // No receiver pairing register here, so `0x0005` is the only kind
             // hint — but kind is just identity now; the UI gates on the

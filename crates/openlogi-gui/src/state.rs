@@ -47,7 +47,9 @@ pub enum SmartShiftWriteStatus {
 use load::LazyDeviceData;
 
 use crate::asset::AssetResolver;
-use crate::data::mouse_buttons::{Action, Binding, ButtonId, GestureDirection};
+use crate::data::mouse_buttons::{Action, ButtonId, GestureDirection};
+use openlogi_core::binding::Binding;
+use crate::mouse_model::thumbwheel::{ThumbwheelPair, ThumbwheelPreset};
 use crate::state::devices::{
     adopt_transient_record, build_device_list, direct_key_prefix, pick_initial_device,
     sort_device_list,
@@ -1342,6 +1344,29 @@ impl AppState {
         self.persist_and_reload("binding");
     }
 
+    /// Apply one paired thumb-wheel preset to both persisted direction bindings.
+    /// The two config mutations are followed by exactly one save and one agent
+    /// reload, so the runtime never observes a half-updated pair.
+    pub(crate) fn commit_thumbwheel_preset(&mut self, preset: ThumbwheelPreset) {
+        let pair = preset.pair();
+        let persistent_key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string);
+
+        if !apply_thumbwheel_pair(
+            &mut self.button_bindings,
+            &mut self.config,
+            persistent_key.as_deref(),
+            pair,
+        ) {
+            debug!("no persistent device key — thumb-wheel pair kept in memory only");
+            return;
+        }
+
+        self.persist_and_reload("thumb-wheel binding");
+    }
+
     fn bindings_for_current(&self) -> BTreeMap<ButtonId, Action> {
         bindings_for(
             &self.config,
@@ -1437,6 +1462,34 @@ impl AppState {
         // The agent owns the gesture watcher; have it rebuild from config.
         self.persist_and_reload("gesture binding");
     }
+}
+
+/// Update both projected bindings and, when a stable device key exists, both
+/// persisted single-action entries. Returns whether the caller should persist
+/// and reload the agent.
+fn apply_thumbwheel_pair(
+    button_bindings: &mut BTreeMap<ButtonId, Action>,
+    config: &mut Config,
+    persistent_key: Option<&str>,
+    pair: ThumbwheelPair,
+) -> bool {
+    button_bindings.insert(ButtonId::ThumbwheelScrollDown, pair.backward.clone());
+    button_bindings.insert(ButtonId::ThumbwheelScrollUp, pair.forward.clone());
+
+    let Some(key) = persistent_key else {
+        return false;
+    };
+    config.set_binding(
+        key,
+        ButtonId::ThumbwheelScrollDown,
+        Binding::Single(pair.backward),
+    );
+    config.set_binding(
+        key,
+        ButtonId::ThumbwheelScrollUp,
+        Binding::Single(pair.forward),
+    );
+    true
 }
 
 /// Record the identity (name / kind / capabilities) of every currently online,
@@ -1555,12 +1608,20 @@ mod tests {
     };
 
     use crate::asset::AssetResolver;
+    use crate::data::mouse_buttons::{Action, ButtonId};
+    use openlogi_hid::{SmartShiftMode, SmartShiftStatus};
+
+    use openlogi_core::binding::Binding;
+    use crate::mouse_model::thumbwheel::ThumbwheelPreset;
 
     use openlogi_hid::{SmartShiftMode, SmartShiftStatus};
 
     use super::{
-        AppState, Load, SmartShiftWriteStatus, build_device_list,
+        
+        AppState, Load, SmartShiftWriteStatus, apply_thumbwheel_pair, Load, SmartShiftWriteStatus, build_device_list,
+       
         set_scroll_resolution_if_supported, smartshift_read_is_current, smartshift_write_outcome,
+    , smartshift_read_is_current, smartshift_write_outcome,
     };
 
     fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
@@ -1589,6 +1650,52 @@ mod tests {
                 capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
             }],
         }
+    }
+
+    #[test]
+    fn thumbwheel_pair_updates_both_memory_and_config_entries() {
+        let mut bindings = std::collections::BTreeMap::new();
+        let mut config = Config::default();
+        let key = "2b034";
+
+        assert!(apply_thumbwheel_pair(
+            &mut bindings,
+            &mut config,
+            Some(key),
+            ThumbwheelPreset::Volume.pair(),
+        ));
+        assert_eq!(
+            bindings.get(&ButtonId::ThumbwheelScrollDown),
+            Some(&Action::VolumeDown)
+        );
+        assert_eq!(
+            bindings.get(&ButtonId::ThumbwheelScrollUp),
+            Some(&Action::VolumeUp)
+        );
+        let persisted = config.bindings_for(key);
+        assert_eq!(
+            persisted.get(&ButtonId::ThumbwheelScrollDown),
+            Some(&Binding::Single(Action::VolumeDown))
+        );
+        assert_eq!(
+            persisted.get(&ButtonId::ThumbwheelScrollUp),
+            Some(&Binding::Single(Action::VolumeUp))
+        );
+    }
+
+    #[test]
+    fn transient_thumbwheel_pair_stays_in_memory_without_persistence() {
+        let mut bindings = std::collections::BTreeMap::new();
+        let mut config = Config::default();
+
+        assert!(!apply_thumbwheel_pair(
+            &mut bindings,
+            &mut config,
+            None,
+            ThumbwheelPreset::CycleDpi.pair(),
+        ));
+        assert_eq!(bindings.len(), 2);
+        assert!(config.bindings_for("missing").is_empty());
     }
 
     #[test]

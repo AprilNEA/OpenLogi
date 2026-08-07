@@ -149,6 +149,9 @@ pub(super) fn backfill_identity(fresh: &mut ProbedFeatures, cached: &ProbedFeatu
     if fresh.kind.is_none() {
         fresh.kind = cached.kind;
     }
+    if fresh.marketing_name.is_none() {
+        fresh.marketing_name.clone_from(&cached.marketing_name);
+    }
     if !fresh.identity_incomplete {
         return;
     }

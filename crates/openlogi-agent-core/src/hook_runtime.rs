@@ -217,7 +217,31 @@ pub fn start(
                 HOLD.with_borrow_mut(HoldState::cancel);
                 EventDisposition::PassThrough
             }
-            MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
+            MouseEvent::Scroll {
+                delta_x, delta_y, ..
+            } => {
+                // Older MX mice (MX Master 2S) report the thumb wheel through
+                // native horizontal HID scroll rather than 0x2150. Windows'
+                // low-level hook sees those WM_MOUSEHWHEEL ticks, so when a
+                // direction is rebound we consume the native tick and dispatch
+                // the configured action. Newer 0x2150 devices are diverted by
+                // the HID++ capture session and therefore produce no duplicate
+                // OS event here. Leave the default left/right scroll untouched.
+                #[cfg(not(target_os = "windows"))]
+                let _ = (delta_x, delta_y);
+                #[cfg(target_os = "windows")]
+                if delta_y == 0.0
+                    && let Some((button, action)) = hooks
+                        .read()
+                        .ok()
+                        .and_then(|maps| rebound_thumbwheel_action(&maps, delta_x))
+                {
+                    info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
+                    dispatch_action(&action, &dpi_cycle, &capture);
+                    return EventDisposition::Suppress;
+                }
+                EventDisposition::PassThrough
+            }
         }
     });
 
@@ -231,6 +255,24 @@ pub fn start(
             None
         }
     }
+}
+
+/// Resolve a native horizontal wheel tick to a rebound thumb-wheel action.
+/// The built-in horizontal-scroll defaults intentionally return `None` so the
+/// physical wheel stays native unless the user changed that direction. On
+/// Windows/MX Master 2S, positive `WM_MOUSEHWHEEL` delta is the physical
+/// backward/down direction, so it maps to `ThumbwheelScrollDown`.
+#[cfg(any(target_os = "windows", test))]
+fn rebound_thumbwheel_action(maps: &HookMaps, delta_x: f32) -> Option<(ButtonId, Action)> {
+    let button = if delta_x > 0.0 {
+        ButtonId::ThumbwheelScrollDown
+    } else if delta_x < 0.0 {
+        ButtonId::ThumbwheelScrollUp
+    } else {
+        return None;
+    };
+    let action = maps.bindings.get(&button)?.clone();
+    (action != default_binding(button)).then_some((button, action))
 }
 
 /// The action a gesture button's plain (no-swipe) click should fire: its
@@ -372,6 +414,45 @@ mod tests {
             BTreeMap::from([(GestureDirection::Click, Action::None)]),
         )]);
         assert_eq!(resolve_gesture_click(&off, ButtonId::Back), Action::None);
+    }
+
+    #[test]
+    fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
+        let maps = HookMaps {
+            bindings: BTreeMap::from([
+                (ButtonId::ThumbwheelScrollUp, Action::NextTab),
+                (ButtonId::ThumbwheelScrollDown, Action::PrevTab),
+            ]),
+            gestures: BTreeMap::new(),
+        };
+        assert_eq!(
+            rebound_thumbwheel_action(&maps, 1.0),
+            Some((ButtonId::ThumbwheelScrollDown, Action::PrevTab))
+        );
+        assert_eq!(
+            rebound_thumbwheel_action(&maps, -1.0),
+            Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
+        );
+        assert_eq!(rebound_thumbwheel_action(&maps, 0.0), None);
+    }
+
+    #[test]
+    fn native_thumbwheel_scroll_stays_os_native() {
+        let maps = HookMaps {
+            bindings: BTreeMap::from([
+                (
+                    ButtonId::ThumbwheelScrollUp,
+                    default_binding(ButtonId::ThumbwheelScrollUp),
+                ),
+                (
+                    ButtonId::ThumbwheelScrollDown,
+                    default_binding(ButtonId::ThumbwheelScrollDown),
+                ),
+            ]),
+            gestures: BTreeMap::new(),
+        };
+        assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
+        assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
     }
 
     #[test]
