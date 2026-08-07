@@ -22,7 +22,9 @@ use tracing::warn;
 use crate::DpiCycleState;
 use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
 use crate::device_order::DeviceStableId;
-use crate::hook_runtime::{HookMaps, SharedHookMaps};
+use crate::hook_runtime::{
+    HookMaps, ScrollDeviceKey, ScrollInversions, SharedHookMaps, SharedScrollInversions,
+};
 use crate::ipc::InventoryHealth;
 use crate::receiver_access::ReceiverAccess;
 use crate::watchers::gesture::GestureBindings;
@@ -38,6 +40,12 @@ struct AgentDevice {
     slot: u8,
     serial: Option<String>,
     unit_id: [u8; 4],
+    model_ids: [u16; 3],
+    product_name: Option<String>,
+    receiver_vendor_id: u16,
+    receiver_product_id: u16,
+    receiver_name: String,
+    receiver_identity_safe: bool,
     capabilities: Option<Capabilities>,
     /// Live link state from the inventory snapshot. An offline→online
     /// transition is a reconnect — the device may have power-cycled, so its
@@ -54,6 +62,10 @@ pub struct SharedRuntime {
     /// rebuild publishes both atomically (see [`HookMaps`]). Also read by the
     /// gesture watcher for the thumb-wheel/DPI-button single actions.
     pub hook_maps: SharedHookMaps,
+    /// Software scroll inversion settings for pointer devices whose firmware
+    /// cannot invert natively. The OS hook matches these against event-source
+    /// identities; native-capable devices are omitted to prevent double inversion.
+    pub scroll_inversions: SharedScrollInversions,
     pub gesture_bindings: GestureBindings,
     pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
     pub thumbwheel_sensitivity: Arc<AtomicI32>,
@@ -105,6 +117,7 @@ impl Orchestrator {
     pub fn new(config: Config) -> Self {
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
+            scroll_inversions: Arc::new(RwLock::new(ScrollInversions::default())),
             gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
             dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
             thumbwheel_sensitivity: Arc::new(AtomicI32::new(
@@ -170,6 +183,11 @@ impl Orchestrator {
             "gesture_bindings",
         );
         write_value(
+            &self.shared.scroll_inversions,
+            self.scroll_inversions_for_devices(),
+            "scroll_inversions",
+        );
+        write_value(
             &self.shared.dpi_cycle,
             DpiCycleState {
                 presets: key.map(|k| self.config.dpi_presets(k)).unwrap_or_default(),
@@ -183,6 +201,37 @@ impl Orchestrator {
             self.config.app_settings.thumbwheel_sensitivity,
             Ordering::Relaxed,
         );
+    }
+
+    fn scroll_inversions_for_devices(&self) -> ScrollInversions {
+        let entries = self.devices.iter().flat_map(|dev| {
+            let software_inversion = dev
+                .capabilities
+                .is_some_and(|capabilities| capabilities.pointer && !capabilities.scroll_inversion);
+            let invert = software_inversion.then(|| self.config.invert_scroll(&dev.config_key));
+
+            let device_keys = dev
+                .model_ids
+                .into_iter()
+                .filter(|product_id| *product_id != 0)
+                .map(|product_id| ScrollDeviceKey {
+                    vendor_id: Some(u32::from(dev.receiver_vendor_id)),
+                    product_id: Some(u32::from(product_id)),
+                    product_name: dev.product_name.clone(),
+                });
+            let receiver_key = dev
+                .receiver_identity_safe
+                .then(|| ScrollDeviceKey {
+                    vendor_id: Some(u32::from(dev.receiver_vendor_id)),
+                    product_id: Some(u32::from(dev.receiver_product_id)),
+                    product_name: Some(dev.receiver_name.clone()),
+                })
+                .into_iter();
+            device_keys
+                .chain(receiver_key)
+                .filter_map(move |key| invert.map(|invert| (key, invert)))
+        });
+        ScrollInversions::new(entries)
     }
 
     /// Apply a fresh inventory snapshot. Always refreshes the snapshot the IPC
@@ -216,6 +265,12 @@ impl Orchestrator {
             || devices.iter().zip(&self.devices).any(|(a, b)| {
                 a.config_key != b.config_key
                     || a.route != b.route
+                    || a.model_ids != b.model_ids
+                    || a.product_name != b.product_name
+                    || a.receiver_vendor_id != b.receiver_vendor_id
+                    || a.receiver_product_id != b.receiver_product_id
+                    || a.receiver_name != b.receiver_name
+                    || a.receiver_identity_safe != b.receiver_identity_safe
                     || a.capabilities != b.capabilities
             });
         if !changed {
@@ -388,6 +443,20 @@ fn configured_wheel_mode(
 fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
     let mut devices = Vec::new();
     for inv in inventories {
+        // An OS event attributed only to a shared receiver cannot identify
+        // which paired mouse produced it. Publish that identity only when the
+        // receiver has exactly one possible pointer source. Unknown capability
+        // records count conservatively: an offline mouse must not make another
+        // slot's software setting bleed onto it when it wakes.
+        let receiver_pointer_count = inv
+            .paired
+            .iter()
+            .filter(|paired| {
+                paired
+                    .capabilities
+                    .is_none_or(|capabilities| capabilities.pointer)
+            })
+            .count();
         for paired in &inv.paired {
             let Some(model) = paired.model_info.as_ref() else {
                 continue;
@@ -402,6 +471,11 @@ fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
             let Some(config_key) = stable_id.physical_key() else {
                 continue;
             };
+            let receiver_identity_safe = matches!(route.as_ref(), Some(DeviceRoute::Direct { .. }))
+                || (matches!(
+                    route.as_ref(),
+                    Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
+                ) && receiver_pointer_count == 1);
             devices.push(AgentDevice {
                 config_key: config_key.into_string(),
                 model_key: model.config_key(),
@@ -409,6 +483,12 @@ fn build_devices(inventories: &[DeviceInventory]) -> Vec<AgentDevice> {
                 slot: paired.slot,
                 serial: model.serial_number.clone(),
                 unit_id: model.unit_id,
+                model_ids: model.model_ids,
+                product_name: paired.codename.clone(),
+                receiver_vendor_id: inv.receiver.vendor_id,
+                receiver_product_id: inv.receiver.product_id,
+                receiver_name: inv.receiver.name.clone(),
+                receiver_identity_safe,
                 capabilities: paired.capabilities,
                 online: paired.online,
             });
@@ -528,6 +608,7 @@ mod tests {
         ReceiverInfo,
     };
     use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+    use openlogi_hook::{EventDevice, EventDisposition};
 
     fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
         AgentDevice {
@@ -540,6 +621,12 @@ mod tests {
             slot,
             serial: None,
             unit_id: [0; 4],
+            model_ids: [0; 3],
+            product_name: None,
+            receiver_vendor_id: 0x046d,
+            receiver_product_id: 0xc548,
+            receiver_name: "Logi Bolt Receiver".to_string(),
+            receiver_identity_safe: false,
             capabilities: None,
             online,
         }
@@ -580,6 +667,247 @@ mod tests {
         let devices = build_devices(&[direct_inventory(Some("ABC123"), [0; 4])]);
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].config_key, "direct:046d:b023:serial:abc123");
+    }
+
+    fn software_scroll_capabilities() -> Capabilities {
+        Capabilities {
+            pointer: true,
+            scroll_inversion: false,
+            ..Capabilities::default()
+        }
+    }
+
+    fn shared_receiver_inventory(second_capabilities: Option<Capabilities>) -> DeviceInventory {
+        let mut inventory = direct_inventory(Some("software"), [1, 2, 3, 4]);
+        inventory.receiver = ReceiverInfo {
+            name: "Logi Bolt Receiver".to_string(),
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+            unique_id: Some("RX".to_string()),
+        };
+        inventory.paired[0].slot = 1;
+        inventory.paired[0].codename = Some("Signature M650".to_string());
+        inventory.paired[0].capabilities = Some(software_scroll_capabilities());
+        let Some(software_model) = inventory.paired[0].model_info.as_mut() else {
+            panic!("shared receiver fixture must include model info");
+        };
+        software_model.model_ids = [0xb02a, 0, 0];
+
+        let mut second = inventory.paired[0].clone();
+        second.slot = 2;
+        second.codename = Some("Second Pointer".to_string());
+        second.capabilities = second_capabilities;
+        let Some(second_model) = second.model_info.as_mut() else {
+            panic!("shared receiver fixture must include model info");
+        };
+        second_model.model_ids = [0xb034, 0, 0];
+        inventory.paired.push(second);
+        inventory
+    }
+
+    fn scroll_inversion_for(orch: &Orchestrator, event: &EventDevice) -> Option<bool> {
+        orch.shared()
+            .scroll_inversions
+            .read()
+            .ok()
+            .and_then(|inversions| inversions.inversion_for(Some(event)))
+    }
+
+    #[test]
+    fn direct_m650_uses_software_inversion_even_with_a_direct_route() {
+        let mut inventory = direct_inventory(Some("M650-1"), [1, 2, 3, 4]);
+        inventory.receiver.name = "Logitech Signature M650 L".to_string();
+        inventory.receiver.product_id = 0xb02a;
+        inventory.paired[0].codename = Some("M650".to_string());
+        let Some(model_info) = inventory.paired[0].model_info.as_mut() else {
+            panic!("direct inventory fixture must include model info");
+        };
+        model_info.model_ids = [0xb02a, 0, 0];
+        inventory.paired[0].capabilities = Some(software_scroll_capabilities());
+
+        let mut config = Config::default();
+        config.set_invert_scroll("direct:046d:b02a:serial:m650-1", true);
+        let mut orch = Orchestrator::new(config);
+        orch.refresh_inventory(&[inventory]);
+
+        assert_eq!(
+            scroll_inversion_for(
+                &orch,
+                &EventDevice {
+                    vendor_id: Some(0x046d),
+                    product_id: Some(0xb02a),
+                    product_name: Some("Logitech Signature M650 L".to_string()),
+                },
+            ),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn shared_receiver_identity_is_excluded_for_mixed_software_and_native_pointers() {
+        let inventory = shared_receiver_inventory(Some(Capabilities {
+            pointer: true,
+            scroll_inversion: true,
+            ..Capabilities::default()
+        }));
+
+        let mut config = Config::default();
+        config.set_invert_scroll("receiver:rx:slot:1", true);
+        let mut orch = Orchestrator::new(config);
+        orch.refresh_inventory(&[inventory]);
+        let receiver_event = EventDevice {
+            vendor_id: Some(0x046d),
+            product_id: Some(0xc548),
+            product_name: Some("Logi Bolt Receiver".to_string()),
+        };
+        let model_event = EventDevice {
+            vendor_id: Some(0x046d),
+            product_id: Some(0xb02a),
+            product_name: Some("Signature M650".to_string()),
+        };
+
+        assert_eq!(scroll_inversion_for(&orch, &receiver_event), None);
+        assert_eq!(
+            crate::hook_runtime::scroll_disposition(
+                1.0,
+                false,
+                Some(&receiver_event),
+                &orch.shared().scroll_inversions,
+            ),
+            EventDisposition::PassThrough
+        );
+        assert_eq!(scroll_inversion_for(&orch, &model_event), Some(true));
+    }
+
+    #[test]
+    fn unknown_shared_receiver_occupant_conservatively_excludes_receiver_identity() {
+        let inventory = shared_receiver_inventory(None);
+        let mut config = Config::default();
+        config.set_invert_scroll("receiver:rx:slot:1", true);
+        let mut orch = Orchestrator::new(config);
+        orch.refresh_inventory(&[inventory]);
+
+        assert_eq!(
+            scroll_inversion_for(
+                &orch,
+                &EventDevice {
+                    vendor_id: Some(0x046d),
+                    product_id: Some(0xc548),
+                    product_name: Some("Logi Bolt Receiver".to_string()),
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn native_scroll_inversion_devices_are_excluded_from_software_map() {
+        let mut inventory = direct_inventory(Some("native"), [1, 2, 3, 4]);
+        inventory.paired[0].capabilities = Some(Capabilities {
+            pointer: true,
+            scroll_inversion: true,
+            ..Capabilities::default()
+        });
+        let mut config = Config::default();
+        config.set_invert_scroll("direct:046d:b023:serial:native", true);
+        let mut orch = Orchestrator::new(config);
+        orch.refresh_inventory(&[inventory]);
+
+        assert_eq!(
+            scroll_inversion_for(
+                &orch,
+                &EventDevice {
+                    vendor_id: Some(0x046d),
+                    product_id: Some(0xb023),
+                    product_name: Some("MX Master 3S".to_string()),
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn non_pointer_devices_are_excluded_from_software_scroll_map() {
+        let mut inventory = direct_inventory(Some("keyboard"), [1, 2, 3, 4]);
+        inventory.paired[0].capabilities = Some(Capabilities {
+            pointer: false,
+            scroll_inversion: false,
+            ..Capabilities::default()
+        });
+        let mut config = Config::default();
+        config.set_invert_scroll("direct:046d:b023:serial:keyboard", true);
+        let mut orch = Orchestrator::new(config);
+        orch.refresh_inventory(&[inventory]);
+
+        assert_eq!(
+            scroll_inversion_for(
+                &orch,
+                &EventDevice {
+                    vendor_id: Some(0x046d),
+                    product_id: Some(0xb023),
+                    product_name: Some("MX Master 3S".to_string()),
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn config_reload_republishes_software_scroll_inversion() {
+        let mut inventory = direct_inventory(Some("reload"), [1, 2, 3, 4]);
+        inventory.paired[0].capabilities = Some(software_scroll_capabilities());
+        let key = "direct:046d:b023:serial:reload";
+        let event = EventDevice {
+            vendor_id: Some(0x046d),
+            product_id: Some(0xb023),
+            product_name: Some("MX Master 3S".to_string()),
+        };
+        let mut orch = Orchestrator::new(Config::default());
+        orch.refresh_inventory(&[inventory]);
+        assert_eq!(scroll_inversion_for(&orch, &event), Some(false));
+
+        let mut config = Config::default();
+        config.set_invert_scroll(key, true);
+        orch.reload_config(config);
+        assert_eq!(scroll_inversion_for(&orch, &event), Some(true));
+    }
+
+    #[test]
+    fn identity_and_capability_changes_republish_software_scroll_map() {
+        let mut inventory = direct_inventory(Some("changing"), [1, 2, 3, 4]);
+        inventory.receiver.name = "Old Mouse".to_string();
+        inventory.paired[0].codename = Some("Old Mouse".to_string());
+        inventory.paired[0].capabilities = Some(software_scroll_capabilities());
+        let mut config = Config::default();
+        config.set_invert_scroll("direct:046d:b023:serial:changing", true);
+        let mut orch = Orchestrator::new(config);
+        orch.refresh_inventory(&[inventory.clone()]);
+        let named_event = |name: &str| EventDevice {
+            vendor_id: Some(0x046d),
+            product_id: None,
+            product_name: Some(name.to_string()),
+        };
+        assert_eq!(
+            scroll_inversion_for(&orch, &named_event("Old Mouse")),
+            Some(true)
+        );
+
+        inventory.receiver.name = "New Mouse".to_string();
+        inventory.paired[0].codename = Some("New Mouse".to_string());
+        orch.refresh_inventory(&[inventory.clone()]);
+        assert_eq!(scroll_inversion_for(&orch, &named_event("Old Mouse")), None);
+        assert_eq!(
+            scroll_inversion_for(&orch, &named_event("New Mouse")),
+            Some(true)
+        );
+
+        inventory.paired[0].capabilities = Some(Capabilities {
+            pointer: true,
+            scroll_inversion: true,
+            ..Capabilities::default()
+        });
+        orch.refresh_inventory(&[inventory]);
+        assert_eq!(scroll_inversion_for(&orch, &named_event("New Mouse")), None);
     }
 
     #[test]

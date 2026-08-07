@@ -271,6 +271,7 @@ _version: 1
 "Scrolling": "스크롤"
 "Invert scroll direction": "스크롤 방향 반전"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "이 마우스의 스크롤 휠을 반전합니다. 트랙패드는 시스템 스크롤 방향을 유지합니다."
+"Reverse this mouse's scroll wheel in macOS. Your trackpad keeps the system scroll direction.": "macOS에서 이 마우스의 스크롤 휠을 반전합니다. 트랙패드는 시스템 스크롤 방향을 유지합니다."
 "This device does not report native HID++ scroll inversion support.": "This device does not report native HID++ scroll inversion support."
 "Wheel resolution": "휠 해상도"
 "Device default": "기기 기본값"

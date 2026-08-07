@@ -271,6 +271,7 @@ _version: 1
 "Scrolling": "Прокрутка"
 "Invert scroll direction": "Инвертировать направление прокрутки"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "Инвертирует колёсико прокрутки этой мыши. Трекпад сохраняет системное направление прокрутки."
+"Reverse this mouse's scroll wheel in macOS. Your trackpad keeps the system scroll direction.": "Инвертирует колёсико прокрутки этой мыши в macOS. Трекпад сохраняет системное направление прокрутки."
 "This device does not report native HID++ scroll inversion support.": "This device does not report native HID++ scroll inversion support."
 "Wheel resolution": "Разрешение колеса"
 "Device default": "По умолчанию устройства"

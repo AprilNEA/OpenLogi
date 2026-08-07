@@ -271,6 +271,7 @@ _version: 1
 "Scrolling": "Κύλιση"
 "Invert scroll direction": "Αντιστροφή κατεύθυνσης κύλισης"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "Αντιστρέφει τον τροχό κύλισης αυτού του ποντικιού. Το trackpad διατηρεί την κατεύθυνση κύλισης του συστήματος."
+"Reverse this mouse's scroll wheel in macOS. Your trackpad keeps the system scroll direction.": "Αντιστρέφει τον τροχό κύλισης αυτού του ποντικιού στο macOS. Το trackpad διατηρεί την κατεύθυνση κύλισης του συστήματος."
 "This device does not report native HID++ scroll inversion support.": "This device does not report native HID++ scroll inversion support."
 "Wheel resolution": "Ανάλυση τροχού"
 "Device default": "Προεπιλογή συσκευής"
