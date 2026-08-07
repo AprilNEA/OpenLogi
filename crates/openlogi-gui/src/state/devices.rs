@@ -745,6 +745,7 @@ mod tests {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: false,
+                thumbwheel: false,
             },
             light_capabilities: None,
             model_info: None,

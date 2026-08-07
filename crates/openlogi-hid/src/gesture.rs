@@ -21,7 +21,12 @@
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
-use hidpp::{channel::HidppChannel, device::Device, protocol::v20};
+use hidpp::{
+    channel::HidppChannel,
+    device::Device,
+    feature::{CreatableFeature, gestures2::Gestures2Feature},
+    protocol::v20,
+};
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -308,6 +313,7 @@ where
         device_index,
         capture_thumbwheel,
         divert_gesture_button,
+        legacy_thumbwheel_trace_requested(),
     )
     .await;
     let armed = match armed {
@@ -321,6 +327,7 @@ where
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
     let reprog_index = armed.reprog.as_ref().map(|(_, idx)| *idx);
     let thumb_index = armed.thumb.as_ref().map(|(_, idx)| *idx);
+    let legacy_thumb_index = armed.legacy_thumb.as_ref().map(|legacy| legacy.index);
     let dpi_set = armed.dpi_cids.clone();
     let back_set = armed.back_cids.clone();
     let forward_set = armed.forward_cids.clone();
@@ -332,6 +339,9 @@ where
                 return;
             }
             let msg = v20::Message::from(raw);
+            if log_legacy_thumbwheel_packet(&msg, device_index, legacy_thumb_index) {
+                return;
+            }
             if let Some(idx) = reprog_index
                 && let Some(event) = reprog_controls::decode_event(&msg, device_index, idx)
             {
@@ -412,6 +422,32 @@ async fn teardown_capture<Listener, Clear, Disarm, DisarmFuture>(
     }
 }
 
+fn legacy_thumbwheel_trace_requested() -> bool {
+    std::env::var_os("OPENLOGI_TRACE_GESTURE2_THUMBWHEEL").is_some()
+}
+
+fn log_legacy_thumbwheel_packet(
+    msg: &v20::Message,
+    device_index: u8,
+    feature_index: Option<u8>,
+) -> bool {
+    let Some(feature_index) = feature_index else {
+        return false;
+    };
+    if msg.header().device_index != device_index || msg.header().feature_index != feature_index {
+        return false;
+    }
+    let header = msg.header();
+    info!(
+        feature_index = header.feature_index,
+        function_id = header.function_id.to_lo(),
+        software_id = header.software_id.to_lo(),
+        payload = ?msg.extend_payload(),
+        "legacy Gestures2 thumbwheel raw event"
+    );
+    true
+}
+
 /// The set of controls a session has diverted, kept so they can be handed back
 /// to the firmware on teardown.
 struct ArmedControls {
@@ -428,6 +464,17 @@ struct ArmedControls {
     /// `0x2150` accessor + feature index, present when the thumb wheel is
     /// diverted.
     thumb: Option<(Thumbwheel, u8)>,
+    /// Diagnostic-only `0x6501` diversion for old MX thumb wheels. The packet
+    /// format is not decoded yet; this exists only while collecting real-device
+    /// traces for a native HID++ decoder.
+    legacy_thumb: Option<LegacyThumbwheelTrace>,
+}
+
+struct LegacyThumbwheelTrace {
+    feature: Gestures2Feature,
+    index: u8,
+    /// Restore only when this process changed the state.
+    restore_native: bool,
 }
 
 impl ArmedControls {
@@ -456,12 +503,123 @@ impl ArmedControls {
         if let Some((tw, _)) = self.thumb.as_ref() {
             restore(tw.set_reporting(false, false).await, "thumb wheel");
         }
+        if let Some(legacy) = self.legacy_thumb.as_ref()
+            && legacy.restore_native
+        {
+            restore(
+                legacy
+                    .feature
+                    .set_thumbwheel_diverted(false)
+                    .await
+                    .map(|_| ()),
+                "legacy Gestures2 thumb wheel",
+            );
+        }
+    }
+}
+
+/// Arm the dedicated HID++ `0x2150` thumbwheel when available.
+async fn arm_modern_thumbwheel(
+    device: &Device,
+    chan: &Arc<HidppChannel>,
+    slot: u8,
+    capture_thumbwheel: bool,
+) -> Result<Option<(Thumbwheel, u8)>, GestureError> {
+    let mut thumb = None;
+    if capture_thumbwheel
+        && let Some(info) = device
+            .root()
+            .get_feature(thumbwheel::FEATURE_ID)
+            .await
+            .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
+    {
+        let tw = Thumbwheel::new(Arc::clone(chan), slot, info.index);
+        // Consume the getInfo error here, before the next await: Hidpp20Error
+        // isn't Send, so holding it across an await would make this future
+        // (spawned on tokio) non-Send.
+        let supports_single_tap = match tw.get_info().await {
+            Ok(twinfo) => twinfo.supports_single_tap,
+            Err(e) => {
+                warn!(error = ?e, "thumb wheel getInfo failed");
+                false
+            }
+        };
+        // Divert whenever capture was requested: rotation rebinds and the
+        // sensitivity multiplier need the diverted event stream even on wheels
+        // that report no single-tap capability (e.g. MX Master 4) — lacking the
+        // tap only means a bound click can never fire.
+        if !supports_single_tap {
+            debug!("thumb wheel reports no single tap — click not capturable");
+        }
+        // Use warn+continue rather than ? so a thumbwheel setup failure
+        // doesn't abort the whole session and leave already-diverted
+        // Back/Forward/DPI controls stuck with no capture session to
+        // restore them.
+        match tw.set_reporting(true, false).await {
+            Ok(()) => thumb = Some((tw, info.index)),
+            Err(e) => {
+                warn!(error = ?e, "thumb wheel set_reporting failed — skipping click capture");
+            }
+        }
+    }
+
+    Ok(thumb)
+}
+
+/// Arm diagnostic-only diversion for the legacy `Gestures2` thumb wheel.
+async fn arm_legacy_thumbwheel_trace(
+    device: &Device,
+    chan: &Arc<HidppChannel>,
+    slot: u8,
+    enabled: bool,
+) -> Result<Option<LegacyThumbwheelTrace>, GestureError> {
+    if !enabled {
+        return Ok(None);
+    }
+    let Some(info) = device
+        .root()
+        .get_feature(Gestures2Feature::ID)
+        .await
+        .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
+    else {
+        return Ok(None);
+    };
+
+    let feature = Gestures2Feature::new(Arc::clone(chan), slot, info.index);
+    match feature.thumbwheel_diverted().await {
+        Ok(Some(already_diverted)) => {
+            if !already_diverted {
+                feature
+                    .set_thumbwheel_diverted(true)
+                    .await
+                    .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+            }
+            info!(
+                slot,
+                feature_index = info.index,
+                "legacy Gestures2 thumbwheel trace armed; rotate both directions now"
+            );
+            Ok(Some(LegacyThumbwheelTrace {
+                feature,
+                index: info.index,
+                restore_native: !already_diverted,
+            }))
+        }
+        Ok(None) => {
+            debug!(slot, "Gestures2 thumbwheel is absent or not divertable");
+            Ok(None)
+        }
+        Err(e) => {
+            warn!(error = ?e, "failed to inspect legacy Gestures2 thumbwheel diversion");
+            Ok(None)
+        }
     }
 }
 
 /// Resolve features off the device's root and divert the controls we capture:
 /// the gesture button (raw-XY) and DPI/ModeShift buttons over `0x1b04`, and —
-/// when `capture_thumbwheel` — the thumb wheel over `0x2150`. The
+/// when `capture_thumbwheel` — the thumb wheel over `0x2150`. Optional legacy
+/// `0x6501` tracing is isolated in [`arm_legacy_thumbwheel_trace`]. The
 /// root-feature lookup mirrors `write::open_feature`,
 /// since hidpp 0.2's registry doesn't carry the features OpenLogi reimplements.
 async fn arm_controls(
@@ -469,6 +627,7 @@ async fn arm_controls(
     slot: u8,
     capture_thumbwheel: bool,
     divert_gesture_button: bool,
+    trace_legacy_thumbwheel: bool,
 ) -> Result<ArmedControls, GestureError> {
     let device = Device::new(Arc::clone(chan), slot)
         .await
@@ -535,49 +694,25 @@ async fn arm_controls(
         reprog = Some((rc, info.index));
     }
 
-    let mut thumb: Option<(Thumbwheel, u8)> = None;
-    if capture_thumbwheel
-        && let Some(info) = device
-            .root()
-            .get_feature(thumbwheel::FEATURE_ID)
-            .await
-            .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
-    {
-        let tw = Thumbwheel::new(Arc::clone(chan), slot, info.index);
-        // Consume the getInfo error here, before the next await: Hidpp20Error
-        // isn't Send, so holding it across an await would make this future
-        // (spawned on tokio) non-Send.
-        let supports_single_tap = match tw.get_info().await {
-            Ok(twinfo) => twinfo.supports_single_tap,
-            Err(e) => {
-                warn!(error = ?e, "thumb wheel getInfo failed");
-                false
-            }
-        };
-        // Divert whenever capture was requested: rotation rebinds and the
-        // sensitivity multiplier need the diverted event stream even on wheels
-        // that report no single-tap capability (e.g. MX Master 4) — lacking the
-        // tap only means a bound click can never fire.
-        if !supports_single_tap {
-            debug!("thumb wheel reports no single tap — click not capturable");
-        }
-        // Use warn+continue rather than ? so a thumbwheel setup failure
-        // doesn't abort the whole session and leave already-diverted
-        // Back/Forward/DPI controls stuck with no capture session to
-        // restore them.
-        match tw.set_reporting(true, false).await {
-            Ok(()) => thumb = Some((tw, info.index)),
-            Err(e) => {
-                warn!(error = ?e, "thumb wheel set_reporting failed — skipping click capture");
-            }
-        }
-    }
+    let thumb = arm_modern_thumbwheel(&device, chan, slot, capture_thumbwheel).await?;
+
+    // MX Master 2S does not expose 0x2150. Its thumb wheel is Gestures2
+    // gesture 46. Trace mode diverts only that gesture and logs raw packets;
+    // normal builds continue using the native horizontal-wheel fallback.
+    let legacy_thumb = arm_legacy_thumbwheel_trace(
+        &device,
+        chan,
+        slot,
+        capture_thumbwheel && thumb.is_none() && trace_legacy_thumbwheel,
+    )
+    .await?;
 
     if !gesture_diverted
         && dpi_cids.is_empty()
         && back_cids.is_empty()
         && forward_cids.is_empty()
         && thumb.is_none()
+        && legacy_thumb.is_none()
     {
         debug!(slot, "no capturable controls — idle session");
     }
@@ -588,6 +723,7 @@ async fn arm_controls(
         back_cids,
         forward_cids,
         thumb,
+        legacy_thumb,
     })
 }
 

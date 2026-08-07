@@ -30,7 +30,8 @@ use serde::{Deserialize, Serialize};
 /// v10: `Capabilities::hires_wheel` appended.
 /// v11: standalone raw-HID inventory, camera state, and light methods appended.
 /// v12: standalone registry model identity appended to `StandaloneDevice`.
-pub const PROTOCOL_VERSION: u32 = 12;
+/// v13: `Capabilities::thumbwheel` appended.
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep

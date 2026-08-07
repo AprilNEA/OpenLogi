@@ -596,6 +596,7 @@ mod tests {
                         lighting: false,
                         scroll_inversion: false,
                         hires_wheel: true,
+                        thumbwheel: false,
                     }),
                     dpi: Some("1600 dpi (range 200–8000, 5 steps)".to_string()),
                     config_key: "4082d".to_string(),

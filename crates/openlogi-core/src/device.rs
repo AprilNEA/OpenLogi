@@ -115,6 +115,11 @@ pub struct Capabilities {
     /// can be read and changed independently of inversion support.
     #[serde(default)]
     pub hires_wheel: bool,
+    /// A horizontal thumb wheel is available: either the dedicated HID++
+    /// `0x2150 Thumbwheel` feature or a legacy `0x6501 Gestures2` descriptor
+    /// (gesture id 46, used by MX Master 2S).
+    #[serde(default)]
+    pub thumbwheel: bool,
 }
 
 impl Capabilities {
@@ -136,6 +141,7 @@ impl Capabilities {
             lighting: has(&LIGHTING),
             scroll_inversion: false,
             hires_wheel: ids.contains(&0x2121),
+            thumbwheel: ids.contains(&0x2150),
         }
     }
 
@@ -153,6 +159,7 @@ impl Capabilities {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: false,
+                thumbwheel: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -449,6 +456,7 @@ mod tests {
                     lighting: false,
                     scroll_inversion: false,
                     hires_wheel: false,
+                    thumbwheel: false,
                 }),
             }],
         }
@@ -503,7 +511,9 @@ mod tests {
         use super::Capabilities;
         // A typical MX mouse: ReprogControls (0x1b04) + ExtendedAdjustableDpi
         // (0x2202), no lighting.
-        let mouse = Capabilities::from_feature_ids(&[0x0003, 0x1b04, 0x2121, 0x2202, 0x2110]);
+        let mouse = Capabilities::from_feature_ids(&[
+            0x0003, 0x1b04, 0x2121, 0x2150, 0x2202, 0x2110,
+        ]);
         assert_eq!(
             mouse,
             Capabilities {
@@ -512,8 +522,10 @@ mod tests {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: true,
+                thumbwheel: true,
             }
         );
+        assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
         // A wired G-series keyboard: PerKeyLighting (0x8080), no DPI/buttons.
         let keyboard = Capabilities::from_feature_ids(&[0x0001, 0x8080]);
         assert_eq!(
@@ -524,6 +536,7 @@ mod tests {
                 lighting: true,
                 scroll_inversion: false,
                 hires_wheel: false,
+                thumbwheel: false,
             }
         );
         // No driving features → nothing offered.
@@ -534,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_capabilities_without_hires_wheel_load_as_unsupported()
+    fn persisted_capabilities_without_appended_wheel_fields_load_as_unsupported()
     -> Result<(), toml::de::Error> {
         use super::Capabilities;
 
@@ -548,6 +561,7 @@ mod tests {
         )?;
 
         assert!(!capabilities.hires_wheel);
+        assert!(!capabilities.thumbwheel);
         assert!(capabilities.scroll_inversion);
         Ok(())
     }
@@ -557,6 +571,7 @@ mod tests {
         use super::Capabilities;
         let mouse = Capabilities::presumed_from_kind(DeviceKind::Mouse);
         assert!(mouse.buttons && mouse.pointer && !mouse.lighting);
+        assert!(!mouse.thumbwheel);
         assert!(Capabilities::presumed_from_kind(DeviceKind::Keyboard).lighting);
         // An unidentified device presumes nothing — it must be measured.
         assert_eq!(

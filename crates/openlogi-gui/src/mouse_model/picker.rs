@@ -29,8 +29,9 @@ use gpui::{
 use gpui_component::{Icon, IconName, h_flex, popover::PopoverState, v_flex};
 
 use crate::data::mouse_buttons::{
-    Action, ButtonId, Category, GestureDirection, default_gesture_binding,
+    Action, ButtonId, Category, GestureDirection, default_binding, default_gesture_binding,
 };
+use crate::mouse_model::thumbwheel::ThumbwheelPreset;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
@@ -78,6 +79,89 @@ pub fn action_picker<T: 'static>(
             "picker-scroll",
             action_rows("action-item", current.as_ref(), &on_pick, pal),
         ))
+        .into_any_element()
+}
+
+/// Build the paired preset picker for thumb-wheel rotation. One click updates
+/// both directional bindings and dismisses the popover.
+pub(crate) fn thumbwheel_picker<T: 'static>(
+    observer: &Entity<T>,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
+    let current = cx.try_global::<AppState>().and_then(|state| {
+        let backward = state
+            .button_bindings
+            .get(&ButtonId::ThumbwheelScrollDown)
+            .cloned()
+            .unwrap_or_else(|| default_binding(ButtonId::ThumbwheelScrollDown));
+        let forward = state
+            .button_bindings
+            .get(&ButtonId::ThumbwheelScrollUp)
+            .cloned()
+            .unwrap_or_else(|| default_binding(ButtonId::ThumbwheelScrollUp));
+        ThumbwheelPreset::recognize(&backward, &forward)
+    });
+
+    let pal = theme::palette(cx);
+    let popover = cx.entity().downgrade();
+    let rows: Vec<AnyElement> = ThumbwheelPreset::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(idx, preset)| {
+            let selected = current == Some(preset);
+            let label = tr!(preset.label());
+            let observer = observer.clone();
+            let popover = popover.clone();
+            menu_row(("thumbwheel-preset", idx), pal, selected)
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            svg()
+                                .path(preset.icon())
+                                .size_4()
+                                .flex_none()
+                                .text_color(pal.text_muted),
+                        )
+                        .child(div().child(label)),
+                )
+                .when(selected, |row| {
+                    row.child(
+                        Icon::new(IconName::Check)
+                            .size_3()
+                            .text_color(rgb(ACCENT_BLUE)),
+                    )
+                })
+                .on_click(move |_event, window, cx| {
+                    cx.update_global::<AppState, _>(|state, _| {
+                        state.commit_thumbwheel_preset(preset);
+                    });
+                    observer.update(cx, |_, cx| cx.notify());
+                    if let Some(popover) = popover.upgrade() {
+                        popover.update(cx, |state, cx| state.dismiss(window, cx));
+                    }
+                })
+                .into_any_element()
+        })
+        .collect();
+
+    menu_card(pal)
+        .min_w(px(POPOVER_W))
+        .child(title(tr!("Bind %{name}", name => tr!("Thumb Wheel")), pal))
+        .child(divider(pal))
+        .when(current.is_none(), |card| {
+            card.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("Custom")),
+            )
+            .child(divider(pal))
+        })
+        .child(scroll_list("thumbwheel-picker-scroll", rows))
         .into_any_element()
 }
 
