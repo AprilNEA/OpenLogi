@@ -429,7 +429,7 @@ jobs:
       # Authenticode-signs via Artifact Signing (ex-Trusted Signing). The action only
       # runs on Windows runners. azure/login leaves an az CLI session that the action's
       # default AzureCliCredential picks up, so no azure-* secret inputs are needed.
-      - name: Sign openlogi-gui.exe and openlogi-agent.exe with Artifact Signing
+      - name: Sign OpenLogi Windows executables with Artifact Signing
         if: ${{ inputs.sign }}
         uses: azure/artifact-signing-action@v2
         with:
@@ -439,6 +439,7 @@ jobs:
           # `files` is a newline-separated list; one call signs both PE files.
           files: |
             ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-gui.exe
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-overlay.exe
             ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-agent.exe
           # Timestamping is mandatory: without it the signature expires after
           # 3 days. The URL must stay http — SignTool rejects an https /tr up
@@ -460,7 +461,7 @@ jobs:
           # HashMismatch (bytes no longer match the signature) are trust-store
           # independent and always ship-blockers; NotTrusted/UnknownError depend
           # on the runner's trust store, so they stay log-only.
-          foreach ($exe in 'openlogi-gui.exe', 'openlogi-agent.exe') {
+          foreach ($exe in 'openlogi-gui.exe', 'openlogi-overlay.exe', 'openlogi-agent.exe') {
             $sig = Get-AuthenticodeSignature "target\${{ matrix.target }}\release\$exe"
             $sig | Format-List
             if ($null -eq $sig.SignerCertificate -or
@@ -479,6 +480,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist, stage | Out-Null
           Copy-Item target\${{ matrix.target }}\release\openlogi-gui.exe stage\OpenLogi.exe
+          Copy-Item target\${{ matrix.target }}\release\openlogi-overlay.exe stage\openlogi-overlay.exe
           Copy-Item target\${{ matrix.target }}\release\openlogi-agent.exe stage\openlogi-agent.exe
           # Zipping after signing is safe: Authenticode lives in the PE files.
           $ref = $env:GITHUB_REF_NAME -replace '/', '-'
@@ -601,9 +603,10 @@ jobs:
           # unreachable; the guards turn a confusing "$null.FullName -> empty
           # -d" wix error into a named cause if those invariants ever shift.
           $gui = Get-Item signed-exe\OpenLogi.exe -ErrorAction SilentlyContinue
+          $overlay = Get-Item signed-exe\openlogi-overlay.exe -ErrorAction SilentlyContinue
           $agent = Get-Item signed-exe\openlogi-agent.exe -ErrorAction SilentlyContinue
-          if ($null -eq $gui -or $null -eq $agent) {
-            Write-Error "signed-exe\ must contain OpenLogi.exe and openlogi-agent.exe — nothing to package"
+          if ($null -eq $gui -or $null -eq $overlay -or $null -eq $agent) {
+            Write-Error "signed-exe\ must contain OpenLogi.exe, openlogi-overlay.exe, and openlogi-agent.exe — nothing to package"
             exit 1
           }
           New-Item -ItemType Directory -Force -Path out | Out-Null
@@ -613,6 +616,7 @@ jobs:
             -d Version=$version `
             -d ExeFile="$($gui.FullName)" `
             -d AgentExeFile="$($agent.FullName)" `
+            -d OverlayExeFile="$($overlay.FullName)" `
             -o out\OpenLogi.msi
 
       - name: Azure login (OIDC)
