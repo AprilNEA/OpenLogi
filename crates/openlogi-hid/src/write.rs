@@ -16,6 +16,7 @@ use crate::route::{DeviceRoute, open_route_channel};
 mod diagnostics;
 mod dpi;
 mod error;
+mod haptic;
 mod lighting;
 mod shared;
 mod smartshift;
@@ -23,6 +24,11 @@ mod smartshift;
 pub use diagnostics::{FeatureEntry, ReprogControlEntry, dump_features, dump_reprog_controls};
 pub use dpi::{DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, set_dpi};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
+pub use haptic::{
+    get_haptic_configuration, get_haptic_configuration_on, play_haptic, play_haptic_on,
+    set_haptic_configuration, set_haptic_configuration_on,
+};
+pub use hidpp::feature::haptic_feedback::{HapticConfiguration, HapticIntensity, HapticWaveform};
 pub use lighting::{LightingMethod, set_keyboard_color, set_keyboard_color_with};
 pub use shared::{SharedChannel, set_dpi_on, set_smartshift_on, toggle_smartshift_on};
 pub use smartshift::{

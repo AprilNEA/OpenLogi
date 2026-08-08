@@ -44,9 +44,11 @@ pub use pairing::{
 pub use route::{BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, UNIFYING_PIDS};
 pub use smartshift::{AUTO_DISENGAGE_PERMANENT, SmartShiftMode, SmartShiftStatus};
 pub use write::{
-    DpiCapabilities, DpiInfo, FeatureEntry, HidppFeatureErrorKind, HidppOperation, LightingMethod,
-    ReprogControlEntry, SharedChannel, WriteError, dump_features, dump_reprog_controls, get_dpi,
-    get_dpi_info, get_smartshift_status, set_dpi, set_dpi_on, set_keyboard_color,
-    set_keyboard_color_with, set_smartshift, set_smartshift_on, set_smartshift_sensitivity,
-    toggle_smartshift, toggle_smartshift_on,
+    DpiCapabilities, DpiInfo, FeatureEntry, HapticConfiguration, HapticIntensity, HapticWaveform,
+    HidppFeatureErrorKind, HidppOperation, LightingMethod, ReprogControlEntry, SharedChannel,
+    WriteError, dump_features, dump_reprog_controls, get_dpi, get_dpi_info,
+    get_haptic_configuration, get_haptic_configuration_on, get_smartshift_status, play_haptic,
+    play_haptic_on, set_dpi, set_dpi_on, set_haptic_configuration, set_haptic_configuration_on,
+    set_keyboard_color, set_keyboard_color_with, set_smartshift, set_smartshift_on,
+    set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
 };

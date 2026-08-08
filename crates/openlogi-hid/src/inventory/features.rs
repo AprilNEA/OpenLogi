@@ -5,8 +5,11 @@ use hidpp::{
     device::Device,
     feature::hires_wheel::HiResWheelFeature,
     feature::{
-        CreatableFeature, device_information::DeviceInformationFeature,
-        device_type_and_name::DeviceTypeAndNameFeature, unified_battery::UnifiedBatteryFeature,
+        CreatableFeature,
+        device_information::DeviceInformationFeature,
+        device_type_and_name::DeviceTypeAndNameFeature,
+        reprog_controls::{ReprogControlsFeature, control_ids},
+        unified_battery::UnifiedBatteryFeature,
     },
 };
 use openlogi_core::device::{
@@ -103,13 +106,21 @@ pub(super) async fn probe_features(
             return (ProbedFeatures::default(), None);
         }
     };
-    if let Some(caps) = capabilities.as_mut()
-        && let Some(feature) = device.get_feature::<HiResWheelFeature>()
-    {
-        caps.scroll_inversion = feature
-            .get_wheel_capabilities()
-            .await
-            .is_ok_and(|wheel| wheel.has_invert);
+    if let Some(caps) = capabilities.as_mut() {
+        if let Some(feature) = device.get_feature::<HiResWheelFeature>() {
+            caps.scroll_inversion = feature
+                .get_wheel_capabilities()
+                .await
+                .is_ok_and(|wheel| wheel.has_invert);
+        }
+        // The panel is a control inside 0x1b04, not a standalone feature. Only
+        // newer haptic/force devices need the extra table walk; older mice keep
+        // the existing probe cost.
+        if (caps.haptic_feedback || caps.force_sensing)
+            && let Some(feature) = device.get_feature::<ReprogControlsFeature>()
+        {
+            caps.haptic_panel = has_haptic_panel(&feature).await;
+        }
     }
 
     let battery = match battery_index {
@@ -181,6 +192,24 @@ pub(super) async fn probe_features(
         },
         battery_index,
     )
+}
+
+/// Whether the reprogrammable-control table contains a divertable Haptic Sense
+/// Panel. Read failures mean the capability remains unavailable for this probe;
+/// a later inventory refresh can retry without inventing model-based support.
+async fn has_haptic_panel(feature: &ReprogControlsFeature) -> bool {
+    let Ok(count) = feature.get_count().await else {
+        return false;
+    };
+    for index in 0..count {
+        let Ok(info) = feature.get_cid_info(index).await else {
+            return false;
+        };
+        if info.cid == control_ids::HAPTIC_PANEL {
+            return info.flags.is_divertable();
+        }
+    }
+    false
 }
 
 #[cfg(test)]
