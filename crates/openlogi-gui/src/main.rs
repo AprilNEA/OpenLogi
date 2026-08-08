@@ -29,6 +29,8 @@ macro_rules! tr {
     };
 }
 
+mod action_icons;
+mod action_ring_geometry;
 mod app;
 mod app_assets;
 mod app_menu;

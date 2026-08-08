@@ -8,6 +8,7 @@ use gpui::{
 };
 use gpui_component::{Icon, IconName, Selectable, h_flex, popover::Popover, v_flex};
 
+use crate::action_icons::action_icon_path;
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::asset::{GlowGeometry, ResolvedAsset};
 use crate::data::mouse_buttons::{
@@ -21,9 +22,7 @@ use crate::mouse_model::geometry::{
 use crate::mouse_model::leader_lines::{
     Geometry as LeaderGeometry, Label, Side, paint as paint_leader_lines,
 };
-use crate::mouse_model::picker::{
-    GESTURE_BUTTON_ICON, action_icon_path, action_picker, gesture_overview,
-};
+use crate::mouse_model::picker::{GESTURE_BUTTON_ICON, action_picker, gesture_overview};
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
 
@@ -568,7 +567,9 @@ fn label_popover(
                     vcx.notify();
                 });
             })
-            .content(move |_state, _window, cx| action_picker(label.id, &view_content, cx))
+            .content(move |_state, window, cx| {
+                action_picker(label.id, &view_content, window, cx)
+            })
             .into_any_element()
     };
     div()
@@ -831,7 +832,9 @@ fn hotspot_popover(
                     vcx.notify();
                 });
             })
-            .content(move |_state, _window, cx| action_picker(hotspot.id, &view_content, cx))
+            .content(move |_state, window, cx| {
+                action_picker(hotspot.id, &view_content, window, cx)
+            })
             .into_any_element()
     };
     div()

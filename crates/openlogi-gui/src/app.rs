@@ -15,6 +15,7 @@ use openlogi_agent_core::ipc::InventoryHealth;
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::asset::AssetResolver;
+use crate::components::action_ring_panel::ActionRingPanel;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
@@ -63,6 +64,8 @@ enum Route {
 enum DetailTab {
     /// The mouse model with clickable button hotspots.
     Buttons,
+    /// Cursor-centred eight-slot action launcher.
+    ActionsRing,
     /// Pointer tuning — DPI and presets.
     Pointer,
     /// RGB lighting — color, brightness, on/off.
@@ -98,6 +101,9 @@ impl DetailTab {
         if caps.buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
         }
+        if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
+            tabs.push(Self::ActionsRing);
+        }
         if caps.pointer {
             tabs.push(Self::Pointer);
         }
@@ -119,6 +125,7 @@ impl DetailTab {
     fn label(self) -> gpui::SharedString {
         match self {
             Self::Buttons => tr!("Buttons"),
+            Self::ActionsRing => tr!("Actions Ring"),
             Self::Pointer => tr!("Pointer"),
             Self::Lighting => tr!("Lighting"),
             Self::Device => tr!("Device"),
@@ -131,6 +138,7 @@ pub struct AppView {
     focus_handle: FocusHandle,
     route: Route,
     mouse_model: Entity<MouseModelView>,
+    action_ring_panel: Entity<ActionRingPanel>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
@@ -175,6 +183,7 @@ impl AppView {
         }
 
         let mouse_model = cx.new(MouseModelView::new);
+        let action_ring_panel = cx.new(ActionRingPanel::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
@@ -183,6 +192,7 @@ impl AppView {
             focus_handle,
             route: Route::Home,
             mouse_model,
+            action_ring_panel,
             dpi_panel,
             smartshift_panel,
             lighting_panel,
@@ -296,6 +306,16 @@ impl AppView {
                     })),
             )
             .into_any_element()
+    }
+
+    fn detail_panels(&self) -> detail::DetailPanels<'_> {
+        detail::DetailPanels {
+            mouse_model: &self.mouse_model,
+            action_ring: &self.action_ring_panel,
+            dpi: &self.dpi_panel,
+            smartshift: &self.smartshift_panel,
+            lighting: &self.lighting_panel,
+        }
     }
 }
 
@@ -433,16 +453,7 @@ impl Render for AppView {
             };
             (
                 detail::detail_header(record.as_ref(), &tabs, active, pal, cx).into_any_element(),
-                detail::detail_content(
-                    &self.mouse_model,
-                    &self.dpi_panel,
-                    &self.smartshift_panel,
-                    &self.lighting_panel,
-                    active,
-                    pal,
-                    cx,
-                )
-                .into_any_element(),
+                detail::detail_content(self.detail_panels(), active, pal, cx).into_any_element(),
             )
         } else {
             (
@@ -582,10 +593,14 @@ mod tests {
             lighting: false,
             scroll_inversion: false,
             hires_wheel: false,
+            haptic_feedback: false,
+            force_sensing: false,
+            haptic_panel: false,
         });
         // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
         assert!(tabs.contains(&DetailTab::Buttons));
+        assert!(tabs.contains(&DetailTab::ActionsRing));
         assert!(tabs.contains(&DetailTab::Pointer));
         assert!(!tabs.contains(&DetailTab::Lighting));
     }
@@ -601,6 +616,9 @@ mod tests {
             lighting: true,
             scroll_inversion: false,
             hires_wheel: false,
+            haptic_feedback: false,
+            force_sensing: false,
+            haptic_panel: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(
@@ -612,6 +630,16 @@ mod tests {
 
     /// Each panel is independent: a lighting-only device (e.g. a keyboard with
     /// RGB but no remappable keys yet) shows only Lighting + Device.
+    #[test]
+    fn haptic_panel_adds_the_actions_ring_tab() {
+        let caps = Capabilities {
+            haptic_panel: true,
+            ..Capabilities::default()
+        };
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, Some(caps)));
+        assert_eq!(tabs, vec![DetailTab::ActionsRing, DetailTab::Device]);
+    }
+
     #[test]
     fn lighting_only_device_shows_only_lighting() {
         let caps = Some(Capabilities {

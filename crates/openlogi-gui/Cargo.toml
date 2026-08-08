@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "GPUI-based desktop UI for OpenLogi."
+default-run = "openlogi-gui"
 # Not publishable to crates.io: depends on git-only gpui / gpui_platform
 # (gpui_platform is not on the registry). Distributed as a bundled .app.
 publish = false
@@ -14,6 +15,10 @@ publish = false
 [[bin]]
 name = "openlogi-gui"
 path = "src/main.rs"
+
+[[bin]]
+name = "openlogi-overlay"
+path = "src/bin/openlogi-overlay.rs"
 
 [dependencies]
 openlogi-core = { path = "../openlogi-core" }
@@ -58,7 +63,7 @@ embed-resource = "3.0.9"
 # `Retained<T>`-owned AppKit bindings so the status-item code can't leak (#99).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance"] }
+objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance", "NSWindow"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSProcessInfo"] }
 
 # unsafe_code stays denied; the status-item/tray modules opt in locally with
