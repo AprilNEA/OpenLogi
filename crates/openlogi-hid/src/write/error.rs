@@ -100,6 +100,12 @@ pub enum HidppOperation {
     ReadWheelMode,
     /// Write and verify the native HiResWheel mode.
     WriteWheelMode,
+    /// Read the device-wide haptic configuration.
+    ReadHaptic,
+    /// Write the device-wide haptic configuration.
+    WriteHaptic,
+    /// Play one haptic waveform.
+    PlayHaptic,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

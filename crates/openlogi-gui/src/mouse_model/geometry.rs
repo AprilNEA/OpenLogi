@@ -217,6 +217,9 @@ fn map_slot_name(name: &str) -> Option<ButtonId> {
         "SLOT_NAME_MODESHIFT_BUTTON" => Some(ButtonId::DpiToggle),
         "SLOT_NAME_THUMBWHEEL" => Some(ButtonId::Thumbwheel),
         "SLOT_NAME_GESTURE_BUTTON" => Some(ButtonId::GestureButton),
+        // MX Master 4 calls the Haptic Sense Panel hotspot by its default
+        // assignment rather than by a physical SLOT_NAME_* identifier.
+        "ASSIGNMENT_NAME_SHOW_RADIAL_MENU" => Some(ButtonId::HapticPanel),
         _ => None,
     }
 }

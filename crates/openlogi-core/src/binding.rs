@@ -10,9 +10,16 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
+mod action_ring;
+mod key_combo;
 mod swipe;
 
+pub use action_ring::{
+    ActionRingConfig, ActionRingIcon, ActionRingLayout, ActionRingSlot, RingAction, RingActionError,
+};
+pub use key_combo::KeyComboParseError;
 pub use swipe::{
     GESTURE_HOLD_FOR_SWIPE, GESTURE_SWIPE_DEADZONE, GESTURE_SWIPE_THRESHOLD, SwipeAccumulator,
     detect_swipe,
@@ -51,13 +58,16 @@ pub enum ButtonId {
     /// The HID++ gesture button on MX-line devices. The press itself
     /// fires the bound action; swipe directions are P1.5 territory.
     GestureButton,
+    /// The force-sensitive Haptic Sense Panel on devices such as MX Master 4.
+    /// Captured over HID++ independently of the dedicated gesture button.
+    HapticPanel,
 }
 
 impl ButtonId {
     /// Every rebindable button in declaration (physical front-to-side) order —
     /// the iteration source for default-binding seeding and the popover
     /// trigger list.
-    pub const ALL: [ButtonId; 10] = [
+    pub const ALL: [ButtonId; 11] = [
         ButtonId::LeftClick,
         ButtonId::RightClick,
         ButtonId::MiddleClick,
@@ -68,6 +78,7 @@ impl ButtonId {
         ButtonId::ThumbwheelScrollUp,
         ButtonId::ThumbwheelScrollDown,
         ButtonId::GestureButton,
+        ButtonId::HapticPanel,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -99,6 +110,7 @@ impl ButtonId {
             ButtonId::ThumbwheelScrollUp => "Thumb Wheel Up",
             ButtonId::ThumbwheelScrollDown => "Thumb Wheel Down",
             ButtonId::GestureButton => "Gesture Button",
+            ButtonId::HapticPanel => "Haptic Sense Panel",
         }
     }
 }
@@ -363,6 +375,92 @@ pub enum Action {
     /// The `display` field is used by [`Action::label`] so the popover
     /// shows the user-friendly chord name.
     CustomShortcut(KeyCombo),
+
+    // ── OpenLogi UI ──────────────────────────────────────────────────────────
+    /// Open the configured Actions Ring at the current pointer position.
+    /// Handled by the agent rather than the OS input synthesizer.
+    ShowActionsRing,
+    /// Open an application, folder, filesystem path, or platform URL.
+    OpenApplication(ApplicationTarget),
+}
+
+/// Why an application launch target could not be constructed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum ApplicationTargetError {
+    /// The launch path or URL was blank.
+    #[error("application path must not be empty")]
+    EmptyPath,
+}
+
+/// Validated application, folder, filesystem, or URL target for
+/// [`Action::OpenApplication`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "ApplicationTargetWire", into = "ApplicationTargetWire")]
+pub struct ApplicationTarget {
+    path: String,
+    display_name: String,
+}
+
+impl ApplicationTarget {
+    /// Validate a platform path or URL and its user-facing name.
+    pub fn new(
+        path: impl Into<String>,
+        display_name: impl Into<String>,
+    ) -> Result<Self, ApplicationTargetError> {
+        let path = path.into().trim().to_string();
+        if path.is_empty() {
+            return Err(ApplicationTargetError::EmptyPath);
+        }
+        let requested_name = display_name.into();
+        let display_name = if requested_name.trim().is_empty() {
+            std::path::Path::new(&path)
+                .file_stem()
+                .and_then(std::ffi::OsStr::to_str)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(path.as_str())
+                .to_string()
+        } else {
+            requested_name.trim().to_string()
+        };
+        Ok(Self { path, display_name })
+    }
+
+    /// Platform path or URL passed to the operating system. A leading `~` is
+    /// expanded by the injector immediately before opening.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Name displayed in configuration and overlay UI.
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        &self.display_name
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ApplicationTargetWire {
+    path: String,
+    #[serde(default)]
+    display_name: String,
+}
+
+impl TryFrom<ApplicationTargetWire> for ApplicationTarget {
+    type Error = ApplicationTargetError;
+
+    fn try_from(target: ApplicationTargetWire) -> Result<Self, Self::Error> {
+        Self::new(target.path, target.display_name)
+    }
+}
+
+impl From<ApplicationTarget> for ApplicationTargetWire {
+    fn from(target: ApplicationTarget) -> Self {
+        Self {
+            path: target.path,
+            display_name: target.display_name,
+        }
+    }
 }
 
 /// A modifier + virtual-key keystroke captured by the P1.3 recorder UI or
@@ -380,9 +478,8 @@ pub enum Action {
 pub struct KeyCombo {
     /// Bitmask of [`Self::MOD_CMD`] etc.
     pub modifiers: u8,
-    /// macOS virtual key code (`kVK_*`). 0 means "no key" — useful for
-    /// modifier-only placeholders that the recorder UI rejects. On Linux,
-    /// `openlogi-inject` translates this to an evdev `KeyCode`.
+    /// macOS virtual key code (`kVK_*`). `0` is the valid code for the A key.
+    /// On Linux, `openlogi-inject` translates this to an evdev `KeyCode`.
     pub key_code: u16,
     /// Pre-rendered chord label, e.g. `"⌘⇧P"`. Empty falls through to a
     /// generated label at runtime.
@@ -609,6 +706,8 @@ impl Action {
             Action::HorizontalScrollLeft => "Scroll Left".into(),
             Action::HorizontalScrollRight => "Scroll Right".into(),
             Action::CustomShortcut(combo) => combo.rendered_label(),
+            Action::ShowActionsRing => "Show Actions Ring".into(),
+            Action::OpenApplication(target) => target.display_name().into(),
         }
     }
 
@@ -645,7 +744,9 @@ impl Action {
             | Action::PreviousDesktop
             | Action::NextDesktop
             | Action::ShowDesktop
-            | Action::LaunchpadShow => Category::Navigation,
+            | Action::LaunchpadShow
+            | Action::ShowActionsRing
+            | Action::OpenApplication(_) => Category::Navigation,
             Action::None | Action::LockScreen | Action::Screenshot | Action::CaptureRegion => {
                 Category::System
             }
@@ -703,6 +804,7 @@ impl Action {
             Action::NextDesktop,
             Action::ShowDesktop,
             Action::LaunchpadShow,
+            Action::ShowActionsRing,
             // System
             Action::None,
             Action::LockScreen,
@@ -758,6 +860,7 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollRight,
         ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
         ButtonId::GestureButton => Action::MissionControl,
+        ButtonId::HapticPanel => Action::ShowActionsRing,
     }
 }
 
@@ -983,6 +1086,20 @@ mod tests {
             display: "⌘⇧P".into(),
         });
         assert_eq!(roundtrip(&action), action);
+    }
+
+    #[test]
+    fn application_target_validates_and_roundtrips() {
+        assert!(ApplicationTarget::new("  ", "App").is_err());
+        let target = ApplicationTarget::new("/Applications/Safari.app", "")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let action = Action::OpenApplication(target.clone());
+        assert_eq!(target.display_name(), "Safari");
+        assert_eq!(roundtrip(&action), action);
+
+        let downloads =
+            ApplicationTarget::new("~/Downloads/", "").unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(downloads.display_name(), "Downloads");
     }
 
     #[test]

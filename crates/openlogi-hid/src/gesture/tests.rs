@@ -66,8 +66,9 @@ fn a_held_dpi_button_presses_once_on_the_rising_edge() {
     let dpi = reprog_controls::DPI_MODE_SHIFT_CIDS[0];
     let down = RawControlEvent::DivertedButtons([dpi, 0, 0, 0]);
 
-    handle_reprog(&mut acc, down, &[dpi], &tx);
-    handle_reprog(&mut acc, down, &[dpi], &tx);
+    let mappings = [(dpi, ButtonId::DpiToggle)];
+    handle_reprog(&mut acc, down, &mappings, &tx);
+    handle_reprog(&mut acc, down, &mappings, &tx);
 
     assert_eq!(
         rx.try_recv(),
@@ -87,9 +88,10 @@ fn a_dpi_button_re_presses_after_a_release() {
     let down = RawControlEvent::DivertedButtons([dpi, 0, 0, 0]);
     let up = RawControlEvent::DivertedButtons([0, 0, 0, 0]);
 
-    handle_reprog(&mut acc, down, &[dpi], &tx);
-    handle_reprog(&mut acc, up, &[dpi], &tx);
-    handle_reprog(&mut acc, down, &[dpi], &tx);
+    let mappings = [(dpi, ButtonId::DpiToggle)];
+    handle_reprog(&mut acc, down, &mappings, &tx);
+    handle_reprog(&mut acc, up, &mappings, &tx);
+    handle_reprog(&mut acc, down, &mappings, &tx);
 
     assert_eq!(
         rx.try_recv(),
@@ -99,6 +101,27 @@ fn a_dpi_button_re_presses_after_a_release() {
         rx.try_recv(),
         Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle)),
         "a release re-arms the rising edge"
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn haptic_panel_maps_to_its_own_button() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let cid = reprog_controls::HAPTIC_PANEL_CID;
+    let mappings = [(cid, ButtonId::HapticPanel)];
+
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+        &mappings,
+        &tx,
+    );
+
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonPressed(ButtonId::HapticPanel))
     );
     assert!(rx.try_recv().is_err());
 }

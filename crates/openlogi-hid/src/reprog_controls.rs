@@ -43,6 +43,12 @@ pub const FEATURE_ID: u16 = 0x1b04;
 /// bindable/capturable input.
 pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 
+/// Control ID of the MX Master 4 Haptic Sense Panel.
+///
+/// This newer value is absent from Logitech's published control-ID list; it is
+/// cross-checked against the MX Master 4 `0x1b04` table and device metadata.
+pub const HAPTIC_PANEL_CID: u16 = 0x01a0;
+
 /// Control IDs of the "DPI / ModeShift" button family. Whichever a device
 /// exposes (and can divert) is captured and mapped to
 /// [`ButtonId::DpiToggle`](openlogi_core::binding::ButtonId::DpiToggle): the MX

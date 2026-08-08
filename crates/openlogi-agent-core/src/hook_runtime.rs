@@ -14,6 +14,7 @@ use openlogi_core::binding::{
 };
 use openlogi_hid::CaptureChannel;
 use openlogi_hook::{EventDisposition, Hook, MouseEvent};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::DpiCycleState;
@@ -38,6 +39,88 @@ pub struct HookMaps {
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
 /// (orchestrator), the OS-hook callback, and the gesture watcher.
 pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
+
+/// Runtime dependencies shared by every action source: the OS hook, HID++
+/// controls, and Actions Ring slot activation.
+#[derive(Clone)]
+pub struct ActionDispatcher {
+    dpi_cycle: Arc<RwLock<DpiCycleState>>,
+    capture: CaptureChannel,
+    action_ring: mpsc::UnboundedSender<()>,
+}
+
+impl ActionDispatcher {
+    /// Build a dispatcher around the agent's shared device state and ring queue.
+    #[must_use]
+    pub fn new(
+        dpi_cycle: Arc<RwLock<DpiCycleState>>,
+        capture: CaptureChannel,
+        action_ring: mpsc::UnboundedSender<()>,
+    ) -> Self {
+        Self {
+            dpi_cycle,
+            capture,
+            action_ring,
+        }
+    }
+
+    /// The selected HID++ target state used by the capture-session manager.
+    #[must_use]
+    pub fn dpi_cycle(&self) -> Arc<RwLock<DpiCycleState>> {
+        Arc::clone(&self.dpi_cycle)
+    }
+
+    /// The active capture channel slot used by the capture-session manager.
+    #[must_use]
+    pub fn capture_channel(&self) -> CaptureChannel {
+        Arc::clone(&self.capture)
+    }
+
+    /// Route one action without blocking the input callback.
+    pub fn dispatch(&self, action: &Action) {
+        let next = match action {
+            Action::CycleDpiPresets => match self.dpi_cycle.write() {
+                Ok(mut guard) => guard.cycle(),
+                Err(e) => {
+                    warn!(error = %e, "dpi_cycle lock poisoned — cycle skipped");
+                    None
+                }
+            },
+            Action::SetDpiPreset(i) => match self.dpi_cycle.write() {
+                Ok(mut guard) => guard.set(usize::from(*i)),
+                Err(e) => {
+                    warn!(error = %e, "dpi_cycle lock poisoned — set skipped");
+                    None
+                }
+            },
+            Action::ToggleSmartShift => {
+                let target = self.dpi_cycle.read().ok().and_then(|g| g.target.clone());
+                info!("SmartShift toggle → flipping wheel mode");
+                toggle_smartshift_in_background(Some(&self.capture), target);
+                return;
+            }
+            Action::ShowActionsRing => {
+                if self.action_ring.send(()).is_err() {
+                    warn!("Actions Ring runtime unavailable — trigger ignored");
+                }
+                return;
+            }
+            other => {
+                openlogi_inject::execute(other);
+                None
+            }
+        };
+        if let Some((dpi, target)) = next {
+            info!(dpi, "DPI action → writing to device");
+            write_dpi_in_background(Some(&self.capture), target, dpi);
+        } else if matches!(action, Action::CycleDpiPresets | Action::SetDpiPreset(_)) {
+            info!(
+                action = %action.label(),
+                "no DPI presets configured for active device — press ignored"
+            );
+        }
+    }
+}
 
 /// Tracks which OS-hook button (Middle/Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
@@ -100,8 +183,7 @@ thread_local! {
 /// granted or on an unsupported platform — the app continues without crashing.
 pub fn start(
     hooks: SharedHookMaps,
-    dpi_cycle: Arc<RwLock<DpiCycleState>>,
-    capture: CaptureChannel,
+    dispatcher: ActionDispatcher,
     monitor: SharedEventMonitor,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
@@ -157,7 +239,7 @@ pub fn start(
                                 .map(|m| resolve_gesture_click(&m.gestures, id));
                             if let Some(action) = action {
                                 info!(button = %id, action = %action.label(), "gesture click → executing bound action");
-                                dispatch_action(&action, &dpi_cycle, &capture);
+                                dispatcher.dispatch(&action);
                             }
                         }
                         return EventDisposition::Suppress;
@@ -180,7 +262,7 @@ pub fn start(
 
                 if pressed {
                     info!(button = %id, action = %action.label(), "button → executing bound action");
-                    dispatch_action(&action, &dpi_cycle, &capture);
+                    dispatcher.dispatch(&action);
                 }
                 EventDisposition::Suppress
             }
@@ -206,7 +288,7 @@ pub fn start(
                     });
                     if let Some(action) = action {
                         info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
-                        dispatch_action(&action, &dpi_cycle, &capture);
+                        dispatcher.dispatch(&action);
                     }
                 }
                 EventDisposition::PassThrough
@@ -263,55 +345,6 @@ fn is_native_click(id: ButtonId, action: &Action) -> bool {
             | (ButtonId::Back, Action::MouseBack)
             | (ButtonId::Forward, Action::MouseForward)
     )
-}
-
-/// Route a bound action either to OS-level event synthesis
-/// ([`Action::execute`]) or to one of OpenLogi's hardware-side handlers.
-///
-/// `dpi_cycle` is held across a write lock long enough to advance the index
-/// and snapshot the new DPI + target; the actual HID write spawns its own
-/// thread via [`write_dpi_in_background`] to keep event callbacks non-blocking.
-/// `capture` lets those writes reuse the capture session's open channel.
-pub fn dispatch_action(
-    action: &Action,
-    dpi_cycle: &Arc<RwLock<DpiCycleState>>,
-    capture: &CaptureChannel,
-) {
-    let next = match action {
-        Action::CycleDpiPresets => match dpi_cycle.write() {
-            Ok(mut guard) => guard.cycle(),
-            Err(e) => {
-                warn!(error = %e, "dpi_cycle lock poisoned — cycle skipped");
-                None
-            }
-        },
-        Action::SetDpiPreset(i) => match dpi_cycle.write() {
-            Ok(mut guard) => guard.set(usize::from(*i)),
-            Err(e) => {
-                warn!(error = %e, "dpi_cycle lock poisoned — set skipped");
-                None
-            }
-        },
-        Action::ToggleSmartShift => {
-            let target = dpi_cycle.read().ok().and_then(|g| g.target.clone());
-            info!("SmartShift toggle → flipping wheel mode");
-            toggle_smartshift_in_background(Some(capture), target);
-            return;
-        }
-        other => {
-            openlogi_inject::execute(other);
-            None
-        }
-    };
-    if let Some((dpi, target)) = next {
-        info!(dpi, "DPI action → writing to device");
-        write_dpi_in_background(Some(capture), target, dpi);
-    } else if matches!(action, Action::CycleDpiPresets | Action::SetDpiPreset(_)) {
-        info!(
-            action = %action.label(),
-            "no DPI presets configured for active device — press ignored"
-        );
-    }
 }
 
 #[cfg(test)]

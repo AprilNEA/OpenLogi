@@ -27,7 +27,10 @@ pub use settings::{
     WheelMode,
 };
 
-use crate::binding::{Action, Binding, ButtonId, GestureDirection, default_binding_for};
+use crate::binding::{
+    Action, ActionRingConfig, ActionRingIcon, ActionRingLayout, ActionRingSlot, Binding, ButtonId,
+    GestureDirection, RingAction, default_binding_for,
+};
 use crate::paths::{self, PathsError};
 
 /// The schema version the current build produces. Bumped on breaking layout
@@ -405,6 +408,159 @@ impl Config {
         }
         if let Some(d) = self.devices.get_mut(device_key) {
             d.per_app_bindings.retain(|_, m| !m.is_empty());
+        }
+    }
+
+    /// Actions Ring settings for `device_key`, falling back to the implicit
+    /// eight-slot default when the device has no saved configuration.
+    #[must_use]
+    pub fn action_ring(&self, device_key: &str) -> ActionRingConfig {
+        self.devices
+            .get(device_key)
+            .map(|device| device.action_ring.clone())
+            .unwrap_or_default()
+    }
+
+    /// Resolve `device_key`'s complete Actions Ring layout for `app_id`.
+    #[must_use]
+    pub fn effective_action_ring(
+        &self,
+        device_key: &str,
+        app_id: Option<&str>,
+    ) -> ActionRingLayout {
+        self.action_ring(device_key).effective_layout(app_id)
+    }
+
+    /// Enable or disable `device_key`'s Actions Ring.
+    pub fn set_action_ring_enabled(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .enabled = enabled;
+    }
+
+    /// Enable or disable ring-specific hover and activation haptics.
+    pub fn set_action_ring_haptics(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .haptics = enabled;
+    }
+
+    /// Replace or clear one slot in the default Actions Ring layout.
+    pub fn set_action_ring_slot(
+        &mut self,
+        device_key: &str,
+        slot: ActionRingSlot,
+        action: Option<RingAction>,
+    ) {
+        let layout = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .default;
+        if let Some(action) = action {
+            layout.slots.insert(slot, action);
+        } else {
+            layout.slots.remove(&slot);
+            layout.icons.remove(&slot);
+        }
+    }
+
+    /// Set or restore the action-derived icon for one default ring slot.
+    pub fn set_action_ring_icon(
+        &mut self,
+        device_key: &str,
+        slot: ActionRingSlot,
+        icon: Option<ActionRingIcon>,
+    ) {
+        let layout = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .default;
+        if !layout.slots.contains_key(&slot) {
+            layout.icons.remove(&slot);
+            return;
+        }
+        match icon {
+            Some(icon) => {
+                layout.icons.insert(slot, icon);
+            }
+            None => {
+                layout.icons.remove(&slot);
+            }
+        }
+    }
+
+    /// Replace or clear one slot in a complete per-application ring layout.
+    /// A new app layout starts from the current default so editing one position
+    /// does not unexpectedly clear the other seven.
+    pub fn set_per_app_action_ring_slot(
+        &mut self,
+        device_key: &str,
+        app_id: &str,
+        slot: ActionRingSlot,
+        action: Option<RingAction>,
+    ) {
+        let ring = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring;
+        let default_layout = ring.default.clone();
+        let layout = ring
+            .per_app
+            .entry(app_id.to_string())
+            .or_insert(default_layout);
+        if let Some(action) = action {
+            layout.slots.insert(slot, action);
+        } else {
+            layout.slots.remove(&slot);
+            layout.icons.remove(&slot);
+        }
+    }
+
+    /// Set or restore the action-derived icon in a per-application ring layout.
+    pub fn set_per_app_action_ring_icon(
+        &mut self,
+        device_key: &str,
+        app_id: &str,
+        slot: ActionRingSlot,
+        icon: Option<ActionRingIcon>,
+    ) {
+        let ring = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring;
+        let default_layout = ring.default.clone();
+        let layout = ring
+            .per_app
+            .entry(app_id.to_string())
+            .or_insert(default_layout);
+        if !layout.slots.contains_key(&slot) {
+            layout.icons.remove(&slot);
+            return;
+        }
+        match icon {
+            Some(icon) => {
+                layout.icons.insert(slot, icon);
+            }
+            None => {
+                layout.icons.remove(&slot);
+            }
+        }
+    }
+
+    /// Remove the complete per-application Actions Ring override for `app_id`.
+    pub fn clear_per_app_action_ring(&mut self, device_key: &str, app_id: &str) {
+        if let Some(device) = self.devices.get_mut(device_key) {
+            device.action_ring.per_app.remove(app_id);
         }
     }
 
@@ -895,6 +1051,9 @@ mod tests {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: true,
+                haptic_feedback: false,
+                force_sensing: false,
+                haptic_panel: false,
             },
         };
         cfg.set_device_identity("2b034", mouse.clone());
@@ -1406,6 +1565,28 @@ Back = \"BrowserBack\"
         let body = toml::to_string_pretty(&cfg).expect("serialize");
         assert!(body.contains("gesture_owner = \"Back\""), "got: {body}");
         assert!(body.contains("gesture_owner = \"Off\""), "got: {body}");
+    }
+
+    #[test]
+    fn clearing_a_ring_slot_also_clears_its_presentation_icon() {
+        let mut cfg = Config::default();
+        cfg.set_action_ring_icon(
+            "device",
+            ActionRingSlot::Top,
+            Some(ActionRingIcon::Keyboard),
+        );
+        assert_eq!(
+            cfg.action_ring("device")
+                .default
+                .icons
+                .get(&ActionRingSlot::Top),
+            Some(&ActionRingIcon::Keyboard)
+        );
+
+        cfg.set_action_ring_slot("device", ActionRingSlot::Top, None);
+        let layout = cfg.action_ring("device").default;
+        assert!(!layout.slots.contains_key(&ActionRingSlot::Top));
+        assert!(!layout.icons.contains_key(&ActionRingSlot::Top));
     }
 
     #[test]

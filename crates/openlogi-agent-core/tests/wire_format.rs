@@ -19,13 +19,16 @@
 
 #![allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_agent_core::ipc::{
-    AgentRequest, AgentSnapshot, AgentStatus, FoundDevice, InventoryHealth, MonitorEvent,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate,
+    ActionRingCommandError, ActionRingInvocation, AgentRequest, AgentSnapshot, AgentStatus,
+    FoundDevice, InventoryHealth, MonitorEvent, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingUpdate,
 };
+use openlogi_core::binding::{Action, ActionRingIcon, ActionRingSlot, ApplicationTarget};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
@@ -61,7 +64,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 10);
+    assert_eq!(PROTOCOL_VERSION, 13);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -83,6 +86,15 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::NextPairing {}, "0d");
     assert_wire(&AgentRequest::Snapshot {}, "0e");
     assert_wire(&AgentRequest::PollEventMonitor {}, "0f");
+    assert_wire(&AgentRequest::NextActionRing {}, "10");
+    assert_wire(
+        &AgentRequest::ActionRingHover {
+            session_id: 42,
+            slot: ActionRingSlot::TopRight,
+        },
+        "112a01",
+    );
+    assert_wire(&AgentRequest::ActionRingCancel { session_id: 42 }, "132a");
 }
 
 #[test]
@@ -178,12 +190,48 @@ fn device_inventory() {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: true,
+                haptic_feedback: true,
+                force_sensing: true,
+                haptic_panel: true,
             }),
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101",
+    );
+}
+
+#[test]
+fn action_ring_types() {
+    assert_wire(
+        &ActionRingInvocation {
+            session_id: 42,
+            slots: BTreeMap::from([(ActionRingSlot::Top, Action::Cut)]),
+            icons: BTreeMap::from([(ActionRingSlot::Top, ActionRingIcon::Keyboard)]),
+        },
+        "2a010008010007",
+    );
+    assert_wire(&ActionRingSlot::Top, "00");
+    assert_wire(&ActionRingSlot::TopLeft, "07");
+    assert_wire(&ActionRingIcon::Pointer, "00");
+    assert_wire(&ActionRingIcon::ArrowRight, "15");
+    assert_wire(&ActionRingIcon::Book, "34");
+    assert_wire(&ActionRingCommandError::SessionNotFound, "00");
+    assert_wire(&ActionRingCommandError::Unavailable, "02");
+    assert_wire(&HidppOperation::PlayHaptic, "0c");
+    let target = ApplicationTarget::new("/Applications/Safari.app", "Safari")
+        .expect("valid application target");
+    assert_wire(
+        &Action::OpenApplication(target),
+        "2e182f4170706c69636174696f6e732f5361666172692e61707006536166617269",
+    );
+    let shortcut = "Cmd+Shift+P"
+        .parse()
+        .expect("valid keyboard shortcut for wire golden");
+    assert_wire(
+        &Action::CustomShortcut(shortcut),
+        "2c03230b436d642b53686966742b50",
     );
 }
 

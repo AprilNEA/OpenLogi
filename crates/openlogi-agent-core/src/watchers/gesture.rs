@@ -12,7 +12,7 @@
 //!   continuous, sensitivity-scaled horizontal scroll or accumulated into a
 //!   custom action,
 //!
-//! all via the common action path ([`crate::hook_runtime::dispatch_action`]).
+//! all via the common [`crate::hook_runtime::ActionDispatcher`].
 //!
 //! Unlike the CGEventTap hook, this needs no macOS Accessibility permission —
 //! the events arrive over HID++, and the bound action is synthesised the same
@@ -26,12 +26,11 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
+use openlogi_hid::{CapturedInput, DeviceRoute, run_capture_session};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use crate::DpiCycleState;
-use crate::hook_runtime::{self, SharedHookMaps};
+use crate::hook_runtime::{ActionDispatcher, SharedHookMaps};
 use crate::receiver_access::ReceiverAccess;
 
 /// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
@@ -77,8 +76,7 @@ fn action_threshold(sensitivity: i32) -> i32 {
 pub fn spawn(
     hook_maps: SharedHookMaps,
     gesture_bindings: GestureBindings,
-    dpi_cycle: Arc<RwLock<DpiCycleState>>,
-    capture_channel: CaptureChannel,
+    dispatcher: ActionDispatcher,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
 ) {
@@ -96,8 +94,7 @@ pub fn spawn(
         runtime.block_on(manage(
             hook_maps,
             gesture_bindings,
-            dpi_cycle,
-            capture_channel,
+            dispatcher,
             thumbwheel_sensitivity,
             receiver_access,
         ));
@@ -147,11 +144,12 @@ fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -> bool {
 async fn manage(
     hook_maps: SharedHookMaps,
     gesture_bindings: GestureBindings,
-    dpi_cycle: Arc<RwLock<DpiCycleState>>,
-    capture_channel: CaptureChannel,
+    dispatcher: ActionDispatcher,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
 ) {
+    let dpi_cycle = dispatcher.dpi_cycle();
+    let capture_channel = dispatcher.capture_channel();
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
     // (route, capture_thumbwheel, divert_gesture_button)
     let mut current: Option<(DeviceRoute, bool, bool)> = None;
@@ -177,8 +175,7 @@ async fn manage(
                     &mut accumulators,
                     &hook_maps,
                     &gesture_bindings,
-                    &dpi_cycle,
-                    &capture_channel,
+                    &dispatcher,
                     &thumbwheel_sensitivity,
                 );
             }
@@ -313,8 +310,7 @@ fn dispatch(
     accumulators: &mut WheelAccumulators,
     hook_maps: &SharedHookMaps,
     gesture_bindings: &GestureBindings,
-    dpi_cycle: &Arc<RwLock<DpiCycleState>>,
-    capture: &CaptureChannel,
+    dispatcher: &ActionDispatcher,
     thumbwheel_sensitivity: &ThumbwheelSensitivity,
 ) {
     match input {
@@ -325,7 +321,7 @@ fn dispatch(
                 .and_then(|guard| guard.get(&direction).cloned());
             if let Some(action) = action {
                 debug!(?direction, action = %action.label(), "gesture → action");
-                hook_runtime::dispatch_action(&action, dpi_cycle, capture);
+                dispatcher.dispatch(&action);
             } else {
                 debug!(?direction, "gesture with no binding — ignored");
             }
@@ -337,7 +333,7 @@ fn dispatch(
                 .and_then(|maps| maps.bindings.get(&button).cloned());
             if let Some(action) = action {
                 debug!(?button, action = %action.label(), "HID++ button → action");
-                hook_runtime::dispatch_action(&action, dpi_cycle, capture);
+                dispatcher.dispatch(&action);
             } else {
                 debug!(?button, "HID++ button with no binding — ignored");
             }
@@ -369,7 +365,7 @@ fn dispatch(
                 }
                 WheelOutput::FireAction => {
                     debug!(?button, action = %action.label(), "thumb wheel → action");
-                    hook_runtime::dispatch_action(&action, dpi_cycle, capture);
+                    dispatcher.dispatch(&action);
                 }
             }
         }

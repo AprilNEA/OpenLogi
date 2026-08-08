@@ -51,6 +51,18 @@ mod windows;
 /// bind a button to any action in the GUI and confirm the expected system event
 /// fires when the button is pressed (or use the `inject_action` example).
 pub fn execute(action: &Action) {
+    if let Action::OpenApplication(target) = action {
+        let expanded = shellexpand::tilde(target.path());
+        if let Err(error) = opener::open(expanded.as_ref()) {
+            tracing::warn!(
+                %error,
+                path = target.path(),
+                "could not open configured application, folder, or URL"
+            );
+        }
+        return;
+    }
+
     cfg_select! {
         target_os = "macos" => {
             macos::execute(action);

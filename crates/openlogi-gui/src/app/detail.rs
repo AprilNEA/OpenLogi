@@ -23,6 +23,7 @@ use super::widgets::{
 };
 use super::{AppView, DetailTab};
 use crate::app_menu::file_url;
+use crate::components::action_ring_panel::ActionRingPanel;
 use crate::components::dpi_panel::DpiPanel;
 use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
@@ -86,11 +87,17 @@ pub(super) fn detail_header(
 /// switches them — is the header's job (see [`detail_header`] and
 /// [`DetailTab::tabs_for`]); `active` arrives pre-resolved against this device's
 /// tab set, so this only has to render the chosen section.
+#[derive(Clone, Copy)]
+pub(super) struct DetailPanels<'a> {
+    pub(super) mouse_model: &'a gpui::Entity<MouseModelView>,
+    pub(super) action_ring: &'a gpui::Entity<ActionRingPanel>,
+    pub(super) dpi: &'a gpui::Entity<DpiPanel>,
+    pub(super) smartshift: &'a gpui::Entity<SmartShiftPanel>,
+    pub(super) lighting: &'a gpui::Entity<LightingPanel>,
+}
+
 pub(super) fn detail_content(
-    mouse_model: &gpui::Entity<MouseModelView>,
-    dpi_panel: &gpui::Entity<DpiPanel>,
-    smartshift_panel: &gpui::Entity<SmartShiftPanel>,
-    lighting_panel: &gpui::Entity<LightingPanel>,
+    panels: DetailPanels<'_>,
     active: DetailTab,
     pal: Palette,
     cx: &mut Context<AppView>,
@@ -100,9 +107,12 @@ pub(super) fn detail_content(
         .and_then(AppState::current_record)
         .is_some_and(|record| record.online);
     let content = match active {
-        DetailTab::Buttons => buttons_tab(mouse_model).into_any_element(),
-        DetailTab::Pointer => pointer_tab(dpi_panel, smartshift_panel, pal, cx).into_any_element(),
-        DetailTab::Lighting => lighting_tab(lighting_panel, pal).into_any_element(),
+        DetailTab::Buttons => buttons_tab(panels.mouse_model).into_any_element(),
+        DetailTab::ActionsRing => action_ring_tab(panels.action_ring).into_any_element(),
+        DetailTab::Pointer => {
+            pointer_tab(panels.dpi, panels.smartshift, pal, cx).into_any_element()
+        }
+        DetailTab::Lighting => lighting_tab(panels.lighting, pal).into_any_element(),
         DetailTab::Device => device_tab(pal, cx).into_any_element(),
     };
     v_flex()
@@ -171,6 +181,17 @@ fn buttons_tab(mouse_model: &gpui::Entity<MouseModelView>) -> impl IntoElement {
         .justify_center()
         .p(px(SCREEN_PAD))
         .child(div().w_full().max_w(px(760.)).child(mouse_model.clone()))
+}
+
+fn action_ring_tab(panel: &gpui::Entity<ActionRingPanel>) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .items_center()
+        .overflow_y_scrollbar()
+        .p(px(SCREEN_PAD))
+        .child(div().w_full().max_w(px(680.)).child(panel.clone()))
 }
 
 /// Pointer tab: the DPI panel, the SmartShift wheel controls, and the

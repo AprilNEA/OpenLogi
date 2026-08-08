@@ -22,18 +22,27 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, BorrowAppContext as _, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Role, StatefulInteractiveElement as _, Styled, Window, div,
+    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
+    IntoElement, ParentElement, Role, StatefulInteractiveElement as _, Styled, Window, div,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::{Icon, IconName, h_flex, popover::PopoverState, v_flex};
+use gpui_component::{
+    Icon, IconName, Sizable as _,
+    button::Button,
+    h_flex,
+    input::{Input, InputState},
+    popover::PopoverState,
+    v_flex,
+};
 
+use crate::action_icons::action_icon_path;
 use crate::data::mouse_buttons::{
     Action, ButtonId, Category, GestureDirection, default_gesture_binding,
 };
 use crate::mouse_model::view::MouseModelView;
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
+use openlogi_core::binding::ApplicationTarget;
 
 /// Floor width for the [`action_picker`] popover. The action labels drive the
 /// actual width; this only stops the list from collapsing too narrow. Matches
@@ -52,6 +61,7 @@ const POPOVER_LIST_MAX_H: f32 = 360.;
 pub fn action_picker<T: 'static>(
     btn: ButtonId,
     observer: &Entity<T>,
+    window: &mut Window,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let current = cx
@@ -74,11 +84,60 @@ pub fn action_picker<T: 'static>(
         .min_w(px(POPOVER_W))
         .child(title(tr!("Bind %{name}", name => button), pal))
         .child(divider(pal))
+        .child(application_editor(
+            ("button-application", btn as usize),
+            &on_pick,
+            window,
+            cx,
+        ))
+        .child(divider(pal))
         .child(scroll_list(
             "picker-scroll",
             action_rows("action-item", current.as_ref(), &on_pick, pal),
         ))
         .into_any_element()
+}
+
+fn application_editor(
+    id: (&'static str, usize),
+    on_pick: &PickFn,
+    window: &mut Window,
+    cx: &mut Context<PopoverState>,
+) -> impl IntoElement {
+    let input = cx
+        .new(|cx| InputState::new(window, cx).placeholder(tr!("Application, folder path, or URL")));
+    let submit_input = input.clone();
+    let submit = on_pick.clone();
+    v_flex()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .child(
+            div()
+                .text_caption()
+                .text_color(theme::palette(cx).text_muted)
+                .child(tr!("Open application or folder")),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(240.0))
+                        .child(Input::new(&input).small().cleanable(true)),
+                )
+                .child(
+                    Button::new(format!("{}-{}-add", id.0, id.1))
+                        .compact()
+                        .label(tr!("Add"))
+                        .on_click(move |_, window, cx| {
+                            let path = submit_input.read(cx).value().to_string();
+                            if let Ok(target) = ApplicationTarget::new(path, "") {
+                                submit(Action::OpenApplication(target), window, cx);
+                            }
+                        }),
+                ),
+        )
 }
 
 /// Floor width of a single direction cell in the plus navigator. Three sit side
@@ -293,59 +352,6 @@ fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
 /// cross), standing in for its five swipe directions since it has no single
 /// bound action.
 pub(crate) const GESTURE_BUTTON_ICON: &str = "action-icons/move.svg";
-
-/// Asset path (served by [`crate::app_assets`]) of the vendored lucide glyph for
-/// an action — the leading icon in each action row and in the leader-line label
-/// card. Exhaustive on purpose: a new [`Action`] variant must pick an icon here
-/// (no catch-all fallback).
-pub(crate) fn action_icon_path(action: &Action) -> &'static str {
-    match action {
-        Action::None => "action-icons/ban.svg",
-        Action::LeftClick | Action::RightClick => "action-icons/mouse-pointer-click.svg",
-        Action::MiddleClick => "action-icons/mouse.svg",
-        // Circled arrows: visually "back/forward as a button", distinct from
-        // BrowserBack/BrowserForward's bare arrows in the Navigation section.
-        Action::MouseBack => "action-icons/circle-arrow-left.svg",
-        Action::MouseForward => "action-icons/circle-arrow-right.svg",
-        Action::Copy => "action-icons/copy.svg",
-        Action::Paste => "action-icons/clipboard-paste.svg",
-        Action::Cut => "action-icons/scissors.svg",
-        Action::Undo => "action-icons/undo-2.svg",
-        Action::Redo => "action-icons/redo-2.svg",
-        Action::SelectAll => "action-icons/list-checks.svg",
-        Action::Find => "action-icons/search.svg",
-        Action::Save => "action-icons/save.svg",
-        Action::BrowserBack => "action-icons/arrow-left.svg",
-        Action::BrowserForward => "action-icons/arrow-right.svg",
-        Action::NewTab => "action-icons/square-plus.svg",
-        Action::CloseTab => "action-icons/square-x.svg",
-        Action::ReopenTab => "action-icons/rotate-ccw.svg",
-        Action::NextTab => "action-icons/chevron-right.svg",
-        Action::PrevTab => "action-icons/chevron-left.svg",
-        Action::ReloadPage => "action-icons/rotate-cw.svg",
-        Action::MissionControl => "action-icons/layout-grid.svg",
-        Action::AppExpose => "action-icons/layers.svg",
-        Action::PreviousDesktop => "action-icons/square-arrow-left.svg",
-        Action::NextDesktop => "action-icons/square-arrow-right.svg",
-        Action::ShowDesktop => "action-icons/monitor.svg",
-        Action::LaunchpadShow => "action-icons/grid-3x3.svg",
-        Action::LockScreen => "action-icons/lock.svg",
-        Action::Screenshot | Action::CaptureRegion => "action-icons/camera.svg",
-        Action::PlayPause => "action-icons/play.svg",
-        Action::NextTrack => "action-icons/skip-forward.svg",
-        Action::PrevTrack => "action-icons/skip-back.svg",
-        Action::VolumeUp => "action-icons/volume-2.svg",
-        Action::VolumeDown => "action-icons/volume-1.svg",
-        Action::MuteVolume => "action-icons/volume-x.svg",
-        Action::CycleDpiPresets | Action::SetDpiPreset(_) => "action-icons/gauge.svg",
-        Action::ToggleSmartShift => "action-icons/refresh-cw.svg",
-        Action::ScrollUp => "action-icons/chevrons-up.svg",
-        Action::ScrollDown => "action-icons/chevrons-down.svg",
-        Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
-        Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
-        Action::CustomShortcut(_) => "action-icons/keyboard.svg",
-    }
-}
 
 /// Build the category-grouped action rows. Each row leads with the action's
 /// icon, then its label; `current` adds a trailing accent check. Clicking any
