@@ -147,7 +147,8 @@ sudo pacman -U openlogi-*.pkg.tar.zst
 Packages are published for both `x86_64`/`amd64` and `arm64`/`aarch64`.
 
 The package installs udev rules that grant your user access to
-`/dev/hidraw*` and `/dev/uinput` without `sudo`. After installation,
+`/dev/hidraw*`, `/dev/uinput` and your Logitech mouse's `/dev/input/event*`
+node without `sudo`. After installation,
 enable the background agent for your user:
 
 ```sh

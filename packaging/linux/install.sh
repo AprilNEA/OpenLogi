@@ -83,6 +83,7 @@ if command -v udevadm > /dev/null 2>&1; then
     echo "Reloading udev rules …"
     sudo udevadm control --reload-rules
     sudo udevadm trigger --subsystem-match=hidraw
+    sudo udevadm trigger --subsystem-match=input
     sudo udevadm trigger --subsystem-match=misc --attr-match=name=uinput 2>/dev/null || true
 fi
 
