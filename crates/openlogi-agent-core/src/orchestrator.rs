@@ -20,6 +20,7 @@ use openlogi_hid::{CaptureChannel, DeviceRoute};
 use tracing::warn;
 
 use crate::DpiCycleState;
+use crate::action_ring::ActionRingSessionSpec;
 use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
 use crate::device_order::DeviceStableId;
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
@@ -351,6 +352,27 @@ impl Orchestrator {
             self.hook_maps_for(self.current_key(), self.current_app.as_deref()),
             "hook_maps",
         );
+    }
+
+    /// Snapshot the active device, foreground application, and effective ring
+    /// layout for a new invocation. `None` means the ring is disabled, has no
+    /// populated slots, or no persistent device is selected.
+    #[must_use]
+    pub fn action_ring_session(&self) -> Option<ActionRingSessionSpec> {
+        let key = self.current_key()?;
+        let ring = self.config.action_ring(key);
+        if !ring.enabled {
+            return None;
+        }
+        let layout = ring.effective_layout(self.current_app.as_deref());
+        if layout.slots.is_empty() {
+            return None;
+        }
+        Some(ActionRingSessionSpec {
+            route: self.current_route(),
+            layout,
+            haptics: ring.haptics,
+        })
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.

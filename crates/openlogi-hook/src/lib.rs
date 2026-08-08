@@ -44,6 +44,15 @@ pub struct EventDevice {
     pub product_name: Option<String>,
 }
 
+/// Cursor position in the operating system's global screen coordinate space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CursorPosition {
+    /// Horizontal screen coordinate.
+    pub x: f64,
+    /// Vertical screen coordinate.
+    pub y: f64,
+}
+
 /// An event captured at the OS layer.
 #[derive(Clone, Debug)]
 pub enum MouseEvent {
@@ -383,6 +392,20 @@ pub fn frontmost_bundle_id() -> Option<String> {
         target_os = "macos" => { macos::frontmost_bundle_id() }
         target_os = "linux" => { linux::frontmost_bundle_id() }
         target_os = "windows" => { windows::frontmost_process_path() }
+        _ => { None }
+    }
+}
+
+/// Return the current global cursor position without installing an input hook.
+///
+/// Returns `None` on unsupported platforms and on native Wayland, where the
+/// compositor deliberately does not expose global pointer coordinates.
+#[must_use]
+pub fn cursor_position() -> Option<CursorPosition> {
+    cfg_select! {
+        target_os = "macos" => { macos::cursor_position() }
+        target_os = "linux" => { linux::cursor_position() }
+        target_os = "windows" => { windows::cursor_position() }
         _ => { None }
     }
 }

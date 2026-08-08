@@ -6,6 +6,9 @@
 //! flow long-polls [`Agent::next_pairing`], which the agent holds open until a
 //! pairing event arrives or the request deadline elapses.
 
+use std::collections::BTreeMap;
+
+use openlogi_core::binding::{Action, ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
@@ -28,7 +31,9 @@ use serde::{Deserialize, Serialize};
 /// v8: [`WriteError`] carries typed HID++ operation failures.
 /// v9: `poll_event_monitor` appended + [`MonitorEvent`] (live event monitor).
 /// v10: `Capabilities::hires_wheel` appended.
-pub const PROTOCOL_VERSION: u32 = 10;
+/// v11: Actions Ring RPCs and haptic capability fields appended.
+/// v12: custom Actions Ring presentation icons appended.
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep
@@ -208,6 +213,31 @@ pub enum MonitorEvent {
     CaptureInterrupted,
 }
 
+/// One request for the overlay helper to display an Actions Ring.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionRingInvocation {
+    /// Opaque session identity used by hover/activate/cancel commands.
+    pub session_id: u64,
+    /// Read-only action snapshots used to render labels and icons. Activation
+    /// remains slot-only and executes the agent's authoritative session copy.
+    pub slots: BTreeMap<ActionRingSlot, Action>,
+    /// Optional user-selected presentation icons for populated slots.
+    pub icons: BTreeMap<ActionRingSlot, ActionRingIcon>,
+}
+
+/// Why an Actions Ring interaction command was rejected.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActionRingCommandError {
+    /// The session was replaced, cancelled, expired, or never existed.
+    SessionNotFound,
+    /// The selected position has no action.
+    SlotEmpty,
+    /// Internal ring state is temporarily unavailable.
+    Unavailable,
+}
+
 #[tarpc::service]
 pub trait Agent {
     /// Wire-protocol version, for the connect handshake.
@@ -275,4 +305,20 @@ pub trait Agent {
     /// there is no explicit stop. Appended last — see the method-order note on
     /// [`Agent::protocol_version`].
     async fn poll_event_monitor() -> Vec<MonitorEvent>;
+    /// Long-poll the next Actions Ring invocation. The overlay helper keeps this
+    /// request on a dedicated connection so interaction commands are never
+    /// queued behind it.
+    async fn next_action_ring() -> Option<ActionRingInvocation>;
+    /// Report a changed highlighted slot for optional haptic feedback.
+    async fn action_ring_hover(
+        session_id: u64,
+        slot: ActionRingSlot,
+    ) -> Result<(), ActionRingCommandError>;
+    /// Execute the snapshotted action in `slot` and consume the session.
+    async fn action_ring_activate(
+        session_id: u64,
+        slot: ActionRingSlot,
+    ) -> Result<(), ActionRingCommandError>;
+    /// Close a ring without executing an action.
+    async fn action_ring_cancel(session_id: u64);
 }

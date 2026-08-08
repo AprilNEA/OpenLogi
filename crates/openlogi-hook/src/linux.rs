@@ -37,7 +37,7 @@ use x11rb::properties::WmClass;
 use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, Window};
 use x11rb::rust_connection::RustConnection;
 
-use crate::{ButtonId, EventDisposition, HookError, MouseEvent};
+use crate::{ButtonId, CursorPosition, EventDisposition, HookError, MouseEvent};
 
 /// Prefix carried by every uinput device OpenLogi creates — the hook's
 /// pass-through mice ([`VIRTUAL_DEVICE_NAME`]) and openlogi-inject's
@@ -487,6 +487,15 @@ static X11_STATE: LazyLock<Option<X11State>> = LazyLock::new(|| {
         net_active_window,
     })
 });
+
+pub(crate) fn cursor_position() -> Option<CursorPosition> {
+    let state = X11_STATE.as_ref()?;
+    let reply = state.conn.query_pointer(state.root).ok()?.reply().ok()?;
+    Some(CursorPosition {
+        x: f64::from(reply.root_x),
+        y: f64::from(reply.root_y),
+    })
+}
 
 /// Return the X11 `WM_CLASS` class component of the currently active window,
 /// e.g. `"Firefox"` or `"Code"`.

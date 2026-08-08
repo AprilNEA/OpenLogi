@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, DeviceRoute, DpiInfo, HidppFeatureErrorKind, HidppOperation, ScrollResolution,
-    SharedChannel, SmartShiftMode, SmartShiftStatus, WriteError,
+    CaptureChannel, DeviceRoute, DpiInfo, HapticWaveform, HidppFeatureErrorKind, HidppOperation,
+    ScrollResolution, SharedChannel, SmartShiftMode, SmartShiftStatus, WriteError,
 };
 use tracing::{debug, warn};
 
@@ -653,6 +653,22 @@ pub async fn apply_smartshift(
                 openlogi_hid::set_smartshift_on(shared, mode, auto_disengage, tunable_torque).await
             }
             None => openlogi_hid::set_smartshift(route, mode, auto_disengage, tunable_torque).await,
+        }
+    })
+    .await
+}
+
+/// Play one haptic waveform on `route`, reusing the capture channel when possible.
+pub async fn play_haptic(
+    capture: &CaptureChannel,
+    route: &DeviceRoute,
+    waveform: HapticWaveform,
+) -> Result<(), WriteError> {
+    let shared = reusable_channel(Some(capture), route);
+    timed(HidppOperation::PlayHaptic, async {
+        match &shared {
+            Some(shared) => openlogi_hid::play_haptic_on(shared, waveform).await,
+            None => openlogi_hid::play_haptic(route, waveform).await,
         }
     })
     .await

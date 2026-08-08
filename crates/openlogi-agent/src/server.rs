@@ -9,17 +9,21 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt as _;
+use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
+use openlogi_agent_core::hook_runtime::ActionDispatcher;
 use openlogi_agent_core::ipc::{
-    Agent, AgentSnapshot, AgentStatus, MonitorEvent, PROTOCOL_VERSION, PairingCommandError,
-    PairingUpdate,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, MonitorEvent,
+    PROTOCOL_VERSION, PairingCommandError, PairingUpdate,
 };
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::{hardware, transport};
+use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, DpiInfo, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
+    DeviceRoute, DpiInfo, HapticWaveform, ReceiverSelector, SmartShiftMode, SmartShiftStatus,
+    WriteError,
 };
 
 use crate::pairing::PairingManager;
@@ -40,6 +44,8 @@ pub struct AgentServer {
     pub hook_installed: Arc<AtomicBool>,
     pub pairing: Arc<PairingManager>,
     pub event_monitor: SharedEventMonitor,
+    pub action_ring: Arc<ActionRingManager>,
+    pub dispatcher: ActionDispatcher,
 }
 
 impl Agent for AgentServer {
@@ -170,6 +176,58 @@ impl Agent for AgentServer {
 
     async fn poll_event_monitor(self, _: Context) -> Vec<MonitorEvent> {
         self.event_monitor.poll()
+    }
+
+    async fn next_action_ring(self, _: Context) -> Option<ActionRingInvocation> {
+        self.action_ring.next_invocation().await
+    }
+
+    async fn action_ring_hover(
+        self,
+        _: Context,
+        session_id: u64,
+        slot: ActionRingSlot,
+    ) -> Result<(), ActionRingCommandError> {
+        if let Some(hover) = self.action_ring.hover(session_id, slot)?
+            && hover.haptics
+            && let Some(route) = hover.route
+            && let Err(error) = hardware::play_haptic(
+                &self.shared.capture_channel,
+                &route,
+                HapticWaveform::SubtleCollision,
+            )
+            .await
+        {
+            warn!(%error, "Actions Ring hover haptic failed");
+        }
+        Ok(())
+    }
+
+    async fn action_ring_activate(
+        self,
+        _: Context,
+        session_id: u64,
+        slot: ActionRingSlot,
+    ) -> Result<(), ActionRingCommandError> {
+        let activation = self.action_ring.activate(session_id, slot)?;
+        self.dispatcher.dispatch(&activation.action);
+        if activation.haptics
+            && let Some(route) = activation.route
+        {
+            let capture = Arc::clone(&self.shared.capture_channel);
+            tokio::spawn(async move {
+                if let Err(error) =
+                    hardware::play_haptic(&capture, &route, HapticWaveform::DampStateChange).await
+                {
+                    warn!(%error, "Actions Ring activation haptic failed");
+                }
+            });
+        }
+        Ok(())
+    }
+
+    async fn action_ring_cancel(self, _: Context, session_id: u64) {
+        self.action_ring.cancel(session_id);
     }
 }
 

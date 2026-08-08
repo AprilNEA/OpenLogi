@@ -16,11 +16,13 @@ use core_graphics::event::{
     CGEvent, CGEventField, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
     CGEventTapProxy, CGEventType, CallbackResult, EventField,
 };
+use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use foreign_types_shared::ForeignType as _;
 use tracing::{debug, error, warn};
 
 use crate::{
-    ButtonId, EventDevice, EventDisposition, EventTapInfo, HookError, MouseEvent, TapLocation,
+    ButtonId, CursorPosition, EventDevice, EventDisposition, EventTapInfo, HookError, MouseEvent,
+    TapLocation,
 };
 
 /// Everything `Hook` needs to control the background thread.
@@ -232,6 +234,15 @@ pub(crate) fn prompt_accessibility() {
 /// UTF-8 view from the pool — so an explicit `autoreleasepool` is required off
 /// the main thread, where no run loop drains one. (Without it the old raw path
 /// leaked the workspace/app/bundle-id objects: hundreds of MB across a workday.)
+pub(crate) fn cursor_position() -> Option<CursorPosition> {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok()?;
+    let point = CGEvent::new(source).ok()?.location();
+    Some(CursorPosition {
+        x: point.x,
+        y: point.y,
+    })
+}
+
 pub(crate) fn frontmost_bundle_id() -> Option<String> {
     use objc2::rc::autoreleasepool;
     use objc2_app_kit::NSWorkspace;
