@@ -41,7 +41,7 @@ OpenLogi needs:
 - **Write access to `/dev/uinput`** — to create the virtual input device for
   button remapping.
 - **Read/write access to `/dev/hidraw*`** — to send HID++ commands to the Bolt
-  receiver.
+  receiver, or to the device itself when it is paired over Bluetooth.
 - **Read access to the mouse's `/dev/input/event*` node** — the hook grabs the
   pointer there to capture button presses. Bluetooth mice need the bundled rule
   for this: their event node hangs off `/devices/virtual/misc/uhid`, which has
