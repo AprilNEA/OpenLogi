@@ -77,7 +77,11 @@ pub(super) fn execute(action: &Action) {
         Action::VolumeDown => press_key(&[], KeyCode::KEY_VOLUMEDOWN),
         Action::MuteVolume => press_key(&[], KeyCode::KEY_MUTE),
         // ── DPI / SmartShift: handled at hook/HID layer ───────────────────
-        Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::ToggleSmartShift => {
+        Action::CycleDpiPresets
+        | Action::SetDpiPreset(_)
+        | Action::ToggleSmartShift
+        | Action::ShowActionsRing
+        | Action::OpenApplication(_) => {
             tracing::debug!(
                 action = action.label(),
                 "device action handled by hook/HID layer"
@@ -92,13 +96,6 @@ pub(super) fn execute(action: &Action) {
         Action::None => {}
         // ── Custom shortcut ───────────────────────────────────────────────
         Action::CustomShortcut(combo) => {
-            if combo.key_code == 0 {
-                tracing::warn!(
-                    chord = %combo.rendered_label(),
-                    "CustomShortcut with no key code — press ignored"
-                );
-                return;
-            }
             let Some(key) = macos_vk_to_linux(combo.key_code) else {
                 tracing::warn!(
                     key_code = combo.key_code,

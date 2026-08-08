@@ -107,7 +107,11 @@ pub(super) fn execute(action: &Action) {
         Action::VolumeDown => post_media_key(NX_KEYTYPE_SOUND_DOWN),
         Action::MuteVolume => post_media_key(NX_KEYTYPE_MUTE),
         // ── DPI / SmartShift: handled at hook/HID layer ───────────────────
-        Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::ToggleSmartShift => {
+        Action::CycleDpiPresets
+        | Action::SetDpiPreset(_)
+        | Action::ToggleSmartShift
+        | Action::ShowActionsRing
+        | Action::OpenApplication(_) => {
             tracing::debug!(
                 action = action.label(),
                 "device action handled by hook/HID layer"
@@ -120,17 +124,6 @@ pub(super) fn execute(action: &Action) {
         | Action::HorizontalScrollRight => post_scroll(action),
         // ── Custom ────────────────────────────────────────────────────────
         Action::CustomShortcut(combo) => {
-            // P1.3: post the recorded chord. `key_code == 0` is the
-            // "modifier-only placeholder" the recorder UI rejects;
-            // skip it here too so a malformed config doesn't fire
-            // bare modifier presses.
-            if combo.key_code == 0 {
-                tracing::warn!(
-                    chord = %combo.rendered_label(),
-                    "CustomShortcut with no key code — press ignored"
-                );
-                return;
-            }
             let mut flags = CGEventFlags::CGEventFlagNull;
             if combo.modifiers & KeyCombo::MOD_CMD != 0 {
                 flags |= CGEventFlags::CGEventFlagCommand;

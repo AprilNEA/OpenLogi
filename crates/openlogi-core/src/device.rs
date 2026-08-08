@@ -102,6 +102,17 @@ pub struct Capabilities {
     /// can be read and changed independently of inversion support.
     #[serde(default)]
     pub hires_wheel: bool,
+    /// Programmable haptic output — HID++ `0x19b0` (`HapticFeedback`).
+    #[serde(default)]
+    pub haptic_feedback: bool,
+    /// Force-sensitive button threshold control — HID++ `0x19c0`.
+    #[serde(default)]
+    pub force_sensing: bool,
+    /// A divertable Haptic Sense Panel control (`0x01a0`) was found in the
+    /// device's `0x1b04` control table. Unlike the two feature flags above,
+    /// this is populated by the live control-table probe.
+    #[serde(default)]
+    pub haptic_panel: bool,
 }
 
 impl Capabilities {
@@ -123,6 +134,9 @@ impl Capabilities {
             lighting: has(&LIGHTING),
             scroll_inversion: false,
             hires_wheel: ids.contains(&0x2121),
+            haptic_feedback: ids.contains(&0x19b0),
+            force_sensing: ids.contains(&0x19c0),
+            haptic_panel: false,
         }
     }
 
@@ -140,6 +154,9 @@ impl Capabilities {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: false,
+                haptic_feedback: false,
+                force_sensing: false,
+                haptic_panel: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -371,6 +388,9 @@ mod tests {
                     lighting: false,
                     scroll_inversion: false,
                     hires_wheel: false,
+                    haptic_feedback: false,
+                    force_sensing: false,
+                    haptic_panel: false,
                 }),
             }],
         }
@@ -434,6 +454,9 @@ mod tests {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: true,
+                haptic_feedback: false,
+                force_sensing: false,
+                haptic_panel: false,
             }
         );
         // A wired G-series keyboard: PerKeyLighting (0x8080), no DPI/buttons.
@@ -446,6 +469,9 @@ mod tests {
                 lighting: true,
                 scroll_inversion: false,
                 hires_wheel: false,
+                haptic_feedback: false,
+                force_sensing: false,
+                haptic_panel: false,
             }
         );
         // No driving features → nothing offered.

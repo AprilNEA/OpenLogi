@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::settings::{
     GestureOwner, Lighting, ScrollResolution, SmartShift, deserialize_gesture_owner,
 };
-use crate::binding::{Action, Binding, ButtonId, GestureDirection};
+use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo};
 
 /// Last-known identity of a device, captured while it was online so the UI can
@@ -81,6 +81,11 @@ pub struct DeviceConfig {
     /// action, never a per-direction gesture overlay.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
+    /// The host-rendered eight-slot Actions Ring and its per-app layouts.
+    /// The implicit default is enabled and mirrors the fresh-device layout;
+    /// unchanged defaults stay out of `config.toml`.
+    #[serde(default, skip_serializing_if = "ActionRingConfig::is_default")]
+    pub action_ring: ActionRingConfig,
     /// Ordered list of DPI presets cycled through by
     /// [`Action::CycleDpiPresets`] and indexed by
     /// [`Action::SetDpiPreset`]. Empty means "no presets configured" —
@@ -152,6 +157,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
     #[serde(default)]
+    action_ring: ActionRingConfig,
+    #[serde(default)]
     dpi_presets: Vec<u32>,
     #[serde(default)]
     dpi: Option<u32>,
@@ -201,6 +208,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             identity: raw.identity,
             bindings,
             per_app_bindings: raw.per_app_bindings,
+            action_ring: raw.action_ring,
             dpi_presets: raw.dpi_presets,
             dpi: raw.dpi,
             lighting: raw.lighting,
