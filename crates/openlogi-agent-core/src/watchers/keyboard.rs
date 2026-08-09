@@ -1,10 +1,10 @@
 //! Background HID++ key-capture watcher for a bound keyboard.
 //!
-//! Runs [`openlogi_hid::run_keyboard_capture_session`] on a dedicated thread
-//! for the keyboard the orchestrator publishes in [`SharedKeyboardSpec`],
-//! restarts it when the keyboard (or the set of bound keys) changes, and
-//! dispatches each captured key press through the common action path
-//! ([`crate::hook_runtime::dispatch_action`]).
+//! Runs [`openlogi_hid::run_keyboard_capture_session_with_registry`] on a
+//! dedicated thread for the keyboard the orchestrator publishes in
+//! [`SharedKeyboardSpec`], restarts it when the keyboard (or the set of bound
+//! keys) changes, and dispatches each captured key press through the common
+//! action path ([`crate::hook_runtime::dispatch_action`]).
 //!
 //! The mouse capture watcher ([`super::gesture`]) and this one hold *shared*
 //! receiver leases, so both run concurrently; pairing still waits for (and
@@ -18,7 +18,8 @@ use std::time::Duration;
 
 use openlogi_core::binding::{Action, ButtonId};
 use openlogi_hid::{
-    CaptureChannel, CapturedInput, ChannelRegistry, DeviceRoute, run_keyboard_capture_session,
+    CaptureChannel, CapturedInput, ChannelRegistry, DeviceRoute,
+    run_keyboard_capture_session_with_registry,
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
@@ -109,7 +110,7 @@ async fn manage(
             Some(input) = rx.recv() => {
                 // The keyboard session only emits ButtonPressed; other inputs
                 // (gesture/scroll) never originate here.
-                let CapturedInput::ButtonPressed(button) = input else {
+                let CapturedInput::ButtonPressed(button, _) = input else {
                     continue;
                 };
                 let action = spec
@@ -164,13 +165,21 @@ async fn manage(
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
                     let slot = Arc::clone(&keyboard_channel);
+                    let session_registry = registry.clone();
                     epoch = epoch.wrapping_add(1);
                     let session_epoch = epoch;
                     let done = done_tx.clone();
                     tokio::spawn(async move {
                         let _receiver_lease = receiver_lease;
-                        if let Err(e) =
-                            run_keyboard_capture_session(route, wanted, sink, stop_rx, slot).await
+                        if let Err(e) = run_keyboard_capture_session_with_registry(
+                            route,
+                            wanted,
+                            sink,
+                            stop_rx,
+                            slot,
+                            &session_registry,
+                        )
+                        .await
                         {
                             debug!(error = %e, "keyboard capture session ended");
                         }

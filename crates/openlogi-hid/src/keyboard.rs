@@ -28,6 +28,7 @@ use openlogi_core::binding::ButtonId;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use crate::channel_registry::ChannelRegistry;
 use crate::gesture::{CaptureChannel, CapturedInput, GestureError, enumerate_controls, restore};
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::route::{DeviceRoute, open_route_channel};
@@ -67,6 +68,38 @@ pub async fn run_keyboard_capture_session(
     let chan = open_route_channel(&route)
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
+    let shared = SharedChannel::new(chan, route.clone());
+    run_keyboard_capture_session_on(route, shared, wanted, sink, shutdown, channel_slot).await
+}
+
+/// Run keyboard capture on the exact channel currently published by `registry`.
+///
+/// A registry miss returns [`GestureError::DeviceNotFound`] without falling
+/// back to route enumeration/opening; the agent watcher retries after a later
+/// inventory publication.
+pub async fn run_keyboard_capture_session_with_registry(
+    route: DeviceRoute,
+    wanted: BTreeMap<u16, ButtonId>,
+    sink: mpsc::UnboundedSender<CapturedInput>,
+    shutdown: oneshot::Receiver<()>,
+    channel_slot: CaptureChannel,
+    registry: &ChannelRegistry,
+) -> Result<(), GestureError> {
+    let shared = registry
+        .lookup(&route)
+        .ok_or(GestureError::DeviceNotFound)?;
+    run_keyboard_capture_session_on(route, shared, wanted, sink, shutdown, channel_slot).await
+}
+
+async fn run_keyboard_capture_session_on(
+    route: DeviceRoute,
+    shared: SharedChannel,
+    wanted: BTreeMap<u16, ButtonId>,
+    sink: mpsc::UnboundedSender<CapturedInput>,
+    shutdown: oneshot::Receiver<()>,
+    channel_slot: CaptureChannel,
+) -> Result<(), GestureError> {
+    let chan = Arc::clone(shared.channel());
     let device_index = route.device_index();
     let device = Device::new(Arc::clone(&chan), device_index)
         .await
@@ -108,7 +141,7 @@ pub async fn run_keyboard_capture_session(
                 let now = cids.contains(&cid);
                 let was = down.contains(&cid);
                 if now && !was {
-                    let _ = sink.send(CapturedInput::ButtonPressed(button));
+                    let _ = sink.send(CapturedInput::ButtonPressed(button, None));
                 }
                 if now {
                     down.insert(cid);
@@ -137,7 +170,7 @@ pub async fn run_keyboard_capture_session(
     // reuse it instead of opening the same HID node a second time. Cleared
     // on the way out.
     if let Ok(mut slot) = channel_slot.write() {
-        *slot = Some(SharedChannel::new(Arc::clone(&chan), route.clone()));
+        *slot = Some(shared);
     }
 
     info!(
