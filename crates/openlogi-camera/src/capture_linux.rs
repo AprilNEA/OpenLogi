@@ -8,6 +8,12 @@
 //! of that, and `zune-jpeg` decodes it straight to BGRA in one pass. YUYV is
 //! the fallback for the few cameras that don't offer MJPEG.
 //!
+//! Resolution follows the session's [`Quality`]: the live preview streams 720p,
+//! while a snapshot takes the camera's largest mode. Note this only sizes
+//! *OpenLogi's own* stream — resolution is negotiated per handle, so it is not
+//! a device setting other applications observe, unlike the UVC controls in
+//! `uvc_linux`.
+//!
 //! Unlike macOS, Linux has no per-app camera consent model — access is decided
 //! by filesystem permission on `/dev/video*` (the `video` group). So
 //! [`camera_authorization`] reports `Granted`/`Denied` by probing whether the
@@ -39,8 +45,14 @@ use crate::{CameraAuthorization, linux};
 
 /// Preview target. The driver picks the nearest size it supports, so this is a
 /// request rather than a guarantee — the negotiated format is read back.
-const TARGET_WIDTH: u32 = 1280;
-const TARGET_HEIGHT: u32 = 720;
+const PREVIEW_WIDTH: u32 = 1280;
+const PREVIEW_HEIGHT: u32 = 720;
+
+/// Size requested for a native-resolution session when the driver reports only
+/// stepwise or continuous frame sizes, with no discrete list to pick a maximum
+/// from. `VIDIOC_S_FMT` clamps a request to what the device supports, so asking
+/// for more than any current sensor offers resolves to its largest mode.
+const OVERSIZED_REQUEST: u32 = 16384;
 
 /// Mapped buffers to keep in flight. Four is the usual V4L2 default: enough to
 /// absorb a scheduling hiccup without adding a frame of latency.
@@ -71,6 +83,19 @@ impl Encoding {
         [(Self::Mjpeg, b"MJPG"), (Self::Yuyv, b"YUYV")];
 }
 
+/// What a capture session optimises for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Quality {
+    /// 720p. Sharp in the preview box at a fraction of a 4K frame's decode,
+    /// copy and texture upload — and a live stream pays that cost 30 times a
+    /// second.
+    Preview,
+    /// The camera's largest mode. A snapshot is taken once and kept, so it is
+    /// worth the sensor's full detail; this mirrors the macOS backend, where
+    /// only the preview session carries a 720p preset.
+    Native,
+}
+
 /// A negotiated capture session: the open device plus what its frames contain.
 struct Session {
     device: Device,
@@ -80,7 +105,7 @@ struct Session {
 }
 
 /// Open `unique_id` and negotiate a decodable format on it.
-fn open_session(unique_id: &str) -> Result<Session, CaptureError> {
+fn open_session(unique_id: &str, quality: Quality) -> Result<Session, CaptureError> {
     let path = linux::node_for_unique_id(unique_id).ok_or(CaptureError::NotFound)?;
     let device = Device::with_path(&path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::PermissionDenied {
@@ -112,7 +137,11 @@ fn open_session(unique_id: &str) -> Result<Session, CaptureError> {
             ))
         })?;
 
-    let requested = Format::new(TARGET_WIDTH, TARGET_HEIGHT, FourCC::new(fourcc));
+    let (width, height) = match quality {
+        Quality::Preview => (PREVIEW_WIDTH, PREVIEW_HEIGHT),
+        Quality::Native => largest_size(&device, FourCC::new(fourcc)),
+    };
+    let requested = Format::new(width, height, FourCC::new(fourcc));
     let actual = with_busy_retry(|| device.set_format(&requested))
         .map_err(|error| CaptureError::Setup(error.to_string()))?;
 
@@ -132,6 +161,22 @@ fn open_session(unique_id: &str) -> Result<Session, CaptureError> {
         width: actual.width,
         height: actual.height,
     })
+}
+
+/// The largest frame size the camera offers for `fourcc`, by pixel count.
+///
+/// Only discrete sizes can be compared directly; a driver advertising a
+/// stepwise or continuous range gets [`OVERSIZED_REQUEST`] instead and clamps
+/// it down itself.
+fn largest_size(device: &Device, fourcc: FourCC) -> (u32, u32) {
+    device
+        .enum_framesizes(fourcc)
+        .into_iter()
+        .flatten()
+        .flat_map(|size| size.size.to_discrete())
+        .map(|discrete| (discrete.width, discrete.height))
+        .max_by_key(|&(width, height)| u64::from(width) * u64::from(height))
+        .unwrap_or((OVERSIZED_REQUEST, OVERSIZED_REQUEST))
 }
 
 /// `EBUSY` — the device is still streaming, here always on another handle.
@@ -182,19 +227,21 @@ fn with_busy_retry<T>(mut step: impl FnMut() -> std::io::Result<T>) -> std::io::
     }
 }
 
-/// Capture a single frame from the camera with `unique_id`.
+/// Capture a single frame from the camera with `unique_id`, at the camera's
+/// native resolution.
 ///
 /// A partially-filled MJPEG buffer (a dropped USB packet) fails to decode, so
 /// this keeps reading until one decodes or `timeout` elapses. The caller's whole
 /// budget is given to the dequeue, since the first frame carries the stream
-/// start-up cost described on [`STREAM_TIMEOUT`].
+/// start-up cost described on [`STREAM_TIMEOUT`] — and more of it at full
+/// resolution, where the sensor has more to read out per frame.
 ///
 /// # Errors
 /// [`CaptureError::NotFound`] when no camera matches, [`CaptureError::AccessDenied`]
 /// without permission on the node, [`CaptureError::Timeout`] when no frame
 /// decodes in time.
 pub fn capture_frame(unique_id: &str, timeout: Duration) -> Result<Frame, CaptureError> {
-    let session = open_session(unique_id)?;
+    let session = open_session(unique_id, Quality::Native)?;
     let mut stream = build_stream(&session, timeout)?;
     let deadline = Instant::now() + timeout;
 
@@ -280,7 +327,7 @@ impl Drop for CameraStream {
 /// # Errors
 /// Same as [`capture_frame`], minus `Timeout` (frames are polled, not awaited).
 pub fn start_stream(unique_id: &str) -> Result<CameraStream, CaptureError> {
-    let session = open_session(unique_id)?;
+    let session = open_session(unique_id, Quality::Preview)?;
     let stream = build_stream(&session, STREAM_TIMEOUT)?;
 
     let shared = Arc::new(Shared {
