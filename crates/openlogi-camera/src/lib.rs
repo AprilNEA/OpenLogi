@@ -373,10 +373,7 @@ mod tests {
             max_resolution: None,
             max_fps: None,
         };
-        assert_eq!(
-            with_serial.config_key(),
-            "camera:046d:0893:serial:abc123"
-        );
+        assert_eq!(with_serial.config_key(), "camera:046d:0893:serial:abc123");
         // Same physical camera on another USB port → same config key.
         let moved = Camera {
             unique_id: "0x14110000046d0893".into(),

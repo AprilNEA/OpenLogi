@@ -340,8 +340,7 @@ unsafe fn registry_location_and_serial(
             }
             loc
         })?;
-        let serial_ref =
-            IORegistryEntryCreateCFProperty(service, serial_key, ptr::null(), 0);
+        let serial_ref = IORegistryEntryCreateCFProperty(service, serial_key, ptr::null(), 0);
         let serial = cf_string_value(serial_ref)?;
         if serial.is_empty() {
             return None;
@@ -373,8 +372,7 @@ unsafe fn device_location_id(service: IoService) -> Option<u32> {
         let dev_uuid = CFUUIDGetUUIDBytes(dev_uuid_ref);
         CFRelease(dev_uuid_ref);
         let mut dev_ptr: *mut c_void = ptr::null_mut();
-        let qrc =
-            ((**plugin).query_interface)(plugin.cast::<c_void>(), dev_uuid, &raw mut dev_ptr);
+        let qrc = ((**plugin).query_interface)(plugin.cast::<c_void>(), dev_uuid, &raw mut dev_ptr);
         IODestroyPlugInInterface(plugin);
         if qrc != 0 || dev_ptr.is_null() {
             return None;
@@ -393,9 +391,7 @@ fn cf_string(s: &str) -> *const c_void {
         return ptr::null();
     };
     // SAFETY: UTF-8 C string; returned CFString is owned by the caller.
-    unsafe {
-        CFStringCreateWithCString(ptr::null(), c.as_ptr(), K_CF_STRING_ENCODING_UTF8)
-    }
+    unsafe { CFStringCreateWithCString(ptr::null(), c.as_ptr(), K_CF_STRING_ENCODING_UTF8) }
 }
 
 unsafe fn cf_string_value(cf: *const c_void) -> Option<String> {
@@ -554,12 +550,7 @@ unsafe extern "C" {
     fn CFNumberGetTypeID() -> usize;
     fn CFGetTypeID(cf: *const c_void) -> usize;
     fn CFStringGetLength(s: *const c_void) -> isize;
-    fn CFStringGetCString(
-        s: *const c_void,
-        buf: *mut i8,
-        buffer_size: isize,
-        encoding: u32,
-    ) -> u8;
+    fn CFStringGetCString(s: *const c_void, buf: *mut i8, buffer_size: isize, encoding: u32) -> u8;
     fn CFNumberGetValue(number: *const c_void, the_type: i32, value_ptr: *mut c_void) -> u8;
 }
 

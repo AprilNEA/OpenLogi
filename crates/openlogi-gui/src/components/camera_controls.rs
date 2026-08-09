@@ -996,5 +996,3 @@ fn control_label(control: CameraControl) -> SharedString {
         CameraControl::Tint => tr!("Tint"),
     }
 }
-
-
