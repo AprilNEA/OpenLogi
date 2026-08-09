@@ -511,9 +511,8 @@ mod tests {
         use super::Capabilities;
         // A typical MX mouse: ReprogControls (0x1b04) + ExtendedAdjustableDpi
         // (0x2202), no lighting.
-        let mouse = Capabilities::from_feature_ids(&[
-            0x0003, 0x1b04, 0x2121, 0x2150, 0x2202, 0x2110,
-        ]);
+        let mouse =
+            Capabilities::from_feature_ids(&[0x0003, 0x1b04, 0x2121, 0x2150, 0x2202, 0x2110]);
         assert_eq!(
             mouse,
             Capabilities {
