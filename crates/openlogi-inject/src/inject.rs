@@ -6,7 +6,7 @@
 //! of which translates an [`Action`] into the native event(s) — CGEvent/NSEvent
 //! on macOS, uinput/D-Bus on Linux, SendInput on Windows.
 
-use openlogi_core::binding::Action;
+use openlogi_core::binding::{Action, KeyCombo};
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -65,6 +65,59 @@ pub fn execute(action: &Action) {
             tracing::warn!(
                 action = action.label(),
                 "execute unsupported on this platform"
+            );
+        }
+    }
+}
+
+/// Synthesise the key-down half of `combo`, leaving the chord held.
+///
+/// The caller **must** pair every `press_hold` with a [`release_hold`] of the
+/// same combo — including on abnormal paths (lost button-up, capture
+/// interrupted, agent shutdown). A chord left down jams those keys for every
+/// app on the system until something releases them.
+///
+/// A `key_code` of 0 (the recorder's modifier-only placeholder) is ignored, so
+/// a hand-edited config can't leave bare modifiers stuck down.
+pub fn press_hold(combo: &KeyCombo) {
+    hold_phase(combo, true);
+}
+
+/// Synthesise the key-up half of `combo`, releasing a [`press_hold`].
+///
+/// Safe to call without a matching press — a redundant key-up for a key the OS
+/// doesn't think is down is a no-op, which is what makes the force-release
+/// paths safe to fire unconditionally.
+pub fn release_hold(combo: &KeyCombo) {
+    hold_phase(combo, false);
+}
+
+/// Shared body of [`press_hold`] / [`release_hold`] — `down` picks the edge.
+fn hold_phase(combo: &KeyCombo, down: bool) {
+    if combo.key_code == 0 {
+        tracing::warn!(
+            chord = %combo.rendered_label(),
+            down,
+            "hold chord has no key code — ignored"
+        );
+        return;
+    }
+
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_key_phase(combo.key_code, macos::combo_flags(combo), down);
+        }
+        target_os = "linux" => {
+            linux::key_phase(combo, down);
+        }
+        target_os = "windows" => {
+            windows::key_phase(combo, down);
+        }
+        _ => {
+            let _ = down;
+            tracing::warn!(
+                chord = %combo.rendered_label(),
+                "hold unsupported on this platform"
             );
         }
     }

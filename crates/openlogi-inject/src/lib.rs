@@ -2,7 +2,9 @@
 
 mod inject;
 
-pub use inject::{SYNTHETIC_EVENT_USER_DATA, execute, post_horizontal_scroll};
+pub use inject::{
+    SYNTHETIC_EVENT_USER_DATA, execute, post_horizontal_scroll, press_hold, release_hold,
+};
 
 #[cfg(target_os = "linux")]
 pub use inject::action_device_path;
