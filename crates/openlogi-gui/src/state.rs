@@ -405,41 +405,34 @@ impl AppState {
         }
     }
 
-    /// Move camera settings from older key shapes onto `stable_key` when it is
-    /// empty: the port-bound `camera-<unique_id>` form, and the multi-camera
-    /// disambiguated `…:cap:<unique_id>` form used while two serial-less units
-    /// of the same model were plugged in together.
-    pub fn migrate_legacy_camera_key(&mut self, stable_key: &str, capture_id: &str) {
-        if self.config.camera_controls(stable_key).is_some()
-            || !self.config.camera_profiles(stable_key).is_empty()
-            || self.config.camera_active_profile(stable_key).is_some()
-        {
+    /// Reconcile camera settings across the key shapes a device can wear.
+    ///
+    /// - Lone camera on a stable key (`serial` / model): prefer any newer
+    ///   `…:cap:<id>` settings written while a twin was plugged in (overwrite),
+    ///   else lift a legacy port-bound `camera-<id>` section if the stable key
+    ///   is still empty.
+    /// - Disambiguated `…:cap:<id>` key (two same-model serial-less cameras):
+    ///   seed from the model base when the cap key is empty so both twins
+    ///   inherit the shared model settings instead of device defaults.
+    pub fn migrate_legacy_camera_key(&mut self, config_key: &str, capture_id: &str) {
+        let base = camera_base_config_key(config_key);
+        let cap_key = format!("{base}:cap:{capture_id}");
+        let port_key = format!("camera-{capture_id}");
+
+        if config_key.contains(":cap:") {
+            if !self.camera_key_has_settings(config_key) && self.camera_key_has_settings(base) {
+                self.seed_camera_settings(base, config_key);
+            }
             return;
         }
-        let candidates = [
-            format!("camera-{capture_id}"),
-            format!("{stable_key}:cap:{capture_id}"),
-        ];
-        let Some(legacy) = candidates
-            .into_iter()
-            .find(|key| key != stable_key && self.camera_key_has_settings(key))
-        else {
+
+        // 2→1: the remaining camera was editing under :cap:; those settings win.
+        if self.camera_key_has_settings(&cap_key) {
+            self.move_camera_settings(&cap_key, config_key);
             return;
-        };
-        if let Some(controls) = self.config.camera_controls(&legacy) {
-            self.config.set_camera_controls(stable_key, controls);
         }
-        for (name, snap) in self.config.camera_profiles(&legacy) {
-            self.config.save_camera_profile(stable_key, &name, snap);
-        }
-        if let Some(active) = self.config.camera_active_profile(&legacy) {
-            self.config
-                .set_camera_active_profile(stable_key, Some(active));
-        }
-        // Drop the orphaned section so a later plug-in doesn't inherit it.
-        self.config.devices.remove(&legacy);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist camera key migration");
+        if !self.camera_key_has_settings(config_key) && self.camera_key_has_settings(&port_key) {
+            self.move_camera_settings(&port_key, config_key);
         }
     }
 
@@ -447,6 +440,36 @@ impl AppState {
         self.config.camera_controls(key).is_some()
             || !self.config.camera_profiles(key).is_empty()
             || self.config.camera_active_profile(key).is_some()
+    }
+
+    /// Copy camera controls/profiles/active selection from `from` onto `to`
+    /// without deleting `from` (used to seed a :cap: twin from the model key).
+    fn copy_camera_settings(&mut self, from: &str, to: &str) {
+        if let Some(controls) = self.config.camera_controls(from) {
+            self.config.set_camera_controls(to, controls);
+        }
+        for (name, snap) in self.config.camera_profiles(from) {
+            self.config.save_camera_profile(to, &name, snap);
+        }
+        if let Some(active) = self.config.camera_active_profile(from) {
+            self.config.set_camera_active_profile(to, Some(active));
+        }
+    }
+
+    /// Move camera settings from `from` onto `to` (overwrite) and drop `from`.
+    fn move_camera_settings(&mut self, from: &str, to: &str) {
+        self.copy_camera_settings(from, to);
+        self.config.devices.remove(from);
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist camera key migration");
+        }
+    }
+
+    fn seed_camera_settings(&mut self, from: &str, to: &str) {
+        self.copy_camera_settings(from, to);
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist camera key seed");
+        }
     }
 
     /// User-saved camera profiles for `config_key` (name → snapshot).
@@ -1602,6 +1625,13 @@ impl AppState {
 /// or carried-forward `None` — so a placeholder never persists empty panels.
 /// The change-guard keeps quiet inventory ticks off the disk; the agent does
 /// not consume identities, so no `ReloadConfig` is sent.
+/// Strip a trailing `:cap:<capture-id>` suffix, leaving the serial/model key.
+fn camera_base_config_key(config_key: &str) -> &str {
+    config_key
+        .split_once(":cap:")
+        .map_or(config_key, |(base, _)| base)
+}
+
 fn persist_identities(config: &mut Config, list: &[DeviceRecord]) {
     let mut changed = false;
     for record in list {
