@@ -70,6 +70,15 @@ pub(super) fn execute(action: &Action) {
         Action::MiddleClick => post_click(MouseButton::Middle),
         Action::MouseBack => post_click(MouseButton::Back),
         Action::MouseForward => post_click(MouseButton::Forward),
+        Action::MouseButton6
+        | Action::MouseButton7
+        | Action::MouseButton8
+        | Action::MouseButton9 => {
+            tracing::debug!(
+                action = action.label(),
+                "mouse buttons 6-9 are not supported on Windows — press ignored"
+            );
+        }
         Action::Copy => post_key(VK_C, &[VK_CONTROL]),
         Action::Paste => post_key(VK_V, &[VK_CONTROL]),
         Action::Cut => post_key(VK_X, &[VK_CONTROL]),

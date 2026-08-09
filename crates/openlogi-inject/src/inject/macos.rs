@@ -56,6 +56,10 @@ pub(super) fn execute(action: &Action) {
         // 4 = forward / "button 5").
         Action::MouseBack => post_other_button(3),
         Action::MouseForward => post_other_button(4),
+        Action::MouseButton6 => post_other_button(5),
+        Action::MouseButton7 => post_other_button(6),
+        Action::MouseButton8 => post_other_button(7),
+        Action::MouseButton9 => post_other_button(8),
         // ── Editing ───────────────────────────────────────────────────────
         Action::Copy => post_key(VK_C, cmd),
         Action::Paste => post_key(VK_V, cmd),
