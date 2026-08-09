@@ -298,14 +298,11 @@ pub fn dispatch_action(
             toggle_smartshift_in_background(Some(capture), target);
             return;
         }
-        Action::BrowserBack | Action::BrowserForward => {
-            // Use keyboard shortcut (Cmd+[ / Cmd+]) for browsers like Chrome that
-            // respond to it. Safari is handled exclusively via the HID++ gesture
-            // watcher path (which uses AXPress with the PID captured at press time)
-            // to avoid double-navigation when both paths fire for the same press.
-            openlogi_inject::execute(action);
-            None
-        }
+        // BrowserBack/BrowserForward fall through to the keyboard shortcut
+        // (Cmd+[ / Cmd+]) here — fine for Chrome and other apps that respond
+        // to it. Safari is handled exclusively via the HID++ gesture watcher
+        // path (which uses AXPress with the PID captured at press time) to
+        // avoid double-navigation when both paths fire for the same press.
         other => {
             openlogi_inject::execute(other);
             None
