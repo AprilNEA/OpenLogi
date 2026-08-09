@@ -51,8 +51,8 @@ pub use smartshift::{AUTO_DISENGAGE_PERMANENT, SmartShiftMode, SmartShiftStatus}
 pub use write::{
     DpiCapabilities, DpiInfo, FeatureEntry, HidppFeatureErrorKind, HidppOperation, LightingMethod,
     ReprogControlEntry, SharedChannel, WriteError, dump_features, dump_reprog_controls, get_dpi,
-    get_dpi_info, get_dpi_info_on, get_smartshift_status, get_smartshift_status_on, read_battery_raw,
-    set_dpi, set_dpi_on, set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with,
-    set_keyboard_color_with_on, set_smartshift, set_smartshift_on, set_smartshift_sensitivity,
-    toggle_smartshift, toggle_smartshift_on,
+    get_dpi_info, get_dpi_info_on, get_smartshift_status, get_smartshift_status_on,
+    read_battery_raw, set_dpi, set_dpi_on, set_keyboard_color, set_keyboard_color_on,
+    set_keyboard_color_with, set_keyboard_color_with_on, set_smartshift, set_smartshift_on,
+    set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
 };
