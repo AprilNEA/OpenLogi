@@ -408,27 +408,52 @@ impl AppState {
     /// Reconcile camera settings across the key shapes a device can wear.
     ///
     /// - Lone camera on a stable key (`serial` / model): prefer any newer
-    ///   `…:cap:<id>` settings written while a twin was plugged in (overwrite),
+    ///   `…:cap:*` settings written while a twin was plugged in (overwrite),
+    ///   matching the current capture id first, then any historical cap suffix
+    ///   (so a port change that rewrote the capture id still recovers settings),
     ///   else lift a legacy port-bound `camera-<id>` section if the stable key
     ///   is still empty.
     /// - Disambiguated `…:cap:<id>` key (two same-model serial-less cameras):
-    ///   seed from the model base when the cap key is empty so both twins
-    ///   inherit the shared model settings instead of device defaults.
+    ///   seed from the model base, then from any other `…:cap:*` sibling, so a
+    ///   twin that moved ports doesn't fall back to hardware defaults.
     pub fn migrate_legacy_camera_key(&mut self, config_key: &str, capture_id: &str) {
         let base = camera_base_config_key(config_key);
         let cap_key = format!("{base}:cap:{capture_id}");
         let port_key = format!("camera-{capture_id}");
 
         if config_key.contains(":cap:") {
-            if !self.camera_key_has_settings(config_key) && self.camera_key_has_settings(base) {
+            if self.camera_key_has_settings(config_key) {
+                return;
+            }
+            if self.camera_key_has_settings(base) {
                 self.seed_camera_settings(base, config_key);
+                return;
+            }
+            // Port change while a twin is still present: capture id moved, so
+            // look for settings left under another :cap: suffix of the same base.
+            if let Some(sibling) = self
+                .camera_cap_keys(base)
+                .into_iter()
+                .find(|key| key != config_key && self.camera_key_has_settings(key))
+            {
+                self.move_camera_settings(&sibling, config_key);
             }
             return;
         }
 
-        // 2→1: the remaining camera was editing under :cap:; those settings win.
+        // 2→1: prefer the remaining camera's :cap: settings (current id first,
+        // then any historical suffix after a port change), overwriting the model
+        // key so a twin-session edit isn't discarded for a stale model snapshot.
         if self.camera_key_has_settings(&cap_key) {
             self.move_camera_settings(&cap_key, config_key);
+            return;
+        }
+        if let Some(historical) = self
+            .camera_cap_keys(base)
+            .into_iter()
+            .find(|key| self.camera_key_has_settings(key))
+        {
+            self.move_camera_settings(&historical, config_key);
             return;
         }
         if !self.camera_key_has_settings(config_key) && self.camera_key_has_settings(&port_key) {
@@ -440,6 +465,17 @@ impl AppState {
         self.config.camera_controls(key).is_some()
             || !self.config.camera_profiles(key).is_empty()
             || self.config.camera_active_profile(key).is_some()
+    }
+
+    /// Every config section under `base:cap:` (multi-camera disambiguation keys).
+    fn camera_cap_keys(&self, base: &str) -> Vec<String> {
+        let prefix = format!("{base}:cap:");
+        self.config
+            .devices
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect()
     }
 
     /// Copy camera controls/profiles/active selection from `from` onto `to`

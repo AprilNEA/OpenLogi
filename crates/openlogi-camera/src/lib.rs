@@ -215,9 +215,8 @@ impl Camera {
     ///
     /// Prefers the USB serial when the device reports one. When it doesn't,
     /// falls back to a model-scoped key (`camera:vid:pid`) so a single webcam
-    /// keeps its controls and profiles after a port change. Two serial-less
-    /// cameras of the same model therefore share settings — the USB stack
-    /// exposes no stronger identity without a serial.
+    /// keeps its controls and profiles after a port change. The GUI disambiguates
+    /// simultaneous serial-less twins of the same model with a `:cap:` suffix.
     #[must_use]
     pub fn config_key(&self) -> String {
         if let Some(serial) = self
