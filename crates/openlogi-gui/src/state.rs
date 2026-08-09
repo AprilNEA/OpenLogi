@@ -407,15 +407,17 @@ impl AppState {
 
     /// Reconcile camera settings across the key shapes a device can wear.
     ///
-    /// - Lone camera on a stable key (`serial` / model): prefer any newer
-    ///   `…:cap:*` settings written while a twin was plugged in (overwrite),
-    ///   matching the current capture id first, then any historical cap suffix
-    ///   (so a port change that rewrote the capture id still recovers settings),
-    ///   else lift a legacy port-bound `camera-<id>` section if the stable key
+    /// Identity without a USB serial is weak, so migration is deliberately
+    /// conservative: never apply another twin's `:cap:` section by map order.
+    ///
+    /// - Disambiguated `…:cap:<id>` key: seed only from the shared model base
+    ///   when empty (never from a sibling `:cap:` — that is a different unit).
+    /// - Lone stable key: move `…:cap:<current-id>` if present (overwrite);
+    ///   else, if **exactly one** historical `…:cap:*` remains under the base,
+    ///   that is unambiguous after a port change and is moved; if several
+    ///   remain we leave them alone rather than guess which twin is which;
+    ///   finally lift a legacy port-bound `camera-<id>` when the stable key
     ///   is still empty.
-    /// - Disambiguated `…:cap:<id>` key (two same-model serial-less cameras):
-    ///   seed from the model base, then from any other `…:cap:*` sibling, so a
-    ///   twin that moved ports doesn't fall back to hardware defaults.
     pub fn migrate_legacy_camera_key(&mut self, config_key: &str, capture_id: &str) {
         let base = camera_base_config_key(config_key);
         let cap_key = format!("{base}:cap:{capture_id}");
@@ -425,37 +427,33 @@ impl AppState {
             if self.camera_key_has_settings(config_key) {
                 return;
             }
+            // Shared model defaults only — a sibling :cap: belongs to the twin.
             if self.camera_key_has_settings(base) {
                 self.seed_camera_settings(base, config_key);
-                return;
-            }
-            // Port change while a twin is still present: capture id moved, so
-            // look for settings left under another :cap: suffix of the same base.
-            if let Some(sibling) = self
-                .camera_cap_keys(base)
-                .into_iter()
-                .find(|key| key != config_key && self.camera_key_has_settings(key))
-            {
-                self.move_camera_settings(&sibling, config_key);
             }
             return;
         }
 
-        // 2→1: prefer the remaining camera's :cap: settings (current id first,
-        // then any historical suffix after a port change), overwriting the model
-        // key so a twin-session edit isn't discarded for a stale model snapshot.
+        // Exact match for this physical open: safe even when several twins
+        // have saved sections.
         if self.camera_key_has_settings(&cap_key) {
             self.move_camera_settings(&cap_key, config_key);
             return;
         }
-        if let Some(historical) = self
+
+        // Port change after the twin left: only one historical :cap: remains,
+        // so it must be this unit. Two or more means we cannot tell them apart
+        // without a serial — leave them rather than steal the wrong settings.
+        let historical: Vec<String> = self
             .camera_cap_keys(base)
             .into_iter()
-            .find(|key| self.camera_key_has_settings(key))
-        {
-            self.move_camera_settings(&historical, config_key);
+            .filter(|key| self.camera_key_has_settings(key))
+            .collect();
+        if historical.len() == 1 {
+            self.move_camera_settings(&historical[0], config_key);
             return;
         }
+
         if !self.camera_key_has_settings(config_key) && self.camera_key_has_settings(&port_key) {
             self.move_camera_settings(&port_key, config_key);
         }
@@ -2101,5 +2099,133 @@ mod tests {
             Some(ScrollResolution::High),
         ));
         assert_eq!(config.scroll_resolution("mouse"), None);
+    }
+
+    fn camera_controls(brightness: i32) -> openlogi_core::config::CameraControls {
+        openlogi_core::config::CameraControls(std::collections::BTreeMap::from([(
+            "brightness".into(),
+            brightness,
+        )]))
+    }
+
+    fn camera_state(config: Config) -> AppState {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        AppState::with_runtime(config, &[], &AssetResolver::new(), &[], tx)
+    }
+
+    #[test]
+    fn migrate_moves_exact_cap_key_onto_model_key() {
+        let mut config = Config::ephemeral();
+        let model = "camera:046d:0893";
+        let cap = format!("{model}:cap:0xOLD");
+        config.set_camera_controls(&cap, camera_controls(42));
+        config.set_camera_controls(model, camera_controls(1)); // stale model snapshot
+        let mut state = camera_state(config);
+
+        state.migrate_legacy_camera_key(model, "0xOLD");
+
+        assert_eq!(
+            state
+                .config
+                .camera_controls(model)
+                .map(|c| c.0["brightness"]),
+            Some(42),
+            "exact :cap: settings overwrite the model key"
+        );
+        assert!(
+            state.config.camera_controls(&cap).is_none(),
+            "source :cap: section is removed"
+        );
+    }
+
+    #[test]
+    fn migrate_does_not_steal_a_sibling_twins_cap_settings() {
+        let mut config = Config::ephemeral();
+        let model = "camera:046d:0893";
+        // Two historical twins; remaining camera opened under a new capture id.
+        config.set_camera_controls(&format!("{model}:cap:0xA"), camera_controls(10));
+        config.set_camera_controls(&format!("{model}:cap:0xB"), camera_controls(20));
+        config.set_camera_controls(model, camera_controls(1));
+        let mut state = camera_state(config);
+
+        state.migrate_legacy_camera_key(model, "0xNEW");
+
+        // Ambiguous — leave both :cap: sections and the model snapshot alone.
+        assert_eq!(
+            state
+                .config
+                .camera_controls(model)
+                .map(|c| c.0["brightness"]),
+            Some(1)
+        );
+        assert_eq!(
+            state
+                .config
+                .camera_controls(&format!("{model}:cap:0xA"))
+                .map(|c| c.0["brightness"]),
+            Some(10)
+        );
+        assert_eq!(
+            state
+                .config
+                .camera_controls(&format!("{model}:cap:0xB"))
+                .map(|c| c.0["brightness"]),
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn migrate_takes_the_only_remaining_cap_key_after_a_port_change() {
+        let mut config = Config::ephemeral();
+        let model = "camera:046d:0893";
+        config.set_camera_controls(&format!("{model}:cap:0xOLD"), camera_controls(77));
+        let mut state = camera_state(config);
+
+        // Alone, capture id changed with the port — only one :cap: left.
+        state.migrate_legacy_camera_key(model, "0xNEW");
+
+        assert_eq!(
+            state
+                .config
+                .camera_controls(model)
+                .map(|c| c.0["brightness"]),
+            Some(77)
+        );
+        assert!(
+            state
+                .config
+                .camera_controls(&format!("{model}:cap:0xOLD"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn migrate_seeds_empty_cap_key_from_model_not_sibling() {
+        let mut config = Config::ephemeral();
+        let model = "camera:046d:0893";
+        let mine = format!("{model}:cap:0xME");
+        let twin = format!("{model}:cap:0xTWIN");
+        config.set_camera_controls(model, camera_controls(5));
+        config.set_camera_controls(&twin, camera_controls(99));
+        let mut state = camera_state(config);
+
+        state.migrate_legacy_camera_key(&mine, "0xME");
+
+        assert_eq!(
+            state
+                .config
+                .camera_controls(&mine)
+                .map(|c| c.0["brightness"]),
+            Some(5),
+            "empty :cap: inherits the shared model defaults"
+        );
+        assert_eq!(
+            state
+                .config
+                .camera_controls(&twin)
+                .map(|c| c.0["brightness"]),
+            Some(99),
+            "twin's section is never consumed as a seed source"
+        );
     }
 }
