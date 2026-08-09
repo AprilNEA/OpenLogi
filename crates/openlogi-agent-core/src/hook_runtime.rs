@@ -7,7 +7,8 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{
     Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
@@ -265,6 +266,40 @@ fn is_native_click(id: ButtonId, action: &Action) -> bool {
     )
 }
 
+/// Minimum time between two BrowserBack (or two BrowserForward) keyboard
+/// dispatches, shared across the CGEventTap hook and the HID++ gesture
+/// watcher — both call [`dispatch_action`] independently, and on devices
+/// where one physical press is visible through both paths, a naive dispatch
+/// would fire the keyboard shortcut twice for one click. Same window as the
+/// HID++ path's own intra-press debounce (`BACK_FORWARD_DEBOUNCE` in
+/// `openlogi-hid`), for consistency.
+const BROWSER_NAV_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// Per-direction last-dispatch timestamps backing [`browser_nav_debounce_ok`].
+/// `(last_back, last_forward)`.
+static BROWSER_NAV_LAST: Mutex<(Option<Instant>, Option<Instant>)> = Mutex::new((None, None));
+
+/// Whether a BrowserBack/BrowserForward keyboard dispatch for `action` should
+/// proceed, or be suppressed as a duplicate of one already sent (from either
+/// dispatch path) within [`BROWSER_NAV_DEBOUNCE`]. Records the dispatch time
+/// on every `true` return so the *next* call — from either path — sees it.
+fn browser_nav_debounce_ok(action: &Action) -> bool {
+    let mut last = BROWSER_NAV_LAST
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let slot = if matches!(action, Action::BrowserForward) {
+        &mut last.1
+    } else {
+        &mut last.0
+    };
+    let now = Instant::now();
+    let fire = slot.is_none_or(|t| now.duration_since(t) >= BROWSER_NAV_DEBOUNCE);
+    if fire {
+        *slot = Some(now);
+    }
+    fire
+}
+
 /// Route a bound action either to OS-level event synthesis
 /// ([`Action::execute`]) or to one of OpenLogi's hardware-side handlers.
 ///
@@ -299,10 +334,21 @@ pub fn dispatch_action(
             return;
         }
         // BrowserBack/BrowserForward fall through to the keyboard shortcut
-        // (Cmd+[ / Cmd+]) here — fine for Chrome and other apps that respond
-        // to it. Safari is handled exclusively via the HID++ gesture watcher
-        // path (which uses AXPress with the PID captured at press time) to
-        // avoid double-navigation when both paths fire for the same press.
+        // (Cmd+[ / Cmd+]) here — for Chrome and other apps that respond to
+        // it, and as the HID++ gesture watcher's own fallback when its
+        // AXPress attempt (Safari) fails. On devices where one physical press
+        // is visible through both the CGEventTap hook and the HID++ diverted
+        // path (e.g. MX Vertical), both independently reach this arm for the
+        // *same* press, so it's cross-path debounced — otherwise a
+        // keyboard-driven browser like Chrome would navigate twice per click.
+        Action::BrowserBack | Action::BrowserForward => {
+            if browser_nav_debounce_ok(action) {
+                openlogi_inject::execute(action);
+            } else {
+                info!(action = %action.label(), "browser nav debounced — duplicate dispatch path suppressed");
+            }
+            None
+        }
         other => {
             openlogi_inject::execute(other);
             None
