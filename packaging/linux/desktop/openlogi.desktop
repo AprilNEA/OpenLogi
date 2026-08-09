@@ -7,4 +7,5 @@ Icon=openlogi
 Terminal=false
 Categories=Settings;HardwareSettings;
 Keywords=logitech;mouse;hid;remap;dpi;
+StartupWMClass=openlogi
 StartupNotify=true
