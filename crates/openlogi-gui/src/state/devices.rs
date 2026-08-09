@@ -916,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn webcam_without_serial_falls_back_to_capture_id_key() {
+    fn webcam_without_serial_uses_model_scoped_key() {
         let camera = Camera {
             name: "Logitech C920".to_string(),
             unique_id: "0x14110000046d082d".to_string(),
@@ -928,7 +928,9 @@ mod tests {
         };
         let cache = AssetResolver::new();
         let list = build_device_list(&[], &cache, &Config::default(), &[camera]);
-        assert_eq!(list[0].config_key, "camera-0x14110000046d082d");
+        // Port-stable even without a serial: settings follow the model, not the
+        // OS capture id (which embeds the USB location on macOS/Windows).
+        assert_eq!(list[0].config_key, "camera:046d:082d");
         assert_eq!(list[0].capture_id.as_deref(), Some("0x14110000046d082d"));
     }
 

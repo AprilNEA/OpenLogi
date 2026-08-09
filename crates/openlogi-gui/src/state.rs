@@ -406,7 +406,7 @@ impl AppState {
     }
 
     /// Move camera settings from the legacy port-bound `camera-<unique_id>` key
-    /// onto the stable serial-based key when the latter has no settings yet.
+    /// onto the stable key (serial or model-scoped) when the latter is empty.
     pub fn migrate_legacy_camera_key(&mut self, stable_key: &str, capture_id: &str) {
         let legacy = format!("camera-{capture_id}");
         if legacy == stable_key {

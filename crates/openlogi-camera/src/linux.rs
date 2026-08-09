@@ -29,6 +29,8 @@ pub(crate) struct Node {
     pub(crate) name: String,
     pub(crate) vendor_id: u16,
     pub(crate) product_id: u16,
+    /// USB `iSerialNumber` from sysfs when the device reports one.
+    pub(crate) serial_number: Option<String>,
 }
 
 /// Enumerate every V4L2 capture node, newest-first by node index.
@@ -56,6 +58,7 @@ pub(crate) fn nodes() -> Vec<Node> {
                 path: dev_path,
                 vendor_id,
                 product_id,
+                serial_number: usb_serial(&sysfs),
             })
         })
         .collect();
@@ -88,6 +91,7 @@ pub(crate) fn describe(node: &Node) -> Camera {
     Camera {
         name: node.name.clone(),
         unique_id: unique_id_for(&node.path),
+        serial_number: node.serial_number.clone(),
         vendor_id: node.vendor_id,
         product_id: node.product_id,
         max_resolution,
@@ -116,13 +120,31 @@ fn unique_id_for(path: &Path) -> String {
 ///
 /// `<sysfs>/device` is the USB *interface*; its parent holds the ids.
 fn usb_ids(sysfs: &Path) -> Option<(u16, u16)> {
-    let usb = sysfs.join("device").join("..");
+    let usb = usb_device_sysfs(sysfs)?;
     let vendor = read_trimmed(&usb.join("idVendor"))?;
     let product = read_trimmed(&usb.join("idProduct"))?;
     Some((
         u16::from_str_radix(&vendor, 16).ok()?,
         u16::from_str_radix(&product, 16).ok()?,
     ))
+}
+
+/// USB `iSerialNumber` from the parent USB device, when present and non-empty.
+fn usb_serial(sysfs: &Path) -> Option<String> {
+    let usb = usb_device_sysfs(sysfs)?;
+    let serial = read_trimmed(&usb.join("serial"))?;
+    let serial = serial.trim();
+    // Kernel placeholder when the descriptor has no iSerialNumber.
+    if serial.is_empty() || serial == "0" {
+        return None;
+    }
+    Some(serial.to_string())
+}
+
+/// Sysfs directory of the USB *device* behind a V4L2 node (parent of the
+/// interface entry at `<sysfs>/device`).
+fn usb_device_sysfs(sysfs: &Path) -> Option<PathBuf> {
+    fs::canonicalize(sysfs.join("device").join("..")).ok()
 }
 
 /// Whether the node serves video capture, i.e. enumerates at least one capture

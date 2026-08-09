@@ -211,8 +211,13 @@ pub struct Camera {
 }
 
 impl Camera {
-    /// Persistence key that prefers the USB serial (stable across USB ports)
-    /// and falls back to the OS capture id when the device reports none.
+    /// Persistence key that is stable across USB ports.
+    ///
+    /// Prefers the USB serial when the device reports one. When it doesn't,
+    /// falls back to a model-scoped key (`camera:vid:pid`) so a single webcam
+    /// keeps its controls and profiles after a port change. Two serial-less
+    /// cameras of the same model therefore share settings — the USB stack
+    /// exposes no stronger identity without a serial.
     #[must_use]
     pub fn config_key(&self) -> String {
         if let Some(serial) = self
@@ -228,7 +233,7 @@ impl Camera {
                 serial.to_ascii_lowercase()
             )
         } else {
-            format!("camera-{}", self.unique_id)
+            format!("camera:{:04x}:{:04x}", self.vendor_id, self.product_id)
         }
     }
 }
@@ -413,8 +418,15 @@ mod tests {
 
         let no_serial = Camera {
             serial_number: None,
-            ..with_serial
+            unique_id: "0x1123000046d0893".into(),
+            ..with_serial.clone()
         };
-        assert_eq!(no_serial.config_key(), "camera-0x1123000046d0893");
+        // Model-scoped — same key after a port change even without a serial.
+        assert_eq!(no_serial.config_key(), "camera:046d:0893");
+        let moved_no_serial = Camera {
+            unique_id: "0x14110000046d0893".into(),
+            ..no_serial
+        };
+        assert_eq!(moved_no_serial.config_key(), "camera:046d:0893");
     }
 }
