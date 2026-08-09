@@ -9,7 +9,8 @@
 //!
 //! macOS has the full backend (AVFoundation capture + IOKit UVC controls);
 //! Windows matches it with Media Foundation capture and DirectShow controls;
-//! other platforms return an empty list.
+//! Linux uses V4L2 for both, through the kernel's `uvcvideo` driver. Other
+//! platforms return an empty list.
 
 use serde::Serialize;
 
@@ -50,7 +51,24 @@ pub use uvc_windows::{
     apply_settings, control_range, control_ranges, read_camera_state, set_auto, set_control,
 };
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+mod linux;
+
+#[cfg(target_os = "linux")]
+mod capture_linux;
+#[cfg(target_os = "linux")]
+pub use capture_linux::{
+    CameraStream, camera_access_granted, camera_authorization, capture_frame, start_stream,
+};
+
+#[cfg(target_os = "linux")]
+mod uvc_linux;
+#[cfg(target_os = "linux")]
+pub use uvc_linux::{
+    apply_settings, control_range, control_ranges, read_camera_state, set_auto, set_control,
+};
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod capture {
     //! Stub capture backend for platforms without one.
     use std::sync::Arc;
@@ -100,12 +118,12 @@ mod capture {
         crate::CameraAuthorization::Undetermined
     }
 }
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub use capture::{
     CameraStream, camera_access_granted, camera_authorization, capture_frame, start_stream,
 };
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod uvc {
     //! Stub UVC control backend for platforms without one.
     use crate::controls::{AutoToggle, CameraControl, CameraState, ControlError, ControlRange};
@@ -144,7 +162,7 @@ mod uvc {
         Err(ControlError::Unsupported)
     }
 }
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub use uvc::{
     apply_settings, control_range, control_ranges, read_camera_state, set_auto, set_control,
 };
@@ -153,9 +171,12 @@ pub use uvc::{
 /// `AVCaptureDevice` modelID, and in hex (`046d`) most everywhere else.
 pub const LOGITECH_VID: u16 = 0x046d;
 
-/// Tri-state Camera permission, mirroring macOS `AVAuthorizationStatus`. Off
-/// macOS there is no consent model, so the backend reports
-/// [`CameraAuthorization::Undetermined`].
+/// Tri-state Camera permission, mirroring macOS `AVAuthorizationStatus`.
+///
+/// Only macOS has a consent model with a pending state. Linux decides access
+/// by filesystem permission on the device node, so it reports `Granted` or
+/// `Denied` but never `Undetermined`; platforms with no backend at all report
+/// `Undetermined`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraAuthorization {
     /// The process may open cameras.
@@ -216,7 +237,11 @@ impl Camera {
 /// Enumeration and UVC controls can be supported without it.
 #[must_use]
 pub const fn capture_supported() -> bool {
-    cfg!(any(target_os = "macos", target_os = "windows"))
+    cfg!(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux"
+    ))
 }
 
 /// Serializes UVC device seizes against enumeration within this process.
@@ -273,7 +298,12 @@ fn enumerate_all() -> Vec<Camera> {
     uvc_windows::enumerate()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+fn enumerate_all() -> Vec<Camera> {
+    linux::nodes().iter().map(linux::describe).collect()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn enumerate_all() -> Vec<Camera> {
     Vec::new()
 }

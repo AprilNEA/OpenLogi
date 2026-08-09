@@ -6,8 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Generic Logitech UVC webcam discovery for OpenLogi (AVFoundation on macOS, DirectShow on Windows)."
-keywords = ["logitech", "uvc", "webcam", "camera", "avfoundation"]
+description = "Generic Logitech UVC webcam discovery for OpenLogi (AVFoundation on macOS, DirectShow on Windows, V4L2 on Linux)."
+keywords = ["logitech", "uvc", "webcam", "camera", "v4l2"]
 categories = ["hardware-support"]
 
 [dependencies]
@@ -34,6 +34,15 @@ windows = { version = "0.61", features = [
     "Win32_System_Variant",
     "Win32_System_Ole",
 ] }
+
+# V4L2 enumeration, UVC controls and mmap capture. `v4l` wraps every ioctl in a
+# safe API, so the Linux backend needs no `unsafe` of its own. MJPEG frames are
+# decoded by `zune-jpeg`, which already ships in the tree (via `image`) and can
+# emit BGRA directly — gpui's texture order, so the preview needs no swap.
+[target.'cfg(target_os = "linux")'.dependencies]
+v4l = "0.14"
+zune-jpeg = "0.5"
+zune-core = "0.5"
 
 # Mirrors [workspace.lints]. unsafe_code stays denied; the AVFoundation modules
 # opt in locally with #[expect(unsafe_code)]. (The `unexpected_cfgs` allow the
