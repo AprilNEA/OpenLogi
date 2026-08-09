@@ -405,25 +405,27 @@ impl AppState {
         }
     }
 
-    /// Move camera settings from the legacy port-bound `camera-<unique_id>` key
-    /// onto the stable key (serial or model-scoped) when the latter is empty.
+    /// Move camera settings from older key shapes onto `stable_key` when it is
+    /// empty: the port-bound `camera-<unique_id>` form, and the multi-camera
+    /// disambiguated `…:cap:<unique_id>` form used while two serial-less units
+    /// of the same model were plugged in together.
     pub fn migrate_legacy_camera_key(&mut self, stable_key: &str, capture_id: &str) {
-        let legacy = format!("camera-{capture_id}");
-        if legacy == stable_key {
-            return;
-        }
         if self.config.camera_controls(stable_key).is_some()
             || !self.config.camera_profiles(stable_key).is_empty()
             || self.config.camera_active_profile(stable_key).is_some()
         {
             return;
         }
-        let has_legacy = self.config.camera_controls(&legacy).is_some()
-            || !self.config.camera_profiles(&legacy).is_empty()
-            || self.config.camera_active_profile(&legacy).is_some();
-        if !has_legacy {
+        let candidates = [
+            format!("camera-{capture_id}"),
+            format!("{stable_key}:cap:{capture_id}"),
+        ];
+        let Some(legacy) = candidates
+            .into_iter()
+            .find(|key| key != stable_key && self.camera_key_has_settings(key))
+        else {
             return;
-        }
+        };
         if let Some(controls) = self.config.camera_controls(&legacy) {
             self.config.set_camera_controls(stable_key, controls);
         }
@@ -434,12 +436,17 @@ impl AppState {
             self.config
                 .set_camera_active_profile(stable_key, Some(active));
         }
-        // Drop the orphaned port-bound section so a later plug-in of a different
-        // camera at the same port doesn't inherit these settings.
+        // Drop the orphaned section so a later plug-in doesn't inherit it.
         self.config.devices.remove(&legacy);
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist camera key migration");
         }
+    }
+
+    fn camera_key_has_settings(&self, key: &str) -> bool {
+        self.config.camera_controls(key).is_some()
+            || !self.config.camera_profiles(key).is_empty()
+            || self.config.camera_active_profile(key).is_some()
     }
 
     /// User-saved camera profiles for `config_key` (name → snapshot).

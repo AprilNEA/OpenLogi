@@ -175,8 +175,40 @@ pub(super) fn build_device_list(
     for camera in cameras {
         list.push(camera_record(camera, cache));
     }
+    // Model-scoped serial-less keys collide when two identical cameras are
+    // plugged in; the inventory merge keys by config_key and would drop one.
+    uniquify_camera_config_keys(&mut list);
     sort_device_list(&mut list);
     list
+}
+
+/// When several live cameras share one config key (two serial-less units of
+/// the same model), suffix each with its capture id so inventory reconciliation
+/// keeps both. A lone camera keeps the port-stable model key.
+fn uniquify_camera_config_keys(list: &mut [DeviceRecord]) {
+    use std::collections::HashMap;
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for record in list.iter().filter(|r| r.kind == DeviceKind::Camera) {
+        *counts.entry(record.config_key.clone()).or_default() += 1;
+    }
+    let collisions: HashSet<String> = counts
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(key, _)| key)
+        .collect();
+    if collisions.is_empty() {
+        return;
+    }
+    for record in list.iter_mut().filter(|r| r.kind == DeviceKind::Camera) {
+        if !collisions.contains(&record.config_key) {
+            continue;
+        }
+        let Some(capture_id) = record.capture_id.as_deref() else {
+            continue;
+        };
+        record.config_key = format!("{}:cap:{capture_id}", record.config_key);
+    }
 }
 
 /// A [`DeviceRecord`] for a Logitech UVC webcam.
@@ -954,5 +986,42 @@ mod tests {
         let b = build_device_list(&[], &cache, &Config::default(), &[port_b]);
         assert_eq!(a[0].config_key, b[0].config_key);
         assert_ne!(a[0].capture_id, b[0].capture_id);
+    }
+
+    #[test]
+    fn two_serial_less_same_model_cameras_stay_distinct() {
+        // Model-scoped keys collide without disambiguation; inventory merge
+        // would otherwise keep only one of the two live records.
+        let a = Camera {
+            name: "Logitech StreamCam".to_string(),
+            unique_id: "0x1123000046d0893".to_string(),
+            serial_number: None,
+            vendor_id: 0x046d,
+            product_id: 0x0893,
+            max_resolution: None,
+            max_fps: None,
+        };
+        let b = Camera {
+            unique_id: "0x14110000046d0893".to_string(),
+            ..a.clone()
+        };
+        let cache = AssetResolver::new();
+        let list = build_device_list(&[], &cache, &Config::default(), &[a, b]);
+        assert_eq!(list.len(), 2);
+        assert_ne!(list[0].config_key, list[1].config_key);
+        assert!(list[0].config_key.starts_with("camera:046d:0893:cap:"));
+        assert!(list[1].config_key.starts_with("camera:046d:0893:cap:"));
+        // Alone again, the model key (port-stable) returns.
+        let alone = Camera {
+            name: "Logitech StreamCam".to_string(),
+            unique_id: "0x1123000046d0893".to_string(),
+            serial_number: None,
+            vendor_id: 0x046d,
+            product_id: 0x0893,
+            max_resolution: None,
+            max_fps: None,
+        };
+        let single = build_device_list(&[], &cache, &Config::default(), &[alone]);
+        assert_eq!(single[0].config_key, "camera:046d:0893");
     }
 }
