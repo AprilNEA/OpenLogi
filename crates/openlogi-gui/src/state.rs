@@ -405,6 +405,43 @@ impl AppState {
         }
     }
 
+    /// Move camera settings from the legacy port-bound `camera-<unique_id>` key
+    /// onto the stable serial-based key when the latter has no settings yet.
+    pub fn migrate_legacy_camera_key(&mut self, stable_key: &str, capture_id: &str) {
+        let legacy = format!("camera-{capture_id}");
+        if legacy == stable_key {
+            return;
+        }
+        if self.config.camera_controls(stable_key).is_some()
+            || !self.config.camera_profiles(stable_key).is_empty()
+            || self.config.camera_active_profile(stable_key).is_some()
+        {
+            return;
+        }
+        let has_legacy = self.config.camera_controls(&legacy).is_some()
+            || !self.config.camera_profiles(&legacy).is_empty()
+            || self.config.camera_active_profile(&legacy).is_some();
+        if !has_legacy {
+            return;
+        }
+        if let Some(controls) = self.config.camera_controls(&legacy) {
+            self.config.set_camera_controls(stable_key, controls);
+        }
+        for (name, snap) in self.config.camera_profiles(&legacy) {
+            self.config.save_camera_profile(stable_key, &name, snap);
+        }
+        if let Some(active) = self.config.camera_active_profile(&legacy) {
+            self.config
+                .set_camera_active_profile(stable_key, Some(active));
+        }
+        // Drop the orphaned port-bound section so a later plug-in of a different
+        // camera at the same port doesn't inherit these settings.
+        self.config.devices.remove(&legacy);
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist camera key migration");
+        }
+    }
+
     /// User-saved camera profiles for `config_key` (name → snapshot).
     #[must_use]
     pub fn camera_profiles(

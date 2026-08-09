@@ -171,9 +171,13 @@ pub enum CameraAuthorization {
 pub struct Camera {
     /// Human-readable name, e.g. `"Logitech StreamCam"`.
     pub name: String,
-    /// Stable per-device identifier from the OS capture layer. Keys the device
-    /// in the UI so two identical cameras stay distinct.
+    /// OS capture-layer identifier (AVFoundation `uniqueID`, DirectShow device
+    /// path). Used to open preview/controls; may embed a USB location and so
+    /// change when the camera is moved to another port.
     pub unique_id: String,
+    /// USB `iSerialNumber` when the device reports one. Port-stable; preferred
+    /// for persisted config keys via [`Self::config_key`].
+    pub serial_number: Option<String>,
     /// USB vendor id (`0x046d` for Logitech).
     pub vendor_id: u16,
     /// USB product id (e.g. `0x0893` for the StreamCam).
@@ -183,6 +187,29 @@ pub struct Camera {
     pub max_resolution: Option<(u32, u32)>,
     /// Highest supported frame rate (fps) across all formats, when known.
     pub max_fps: Option<u32>,
+}
+
+impl Camera {
+    /// Persistence key that prefers the USB serial (stable across USB ports)
+    /// and falls back to the OS capture id when the device reports none.
+    #[must_use]
+    pub fn config_key(&self) -> String {
+        if let Some(serial) = self
+            .serial_number
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            format!(
+                "camera:{:04x}:{:04x}:serial:{}",
+                self.vendor_id,
+                self.product_id,
+                serial.to_ascii_lowercase()
+            )
+        } else {
+            format!("camera-{}", self.unique_id)
+        }
+    }
 }
 
 /// Whether this platform has a live-capture backend (preview + snapshot).
@@ -222,6 +249,7 @@ fn enumerate_all() -> Vec<Camera> {
     let _quiesce = USB_QUIESCE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let serials = uvc::usb_serials_by_location();
     macos::enumerate()
         .iter()
         .filter_map(|raw| {
@@ -231,6 +259,9 @@ fn enumerate_all() -> Vec<Camera> {
             }
             if raw.max_fps > 0 {
                 camera.max_fps = Some(raw.max_fps);
+            }
+            if let Some(location) = uvc::location_hint(&raw.unique_id) {
+                camera.serial_number = serials.get(&location).cloned();
             }
             Some(camera)
         })
@@ -261,6 +292,7 @@ impl Camera {
         Some(Self {
             name: name.to_string(),
             unique_id: unique_id.to_string(),
+            serial_number: None,
             vendor_id,
             product_id,
             max_resolution: None,
@@ -317,6 +349,7 @@ mod tests {
             Some(Camera {
                 name: "Logitech StreamCam".to_string(),
                 unique_id: "0x1123000046d0893".to_string(),
+                serial_number: None,
                 vendor_id: LOGITECH_VID,
                 product_id: 0x0893,
                 max_resolution: None,
@@ -327,5 +360,34 @@ mod tests {
             Camera::from_raw("FaceTime HD Camera", "uuid", "FaceTime HD Camera"),
             None
         );
+    }
+
+    #[test]
+    fn config_key_prefers_usb_serial_over_capture_id() {
+        let with_serial = Camera {
+            name: "Logitech StreamCam".into(),
+            unique_id: "0x1123000046d0893".into(),
+            serial_number: Some("ABC123".into()),
+            vendor_id: LOGITECH_VID,
+            product_id: 0x0893,
+            max_resolution: None,
+            max_fps: None,
+        };
+        assert_eq!(
+            with_serial.config_key(),
+            "camera:046d:0893:serial:abc123"
+        );
+        // Same physical camera on another USB port → same config key.
+        let moved = Camera {
+            unique_id: "0x14110000046d0893".into(),
+            ..with_serial.clone()
+        };
+        assert_eq!(moved.config_key(), with_serial.config_key());
+
+        let no_serial = Camera {
+            serial_number: None,
+            ..with_serial
+        };
+        assert_eq!(no_serial.config_key(), "camera-0x1123000046d0893");
     }
 }

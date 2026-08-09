@@ -9,8 +9,10 @@
 //!
 //! Enumeration also lives here: the DirectShow video-input category yields
 //! each camera's friendly name and its device path, whose embedded
-//! `vid_xxxx&pid_xxxx` markers give the USB identity. The device path doubles
-//! as the camera's stable [`Camera::unique_id`].
+//! `vid_xxxx&pid_xxxx` markers give the USB identity. The device path is the
+//! OS capture id ([`Camera::unique_id`]); when it embeds a real USB serial
+//! (not a parent-generated instance id) that serial is preferred for the
+//! port-stable [`Camera::config_key`].
 
 #![expect(
     unsafe_code,
@@ -369,14 +371,30 @@ fn camera_from_moniker(moniker: &IMoniker) -> Option<Camera> {
     let unique_id = read_property(moniker, w!("DevicePath"))?;
     let (vendor_id, product_id) = parse_device_path_ids(&unique_id)?;
     let name = read_property(moniker, w!("FriendlyName")).unwrap_or_else(|| "Camera".into());
+    let serial_number = usb_serial_from_device_path(&unique_id);
     Some(Camera {
         name,
         unique_id,
+        serial_number,
         vendor_id,
         product_id,
         max_resolution: None,
         max_fps: None,
     })
+}
+
+/// USB `iSerialNumber` embedded in a device-interface path, when present.
+///
+/// Paths look like `\\?\usb#vid_046d&pid_0893&mi_00#SERIAL#{guid}\global`.
+/// Windows fabricates a parent-relative instance id (always containing `&`)
+/// when the device has no serial — those are port-dependent and rejected.
+pub(crate) fn usb_serial_from_device_path(path: &str) -> Option<String> {
+    // Split on '#': [prefix, hardware-id, instance, {class-guid}…]
+    let instance = path.split('#').nth(2)?.split('\\').next()?.trim();
+    if instance.is_empty() || instance.contains('&') {
+        return None;
+    }
+    Some(instance.to_string())
 }
 
 /// Read one string property (`FriendlyName` / `DevicePath`) from a moniker's
@@ -404,4 +422,25 @@ fn parse_device_path_ids(path: &str) -> Option<(u16, u16)> {
         u16::from_str_radix(rest.get(..4)?, 16).ok()
     };
     Some((hex_after("vid_")?, hex_after("pid_")?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::usb_serial_from_device_path;
+
+    #[test]
+    fn real_usb_serial_is_extracted() {
+        let path = r"\\?\usb#vid_046d&pid_0893&mi_00#6B123456#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global";
+        assert_eq!(
+            usb_serial_from_device_path(path).as_deref(),
+            Some("6B123456")
+        );
+    }
+
+    #[test]
+    fn parent_generated_instance_is_rejected() {
+        // StreamCam without a firmware serial: Windows fabricates `9&56d9c30&0&0000`.
+        let path = r"\\?\usb#vid_046d&pid_0893&mi_00#9&56d9c30&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global";
+        assert_eq!(usb_serial_from_device_path(path), None);
+    }
 }

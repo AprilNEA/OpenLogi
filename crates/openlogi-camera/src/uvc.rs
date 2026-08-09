@@ -267,13 +267,179 @@ pub fn apply_settings(
 // the trailing 8 vid+pid digits; taking a fixed leading 8 would swallow a
 // nibble of the vid and shift the location. Only used to pick between two
 // identical cameras; matching is primarily by vendor id.
-fn location_hint(unique_id: &str) -> Option<u32> {
+pub(crate) fn location_hint(unique_id: &str) -> Option<u32> {
     let hex = unique_id.strip_prefix("0x").unwrap_or(unique_id);
     let location = hex.get(..hex.len().checked_sub(8)?)?;
     if location.is_empty() {
         return None;
     }
     u32::from_str_radix(location, 16).ok()
+}
+
+/// USB `iSerialNumber` for every attached `IOUSBDevice`, keyed by location id.
+///
+/// Read from the IORegistry only — no device open — so enumeration can prefer
+/// the port-stable serial for config keys without racing a control seize.
+pub(crate) fn usb_serials_by_location() -> std::collections::HashMap<u32, String> {
+    use std::collections::HashMap;
+
+    let mut out = HashMap::new();
+    let Ok(class) = CString::new("IOUSBDevice") else {
+        return out;
+    };
+    // SAFETY: matching dict is consumed by GetMatchingServices; each service
+    // is released after we read its registry properties.
+    unsafe {
+        let matching = IOServiceMatching(class.as_ptr());
+        if matching.is_null() {
+            return out;
+        }
+        let mut iter: IoIterator = 0;
+        if IOServiceGetMatchingServices(kIOMainPortDefault, matching, &raw mut iter)
+            != KIO_RETURN_SUCCESS
+        {
+            return out;
+        }
+        let key = cf_string("USB Serial Number");
+        loop {
+            let service = IOIteratorNext(iter);
+            if service == 0 {
+                break;
+            }
+            if let Some((location, serial)) = registry_location_and_serial(service, key) {
+                out.entry(location).or_insert(serial);
+            }
+            IOObjectRelease(service);
+        }
+        if !key.is_null() {
+            CFRelease(key);
+        }
+        IOObjectRelease(iter);
+    }
+    out
+}
+
+/// Location id + USB serial from an `IOUSBDevice` service, without opening it.
+unsafe fn registry_location_and_serial(
+    service: IoService,
+    serial_key: *const c_void,
+) -> Option<(u32, String)> {
+    unsafe {
+        // Prefer the USB device interface for location (matches control open);
+        // fall back to the registry number property when the plug-in is busy.
+        let location = device_location_id(service).or_else(|| {
+            let key = cf_string("locationID");
+            let loc = cf_number_u32(IORegistryEntryCreateCFProperty(
+                service,
+                key,
+                ptr::null(),
+                0,
+            ));
+            if !key.is_null() {
+                CFRelease(key);
+            }
+            loc
+        })?;
+        let serial_ref =
+            IORegistryEntryCreateCFProperty(service, serial_key, ptr::null(), 0);
+        let serial = cf_string_value(serial_ref)?;
+        if serial.is_empty() {
+            return None;
+        }
+        Some((location, serial))
+    }
+}
+
+/// Location id via a transient `IOUSBDeviceInterface` (no open/seize).
+unsafe fn device_location_id(service: IoService) -> Option<u32> {
+    unsafe {
+        let user_client = make_uuid(&KIO_USB_DEVICE_USER_CLIENT_TYPE_ID);
+        let plugin_type = make_uuid(&KIO_CF_PLUGIN_INTERFACE_ID);
+        let mut plugin: *mut *mut PlugInInterface = ptr::null_mut();
+        let mut score: i32 = 0;
+        let rc = IOCreatePlugInInterfaceForService(
+            service,
+            user_client,
+            plugin_type,
+            &raw mut plugin,
+            &raw mut score,
+        );
+        CFRelease(user_client);
+        CFRelease(plugin_type);
+        if rc != KIO_RETURN_SUCCESS || plugin.is_null() {
+            return None;
+        }
+        let dev_uuid_ref = make_uuid(&KIO_USB_DEVICE_INTERFACE_ID);
+        let dev_uuid = CFUUIDGetUUIDBytes(dev_uuid_ref);
+        CFRelease(dev_uuid_ref);
+        let mut dev_ptr: *mut c_void = ptr::null_mut();
+        let qrc =
+            ((**plugin).query_interface)(plugin.cast::<c_void>(), dev_uuid, &raw mut dev_ptr);
+        IODestroyPlugInInterface(plugin);
+        if qrc != 0 || dev_ptr.is_null() {
+            return None;
+        }
+        let dev = dev_ptr.cast::<*mut UsbDeviceInterface>();
+        let mut location: u32 = 0;
+        let ok = ((**dev).get_location_id)(dev.cast::<c_void>(), &raw mut location)
+            == KIO_RETURN_SUCCESS;
+        ((**dev).release)(dev.cast::<c_void>());
+        ok.then_some(location)
+    }
+}
+
+fn cf_string(s: &str) -> *const c_void {
+    let Ok(c) = CString::new(s) else {
+        return ptr::null();
+    };
+    // SAFETY: UTF-8 C string; returned CFString is owned by the caller.
+    unsafe {
+        CFStringCreateWithCString(ptr::null(), c.as_ptr(), K_CF_STRING_ENCODING_UTF8)
+    }
+}
+
+unsafe fn cf_string_value(cf: *const c_void) -> Option<String> {
+    if cf.is_null() {
+        return None;
+    }
+    unsafe {
+        if CFGetTypeID(cf) != CFStringGetTypeID() {
+            CFRelease(cf);
+            return None;
+        }
+        let len = CFStringGetLength(cf);
+        // UTF-8 worst case 4 bytes/char + NUL.
+        let cap = usize::try_from(len).ok()?.checked_mul(4)?.checked_add(1)?;
+        let mut buf = vec![0u8; cap];
+        let ok = CFStringGetCString(
+            cf,
+            buf.as_mut_ptr().cast(),
+            isize::try_from(cap).ok()?,
+            K_CF_STRING_ENCODING_UTF8,
+        ) != 0;
+        CFRelease(cf);
+        if !ok {
+            return None;
+        }
+        let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        String::from_utf8(buf[..nul].to_vec()).ok()
+    }
+}
+
+unsafe fn cf_number_u32(cf: *const c_void) -> Option<u32> {
+    if cf.is_null() {
+        return None;
+    }
+    unsafe {
+        if CFGetTypeID(cf) != CFNumberGetTypeID() {
+            CFRelease(cf);
+            return None;
+        }
+        let mut value: u32 = 0;
+        let ok = CFNumberGetValue(cf, K_CF_NUMBER_SINT32_TYPE, (&raw mut value).cast()) != 0;
+        CFRelease(cf);
+        ok.then_some(value)
+    }
 }
 
 // ── IOKit / CoreFoundation FFI ───────────────────────────────────────────────
@@ -366,6 +532,12 @@ unsafe extern "C" {
         score: *mut i32,
     ) -> IoReturn;
     fn IODestroyPlugInInterface(interface: *mut *mut PlugInInterface) -> IoReturn;
+    fn IORegistryEntryCreateCFProperty(
+        entry: IoService,
+        key: *const c_void,
+        allocator: *const c_void,
+        options: u32,
+    ) -> *const c_void;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -373,7 +545,28 @@ unsafe extern "C" {
     fn CFUUIDCreateFromUUIDBytes(allocator: *const c_void, bytes: CfUuidBytes) -> CfUuidRef;
     fn CFUUIDGetUUIDBytes(uuid: CfUuidRef) -> CfUuidBytes;
     fn CFRelease(cf: *const c_void);
+    fn CFStringCreateWithCString(
+        allocator: *const c_void,
+        c_str: *const i8,
+        encoding: u32,
+    ) -> *const c_void;
+    fn CFStringGetTypeID() -> usize;
+    fn CFNumberGetTypeID() -> usize;
+    fn CFGetTypeID(cf: *const c_void) -> usize;
+    fn CFStringGetLength(s: *const c_void) -> isize;
+    fn CFStringGetCString(
+        s: *const c_void,
+        buf: *mut i8,
+        buffer_size: isize,
+        encoding: u32,
+    ) -> u8;
+    fn CFNumberGetValue(number: *const c_void, the_type: i32, value_ptr: *mut c_void) -> u8;
 }
+
+/// `kCFStringEncodingUTF8`.
+const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+/// `kCFNumberSInt32Type` — locationID is a 32-bit number in the registry.
+const K_CF_NUMBER_SINT32_TYPE: i32 = 3;
 
 // IOUSBLib UUIDs, as raw bytes (UUID order).
 const KIO_USB_DEVICE_USER_CLIENT_TYPE_ID: [u8; 16] = [

@@ -73,8 +73,10 @@ struct BuiltinProfile {
 }
 
 pub struct CameraControlsPanel {
-    /// The `camera-<uid>` config key the panel is currently built for.
+    /// Persistence key (`camera:vid:pid:serial:…` or legacy `camera-<uid>`).
     key: Option<String>,
+    /// OS capture id used for UVC open/read/write (may change with USB port).
+    uid: Option<String>,
     sliders: Vec<ControlSlider>,
     autos: Vec<AutoRow>,
     #[allow(dead_code, reason = "held to keep the AppState observer alive")]
@@ -115,17 +117,20 @@ impl CameraControlsPanel {
         let state_obs = cx.observe_global::<AppState>(|_panel, cx| cx.notify());
         Self {
             key: None,
+            uid: None,
             sliders: Vec::new(),
             autos: Vec::new(),
             state_obs,
         }
     }
 
-    /// The active camera's config key, if a webcam is the selected device.
-    fn active_key(cx: &Context<Self>) -> Option<String> {
+    /// The active camera's `(config_key, capture_id)`, if a webcam is selected.
+    fn active_camera(cx: &Context<Self>) -> Option<(String, String)> {
         let record = cx.try_global::<AppState>()?.current_record()?;
-        matches!(record.kind, openlogi_core::device::DeviceKind::Camera)
-            .then(|| record.config_key.clone())
+        if !matches!(record.kind, openlogi_core::device::DeviceKind::Camera) {
+            return None;
+        }
+        Some((record.config_key.clone(), record.capture_id.clone()?))
     }
 
     /// Re-assert the saved auto/value differences on the hardware in one
@@ -166,25 +171,30 @@ impl CameraControlsPanel {
 
     /// Build the sliders and auto rows for `key` from the device's reported
     /// state, re-applying any saved values in one batched device write. Cheap
-    /// no-op when already built for this camera.
-    fn ensure_built(&mut self, key: &str, cx: &mut Context<Self>) {
-        if self.key.as_deref() == Some(key) {
+    /// no-op when already built for this camera. `uid` is the OS capture id.
+    fn ensure_built(&mut self, key: &str, uid: &str, cx: &mut Context<Self>) {
+        if self.key.as_deref() == Some(key) && self.uid.as_deref() == Some(uid) {
             return;
         }
         self.sliders.clear();
         self.autos.clear();
-        let uid = uid_of(key).to_string();
+        // Port-bound keys from older builds → stable serial key, once per open.
+        cx.update_global::<AppState, _>(|state, _| {
+            state.migrate_legacy_camera_key(key, uid);
+        });
 
         // One device-open reads every control and auto state. A failed read
         // means the camera is unreachable (unplugged or seized by another app):
         // leave `self.key` unset so the next render retries, instead of caching
         // an empty panel that never rebuilds once the device returns.
-        let Ok(snap) = openlogi_camera::read_camera_state(&uid) else {
+        let Ok(snap) = openlogi_camera::read_camera_state(uid) else {
             debug!("camera state read failed; retrying next render");
             self.key = None;
+            self.uid = None;
             return;
         };
         self.key = Some(key.to_string());
+        self.uid = Some(uid.to_string());
 
         // Saved auto states win over the device's, then saved values win for
         // controls whose auto is off; the differences push back in one open.
@@ -227,11 +237,12 @@ impl CameraControlsPanel {
         // (non-atomic) batch, rebuild rows from the device's live state; if even
         // that read fails, the hardware state is unknown — drop the key and let
         // the next render retry rather than caching the stale pre-write values.
-        let live = match Self::reapply_saved(key, &uid, &apply_autos, &apply_values, cx) {
+        let live = match Self::reapply_saved(key, uid, &apply_autos, &apply_values, cx) {
             Reapplied::Clean => None,
             Reapplied::Live(state) => Some(state),
             Reapplied::Unknown => {
                 self.key = None;
+                self.uid = None;
                 return;
             }
         };
@@ -260,7 +271,7 @@ impl CameraControlsPanel {
                     .find(|(c, _)| *c == control)
                     .map_or(range.current, |(_, r)| r.current),
             };
-            self.push_control_slider(control, range, shown, &uid, key, cx);
+            self.push_control_slider(control, range, shown, uid, key, cx);
         }
     }
 
@@ -364,7 +375,7 @@ impl CameraControlsPanel {
     /// Flip one auto mode. Turning auto off re-asserts the slider's value so
     /// the hardware ends where the UI shows, in the same device-open.
     fn toggle_auto(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(key) = self.key.clone() else {
+        let (Some(key), Some(uid)) = (self.key.clone(), self.uid.clone()) else {
             return;
         };
         let Some(row) = self.autos.get(ix) else {
@@ -372,7 +383,6 @@ impl CameraControlsPanel {
         };
         let toggle = row.toggle;
         let on = !row.on;
-        let uid = uid_of(&key).to_string();
         let mut values = Vec::new();
         if !on
             && let Some(slider) = self
@@ -405,10 +415,9 @@ impl CameraControlsPanel {
     /// per-row loop would silently skip the remaining rows once a failure
     /// invalidated the panel, leaving a mix of reset and stale saved values.
     fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.key.clone() else {
+        let (Some(key), Some(uid)) = (self.key.clone(), self.uid.clone()) else {
             return;
         };
-        let uid = uid_of(&key).to_string();
         let autos: Vec<(AutoToggle, bool)> = self
             .autos
             .iter()
@@ -466,7 +475,7 @@ impl CameraControlsPanel {
     /// Reset one control to its device default — auto mode back to the
     /// device's default state, the value re-seated and persisted.
     fn reset_control(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.key.clone() else {
+        let (Some(key), Some(uid)) = (self.key.clone(), self.uid.clone()) else {
             return;
         };
         let Some((control, default, state)) = self
@@ -476,7 +485,6 @@ impl CameraControlsPanel {
         else {
             return;
         };
-        let uid = uid_of(&key).to_string();
         let mut autos = Vec::new();
         let auto_pos = control.auto_toggle().and_then(|toggle| {
             let pos = self.autos.iter().position(|a| a.toggle == toggle)?;
@@ -511,10 +519,9 @@ impl CameraControlsPanel {
     /// everything to the hardware in one batched open, re-seat the sliders,
     /// persist the values, and remember the selection.
     fn apply_profile(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.key.clone() else {
+        let (Some(key), Some(uid)) = (self.key.clone(), self.uid.clone()) else {
             return;
         };
-        let uid = uid_of(&key).to_string();
         let custom = cx
             .try_global::<AppState>()
             .map(|s| s.camera_profiles(&key))
@@ -623,6 +630,7 @@ impl CameraControlsPanel {
     /// later edit's [`Self::sync_active_custom`] can't overwrite a saved profile
     /// with those rebuilt values.
     fn resync_after_failed_write(&mut self, cx: &mut Context<Self>) {
+        self.uid = None;
         if let Some(key) = self.key.take() {
             cx.update_global::<AppState, _>(|state, _| {
                 state.set_camera_active_profile(&key, None);
@@ -668,13 +676,14 @@ impl CameraControlsPanel {
 impl Render for CameraControlsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let Some(key) = Self::active_key(cx) else {
+        let Some((key, uid)) = Self::active_camera(cx) else {
             self.key = None;
+            self.uid = None;
             self.sliders.clear();
             self.autos.clear();
             return div().into_any_element();
         };
-        self.ensure_built(&key, cx);
+        self.ensure_built(&key, &uid, cx);
 
         if self.sliders.is_empty() {
             return div()
@@ -988,8 +997,4 @@ fn control_label(control: CameraControl) -> SharedString {
     }
 }
 
-/// Strip the `camera-` config-key prefix back to the AVFoundation unique id the
-/// UVC layer matches on.
-fn uid_of(key: &str) -> &str {
-    key.strip_prefix("camera-").unwrap_or(key)
-}
+

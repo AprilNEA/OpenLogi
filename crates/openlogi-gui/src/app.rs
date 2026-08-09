@@ -455,11 +455,13 @@ impl Render for AppView {
             };
             // Run the camera only while its live-preview tab is the one on screen;
             // any other tab, device, or Home tears the session down (LED off).
+            // Use capture_id (OS open id), not config_key — the latter prefers
+            // the port-stable USB serial and is not a valid AVFoundation id.
             let camera_target = if active == DetailTab::Camera {
                 record
                     .as_ref()
                     .filter(|r| matches!(r.kind, DeviceKind::Camera))
-                    .and_then(|r| r.config_key.strip_prefix("camera-").map(ToOwned::to_owned))
+                    .and_then(|r| r.capture_id.clone())
             } else {
                 None
             };
@@ -626,6 +628,7 @@ mod tests {
             serial_number: None,
             unit_id: [0; 4],
             route: None,
+            capture_id: None,
             kind,
             capabilities,
             slot: 1,
