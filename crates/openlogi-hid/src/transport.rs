@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, LazyLock};
 
 #[cfg(not(target_os = "windows"))]
-use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader};
-use async_hid::{DeviceInfo, DeviceWriter, HidBackend};
+use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader, DeviceWriter};
+use async_hid::{DeviceInfo, HidBackend};
 use futures_lite::StreamExt as _;
 use hidpp::channel::HidppChannel;
 use hidpp::nibble::U4;
