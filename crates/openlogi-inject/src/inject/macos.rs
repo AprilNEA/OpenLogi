@@ -546,7 +546,10 @@ unsafe fn find_nav_button_by_position(
             if c.is_null() { None } else { Some(c) }
         };
 
-        // AXWindow children: find AXToolbar
+        // AXWindow children: find AXToolbar. `child_at` returns a Get-Rule
+        // pointer owned by the array it was read from — retain it before
+        // releasing that array, or the element can be deallocated along
+        // with it, leaving a dangling pointer for every use below.
         let win_kids = children_of(win)?;
         let count = CFArrayGetCount(win_kids);
         let mut toolbar: Option<CFTypeRef> = None;
@@ -554,7 +557,7 @@ unsafe fn find_nav_button_by_position(
             if let Some(c) = child_at(win_kids, i)
                 && role_of(c).as_deref() == Some("AXToolbar")
             {
-                toolbar = Some(c);
+                toolbar = Some(CFRetain(c));
                 break;
             }
         }
@@ -564,6 +567,7 @@ unsafe fn find_nav_button_by_position(
         // AXToolbar children: skip AXGroups until we find the nav group (the
         // group whose first child is itself an AXGroup containing buttons).
         let tb_kids = children_of(toolbar)?;
+        CFRelease(toolbar);
         let tb_count = CFArrayGetCount(tb_kids);
         let mut nav_group: Option<CFTypeRef> = None;
         for i in 0..tb_count {
@@ -577,7 +581,7 @@ unsafe fn find_nav_button_by_position(
                         child_at(inner_kids, 0).and_then(role_of).as_deref() == Some("AXGroup");
                     CFRelease(inner_kids);
                     if has_inner {
-                        nav_group = Some(g);
+                        nav_group = Some(CFRetain(g));
                         break;
                     }
                 }
@@ -588,17 +592,26 @@ unsafe fn find_nav_button_by_position(
 
         // nav_group → first AXGroup child → AXButton[0 or 1]
         let ng_kids = children_of(nav_group)?;
-        let inner = child_at(ng_kids, 0);
+        CFRelease(nav_group);
+        let inner = child_at(ng_kids, 0).map(|c| CFRetain(c));
         CFRelease(ng_kids);
         let inner = inner?;
 
         let inner_kids = children_of(inner)?;
+        CFRelease(inner);
         let btn_idx = isize::from(forward);
-        let btn = child_at(inner_kids, btn_idx);
+        let btn = child_at(inner_kids, btn_idx).map(|c| CFRetain(c));
         CFRelease(inner_kids);
         let btn = btn?;
 
-        (role_of(btn).as_deref() == Some("AXButton")).then(|| CFRetain(btn))
+        // btn is already +1 retained (above) to survive inner_kids' release —
+        // return it as-is on match, or release it before failing out.
+        if role_of(btn).as_deref() == Some("AXButton") {
+            Some(btn)
+        } else {
+            CFRelease(btn);
+            None
+        }
     }
 }
 

@@ -566,6 +566,11 @@ async fn divert_candidate_cids(
                 for &d in diverted.iter() {
                     let _ = rc.set_cid_reporting(d, false, false).await;
                 }
+                // The failed enable may still have applied in firmware if only
+                // the acknowledgement was lost — best-effort revert this CID
+                // too, so a flaky response doesn't leave it silently diverted
+                // with no ArmedControls session ever created to restore it.
+                let _ = rc.set_cid_reporting(cid, false, false).await;
                 return Err(GestureError::Hidpp(format!("{e:?}")));
             }
             group.push(cid);
