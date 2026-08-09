@@ -58,10 +58,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ steps.app-token.outputs.cargo-registry-token }}
-      # release-plz only lists commits for packages it processes. App crates with
-      # release=false (gui/agent/agent-core) never contribute via changelog_include,
-      # so fold every release-worthy subject since the last v* tag into CHANGELOG.md.
-      - name: Augment release changelog with app-crate commits
+      # Whole-repo CHANGELOG via git-cliff (cliff.toml). release-plz is
+      # package-path-scoped and skips release=false app crates; git-cliff is the
+      # GoReleaser-style "every conventional commit since last tag" path.
+      - name: Write root changelog with git-cliff
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -75,28 +75,30 @@ jobs:
               | head -n1
           )"
           if [[ -z "${branch}" ]]; then
-            echo "No open release-plz PR — nothing to augment."
+            echo "No open release-plz PR — nothing to write."
             exit 0
           fi
           git config user.name "aprilnea[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-          # The release-plz branch does not yet contain this script on first
-          # land; copy it from the master checkout before switching.
-          cp scripts/release/augment_changelog.py "${RUNNER_TEMP}/augment_changelog.py"
+          # Script/config may not be on the release-plz branch yet — copy from master.
+          cp cliff.toml "${RUNNER_TEMP}/cliff.toml"
+          cp scripts/release/write-changelog.sh "${RUNNER_TEMP}/write-changelog.sh"
+          chmod +x "${RUNNER_TEMP}/write-changelog.sh"
           git fetch origin "${branch}"
           git checkout --force "origin/${branch}"
-          # release-plz wrote CHANGELOG from package-scoped commits; re-scan the
-          # full history since the previous tag so gui/agent-only fixes appear.
-          python3 "${RUNNER_TEMP}/augment_changelog.py" \
-            --changelog CHANGELOG.md \
-            --repo-url "https://github.com/${{ github.repository }}"
+          cp "${RUNNER_TEMP}/cliff.toml" cliff.toml
+          # git-cliff: same binary release-plz uses under the hood for formatting.
+          curl -sL "https://github.com/orhun/git-cliff/releases/download/v2.13.1/git-cliff-2.13.1-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "${RUNNER_TEMP}"
+          export PATH="${RUNNER_TEMP}/git-cliff-2.13.1:${PATH}"
+          "${RUNNER_TEMP}/write-changelog.sh"
           if git diff --quiet -- CHANGELOG.md; then
             echo "CHANGELOG already complete."
             exit 0
           fi
-          git add CHANGELOG.md
-          git commit -m "chore(release): include all post-tag commits in changelog"
+          git add CHANGELOG.md cliff.toml 2>/dev/null || git add CHANGELOG.md
+          git commit -m "chore(release): write whole-repo changelog"
           git push origin "HEAD:refs/heads/${branch}"
       # `release-plz/action` swallows a release-pr HTTP 422 as a warning and
       # reports no PR, which silently stalls releases (it looks identical to a

@@ -14,16 +14,11 @@
 # could attach assets — "target_commitish cannot be changed when release is
 # immutable". Keep `git_release_enable = false` so release.yml owns the lifecycle.)
 #
-# Single changelog: every crate points `changelog_path` at the repo-root
-# CHANGELOG.md, so release-plz aggregates all crates' sections into that one file
-# instead of scattering a CHANGELOG.md into each crate directory. (changelog_path
-# is per-package only — it can't be set in [workspace].)
-#
-# App crates (gui/agent/agent-core) stay release=false; release-plz cannot process
-# them (git_only cargo-package fails on path/git deps), so changelog_include is a
-# no-op for their commits. scripts/release/augment_changelog.py runs after
-# release-pr and folds every release-worthy subject since the last v* tag into
-# the root CHANGELOG so gui/agent-only fixes are not dropped.
+# Changelog: release-plz is package-path-scoped and skips `release = false` app
+# crates (gui/agent), so it does NOT own CHANGELOG.md. Whole-repo notes are
+# written by git-cliff via `cliff.toml` after each release-pr (same idea as
+# GoReleaser's `changelog.use: git` — every conventional commit since the last
+# tag, no per-crate path filter).
 
 [workspace]
 # Open release PRs from a `release-plz/`-prefixed branch.
@@ -35,6 +30,8 @@ semver_check = false
 # Per-crate tags/releases are off; the root crate owns the one workspace release.
 git_tag_enable = false
 git_release_enable = false
+# Version bumps only — root CHANGELOG.md is written by git-cliff (cliff.toml).
+changelog_update = false
 # Only publish/tag when the release PR merges (branch prefix above). A later
 # master tip after a failed crates.io publish must not cut v{version} — re-run
 # the failed release job on that same SHA once credentials are fixed.
@@ -43,7 +40,6 @@ release_always = false
 [[package]]
 name = "openlogi"
 version_group = "openlogi"
-changelog_path = "CHANGELOG.md"
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
 # GitHub Release is owned by release.yml (softprops), not release-plz — see header.
@@ -52,46 +48,36 @@ git_release_enable = false
 [[package]]
 name = "openlogi-core"
 version_group = "openlogi"
-changelog_path = "CHANGELOG.md"
 
 # OS input-event synthesis split out of openlogi-core (depends on it). Published
 # with the workspace under unified versioning.
 [[package]]
 name = "openlogi-inject"
 version_group = "openlogi"
-changelog_path = "CHANGELOG.md"
 
 [[package]]
 name = "openlogi-hid"
 version_group = "openlogi"
-changelog_path = "CHANGELOG.md"
 
 [[package]]
 name = "openlogi-assets"
 version_group = "openlogi"
-changelog_path = "CHANGELOG.md"
 
 [[package]]
 name = "openlogi-cli"
 version_group = "openlogi"
-changelog_path = "CHANGELOG.md"
 
 [[package]]
 name = "openlogi-hook"
 version_group = "openlogi"
-changelog_path = "CHANGELOG.md"
 
 # Vendored fork of the `hidpp` crate (0BSD, from lus/logy). Published with the
 # workspace under unified versioning; upstream's 0.3.0 is provenance only.
 [[package]]
 name = "openlogi-hidpp"
 version_group = "openlogi"
-changelog_path = "CHANGELOG.md"
 
-# App crates: not crates.io packages (git gpui deps / login-item binary). They
-# stay `release = false` so release-plz does not try to package them (git_only
-# cargo-package fails on path/git deps). Their conventional commits still reach
-# the root CHANGELOG via scripts/release/augment_changelog.py after release-pr.
+# App crates: not crates.io packages (git gpui deps / login-item binary).
 # `publish = false` must mirror each crate's Cargo.toml.
 [[package]]
 name = "openlogi-gui"
