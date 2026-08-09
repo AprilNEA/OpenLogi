@@ -271,6 +271,7 @@ _version: 1
 "Scrolling": "Rolagem"
 "Invert scroll direction": "Inverter direção de rolagem"
 "Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.": "Inverte a roda de rolagem deste mouse. Seu trackpad mantém a direção de rolagem do sistema."
+"Reverse this mouse's scroll wheel in macOS. Your trackpad keeps the system scroll direction.": "Inverte a roda de rolagem deste mouse no macOS. Seu trackpad mantém a direção de rolagem do sistema."
 "This device does not report native HID++ scroll inversion support.": "This device does not report native HID++ scroll inversion support."
 "Wheel resolution": "Resolução da roda"
 "Device default": "Padrão do dispositivo"

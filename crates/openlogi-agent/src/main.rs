@@ -235,6 +235,7 @@ async fn run(config: Config) {
                         info!("accessibility granted — installing OS mouse hook");
                         hook = hook_runtime::start(
                             shared.hook_maps.clone(),
+                            shared.scroll_inversions.clone(),
                             shared.dpi_cycle.clone(),
                             shared.capture_channel.clone(),
                             Arc::clone(&event_monitor),

@@ -153,6 +153,9 @@ pub struct AppState {
     /// rebuild, and "apply now" device changes (DPI / SmartShift / lighting)
     /// go out as their own commands. The GUI never opens a device itself.
     ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
+    /// Isolated persistence target for tests that exercise commit + reload.
+    #[cfg(test)]
+    test_config_path: Option<std::path::PathBuf>,
     /// Raw inventory from the last *completed* enumeration, kept for the
     /// diagnostics report (receivers + transports). The poll path only stores
     /// [`InventoryHealth::Ready`](openlogi_agent_core::ipc::InventoryHealth)
@@ -209,6 +212,8 @@ impl AppState {
             device_list,
             config,
             ipc_commands,
+            #[cfg(test)]
+            test_config_path: None,
             last_inventory: Vec::new(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             monitor_events: std::collections::VecDeque::new(),
@@ -237,7 +242,14 @@ impl AppState {
     /// next reconnect or wake. Skipping the reload keeps the agent on whatever
     /// it already runs; the GUI keeps the new value in memory either way.
     fn persist_and_reload(&self, what: &str) {
-        if let Err(e) = self.config.save_atomic() {
+        #[cfg(test)]
+        let save = self.test_config_path.as_ref().map_or_else(
+            || self.config.save_atomic(),
+            |path| self.config.save_to_path(path),
+        );
+        #[cfg(not(test))]
+        let save = self.config.save_atomic();
+        if let Err(e) = save {
             warn!(error = %e, what, "could not persist to config.toml — agent reload skipped");
             return;
         }
@@ -962,18 +974,31 @@ impl AppState {
 
     /// Whether the active device reports native HID++ wheel inversion support.
     #[must_use]
-    pub fn current_scroll_inversion_supported(&self) -> bool {
+    pub fn current_native_scroll_inversion_supported(&self) -> bool {
         self.current_record()
             .and_then(|record| record.capabilities)
             .is_some_and(|capabilities| capabilities.scroll_inversion)
     }
 
+    /// Whether the active device can invert its scroll wheel, either through
+    /// native HID++ support or the macOS host-side fallback.
+    #[must_use]
+    pub fn current_scroll_inversion_supported(&self) -> bool {
+        self.current_record().is_some_and(|record| {
+            scroll_inversion_supported(
+                record.capabilities,
+                record.is_persistent(),
+                cfg!(target_os = "macos"),
+            )
+        })
+    }
+
     /// Set the active device's scroll-wheel inversion, persist it, and reload
-    /// the agent so it writes the device's native HID++ wheel inversion. No-op
-    /// when no device is selected or the active device does not report support.
+    /// the agent so it applies either native HID++ inversion or the macOS
+    /// host-side fallback. No-op when no supported persistent device is selected.
     pub fn commit_invert_scroll(&mut self, invert: bool) {
         if !self.current_scroll_inversion_supported() {
-            debug!("active device does not support native scroll inversion");
+            debug!("active device does not support scroll inversion");
             return;
         }
         let Some(key) = self
@@ -1531,6 +1556,17 @@ fn smartshift_read_is_current(
     }
 }
 
+fn scroll_inversion_supported(
+    capabilities: Option<openlogi_core::device::Capabilities>,
+    persistent: bool,
+    macos_fallback: bool,
+) -> bool {
+    persistent
+        && capabilities.is_some_and(|capabilities| {
+            capabilities.scroll_inversion || (macos_fallback && capabilities.pointer)
+        })
+}
+
 fn set_scroll_resolution_if_supported(
     config: &mut Config,
     key: &str,
@@ -1559,11 +1595,23 @@ mod tests {
     use openlogi_hid::{SmartShiftMode, SmartShiftStatus};
 
     use super::{
-        AppState, Load, SmartShiftWriteStatus, build_device_list,
+        AppState, Load, SmartShiftWriteStatus, build_device_list, scroll_inversion_supported,
         set_scroll_resolution_if_supported, smartshift_read_is_current, smartshift_write_outcome,
     };
 
     fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
+        direct_inventory_with(
+            unit_id,
+            DeviceKind::Mouse,
+            Capabilities::presumed_from_kind(DeviceKind::Mouse),
+        )
+    }
+
+    fn direct_inventory_with(
+        unit_id: [u8; 4],
+        kind: DeviceKind,
+        capabilities: Capabilities,
+    ) -> DeviceInventory {
         DeviceInventory {
             receiver: ReceiverInfo {
                 name: "MX Master 3S".to_string(),
@@ -1575,7 +1623,7 @@ mod tests {
                 slot: openlogi_hid::DIRECT_DEVICE_INDEX,
                 codename: Some("MX Master 3S".to_string()),
                 wpid: None,
-                kind: DeviceKind::Mouse,
+                kind,
                 online: true,
                 battery: None,
                 model_info: Some(DeviceModelInfo {
@@ -1586,9 +1634,153 @@ mod tests {
                     model_ids: [0xb034, 0, 0],
                     extended_model_id: 2,
                 }),
-                capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+                capabilities: Some(capabilities),
             }],
         }
+    }
+
+    #[test]
+    fn native_scroll_inversion_remains_supported() {
+        let capabilities = Capabilities {
+            pointer: true,
+            scroll_inversion: true,
+            ..Capabilities::default()
+        };
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState::with_runtime(
+            Config::default(),
+            &[direct_inventory_with(
+                [0xa3, 0x93, 0xca, 0xe0],
+                DeviceKind::Mouse,
+                capabilities,
+            )],
+            &AssetResolver::new(),
+            commands,
+        );
+
+        assert!(state.current_native_scroll_inversion_supported());
+        assert!(state.current_scroll_inversion_supported());
+    }
+
+    #[test]
+    fn software_scroll_inversion_is_macos_only() {
+        let capabilities = Some(Capabilities {
+            pointer: true,
+            scroll_inversion: false,
+            ..Capabilities::default()
+        });
+
+        assert!(scroll_inversion_supported(capabilities, true, true));
+        assert!(!scroll_inversion_supported(capabilities, true, false));
+        assert!(!scroll_inversion_supported(capabilities, false, true));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn persistent_pointer_supports_macos_scroll_inversion_fallback() {
+        let capabilities = Capabilities {
+            pointer: true,
+            scroll_inversion: false,
+            ..Capabilities::default()
+        };
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState::with_runtime(
+            Config::default(),
+            &[direct_inventory_with(
+                [0x65, 0x00, 0x00, 0x01],
+                DeviceKind::Mouse,
+                capabilities,
+            )],
+            &AssetResolver::new(),
+            commands,
+        );
+
+        assert!(!state.current_native_scroll_inversion_supported());
+        assert!(state.current_scroll_inversion_supported());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn m650_fallback_commit_persists_and_reloads() {
+        let capabilities = Capabilities {
+            pointer: true,
+            scroll_inversion: false,
+            ..Capabilities::default()
+        };
+        let mut inventory =
+            direct_inventory_with([0x65, 0x00, 0x00, 0x01], DeviceKind::Mouse, capabilities);
+        inventory.receiver.name = "M650".to_string();
+        inventory.paired[0].codename = Some("M650".to_string());
+        let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::default(),
+            &[inventory],
+            &AssetResolver::new(),
+            commands,
+        );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        state.test_config_path = Some(config_path.clone());
+        let key = state
+            .current_record()
+            .expect("M650 record")
+            .config_key
+            .clone();
+
+        state.commit_invert_scroll(true);
+
+        assert!(state.current_invert_scroll());
+        let saved = Config::load_from_path(&config_path).expect("saved config");
+        assert!(saved.invert_scroll(&key));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(crate::ipc_client::Command::ReloadConfig)
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn non_pointer_does_not_support_scroll_inversion_fallback() {
+        let capabilities = Capabilities {
+            pointer: false,
+            scroll_inversion: false,
+            ..Capabilities::default()
+        };
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState::with_runtime(
+            Config::default(),
+            &[direct_inventory_with(
+                [0x65, 0x00, 0x00, 0x01],
+                DeviceKind::Keyboard,
+                capabilities,
+            )],
+            &AssetResolver::new(),
+            commands,
+        );
+
+        assert!(!state.current_scroll_inversion_supported());
+    }
+
+    #[test]
+    fn transient_pointer_does_not_support_scroll_inversion_fallback() {
+        let capabilities = Capabilities {
+            pointer: true,
+            scroll_inversion: false,
+            ..Capabilities::default()
+        };
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState::with_runtime(
+            Config::default(),
+            &[direct_inventory_with(
+                [0; 4],
+                DeviceKind::Mouse,
+                capabilities,
+            )],
+            &AssetResolver::new(),
+            commands,
+        );
+
+        assert!(!state.current_scroll_inversion_supported());
     }
 
     #[test]

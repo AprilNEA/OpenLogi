@@ -99,6 +99,13 @@ pub enum EventDisposition {
     PassThrough,
     /// Drop the event; the target application never sees it.
     Suppress,
+    /// Replace a macOS scroll event with one whose vertical axis is inverted.
+    ///
+    /// The original event is preserved if the synthetic replacement cannot be
+    /// created. Available only on macOS because other hooks handle scroll
+    /// replacement through their platform-native paths.
+    #[cfg(target_os = "macos")]
+    InvertScroll,
 }
 
 /// Where in the event stream a tap is inserted (macOS `CGEventTapLocation`).
