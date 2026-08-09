@@ -86,6 +86,56 @@ class AugmentChangelogTests(unittest.TestCase):
         self.assertEqual(once, twice)
         self.assertEqual(once.count("#522"), 1)
 
+    def test_idempotent_for_non_pr_rendered_entries(self) -> None:
+        """Rendered lines without PR links must not duplicate on re-run."""
+        body = """# Changelog
+
+## [Unreleased]
+
+## [0.6.24](https://example/compare/v0.6.23...v0.6.24) - 2026-08-09
+
+### Fixed
+
+- *(gui)* improve card contrast and depth
+
+## [0.6.23](https://example/compare/v0.6.22...v0.6.23) - 2026-08-02
+
+### Fixed
+
+- *(hook)* grab only relative pointer devices
+"""
+        commit = parse_commit_subject("fix(gui): improve card contrast and depth")
+        assert commit is not None
+        once = augment_changelog(
+            body, [commit], "https://github.com/AprilNEA/OpenLogi"
+        )
+        twice = augment_changelog(
+            once, [commit], "https://github.com/AprilNEA/OpenLogi"
+        )
+        self.assertEqual(once, twice)
+        self.assertEqual(once.count("improve card contrast and depth"), 1)
+        # Second call must not grow the Fixed section.
+        third = augment_changelog(
+            twice, [commit], "https://github.com/AprilNEA/OpenLogi"
+        )
+        self.assertEqual(twice, third)
+
+    def test_blank_line_before_next_version_header(self) -> None:
+        commits = [
+            parse_commit_subject(
+                "fix(i18n): complete Crowdin synchronization (#508)"
+            ),
+        ]
+        assert commits[0] is not None
+        updated = augment_changelog(
+            SAMPLE, [commits[0]], "https://github.com/AprilNEA/OpenLogi"
+        )
+        # The 0.6.24 section must end with a blank line before ## [0.6.23].
+        self.assertRegex(
+            updated,
+            r"Crowdin synchronization \(\[#508\]\([^)]+\)\)\n\n## \[0\.6\.23\]",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

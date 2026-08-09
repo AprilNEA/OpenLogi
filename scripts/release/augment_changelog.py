@@ -23,6 +23,9 @@ RELEASE_WORTHY = re.compile(
 )
 PR_IN_SUBJECT = re.compile(r"\(#(\d+)\)\s*$")
 PR_IN_ENTRY = re.compile(r"\[#(\d+)\]")
+PR_LINK_TAIL = re.compile(r"\s*\(\[#\d+\]\([^)]+\)\)\s*$")
+SCOPE_PREFIX = re.compile(r"^\*\([^)]+\)\*\s*")
+BREAKING_PREFIX = re.compile(r"^\[\*\*breaking\*\*\]\s*")
 VERSION_HEADER = re.compile(r"^## \[([^\]]+)\]")
 
 GROUP_FOR_TYPE = {
@@ -35,6 +38,44 @@ GROUP_FOR_TYPE = {
 DEFAULT_REPO = "https://github.com/AprilNEA/OpenLogi"
 
 
+def _summary_text(summary: str, pr: str | None) -> str:
+    text = summary.strip()
+    if pr:
+        text = PR_IN_SUBJECT.sub("", text).rstrip()
+    return text
+
+
+def _message_keys(scope: str | None, summary: str, breaking: bool = False) -> set[str]:
+    """Keys used to match a commit against an already-rendered changelog line."""
+    text = summary.strip().lower()
+    keys = {f"msg:{text}"}
+    if scope:
+        keys.add(f"msg:*({scope.lower()})* {text}")
+        if breaking:
+            keys.add(f"msg:*({scope.lower()})* [**breaking**] {text}")
+    elif breaking:
+        keys.add(f"msg:[**breaking**] {text}")
+    return keys
+
+
+def _keys_from_entry_line(line: str) -> set[str]:
+    stripped = line.strip()
+    if not stripped.startswith("- "):
+        return set()
+    body = stripped[2:].strip()
+    keys: set[str] = set()
+    for pr in PR_IN_ENTRY.findall(body):
+        keys.add(f"pr:{pr}")
+    # Drop the markdown PR link so bare summary matches commit subjects.
+    body = PR_LINK_TAIL.sub("", body).strip()
+    keys.add(f"msg:{body.lower()}")
+    bare = SCOPE_PREFIX.sub("", body)
+    bare = BREAKING_PREFIX.sub("", bare).strip()
+    if bare:
+        keys.add(f"msg:{bare.lower()}")
+    return keys
+
+
 @dataclass(frozen=True)
 class Commit:
     type: str
@@ -44,9 +85,7 @@ class Commit:
     breaking: bool
 
     def entry_line(self, repo_url: str) -> str:
-        text = self.summary
-        if self.pr:
-            text = PR_IN_SUBJECT.sub("", text).rstrip()
+        text = _summary_text(self.summary, self.pr)
         scope = f"*({self.scope})* " if self.scope else ""
         breaking = "[**breaking**] " if self.breaking else ""
         line = f"- {scope}{breaking}{text}"
@@ -54,11 +93,24 @@ class Commit:
             line += f" ([#{self.pr}]({repo_url}/pull/{self.pr}))"
         return line
 
+    def fingerprints(self) -> set[str]:
+        keys = _message_keys(
+            self.scope,
+            _summary_text(self.summary, self.pr),
+            breaking=self.breaking,
+        )
+        if self.pr:
+            keys.add(f"pr:{self.pr}")
+        return keys
+
     def fingerprint(self) -> str:
+        # Stable single key for de-duping within a commit list.
         if self.pr:
             return f"pr:{self.pr}"
-        return f"msg:{self.type}:{self.scope or ''}:{self.summary.strip().lower()}"
-
+        text = _summary_text(self.summary, self.pr).strip().lower()
+        if self.scope:
+            return f"msg:*({self.scope.lower()})* {text}"
+        return f"msg:{text}"
 
 def parse_commit_subject(subject: str) -> Commit | None:
     subject = subject.strip()
@@ -119,15 +171,26 @@ def commits_since(tag: str, cwd: Path) -> list[Commit]:
 def existing_fingerprints(section: str) -> set[str]:
     found: set[str] = set()
     for line in section.splitlines():
-        prs = PR_IN_ENTRY.findall(line)
-        if prs:
-            for pr in prs:
-                found.add(f"pr:{pr}")
-            continue
-        stripped = line.strip()
-        if stripped.startswith("- "):
-            found.add(f"msg:{stripped[2:].strip().lower()}")
+        found |= _keys_from_entry_line(line)
     return found
+
+
+def commit_is_present(commit: Commit, present: set[str]) -> bool:
+    return bool(commit.fingerprints() & present)
+
+
+def ensure_section_spacing(body: str) -> str:
+    """Blank line after the version header and before the next version header."""
+    if not body:
+        return "\n"
+    if not body.startswith("\n"):
+        body = "\n" + body
+    # Body must end with a blank line so suffix "## [older]" is separated.
+    if not body.endswith("\n"):
+        body += "\n"
+    if not body.endswith("\n\n"):
+        body += "\n"
+    return body
 
 
 def split_top_version_section(changelog: str) -> tuple[str, str, str, str]:
@@ -156,9 +219,9 @@ def split_top_version_section(changelog: str) -> tuple[str, str, str, str]:
 
 def merge_commits_into_section(body: str, commits: list[Commit], repo_url: str) -> str:
     present = existing_fingerprints(body)
-    missing = [c for c in commits if c.fingerprint() not in present]
+    missing = [c for c in commits if not commit_is_present(c, present)]
     if not missing:
-        return body
+        return ensure_section_spacing(body)
 
     groups: dict[str, list[str]] = {}
     # Preserve existing groups and their lines.
@@ -198,16 +261,11 @@ def merge_commits_into_section(body: str, commits: list[Commit], repo_url: str) 
         parts.append(f"### {name}")
         parts.append("")
         for entry in entries:
-            parts.append(entry if entry.endswith("\n") else entry)
+            parts.append(entry.rstrip("\n"))
         parts.append("")
 
     text = "\n".join(parts)
-    if not text.endswith("\n"):
-        text += "\n"
-    # Keep a blank line after the version header when the section is non-empty.
-    if not text.startswith("\n"):
-        text = "\n" + text
-    return text
+    return ensure_section_spacing(text)
 
 
 def augment_changelog(changelog: str, commits: list[Commit], repo_url: str) -> str:
