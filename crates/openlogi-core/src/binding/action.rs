@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::application_target::ApplicationTarget;
 use super::category::Category;
 use super::key_combo::KeyCombo;
 
@@ -172,6 +173,11 @@ pub enum Action {
     /// (`openlogi-inject`) runs them in order, awaiting `Delay`s. Power-user
     /// escape hatch — excluded from the default catalog.
     Workflow(Vec<WorkflowStep>),
+    /// Open the configured Actions Ring at the current pointer position.
+    /// The agent handles the ring session rather than the OS injector.
+    ShowActionsRing,
+    /// Open an application, folder, filesystem path, or platform URL.
+    OpenApplication(ApplicationTarget),
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -257,6 +263,8 @@ impl Action {
             Action::RunAppleScript(_) => "Run AppleScript".into(),
             Action::RunShellCommand(_) => "Run Command".into(),
             Action::Workflow(steps) => format!("Workflow ({} steps)", steps.len()),
+            Action::ShowActionsRing => "Actions Ring".into(),
+            Action::OpenApplication(target) => format!("Open {}", target.display_name()),
         }
     }
 
@@ -302,7 +310,9 @@ impl Action {
             | Action::LockScreen
             | Action::Screenshot
             | Action::CaptureRegion
-            | Action::Sleep => Category::System,
+            | Action::Sleep
+            | Action::ShowActionsRing
+            | Action::OpenApplication(_) => Category::System,
             Action::PlayPause
             | Action::NextTrack
             | Action::PrevTrack

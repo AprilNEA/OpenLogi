@@ -119,7 +119,11 @@ pub(super) fn execute(action: &Action) {
         Action::VolumeUp => post_key(VK_VOLUME_UP, &[]),
         Action::VolumeDown => post_key(VK_VOLUME_DOWN, &[]),
         Action::MuteVolume => post_key(VK_VOLUME_MUTE, &[]),
-        Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::ToggleSmartShift => {
+        Action::CycleDpiPresets
+        | Action::SetDpiPreset(_)
+        | Action::ToggleSmartShift
+        | Action::ShowActionsRing
+        | Action::OpenApplication(_) => {
             tracing::debug!(
                 action = action.label(),
                 "device action handled by hook/HID layer"
@@ -225,16 +229,9 @@ pub(super) fn post_horizontal_scroll(delta: i32) {
 }
 
 fn post_custom_shortcut(combo: &KeyCombo) {
-    if combo.key_code == 0 {
+    let Some(vk) = super::hid_usage_to_windows(combo.key().code()) else {
         tracing::warn!(
-            chord = %combo.rendered_label(),
-            "CustomShortcut with no key code; press ignored"
-        );
-        return;
-    }
-    let Some(vk) = super::mac_virtual_key_to_windows(combo.key_code) else {
-        tracing::warn!(
-            key_code = combo.key_code,
+            usage = combo.key().code(),
             chord = %combo.rendered_label(),
             "CustomShortcut key has no Windows mapping yet; press ignored"
         );
@@ -242,16 +239,16 @@ fn post_custom_shortcut(combo: &KeyCombo) {
     };
 
     let mut modifiers = Vec::new();
-    if combo.modifiers & KeyCombo::MOD_CMD != 0 {
+    if combo.has_command() {
         modifiers.push(VK_CONTROL);
     }
-    if combo.modifiers & KeyCombo::MOD_SHIFT != 0 {
+    if combo.has_shift() {
         modifiers.push(VK_SHIFT);
     }
-    if combo.modifiers & KeyCombo::MOD_CTRL != 0 && !modifiers.contains(&VK_CONTROL) {
+    if combo.has_control() && !modifiers.contains(&VK_CONTROL) {
         modifiers.push(VK_CONTROL);
     }
-    if combo.modifiers & KeyCombo::MOD_OPTION != 0 {
+    if combo.has_option() {
         modifiers.push(VK_MENU);
     }
     post_key(vk, &modifiers);

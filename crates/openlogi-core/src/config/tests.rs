@@ -15,6 +15,52 @@ fn write_and_read(config: &Config) -> Config {
 }
 
 #[test]
+fn first_save_preserves_the_previous_config_for_recovery() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let backup = dir.path().join("config.toml.backup.1");
+    let original = b"schema_version = 3\nselected_device = \"original\"\n";
+    fs::write(&path, original).expect("write original config");
+
+    let mut config = Config {
+        selected_device: Some("replacement".to_string()),
+        ..Config::default()
+    };
+    config.save_to_path(&path).expect("save replacement");
+    assert_eq!(fs::read(&backup).expect("read backup"), original);
+
+    config.selected_device = Some("second-save".to_string());
+    config.save_to_path(&path).expect("save again");
+    assert_eq!(
+        fs::read(&backup).expect("read original backup"),
+        original,
+        "later saves in one process must not replace the recovery copy"
+    );
+}
+
+#[test]
+fn config_backups_rotate_between_generations() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(&path, b"first").expect("write first generation");
+    super::backup_existing_config(&path).expect("back up first generation");
+
+    fs::write(&path, b"second").expect("write second generation");
+    super::backup_existing_config(&path).expect("back up second generation");
+
+    assert_eq!(
+        fs::read(super::config_backup_path(&path, 1).expect("backup path"))
+            .expect("read newest backup"),
+        b"second"
+    );
+    assert_eq!(
+        fs::read(super::config_backup_path(&path, 2).expect("backup path"))
+            .expect("read older backup"),
+        b"first"
+    );
+}
+
+#[test]
 fn key_trigger_parses_bare_and_modified() {
     // Bare function key — F1 is macOS keycode 0x7A.
     let t: KeyTrigger = "f1".parse().expect("parse key trigger");
@@ -381,11 +427,11 @@ fn bindings_roundtrip_per_device() {
     cfg.set_binding(
         "2b042",
         ButtonId::DpiToggle,
-        Binding::Single(Action::CustomShortcut(crate::binding::KeyCombo {
-            modifiers: crate::binding::KeyCombo::MOD_CMD,
-            key_code: 0x23, // kVK_ANSI_P
-            display: "⌘P".into(),
-        })),
+        Binding::Single(Action::CustomShortcut(
+            "Cmd+P"
+                .parse()
+                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+        )),
     );
     cfg.set_binding("4082d", ButtonId::Back, Binding::Single(Action::Paste));
 
@@ -397,11 +443,9 @@ fn bindings_roundtrip_per_device() {
     assert_eq!(
         a.get(&ButtonId::DpiToggle),
         Some(&Binding::Single(Action::CustomShortcut(
-            crate::binding::KeyCombo {
-                modifiers: crate::binding::KeyCombo::MOD_CMD,
-                key_code: 0x23,
-                display: "⌘P".into(),
-            }
+            "Cmd+P"
+                .parse()
+                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"))
         )))
     );
 

@@ -8,7 +8,7 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
 use core_foundation::base::TCFType as _;
-use openlogi_core::binding::{Action, WorkflowStep};
+use openlogi_core::binding::{Action, KeyCombo, WorkflowStep};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -35,8 +35,6 @@ const VK_TAB: u16 = 0x30;
 
 /// macOS implementation: dispatch to the appropriate event helper.
 pub(super) fn execute(action: &Action) {
-    use openlogi_core::binding::KeyCombo;
-
     // Modifier bit shorthands.
     let cmd = CGEventFlags::CGEventFlagCommand;
     let shift = CGEventFlags::CGEventFlagShift;
@@ -114,7 +112,11 @@ pub(super) fn execute(action: &Action) {
         Action::VolumeDown => post_media_key(NX_KEYTYPE_SOUND_DOWN),
         Action::MuteVolume => post_media_key(NX_KEYTYPE_MUTE),
         // ── DPI / SmartShift: handled at hook/HID layer ───────────────────
-        Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::ToggleSmartShift => {
+        Action::CycleDpiPresets
+        | Action::SetDpiPreset(_)
+        | Action::ToggleSmartShift
+        | Action::ShowActionsRing
+        | Action::OpenApplication(_) => {
             tracing::debug!(
                 action = action.label(),
                 "device action handled by hook/HID layer"
@@ -127,31 +129,7 @@ pub(super) fn execute(action: &Action) {
         | Action::HorizontalScrollRight => post_scroll(action),
         // ── Custom ────────────────────────────────────────────────────────
         Action::CustomShortcut(combo) => {
-            // P1.3: post the recorded chord. `key_code == 0` is the
-            // "modifier-only placeholder" the recorder UI rejects;
-            // skip it here too so a malformed config doesn't fire
-            // bare modifier presses.
-            if combo.key_code == 0 {
-                tracing::warn!(
-                    chord = %combo.rendered_label(),
-                    "CustomShortcut with no key code — press ignored"
-                );
-                return;
-            }
-            let mut flags = CGEventFlags::CGEventFlagNull;
-            if combo.modifiers & KeyCombo::MOD_CMD != 0 {
-                flags |= CGEventFlags::CGEventFlagCommand;
-            }
-            if combo.modifiers & KeyCombo::MOD_SHIFT != 0 {
-                flags |= CGEventFlags::CGEventFlagShift;
-            }
-            if combo.modifiers & KeyCombo::MOD_CTRL != 0 {
-                flags |= CGEventFlags::CGEventFlagControl;
-            }
-            if combo.modifiers & KeyCombo::MOD_OPTION != 0 {
-                flags |= CGEventFlags::CGEventFlagAlternate;
-            }
-            post_key(combo.key_code, flags);
+            post_keycombo(combo);
         }
         // TypeText emits a unicode string, layout-independent.
         Action::TypeText(text) => post_unicode(text),
@@ -277,23 +255,88 @@ fn post_unicode(text: &str) {
 
 /// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
 /// keycode. Used by the workflow sequencer's `PressKey` step.
-fn post_keycombo(modifiers: u8, vk: u16) {
-    use openlogi_core::binding::KeyCombo;
-
+fn post_keycombo(combo: &KeyCombo) {
     let mut flags = CGEventFlags::CGEventFlagNull;
-    if modifiers & KeyCombo::MOD_CMD != 0 {
+    if combo.has_command() {
         flags |= CGEventFlags::CGEventFlagCommand;
     }
-    if modifiers & KeyCombo::MOD_SHIFT != 0 {
+    if combo.has_shift() {
         flags |= CGEventFlags::CGEventFlagShift;
     }
-    if modifiers & KeyCombo::MOD_CTRL != 0 {
+    if combo.has_control() {
         flags |= CGEventFlags::CGEventFlagControl;
     }
-    if modifiers & KeyCombo::MOD_OPTION != 0 {
+    if combo.has_option() {
         flags |= CGEventFlags::CGEventFlagAlternate;
     }
-    post_key(vk, flags);
+    if let Some(vk) = hid_usage_to_macos(combo.key().code()) {
+        post_key(vk, flags);
+    } else {
+        tracing::warn!(
+            usage = combo.key().code(),
+            "shortcut usage has no macOS mapping"
+        );
+    }
+}
+
+/// Map a platform-neutral USB HID keyboard usage to a macOS virtual key.
+fn hid_usage_to_macos(usage: u8) -> Option<u16> {
+    const LETTERS: [u16; 26] = [
+        0x00, 0x0b, 0x08, 0x02, 0x0e, 0x03, 0x05, 0x04, 0x22, 0x26, 0x28, 0x25, 0x2e, 0x2d, 0x1f,
+        0x23, 0x0c, 0x0f, 0x01, 0x11, 0x20, 0x09, 0x0d, 0x07, 0x10, 0x06,
+    ];
+    const DIGITS: [u16; 10] = [0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1a, 0x1c, 0x19, 0x1d];
+    const FUNCTIONS: [u16; 20] = [
+        0x7a, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6d, 0x67, 0x6f, 0x69, 0x6b, 0x71,
+        0x6a, 0x40, 0x4f, 0x50, 0x5a,
+    ];
+    match usage {
+        0x04..=0x1d => LETTERS.get(usize::from(usage - 0x04)).copied(),
+        0x1e..=0x27 => DIGITS.get(usize::from(usage - 0x1e)).copied(),
+        0x3a..=0x45 => FUNCTIONS.get(usize::from(usage - 0x3a)).copied(),
+        0x68..=0x6f => FUNCTIONS.get(usize::from(usage - 0x68 + 12)).copied(),
+        0x28 => Some(0x24),
+        0x29 => Some(0x35),
+        0x2a => Some(0x33),
+        0x2b => Some(0x30),
+        0x2c => Some(0x31),
+        0x2d => Some(0x1b),
+        0x2e => Some(0x18),
+        0x2f => Some(0x21),
+        0x30 => Some(0x1e),
+        0x31 => Some(0x2a),
+        0x33 => Some(0x29),
+        0x34 => Some(0x27),
+        0x35 => Some(0x32),
+        0x36 => Some(0x2b),
+        0x37 => Some(0x2f),
+        0x38 => Some(0x2c),
+        0x4a => Some(0x73),
+        0x4b => Some(0x74),
+        0x4c => Some(0x75),
+        0x4d => Some(0x77),
+        0x4e => Some(0x79),
+        0x4f => Some(0x7c),
+        0x50 => Some(0x7b),
+        0x51 => Some(0x7d),
+        0x52 => Some(0x7e),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hid_usage_to_macos;
+
+    #[test]
+    fn hid_usages_map_to_macos_virtual_keys() {
+        assert_eq!(hid_usage_to_macos(0x04), Some(0x00));
+        assert_eq!(hid_usage_to_macos(0x13), Some(0x23));
+        assert_eq!(hid_usage_to_macos(0x50), Some(0x7b));
+        assert_eq!(hid_usage_to_macos(0x3a), Some(0x7a));
+        assert_eq!(hid_usage_to_macos(0x6f), Some(0x5a));
+        assert_eq!(hid_usage_to_macos(0xff), None);
+    }
 }
 
 fn run_apple_script_async(src: String) {
@@ -313,7 +356,7 @@ fn run_workflow(steps: &[WorkflowStep]) {
     for step in steps {
         match step {
             WorkflowStep::TypeText(text) => post_unicode(text),
-            WorkflowStep::PressKey(combo) => post_keycombo(combo.modifiers, combo.key_code),
+            WorkflowStep::PressKey(combo) => post_keycombo(combo),
             WorkflowStep::Delay { millis } => {
                 std::thread::sleep(std::time::Duration::from_millis(*millis));
             }

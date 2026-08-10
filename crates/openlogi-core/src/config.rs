@@ -7,9 +7,11 @@
 //! [`Config::schema_version`].
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
+    ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock, PoisonError},
 };
 
 use atomic_write_file::AtomicWriteFile;
@@ -33,7 +35,10 @@ pub use settings::{
     WheelMode,
 };
 
-use crate::binding::{Action, Binding, ButtonId, GestureDirection, default_binding_for};
+use crate::binding::{
+    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureDirection,
+    RingAction, default_binding_for,
+};
 use crate::paths::{self, PathsError};
 
 /// The schema version the current build produces. Bumped on breaking layout
@@ -50,6 +55,9 @@ use crate::paths::{self, PathsError};
 /// next save; [`Config::load_from_path`] rejects only versions *newer* than this
 /// so a forward file fails loudly instead of silently losing bindings.
 pub const SCHEMA_VERSION: u32 = 3;
+
+const CONFIG_BACKUP_GENERATIONS: usize = 5;
+static BACKED_UP_CONFIGS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +233,10 @@ impl Config {
             })?;
         }
         let body = toml::to_string_pretty(self)?;
+        backup_config_once(path).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
         write_atomic(path, body.as_bytes()).map_err(|source| ConfigError::Write {
             path: path.to_path_buf(),
             source,
@@ -467,6 +479,64 @@ impl Config {
         if let Some(d) = self.devices.get_mut(device_key) {
             d.per_app_bindings.retain(|_, m| !m.is_empty());
         }
+    }
+
+    /// Actions Ring settings for `device_key`, falling back to defaults when
+    /// the device has no saved ring configuration.
+    #[must_use]
+    pub fn action_ring(&self, device_key: &str) -> ActionRingConfig {
+        self.devices
+            .get(device_key)
+            .map(|device| device.action_ring.clone())
+            .unwrap_or_default()
+    }
+
+    /// Enable or disable `device_key`'s Actions Ring.
+    pub fn set_action_ring_enabled(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .enabled = enabled;
+    }
+
+    /// Enable or disable ring hover and activation haptics.
+    pub fn set_action_ring_haptics(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .haptics = enabled;
+    }
+
+    /// Replace or clear one slot in the default Actions Ring layout.
+    pub fn set_action_ring_slot(
+        &mut self,
+        device_key: &str,
+        slot: ActionRingSlot,
+        action: Option<RingAction>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .default
+            .set_action(slot, action);
+    }
+
+    /// Set or restore the action-derived icon for one default ring slot.
+    pub fn set_action_ring_icon(
+        &mut self,
+        device_key: &str,
+        slot: ActionRingSlot,
+        icon: Option<ActionRingIcon>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .default
+            .set_icon(slot, icon);
     }
 
     /// HID++ config key of the carousel-selected device, if any.
@@ -744,6 +814,45 @@ impl Config {
             .or_default()
             .thumbwheel_sensitivity = sensitivity;
     }
+}
+
+fn backup_config_once(path: &Path) -> io::Result<()> {
+    let backed_up = BACKED_UP_CONFIGS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut backed_up = backed_up.lock().unwrap_or_else(PoisonError::into_inner);
+    if backed_up.contains(path) {
+        return Ok(());
+    }
+    match fs::metadata(path) {
+        Ok(_) => backup_existing_config(path)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    backed_up.insert(path.to_path_buf());
+    Ok(())
+}
+
+fn backup_existing_config(path: &Path) -> io::Result<()> {
+    for generation in (1..CONFIG_BACKUP_GENERATIONS).rev() {
+        let source = config_backup_path(path, generation)?;
+        match fs::read(&source) {
+            Ok(bytes) => write_atomic(&config_backup_path(path, generation + 1)?, &bytes)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    write_atomic(&config_backup_path(path, 1)?, &fs::read(path)?)
+}
+
+fn config_backup_path(path: &Path, generation: usize) -> io::Result<PathBuf> {
+    let Some(file_name) = path.file_name() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "config path has no file name",
+        ));
+    };
+    let mut backup_name = OsString::from(file_name);
+    backup_name.push(format!(".backup.{generation}"));
+    Ok(path.with_file_name(backup_name))
 }
 
 /// Write `bytes` to `path` atomically via a randomized temp file + rename,

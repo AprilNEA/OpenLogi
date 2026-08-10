@@ -3,7 +3,9 @@
 How OpenLogi stores its settings. For install and usage, see the
 [README](../README.md).
 
-Config is a TOML file, read on startup and written atomically on change:
+Config is a TOML file, read on startup and written atomically on change. Before
+the first save in each process, the previous file is retained as
+`config.toml.backup.1`; up to five generations are rotated.
 
 - macOS & Linux: `$XDG_CONFIG_HOME/openlogi/config.toml` (default `~/.config/openlogi/config.toml`)
 - Windows: `%USERPROFILE%\.config\openlogi\config.toml`
@@ -24,6 +26,8 @@ MX Master 4):
   `com.microsoft.VSCode` on macOS, `WM_CLASS` on Linux/X11, or a lower-cased
   executable path on Windows) that take precedence while that app is
   frontmost.
+- `action_ring` — the enabled state, haptic preference, default eight-slot
+  layout, and complete per-application layouts.
 - `dpi_presets` — the ordered list cycled by the `CycleDpiPresets` action.
 - `smartshift` — wheel mode, sensitivity, and permanent-ratchet state.
 - `invert_scroll` — reverse this device's native vertical wheel direction
@@ -58,7 +62,7 @@ locale); `thumbwheel_sensitivity` (default `14`); and the `appearance` (default
 settings. The theme and radius overrides are absent by default.
 
 ```toml
-schema_version = 2
+schema_version = 3
 selected_device = "2b042"
 
 [app_settings]
@@ -100,6 +104,16 @@ Right = "NextDesktop"
 [devices.2b042.per_app_bindings."com.microsoft.VSCode"]
 Back = "Undo"
 
+# Actions Ring slots couple an executable action with an optional custom icon.
+[devices.2b042.action_ring]
+enabled = true
+haptics = true
+
+[devices.2b042.action_ring.default.slots]
+Top = { action = "Copy", icon = "Keyboard" }
+Right = { action = { OpenApplication = { path = "/Applications/Safari.app", display_name = "Safari" } }, icon = "Applications" }
+Bottom = { action = "ShowDesktop" }
+
 [devices.2b042.lighting]
 enabled = true
 color = "ff0000"
@@ -132,5 +146,17 @@ temperature_kelvin = 4600
 ```
 
 Action names are the catalog's variant names (`LeftClick`, `MouseBack`,
-`Copy`, `PlayPause`, `CycleDpiPresets`, …). Custom keyboard shortcuts are
-currently hand-authored as a `CustomShortcut` table in the TOML file.
+`Copy`, `PlayPause`, `CycleDpiPresets`, …). `ShowActionsRing` opens the ring;
+ring slots cannot recursively contain it. `OpenApplication` accepts an
+application, folder, filesystem path, or URL as a typed target, for example:
+
+```toml
+Top = { action = { OpenApplication = { path = "/Applications/Safari.app", display_name = "Safari" } } }
+```
+
+Custom keyboard shortcuts use platform-neutral USB HID usages and remain
+human-readable in TOML:
+
+```toml
+Top = { action = { CustomShortcut = "Cmd+Shift+P" } }
+```

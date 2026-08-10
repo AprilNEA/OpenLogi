@@ -74,6 +74,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 core-graphics = { version = "0.25", default-features = false, features = ["link"] }
 core-foundation = { version = "0.10", default-features = false, features = ["link"] }
 opener = "0.8.5"
+shellexpand = "3.1.2"
 evdev = "0.13"
 # macOS ObjC FFI (see platform/CLAUDE.md): objc2 gives leak-proof Retained<T>
 # bindings. Feature lists are selected per crate; the version stays unified so
@@ -120,4 +121,3 @@ strip = "symbols"
 # SDK). See third_party/tarpc/README.md.
 [patch.crates-io]
 tarpc = { path = "third_party/tarpc" }
-

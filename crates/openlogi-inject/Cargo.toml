@@ -11,6 +11,8 @@ keywords = ["logitech", "input", "uinput", "sendinput", "mouse"]
 categories = ["hardware-support", "os"]
 
 [dependencies]
+shellexpand.workspace = true
+opener.workspace = true
 openlogi-core = { path = "../openlogi-core", version = "0.6.26" }
 tracing = { workspace = true }
 

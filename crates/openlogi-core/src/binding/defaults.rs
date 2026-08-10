@@ -36,12 +36,10 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollRight,
         ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
         ButtonId::GestureButton => Action::MissionControl,
-        // Keyboard keys and the MX Master 4 haptic panel stay on their native
-        // firmware function (media keys; haptics and the Options+ Actions Ring)
-        // until the user explicitly binds them — neither has an OpenLogi
-        // equivalent yet. `None` means "binding at its default", and the
-        // capture layer never diverts a control sitting at its default, so this
-        // keeps the projection total without capturing anything.
+        ButtonId::HapticPanel => Action::ShowActionsRing,
+        // Keyboard keys stay on their native firmware function until the user
+        // explicitly binds them; an unbound key is never diverted, so a
+        // `None` default keeps the projection total without capturing anything.
         ButtonId::KeySearch
         | ButtonId::KeyDictation
         | ButtonId::KeyEmoji
@@ -50,8 +48,7 @@ pub fn default_binding(button: ButtonId) -> Action {
         | ButtonId::KeyPlayPause
         | ButtonId::KeyMute
         | ButtonId::KeyVolumeDown
-        | ButtonId::KeyVolumeUp
-        | ButtonId::HapticPanel => Action::None,
+        | ButtonId::KeyVolumeUp => Action::None,
     }
 }
 

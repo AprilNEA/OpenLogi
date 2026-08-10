@@ -47,25 +47,11 @@ use openlogi_inject::action_device_path;
 fn parse_action(s: &str) -> Result<Action, String> {
     // `CustomShortcut` has its own CLI syntax (serde expects a table for the
     // tuple variant), so parse it by hand.
-    if let Some(rest) = s.strip_prefix("CustomShortcut:") {
-        // Format: <modifiers>:<key_code> — modifiers is a hex byte (e.g. 0x05
-        // for Ctrl+Shift), key_code a hex u16. Example: 0x04:0x08 → Ctrl+C on
-        // the macOS layout.
-        let parts: Vec<&str> = rest.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            return Err(
-                "CustomShortcut format: CustomShortcut:<mod_hex>:<key_hex> (e.g. CustomShortcut:0x01:0x08)".to_string()
-            );
-        }
-        let modifiers =
-            parse_hex_u8(parts[0]).ok_or_else(|| format!("invalid modifier byte: {}", parts[0]))?;
-        let key_code =
-            parse_hex_u16(parts[1]).ok_or_else(|| format!("invalid key code: {}", parts[1]))?;
-        return Ok(Action::CustomShortcut(KeyCombo {
-            modifiers,
-            key_code,
-            display: String::new(),
-        }));
+    if let Some(shortcut) = s.strip_prefix("CustomShortcut:") {
+        return shortcut
+            .parse::<KeyCombo>()
+            .map(Action::CustomShortcut)
+            .map_err(|error| error.to_string());
     }
 
     // Every other variant is a serde unit variant that deserializes straight
@@ -73,20 +59,6 @@ fn parse_action(s: &str) -> Result<Action, String> {
     // enum the way a hand-written match would.
     Action::deserialize(s.into_deserializer())
         .map_err(|_: serde::de::value::Error| format!("unknown action: {s}"))
-}
-
-fn strip_hex_prefix(s: &str) -> &str {
-    s.strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s)
-}
-
-fn parse_hex_u8(s: &str) -> Option<u8> {
-    u8::from_str_radix(strip_hex_prefix(s), 16).ok()
-}
-
-fn parse_hex_u16(s: &str) -> Option<u16> {
-    u16::from_str_radix(strip_hex_prefix(s), 16).ok()
 }
 
 fn main() {

@@ -91,11 +91,11 @@ fn workflow_label_category_and_catalog_exclusion() {
     let wf = Action::Workflow(vec![
         WorkflowStep::TypeText("bite me".into()),
         WorkflowStep::Delay { millis: 5000 },
-        WorkflowStep::PressKey(KeyCombo {
-            modifiers: 0,
-            key_code: 0x24, // Return
-            display: String::new(),
-        }),
+        WorkflowStep::PressKey(
+            "Enter"
+                .parse()
+                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+        ),
     ]);
     assert_eq!(wf.label(), "Workflow (3 steps)");
     assert_eq!(wf.category(), Category::Editing);
@@ -112,11 +112,11 @@ fn workflow_roundtrips_toml() {
     let wf = Action::Workflow(vec![
         WorkflowStep::TypeText("bite me".into()),
         WorkflowStep::Delay { millis: 5000 },
-        WorkflowStep::PressKey(KeyCombo {
-            modifiers: KeyCombo::MOD_SHIFT,
-            key_code: 0x24,
-            display: "⇧↩".into(),
-        }),
+        WorkflowStep::PressKey(
+            "Shift+Enter"
+                .parse()
+                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+        ),
         WorkflowStep::RunShellCommand("echo done".into()),
     ]);
     let toml = toml::to_string(&wf).expect("serialize");
@@ -150,11 +150,11 @@ fn binding_single_roundtrips_including_payload_variants() {
     );
     bindings.insert(
         ButtonId::Forward,
-        Binding::Single(Action::CustomShortcut(KeyCombo {
-            modifiers: KeyCombo::MOD_CMD,
-            key_code: 0x23,
-            display: "⌘P".into(),
-        })),
+        Binding::Single(Action::CustomShortcut(
+            "Cmd+P"
+                .parse()
+                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+        )),
     );
     let back = binding_roundtrip(bindings);
     assert_eq!(back[&ButtonId::Back], Binding::Single(Action::BrowserBack));
@@ -258,32 +258,28 @@ fn all_catalog_variants_roundtrip_toml() {
 
 #[test]
 fn custom_shortcut_roundtrips_toml() {
-    let action = Action::CustomShortcut(KeyCombo {
-        modifiers: KeyCombo::MOD_CMD | KeyCombo::MOD_SHIFT,
-        key_code: 0x23, // kVK_ANSI_P
-        display: "⌘⇧P".into(),
-    });
+    let action = Action::CustomShortcut(
+        "Cmd+Shift+P"
+            .parse()
+            .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+    );
     assert_eq!(roundtrip(&action), action);
 }
 
 #[test]
-fn key_combo_rendered_label_uses_display_when_set() {
-    let combo = KeyCombo {
-        modifiers: 0,
-        key_code: 0,
-        display: "preset".into(),
-    };
-    assert_eq!(combo.rendered_label(), "preset");
+fn key_combo_rendered_label_is_canonical() {
+    let combo: KeyCombo = "Cmd+Shift+P"
+        .parse()
+        .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
+    assert_eq!(combo.rendered_label(), "Cmd+Shift+P");
 }
 
 #[test]
 fn key_combo_rendered_label_falls_back_to_modifiers_plus_key() {
-    let combo = KeyCombo {
-        modifiers: KeyCombo::MOD_CMD | KeyCombo::MOD_SHIFT,
-        key_code: 0x23, // P
-        display: String::new(),
-    };
-    assert_eq!(combo.rendered_label(), "⇧⌘P");
+    let combo: KeyCombo = "Cmd+Shift+P"
+        .parse()
+        .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
+    assert_eq!(combo.rendered_label(), "Cmd+Shift+P");
 }
 
 // ── Category tests ────────────────────────────────────────────────────────
@@ -386,4 +382,13 @@ fn dpi_toggle_default_is_cycle_dpi_presets() {
         default_binding(ButtonId::DpiToggle),
         Action::CycleDpiPresets
     );
+}
+
+#[test]
+fn haptic_panel_defaults_to_opening_the_actions_ring() {
+    assert_eq!(
+        default_binding(ButtonId::HapticPanel),
+        Action::ShowActionsRing
+    );
+    assert!(ButtonId::ALL.contains(&ButtonId::HapticPanel));
 }
