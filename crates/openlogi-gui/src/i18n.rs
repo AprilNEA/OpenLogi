@@ -2,11 +2,13 @@
 //!
 //! Translations live in `crates/openlogi-gui/locales/*.yml` and are loaded at
 //! compile time by the `rust_i18n::i18n!` macro in `main.rs` (fallback `"en"`).
-//! **`en.yml` is the only source of truth** for UI strings — edit that file when
-//! adding or changing copy. Crowdin owns non-English catalogs (`SUPPORTED`
-//! minus `en`); the Crowdin workflow downloads them. Call sites use
+//! **`en.yml` is the English source of truth** (the English text IS the key).
+//! New or changed copy must land in **every** `locales/*.yml` in the same
+//! change — the parity test enforces key-for-key match. Crowdin improves
+//! non-English values over time and the workflow downloads only real
+//! translations (`skip_untranslated_strings`). Call sites use
 //! [`tr!`](crate::tr) / `rust_i18n::t!` with the **English string as the key**.
-//! Missing keys in a non-English file fall back to English at runtime.
+//! Missing keys fall back to English at runtime, but catalogs must not lag.
 //!
 //! The current locale is a process-global atomic inside `rust_i18n`. Setting it
 //! re-localizes both our own call sites *and* gpui-component's built-in widget
@@ -296,10 +298,11 @@ mod tests {
         assert_eq!(rust_i18n::t!(BLURB), BLURB);
     }
 
-    /// Non-English catalogs may lag `en.yml` until Crowdin syncs (runtime falls
-    /// back to English). They must never introduce keys that are not in `en.yml`.
+    /// Every shipped locale must carry the same keys as `en.yml`. New UI copy
+    /// is added to all catalogs in the same change; Crowdin later improves the
+    /// non-English values (never English fill-in).
     #[test]
-    fn locale_files_keys_are_subset_of_en() {
+    fn locale_files_have_the_same_keys() {
         use std::collections::BTreeSet;
 
         let source: BTreeSet<&str> = locale_keys(include_str!("../locales/en.yml"))
@@ -332,10 +335,11 @@ mod tests {
             ("sv", include_str!("../locales/sv.yml")),
         ] {
             let keys: BTreeSet<&str> = locale_keys(file).into_iter().collect();
+            let missing: Vec<&str> = source.difference(&keys).copied().collect();
             let extras: Vec<&str> = keys.difference(&source).copied().collect();
             assert!(
-                extras.is_empty(),
-                "{locale}.yml has keys not in en.yml (edit en.yml only; Crowdin owns other locales): {extras:?}"
+                missing.is_empty() && extras.is_empty(),
+                "{locale}.yml key mismatch vs en.yml — missing: {missing:?}, extras: {extras:?}"
             );
         }
     }
