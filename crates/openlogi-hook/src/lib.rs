@@ -89,6 +89,10 @@ pub fn source_is_remappable(device: Option<&EventDevice>) -> bool {
 /// firmware-internal and never reported on non-function-row keys (see the
 /// function-key-remapper spec, Appendix A).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent modifier flags from OS event bits"
+)]
 pub struct KeyModifiers {
     pub shift: bool,
     pub control: bool,

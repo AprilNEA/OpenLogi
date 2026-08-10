@@ -292,8 +292,10 @@ fn translate_key(etype: CGEventType, event: &CGEvent) -> Option<KeyEvent> {
         // FlagsChanged: no key to remap here.
         _ => return None,
     };
+    let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+    let keycode = u16::try_from(keycode).ok()?;
     Some(KeyEvent {
-        keycode: event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16,
+        keycode,
         pressed,
         modifiers: modifiers_from_flags(event.get_flags()),
     })

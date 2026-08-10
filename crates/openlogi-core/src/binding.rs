@@ -705,7 +705,7 @@ impl Action {
             Action::TypeText(s) => format!("Type \"{s}\"").into(),
             Action::RunAppleScript(_) => "Run AppleScript".into(),
             Action::RunShellCommand(_) => "Run Command".into(),
-            Action::Workflow(steps) => format!("Workflow ({} steps)", steps.len()).into(),
+            Action::Workflow(steps) => format!("Workflow ({} steps)", steps.len()),
         }
     }
 
@@ -1000,8 +1000,8 @@ mod tests {
             Action::RunAppleScript("beep".into()),
             Action::RunShellCommand("date".into()),
         ] {
-            let toml = toml::to_string(&action).unwrap();
-            let back: Action = toml::from_str(&toml).unwrap();
+            let toml = toml::to_string(&action).expect("serialize");
+            let back: Action = toml::from_str(&toml).expect("deserialize");
             assert_eq!(action, back);
         }
     }
@@ -1039,8 +1039,8 @@ mod tests {
             }),
             WorkflowStep::RunShellCommand("echo done".into()),
         ]);
-        let toml = toml::to_string(&wf).unwrap();
-        let back: Action = toml::from_str(&toml).unwrap();
+        let toml = toml::to_string(&wf).expect("serialize");
+        let back: Action = toml::from_str(&toml).expect("deserialize");
         assert_eq!(wf, back);
     }
 

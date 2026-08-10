@@ -57,14 +57,14 @@ fn write_icns(master: &Path, output: &Path) -> Result<()> {
 }
 
 pub(crate) fn run() -> Result<()> {
-    run_with_profile(BundleProfile::Local)
+    run_with_profile(&BundleProfile::Local)
 }
 
 pub(crate) fn run_for_distribution(sign_identity: Option<&str>) -> Result<()> {
-    run_with_profile(BundleProfile::Distribution { sign_identity })
+    run_with_profile(&BundleProfile::Distribution { sign_identity })
 }
 
-fn run_with_profile(profile: BundleProfile<'_>) -> Result<()> {
+fn run_with_profile(profile: &BundleProfile<'_>) -> Result<()> {
     let root = repo_root()?;
     let sh = Shell::new()?;
     let _repo = sh.push_dir(&root);
@@ -387,9 +387,8 @@ fn env_nonempty(name: &str) -> Option<String> {
 
 fn first_apple_development_identity() -> Result<Option<String>> {
     let sh = Shell::new()?;
-    let output = match cmd!(sh, "security find-identity -v -p codesigning").read() {
-        Ok(output) => output,
-        Err(_) => return Ok(None),
+    let Ok(output) = cmd!(sh, "security find-identity -v -p codesigning").read() else {
+        return Ok(None);
     };
     Ok(output
         .lines()

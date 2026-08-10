@@ -55,6 +55,10 @@ pub const SCHEMA_VERSION: u32 = 3;
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent modifier flags mirrored from the OS hook"
+)]
 pub struct KeyModifiers {
     /// Shift held.
     pub shift: bool,
@@ -68,6 +72,7 @@ pub struct KeyModifiers {
 
 impl KeyModifiers {
     /// True when no modifiers are held.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         !self.shift && !self.control && !self.option && !self.command
     }
@@ -905,28 +910,34 @@ mod tests {
     #[test]
     fn key_trigger_parses_bare_and_modified() {
         // Bare function key — F1 is macOS keycode 0x7A.
-        let t: KeyTrigger = "f1".parse().unwrap();
+        let t: KeyTrigger = "f1".parse().expect("parse key trigger");
         assert_eq!(t.keycode, 0x7A);
         assert!(t.modifiers.is_empty());
 
         // Modifier-qualified, in any order, with aliases.
-        let t: KeyTrigger = "shift+cmd+f5".parse().unwrap();
+        let t: KeyTrigger = "shift+cmd+f5".parse().expect("parse key trigger");
         assert_eq!(t.keycode, 0x60); // F5
         assert!(t.modifiers.shift && t.modifiers.command);
         assert!(!t.modifiers.control && !t.modifiers.option);
 
-        let t: KeyTrigger = "ctrl+alt+f2".parse().unwrap();
+        let t: KeyTrigger = "ctrl+alt+f2".parse().expect("parse key trigger");
         assert!(t.modifiers.control && t.modifiers.option);
 
         // Esc.
-        assert_eq!("esc".parse::<KeyTrigger>().unwrap().keycode, 0x35);
+        assert_eq!(
+            "esc"
+                .parse::<KeyTrigger>()
+                .expect("parse key trigger")
+                .keycode,
+            0x35
+        );
     }
 
     #[test]
     fn key_trigger_parses_and_displays_extended_function_keys() {
-        let f13: KeyTrigger = "f13".parse().unwrap();
-        let f17: KeyTrigger = "command+f17".parse().unwrap();
-        let f19: KeyTrigger = "f19".parse().unwrap();
+        let f13: KeyTrigger = "f13".parse().expect("parse key trigger");
+        let f17: KeyTrigger = "command+f17".parse().expect("parse key trigger");
+        let f19: KeyTrigger = "f19".parse().expect("parse key trigger");
 
         assert_eq!(f13.keycode, 0x69);
         assert_eq!(f17.keycode, 0x40);
@@ -945,18 +956,18 @@ mod tests {
     #[test]
     fn keyboard_section_roundtrips_through_config() {
         let mut config = Config::default();
-        config
-            .keyboard
-            .bindings
-            .insert("f1".parse().unwrap(), Action::TypeText("hello".into()));
-        config
-            .keyboard
-            .bindings
-            .insert("shift+f2".parse().unwrap(), Action::VolumeUp);
-        config
-            .keyboard
-            .bindings
-            .insert("f17".parse().unwrap(), Action::MissionControl);
+        config.keyboard.bindings.insert(
+            "f1".parse().expect("parse key trigger"),
+            Action::TypeText("hello".into()),
+        );
+        config.keyboard.bindings.insert(
+            "shift+f2".parse().expect("parse key trigger"),
+            Action::VolumeUp,
+        );
+        config.keyboard.bindings.insert(
+            "f17".parse().expect("parse key trigger"),
+            Action::MissionControl,
+        );
 
         let roundtripped = write_and_read(&config);
         assert_eq!(roundtripped.keyboard.bindings.len(), 3);
@@ -964,14 +975,14 @@ mod tests {
             roundtripped
                 .keyboard
                 .bindings
-                .get(&"f1".parse::<KeyTrigger>().unwrap()),
+                .get(&"f1".parse::<KeyTrigger>().expect("parse key trigger")),
             Some(&Action::TypeText("hello".into()))
         );
         assert_eq!(
             roundtripped
                 .keyboard
                 .bindings
-                .get(&"f17".parse::<KeyTrigger>().unwrap()),
+                .get(&"f17".parse::<KeyTrigger>().expect("parse key trigger")),
             Some(&Action::MissionControl)
         );
     }
@@ -979,7 +990,7 @@ mod tests {
     #[test]
     fn set_keyboard_binding_inserts_and_clears() {
         let mut config = Config::default();
-        let f1: KeyTrigger = "f1".parse().unwrap();
+        let f1: KeyTrigger = "f1".parse().expect("parse key trigger");
 
         // Insert.
         config.set_keyboard_binding(f1.clone(), Some(Action::VolumeUp));

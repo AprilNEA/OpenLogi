@@ -41,7 +41,7 @@ embed-resource = "3.0.9"
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSData", "NSArray"] }
-plist = "1.9.0"
+plist = "1.10.0"
 
 # Autostart via the HKCU Run key (launch_agent.rs); winreg also answers the
 # taskbar light/dark theme read for the tray glyph (tray_windows.rs). The

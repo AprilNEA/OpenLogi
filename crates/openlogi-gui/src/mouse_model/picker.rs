@@ -312,7 +312,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::Cut => "action-icons/scissors.svg",
         Action::Undo => "action-icons/undo-2.svg",
         Action::Redo => "action-icons/redo-2.svg",
-        Action::SelectAll => "action-icons/list-checks.svg",
+        Action::SelectAll | Action::Workflow(_) => "action-icons/list-checks.svg",
         Action::Find => "action-icons/search.svg",
         Action::Save => "action-icons/save.svg",
         Action::BrowserBack => "action-icons/arrow-left.svg",
@@ -344,13 +344,10 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::ScrollDown => "action-icons/chevrons-down.svg",
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
-        Action::CustomShortcut(_) => "action-icons/keyboard.svg",
-        // Power-user actions (M1 function-key remapper). These carry payload,
-        // so the icon doubles as the row glyph *and* the bound-key caption.
-        Action::TypeText(_) => "action-icons/keyboard.svg",
-        Action::RunAppleScript(_) => "action-icons/terminal.svg",
-        Action::RunShellCommand(_) => "action-icons/terminal.svg",
-        Action::Workflow(_) => "action-icons/list-checks.svg",
+        // Power-user actions (M1 function-key remapper). TypeText shares the
+        // keyboard glyph with CustomShortcut; shell/script arms share terminal.
+        Action::CustomShortcut(_) | Action::TypeText(_) => "action-icons/keyboard.svg",
+        Action::RunAppleScript(_) | Action::RunShellCommand(_) => "action-icons/terminal.svg",
     }
 }
 

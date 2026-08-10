@@ -65,7 +65,10 @@ fn is_dev_profile() -> bool {
     #[cfg(target_os = "macos")]
     {
         if let Some(identifier) = current_bundle_identifier() {
-            return identifier.ends_with(".dev");
+            // Reverse-DNS suffix (org.openlogi.*.dev), not a filesystem extension.
+            return identifier
+                .rsplit_once('.')
+                .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("dev"));
         }
     }
 
@@ -76,7 +79,10 @@ fn is_dev_profile() -> bool {
 fn current_bundle_identifier() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     for ancestor in exe.ancestors() {
-        if ancestor.extension().and_then(|ext| ext.to_str()) != Some("app") {
+        if !ancestor
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
+        {
             continue;
         }
 

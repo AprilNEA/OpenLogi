@@ -10,6 +10,14 @@
 //! [`AppState::commit_keyboard_binding`]. The panel lists the same action
 //! catalog the mouse picker uses, plus a Power User section.
 
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::float_cmp,
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "GPUI builders take owned Copy palette/slots; layout math uses small f32 counts"
+)]
+
 use std::rc::Rc;
 
 use gpui::{
@@ -322,16 +330,16 @@ fn inspector_row(
     let keyboard = keyboard_pane(slots.clone(), asset.as_ref(), selected, hovered, view, pal);
 
     // When nothing is selected, just the keyboard, full width.
-    if selected.is_none() {
+    let Some(selected) = selected else {
         return h_flex()
             .w_full()
             .justify_center()
             .child(keyboard)
             .into_any_element();
-    }
+    };
 
     let panel = config_panel(
-        selected.unwrap(),
+        selected,
         &slots,
         active_editor,
         text_state,
@@ -562,12 +570,11 @@ fn key_click_target(
 }
 
 fn binding_label(action: Option<&Action>) -> gpui::SharedString {
-    action
-        .map(|a| match a {
-            Action::CustomShortcut(combo) => combo.rendered_label().into(),
-            _ => tr!(a.label()).into(),
-        })
-        .unwrap_or_else(|| tr!("Off").into())
+    match action {
+        Some(Action::CustomShortcut(combo)) => combo.rendered_label().into(),
+        Some(a) => tr!(a.label()),
+        None => tr!("Off"),
+    }
 }
 
 fn keyboard_leader_canvas(
@@ -650,7 +657,7 @@ fn callout_top_px(idx: usize) -> f32 {
 }
 
 fn callout_lane_is_lower(idx: usize) -> bool {
-    idx % 2 == 0
+    idx.is_multiple_of(2)
 }
 
 /// The scrollable config panel for the selected key. Lists the same action

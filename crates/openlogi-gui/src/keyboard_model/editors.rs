@@ -8,6 +8,13 @@
 //!
 //! [`menu_card`]: crate::mouse_model::picker::menu_card
 
+#![allow(
+    clippy::needless_pass_by_value,
+    clippy::redundant_closure,
+    clippy::redundant_closure_for_method_calls,
+    reason = "GPUI builders take owned Copy palette values; entity.update wants closures"
+)]
+
 use std::rc::Rc;
 
 use gpui::{
