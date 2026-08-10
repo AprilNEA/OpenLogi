@@ -199,9 +199,9 @@ cargo run -p xtask -- release latest-json \
 
 `.github/workflows/crowdin.yml` syncs GUI locales with
 [Crowdin](https://crowdin.com/project/openlogi) and opens a `crowdin/i18n` PR
-when downloads change something — nightly, and on master pushes that touch
-English sources (`en.yml`), `crowdin.yml`, the Crowdin workflow, or the shared
-GitHub App token action.
+when a **real** translation value improved — nightly, and on master pushes that
+touch English sources (`en.yml`), `crowdin.yml`, the Crowdin workflow, the merge
+script under `scripts/i18n/`, or the shared GitHub App token action.
 
 **How it helps translation**
 
@@ -210,23 +210,27 @@ GitHub App token action.
 | `en.yml` (git) | English source of truth — English text is the key |
 | All `locales/*.yml` in git | Same keys as `en.yml` (parity test); seed Crowdin per language |
 | Crowdin project | Where people improve non-English **values** |
-| Bot PR (`crowdin/i18n`) | Brings real Crowdin translations back into the repo |
+| Merge script | Applies only values ≠ English; restores keys sparse exports omit |
+| Bot PR (`crowdin/i18n`) | Only when a non-English value actually changed |
 
 Feature PRs add new keys to **every** locale file in the same change. Crowdin
-does not invent translations; it only stores and syncs them. The download uses
-`skip_untranslated_strings` so untranslated keys are **omitted** (never English
-fill-in). Runtime still falls back to English for a missing key, but catalogs
-must stay in key parity so that never happens for shipped strings.
+does not invent translations; it only stores and syncs them. A raw Crowdin
+download is unsafe: untranslated strings come back as English (#549), and
+`skip_untranslated_strings` overwrites catalogs with sparse files that delete
+keys (#552). The workflow always **snapshots → download → merge** via
+`scripts/i18n/merge_crowdin_download.py` so catalogs stay complete and only real
+translations land in git.
 
 Each run:
 
-1. Uploads `en.yml` **sources**.
-2. Uploads **per-language translations** already in git (`import_eq_suggestions`
+1. Snapshots every `locales/*.yml`.
+2. Uploads `en.yml` **sources**.
+3. Uploads **per-language translations** already in git (`import_eq_suggestions`
    off so `value == English` is not stored as a finished translation).
-3. Downloads Crowdin’s export for configured languages with
-   **`skip_untranslated_strings`** (`export_languages` / `languages_mapping` in
-   `crowdin.yml`).
-4. Opens/updates `crowdin/i18n` when the catalogs differ.
+4. Downloads Crowdin’s export (`skip_untranslated_strings`; sparse is fine).
+5. Merges the export into the snapshot (English fill-in ignored; omitted keys
+   kept; headers / `_version` preserved).
+6. Opens/updates `crowdin/i18n` only when the working tree still differs.
 
 Like the release workflow, the job reads its credentials from one 1Password
 item referenced by the GitHub secret `OP_CROWDIN_SECRET_ITEM`. The item must
@@ -255,5 +259,6 @@ Local helpers (with Crowdin credentials configured):
 
 ```sh
 devenv tasks run openlogi:i18n-upload    # en.yml sources + per-language translations
-devenv tasks run openlogi:i18n-download  # download (skip untranslated) + i18n tests
+devenv tasks run openlogi:i18n-download  # download + merge + i18n tests
+python3 scripts/i18n/merge_crowdin_download.py --self-test
 ```

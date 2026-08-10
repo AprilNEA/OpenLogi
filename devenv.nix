@@ -112,11 +112,19 @@ in
       '';
     };
     "openlogi:i18n-download" = {
-      description = "Download per-language translations from Crowdin and run i18n tests.";
+      description = "Download Crowdin translations, merge into complete catalogs, run i18n tests.";
       exec = ''
         set -e
         ${requireXcodeMetal}
+        python3 scripts/i18n/merge_crowdin_download.py --self-test
+        before="$(mktemp -d)"
+        cp crates/openlogi-gui/locales/*.yml "$before/"
         crowdin download --skip-untranslated-strings
+        python3 scripts/i18n/merge_crowdin_download.py \
+          --before "$before" \
+          --locales crates/openlogi-gui/locales \
+          --en crates/openlogi-gui/locales/en.yml
+        rm -rf "$before"
         cargo test -p openlogi-gui i18n
       '';
     };

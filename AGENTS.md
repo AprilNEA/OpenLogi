@@ -247,8 +247,10 @@ including what was NOT verified.
 - Add or change UI strings in **every** `crates/openlogi-gui/locales/*.yml` in
   the same PR. `en.yml` is the English source of truth (the English text IS the
   key); other files must not lag — the parity test fails the build.
-- Crowdin improves non-English **values** over time. The sync job downloads with
-  `skip_untranslated_strings` so English stubs never open a bot PR.
+- Crowdin improves non-English **values** over time. The sync job **merges**
+  downloads into complete catalogs (`scripts/i18n/merge_crowdin_download.py`):
+  only real translations apply; English fill-in and sparse exports never wipe
+  keys or open noise PRs.
 - Details: [`.claude/rules/i18n.md`](.claude/rules/i18n.md).
 
 ## Subsystem rules — read before touching

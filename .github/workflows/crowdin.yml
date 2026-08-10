@@ -12,6 +12,7 @@ on:
       - crates/openlogi-gui/locales/en.yml
       - crowdin.yml
       - .github/workflows/crowdin.yml
+      - scripts/i18n/**
       - .github/actions/github-app-token-from-1password/**
 
 permissions:
@@ -29,8 +30,8 @@ jobs:
 
     steps:
       # persist-credentials must stay false: checkout's default GITHUB_TOKEN
-      # http.extraheader would win over the app token when crowdin/github-action
-      # pushes crowdin/i18n (403 as github-actions[bot] despite env GITHUB_TOKEN).
+      # http.extraheader would win over the app token when we push crowdin/i18n
+      # (403 as github-actions[bot] despite env GITHUB_TOKEN).
       - name: Checkout
         uses: actions/checkout@v6
         with:
@@ -60,12 +61,20 @@ jobs:
           CROWDIN_PROJECT_ID: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PROJECT_ID
           CROWDIN_PERSONAL_TOKEN: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PERSONAL_TOKEN
 
-      # en.yml = English source of truth. Non-English catalogs in git are seeded
-      # into Crowdin (per language) so the download does not wipe real
-      # translations with English fill-in. Crowdin is where people improve
-      # translations; the bot PR brings their work back into the repo.
-      # skip_untranslated_strings: never commit English source fill-in for
-      # keys nobody has translated yet (runtime already falls back to en).
+      - name: Self-test locale merge script
+        run: python3 scripts/i18n/merge_crowdin_download.py --self-test
+
+      # Complete catalogs in git are the merge base. Crowdin download overwrites
+      # the working tree; without a snapshot we cannot restore keys the export
+      # omitted (skip_untranslated) or un-clobber English fill-in.
+      - name: Snapshot locale catalogs
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/openlogi-locales-before
+          cp crates/openlogi-gui/locales/*.yml /tmp/openlogi-locales-before/
+
+      # Upload sources + seed per-language translations, then download only
+      # (no push/PR — we merge first so sparse/English exports never land).
       - name: Synchronize with Crowdin
         uses: crowdin/github-action@c7af9bc98b01694653031fef2a0dc6c7888ce9bc # v2.17.0
         with:
@@ -77,22 +86,57 @@ jobs:
           upload_translations: true
           import_eq_suggestions: false
           download_translations: true
+          # Sparse export is fine: merge restores omitted keys from the snapshot.
           skip_untranslated_strings: true
-          localization_branch_name: crowdin/i18n
-          commit_message: "chore(i18n): sync Crowdin translations"
-          create_pull_request: true
-          pull_request_title: "chore(i18n): sync Crowdin translations"
-          pull_request_body: |
-            Automated per-language translation sync from Crowdin.
-
-            - `en.yml` is the English source of truth (new UI strings go there first).
-            - Feature PRs also add the same keys to every `locales/*.yml` (parity test).
-            - Existing non-English catalogs are uploaded to Crowdin first so real translations are not replaced with English fill-in.
-            - Download uses `skip_untranslated_strings` — only real translations land here, never English stubs.
-            - This PR is Crowdin → git for translated locales only (`export_languages` in `crowdin.yml`).
-          github_user_name: Crowdin Bot
-          github_user_email: support+bot@crowdin.com
+          push_translations: false
+          create_pull_request: false
         env:
           GITHUB_TOKEN: ${{ steps.github_app.outputs.token }}
           CROWDIN_PROJECT_ID: ${{ steps.crowdin_config.outputs.CROWDIN_PROJECT_ID }}
           CROWDIN_PERSONAL_TOKEN: ${{ steps.crowdin_config.outputs.CROWDIN_PERSONAL_TOKEN }}
+
+      - name: Merge Crowdin export into complete catalogs
+        run: |
+          set -euo pipefail
+          python3 scripts/i18n/merge_crowdin_download.py \
+            --before /tmp/openlogi-locales-before \
+            --locales crates/openlogi-gui/locales \
+            --en crates/openlogi-gui/locales/en.yml
+
+      - name: Push translation branch and open PR
+        env:
+          GH_TOKEN: ${{ steps.github_app.outputs.token }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- crates/openlogi-gui/locales/; then
+            echo "No real Crowdin translation updates"
+            exit 0
+          fi
+
+          git config user.name "Crowdin Bot"
+          git config user.email "support+bot@crowdin.com"
+          git checkout -B crowdin/i18n
+          git add crates/openlogi-gui/locales/
+          git commit -m "chore(i18n): sync Crowdin translations"
+          git push -f origin crowdin/i18n
+
+          if gh pr view crowdin/i18n --json number --jq .number >/dev/null 2>&1; then
+            echo "Translation PR already open for crowdin/i18n"
+          else
+            body="$(cat <<'EOF'
+          Automated per-language translation sync from Crowdin.
+
+          - `en.yml` is the English source of truth; feature PRs keep key parity across all `locales/*.yml`.
+          - Existing non-English catalogs are uploaded first so Crowdin is seeded with real work.
+          - Download is merged into complete catalogs: only values that differ from English are applied.
+          - Untranslated keys are never replaced with English fill-in and never deleted (#549 / #552).
+          EOF
+          )"
+            # Strip the common indent from the workflow heredoc.
+            body="$(printf '%s\n' "$body" | sed 's/^          //')"
+            gh pr create \
+              --base master \
+              --head crowdin/i18n \
+              --title "chore(i18n): sync Crowdin translations" \
+              --body "$body"
+          fi
