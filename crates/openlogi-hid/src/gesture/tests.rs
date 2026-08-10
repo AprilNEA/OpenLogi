@@ -3,6 +3,34 @@ use super::*;
 const GESTURE: Option<u16> = Some(reprog_controls::GESTURE_BUTTON_CID);
 const PANEL: Option<u16> = Some(reprog_controls::HAPTIC_PANEL_CID);
 
+#[test]
+fn reporting_restore_preserves_every_mutable_field() {
+    let remap = reprog_controls::ControlId(0x0053);
+    let original = reprog_controls::CidReporting {
+        cid: reprog_controls::ControlId(reprog_controls::GESTURE_BUTTON_CID),
+        diverted: true,
+        persistently_diverted: true,
+        force_raw_xy: true,
+        raw_xy: false,
+        remap: Some(remap),
+        analytics_key_events: true,
+        raw_wheel: true,
+    };
+
+    assert_eq!(
+        reporting_change(original),
+        reprog_controls::CidReportingChange {
+            diverted: Some(true),
+            persistently_diverted: Some(true),
+            force_raw_xy: Some(true),
+            raw_xy: Some(false),
+            remap: Some(remap),
+            analytics_key_events: Some(true),
+            raw_wheel: Some(true),
+        }
+    );
+}
+
 fn press() -> RawControlEvent {
     RawControlEvent::DivertedButtons([reprog_controls::GESTURE_BUTTON_CID, 0, 0, 0])
 }

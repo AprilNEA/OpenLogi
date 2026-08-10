@@ -277,6 +277,7 @@ pub async fn run_capture_session_with_registry(
 
 /// The set of controls a session has diverted, kept so they can be handed back
 /// to the firmware on teardown.
+#[derive(Default)]
 struct ArmedControls {
     /// `0x1b04` accessor + feature index, present when the device exposes it.
     reprog: Option<(ReprogControlsV4, u8)>,
@@ -288,27 +289,25 @@ struct ArmedControls {
     /// Standard-button CIDs diverted per the session's [`CaptureSpec`], with
     /// the [`ButtonId`] each dispatches as.
     button_cids: Vec<(u16, ButtonId)>,
+    /// Original reporting state for every diverted `0x1b04` control.
+    reporting: Vec<ArmedCid>,
     /// `0x2150` accessor + feature index, present when the thumb wheel is
     /// diverted.
     thumb: Option<(Thumbwheel, u8)>,
+}
+
+#[derive(Clone, Copy)]
+struct ArmedCid {
+    cid: u16,
+    original: reprog_controls::CidReporting,
 }
 
 impl ArmedControls {
     /// Restore every diverted control. Failures are logged, not propagated.
     async fn disarm(&self) {
         if let Some((rc, _)) = self.reprog.as_ref() {
-            if let Some(cid) = self.gesture_cid {
-                let r = rc.set_cid_reporting(cid, false, false).await;
-                restore(r, "gesture source");
-            }
-            for &cid in &self.dpi_cids {
-                restore(rc.set_cid_reporting(cid, false, false).await, "DPI button");
-            }
-            for &(cid, _) in &self.button_cids {
-                restore(
-                    rc.set_cid_reporting(cid, false, false).await,
-                    "standard button",
-                );
+            for &reporting in &self.reporting {
+                restore_reporting(rc, reporting, "captured control").await;
             }
         }
         if let Some((tw, _)) = self.thumb.as_ref() {
@@ -330,11 +329,28 @@ async fn arm_controls(
     let device = Device::new(Arc::clone(chan), slot)
         .await
         .map_err(|_| GestureError::DeviceUnreachable(slot))?;
+    let mut armed = ArmedControls::default();
+    if let Err(error) = arm_controls_into(&device, chan, slot, spec, &mut armed).await {
+        armed.disarm().await;
+        return Err(error);
+    }
+    if armed.gesture_cid.is_none()
+        && armed.dpi_cids.is_empty()
+        && armed.button_cids.is_empty()
+        && armed.thumb.is_none()
+    {
+        debug!(slot, "no capturable controls — idle session");
+    }
+    Ok(armed)
+}
 
-    let mut reprog: Option<(ReprogControlsV4, u8)> = None;
-    let mut gesture_cid: Option<u16> = None;
-    let mut dpi_cids: Vec<u16> = Vec::new();
-    let mut button_cids: Vec<(u16, ButtonId)> = Vec::new();
+async fn arm_controls_into(
+    device: &Device,
+    chan: &Arc<HidppChannel>,
+    slot: u8,
+    spec: &CaptureSpec,
+    armed: &mut ArmedControls,
+) -> Result<(), GestureError> {
     if let Some(info) = device
         .root()
         .get_feature(reprog_controls::FEATURE_ID)
@@ -343,6 +359,7 @@ async fn arm_controls(
     {
         let rc = ReprogControlsV4::new(Arc::clone(chan), slot, info.index);
         let controls = enumerate_controls(&rc).await?;
+        armed.reprog = Some((rc.clone(), info.index));
 
         // Only divert the gesture owner's source; every other gesture source
         // stays native (a non-owner HID++ control must not be
@@ -350,37 +367,32 @@ async fn arm_controls(
         if let Some(cid) = spec.divert_gesture_source
             && controls.iter().any(|c| c.cid == cid && c.supports_raw_xy())
         {
-            rc.set_cid_reporting(cid, true, true)
-                .await
-                .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-            gesture_cid = Some(cid);
+            let reporting = arm_reprog_control(&rc, cid, true).await?;
+            armed.reporting.push(reporting);
+            armed.gesture_cid = Some(cid);
         }
         for &cid in &reprog_controls::DPI_MODE_SHIFT_CIDS {
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-                rc.set_cid_reporting(cid, true, false)
-                    .await
-                    .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-                dpi_cids.push(cid);
+                let reporting = arm_reprog_control(&rc, cid, false).await?;
+                armed.reporting.push(reporting);
+                armed.dpi_cids.push(cid);
             }
         }
         for &(cid, button) in &spec.divert_buttons {
             // The plan never lists the raw-XY-diverted gesture source, but
             // guard anyway: a plain (divert, no raw-XY) write here would strip
             // the raw-XY reporting armed above.
-            if gesture_cid == Some(cid) {
+            if armed.gesture_cid == Some(cid) {
                 continue;
             }
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-                rc.set_cid_reporting(cid, true, false)
-                    .await
-                    .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-                button_cids.push((cid, button));
+                let reporting = arm_reprog_control(&rc, cid, false).await?;
+                armed.reporting.push(reporting);
+                armed.button_cids.push((cid, button));
             }
         }
-        reprog = Some((rc, info.index));
     }
 
-    let mut thumb: Option<(Thumbwheel, u8)> = None;
     if spec.capture_thumbwheel
         && let Some(info) = device
             .root()
@@ -406,22 +418,59 @@ async fn arm_controls(
         if !supports_single_tap {
             debug!("thumb wheel reports no single tap — click not capturable");
         }
-        tw.set_reporting(true, false)
-            .await
-            .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-        thumb = Some((tw, info.index));
+        if let Err(error) = tw.set_reporting(true, false).await {
+            let error = GestureError::Hidpp(format!("{error:?}"));
+            restore(
+                tw.set_reporting(false, false).await,
+                "failed thumb wheel diversion",
+            );
+            return Err(error);
+        }
+        armed.thumb = Some((tw, info.index));
     }
 
-    if gesture_cid.is_none() && dpi_cids.is_empty() && button_cids.is_empty() && thumb.is_none() {
-        debug!(slot, "no capturable controls — idle session");
+    Ok(())
+}
+
+async fn arm_reprog_control(
+    rc: &ReprogControlsV4,
+    cid: u16,
+    raw_xy: bool,
+) -> Result<ArmedCid, GestureError> {
+    let original = rc
+        .get_cid_reporting(cid)
+        .await
+        .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
+    let mut change = reprog_controls::CidReportingChange::temporary_diversion(true, raw_xy);
+    change.remap = original.remap;
+    if let Err(error) = rc.set_cid_reporting_full(cid, change).await {
+        let error = GestureError::Hidpp(format!("{error:?}"));
+        restore_reporting(rc, ArmedCid { cid, original }, "failed diversion").await;
+        return Err(error);
     }
-    Ok(ArmedControls {
-        reprog,
-        gesture_cid,
-        dpi_cids,
-        button_cids,
-        thumb,
-    })
+    Ok(ArmedCid { cid, original })
+}
+
+fn reporting_change(
+    reporting: reprog_controls::CidReporting,
+) -> reprog_controls::CidReportingChange {
+    reprog_controls::CidReportingChange {
+        diverted: Some(reporting.diverted),
+        persistently_diverted: Some(reporting.persistently_diverted),
+        force_raw_xy: Some(reporting.force_raw_xy),
+        raw_xy: Some(reporting.raw_xy),
+        remap: reporting.remap,
+        analytics_key_events: Some(reporting.analytics_key_events),
+        raw_wheel: Some(reporting.raw_wheel),
+    }
+}
+
+async fn restore_reporting(rc: &ReprogControlsV4, armed: ArmedCid, what: &str) {
+    let result = rc
+        .set_cid_reporting_full(armed.cid, reporting_change(armed.original))
+        .await
+        .map(|_| ());
+    restore(result, what);
 }
 
 /// Log (don't propagate) a failure to hand a control back to the firmware.
