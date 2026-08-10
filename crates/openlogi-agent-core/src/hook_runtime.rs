@@ -22,10 +22,10 @@ use openlogi_hook::{
 };
 use tracing::{info, warn};
 
-use crate::{DpiCycleState, DpiCycles};
 use crate::event_monitor::SharedEventMonitor;
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::receiver_access::ReceiverAccess;
+use crate::{DpiCycleState, DpiCycles};
 
 /// Runtime dependencies shared by every action source: the OS hook, HID++
 /// controls, keyboard capture, and Actions Ring slot activation.

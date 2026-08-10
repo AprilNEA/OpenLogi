@@ -42,7 +42,6 @@ mod diagnostics;
 mod i18n;
 mod ipc_client;
 mod keyboard_model;
-mod locale;
 mod mouse_model;
 mod platform;
 mod state;

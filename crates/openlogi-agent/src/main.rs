@@ -148,6 +148,35 @@ fn spawn_hidpp_watchers(shared: &SharedRuntime, dispatcher: ActionDispatcher) {
     );
 }
 
+fn action_ring_runtime(
+    shared: &SharedRuntime,
+) -> (
+    Arc<ActionRingManager>,
+    tokio::sync::mpsc::UnboundedReceiver<Option<String>>,
+    ActionDispatcher,
+) {
+    let manager = Arc::new(ActionRingManager::default());
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let dispatcher = ActionDispatcher::new(
+        shared.dpi_cycle.clone(),
+        shared.capture_channel.clone(),
+        shared.channel_registry.clone(),
+        shared.receiver_access.clone(),
+        sender,
+    );
+    (manager, receiver, dispatcher)
+}
+
+async fn begin_action_ring(
+    orchestrator: &Mutex<Orchestrator>,
+    action_ring: &ActionRingManager,
+    device_key: Option<&str>,
+) {
+    if let Some(session) = orchestrator.lock().await.action_ring_session(device_key) {
+        action_ring.begin(session);
+    }
+}
+
 async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<AtomicBool>) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
     // LaunchAgent, before `config` moves into the orchestrator.
@@ -176,15 +205,7 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
     let orchestrator = Arc::new(Mutex::new(Orchestrator::new(config)));
     let shared = orchestrator.lock().await.shared();
     let hook_installed = Arc::new(AtomicBool::new(false));
-    let action_ring = Arc::new(ActionRingManager::default());
-    let (action_ring_tx, mut action_ring_rx) = tokio::sync::mpsc::unbounded_channel();
-    let dispatcher = ActionDispatcher::new(
-        shared.dpi_cycle.clone(),
-        shared.capture_channel.clone(),
-        shared.channel_registry.clone(),
-        shared.receiver_access.clone(),
-        action_ring_tx,
-    );
+    let (action_ring, mut action_ring_rx, dispatcher) = action_ring_runtime(&shared);
 
     // Live event monitor: shared between the hook callback (which mirrors events
     // into it) and the IPC server (which the GUI polls). The janitor turns it
@@ -273,13 +294,7 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
                 orchestrator.lock().await.set_current_app(bundle);
             }
             Some(device_key) = action_ring_rx.recv() => {
-                let session = orchestrator
-                    .lock()
-                    .await
-                    .action_ring_session(device_key.as_deref());
-                if let Some(session) = session {
-                    action_ring.begin(session);
-                }
+                begin_action_ring(&orchestrator, &action_ring, device_key.as_deref()).await;
             }
             Some(granted) = accessibility_rx.recv() => {
                 if !granted {
