@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.24] - 2026-08-10
+
+### Added
+
+- *(hid)* recognize Lightspeed receiver (046d:c539) as Unifying-compatible ([#510](https://github.com/AprilNEA/OpenLogi/pull/510))
+- add function key remapper ([#344](https://github.com/AprilNEA/OpenLogi/pull/344))
+- *(hid)* add standalone Litra light support ([#513](https://github.com/AprilNEA/OpenLogi/pull/513))
+- keyboard F-row key remapping and fn-lock over HID++ ([#395](https://github.com/AprilNEA/OpenLogi/pull/395))
+- *(hook)* Wayland frontmost-window backends (wlroots + GNOME Shell) ([#191](https://github.com/AprilNEA/OpenLogi/pull/191))
+- *(camera)* add Logitech webcam support ([#531](https://github.com/AprilNEA/OpenLogi/pull/531))
+- *(backlight)* support HID++ 0x1982 ([#470](https://github.com/AprilNEA/OpenLogi/pull/470))
+- *(battery)* support legacy 0x1000 BatteryStatus and its charging quirk ([#312](https://github.com/AprilNEA/OpenLogi/pull/312))
+
+### Fixed
+
+- *(agent-core)* retry volatile DPI re-apply on cold boot ([#449](https://github.com/AprilNEA/OpenLogi/pull/449))
+- *(agent)* prefer online device for input capture ([#453](https://github.com/AprilNEA/OpenLogi/pull/453))
+- *(hidpp)* keep events when a field carries an unknown enum value ([#432](https://github.com/AprilNEA/OpenLogi/pull/432))
+- *(agent)* rearm control capture after device reconnect ([#450](https://github.com/AprilNEA/OpenLogi/pull/450))
+- *(linux)* grant uaccess on Logitech input event nodes ([#530](https://github.com/AprilNEA/OpenLogi/pull/530))
+- *(agent)* reapply volatile settings after macOS resume ([#506](https://github.com/AprilNEA/OpenLogi/pull/506))
+- *(hook)* never wedge system pointer input ([#534](https://github.com/AprilNEA/OpenLogi/pull/534))
+- *(agent)* route hardware operations through inventory channels ([#532](https://github.com/AprilNEA/OpenLogi/pull/532))
+- *(agent)* reuse inventory channels for input capture ([#522](https://github.com/AprilNEA/OpenLogi/pull/522))
+- *(i18n)* complete Crowdin synchronization ([#508](https://github.com/AprilNEA/OpenLogi/pull/508))
+
 ## [0.6.23](https://github.com/AprilNEA/OpenLogi/compare/openlogi-core-v0.6.22...openlogi-core-v0.6.23) - 2026-08-02
 
 ### Fixed
