@@ -237,8 +237,19 @@ including what was NOT verified.
 2. Full local gate green on the **final** tree (fmt + clippy `-D warnings` + test).
 3. If cfg-gated files changed: cross-lint or hand-audit against master (see above).
 4. If wire types changed: `wire_format` tests green + `PROTOCOL_VERSION` bumped.
-5. If locales changed: `cargo test -p openlogi-gui i18n` green.
+5. If locales changed: only `en.yml` is required for new strings; run
+   `cargo test -p openlogi-gui i18n` (non-English may lag until Crowdin).
 6. Only then `git push` / force-push to the PR branch.
+
+## i18n (English only in feature work)
+
+- **Only edit** `crates/openlogi-gui/locales/en.yml` when adding or changing UI
+  strings. The English text is the key; `rust_i18n` falls back to English for
+  missing translations.
+- **Do not** update `da`/`de`/`ja`/… locale files in the same PR to “keep parity.”
+  Crowdin owns non-English catalogs; the Crowdin workflow opens `crowdin/i18n`
+  after `en.yml` lands on master.
+- Details: [`.claude/rules/i18n.md`](.claude/rules/i18n.md).
 
 ## Subsystem rules — read before touching
 

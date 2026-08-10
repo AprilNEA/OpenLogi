@@ -1,11 +1,12 @@
 //! UI localization plumbing.
 //!
 //! Translations live in `crates/openlogi-gui/locales/*.yml` and are loaded at
-//! compile time by the `rust_i18n::i18n!` macro in `main.rs`. Crowdin manages one
-//! file per locale: `en.yml` is the source file, and every other locale in
-//! [`SUPPORTED`] is downloaded as a translated YAML file. Call sites use the
-//! [`tr!`](crate::tr) helper (or `rust_i18n::t!`) with the **English string as
-//! the key**.
+//! compile time by the `rust_i18n::i18n!` macro in `main.rs` (fallback `"en"`).
+//! **`en.yml` is the only source of truth** for UI strings — edit that file when
+//! adding or changing copy. Crowdin owns non-English catalogs (`SUPPORTED`
+//! minus `en`); the Crowdin workflow downloads them. Call sites use
+//! [`tr!`](crate::tr) / `rust_i18n::t!` with the **English string as the key**.
+//! Missing keys in a non-English file fall back to English at runtime.
 //!
 //! The current locale is a process-global atomic inside `rust_i18n`. Setting it
 //! re-localizes both our own call sites *and* gpui-component's built-in widget
@@ -295,9 +296,20 @@ mod tests {
         assert_eq!(rust_i18n::t!(BLURB), BLURB);
     }
 
+    /// Non-English catalogs may lag `en.yml` until Crowdin syncs (runtime falls
+    /// back to English). They must never introduce keys that are not in `en.yml`.
     #[test]
-    fn locale_files_have_the_same_keys() {
-        let source = locale_keys(include_str!("../locales/en.yml"));
+    fn locale_files_keys_are_subset_of_en() {
+        use std::collections::BTreeSet;
+
+        let source: BTreeSet<&str> = locale_keys(include_str!("../locales/en.yml"))
+            .into_iter()
+            .collect();
+        assert!(
+            !source.is_empty(),
+            "en.yml is the string source of truth and must define keys"
+        );
+
         for (locale, file) in [
             ("ja", include_str!("../locales/ja.yml")),
             ("ru", include_str!("../locales/ru.yml")),
@@ -319,8 +331,12 @@ mod tests {
             ("pt-PT", include_str!("../locales/pt-PT.yml")),
             ("sv", include_str!("../locales/sv.yml")),
         ] {
-            let keys = locale_keys(file);
-            assert_eq!(keys, source, "{locale}.yml keys drifted from en.yml");
+            let keys: BTreeSet<&str> = locale_keys(file).into_iter().collect();
+            let extras: Vec<&str> = keys.difference(&source).copied().collect();
+            assert!(
+                extras.is_empty(),
+                "{locale}.yml has keys not in en.yml (edit en.yml only; Crowdin owns other locales): {extras:?}"
+            );
         }
     }
 

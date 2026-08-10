@@ -232,12 +232,16 @@ OpenLogi project:
 - Translations — Read and Write.
 
 Missing or invalid credentials fail the workflow. Translation PRs run the
-normal CI checks, including the locale key-parity test. The workflow uses the
-existing `OP_GITHUB_APP_ITEM` to mint a short-lived token for pushing its
-translation branch and opening the PR; the default `GITHUB_TOKEN` remains
+normal CI checks, including the locale key test (non-English keys must be a
+subset of `en.yml`; catalogs may lag until Crowdin fills them). The workflow
+uses the existing `OP_GITHUB_APP_ITEM` to mint a short-lived token for pushing
+its translation branch and opening the PR; the default `GITHUB_TOKEN` remains
 read-only. Checkout runs with `persist-credentials: false` and the origin
 remote is rewritten to the app token so git push does not inherit the
 read-only Actions credential.
+
+Feature work only needs `en.yml`. Do not hand-edit every locale file for a new
+string — Crowdin + this workflow own non-English updates.
 
 Local helpers (with Crowdin credentials configured):
 
