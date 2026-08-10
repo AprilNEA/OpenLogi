@@ -1,4 +1,5 @@
-//! Windows `WH_MOUSE_LL` implementation of the OS-level mouse hook.
+//! Windows `WH_MOUSE_LL` + `WH_KEYBOARD_LL` implementation of the OS-level
+//! input hook.
 #![allow(
     clippy::borrow_as_ptr,
     clippy::cast_possible_truncation,
@@ -15,16 +16,21 @@ use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LPARAM, LRESULT,
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_F1, VK_LWIN, VK_MENU, VK_RWIN,
+    VK_SHIFT,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
-    HC_ACTION, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostThreadMessageW,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1,
-    XBUTTON2,
+    HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE,
+    PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER, WM_XBUTTONDOWN,
+    WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
-use crate::{ButtonId, EventDisposition, HookError, HookEvent, MouseEvent};
+use crate::{ButtonId, EventDisposition, HookError, HookEvent, KeyEvent, KeyModifiers, MouseEvent};
 
 const WHEEL_DELTA: f32 = 120.0;
 
@@ -99,7 +105,7 @@ fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError
         }
         Ok(_) => {
             let _ = ready.send(Err(HookError::WindowsHook(
-                "another Windows mouse hook is already installed".into(),
+                "another Windows input hook is already installed".into(),
             )));
             return;
         }
@@ -132,7 +138,7 @@ fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError
     // signature; a null module handle plus thread id 0 install a global
     // low-level mouse hook, the documented usage for WH_MOUSE_LL. Returns null
     // on failure, checked below.
-    let hook = unsafe {
+    let mouse_hook = unsafe {
         SetWindowsHookExW(
             WH_MOUSE_LL,
             Some(mouse_proc),
@@ -140,19 +146,43 @@ fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError
             0,
         )
     };
-    if hook.is_null() {
+    if mouse_hook.is_null() {
         clear_callback();
-        let _ = ready.send(Err(last_error("SetWindowsHookExW")));
+        let _ = ready.send(Err(last_error("SetWindowsHookExW(WH_MOUSE_LL)")));
+        return;
+    }
+
+    // SAFETY: same contract as the mouse hook above, with `keyboard_proc` as
+    // the HOOKPROC — the documented usage for WH_KEYBOARD_LL.
+    let keyboard_hook = unsafe {
+        SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            Some(keyboard_proc),
+            std::ptr::null_mut::<core::ffi::c_void>(),
+            0,
+        )
+    };
+    if keyboard_hook.is_null() {
+        // Read the error before UnhookWindowsHookEx can overwrite it.
+        let error = last_error("SetWindowsHookExW(WH_KEYBOARD_LL)");
+        // SAFETY: `mouse_hook` is the live handle just returned above, unhooked
+        // exactly once on this bail-out path.
+        unsafe {
+            UnhookWindowsHookEx(mouse_hook);
+        }
+        clear_callback();
+        let _ = ready.send(Err(error));
         return;
     }
 
     let _ = ready.send(Ok(thread_id));
     message_loop();
 
-    // SAFETY: `hook` is the live handle just returned by SetWindowsHookExW,
-    // unhooked exactly once here as the thread exits.
+    // SAFETY: both handles are the live ones returned by SetWindowsHookExW,
+    // each unhooked exactly once here as the thread exits.
     unsafe {
-        UnhookWindowsHookEx(hook);
+        UnhookWindowsHookEx(keyboard_hook);
+        UnhookWindowsHookEx(mouse_hook);
     }
     clear_callback();
 }
@@ -320,6 +350,120 @@ fn motion_delta(previous: POINT, pt: POINT) -> Option<(i32, i32)> {
     (delta_x != 0 || delta_y != 0).then_some((delta_x, delta_y))
 }
 
+/// Low-level keyboard-hook procedure the OS invokes for every key event.
+///
+/// # Safety
+/// Must only be installed as a `WH_KEYBOARD_LL` hook via `SetWindowsHookExW`.
+/// When `code == HC_ACTION`, Windows guarantees `lparam` points to a live
+/// `KBDLLHOOKSTRUCT`; [`key_hook_data`] relies on that contract to
+/// dereference it.
+unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code != HC_ACTION as i32 {
+        return call_next(code, wparam, lparam);
+    }
+
+    // SAFETY: `keyboard_proc` is only installed as a WH_KEYBOARD_LL hook and
+    // this is the `code == HC_ACTION` arm, so `lparam` is the live
+    // `KBDLLHOOKSTRUCT` pointer `key_hook_data` requires.
+    let Some(data) = (unsafe { key_hook_data(lparam) }) else {
+        return call_next(code, wparam, lparam);
+    };
+    let Some(event) = translate_key(wparam, data, current_modifiers()) else {
+        return call_next(code, wparam, lparam);
+    };
+
+    let callback = CALLBACK.lock().ok().and_then(|slot| slot.clone());
+    let disposition = callback
+        .as_ref()
+        .map_or(EventDisposition::PassThrough, |cb| {
+            cb(HookEvent::Key(event))
+        });
+    match disposition {
+        EventDisposition::PassThrough => call_next(code, wparam, lparam),
+        EventDisposition::Suppress => 1,
+    }
+}
+
+/// Copy the `KBDLLHOOKSTRUCT` the OS passed in `lparam`, or `None` if `lparam`
+/// is null.
+///
+/// # Safety
+/// `lparam` must be the `lParam` the OS passes to a `WH_KEYBOARD_LL` hook
+/// procedure for an `HC_ACTION` event — i.e. it points to a live
+/// `KBDLLHOOKSTRUCT` (or is 0). Any other non-zero value is undefined behavior.
+unsafe fn key_hook_data(lparam: LPARAM) -> Option<KBDLLHOOKSTRUCT> {
+    if lparam == 0 {
+        return None;
+    }
+    // SAFETY: by this function's contract `lparam` is the WH_KEYBOARD_LL
+    // HC_ACTION lParam and is non-zero here, so it points to a live
+    // `KBDLLHOOKSTRUCT`. We copy it out by value (plain-old-data) and never
+    // retain the pointer.
+    Some(unsafe { *(lparam as *const KBDLLHOOKSTRUCT) })
+}
+
+/// Translate a `WH_KEYBOARD_LL` message into a [`KeyEvent`]. Returns `None`
+/// for injected input (our own `SendInput` synthesis must not re-enter the
+/// remapper) and for keys outside the remapper's Esc/F1–F19 vocabulary, which
+/// pass through without ever reaching the callback.
+fn translate_key(
+    wparam: WPARAM,
+    data: KBDLLHOOKSTRUCT,
+    modifiers: KeyModifiers,
+) -> Option<KeyEvent> {
+    if data.flags & LLKHF_INJECTED != 0 {
+        return None;
+    }
+    // Alt-held keys arrive as WM_SYSKEYDOWN/-UP, so `alt+fN` triggers still
+    // reach the remapper.
+    let pressed = match wparam as u32 {
+        WM_KEYDOWN | WM_SYSKEYDOWN => true,
+        WM_KEYUP | WM_SYSKEYUP => false,
+        _ => return None,
+    };
+    Some(KeyEvent {
+        keycode: mac_keycode(data.vkCode)?,
+        pressed,
+        modifiers,
+    })
+}
+
+/// macOS `kVK_*` keycodes for F1–F19 in order — [`KeyEvent`] carries macOS
+/// virtual keycodes on every platform, matching the `KeyTrigger` config
+/// vocabulary.
+const FKEY_MAC_KEYCODES: [u16; 19] = [
+    0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F, 0x69, 0x6B, 0x71, 0x6A,
+    0x40, 0x4F, 0x50,
+];
+
+/// Map a Windows virtual-key code to the macOS keycode [`KeyEvent`] carries,
+/// or `None` for keys outside the Esc/F1–F19 set.
+fn mac_keycode(vk: u32) -> Option<u16> {
+    let vk = u16::try_from(vk).ok()?;
+    if vk == VK_ESCAPE {
+        return Some(0x35);
+    }
+    FKEY_MAC_KEYCODES
+        .get(usize::from(vk.checked_sub(VK_F1)?))
+        .copied()
+}
+
+/// Snapshot the modifier state via `GetAsyncKeyState` — `WH_KEYBOARD_LL`
+/// events carry no modifier flags of their own.
+fn current_modifiers() -> KeyModifiers {
+    KeyModifiers {
+        shift: key_held(VK_SHIFT),
+        control: key_held(VK_CONTROL),
+        option: key_held(VK_MENU),
+        command: key_held(VK_LWIN) || key_held(VK_RWIN),
+    }
+}
+
+fn key_held(vk: VIRTUAL_KEY) -> bool {
+    // SAFETY: GetAsyncKeyState takes the key code by value; no preconditions.
+    (unsafe { GetAsyncKeyState(i32::from(vk)) }) < 0
+}
+
 fn high_word(value: u32) -> u16 {
     (value >> 16) as u16
 }
@@ -378,6 +522,7 @@ fn last_error(context: &str) -> HookError {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 
@@ -417,6 +562,92 @@ mod tests {
 
         assert!(translate_event(WM_LBUTTONDOWN as WPARAM, data).is_none());
         assert!(translate_event(WM_MOUSEMOVE as WPARAM, data).is_none());
+    }
+
+    fn key(vk: u16) -> KBDLLHOOKSTRUCT {
+        KBDLLHOOKSTRUCT {
+            vkCode: u32::from(vk),
+            ..KBDLLHOOKSTRUCT::default()
+        }
+    }
+
+    /// The hook emits macOS `kVK_*` keycodes; a drift from the `KeyTrigger`
+    /// parse table in openlogi-core would make every saved binding miss.
+    #[test]
+    fn emitted_keycodes_match_the_key_trigger_vocabulary() {
+        use openlogi_core::config::KeyTrigger;
+
+        let esc: KeyTrigger = "esc".parse().expect("parse key trigger");
+        assert_eq!(mac_keycode(u32::from(VK_ESCAPE)), Some(esc.keycode));
+        for n in 1..=19u16 {
+            let trigger: KeyTrigger = format!("f{n}").parse().expect("parse key trigger");
+            assert_eq!(
+                mac_keycode(u32::from(VK_F1 + n - 1)),
+                Some(trigger.keycode),
+                "f{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn translate_key_maps_press_and_release() {
+        let mods = KeyModifiers::default();
+        // VK_F18 = VK_F1 + 17.
+        let down = translate_key(WM_KEYDOWN as WPARAM, key(VK_F1 + 17), mods);
+        assert!(matches!(
+            down,
+            Some(KeyEvent {
+                keycode: 0x4F,
+                pressed: true,
+                ..
+            })
+        ));
+        let up = translate_key(WM_KEYUP as WPARAM, key(VK_F1 + 17), mods);
+        assert!(matches!(up, Some(KeyEvent { pressed: false, .. })));
+    }
+
+    /// Alt-held F-keys arrive as WM_SYSKEYDOWN/-UP; an `alt+fN` trigger must
+    /// still see them.
+    #[test]
+    fn translate_key_handles_syskey_messages() {
+        let mods = KeyModifiers {
+            option: true,
+            ..KeyModifiers::default()
+        };
+        let down = translate_key(WM_SYSKEYDOWN as WPARAM, key(VK_F1), mods);
+        assert!(matches!(
+            down,
+            Some(KeyEvent {
+                keycode: 0x7A,
+                pressed: true,
+                ..
+            })
+        ));
+        let up = translate_key(WM_SYSKEYUP as WPARAM, key(VK_F1), mods);
+        assert!(matches!(up, Some(KeyEvent { pressed: false, .. })));
+    }
+
+    #[test]
+    fn translate_key_ignores_injected_keyboard_input() {
+        let data = KBDLLHOOKSTRUCT {
+            vkCode: u32::from(VK_F1),
+            flags: LLKHF_INJECTED,
+            ..KBDLLHOOKSTRUCT::default()
+        };
+
+        assert!(translate_key(WM_KEYDOWN as WPARAM, data, KeyModifiers::default()).is_none());
+    }
+
+    /// Ordinary typing keys are outside the Esc/F1–F19 vocabulary and must
+    /// never reach the callback — their raw VK codes would otherwise collide
+    /// with the macOS keycode space (e.g. VK 0x41 'A' vs kVK 0x41 keypad-.).
+    #[test]
+    fn translate_key_passes_unmapped_keys_through() {
+        let mods = KeyModifiers::default();
+        // 'A'
+        assert!(translate_key(WM_KEYDOWN as WPARAM, key(0x41), mods).is_none());
+        // VK_F20, one past the modeled range.
+        assert!(translate_key(WM_KEYDOWN as WPARAM, key(VK_F1 + 19), mods).is_none());
     }
 
     /// Wheel-forward (away from the user) must produce a positive `delta_y`, the

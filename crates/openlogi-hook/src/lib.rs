@@ -332,16 +332,18 @@ impl Drop for Hook {
 }
 
 impl Hook {
-    /// Install the mouse hook and start delivering events to `cb`.
+    /// Install the input hook and start delivering events to `cb`.
     ///
-    /// The callback runs on a private background thread for every mouse button
-    /// or scroll event. It must return [`EventDisposition`] quickly — blocking
-    /// it stalls input delivery system-wide.
+    /// The callback runs on a private background thread for every mouse
+    /// button, scroll, or (macOS / Windows) keyboard event. It must return
+    /// [`EventDisposition`] quickly — blocking it stalls input delivery
+    /// system-wide.
     ///
     /// On macOS, returns [`HookError::AccessibilityDenied`] when Accessibility
     /// permission has not been granted. On Linux, returns
-    /// [`HookError::NoDeviceFound`] when no mouse device is accessible. On
-    /// Windows, installs a `WH_MOUSE_LL` low-level mouse hook.
+    /// [`HookError::NoDeviceFound`] when no mouse device is accessible (key
+    /// events are not yet captured there). On Windows, installs `WH_MOUSE_LL`
+    /// and `WH_KEYBOARD_LL` low-level hooks.
     pub fn start(
         cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
     ) -> Result<Self, HookError> {
