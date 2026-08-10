@@ -197,38 +197,24 @@ cargo run -p xtask -- release latest-json \
 
 ## Crowdin translation sync
 
-`.github/workflows/crowdin.yml` audits and repairs GUI locales against
-[Crowdin](https://crowdin.com/project/openlogi), then opens a `crowdin/i18n`
-**repair PR** when something actually needs fixing — nightly, and on master
-pushes that touch any locale under `crates/openlogi-gui/locales/` (English
-source or translated catalogs), `crowdin.yml`, the Crowdin workflow, the shared
-GitHub App token action, or `scripts/i18n/**`.
-`crowdin.yml` limits exports to the locales shipped by the app and maps Crowdin
-language identifiers to their repository filenames.
+`.github/workflows/crowdin.yml` syncs **non-English** GUI locales with
+[Crowdin](https://crowdin.com/project/openlogi) and opens a `crowdin/i18n` PR
+when downloads change something — nightly, and on master pushes that touch
+English sources (`en.yml`), `crowdin.yml`, the Crowdin workflow, or the shared
+GitHub App token action.
 
-Locale keys **are** the English source string. For **every** locale catalog under
-`locales/`, a value equal to the `en.yml` source is treated as **untranslated /
-wrong** when it is a Crowdin source fill-in (missing translation).
+**English (`en.yml`) is the only source of truth for strings.** Add or edit UI
+copy there. Crowdin is only for translating those keys into other languages;
+do not hand-maintain non-English locale files as a second source of truth.
+Untranslated keys may still match English until Crowdin is updated — that is
+expected.
 
 Each run:
 
-1. **Snapshot** all master locale catalogs.
-2. **Upload** sources and translations already in git
-   (`import_eq_suggestions` off so English placeholders are not stored as
-   translations).
-3. **Download** Crowdin's export.
-4. **Audit + repair** every `*.yml` via `scripts/i18n/repair_locale_translations.py`:
-   - Crowdin translated, master English source fill-in → **fix**
-   - Crowdin English fill-in, master translated → **preserve** master (block clobber)
-   - both translated, Crowdin differs → **apply Crowdin update**
-   - both still English source fill-in → leave as-is (needs a human translator)
-5. If the working tree still differs from the snapshot, force-push
-   `crowdin/i18n` and open/update a PR titled
-   `fix(i18n): repair locale translations` with a per-locale report
-   (fixed / preserved / updated / still English fill-in).
-
-Without upload + repair, hand-seeded strings never reach Crowdin and the next
-download rewrites them to English.
+1. Uploads `en.yml` **sources** to Crowdin (not locale translations from git).
+2. Downloads Crowdin's non-English export (see `export_languages` /
+   `languages_mapping` in `crowdin.yml`).
+3. Opens/updates `crowdin/i18n` when the translated catalogs differ.
 
 Like the release workflow, the job reads its credentials from one 1Password
 item referenced by the GitHub secret `OP_CROWDIN_SECRET_ITEM`. The item must
@@ -256,7 +242,6 @@ read-only Actions credential.
 Local helpers (with Crowdin credentials configured):
 
 ```sh
-devenv tasks run openlogi:i18n-upload    # sources + translations
-devenv tasks run openlogi:i18n-download  # download + repair + i18n tests
-python3 scripts/i18n/repair_locale_translations.py --self-test
+devenv tasks run openlogi:i18n-upload    # upload en.yml sources
+devenv tasks run openlogi:i18n-download  # download non-English locales + i18n tests
 ```

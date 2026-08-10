@@ -8,13 +8,11 @@ on:
     branches:
       - master
     paths:
+      # English source is SoT; non-English catalogs come from Crowdin only.
+      - crates/openlogi-gui/locales/en.yml
       - crowdin.yml
-      # Any locale catalog (en source or translated). A crowdin/i18n merge may
-      # re-trigger once; a no-diff repair is a no-op (no PR).
-      - crates/openlogi-gui/locales/**
       - .github/workflows/crowdin.yml
       - .github/actions/github-app-token-from-1password/**
-      - scripts/i18n/**
 
 permissions:
   contents: read
@@ -31,8 +29,8 @@ jobs:
 
     steps:
       # persist-credentials must stay false: checkout's default GITHUB_TOKEN
-      # http.extraheader would win over the app token when we push crowdin/i18n
-      # (403 as github-actions[bot] despite env GITHUB_TOKEN).
+      # http.extraheader would win over the app token when crowdin/github-action
+      # pushes crowdin/i18n (403 as github-actions[bot] despite env GITHUB_TOKEN).
       - name: Checkout
         uses: actions/checkout@v6
         with:
@@ -62,96 +60,27 @@ jobs:
           CROWDIN_PROJECT_ID: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PROJECT_ID
           CROWDIN_PERSONAL_TOKEN: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PERSONAL_TOKEN
 
-      # Snapshot master catalogs: the repair step diffs Crowdin export against
-      # these to fix English-on-master and to block Crowdin source clobber.
-      - name: Snapshot locales before Crowdin download
-        run: |
-          set -euo pipefail
-          mkdir -p "${RUNNER_TEMP}/locales-before"
-          cp -a crates/openlogi-gui/locales/. "${RUNNER_TEMP}/locales-before/"
-
+      # English (en.yml) is the only source of truth for strings. Crowdin holds
+      # non-English translations; untranslated keys export as English fill-in
+      # until translators finish — that is expected, not a git merge conflict.
       - name: Synchronize with Crowdin
         uses: crowdin/github-action@c7af9bc98b01694653031fef2a0dc6c7888ce9bc # v2.17.0
         with:
           config: crowdin.yml
           upload_sources: true
-          # Push all locale translations first so Crowdin learns hand-seeded
-          # strings. import_eq_suggestions stays false so value==source English
-          # placeholders are not uploaded as "translations".
-          upload_translations: true
-          import_eq_suggestions: false
+          upload_translations: false
           download_translations: true
-          # We commit ourselves after the repair/audit step below.
-          push_translations: false
-          push_sources: false
-          create_pull_request: false
           localization_branch_name: crowdin/i18n
+          commit_message: "chore(i18n): sync Crowdin translations"
+          create_pull_request: true
+          pull_request_title: "chore(i18n): sync Crowdin translations"
+          pull_request_body: |
+            Automated non-English translation sync from Crowdin.
+
+            `en.yml` in git is the source of truth for English strings. This PR only updates translated locale catalogs from Crowdin (`export_languages` in `crowdin.yml`). Untranslated keys may still match English until Crowdin is updated.
           github_user_name: Crowdin Bot
           github_user_email: support+bot@crowdin.com
         env:
           GITHUB_TOKEN: ${{ steps.github_app.outputs.token }}
           CROWDIN_PROJECT_ID: ${{ steps.crowdin_config.outputs.CROWDIN_PROJECT_ID }}
           CROWDIN_PERSONAL_TOKEN: ${{ steps.crowdin_config.outputs.CROWDIN_PERSONAL_TOKEN }}
-
-      - name: Repair wrong locales (audit + merge, all languages)
-        run: |
-          set -euo pipefail
-          python3 scripts/i18n/repair_locale_translations.py \
-            --before "${RUNNER_TEMP}/locales-before" \
-            --locales crates/openlogi-gui/locales \
-            --en crates/openlogi-gui/locales/en.yml \
-            --report "${RUNNER_TEMP}/i18n-repair-report.md"
-          if [[ -f "${RUNNER_TEMP}/i18n-repair-report.md" ]]; then
-            cat "${RUNNER_TEMP}/i18n-repair-report.md" >> "${GITHUB_STEP_SUMMARY}"
-          fi
-
-      - name: Push crowdin/i18n branch and open repair PR
-        env:
-          GH_TOKEN: ${{ steps.github_app.outputs.token }}
-          GITHUB_TOKEN: ${{ steps.github_app.outputs.token }}
-        run: |
-          set -euo pipefail
-
-          git config user.name "Crowdin Bot"
-          git config user.email "support+bot@crowdin.com"
-
-          if git diff --quiet -- crates/openlogi-gui/locales; then
-            echo "No locale repairs or Crowdin updates after audit."
-            exit 0
-          fi
-
-          branch="crowdin/i18n"
-          report="${RUNNER_TEMP}/i18n-repair-report.md"
-          body_file="${RUNNER_TEMP}/i18n-pr-body.md"
-          {
-            echo "## Summary"
-            echo
-            echo "Automated locale repair after Crowdin sync."
-            echo
-            echo "1. Master locales changed (or schedule/dispatch ran)."
-            echo "2. Job uploaded sources + translations, downloaded Crowdin, then audited **every** locale catalog under \`locales/\`."
-            echo "3. Wrong English source fill-ins were fixed when a real translation existed (Crowdin or git); Crowdin text updates applied; Crowdin English clobber blocked."
-            echo
-            if [[ -f "${report}" ]]; then
-              cat "${report}"
-            fi
-            echo
-            echo "Export languages are limited by \`export_languages\` in \`crowdin.yml\`."
-          } > "${body_file}"
-
-          git checkout -B "${branch}"
-          git add crates/openlogi-gui/locales
-          git commit --no-verify -m "fix(i18n): repair locale translations"
-          git push --force origin "HEAD:refs/heads/${branch}"
-
-          if gh pr list --base master --head "${branch}" --state open --json number --jq 'length' | grep -qx '0'; then
-            gh pr create \
-              --base master \
-              --head "${branch}" \
-              --title "fix(i18n): repair locale translations" \
-              --body-file "${body_file}"
-          else
-            pr_number="$(gh pr list --base master --head "${branch}" --state open --json number --jq '.[0].number')"
-            gh pr edit "${pr_number}" --title "fix(i18n): repair locale translations" --body-file "${body_file}"
-            echo "Updated open PR #${pr_number} for ${branch}"
-          fi
