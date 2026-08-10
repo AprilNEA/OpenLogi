@@ -90,9 +90,16 @@ pub fn plan_for_device(
         .chain(plain_sources)
         .filter(|(_, button)| !oshook.contains_key(button))
         .filter(|(_, button)| {
-            bindings
-                .get(button)
-                .is_some_and(|action| *action != default_binding(*button))
+            bindings.get(button).is_some_and(|action| {
+                // The panel's default is ShowActionsRing, which must be
+                // diverted to open the ring. Action::None means "leave native
+                // firmware haptics alone", so treat None as the only non-divert.
+                if *button == ButtonId::HapticPanel {
+                    *action != Action::None
+                } else {
+                    *action != default_binding(*button)
+                }
+            })
         })
         .collect();
     let thumbwheel_bindings_nondefault = [
@@ -176,10 +183,27 @@ mod tests {
     }
 
     #[test]
-    fn unbound_haptic_panel_stays_native() {
-        // Default binding for the panel is Action::None — an untouched panel
-        // must not be diverted, so its firmware behavior (haptics) survives.
-        let cfg = Config::default();
+    fn haptic_panel_default_is_diverted_for_actions_ring() {
+        // Default binding is ShowActionsRing — the panel has no native OS path
+        // and must be HID++-diverted so the ring can open.
+        let plan = plan_for_device(&Config::default(), "2b042", route(), None, 0);
+
+        assert!(
+            plan.divert_buttons
+                .contains(&(HAPTIC_PANEL_CID, ButtonId::HapticPanel)),
+            "the panel's default Actions Ring binding must be HID++-diverted"
+        );
+    }
+
+    #[test]
+    fn explicit_none_haptic_panel_stays_native() {
+        // Action::None means leave firmware haptics alone — do not divert.
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b042",
+            ButtonId::HapticPanel,
+            Binding::Single(Action::None),
+        );
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
         assert!(
@@ -187,7 +211,7 @@ mod tests {
                 .divert_buttons
                 .iter()
                 .any(|&(cid, _)| cid == HAPTIC_PANEL_CID),
-            "an unbound panel must keep its native behavior"
+            "an explicitly unbound panel must keep its native behavior"
         );
     }
 

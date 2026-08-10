@@ -2,7 +2,9 @@
 //! control-id list (`x1b04_control_ids_list`).
 //!
 //! Covers control IDs `0xB8`..=`0x161`; the classic mouse and keyboard control
-//! IDs below `0xB8` are not enumerated in that list.
+//! IDs below `0xB8` are not enumerated in that list. Newer controls observed on
+//! shipping hardware are listed after the official range and identified as
+//! reverse-engineered.
 
 use super::ControlId;
 
@@ -515,3 +517,9 @@ pub const STANDARD_COMMA_LT: ControlId = ControlId(0x160);
 
 /// `Standard Space` (`0x161`).
 pub const STANDARD_SPACE: ControlId = ControlId(0x161);
+
+/// MX Master 4 Haptic Sense Panel (`0x1A0`).
+///
+/// This value is not present in the published `x1b04_control_ids_list`; it is
+/// cross-checked against the MX Master 4 control table and device metadata.
+pub const HAPTIC_PANEL: ControlId = ControlId(0x1A0);

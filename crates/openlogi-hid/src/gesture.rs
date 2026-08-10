@@ -97,7 +97,8 @@ struct CaptureAccum {
 /// HID++-divertable standard buttons: the `0x1b04` control ID and the
 /// [`ButtonId`] its press dispatches as. A button is diverted per device only
 /// when its binding leaves the default, so an unbound button keeps its native
-/// HID behavior (no re-synthesis needed).
+/// HID behavior (no re-synthesis needed). The Haptic Sense Panel is a gesture
+/// source ([`GESTURE_SOURCE_BUTTONS`]), not a member of this table.
 pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 3] = [
     (0x0052, ButtonId::MiddleClick),
     (0x0053, ButtonId::Back),

@@ -37,7 +37,10 @@ use x11rb::properties::WmClass;
 use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, Window};
 use x11rb::rust_connection::RustConnection;
 
-use crate::{ButtonId, EventDisposition, HookError, HookEvent, LOGITECH_VENDOR_ID, MouseEvent};
+use crate::{
+    ButtonId, CursorPosition, EventDisposition, HookError, HookEvent, LOGITECH_VENDOR_ID,
+    MouseEvent,
+};
 
 /// Prefix carried by every uinput device OpenLogi creates — the hook's
 /// pass-through mice ([`VIRTUAL_DEVICE_NAME`]) and openlogi-inject's
@@ -707,6 +710,17 @@ static FRONTMOST_SOURCE: LazyLock<Box<dyn FrontmostSource>> =
 /// when available; XWayland windows fall back to the X11 backend.
 pub(crate) fn frontmost_bundle_id() -> Option<String> {
     FRONTMOST_SOURCE.frontmost_bundle_id()
+}
+
+/// Read the global cursor position through X11 when an X server is available.
+/// Native Wayland intentionally has no equivalent global-coordinate API.
+pub(crate) fn cursor_position() -> Option<CursorPosition> {
+    let source = X11Source::connect()?;
+    let reply = source.conn.query_pointer(source.root).ok()?.reply().ok()?;
+    Some(CursorPosition {
+        x: f64::from(reply.root_x),
+        y: f64::from(reply.root_y),
+    })
 }
 
 #[cfg(test)]

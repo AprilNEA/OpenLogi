@@ -28,6 +28,7 @@ pub mod extended_report_rate;
 pub mod feature_set;
 pub mod fn_inversion;
 pub mod gestures2;
+pub mod haptic_feedback;
 pub mod hires_wheel;
 pub mod hosts_info;
 pub mod illumination;

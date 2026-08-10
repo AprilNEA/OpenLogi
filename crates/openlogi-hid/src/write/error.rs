@@ -125,6 +125,8 @@ pub enum HidppOperation {
     WriteFnLock,
     /// Write a standalone-light command. Appended last — variant order is wire format.
     Light,
+    /// Play one haptic waveform. Appended last — variant order is wire format.
+    PlayHaptic,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

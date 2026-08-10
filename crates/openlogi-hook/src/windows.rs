@@ -21,16 +21,19 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
-    HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE,
-    PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER, WM_XBUTTONDOWN,
-    WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+    CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
+    GetWindowThreadProcessId, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG,
+    MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetWindowsHookExW,
+    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER,
+    WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
-use crate::{ButtonId, EventDisposition, HookError, HookEvent, KeyEvent, KeyModifiers, MouseEvent};
+use crate::{
+    ButtonId, CursorPosition, EventDisposition, HookError, HookEvent, KeyEvent, KeyModifiers,
+    MouseEvent,
+};
 
 const WHEEL_DELTA: f32 = 120.0;
 
@@ -470,6 +473,18 @@ fn high_word(value: u32) -> u16 {
 
 fn signed_high_word(value: u32) -> i16 {
     high_word(value) as i16
+}
+
+pub(crate) fn cursor_position() -> Option<CursorPosition> {
+    let mut point = POINT { x: 0, y: 0 };
+    // SAFETY: `point` is a valid writable POINT for the duration of the call.
+    if unsafe { GetCursorPos(&raw mut point) } == 0 {
+        return None;
+    }
+    Some(CursorPosition {
+        x: f64::from(point.x),
+        y: f64::from(point.y),
+    })
 }
 
 pub(crate) fn frontmost_process_path() -> Option<String> {

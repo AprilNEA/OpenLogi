@@ -51,7 +51,9 @@ pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 /// relative raw-XY at ~125 Hz exactly like the dedicated gesture button —
 /// except that the first raw-XY sample after contact is a large position jump
 /// that must be discarded before feeding a swipe accumulator.
-pub const HAPTIC_PANEL_CID: u16 = 0x01a0;
+///
+/// The typed source of truth is [`control_ids::HAPTIC_PANEL`].
+pub const HAPTIC_PANEL_CID: u16 = control_ids::HAPTIC_PANEL.0;
 
 /// Control IDs of the "DPI / ModeShift" button family. Whichever a device
 /// exposes (and can divert) is captured and mapped to

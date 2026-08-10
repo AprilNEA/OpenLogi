@@ -32,6 +32,15 @@ pub use openlogi_core::binding::ButtonId;
 /// Logitech's USB/Bluetooth vendor id (`0x046D`).
 pub const LOGITECH_VENDOR_ID: u32 = 0x046d;
 
+/// Cursor position in the operating system's global screen coordinate space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CursorPosition {
+    /// Horizontal screen coordinate.
+    pub x: f64,
+    /// Vertical screen coordinate.
+    pub y: f64,
+}
+
 /// Best-effort identity for the physical device that produced an OS event.
 ///
 /// Platform hooks fill the stable fields they can read cheaply from the native
@@ -467,6 +476,20 @@ pub fn frontmost_bundle_id() -> Option<String> {
         target_os = "macos" => { macos::frontmost_bundle_id() }
         target_os = "linux" => { linux::frontmost_bundle_id() }
         target_os = "windows" => { windows::frontmost_process_path() }
+        _ => { None }
+    }
+}
+
+/// Return the current global cursor position without installing an input hook.
+///
+/// Returns `None` on unsupported platforms and on native Wayland, where the
+/// compositor deliberately does not expose global pointer coordinates.
+#[must_use]
+pub fn cursor_position() -> Option<CursorPosition> {
+    cfg_select! {
+        target_os = "macos" => { macos::cursor_position() }
+        target_os = "linux" => { linux::cursor_position() }
+        target_os = "windows" => { windows::cursor_position() }
         _ => { None }
     }
 }
