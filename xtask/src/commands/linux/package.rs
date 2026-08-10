@@ -30,7 +30,12 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         .run()?;
     }
 
-    for bin in ["openlogi", "openlogi-gui", "openlogi-agent"] {
+    for bin in [
+        "openlogi",
+        "openlogi-gui",
+        "openlogi-overlay",
+        "openlogi-agent",
+    ] {
         ensure_file(&root.join("target/release").join(bin))?;
     }
 

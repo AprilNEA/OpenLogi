@@ -31,6 +31,11 @@ contents:
     file_info:
       mode: 0755
 
+  - src: target/release/openlogi-overlay
+    dst: /usr/bin/openlogi-overlay
+    file_info:
+      mode: 0755
+
   - src: target/release/openlogi-agent
     dst: /usr/bin/openlogi-agent
     file_info:

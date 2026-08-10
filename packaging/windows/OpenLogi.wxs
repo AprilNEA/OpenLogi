@@ -12,6 +12,7 @@
       Version       numeric x.y.z ProductVersion (0.0.0 on non-tag dispatches)
       ExeFile       path to the signed openlogi-gui exe to package
       AgentExeFile  path to the signed openlogi-agent exe to package
+      OverlayExeFile path to the signed openlogi-overlay exe to package
       IconFile      optional override for the app .ico (Add/Remove Programs
                     entry); defaults to the committed design/icon/openlogi.ico
                     below, so the release workflow needs no extra define
@@ -69,6 +70,10 @@
              in openlogi-gui's ipc_client.rs) — the name must match exactly. -->
         <File Id="OpenLogiAgentExe" Name="openlogi-agent.exe" Source="$(var.AgentExeFile)" KeyPath="yes" />
       </Component>
+      <Component Id="OverlayExecutable">
+        <!-- Warm, non-activating GPUI host for the Actions Ring. -->
+        <File Id="OpenLogiOverlayExe" Name="openlogi-overlay.exe" Source="$(var.OverlayExeFile)" KeyPath="yes" />
+      </Component>
     </ComponentGroup>
 
     <!--
@@ -91,6 +96,12 @@
       Other users' processes survive: this is a per-user package, and the
       deferred close action runs without the rights to terminate them.
     -->
+    <util:CloseApplication Id="CloseOverlay"
+                           Target="openlogi-overlay.exe"
+                           CloseMessage="no"
+                           RebootPrompt="no"
+                           Timeout="2"
+                           TerminateProcess="0" />
     <util:CloseApplication Id="CloseAgent"
                            Target="openlogi-agent.exe"
                            CloseMessage="no"

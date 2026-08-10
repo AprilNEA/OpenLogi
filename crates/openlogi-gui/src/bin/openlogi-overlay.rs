@@ -1,0 +1,530 @@
+//! Lightweight GPUI host for the cursor-centred Actions Ring.
+//!
+//! This process is a pure IPC client. The agent owns HID++, session validation,
+//! haptic output, and action execution; the overlay only renders the
+//! agent-snapshotted actions and reports hover/activate/cancel interactions.
+
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
+rust_i18n::i18n!("locales", fallback = "en");
+
+#[path = "../action_ring_geometry.rs"]
+mod action_ring_geometry;
+#[path = "../action_ring_icons.rs"]
+mod action_ring_icons;
+#[path = "../app_assets.rs"]
+mod app_assets;
+#[path = "../locale.rs"]
+mod locale;
+#[path = "../platform/overlay.rs"]
+mod overlay_platform;
+
+use std::time::{Duration, Instant};
+
+use anyhow::{Context as _, Result};
+use gpui::{
+    AppContext as _, Bounds, Context, InteractiveElement, IntoElement, ParentElement, Pixels,
+    Point, Render, SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, hsla, point,
+    prelude::FluentBuilder as _, px, svg,
+};
+use openlogi_agent_core::ipc::{ActionRingInvocation, AgentClient, PROTOCOL_VERSION};
+use openlogi_core::binding::ActionRingSlot;
+use tarpc::{client, context};
+use tokio::sync::mpsc;
+use tracing::{debug, warn};
+use tracing_subscriber::EnvFilter;
+
+const WINDOW_SIZE: f32 = 360.0;
+const SLOT_SIZE: f32 = 54.0;
+const RADIUS: f32 = 122.0;
+const DISPLAY_LIFETIME: Duration = Duration::from_secs(15);
+
+#[derive(Clone, Copy, Debug)]
+enum OverlayCommand {
+    Hover {
+        session_id: u64,
+        slot: ActionRingSlot,
+    },
+    Activate {
+        session_id: u64,
+        slot: ActionRingSlot,
+    },
+    Cancel {
+        session_id: u64,
+    },
+}
+
+impl OverlayCommand {
+    const fn is_terminal(self) -> bool {
+        matches!(self, Self::Activate { .. } | Self::Cancel { .. })
+    }
+}
+
+struct Ipc {
+    invocations: mpsc::UnboundedReceiver<ActionRingInvocation>,
+    commands: mpsc::UnboundedSender<OverlayCommand>,
+}
+
+struct RingView {
+    invocation: ActionRingInvocation,
+    commands: mpsc::UnboundedSender<OverlayCommand>,
+    hovered: Option<ActionRingSlot>,
+}
+
+impl RingView {
+    fn slot_position(slot: ActionRingSlot) -> (f32, f32) {
+        let (x, y) = action_ring_geometry::slot_offset(slot);
+        (
+            WINDOW_SIZE / 2.0 + x * RADIUS - SLOT_SIZE / 2.0,
+            WINDOW_SIZE / 2.0 + y * RADIUS - SLOT_SIZE / 2.0,
+        )
+    }
+
+    fn slot_element(
+        &self,
+        slot: ActionRingSlot,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let presentation = self.invocation.slots.get(&slot)?;
+        let icon_path = action_ring_icons::ring_icon_path(presentation.icon);
+        let selected = self.hovered == Some(slot);
+        let (left, top) = Self::slot_position(slot);
+        let session_id = self.invocation.session_id;
+        let activate = self.commands.clone();
+        Some(
+            div()
+                .id(("ring-slot", slot.index()))
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .size(px(SLOT_SIZE))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(if selected {
+                    hsla(0.59, 0.72, 0.48, 1.0)
+                } else {
+                    hsla(0.0, 0.0, 0.16, 0.98)
+                })
+                .when(selected, |slot| {
+                    slot.border_2().border_color(hsla(0.59, 0.90, 0.72, 1.0))
+                })
+                .shadow_md()
+                .text_color(hsla(0.0, 0.0, 0.98, 1.0))
+                .cursor_pointer()
+                .child(
+                    svg()
+                        .path(icon_path)
+                        .size(px(22.0))
+                        .text_color(hsla(0.0, 0.0, 0.98, 1.0)),
+                )
+                .on_hover(cx.listener(move |this, hovered, _, _| {
+                    if *hovered && this.hovered != Some(slot) {
+                        this.hovered = Some(slot);
+                        let _ = this
+                            .commands
+                            .send(OverlayCommand::Hover { session_id, slot });
+                    } else if !*hovered && this.hovered == Some(slot) {
+                        this.hovered = None;
+                    }
+                }))
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    let _ = activate.send(OverlayCommand::Activate { session_id, slot });
+                    window.remove_window();
+                })
+                .into_any_element(),
+        )
+    }
+}
+
+impl Render for RingView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let session_id = self.invocation.session_id;
+        let root_commands = self.commands.clone();
+        let center_commands = self.commands.clone();
+        let hovered_label = self.hovered.and_then(|slot| {
+            let presentation = self.invocation.slots.get(&slot)?;
+            Some(SharedString::from(
+                rust_i18n::t!(presentation.label.as_str()).into_owned(),
+            ))
+        });
+        let slots = ActionRingSlot::ALL
+            .into_iter()
+            .filter_map(|slot| self.slot_element(slot, cx))
+            .collect::<Vec<_>>();
+
+        div()
+            .id("ring-root")
+            .relative()
+            .size_full()
+            .child(
+                div()
+                    .absolute()
+                    .left(px(18.0))
+                    .top(px(18.0))
+                    .size(px(WINDOW_SIZE - 36.0))
+                    .rounded_full()
+                    .bg(hsla(0.0, 0.0, 0.06, 0.82))
+                    .shadow_lg(),
+            )
+            .children(slots)
+            .child(
+                div()
+                    .id("ring-cancel")
+                    .absolute()
+                    .left(px(WINDOW_SIZE / 2.0 - 24.0))
+                    .top(px(WINDOW_SIZE / 2.0 - 24.0))
+                    .size(px(48.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(hsla(0.0, 0.0, 0.20, 0.98))
+                    .text_color(hsla(0.0, 0.0, 0.82, 1.0))
+                    .text_lg()
+                    .cursor_pointer()
+                    .child("×")
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        let _ = center_commands.send(OverlayCommand::Cancel { session_id });
+                        window.remove_window();
+                    }),
+            )
+            .when_some(hovered_label, |ring, label| {
+                ring.child(
+                    div()
+                        .absolute()
+                        .left(px(WINDOW_SIZE / 2.0 - 80.0))
+                        .top(px(WINDOW_SIZE / 2.0 + 34.0))
+                        .w(px(160.0))
+                        .text_center()
+                        .text_sm()
+                        .text_color(hsla(0.0, 0.0, 0.94, 1.0))
+                        .child(label),
+                )
+            })
+            .on_click(move |_, window, _| {
+                let _ = root_commands.send(OverlayCommand::Cancel { session_id });
+                window.remove_window();
+            })
+    }
+}
+
+fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    rust_i18n::set_locale(locale::resolve(None));
+    let _guard = openlogi_core::single_instance::acquire("overlay.lock")
+        .context("Actions Ring overlay single-instance check")?;
+    let Ipc {
+        mut invocations,
+        commands,
+    } = spawn_ipc();
+
+    let app = gpui_platform::application().with_assets(app_assets::AppAssets);
+    app.run(move |cx| {
+        overlay_platform::configure_application();
+        cx.spawn(async move |cx| {
+            while let Some(invocation) = invocations.recv().await {
+                rust_i18n::set_locale(locale::resolve(invocation.language.as_deref()));
+                cx.update(|cx| {
+                    for handle in cx.windows() {
+                        let _ = handle.update(cx, |_, window, _| window.remove_window());
+                    }
+                    let options = ring_window_options(cx);
+                    let commands = commands.clone();
+                    let timeout_commands = commands.clone();
+                    let session_id = invocation.session_id;
+                    match cx.open_window(options, |_, cx| {
+                        cx.new(|_| RingView {
+                            invocation,
+                            commands,
+                            hovered: None,
+                        })
+                    }) {
+                        Ok(handle) => {
+                            overlay_platform::configure_windows();
+                            cx.spawn(async move |cx| {
+                                cx.background_executor().timer(DISPLAY_LIFETIME).await;
+                                if handle
+                                    .update(cx, |_, window, _| window.remove_window())
+                                    .is_ok()
+                                {
+                                    let _ = timeout_commands
+                                        .send(OverlayCommand::Cancel { session_id });
+                                }
+                            })
+                            .detach();
+                        }
+                        Err(error) => warn!(%error, "could not open Actions Ring window"),
+                    }
+                });
+            }
+        })
+        .detach();
+    });
+    Ok(())
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "native cursor coordinates are screen-sized and exactly usable as GPUI f32 pixels"
+)]
+fn ring_window_options(cx: &mut gpui::App) -> WindowOptions {
+    let cursor = openlogi_hook::cursor_position();
+    let cursor_point = cursor.map(|cursor| point(px(cursor.x as f32), px(cursor.y as f32)));
+    let display = cursor_point
+        .and_then(|cursor| {
+            cx.displays()
+                .into_iter()
+                .find(|display| display.bounds().contains(&cursor))
+        })
+        .or_else(|| cx.primary_display());
+    let center = cursor_point
+        .or_else(|| display.as_ref().map(|display| display.bounds().center()))
+        .unwrap_or_default();
+    let size = Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE));
+    let desired_origin = point(center.x - size.width / 2.0, center.y - size.height / 2.0);
+    let origin = display.as_ref().map_or(desired_origin, |display| {
+        clamp_window_origin(desired_origin, size, display.bounds())
+    });
+    let bounds = Bounds::new(origin, size);
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: None,
+        focus: false,
+        show: true,
+        kind: WindowKind::PopUp,
+        is_movable: false,
+        is_resizable: false,
+        is_minimizable: false,
+        display_id: display.map(|display| display.id()),
+        window_background: WindowBackgroundAppearance::Transparent,
+        app_id: Some("openlogi-action-ring".to_string()),
+        ..WindowOptions::default()
+    }
+}
+
+fn clamp_window_origin(
+    desired: Point<Pixels>,
+    window_size: Size<Pixels>,
+    display: Bounds<Pixels>,
+) -> Point<Pixels> {
+    let max = point(
+        display.right() - window_size.width,
+        display.bottom() - window_size.height,
+    );
+    desired.clamp(&display.origin, &max)
+}
+
+fn spawn_ipc() -> Ipc {
+    let (invocation_tx, invocations) = mpsc::unbounded_channel();
+    let (commands, mut command_rx) = mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                warn!(%error, "overlay IPC runtime initialization failed");
+                return;
+            }
+        };
+        runtime.block_on(async move {
+            tokio::join!(
+                poll_invocations(invocation_tx),
+                send_commands(&mut command_rx)
+            );
+        });
+    });
+    Ipc {
+        invocations,
+        commands,
+    }
+}
+
+async fn connect() -> Option<AgentClient> {
+    let stream = openlogi_agent_core::transport::connect().await.ok()?;
+    let transport = openlogi_agent_core::transport::wrap(stream);
+    let client = AgentClient::new(client::Config::default(), transport).spawn();
+    let version = client.protocol_version(context::current()).await.ok()?;
+    (version == PROTOCOL_VERSION).then_some(client)
+}
+
+async fn poll_invocations(tx: mpsc::UnboundedSender<ActionRingInvocation>) {
+    let mut client = None;
+    loop {
+        if client.is_none() {
+            client = connect().await;
+        }
+        let Some(active) = client.as_ref() else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        };
+        let mut ctx = context::current();
+        ctx.deadline = std::time::Instant::now() + Duration::from_secs(25);
+        match active.next_action_ring(ctx).await {
+            Ok(Some(invocation)) => {
+                if tx.send(invocation).is_err() {
+                    return;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                debug!(?error, "Actions Ring long-poll disconnected");
+                client = None;
+            }
+        }
+    }
+}
+
+fn coalesce_command(current: OverlayCommand, next: OverlayCommand) -> OverlayCommand {
+    match next {
+        OverlayCommand::Hover { .. }
+            if matches!(
+                current,
+                OverlayCommand::Activate { .. } | OverlayCommand::Cancel { .. }
+            ) =>
+        {
+            current
+        }
+        _ => next,
+    }
+}
+
+async fn send_commands(rx: &mut mpsc::UnboundedReceiver<OverlayCommand>) {
+    let mut client = None;
+    while let Some(mut command) = rx.recv().await {
+        while let Ok(next) = rx.try_recv() {
+            command = coalesce_command(command, next);
+        }
+        let deadline = command
+            .is_terminal()
+            .then(|| Instant::now() + DISPLAY_LIFETIME);
+        loop {
+            if client.is_none() {
+                client = connect().await;
+            }
+            let Some(active) = client.as_ref() else {
+                if retry_before(deadline) {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                break;
+            };
+            let ctx = context::current();
+            let result = match command {
+                OverlayCommand::Hover { session_id, slot } => active
+                    .action_ring_hover(ctx, session_id, slot)
+                    .await
+                    .map(|_| ()),
+                OverlayCommand::Activate { session_id, slot } => active
+                    .action_ring_activate(ctx, session_id, slot)
+                    .await
+                    .map(|_| ()),
+                OverlayCommand::Cancel { session_id } => {
+                    active.action_ring_cancel(ctx, session_id).await
+                }
+            };
+            if result.is_ok() {
+                break;
+            }
+            client = None;
+            if !retry_before(deadline) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
+
+fn retry_before(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() < deadline)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_origin_is_clamped_to_the_display() {
+        let display = Bounds::new(point(px(100.0), px(50.0)), Size::new(px(800.0), px(600.0)));
+        let size = Size::new(px(400.0), px(400.0));
+        assert_eq!(
+            clamp_window_origin(point(px(-50.0), px(-50.0)), size, display),
+            point(px(100.0), px(50.0))
+        );
+        assert_eq!(
+            clamp_window_origin(point(px(700.0), px(500.0)), size, display),
+            point(px(500.0), px(250.0))
+        );
+    }
+
+    #[test]
+    fn activation_takes_priority_over_queued_hover_updates() {
+        let hover = OverlayCommand::Hover {
+            session_id: 1,
+            slot: ActionRingSlot::Top,
+        };
+        let activation = OverlayCommand::Activate {
+            session_id: 1,
+            slot: ActionRingSlot::Right,
+        };
+        assert!(matches!(
+            coalesce_command(hover, activation),
+            OverlayCommand::Activate {
+                slot: ActionRingSlot::Right,
+                ..
+            }
+        ));
+        assert!(matches!(
+            coalesce_command(activation, hover),
+            OverlayCommand::Activate { .. }
+        ));
+    }
+
+    #[test]
+    fn only_terminal_commands_are_retryable() {
+        let hover = OverlayCommand::Hover {
+            session_id: 1,
+            slot: ActionRingSlot::Top,
+        };
+        let activation = OverlayCommand::Activate {
+            session_id: 1,
+            slot: ActionRingSlot::Top,
+        };
+        let cancellation = OverlayCommand::Cancel { session_id: 1 };
+        assert!(!hover.is_terminal());
+        assert!(activation.is_terminal());
+        assert!(cancellation.is_terminal());
+    }
+
+    #[test]
+    fn terminal_retries_last_only_until_the_session_deadline() {
+        assert!(retry_before(Some(Instant::now() + Duration::from_secs(1))));
+        assert!(!retry_before(Some(Instant::now() - Duration::from_secs(1))));
+        assert!(!retry_before(None));
+    }
+
+    #[test]
+    fn overlay_origin_stays_cursor_centered_away_from_edges() {
+        let display = Bounds::new(Point::default(), Size::new(px(1600.0), px(1000.0)));
+        let desired = point(px(600.0), px(300.0));
+        assert_eq!(
+            clamp_window_origin(desired, Size::new(px(400.0), px(400.0)), display),
+            desired
+        );
+    }
+}

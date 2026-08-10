@@ -16,6 +16,7 @@ use openlogi_agent_core::ipc::InventoryHealth;
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::asset::AssetResolver;
+use crate::components::action_ring_panel::ActionRingPanel;
 use crate::components::camera_controls::CameraControlsPanel;
 use crate::components::camera_preview::CameraPreview;
 use crate::components::dpi_panel::DpiPanel;
@@ -70,6 +71,8 @@ enum Route {
 enum DetailTab {
     /// The mouse model with clickable button hotspots.
     Buttons,
+    /// Cursor-centred eight-slot action launcher.
+    ActionsRing,
     /// The keyboard function-row remapper with clickable F-key bubbles.
     Keys,
     /// Pointer tuning — DPI and presets.
@@ -114,6 +117,9 @@ impl DetailTab {
         if caps.buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
         }
+        if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
+            tabs.push(Self::ActionsRing);
+        }
         // Function-row remapper when the keyboard reports remappable buttons.
         if matches!(record.kind, DeviceKind::Keyboard) && caps.buttons {
             tabs.push(Self::Keys);
@@ -142,6 +148,7 @@ impl DetailTab {
     fn label(self) -> gpui::SharedString {
         match self {
             Self::Buttons => tr!("Buttons"),
+            Self::ActionsRing => tr!("Actions Ring"),
             Self::Keys => tr!("Keys"),
             Self::Pointer => tr!("Pointer"),
             Self::Lighting | Self::Light => tr!("Lighting"),
@@ -156,6 +163,7 @@ pub struct AppView {
     focus_handle: FocusHandle,
     route: Route,
     mouse_model: Entity<MouseModelView>,
+    action_ring_panel: Entity<ActionRingPanel>,
     keyboard_model: Entity<FunctionRowView>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
@@ -204,6 +212,7 @@ impl AppView {
         }
 
         let mouse_model = cx.new(MouseModelView::new);
+        let action_ring_panel = cx.new(ActionRingPanel::new);
         let keyboard_model = cx.new(FunctionRowView::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
@@ -216,6 +225,7 @@ impl AppView {
             focus_handle,
             route: Route::Home,
             mouse_model,
+            action_ring_panel,
             keyboard_model,
             dpi_panel,
             smartshift_panel,
@@ -517,6 +527,7 @@ impl Render for AppView {
                 detail::detail_content(
                     &detail::DetailPanels {
                         mouse_model: &self.mouse_model,
+                        action_ring: &self.action_ring_panel,
                         keyboard_model: &self.keyboard_model,
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,

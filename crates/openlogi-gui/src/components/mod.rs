@@ -5,6 +5,7 @@
 //! [`crate::state::AppState`].
 
 pub mod camera_controls;
+pub mod action_ring_panel;
 pub mod camera_preview;
 pub mod carousel;
 pub mod device_read;

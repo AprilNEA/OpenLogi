@@ -112,6 +112,7 @@ fn run_with_profile(profile: &BundleProfile<'_>) -> Result<()> {
     let app = root.join("target/release/bundle/osx/OpenLogi.app");
     ensure_dir(&app)?;
     embed_agent_helper(&root, &app, &xcode_env)?;
+    embed_overlay_helper(&root, &app, &xcode_env)?;
     embed_cli(&root, &app, &xcode_env)?;
     verify_bundle_binaries(&app)?;
     stamp_privacy_usage_descriptions(&app)?;
@@ -194,6 +195,36 @@ fn embed_agent_helper(root: &Path, app: &Path, xcode_env: &[(String, String)]) -
     Ok(())
 }
 
+fn embed_overlay_helper(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<()> {
+    let sh = Shell::new()?;
+    let _repo = sh.push_dir(root);
+    println!("==> Actions Ring overlay helper (build)");
+    cmd!(
+        sh,
+        "cargo build -p openlogi-gui --bin openlogi-overlay --release"
+    )
+    .envs(xcode_env.iter().map(|(key, value)| (key, value)))
+    .run()?;
+    let overlay_bin = root.join("target/release/openlogi-overlay");
+    ensure_file(&overlay_bin)?;
+
+    let helper = app.join("Contents/Library/LoginItems/OpenLogiOverlay.app");
+    let helper_macos = helper.join("Contents/MacOS");
+    fs_err::create_dir_all(&helper_macos)
+        .with_context(|| format!("could not create {}", helper_macos.display()))?;
+    fs_err::copy(&overlay_bin, helper_macos.join("openlogi-overlay"))
+        .with_context(|| "could not copy the Actions Ring overlay binary".to_string())?;
+    let info_src = root.join("crates/openlogi-gui/bundle/overlay-release/Info.plist");
+    ensure_file(&info_src)?;
+    let info_dst = helper.join("Contents/Info.plist");
+    fs_err::copy(&info_src, &info_dst)
+        .with_context(|| "could not write the overlay helper Info.plist".to_string())?;
+    stamp_bundle_version(&info_dst, env!("CARGO_PKG_VERSION"))?;
+
+    println!("    embedded {}", helper.display());
+    Ok(())
+}
+
 fn embed_cli(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<()> {
     let sh = Shell::new()?;
     let _repo = sh.push_dir(root);
@@ -213,10 +244,11 @@ fn embed_cli(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<
 }
 
 /// Every Mach-O the finished bundle must ship, relative to the `.app` root.
-const REQUIRED_BUNDLE_BINARIES: [&str; 3] = [
+const REQUIRED_BUNDLE_BINARIES: [&str; 4] = [
     "Contents/MacOS/openlogi",
     "Contents/MacOS/openlogi-gui",
     "Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
+    "Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/MacOS/openlogi-overlay",
 ];
 
 fn verify_bundle_binaries(app: &Path) -> Result<()> {
@@ -344,8 +376,9 @@ fn sign_app_with_timestamp(identity: &str, timestamp: TimestampMode) -> Result<(
     let root = repo_root()?;
     let app = root.join("target/release/bundle/osx/OpenLogi.app");
     let helper = app.join("Contents/Library/LoginItems/OpenLogiAgent.app");
-    // GUI + embedded CLI open the camera (preview / snapshot). The agent helper
-    // does not — leave it without camera so its TCC identity stays minimal.
+    let overlay = app.join("Contents/Library/LoginItems/OpenLogiOverlay.app");
+    // GUI + embedded CLI open the camera (preview / snapshot). The agent and
+    // overlay helpers do not — leave them without camera entitlements.
     let camera_ents = camera_entitlements_path(&root);
     ensure_file(&camera_ents)?;
     println!("==> codesign ({identity})");
@@ -356,6 +389,9 @@ fn sign_app_with_timestamp(identity: &str, timestamp: TimestampMode) -> Result<(
     // Accessibility (TCC) grant persist across updates. So sign each explicitly.
     if helper.exists() {
         codesign_runtime(identity, &helper, timestamp, None)?;
+    }
+    if overlay.exists() {
+        codesign_runtime(identity, &overlay, timestamp, None)?;
     }
     // The embedded CLI is a second Mach-O under Contents/MacOS; sign it with the
     // hardened runtime before the outer app so it carries a Developer ID
@@ -368,6 +404,9 @@ fn sign_app_with_timestamp(identity: &str, timestamp: TimestampMode) -> Result<(
     cmd!(sh, "codesign --verify --strict {app}").run()?;
     if helper.exists() {
         cmd!(sh, "codesign --verify --strict {helper}").run()?;
+    }
+    if overlay.exists() {
+        cmd!(sh, "codesign --verify --strict {overlay}").run()?;
     }
     if cli.exists() {
         cmd!(sh, "codesign --verify --strict {cli}").run()?;

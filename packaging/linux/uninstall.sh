@@ -39,7 +39,8 @@ fi
 # ── remove binaries ───────────────────────────────────────────────────────────
 
 echo "Removing binaries …"
-sudo rm -f "${BINDIR}/openlogi" "${BINDIR}/openlogi-gui" "${BINDIR}/openlogi-agent"
+sudo rm -f "${BINDIR}/openlogi" "${BINDIR}/openlogi-gui" \
+  "${BINDIR}/openlogi-overlay" "${BINDIR}/openlogi-agent"
 
 # ── udev rules ────────────────────────────────────────────────────────────────
 

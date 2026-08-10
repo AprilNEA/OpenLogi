@@ -37,6 +37,7 @@ RES="$APP/Contents/Resources"
 ICON_SRC="$ROOT/crates/openlogi-gui/icon/AppIcon.icns"
 PLIST_SRC="$ROOT/crates/openlogi-gui/bundle/gui-dev/Info.plist"
 AGENT_PLIST_SRC="$ROOT/crates/openlogi-gui/bundle/agent-dev/Info.plist"
+OVERLAY_PLIST_SRC="$ROOT/crates/openlogi-gui/bundle/overlay-dev/Info.plist"
 CODESIGN_ENABLED="${OPENLOGI_DEV_CODESIGN:-1}"
 
 check_external_agent() {
@@ -150,8 +151,10 @@ if [ "${OPENLOGI_DEV_AGENT:-1}" != "0" ]; then
   agent_dir="$(dirname "$bin")" # target/debug or target/release
   if [ "${agent_dir##*/}" = "release" ]; then
     cargo build -p openlogi-agent --release --manifest-path "$ROOT/Cargo.toml"
+    cargo build -p openlogi-gui --bin openlogi-overlay --release --manifest-path "$ROOT/Cargo.toml"
   else
     cargo build -p openlogi-agent --manifest-path "$ROOT/Cargo.toml"
+    cargo build -p openlogi-gui --bin openlogi-overlay --manifest-path "$ROOT/Cargo.toml"
   fi
   helper="$APP/Contents/Library/LoginItems/OpenLogi Agent.app"
   rm -rf \
@@ -169,6 +172,17 @@ if [ "${OPENLOGI_DEV_AGENT:-1}" != "0" ]; then
   # agent isn't a blank entry in the Accessibility list. ICON_SRC was generated
   # / verified above.
   cp -f "$ICON_SRC" "$helper/Contents/Resources/AppIcon.icns"
+
+  overlay_helper="$APP/Contents/Library/LoginItems/OpenLogiOverlay.app"
+  rm -rf "$overlay_helper"
+  mkdir -p "$overlay_helper/Contents/MacOS"
+  if [ "$CODESIGN_ENABLED" != "0" ]; then
+    cp -f "$agent_dir/openlogi-overlay" "$overlay_helper/Contents/MacOS/openlogi-overlay"
+  else
+    ln -f "$agent_dir/openlogi-overlay" "$overlay_helper/Contents/MacOS/openlogi-overlay" 2>/dev/null \
+      || cp -f "$agent_dir/openlogi-overlay" "$overlay_helper/Contents/MacOS/openlogi-overlay"
+  fi
+  cp -f "$OVERLAY_PLIST_SRC" "$overlay_helper/Contents/Info.plist"
 fi
 
 # Sign after all resources and nested helpers are in place; otherwise macOS can
@@ -184,6 +198,10 @@ if [ "$CODESIGN_ENABLED" != "0" ]; then
   if [ -d "$APP/Contents/Library/LoginItems/OpenLogi Agent.app" ]; then
     codesign --force --sign "$identity" --timestamp=none \
       "$APP/Contents/Library/LoginItems/OpenLogi Agent.app"
+  fi
+  if [ -d "$APP/Contents/Library/LoginItems/OpenLogiOverlay.app" ]; then
+    codesign --force --sign "$identity" --timestamp=none \
+      "$APP/Contents/Library/LoginItems/OpenLogiOverlay.app"
   fi
   codesign --force --sign "$identity" --timestamp=none "$APP"
 fi

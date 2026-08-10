@@ -24,6 +24,7 @@ use super::widgets::{
 };
 use super::{AppView, DetailTab};
 use crate::app_menu::file_url;
+use crate::components::action_ring_panel::ActionRingPanel;
 use crate::components::camera_controls::CameraControlsPanel;
 use crate::components::camera_preview::CameraPreview;
 use crate::components::dpi_panel::DpiPanel;
@@ -94,6 +95,7 @@ pub(super) fn detail_header(
 /// tab set, so this only has to render the chosen section.
 pub(super) struct DetailPanels<'a> {
     pub mouse_model: &'a gpui::Entity<MouseModelView>,
+    pub action_ring: &'a gpui::Entity<ActionRingPanel>,
     pub keyboard_model: &'a gpui::Entity<FunctionRowView>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
@@ -115,6 +117,7 @@ pub(super) fn detail_content(
         .is_some_and(|record| record.online);
     let content = match active {
         DetailTab::Buttons => buttons_tab(panels.mouse_model).into_any_element(),
+        DetailTab::ActionsRing => action_ring_tab(panels.action_ring).into_any_element(),
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
         DetailTab::Pointer => {
             pointer_tab(panels.dpi_panel, panels.smartshift_panel, pal, cx).into_any_element()
@@ -209,6 +212,17 @@ fn keys_tab(keyboard_model: &gpui::Entity<FunctionRowView>) -> impl IntoElement 
                 .max_w(px(1040.))
                 .child(keyboard_model.clone()),
         )
+}
+
+fn action_ring_tab(panel: &gpui::Entity<ActionRingPanel>) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .items_center()
+        .overflow_y_scrollbar()
+        .p(px(SCREEN_PAD))
+        .child(div().w_full().max_w(px(680.)).child(panel.clone()))
 }
 
 /// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
