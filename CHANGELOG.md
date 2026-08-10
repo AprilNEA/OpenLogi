@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.25] - 2026-08-10
+
+### Added
+
+- per-device capture with plan-driven sessions ([#419](https://github.com/AprilNEA/OpenLogi/pull/419))
+- *(hid)* recognise Lightspeed nano receivers (G-series, e.g. G305) ([#388](https://github.com/AprilNEA/OpenLogi/pull/388))
+- add MX Master 2S (3S) thumb wheel bindings ([#525](https://github.com/AprilNEA/OpenLogi/pull/525))
+
+### Fixed
+
+- *(i18n)* add camera permission locale keys ([#554](https://github.com/AprilNEA/OpenLogi/pull/554))
+- *(hook)* capture keyboard events on windows ([#548](https://github.com/AprilNEA/OpenLogi/pull/548))
+- *(gui,camera,xtask)* make Camera permission grantable on macOS ([#550](https://github.com/AprilNEA/OpenLogi/pull/550))
+- *(ci)* merge Crowdin downloads into locale catalogs ([#553](https://github.com/AprilNEA/OpenLogi/pull/553))
+- *(i18n)* skip Crowdin English fill-in and restore locale parity ([#551](https://github.com/AprilNEA/OpenLogi/pull/551))
+- *(hidpp)* retry lost feature-table reads during enumeration ([#469](https://github.com/AprilNEA/OpenLogi/pull/469))
+- *(gui,assets)* fit the Keys tab to legacy keyboard assets (G513) ([#544](https://github.com/AprilNEA/OpenLogi/pull/544))
+
 ## [0.6.24] - 2026-08-10
 
 ### Added
