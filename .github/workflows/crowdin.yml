@@ -60,24 +60,32 @@ jobs:
           CROWDIN_PROJECT_ID: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PROJECT_ID
           CROWDIN_PERSONAL_TOKEN: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PERSONAL_TOKEN
 
-      # English (en.yml) is the only source of truth for strings. Crowdin holds
-      # non-English translations; untranslated keys export as English fill-in
-      # until translators finish — that is expected, not a git merge conflict.
+      # en.yml = English source of truth. Non-English catalogs in git are seeded
+      # into Crowdin (per language) so the download does not wipe real
+      # translations with English fill-in. Crowdin is where people improve
+      # translations; the bot PR brings their work back into the repo.
       - name: Synchronize with Crowdin
         uses: crowdin/github-action@c7af9bc98b01694653031fef2a0dc6c7888ce9bc # v2.17.0
         with:
           config: crowdin.yml
           upload_sources: true
-          upload_translations: false
+          # Seed each language from git so Crowdin learns existing translations
+          # (de/ja/…). import_eq_suggestions false: value==English is not a
+          # translation and must not overwrite Crowdin work as "done".
+          upload_translations: true
+          import_eq_suggestions: false
           download_translations: true
           localization_branch_name: crowdin/i18n
           commit_message: "chore(i18n): sync Crowdin translations"
           create_pull_request: true
           pull_request_title: "chore(i18n): sync Crowdin translations"
           pull_request_body: |
-            Automated non-English translation sync from Crowdin.
+            Automated per-language translation sync from Crowdin.
 
-            `en.yml` in git is the source of truth for English strings. This PR only updates translated locale catalogs from Crowdin (`export_languages` in `crowdin.yml`). Untranslated keys may still match English until Crowdin is updated.
+            - `en.yml` is the English source of truth (new UI strings go there).
+            - Existing non-English catalogs are uploaded to Crowdin first so real translations are not replaced with English fill-in.
+            - This PR is Crowdin → git for translated locales only (`export_languages` in `crowdin.yml`).
+            - Truly untranslated keys may still match English until translators finish them in Crowdin.
           github_user_name: Crowdin Bot
           github_user_email: support+bot@crowdin.com
         env:

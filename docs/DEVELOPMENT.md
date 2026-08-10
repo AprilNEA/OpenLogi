@@ -197,24 +197,34 @@ cargo run -p xtask -- release latest-json \
 
 ## Crowdin translation sync
 
-`.github/workflows/crowdin.yml` syncs **non-English** GUI locales with
+`.github/workflows/crowdin.yml` syncs GUI locales with
 [Crowdin](https://crowdin.com/project/openlogi) and opens a `crowdin/i18n` PR
 when downloads change something — nightly, and on master pushes that touch
 English sources (`en.yml`), `crowdin.yml`, the Crowdin workflow, or the shared
 GitHub App token action.
 
-**English (`en.yml`) is the only source of truth for strings.** Add or edit UI
-copy there. Crowdin is only for translating those keys into other languages;
-do not hand-maintain non-English locale files as a second source of truth.
-Untranslated keys may still match English until Crowdin is updated — that is
-expected.
+**How it helps translation**
+
+| | Role |
+|--|--|
+| `en.yml` (git) | English source of truth — add new UI strings here only |
+| Per-language `locales/*.yml` in git | Seeded into Crowdin so existing de/ja/… work is not lost |
+| Crowdin project | Where people translate and improve each language |
+| Bot PR (`crowdin/i18n`) | Brings Crowdin’s per-language progress back into the repo |
+
+Do not treat every feature PR as “edit all 19 locale files.” New copy goes in
+`en.yml`; Crowdin + this job handle the rest. Untranslated keys may still match
+English until someone translates them in Crowdin — that is incomplete work, not
+“remove language support.”
 
 Each run:
 
-1. Uploads `en.yml` **sources** to Crowdin (not locale translations from git).
-2. Downloads Crowdin's non-English export (see `export_languages` /
+1. Uploads `en.yml` **sources**.
+2. Uploads **per-language translations** already in git (`import_eq_suggestions`
+   off so `value == English` is not stored as a finished translation).
+3. Downloads Crowdin’s export for configured languages (`export_languages` /
    `languages_mapping` in `crowdin.yml`).
-3. Opens/updates `crowdin/i18n` when the translated catalogs differ.
+4. Opens/updates `crowdin/i18n` when the catalogs differ.
 
 Like the release workflow, the job reads its credentials from one 1Password
 item referenced by the GitHub secret `OP_CROWDIN_SECRET_ITEM`. The item must
@@ -246,6 +256,6 @@ string — Crowdin + this workflow own non-English updates.
 Local helpers (with Crowdin credentials configured):
 
 ```sh
-devenv tasks run openlogi:i18n-upload    # upload en.yml sources
-devenv tasks run openlogi:i18n-download  # download non-English locales + i18n tests
+devenv tasks run openlogi:i18n-upload    # en.yml sources + per-language translations
+devenv tasks run openlogi:i18n-download  # download locales + i18n tests
 ```
