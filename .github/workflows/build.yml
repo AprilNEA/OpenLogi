@@ -219,6 +219,9 @@ jobs:
           app="target/release/bundle/osx/OpenLogi.app"
           helper="$app/Contents/Library/LoginItems/OpenLogiAgent.app"
           cli="$app/Contents/MacOS/openlogi"
+          # Hardened-runtime camera exception for the GUI (preview) and CLI
+          # (snapshot). The agent helper never opens the camera.
+          ents="crates/openlogi-gui/bundle/OpenLogi.entitlements"
           # Inside-out signing: seal the nested agent helper with its own
           # signature first, then the outer app (which seals the signed helper).
           # --deep is deprecated and can't give the helper an independent
@@ -233,13 +236,18 @@ jobs:
           # rejects its as-built ad-hoc signature.
           if [ -f "$cli" ]; then
             codesign --force --options runtime --timestamp \
+              --entitlements "$ents" \
               --sign "$APPLE_SIGNING_IDENTITY" "$cli"
           fi
           codesign --force --options runtime --timestamp \
+            --entitlements "$ents" \
             --sign "$APPLE_SIGNING_IDENTITY" "$app"
           codesign --verify --strict --verbose=2 "$app"
           [ -d "$helper" ] && codesign --verify --strict --verbose=2 "$helper"
           [ -f "$cli" ] && codesign --verify --strict --verbose=2 "$cli"
+          # Fail the release if camera access would still be blocked at runtime.
+          codesign -d --entitlements - "$app" 2>/dev/null \
+            | grep -q 'com.apple.security.device.camera'
 
       - name: Create and sign DMG
         if: ${{ inputs.sign }}

@@ -337,8 +337,13 @@ fn local_sign_app_if_available() -> Result<()> {
 
 fn sign_app_with_timestamp(identity: &str, timestamp: TimestampMode) -> Result<()> {
     let sh = Shell::new()?;
-    let app = repo_root()?.join("target/release/bundle/osx/OpenLogi.app");
+    let root = repo_root()?;
+    let app = root.join("target/release/bundle/osx/OpenLogi.app");
     let helper = app.join("Contents/Library/LoginItems/OpenLogiAgent.app");
+    // GUI + embedded CLI open the camera (preview / snapshot). The agent helper
+    // does not — leave it without camera so its TCC identity stays minimal.
+    let camera_ents = camera_entitlements_path(&root);
+    ensure_file(&camera_ents)?;
     println!("==> codesign ({identity})");
     // Inside-out signing: seal the nested helper with its own signature first,
     // then the outer app (which seals the already-signed helper). `--deep` is
@@ -346,16 +351,16 @@ fn sign_app_with_timestamp(identity: &str, timestamp: TimestampMode) -> Result<(
     // stable, separately-signed helper identity is exactly what lets the agent's
     // Accessibility (TCC) grant persist across updates. So sign each explicitly.
     if helper.exists() {
-        codesign_runtime(identity, &helper, timestamp)?;
+        codesign_runtime(identity, &helper, timestamp, None)?;
     }
     // The embedded CLI is a second Mach-O under Contents/MacOS; sign it with the
     // hardened runtime before the outer app so it carries a Developer ID
     // signature (its as-built ad-hoc signature would fail notarization).
     let cli = app.join("Contents/MacOS/openlogi");
     if cli.exists() {
-        codesign_runtime(identity, &cli, timestamp)?;
+        codesign_runtime(identity, &cli, timestamp, Some(&camera_ents))?;
     }
-    codesign_runtime(identity, &app, timestamp)?;
+    codesign_runtime(identity, &app, timestamp, Some(&camera_ents))?;
     cmd!(sh, "codesign --verify --strict {app}").run()?;
     if helper.exists() {
         cmd!(sh, "codesign --verify --strict {helper}").run()?;
@@ -366,18 +371,42 @@ fn sign_app_with_timestamp(identity: &str, timestamp: TimestampMode) -> Result<(
     Ok(())
 }
 
-/// Sign one bundle with the hardened runtime and the requested timestamp mode.
-fn codesign_runtime(identity: &str, target: &Path, timestamp: TimestampMode) -> Result<()> {
+/// Path to the GUI/CLI entitlements (camera hardened-runtime exception).
+fn camera_entitlements_path(root: &Path) -> std::path::PathBuf {
+    root.join("crates/openlogi-gui/bundle/OpenLogi.entitlements")
+}
+
+/// Sign one target with the hardened runtime and the requested timestamp mode.
+fn codesign_runtime(
+    identity: &str,
+    target: &Path,
+    timestamp: TimestampMode,
+    entitlements: Option<&Path>,
+) -> Result<()> {
     let sh = Shell::new()?;
-    match timestamp {
-        TimestampMode::Secure => {
+    match (timestamp, entitlements) {
+        (TimestampMode::Secure, Some(ents)) => {
+            cmd!(
+                sh,
+                "codesign --force --options runtime --timestamp --entitlements {ents} --sign {identity} {target}"
+            )
+            .run()?;
+        }
+        (TimestampMode::Secure, None) => {
             cmd!(
                 sh,
                 "codesign --force --options runtime --timestamp --sign {identity} {target}"
             )
             .run()?;
         }
-        TimestampMode::None => {
+        (TimestampMode::None, Some(ents)) => {
+            cmd!(
+                sh,
+                "codesign --force --options runtime --timestamp=none --entitlements {ents} --sign {identity} {target}"
+            )
+            .run()?;
+        }
+        (TimestampMode::None, None) => {
             cmd!(
                 sh,
                 "codesign --force --options runtime --timestamp=none --sign {identity} {target}"
@@ -435,6 +464,19 @@ mod tests {
         let app = app_with_binaries(&REQUIRED_BUNDLE_BINARIES);
 
         verify_bundle_binaries(app.path()).unwrap();
+    }
+
+    #[test]
+    fn camera_entitlements_declare_device_camera() {
+        let path = camera_entitlements_path(&repo_root().unwrap());
+        let plist = Value::from_file(&path).unwrap();
+        let dict = plist.as_dictionary().unwrap();
+        assert_eq!(
+            dict.get("com.apple.security.device.camera")
+                .and_then(Value::as_boolean),
+            Some(true),
+            "hardened-runtime camera capture needs this entitlement"
+        );
     }
 
     #[test]

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Required when codesigning with the hardened runtime: without this,
+	     AVFoundation camera capture is denied even if the user would grant
+	     TCC Camera access and Info.plist has NSCameraUsageDescription. -->
+	<key>com.apple.security.device.camera</key>
+	<true/>
+</dict>
+</plist>
