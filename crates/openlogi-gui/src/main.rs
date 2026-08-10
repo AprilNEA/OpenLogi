@@ -401,11 +401,12 @@ fn main() -> Result<()> {
                         // can't see them. Fold their synthesized models in so a
                         // webcam's product art downloads like any other device's.
                         let mut models = models;
-                        models.extend(
-                            latest_cams
-                                .iter()
-                                .map(|c| (state::camera_model_info(c), Some(c.name.clone()))),
-                        );
+                        models.extend(latest_cams.iter().map(|c| {
+                            crate::asset::sync::AssetTarget::Hidpp {
+                                model: state::camera_model_info(c),
+                                codename: Some(c.name.clone()),
+                            }
+                        }));
                         let pending: Vec<_> = models
                             .into_iter()
                             .filter(|m| !synced_keys.contains(&model_key(m)))
@@ -515,11 +516,12 @@ fn main() -> Result<()> {
                             // Include the UI-side webcam models (see the snapshot
                             // arm) so a manual Refresh fetches camera art too.
                             let mut models = models;
-                            models.extend(
-                                latest_cams
-                                    .iter()
-                                    .map(|c| (state::camera_model_info(c), Some(c.name.clone()))),
-                            );
+                            models.extend(latest_cams.iter().map(|c| {
+                                crate::asset::sync::AssetTarget::Hidpp {
+                                    model: state::camera_model_info(c),
+                                    codename: Some(c.name.clone()),
+                                }
+                            }));
                             let tx = sync_tx.clone();
                             std::thread::spawn(move || {
                                 let keys = models.iter().map(model_key).collect();
