@@ -780,6 +780,7 @@ mod tests {
             std::slice::from_ref(&device),
             &AssetResolver::new(),
             &Config::default(),
+            &[],
         );
 
         assert_eq!(list.len(), 1);
@@ -1092,7 +1093,7 @@ mod tests {
             max_fps: Some(60),
         };
         let cache = AssetResolver::new();
-        let list = build_device_list(&[], &cache, &Config::default(), &[camera]);
+        let list = build_device_list(&[], &[], &cache, &Config::default(), &[camera]);
 
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].kind, DeviceKind::Camera);
@@ -1117,7 +1118,7 @@ mod tests {
             max_fps: None,
         };
         let cache = AssetResolver::new();
-        let list = build_device_list(&[], &cache, &Config::default(), &[camera]);
+        let list = build_device_list(&[], &[], &cache, &Config::default(), &[camera]);
         // Port-stable even without a serial: settings follow the model, not the
         // OS capture id (which embeds the USB location on macOS/Windows).
         assert_eq!(list[0].config_key, "camera:046d:082d");
@@ -1140,8 +1141,8 @@ mod tests {
             ..port_a.clone()
         };
         let cache = AssetResolver::new();
-        let a = build_device_list(&[], &cache, &Config::default(), &[port_a]);
-        let b = build_device_list(&[], &cache, &Config::default(), &[port_b]);
+        let a = build_device_list(&[], &[], &cache, &Config::default(), &[port_a]);
+        let b = build_device_list(&[], &[], &cache, &Config::default(), &[port_b]);
         assert_eq!(a[0].config_key, b[0].config_key);
         assert_ne!(a[0].capture_id, b[0].capture_id);
     }
@@ -1164,7 +1165,7 @@ mod tests {
             ..a.clone()
         };
         let cache = AssetResolver::new();
-        let list = build_device_list(&[], &cache, &Config::default(), &[a, b]);
+        let list = build_device_list(&[], &[], &cache, &Config::default(), &[a, b]);
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].config_key, list[1].config_key);
         assert_eq!(list[0].config_key, "camera:046d:0893");

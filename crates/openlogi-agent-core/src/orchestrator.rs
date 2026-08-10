@@ -20,7 +20,8 @@ use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
 };
 use openlogi_hid::{
-    CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceRoute, KEYBOARD_KEY_CIDS,
+    CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceRoute,
+    KEYBOARD_KEY_CIDS,
 };
 use tracing::{info, warn};
 

@@ -172,7 +172,7 @@ fn agent_snapshot() {
 fn device_inventory() {
     // `Light` was appended after `Unknown`; preserve every existing kind's
     // bincode discriminant.
-    assert_wire(&DeviceKind::Light, "0c");
+    assert_wire(&DeviceKind::Light, "0d");
     let inventory = vec![DeviceInventory {
         receiver: ReceiverInfo {
             name: "Bolt Receiver".into(),
@@ -279,7 +279,7 @@ fn device_settings_payloads() {
         &WriteError::RequestTimedOut {
             operation: HidppOperation::Light,
         },
-        "080a",
+        "080d",
     );
     assert_wire(
         &WriteError::HidppFeature {
@@ -366,13 +366,13 @@ fn standalone_light_dtos_commands_and_errors() {
 
     assert_wire(
         &standalone,
-        "fb6d04fb00c9fb43fffb02020d73657269616c3a676c6f772d310a4c6974726120476c6f7701044c6f67690106676c6f772d31000000000c010001010114fa010101fb8c0afb641964020000056c6974726101053863393030",
+        "fb6d04fb00c9fb43fffb02020d73657269616c3a676c6f772d310a4c6974726120476c6f7701044c6f67690106676c6f772d31000000000d010001010114fa010101fb8c0afb641964020000056c6974726101053863393030",
     );
     let mut legacy = standalone.clone();
     legacy.registry_model_id = None;
     assert_wire(
         &legacy,
-        "fb6d04fb00c9fb43fffb02020d73657269616c3a676c6f772d310a4c6974726120476c6f7701044c6f67690106676c6f772d31000000000c010001010114fa010101fb8c0afb641964020000056c69747261",
+        "fb6d04fb00c9fb43fffb02020d73657269616c3a676c6f772d310a4c6974726120476c6f7701044c6f67690106676c6f772d31000000000d010001010114fa010101fb8c0afb641964020000056c69747261",
     );
     assert_wire(&capabilities, "010114fa010101fb8c0afb641964020000");
     assert_wire(&brightness, "14fa0101");

@@ -2147,6 +2147,7 @@ mod tests {
             &[],
             &[first, second],
             &AssetResolver::new(),
+            &[],
             ConfigPersistence::MemoryOnly,
             commands,
         );
@@ -2363,6 +2364,7 @@ mod tests {
             &[],
             &[light],
             &AssetResolver::new(),
+            &[],
             ConfigPersistence::MemoryOnly,
             commands,
         );
