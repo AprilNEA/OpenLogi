@@ -22,7 +22,11 @@ mod locale;
 #[path = "../platform/overlay.rs"]
 mod overlay_platform;
 
-use std::time::{Duration, Instant};
+use std::{
+    future::Future,
+    pin::Pin,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context as _, Result};
 use gpui::{
@@ -404,7 +408,39 @@ fn coalesce_command(current: OverlayCommand, next: OverlayCommand) -> OverlayCom
     }
 }
 
+type CommandFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+async fn send_command(client: &AgentClient, command: OverlayCommand) -> bool {
+    let ctx = context::current();
+    match command {
+        OverlayCommand::Hover { session_id, slot } => client
+            .action_ring_hover(ctx, session_id, slot)
+            .await
+            .is_ok(),
+        OverlayCommand::Activate { session_id, slot } => client
+            .action_ring_activate(ctx, session_id, slot)
+            .await
+            .is_ok(),
+        OverlayCommand::Cancel { session_id } => {
+            client.action_ring_cancel(ctx, session_id).await.is_ok()
+        }
+    }
+}
+
 async fn send_commands(rx: &mut mpsc::UnboundedReceiver<OverlayCommand>) {
+    send_commands_with(
+        rx,
+        || Box::pin(connect()),
+        |client, command| Box::pin(send_command(client, command)),
+    )
+    .await;
+}
+
+async fn send_commands_with<C>(
+    rx: &mut mpsc::UnboundedReceiver<OverlayCommand>,
+    mut connect_client: impl FnMut() -> CommandFuture<'static, Option<C>>,
+    mut send: impl for<'a> FnMut(&'a C, OverlayCommand) -> CommandFuture<'a, bool>,
+) {
     let mut client = None;
     while let Some(mut command) = rx.recv().await {
         while let Ok(next) = rx.try_recv() {
@@ -416,7 +452,16 @@ async fn send_commands(rx: &mut mpsc::UnboundedReceiver<OverlayCommand>) {
                 (command, deadline) = merge_pending(command, deadline, next);
             }
             if client.is_none() {
-                client = connect().await;
+                match await_command_attempt(rx, command, deadline, connect_client()).await {
+                    CommandAttempt::Completed(connected) => client = connected,
+                    CommandAttempt::Superseded(next, next_deadline) => {
+                        command = next;
+                        deadline = next_deadline;
+                        continue;
+                    }
+                    CommandAttempt::Expired => break,
+                    CommandAttempt::Closed => return,
+                }
             }
             let Some(active) = client.as_ref() else {
                 let Some((next, next_deadline)) = wait_for_retry(rx, command, deadline).await
@@ -427,30 +472,65 @@ async fn send_commands(rx: &mut mpsc::UnboundedReceiver<OverlayCommand>) {
                 deadline = next_deadline;
                 continue;
             };
-            let ctx = context::current();
-            let result = match command {
-                OverlayCommand::Hover { session_id, slot } => active
-                    .action_ring_hover(ctx, session_id, slot)
-                    .await
-                    .map(|_| ()),
-                OverlayCommand::Activate { session_id, slot } => active
-                    .action_ring_activate(ctx, session_id, slot)
-                    .await
-                    .map(|_| ()),
-                OverlayCommand::Cancel { session_id } => {
-                    active.action_ring_cancel(ctx, session_id).await
+            match await_command_attempt(rx, command, deadline, send(active, command)).await {
+                CommandAttempt::Completed(false) => client = None,
+                CommandAttempt::Superseded(next, next_deadline) => {
+                    command = next;
+                    deadline = next_deadline;
+                    continue;
                 }
-            };
-            if result.is_ok() {
-                break;
+                CommandAttempt::Completed(true) | CommandAttempt::Expired => break,
+                CommandAttempt::Closed => return,
             }
-            client = None;
             let Some((next, next_deadline)) = wait_for_retry(rx, command, deadline).await else {
                 break;
             };
             command = next;
             deadline = next_deadline;
         }
+    }
+}
+
+#[derive(Debug)]
+enum CommandAttempt<T> {
+    Completed(T),
+    Superseded(OverlayCommand, Option<Instant>),
+    Expired,
+    Closed,
+}
+
+async fn await_command_attempt<T>(
+    rx: &mut mpsc::UnboundedReceiver<OverlayCommand>,
+    command: OverlayCommand,
+    deadline: Option<Instant>,
+    attempt: impl Future<Output = T>,
+) -> CommandAttempt<T> {
+    tokio::pin!(attempt);
+    loop {
+        tokio::select! {
+            result = &mut attempt => return CommandAttempt::Completed(result),
+            next = rx.recv() => {
+                let Some(next) = next else {
+                    return CommandAttempt::Closed;
+                };
+                let mut pending = merge_pending(command, deadline, next);
+                while let Ok(next) = rx.try_recv() {
+                    pending = merge_pending(pending.0, pending.1, next);
+                }
+                if pending.0 != command {
+                    return CommandAttempt::Superseded(pending.0, pending.1);
+                }
+            }
+            () = deadline_elapsed(deadline) => return CommandAttempt::Expired,
+        }
+    }
+}
+
+async fn deadline_elapsed(deadline: Option<Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline.into()).await;
+    } else {
+        std::future::pending::<()>().await;
     }
 }
 
@@ -563,6 +643,93 @@ mod tests {
         .expect("replacement command should remain pending");
 
         assert_eq!(pending, replacement);
+    }
+
+    #[tokio::test]
+    async fn newer_activation_supersedes_a_stalled_terminal_request() {
+        let stale = OverlayCommand::Cancel { session_id: 1 };
+        let replacement = OverlayCommand::Activate {
+            session_id: 2,
+            slot: ActionRingSlot::Right,
+        };
+        let stale_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let replacement_sent = std::sync::Arc::new(tokio::sync::Notify::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let worker = tokio::spawn({
+            let stale_started = std::sync::Arc::clone(&stale_started);
+            let replacement_sent = std::sync::Arc::clone(&replacement_sent);
+            async move {
+                send_commands_with(
+                    &mut rx,
+                    || Box::pin(async { Some(()) }),
+                    move |(), command| {
+                        let stale_started = std::sync::Arc::clone(&stale_started);
+                        let replacement_sent = std::sync::Arc::clone(&replacement_sent);
+                        Box::pin(async move {
+                            if command == stale {
+                                stale_started.notify_one();
+                                std::future::pending().await
+                            } else {
+                                replacement_sent.notify_one();
+                                true
+                            }
+                        })
+                    },
+                )
+                .await;
+            }
+        });
+
+        tx.send(stale).unwrap();
+        tokio::time::timeout(Duration::from_millis(100), stale_started.notified())
+            .await
+            .expect("stale request should start");
+        tx.send(replacement).unwrap();
+        tokio::time::timeout(Duration::from_millis(100), replacement_sent.notified())
+            .await
+            .expect("replacement should cancel the stalled request");
+        drop(tx);
+        tokio::time::timeout(Duration::from_millis(100), worker)
+            .await
+            .expect("command worker should stop")
+            .expect("command worker should not panic");
+    }
+
+    #[tokio::test]
+    async fn stalled_hover_stops_when_the_command_channel_closes() {
+        let hover = OverlayCommand::Hover {
+            session_id: 1,
+            slot: ActionRingSlot::Top,
+        };
+        let request_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let worker = tokio::spawn({
+            let request_started = std::sync::Arc::clone(&request_started);
+            async move {
+                send_commands_with(
+                    &mut rx,
+                    || Box::pin(async { Some(()) }),
+                    move |(), _| {
+                        let request_started = std::sync::Arc::clone(&request_started);
+                        Box::pin(async move {
+                            request_started.notify_one();
+                            std::future::pending().await
+                        })
+                    },
+                )
+                .await;
+            }
+        });
+
+        tx.send(hover).unwrap();
+        tokio::time::timeout(Duration::from_millis(100), request_started.notified())
+            .await
+            .expect("hover request should start");
+        drop(tx);
+        tokio::time::timeout(Duration::from_millis(100), worker)
+            .await
+            .expect("closing the channel should stop the command worker")
+            .expect("command worker should not panic");
     }
 
     #[test]
