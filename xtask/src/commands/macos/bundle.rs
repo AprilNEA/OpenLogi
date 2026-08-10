@@ -323,7 +323,22 @@ fn stamp_local_bundle_identity(app: &Path) -> Result<()> {
         )?;
     }
 
-    println!("    stamped local IDs: org.openlogi.openlogi.dev / org.openlogi.agent.dev");
+    let overlay_info =
+        app.join("Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/Info.plist");
+    if overlay_info.exists() {
+        stamp_plist_strings(
+            &overlay_info,
+            &[
+                ("CFBundleDisplayName", "OpenLogi Overlay Dev"),
+                ("CFBundleIdentifier", "org.openlogi.overlay.dev"),
+                ("CFBundleName", "OpenLogi Overlay Dev"),
+            ],
+        )?;
+    }
+
+    println!(
+        "    stamped local IDs: org.openlogi.openlogi.dev / org.openlogi.agent.dev / org.openlogi.overlay.dev"
+    );
     Ok(())
 }
 
@@ -502,6 +517,14 @@ mod tests {
         app
     }
 
+    fn write_info_plist(app: &Path, relative: &str) {
+        let path = app.join(relative);
+        fs_err::create_dir_all(path.parent().unwrap()).unwrap();
+        Value::Dictionary(plist::Dictionary::new())
+            .to_file_xml(path)
+            .unwrap();
+    }
+
     #[test]
     fn verify_bundle_binaries_accepts_a_complete_bundle() {
         let app = app_with_binaries(&REQUIRED_BUNDLE_BINARIES);
@@ -520,6 +543,37 @@ mod tests {
             Some(true),
             "hardened-runtime camera capture needs this entitlement"
         );
+    }
+
+    #[test]
+    fn local_identity_stamps_every_nested_helper() {
+        let app = tempfile::tempdir().unwrap();
+        let identities = [
+            ("Contents/Info.plist", "org.openlogi.openlogi.dev"),
+            (
+                "Contents/Library/LoginItems/OpenLogiAgent.app/Contents/Info.plist",
+                "org.openlogi.agent.dev",
+            ),
+            (
+                "Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/Info.plist",
+                "org.openlogi.overlay.dev",
+            ),
+        ];
+        for (path, _) in identities {
+            write_info_plist(app.path(), path);
+        }
+
+        stamp_local_bundle_identity(app.path()).unwrap();
+
+        for (path, expected) in identities {
+            let plist = Value::from_file(app.path().join(path)).unwrap();
+            let actual = plist
+                .as_dictionary()
+                .unwrap()
+                .get("CFBundleIdentifier")
+                .and_then(Value::as_string);
+            assert_eq!(actual, Some(expected));
+        }
     }
 
     #[test]
