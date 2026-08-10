@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.26] - 2026-08-10
+
+### Fixed
+
+- *(macos)* add camera hardened-runtime entitlement ([#557](https://github.com/AprilNEA/OpenLogi/pull/557))
+
 ## [0.6.25] - 2026-08-10
 
 ### Added
