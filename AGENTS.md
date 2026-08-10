@@ -52,12 +52,76 @@ direnv exec . cargo clippy --workspace --all-targets -- -D warnings
 direnv exec . git commit …
 ```
 
-- Full local gate (same as CI): `cargo fmt --all -- --check` +
-  `cargo clippy --workspace --all-targets -- -D warnings` +
-  `cargo test --workspace` (or `devenv tasks run openlogi:check`). Must
-  pass before every commit.
-- prek hooks (`prek.toml`): `cargo fmt` at commit; full-workspace clippy at push
-  (rust-scoped, so non-Rust pushes skip it).
+### Local gate (hard stop — do this before every push)
+
+**Never `git push` until the final tree has passed the full local gate.**
+`cargo check` alone is not enough. Conflict resolution + "it compiles on my
+Mac" is not enough. Run **all three** on the commit you are about to push:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+# or: devenv tasks run openlogi:check
+```
+
+Exit non-zero on any of those → fix, re-run the **whole** triple, then push.
+Do not push "to see if CI likes it." CI is confirmation, not the first compile.
+
+prek hooks (`prek.toml`): `cargo fmt` at commit; full-workspace clippy at push
+(rust-scoped, so non-Rust pushes skip it). Hooks are a backstop, not a substitute
+for running the gate yourself after a rebase.
+
+### Platform / cfg-gated code (macOS-green is a trap)
+
+macOS-green proves **nothing** about `#[cfg(target_os = "linux")]` /
+`windows` code. Recent agent failures that only showed up on CI Linux:
+
+- Shadowing a crate-level constant with a local `const` of a different type
+  (e.g. `LOGITECH_VENDOR_ID: u16` next to `use crate::LOGITECH_VENDOR_ID`
+  which is `u32`) — E0255 / E0308, **only compiles on Linux**.
+- Importing a name that only exists on another OS, or redefining one that
+  master already exports from `lib.rs`.
+
+When the diff touches any of:
+
+- `crates/openlogi-hook/src/linux.rs` / `windows.rs`
+- `crates/openlogi-inject/src/inject/linux.rs` / `windows.rs`
+- `crates/openlogi-hid/src/transport.rs` (has `#[cfg]` branches)
+- any `#[cfg(target_os = …)]` block
+
+you MUST either:
+
+1. Cross-check with devenv when available:
+   `devenv tasks run openlogi:check-windows` (and any linux check the repo has), or
+2. Manually re-read every changed cfg-gated file against **current master** for:
+   - name collisions with existing `pub use` / `pub const` items
+   - type mismatches (`u16` vs `u32`, `Option` arity, new enum fields)
+   - call sites that gained args on master (e.g. `with_runtime`, `build_device_list`,
+     `dispatch_action`) but the PR still uses the old signature
+
+Do not claim "cross-platform green" without CI (or a local cross-lint) having
+actually run those targets. `RUSTFLAGS=-D warnings` is global in CI — plain
+warnings fail there too.
+
+### Wire format / IPC (another silent CI red)
+
+If the change touches anything that crosses the agent↔GUI boundary
+(`ipc.rs`, serde enums in hid write errors, `DeviceKind`, `Action`, …):
+
+- Enums are **append-only** (serde index = wire). New variants go at the end.
+- Bump `PROTOCOL_VERSION` and regenerate
+  `crates/openlogi-agent-core/tests/wire_format.rs` goldens from the failure
+  message (`left` is the new encoding).
+- Run `cargo test -p openlogi-agent-core --test wire_format` before push.
+
+### i18n
+
+New GUI strings: insert the same key in the **same position** in every
+`crates/openlogi-gui/locales/*.yml`. Run `cargo test -p openlogi-gui i18n`.
+
+### App / agent runtime notes
+
 - The macOS GUI build needs full Xcode for GPUI's Metal shaders. devenv sets
   `DEVELOPER_DIR`/`SDKROOT` when present; without it, use system Xcode. If the
   shader compile fails under devenv, `direnv reload` first.
@@ -65,10 +129,6 @@ direnv exec . git commit …
   into `target/dev/OpenLogi.app`. `cargo build` does NOT refresh that bundle,
   and a second instance exits on the singleton lock: quit the old instance and
   re-`run` before judging a UI change "not applied".
-- macOS-green proves nothing about cfg-gated code. CI's linux/windows jobs are the
-  authoritative check (`RUSTFLAGS=-D warnings` globally, so plain warnings fail
-  too); with devenv, `devenv tasks run openlogi:check-windows` cross-lints the
-  ring-free subset locally. Don't claim cross-platform success without CI.
 
 ## Rust standards
 
@@ -119,6 +179,8 @@ House style:
   worktree so parallel work doesn't collide; trivial fixes may go straight to master.
 - Commits are small and focused — split unrelated concerns into separate commits; never
   one giant unreviewable diff.
+- **Always `git fetch upstream master` (or origin) immediately before a rebase.** Rebase
+  onto the refreshed tip, not a stale local `master`.
 - Merging PRs: **squash by default** with a hand-written subject
   `type(scope): description (#N)` (release-plz parses it; merge commits are disabled).
   Rebase-merge only when every commit on the branch is already release-quality
@@ -134,11 +196,24 @@ House style:
 - Never post to external repos or reply publicly on the maintainer's behalf — draft the
   text for approval. Keep public drafts short, casual, and problem-focused.
 - Contributor PRs are adopted, not rejected: check `maintainerCanModify`, rebase onto
-  master in a worktree, fix review findings, push to the fork branch; preserve
-  authorship (`Co-authored-by` when re-homing work).
+  **fresh** master in a worktree, fix review findings, run the **full local gate** on
+  the rebased tip, **then** push to the fork branch; preserve authorship
+  (`Co-authored-by` when re-homing work). Squash-then-rebase is fine when the PR is
+  far behind and commit-by-commit conflicts thrash.
 - Issues use the bug/feature/device forms and the `type:`/`area:`/`platform:`/`needs:`/
   `status:` label families. Deferred or out-of-scope work becomes a linked issue, not a
   TODO comment.
+
+### CI / Actions when adopting PRs
+
+- CI concurrency is **per branch** (`ci-${{ workflow }}-${{ ref }}` with
+  `cancel-in-progress: true`). Approving or re-running an **old SHA** on the same
+  branch cancels the current-head run. Only approve / re-run workflows whose
+  `head_sha` equals the PR's current head.
+- After a force-push, wait for the new runs; do not re-approve stale
+  `action_required` jobs from earlier commits on that branch.
+- First-time-fork PRs may sit in `action_required` until a maintainer approves the
+  workflow run — that is fine; still do not push until the local gate is green.
 
 ## Releases
 
@@ -155,6 +230,15 @@ that should pass, a command whose output should change, a behavior in the runnin
 and loop on that check. Real-hardware verification (physical mice, receivers) is the
 maintainer's job: every fix PR states how to test it. Report outcomes honestly,
 including what was NOT verified.
+
+**Push checklist (agents):**
+
+1. Rebase/merge conflicts fully resolved — no `<<<<<<<` left, no half-ported APIs.
+2. Full local gate green on the **final** tree (fmt + clippy `-D warnings` + test).
+3. If cfg-gated files changed: cross-lint or hand-audit against master (see above).
+4. If wire types changed: `wire_format` tests green + `PROTOCOL_VERSION` bumped.
+5. If locales changed: `cargo test -p openlogi-gui i18n` green.
+6. Only then `git push` / force-push to the PR branch.
 
 ## Subsystem rules — read before touching
 
