@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use openlogi_agent_core::event_monitor::EventMonitor;
-use openlogi_agent_core::orchestrator::Orchestrator;
+use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::{hook_runtime, watchers};
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
@@ -120,6 +120,32 @@ fn main() {
     }
 }
 
+/// Start the HID++ background sessions that do not need Accessibility.
+fn spawn_hidpp_watchers(shared: &SharedRuntime) {
+    watchers::gesture::spawn_with_registry(
+        shared.hook_maps.clone(),
+        shared.gesture_bindings.clone(),
+        shared.dpi_cycle.clone(),
+        shared.capture_channel.clone(),
+        shared.thumbwheel_sensitivity.clone(),
+        shared.receiver_access.clone(),
+        shared.channel_registry.clone(),
+    );
+    watchers::host_switch::spawn(
+        shared.host_switch_links.clone(),
+        shared.channel_pool.clone(),
+        shared.receiver_access.clone(),
+    );
+    watchers::keyboard::spawn(
+        shared.keyboard_spec.clone(),
+        shared.dpi_cycle.clone(),
+        shared.capture_channel.clone(),
+        shared.keyboard_channel.clone(),
+        shared.receiver_access.clone(),
+        shared.channel_registry.clone(),
+    );
+}
+
 async fn run(config: Config) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
     // LaunchAgent, before `config` moves into the orchestrator.
@@ -158,37 +184,8 @@ async fn run(config: Config) {
     // Pairing runs in the agent (it owns device I/O); the GUI drives it over IPC.
     let pairing = Arc::new(pairing::PairingManager::new(shared.clone()));
 
-    // The HID++ control watcher (gesture button, DPI/ModeShift button, thumb
-    // wheel) needs no Accessibility permission — start it up front. It reads the
-    // shared maps and dispatches bound actions itself; the two pairing flags let
-    // it release its capture session while a pairing session owns the receiver.
-    watchers::gesture::spawn_with_registry(
-        shared.hook_maps.clone(),
-        shared.gesture_bindings.clone(),
-        shared.dpi_cycle.clone(),
-        shared.capture_channel.clone(),
-        shared.thumbwheel_sensitivity.clone(),
-        shared.receiver_access.clone(),
-        shared.channel_registry.clone(),
-    );
-    watchers::host_switch::spawn(
-        shared.host_switch_links.clone(),
-        shared.channel_pool.clone(),
-        shared.receiver_access.clone(),
-    );
-
-    // The keyboard key-capture watcher: diverts bound F-row controls on the
-    // keyboard the orchestrator publishes and dispatches their presses. Holds
-    // a shared receiver lease alongside the gesture watcher; also needs no
-    // Accessibility permission.
-    watchers::keyboard::spawn(
-        shared.keyboard_spec.clone(),
-        shared.dpi_cycle.clone(),
-        shared.capture_channel.clone(),
-        shared.keyboard_channel.clone(),
-        shared.receiver_access.clone(),
-        shared.channel_registry.clone(),
-    );
+    // HID++ watchers need no Accessibility permission — start them up front.
+    spawn_hidpp_watchers(&shared);
 
     let mut inventory_rx = watchers::inventory::spawn_with_registry(
         Duration::from_secs(2),
