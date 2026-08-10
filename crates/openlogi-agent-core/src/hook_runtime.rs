@@ -161,7 +161,13 @@ pub fn start(
                                 .map(|m| resolve_gesture_click(&m.gestures, id));
                             if let Some(action) = action {
                                 info!(button = %id, action = %action.label(), "gesture click → executing bound action");
-                                dispatch_action(&action, &dpi_cycle, &capture, Some(&registry), &receiver_access);
+                                dispatch_action(
+                                    &action,
+                                    &dpi_cycle,
+                                    &capture,
+                                    Some(&registry),
+                                    &receiver_access,
+                                );
                             }
                         }
                         return EventDisposition::Suppress;
@@ -184,7 +190,13 @@ pub fn start(
 
                 if pressed {
                     info!(button = %id, action = %action.label(), "button → executing bound action");
-                    dispatch_action(&action, &dpi_cycle, &capture, Some(&registry), &receiver_access);
+                    dispatch_action(
+                        &action,
+                        &dpi_cycle,
+                        &capture,
+                        Some(&registry),
+                        &receiver_access,
+                    );
                 }
                 EventDisposition::Suppress
             }
@@ -210,7 +222,13 @@ pub fn start(
                     });
                     if let Some(action) = action {
                         info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
-                        dispatch_action(&action, &dpi_cycle, &capture, Some(&registry), &receiver_access);
+                        dispatch_action(
+                            &action,
+                            &dpi_cycle,
+                            &capture,
+                            Some(&registry),
+                            &receiver_access,
+                        );
                     }
                 }
                 EventDisposition::PassThrough
