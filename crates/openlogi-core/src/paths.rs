@@ -97,7 +97,6 @@ fn current_bundle_identifier() -> Option<String> {
     None
 }
 
-
 /// The current user's home directory.
 ///
 /// The plain home, not an XDG base — for callers placing files under
@@ -140,9 +139,10 @@ pub fn data_dir() -> Result<PathBuf, PathsError> {
 /// Directory for runtime sockets — the background agent's IPC endpoint.
 pub fn runtime_dir() -> Result<PathBuf, PathsError> {
     let xdg = xdg()?;
-    Ok(xdg
-        .runtime_dir()
-        .map_or_else(|| xdg.config_dir().join(app_dir()), |dir| dir.join(app_dir())))
+    Ok(xdg.runtime_dir().map_or_else(
+        || xdg.config_dir().join(app_dir()),
+        |dir| dir.join(app_dir()),
+    ))
 }
 
 /// Path to the background agent's Unix-domain IPC socket: the GUI connects here

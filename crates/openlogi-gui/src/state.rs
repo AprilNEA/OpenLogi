@@ -1577,7 +1577,6 @@ impl AppState {
         self.persist_and_reload("keyboard binding");
     }
 
-
     fn bindings_for_current(&self) -> BTreeMap<ButtonId, Action> {
         bindings_for(
             &self.config,

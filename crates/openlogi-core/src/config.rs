@@ -56,13 +56,18 @@ pub const SCHEMA_VERSION: u32 = 3;
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
 pub struct KeyModifiers {
+    /// Shift held.
     pub shift: bool,
+    /// Control held.
     pub control: bool,
+    /// Option/Alt held.
     pub option: bool,
+    /// Command held.
     pub command: bool,
 }
 
 impl KeyModifiers {
+    /// True when no modifiers are held.
     pub fn is_empty(&self) -> bool {
         !self.shift && !self.control && !self.option && !self.command
     }
@@ -77,7 +82,9 @@ impl KeyModifiers {
 /// `[keyboard.bindings]` keys are `"f1"`, `"shift+f2"`, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeyTrigger {
+    /// Platform virtual keycode (macOS `kVK_*`).
     pub keycode: u16,
+    /// Modifier mask that must also be held.
     pub modifiers: KeyModifiers,
 }
 
@@ -205,6 +212,7 @@ impl std::str::FromStr for KeyTrigger {
 /// The top-level `[keyboard]` table. Bindings are keyed by [`KeyTrigger`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KeyboardConfig {
+    /// Function-key trigger → action map for the remapper.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub bindings: std::collections::HashMap<KeyTrigger, Action>,
 }

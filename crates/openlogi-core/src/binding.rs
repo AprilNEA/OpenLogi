@@ -447,7 +447,10 @@ pub enum WorkflowStep {
     /// Press a key chord (see [`Action::CustomShortcut`] / [`KeyCombo`]).
     PressKey(KeyCombo),
     /// Wait `millis` milliseconds before the next step.
-    Delay { millis: u64 },
+    Delay {
+        /// Pause length in milliseconds.
+        millis: u64,
+    },
     /// Run an AppleScript (see [`Action::RunAppleScript`]).
     RunAppleScript(String),
     /// Run a shell command (see [`Action::RunShellCommand`]).

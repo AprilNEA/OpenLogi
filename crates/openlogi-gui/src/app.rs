@@ -490,6 +490,7 @@ impl Render for AppView {
                 detail::detail_content(
                     &detail::DetailPanels {
                         mouse_model: &self.mouse_model,
+                        keyboard_model: &self.keyboard_model,
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,
                         lighting_panel: &self.lighting_panel,
@@ -669,20 +670,6 @@ mod tests {
         }
     }
 
-    fn resolved_asset(kind: DeviceKind) -> ResolvedAsset {
-        ResolvedAsset {
-            depot: "test".to_string(),
-            display_name: "Test".to_string(),
-            kind,
-            image_path: PathBuf::from("test.png"),
-            hero_image_path: None,
-            glow: None,
-            metadata: Metadata::default(),
-            png_width: 1,
-            png_height: 1,
-        }
-    }
-
     /// Tabs follow measured capabilities, not kind — the core of the #127 fix.
     /// A device the Bolt register mislabels as Keyboard but whose 0x0005 probe
     /// returns Mouse ends up with kind=Mouse; measured caps drive the tabs.
@@ -722,7 +709,6 @@ mod tests {
         assert!(tabs.contains(&DetailTab::Lighting));
     }
 
-
     #[test]
     fn keyboard_with_buttons_shows_keys_tab() {
         let caps = Some(Capabilities {
@@ -730,6 +716,7 @@ mod tests {
             pointer: false,
             lighting: true,
             scroll_inversion: false,
+            hires_wheel: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(tabs.contains(&DetailTab::Keys));
