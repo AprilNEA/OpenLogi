@@ -118,7 +118,8 @@ If the change touches anything that crosses the agent↔GUI boundary
 ### i18n
 
 New GUI strings: insert the same key in the **same position** in every
-`crates/openlogi-gui/locales/*.yml`. Run `cargo test -p openlogi-gui i18n`.
+`crates/openlogi-gui/locales/*.yml` (parity is required). Run
+`cargo test -p openlogi-gui i18n`.
 
 ### App / agent runtime notes
 
@@ -237,18 +238,17 @@ including what was NOT verified.
 2. Full local gate green on the **final** tree (fmt + clippy `-D warnings` + test).
 3. If cfg-gated files changed: cross-lint or hand-audit against master (see above).
 4. If wire types changed: `wire_format` tests green + `PROTOCOL_VERSION` bumped.
-5. If locales changed: only `en.yml` is required for new strings; run
-   `cargo test -p openlogi-gui i18n` (non-English may lag until Crowdin).
+5. If locales changed: every `locales/*.yml` must have the same keys as
+   `en.yml`; run `cargo test -p openlogi-gui i18n`.
 6. Only then `git push` / force-push to the PR branch.
 
-## i18n (English only in feature work)
+## i18n (all locale files, then Crowdin)
 
-- **Only edit** `crates/openlogi-gui/locales/en.yml` when adding or changing UI
-  strings. The English text is the key; `rust_i18n` falls back to English for
-  missing translations.
-- **Do not** update `da`/`de`/`ja`/… locale files in the same PR to “keep parity.”
-  Crowdin owns non-English catalogs; the Crowdin workflow opens `crowdin/i18n`
-  after `en.yml` lands on master.
+- Add or change UI strings in **every** `crates/openlogi-gui/locales/*.yml` in
+  the same PR. `en.yml` is the English source of truth (the English text IS the
+  key); other files must not lag — the parity test fails the build.
+- Crowdin improves non-English **values** over time. The sync job downloads with
+  `skip_untranslated_strings` so English stubs never open a bot PR.
 - Details: [`.claude/rules/i18n.md`](.claude/rules/i18n.md).
 
 ## Subsystem rules — read before touching
