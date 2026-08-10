@@ -9,9 +9,12 @@ on:
       - master
     paths:
       - crowdin.yml
-      - crates/openlogi-gui/locales/en.yml
+      # Any locale catalog (en source or translated). A crowdin/i18n merge may
+      # re-trigger once; the preserve guard makes a no-diff follow-up a no-op.
+      - crates/openlogi-gui/locales/**
       - .github/workflows/crowdin.yml
       - .github/actions/github-app-token-from-1password/**
+      - scripts/i18n/**
 
 permissions:
   contents: read
@@ -28,8 +31,8 @@ jobs:
 
     steps:
       # persist-credentials must stay false: checkout's default GITHUB_TOKEN
-      # http.extraheader would win over the app token when crowdin/github-action
-      # pushes crowdin/i18n (403 as github-actions[bot] despite env GITHUB_TOKEN).
+      # http.extraheader would win over the app token when we push crowdin/i18n
+      # (403 as github-actions[bot] despite env GITHUB_TOKEN).
       - name: Checkout
         uses: actions/checkout@v6
         with:
@@ -59,24 +62,75 @@ jobs:
           CROWDIN_PROJECT_ID: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PROJECT_ID
           CROWDIN_PERSONAL_TOKEN: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PERSONAL_TOKEN
 
+      # Snapshot pre-download catalogs so we can reject English source fill-ins
+      # that would clobber real translations Crowdin never stored.
+      - name: Snapshot locales before Crowdin download
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/locales-before"
+          cp -a crates/openlogi-gui/locales/. "${RUNNER_TEMP}/locales-before/"
+
       - name: Synchronize with Crowdin
         uses: crowdin/github-action@c7af9bc98b01694653031fef2a0dc6c7888ce9bc # v2.17.0
         with:
           config: crowdin.yml
           upload_sources: true
-          upload_translations: false
+          # Push repo translations first so Crowdin learns hand-seeded strings
+          # (Camera, etc.). import_eq_suggestions stays false so key==value
+          # English placeholders are not uploaded as "translations".
+          upload_translations: true
+          import_eq_suggestions: false
           download_translations: true
+          # We commit ourselves after the preserve guard below.
+          push_translations: false
+          push_sources: false
+          create_pull_request: false
           localization_branch_name: crowdin/i18n
-          commit_message: "chore(i18n): sync Crowdin translations"
-          create_pull_request: true
-          pull_request_title: "chore(i18n): sync Crowdin translations"
-          pull_request_body: |
-            Automated translation sync from Crowdin.
-
-            This workflow is intentionally limited by `export_languages` in `crowdin.yml` so unfinished Crowdin target languages are not exported into the app.
           github_user_name: Crowdin Bot
           github_user_email: support+bot@crowdin.com
         env:
           GITHUB_TOKEN: ${{ steps.github_app.outputs.token }}
           CROWDIN_PROJECT_ID: ${{ steps.crowdin_config.outputs.CROWDIN_PROJECT_ID }}
           CROWDIN_PERSONAL_TOKEN: ${{ steps.crowdin_config.outputs.CROWDIN_PERSONAL_TOKEN }}
+
+      - name: Preserve non-English translations Crowdin left as source
+        run: |
+          set -euo pipefail
+          python3 scripts/i18n/preserve_local_translations.py \
+            --before "${RUNNER_TEMP}/locales-before" \
+            --locales crates/openlogi-gui/locales
+
+      - name: Push crowdin/i18n branch and open PR
+        env:
+          GH_TOKEN: ${{ steps.github_app.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.github_app.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "Crowdin Bot"
+          git config user.email "support+bot@crowdin.com"
+
+          if git diff --quiet -- crates/openlogi-gui/locales; then
+            echo "No translation changes after Crowdin sync + preserve guard."
+            exit 0
+          fi
+
+          branch="crowdin/i18n"
+          git checkout -B "${branch}"
+          git add crates/openlogi-gui/locales
+          git commit --no-verify -m "chore(i18n): sync Crowdin translations"
+          git push --force origin "HEAD:refs/heads/${branch}"
+
+          if gh pr list --base master --head "${branch}" --state open --json number --jq 'length' | grep -qx '0'; then
+            gh pr create \
+              --base master \
+              --head "${branch}" \
+              --title "chore(i18n): sync Crowdin translations" \
+              --body "Automated translation sync from Crowdin.
+
+          Sources and existing repo translations are uploaded first, then downloads are merged with a preserve guard so untranslated Crowdin strings cannot rewrite real non-English values already in git back to English.
+
+          Export languages are limited by \`export_languages\` in \`crowdin.yml\`."
+          else
+            echo "Updated existing open PR for ${branch}"
+          fi

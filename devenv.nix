@@ -88,15 +88,25 @@ in
       '';
     };
     "openlogi:i18n-upload" = {
-      description = "Upload English source strings to Crowdin.";
-      exec = "crowdin upload sources";
+      description = "Upload English sources and non-English locale translations to Crowdin.";
+      exec = ''
+        set -e
+        crowdin upload sources
+        crowdin upload translations
+      '';
     };
     "openlogi:i18n-download" = {
       description = "Download translated locale files from Crowdin.";
       exec = ''
         set -e
         ${requireXcodeMetal}
+        before="$(mktemp -d)"
+        cp -a crates/openlogi-gui/locales/. "${before}/"
         crowdin download
+        python3 scripts/i18n/preserve_local_translations.py \
+          --before "${before}" \
+          --locales crates/openlogi-gui/locales
+        rm -rf "${before}"
         cargo test -p openlogi-gui i18n
       '';
     };
