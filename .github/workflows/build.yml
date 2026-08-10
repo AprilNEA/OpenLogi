@@ -201,51 +201,38 @@ jobs:
           p12-file-base64: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE }}
           p12-password: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE_PASSWORD }}
 
-      - name: Build OpenLogi.app with cargo-bundle
+      - name: Build and package OpenLogi
         env:
+          APPLE_SIGNING_IDENTITY: ${{ steps.load_secrets.outputs.APPLE_SIGNING_IDENTITY }}
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_BASE_URL }}
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
         run: |
           set -euo pipefail
           export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
-          cargo run -p xtask -- macos bundle
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            cargo run -p xtask -- macos package --sign-identity "$APPLE_SIGNING_IDENTITY"
+          else
+            cargo run -p xtask -- macos package
+          fi
 
-      - name: Sign app bundle
+      - name: Verify production bundle identities
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/osx/OpenLogi.app"
+          helper="$app/Contents/Library/LoginItems/OpenLogiAgent.app"
+          overlay="$app/Contents/Library/LoginItems/OpenLogiOverlay.app"
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = "org.openlogi.openlogi" ]
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$helper/Contents/Info.plist")" = "org.openlogi.agent" ]
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$overlay/Contents/Info.plist")" = "org.openlogi.overlay" ]
+
+      - name: Verify signed app bundle
         if: ${{ inputs.sign }}
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ steps.load_secrets.outputs.APPLE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
           app="target/release/bundle/osx/OpenLogi.app"
           helper="$app/Contents/Library/LoginItems/OpenLogiAgent.app"
           overlay="$app/Contents/Library/LoginItems/OpenLogiOverlay.app"
           cli="$app/Contents/MacOS/openlogi"
-          # Hardened-runtime camera exception for the GUI (preview) and CLI
-          # (snapshot). The agent and overlay helpers never open the camera.
-          ents="crates/openlogi-gui/bundle/OpenLogi.entitlements"
-          # Inside-out signing: seal each nested helper with its own signature
-          # first, then the outer app (which seals the signed helpers).
-          # --deep is deprecated and can't give the agent an independent
-          # signature, which a stable TCC identity across updates requires.
-          if [ -d "$helper" ]; then
-            codesign --force --options runtime --timestamp \
-              --sign "$APPLE_SIGNING_IDENTITY" "$helper"
-          fi
-          if [ -d "$overlay" ]; then
-            codesign --force --options runtime --timestamp \
-              --sign "$APPLE_SIGNING_IDENTITY" "$overlay"
-          fi
-          # The embedded CLI is a second Mach-O under Contents/MacOS; sign it
-          # with the hardened runtime before the outer app or notarization
-          # rejects its as-built ad-hoc signature.
-          if [ -f "$cli" ]; then
-            codesign --force --options runtime --timestamp \
-              --entitlements "$ents" \
-              --sign "$APPLE_SIGNING_IDENTITY" "$cli"
-          fi
-          codesign --force --options runtime --timestamp \
-            --entitlements "$ents" \
-            --sign "$APPLE_SIGNING_IDENTITY" "$app"
           codesign --verify --strict --verbose=2 "$app"
           [ -d "$helper" ] && codesign --verify --strict --verbose=2 "$helper"
           [ -d "$overlay" ] && codesign --verify --strict --verbose=2 "$overlay"
@@ -253,22 +240,6 @@ jobs:
           # Fail the release if camera access would still be blocked at runtime.
           codesign -d --entitlements - "$app" 2>/dev/null \
             | grep -q 'com.apple.security.device.camera'
-
-      - name: Create and sign DMG
-        if: ${{ inputs.sign }}
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ steps.load_secrets.outputs.APPLE_SIGNING_IDENTITY }}
-        run: |
-          set -euo pipefail
-          cargo run -p xtask -- macos dmg --sign-identity "$APPLE_SIGNING_IDENTITY"
-
-      # Unsigned PR/dispatch build: `--sign-identity` is optional, so the DMG is
-      # produced without it (Gatekeeper will warn on open — fine for testing).
-      - name: Create unsigned DMG
-        if: ${{ !inputs.sign }}
-        run: |
-          set -euo pipefail
-          cargo run -p xtask -- macos dmg
 
       - name: Notarize DMG
         if: ${{ inputs.sign }}
