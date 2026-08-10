@@ -222,4 +222,6 @@ Missing or invalid credentials fail the workflow. Translation PRs run the
 normal CI checks, including the locale key-parity test. The workflow uses the
 existing `OP_GITHUB_APP_ITEM` to mint a short-lived token for pushing its
 translation branch and opening the PR; the default `GITHUB_TOKEN` remains
-read-only.
+read-only. Checkout runs with `persist-credentials: false` and the origin
+remote is rewritten to the app token so `crowdin/github-action` does not
+inherit the read-only Actions credential for git push.

@@ -26,8 +26,13 @@ jobs:
     if: github.repository == 'AprilNEA/OpenLogi'
 
     steps:
+      # persist-credentials must stay false: checkout's default GITHUB_TOKEN
+      # http.extraheader would win over the app token when crowdin/github-action
+      # pushes crowdin/i18n (403 as github-actions[bot] despite env GITHUB_TOKEN).
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Mint GitHub App token
         id: github_app
@@ -35,6 +40,13 @@ jobs:
         with:
           op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+
+      - name: Configure git for App token
+        env:
+          GH_TOKEN: ${{ steps.github_app.outputs.token }}
+        run: |
+          set -euo pipefail
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
       - name: Load Crowdin credentials from 1Password
         id: crowdin_config

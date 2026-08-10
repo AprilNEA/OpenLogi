@@ -41,7 +41,8 @@ runs:
 
     # The App private key is stored base64-encoded in 1Password (a raw PEM's
     # newlines get mangled to spaces on paste). Decode it here; base64 ignores
-    # whitespace, so it survives re-mangling.
+    # whitespace, so it survives re-mangling. Mask each PEM line so the runner
+    # does not echo the key when create-github-app-token logs its `with:` block.
     - name: Decode GitHub App private key
       id: app-key
       shell: bash
@@ -49,6 +50,11 @@ runs:
         APP_KEY_B64: ${{ steps.load-secrets.outputs.GITHUB_APP_PRIVATE_KEY }}
       run: |
         key="$(printf '%s' "$APP_KEY_B64" | tr -d '[:space:]' | base64 -d)"
+        while IFS= read -r line || [ -n "${line}" ]; do
+          if [ -n "${line}" ]; then
+            echo "::add-mask::${line}"
+          fi
+        done <<< "${key}"
         {
           echo 'pem<<__PEM__'
           printf '%s\n' "$key"
