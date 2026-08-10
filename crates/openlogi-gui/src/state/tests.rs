@@ -14,9 +14,12 @@ use openlogi_core::device::{
 use openlogi_hid::WriteError;
 
 use crate::asset::AssetResolver;
+use crate::data::mouse_buttons::{Action, Binding, ButtonId};
+use crate::mouse_model::thumbwheel::ThumbwheelPreset;
 
 use openlogi_hid::{SmartShiftMode, SmartShiftStatus};
 
+use super::bindings::apply_thumbwheel_pair;
 use super::devices::build_device_list;
 use super::scroll::set_scroll_resolution_if_supported;
 use super::smartshift::{smartshift_read_is_current, smartshift_write_outcome};
@@ -86,6 +89,52 @@ fn next_light_command(
         panic!("expected a light command");
     };
     (command, request_id)
+}
+
+#[test]
+fn thumbwheel_pair_updates_both_memory_and_config_entries() {
+    let mut bindings = std::collections::BTreeMap::new();
+    let mut config = Config::ephemeral();
+    let key = "2b034";
+
+    assert!(apply_thumbwheel_pair(
+        &mut bindings,
+        &mut config,
+        Some(key),
+        ThumbwheelPreset::Volume.pair(),
+    ));
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Action::VolumeDown)
+    );
+    assert_eq!(
+        bindings.get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Action::VolumeUp)
+    );
+    let persisted = config.bindings_for(key);
+    assert_eq!(
+        persisted.get(&ButtonId::ThumbwheelScrollDown),
+        Some(&Binding::Single(Action::VolumeDown))
+    );
+    assert_eq!(
+        persisted.get(&ButtonId::ThumbwheelScrollUp),
+        Some(&Binding::Single(Action::VolumeUp))
+    );
+}
+
+#[test]
+fn transient_thumbwheel_pair_stays_in_memory_without_persistence() {
+    let mut bindings = std::collections::BTreeMap::new();
+    let mut config = Config::ephemeral();
+
+    assert!(!apply_thumbwheel_pair(
+        &mut bindings,
+        &mut config,
+        None,
+        ThumbwheelPreset::CycleDpi.pair(),
+    ));
+    assert_eq!(bindings.len(), 2);
+    assert!(config.bindings_for("missing").is_empty());
 }
 
 #[test]

@@ -480,6 +480,7 @@ fn device_identity_roundtrips_and_is_iterable() {
             lighting: false,
             scroll_inversion: false,
             hires_wheel: true,
+            thumbwheel: false,
         },
         light_capabilities: None,
         driver_id: None,

@@ -195,9 +195,11 @@ mod tests {
 
     #[test]
     fn default_labels_include_capability_gated_thumbwheel() {
-        assert!(!default_labels(false)
-            .iter()
-            .any(|label| label.id == MouseControlId::ThumbwheelRotation));
+        assert!(
+            !default_labels(false)
+                .iter()
+                .any(|label| label.id == MouseControlId::ThumbwheelRotation)
+        );
         assert_eq!(
             default_labels(true)
                 .iter()

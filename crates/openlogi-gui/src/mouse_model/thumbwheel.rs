@@ -54,10 +54,7 @@ impl ThumbwheelPreset {
             Self::Volume => (Action::VolumeDown, Action::VolumeUp),
             Self::CycleDpi => (Action::CycleDpiPresets, Action::CycleDpiPresets),
             Self::VerticalScroll => (Action::ScrollDown, Action::ScrollUp),
-            Self::HorizontalScroll => (
-                Action::HorizontalScrollLeft,
-                Action::HorizontalScrollRight,
-            ),
+            Self::HorizontalScroll => (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
         };
         ThumbwheelPair { backward, forward }
     }
@@ -121,10 +118,7 @@ mod tests {
             (Action::VolumeDown, Action::VolumeUp),
             (Action::CycleDpiPresets, Action::CycleDpiPresets),
             (Action::ScrollDown, Action::ScrollUp),
-            (
-                Action::HorizontalScrollLeft,
-                Action::HorizontalScrollRight,
-            ),
+            (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
         ];
 
         for (preset, (backward, forward)) in ThumbwheelPreset::ALL.into_iter().zip(expected) {

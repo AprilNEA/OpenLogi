@@ -137,33 +137,6 @@ async fn read_marketing_identity(
     (kind, name)
 }
 
-/// Read the marketing identity from HID++ `0x0005` when the device exposes it.
-async fn read_marketing_identity(
-    device: &Device,
-    slot: u8,
-) -> (Option<DeviceKind>, Option<String>) {
-    let Some(feature) = device.get_feature::<DeviceTypeAndNameFeature>() else {
-        return (None, None);
-    };
-
-    let kind = match feature.get_device_type().await {
-        Ok(ty) => Some(map_device_type(ty)),
-        Err(e) => {
-            debug!(slot, error = ?e, "DeviceType read failed");
-            None
-        }
-    };
-    let name = match feature.get_whole_device_name().await {
-        Ok(name) if !name.trim().is_empty() => Some(name),
-        Ok(_) => None,
-        Err(e) => {
-            debug!(slot, error = ?e, "DeviceName read failed");
-            None
-        }
-    };
-    (kind, name)
-}
-
 /// Open a HID++ session for `slot` and read everything we care about (battery,
 /// device-information, `0x0005` device type, and the feature table that drives
 /// [`Capabilities`]) in one shot. Device sessions are expensive (multi-round-

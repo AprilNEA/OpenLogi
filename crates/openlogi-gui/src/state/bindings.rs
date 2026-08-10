@@ -7,9 +7,35 @@ use openlogi_core::config::KeyTrigger;
 use tracing::debug;
 
 use crate::data::mouse_buttons::{Action, Binding, ButtonId, GestureDirection};
+use crate::mouse_model::thumbwheel::{ThumbwheelPair, ThumbwheelPreset};
 use crate::state::devices::DeviceRecord;
 
 use super::AppState;
+
+pub(super) fn apply_thumbwheel_pair(
+    button_bindings: &mut BTreeMap<ButtonId, Action>,
+    config: &mut openlogi_core::config::Config,
+    persistent_key: Option<&str>,
+    pair: ThumbwheelPair,
+) -> bool {
+    button_bindings.insert(ButtonId::ThumbwheelScrollDown, pair.backward.clone());
+    button_bindings.insert(ButtonId::ThumbwheelScrollUp, pair.forward.clone());
+
+    let Some(key) = persistent_key else {
+        return false;
+    };
+    config.set_binding(
+        key,
+        ButtonId::ThumbwheelScrollDown,
+        Binding::Single(pair.backward),
+    );
+    config.set_binding(
+        key,
+        ButtonId::ThumbwheelScrollUp,
+        Binding::Single(pair.forward),
+    );
+    true
+}
 
 impl AppState {
     /// Update a single binding in memory, on disk, and in the shared hook
@@ -36,6 +62,26 @@ impl AppState {
             .set_binding(&key, button, Binding::Single(action));
         // The agent owns the hook; have it rebuild its live map from config.
         self.persist_and_reload("binding");
+    }
+
+    /// Apply one paired thumb-wheel preset atomically. Both directional
+    /// bindings are updated before the single config persistence/reload.
+    pub fn commit_thumbwheel_preset(&mut self, preset: ThumbwheelPreset) {
+        let pair = preset.pair();
+        let key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string);
+        if !apply_thumbwheel_pair(
+            &mut self.button_bindings,
+            &mut self.config,
+            key.as_deref(),
+            pair,
+        ) {
+            debug!("no persistent device key — thumb-wheel pair kept in memory only");
+            return;
+        }
+        self.persist_and_reload("thumb-wheel binding");
     }
     /// Records (or, with `action = None`, clears) the F-key `trigger` binding
     /// in the global `[keyboard]` map. Mirrors [`Self::commit_binding`] minus

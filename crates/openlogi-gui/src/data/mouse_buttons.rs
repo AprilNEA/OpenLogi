@@ -13,7 +13,7 @@
 )]
 
 pub use openlogi_core::binding::{
-    Action, ButtonId, Category, GestureDirection, default_binding, default_gesture_binding,
+    Action, Binding, ButtonId, Category, GestureDirection, default_binding, default_gesture_binding,
 };
 
 /// One visual target in the mouse diagram.
@@ -157,9 +157,11 @@ mod tests {
 
     #[test]
     fn fallback_thumbwheel_is_capability_gated() {
-        assert!(!default_hotspots(false).iter().any(|hotspot| {
-            hotspot.id == MouseControlId::ThumbwheelRotation
-        }));
+        assert!(
+            !default_hotspots(false)
+                .iter()
+                .any(|hotspot| { hotspot.id == MouseControlId::ThumbwheelRotation })
+        );
         assert_eq!(
             default_hotspots(true)
                 .iter()
@@ -173,9 +175,9 @@ mod tests {
     fn default_hotspots_expose_the_gesture_button() {
         let hotspots = default_hotspots(false);
         assert!(
-            hotspots.iter().any(|h| {
-                h.id == MouseControlId::Button(ButtonId::GestureButton)
-            }),
+            hotspots
+                .iter()
+                .any(|h| { h.id == MouseControlId::Button(ButtonId::GestureButton) }),
             "the gesture button must be a mappable hotspot in the synthetic model"
         );
     }
