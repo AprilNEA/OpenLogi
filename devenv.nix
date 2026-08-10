@@ -101,13 +101,13 @@ in
         set -e
         ${requireXcodeMetal}
         before="$(mktemp -d)"
+        trap 'rm -rf "${before}"' EXIT
         cp -a crates/openlogi-gui/locales/. "${before}/"
         crowdin download
         python3 scripts/i18n/repair_locale_translations.py \
           --before "${before}" \
           --locales crates/openlogi-gui/locales \
           --en crates/openlogi-gui/locales/en.yml
-        rm -rf "${before}"
         cargo test -p openlogi-gui i18n
       '';
     };
