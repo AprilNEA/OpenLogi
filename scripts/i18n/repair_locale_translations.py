@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Audit and repair GUI locale YAML after a Crowdin download.
 
-OpenLogi keys are English source text. A value equal to the English source is
-treated as untranslated / wrong for non-English catalogs (Crowdin fills missing
-translations with source).
+OpenLogi keys are English source text. Across **every** locale catalog, a value
+equal to the English source (from `en.yml`) is treated as untranslated / wrong
+when Crowdin fills missing translations with source.
 
-Merge rules per key (non-English locales only):
+Merge rules per key (all locale files under `locales/`):
 
 1. Crowdin value is translated → use Crowdin (fixes English-on-master when
    Crowdin has a real string; also accepts Crowdin updates).
 2. Else master/git value is translated → keep git (Crowdin source fill-in must
    not clobber hand-seeded or previously good strings).
-3. Else keep Crowdin/export (both still English; translators must finish it).
+3. Else keep Crowdin/export (both still English source fill-in).
+
+The English catalog (`en.yml`) is the reference for “source text” and is still
+merged like every other file (Crowdin/source updates apply). “Still English”
+counts are for catalogs that should differ from source.
 
 Writes repaired catalogs in place, prints a summary, and optionally writes a
 Markdown report for the bot PR body.
@@ -104,12 +108,13 @@ class RepairReport:
         lines = [
             "## Locale repair report",
             "",
-            "English source fill-in (`value == en source`) is treated as untranslated.",
+            "English source fill-in (`value == en.yml source`) is treated as untranslated.",
+            "Every locale file under `locales/` is audited with the same rules.",
             "",
-            f"- **Fixed** (were English on master, now translated): **{self.fixed_count}**",
+            f"- **Fixed** (were English source on master, now translated): **{self.fixed_count}**",
             f"- **Preserved** (blocked Crowdin English clobber): **{self.preserved_count}**",
             f"- **Crowdin updates** (translated text changed): **{self.crowdin_updated_count}**",
-            f"- **Still English** (needs translators): **{self.still_english_count}**",
+            f"- **Still English source fill-in** (needs translators): **{self.still_english_count}**",
             "",
         ]
         for locale in self.locales:
@@ -117,15 +122,22 @@ class RepairReport:
                 continue
             lines.append(f"### `{locale.name}`")
             if locale.fixed:
-                lines.append(f"- Fixed {len(locale.fixed)}: " + ", ".join(f"`{k}`" for k in locale.fixed[:30]))
+                lines.append(
+                    f"- Fixed {len(locale.fixed)}: "
+                    + ", ".join(f"`{k}`" for k in locale.fixed[:30])
+                )
                 if len(locale.fixed) > 30:
                     lines.append(f"  - …and {len(locale.fixed) - 30} more")
             if locale.preserved:
-                lines.append(f"- Preserved {len(locale.preserved)} against Crowdin source fill-in")
+                lines.append(
+                    f"- Preserved {len(locale.preserved)} against Crowdin source fill-in"
+                )
             if locale.crowdin_updated:
-                lines.append(f"- Applied {len(locale.crowdin_updated)} Crowdin translation update(s)")
+                lines.append(
+                    f"- Applied {len(locale.crowdin_updated)} Crowdin translation update(s)"
+                )
             if locale.still_english:
-                lines.append(f"- Still English: {len(locale.still_english)} key(s)")
+                lines.append(f"- Still English source fill-in: {len(locale.still_english)} key(s)")
             lines.append("")
         return "\n".join(lines).rstrip() + "\n"
 
@@ -135,6 +147,8 @@ def repair_file(
     after: Path,
     en: dict[str, str],
     locale_name: str,
+    *,
+    track_still_english: bool,
 ) -> LocaleStats:
     stats = LocaleStats(name=locale_name)
     if not after.is_file():
@@ -169,7 +183,8 @@ def repair_file(
             stats.preserved.append(key)
         else:
             chosen = crowdin_value
-            stats.still_english.append(key)
+            if track_still_english:
+                stats.still_english.append(key)
 
         if chosen == crowdin_value:
             lines.append(line)
@@ -185,11 +200,19 @@ def repair_file(
 
 def repair_locales(before_dir: Path, locales_dir: Path, en_path: Path) -> RepairReport:
     en = parse_entries(en_path)
+    en_name = en_path.name
     report = RepairReport()
     for after in sorted(locales_dir.glob("*.yml")):
-        if after.name == "en.yml":
-            continue
-        stats = repair_file(before_dir / after.name, after, en, after.name)
+        # Same rules for every locale file, including en.yml.
+        stats = repair_file(
+            before_dir / after.name,
+            after,
+            en,
+            after.name,
+            # en.yml is the English source catalog — values matching source are
+            # expected, not "still needs translation".
+            track_still_english=after.name != en_name,
+        )
         report.locales.append(stats)
         bits: list[str] = []
         if stats.fixed:
@@ -220,7 +243,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--en",
         type=Path,
-        help="Path to en.yml (defaults to <locales>/en.yml)",
+        help="Path to en.yml English source reference (defaults to <locales>/en.yml)",
     )
     parser.add_argument(
         "--report",
@@ -266,6 +289,7 @@ class RepairTests(unittest.TestCase):
             after.mkdir()
             en = '"Camera": "Camera"\n"Sleep": "Sleep"\n"Ok": "Ok"\n'
             (after / "en.yml").write_text(en, encoding="utf-8")
+            (before / "en.yml").write_text(en, encoding="utf-8")
             (before / "de.yml").write_text(
                 "\n".join(
                     [
@@ -293,10 +317,14 @@ class RepairTests(unittest.TestCase):
             text = (after / "de.yml").read_text(encoding="utf-8")
             self.assertIn('"Camera": "Kamera"', text)
             self.assertIn('"Sleep": "Ruhezustand"', text)
+            names = {item.name for item in report.locales}
+            self.assertEqual(names, {"de.yml", "en.yml"})
             de = next(item for item in report.locales if item.name == "de.yml")
             self.assertEqual(de.fixed, ["Camera"])
             self.assertEqual(de.preserved, ["Sleep"])
             self.assertEqual(de.still_english, ["Ok"])
+            en_stats = next(item for item in report.locales if item.name == "en.yml")
+            self.assertEqual(en_stats.still_english, [])
 
     def test_crowdin_update_wins_when_both_translated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -306,6 +334,7 @@ class RepairTests(unittest.TestCase):
             before.mkdir()
             after.mkdir()
             (after / "en.yml").write_text('"Sleep": "Sleep"\n', encoding="utf-8")
+            (before / "en.yml").write_text('"Sleep": "Sleep"\n', encoding="utf-8")
             (before / "de.yml").write_text('"Sleep": "Ruhezustand"\n', encoding="utf-8")
             (after / "de.yml").write_text('"Sleep": "Schlafen"\n', encoding="utf-8")
 
@@ -314,6 +343,30 @@ class RepairTests(unittest.TestCase):
             self.assertIn('"Sleep": "Schlafen"', text)
             de = next(item for item in report.locales if item.name == "de.yml")
             self.assertEqual(de.crowdin_updated, ["Sleep"])
+
+    def test_processes_every_locale_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            before = root / "before"
+            after = root / "after"
+            before.mkdir()
+            after.mkdir()
+            (after / "en.yml").write_text('"A": "A"\n', encoding="utf-8")
+            (before / "en.yml").write_text('"A": "A"\n', encoding="utf-8")
+            for name, master, crowdin in (
+                ("da.yml", '"A": "A"', '"A": "Dansk"'),
+                ("ja.yml", '"A": "あ"', '"A": "A"'),
+            ):
+                (before / name).write_text(master + "\n", encoding="utf-8")
+                (after / name).write_text(crowdin + "\n", encoding="utf-8")
+
+            report = repair_locales(before, after, after / "en.yml")
+            self.assertEqual(
+                {item.name for item in report.locales},
+                {"da.yml", "en.yml", "ja.yml"},
+            )
+            self.assertIn('"A": "Dansk"', (after / "da.yml").read_text(encoding="utf-8"))
+            self.assertIn('"A": "あ"', (after / "ja.yml").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

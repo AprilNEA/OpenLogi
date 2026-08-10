@@ -75,9 +75,9 @@ jobs:
         with:
           config: crowdin.yml
           upload_sources: true
-          # Push repo translations first so Crowdin learns hand-seeded strings.
-          # import_eq_suggestions stays false so key==value English placeholders
-          # are not uploaded as "translations".
+          # Push all locale translations first so Crowdin learns hand-seeded
+          # strings. import_eq_suggestions stays false so value==source English
+          # placeholders are not uploaded as "translations".
           upload_translations: true
           import_eq_suggestions: false
           download_translations: true
@@ -93,7 +93,7 @@ jobs:
           CROWDIN_PROJECT_ID: ${{ steps.crowdin_config.outputs.CROWDIN_PROJECT_ID }}
           CROWDIN_PERSONAL_TOKEN: ${{ steps.crowdin_config.outputs.CROWDIN_PERSONAL_TOKEN }}
 
-      - name: Repair wrong locales (audit + merge)
+      - name: Repair wrong locales (audit + merge, all languages)
         run: |
           set -euo pipefail
           python3 scripts/i18n/repair_locale_translations.py \
@@ -129,7 +129,7 @@ jobs:
             echo "Automated locale repair after Crowdin sync."
             echo
             echo "1. Master locales changed (or schedule/dispatch ran)."
-            echo "2. Job uploaded sources + translations, downloaded Crowdin, then audited every non-English catalog."
+            echo "2. Job uploaded sources + translations, downloaded Crowdin, then audited **every** locale catalog under \`locales/\`."
             echo "3. Wrong English source fill-ins were fixed when a real translation existed (Crowdin or git); Crowdin text updates applied; Crowdin English clobber blocked."
             echo
             if [[ -f "${report}" ]]; then

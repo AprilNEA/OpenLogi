@@ -88,7 +88,7 @@ in
       '';
     };
     "openlogi:i18n-upload" = {
-      description = "Upload English sources and non-English locale translations to Crowdin.";
+      description = "Upload English sources and all locale translations to Crowdin.";
       exec = ''
         set -e
         crowdin upload sources

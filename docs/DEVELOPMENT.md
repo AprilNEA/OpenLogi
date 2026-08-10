@@ -206,26 +206,26 @@ GitHub App token action, or `scripts/i18n/**`.
 `crowdin.yml` limits exports to the locales shipped by the app and maps Crowdin
 language identifiers to their repository filenames.
 
-Locale keys **are** the English source string. For non-English catalogs a value
-equal to that English source is treated as **untranslated / wrong** (Crowdin
-fills missing translations with source text).
+Locale keys **are** the English source string. For **every** locale catalog under
+`locales/`, a value equal to the `en.yml` source is treated as **untranslated /
+wrong** when it is a Crowdin source fill-in (missing translation).
 
 Each run:
 
-1. **Snapshot** master locale catalogs.
-2. **Upload** `en.yml` sources and non-English translations already in git
+1. **Snapshot** all master locale catalogs.
+2. **Upload** sources and translations already in git
    (`import_eq_suggestions` off so English placeholders are not stored as
    translations).
 3. **Download** Crowdin's export.
-4. **Audit + repair** via `scripts/i18n/repair_locale_translations.py`:
-   - Crowdin translated, master English → **fix** (un-fuck master)
-   - Crowdin English, master translated → **preserve** master (block clobber)
+4. **Audit + repair** every `*.yml` via `scripts/i18n/repair_locale_translations.py`:
+   - Crowdin translated, master English source fill-in → **fix**
+   - Crowdin English fill-in, master translated → **preserve** master (block clobber)
    - both translated, Crowdin differs → **apply Crowdin update**
-   - both English → leave English (still needs a human translator)
+   - both still English source fill-in → leave as-is (needs a human translator)
 5. If the working tree still differs from the snapshot, force-push
    `crowdin/i18n` and open/update a PR titled
    `fix(i18n): repair locale translations` with a per-locale report
-   (fixed / preserved / updated / still English).
+   (fixed / preserved / updated / still English fill-in).
 
 Without upload + repair, hand-seeded strings never reach Crowdin and the next
 download rewrites them to English.
