@@ -27,15 +27,12 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
 use openlogi_hid::gesture::CaptureSpec;
-use openlogi_hid::{
-    CaptureChannel, CapturedInput, ChannelRegistry, DeviceRoute, run_capture_session,
-};
+use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use crate::DpiCycles;
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
-use crate::hook_runtime;
+use crate::hook_runtime::ActionDispatcher;
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
 
 /// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
@@ -76,10 +73,9 @@ fn action_threshold(sensitivity: i32) -> i32 {
 /// captured input.
 pub fn spawn(
     capture_plans: SharedCapturePlans,
-    dpi_cycle: Arc<RwLock<DpiCycles>>,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
-    channel_registry: ChannelRegistry,
+    dispatcher: ActionDispatcher,
 ) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -94,10 +90,9 @@ pub fn spawn(
         };
         runtime.block_on(manage(
             capture_plans,
-            dpi_cycle,
             capture_channel,
             receiver_access,
-            channel_registry,
+            dispatcher,
         ));
     });
 }
@@ -170,10 +165,9 @@ fn on_done(done_epoch: u64, live: Option<&RunningSession>) -> DoneAction {
 /// the device they arrived on. Runs for the lifetime of the process.
 async fn manage(
     capture_plans: SharedCapturePlans,
-    dpi_cycle: Arc<RwLock<DpiCycles>>,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
-    channel_registry: ChannelRegistry,
+    dispatcher: ActionDispatcher,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<(String, CapturedInput)>();
     let mut sessions: HashMap<String, RunningSession> = HashMap::new();
@@ -201,10 +195,7 @@ async fn manage(
                     input,
                     &mut accumulators,
                     &capture_plans,
-                    &dpi_cycle,
-                    &capture_channel,
-                    &channel_registry,
-                    &receiver_access,
+                    &dispatcher,
                 );
             }
             _ = ticker.tick() => {
@@ -391,19 +382,12 @@ enum WheelOutput {
 
 /// Route one captured input from device `key` to its bound action (or
 /// re-synthesised scroll), using that device's own plan maps.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "per-device dispatch needs plan maps, dpi, capture, and registry handles"
-)]
 fn dispatch(
     key: &str,
     input: CapturedInput,
     accumulators: &mut HashMap<String, WheelAccumulators>,
     capture_plans: &SharedCapturePlans,
-    dpi_cycle: &Arc<RwLock<DpiCycles>>,
-    capture: &CaptureChannel,
-    registry: &ChannelRegistry,
-    receiver_access: &ReceiverAccess,
+    dispatcher: &ActionDispatcher,
 ) {
     let Ok(plans) = capture_plans.read() else {
         return;
@@ -416,14 +400,7 @@ fn dispatch(
         CapturedInput::Gesture(direction) => {
             if let Some(action) = plan.gesture_bindings.get(&direction) {
                 debug!(key, ?direction, action = %action.label(), "gesture → action");
-                hook_runtime::dispatch_action(
-                    action,
-                    dpi_cycle,
-                    Some(key),
-                    capture,
-                    Some(registry),
-                    receiver_access,
-                );
+                dispatcher.dispatch(action, Some(key));
             } else {
                 debug!(key, ?direction, "gesture with no binding — ignored");
             }
@@ -431,14 +408,7 @@ fn dispatch(
         CapturedInput::ButtonPressed(button, _) => {
             if let Some(action) = plan.bindings.get(&button) {
                 debug!(key, ?button, action = %action.label(), "HID++ button → action");
-                hook_runtime::dispatch_action(
-                    action,
-                    dpi_cycle,
-                    Some(key),
-                    capture,
-                    Some(registry),
-                    receiver_access,
-                );
+                dispatcher.dispatch(action, Some(key));
             } else {
                 debug!(key, ?button, "HID++ button with no binding — ignored");
             }
@@ -467,14 +437,7 @@ fn dispatch(
                 }
                 WheelOutput::FireAction => {
                     debug!(key, ?button, action = %action.label(), "thumb wheel → action");
-                    hook_runtime::dispatch_action(
-                        &action,
-                        dpi_cycle,
-                        Some(key),
-                        capture,
-                        Some(registry),
-                        receiver_access,
-                    );
+                    dispatcher.dispatch(&action, Some(key));
                 }
             }
         }

@@ -179,6 +179,7 @@ impl Default for DeviceConfig {
             identity: None,
             bindings: BTreeMap::new(),
             per_app_bindings: BTreeMap::new(),
+            action_ring: ActionRingConfig::default(),
             dpi_presets: Vec::new(),
             dpi: None,
             lighting: None,

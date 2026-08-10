@@ -9,18 +9,21 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt as _;
+use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
+use openlogi_agent_core::hook_runtime::ActionDispatcher;
 use openlogi_agent_core::ipc::{
-    Agent, AgentSnapshot, AgentStatus, MonitorEvent, PROTOCOL_VERSION, PairingCommandError,
-    PairingUpdate,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, MonitorEvent,
+    PROTOCOL_VERSION, PairingCommandError, PairingUpdate,
 };
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::{hardware, transport};
+use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, DpiInfo, LightCommand, ReceiverSelector, SmartShiftMode, SmartShiftStatus,
-    WriteError,
+    DeviceRoute, DpiInfo, HapticWaveform, LightCommand, ReceiverSelector, SmartShiftMode,
+    SmartShiftStatus, WriteError,
 };
 
 use crate::pairing::PairingManager;
@@ -41,6 +44,8 @@ pub struct AgentServer {
     pub hook_installed: Arc<AtomicBool>,
     pub pairing: Arc<PairingManager>,
     pub event_monitor: SharedEventMonitor,
+    pub action_ring: Arc<ActionRingManager>,
+    pub dispatcher: ActionDispatcher,
 }
 
 impl Agent for AgentServer {
@@ -233,6 +238,74 @@ impl Agent for AgentServer {
         }
         Ok(())
     }
+
+    async fn next_action_ring(self, _: Context) -> Option<ActionRingInvocation> {
+        self.action_ring.next_invocation().await
+    }
+
+    async fn action_ring_hover(
+        self,
+        _: Context,
+        session_id: u64,
+        slot: ActionRingSlot,
+    ) -> Result<(), ActionRingCommandError> {
+        if let Some(hover) = self.action_ring.hover(session_id, slot)? {
+            spawn_ring_haptic(
+                &self.shared,
+                hover.haptic_route,
+                HapticWaveform::SubtleCollision,
+                "hover",
+            );
+        }
+        Ok(())
+    }
+
+    async fn action_ring_activate(
+        self,
+        _: Context,
+        session_id: u64,
+        slot: ActionRingSlot,
+    ) -> Result<(), ActionRingCommandError> {
+        let activation = self.action_ring.activate(session_id, slot)?;
+        self.dispatcher
+            .dispatch(&activation.action, Some(&activation.device_key));
+        spawn_ring_haptic(
+            &self.shared,
+            activation.haptic_route,
+            HapticWaveform::DampStateChange,
+            "activation",
+        );
+        Ok(())
+    }
+
+    async fn action_ring_cancel(self, _: Context, session_id: u64) {
+        self.action_ring.cancel(session_id);
+    }
+}
+
+fn spawn_ring_haptic(
+    shared: &SharedRuntime,
+    route: Option<DeviceRoute>,
+    waveform: HapticWaveform,
+    interaction: &'static str,
+) {
+    let Some(route) = route else {
+        return;
+    };
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        if let Err(error) = hardware::play_haptic(
+            &shared.capture_channel,
+            &shared.channel_registry,
+            &shared.receiver_access,
+            &route,
+            waveform,
+        )
+        .await
+        {
+            warn!(%error, interaction, "Actions Ring haptic failed");
+        }
+    });
 }
 
 /// Bind the agent's IPC socket and serve [`Agent`] requests until the process

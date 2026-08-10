@@ -25,6 +25,7 @@ use openlogi_hid::{
 };
 use tracing::{debug, info, warn};
 
+use crate::action_ring::ActionRingSessionSpec;
 use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
 use crate::device_order::DeviceStableId;
@@ -608,6 +609,43 @@ impl Orchestrator {
     #[must_use]
     pub fn camera_active(&self) -> bool {
         self.camera_active.unwrap_or(false)
+    }
+
+    /// Snapshot the active device and effective ring layout for a new
+    /// invocation. `None` means the ring is disabled, empty, or has no active
+    /// persistent device. The returned layout is owned so later config and
+    /// foreground-app changes cannot alter an already-open ring session.
+    #[must_use]
+    pub fn action_ring_session(
+        &self,
+        triggering_device: Option<&str>,
+    ) -> Option<ActionRingSessionSpec> {
+        let key = triggering_device.or_else(|| self.current_key())?;
+        let device = self
+            .devices
+            .iter()
+            .find(|device| device.config_key == key)?;
+        let ring = self.config.action_ring(key);
+        if !ring.enabled {
+            return None;
+        }
+        let layout = ring.effective_layout(self.current_app.as_deref());
+        if layout.slots.is_empty() {
+            return None;
+        }
+        let haptic_route = (device.online
+            && ring.haptics
+            && device
+                .capabilities
+                .is_some_and(|capabilities| capabilities.haptic_feedback))
+        .then(|| device.route.clone())
+        .flatten();
+        Some(ActionRingSessionSpec {
+            device_key: key.to_owned(),
+            haptic_route,
+            layout,
+            language: self.config.app_settings.language.clone(),
+        })
     }
 
     /// Where enumeration stands, for the IPC `status` poll.

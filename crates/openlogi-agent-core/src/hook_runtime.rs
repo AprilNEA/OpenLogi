@@ -22,10 +22,63 @@ use openlogi_hook::{
 };
 use tracing::{info, warn};
 
+use crate::{DpiCycleState, DpiCycles};
 use crate::event_monitor::SharedEventMonitor;
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::receiver_access::ReceiverAccess;
-use crate::{DpiCycleState, DpiCycles};
+
+/// Runtime dependencies shared by every action source: the OS hook, HID++
+/// controls, keyboard capture, and Actions Ring slot activation.
+#[derive(Clone)]
+pub struct ActionDispatcher {
+    dpi_cycle: Arc<RwLock<DpiCycles>>,
+    capture: CaptureChannel,
+    registry: ChannelRegistry,
+    receiver_access: ReceiverAccess,
+    action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+}
+
+impl ActionDispatcher {
+    /// Build a dispatcher around the agent's shared device state and ring queue.
+    #[must_use]
+    pub fn new(
+        dpi_cycle: Arc<RwLock<DpiCycles>>,
+        capture: CaptureChannel,
+        registry: ChannelRegistry,
+        receiver_access: ReceiverAccess,
+        action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    ) -> Self {
+        Self {
+            dpi_cycle,
+            capture,
+            registry,
+            receiver_access,
+            action_ring,
+        }
+    }
+
+    /// Route one action without blocking the input callback.
+    pub fn dispatch(&self, action: &Action, device_key: Option<&str>) {
+        if matches!(action, Action::ShowActionsRing) {
+            if self
+                .action_ring
+                .send(device_key.map(str::to_owned))
+                .is_err()
+            {
+                warn!("Actions Ring runtime unavailable — trigger ignored");
+            }
+            return;
+        }
+        dispatch_action(
+            action,
+            &self.dpi_cycle,
+            device_key,
+            &self.capture,
+            Some(&self.registry),
+            &self.receiver_access,
+        );
+    }
+}
 
 /// The two button maps the OS-hook callback reads, kept behind ONE lock so a
 /// config rebuild publishes both atomically — a press during an owner switch can
@@ -145,25 +198,13 @@ fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
 }
 
 /// Off-thread worker for bound actions so the tap callback never injects input.
-fn spawn_action_worker(
-    dpi_cycle: Arc<RwLock<DpiCycles>>,
-    capture: CaptureChannel,
-    registry: ChannelRegistry,
-    receiver_access: ReceiverAccess,
-) -> mpsc::SyncSender<Action> {
+fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<Action> {
     let (tx, rx) = mpsc::sync_channel::<Action>(64);
     let _ = thread::Builder::new()
         .name("openlogi-action".into())
         .spawn(move || {
             while let Ok(action) = rx.recv() {
-                dispatch_action(
-                    &action,
-                    &dpi_cycle,
-                    None,
-                    &capture,
-                    Some(&registry),
-                    &receiver_access,
-                );
+                dispatcher.dispatch(&action, None);
             }
         });
     tx
@@ -294,10 +335,7 @@ fn handle_moved(
 pub fn start(
     hooks: SharedHookMaps,
     keyboard_bindings: SharedKeyboardBindings,
-    dpi_cycle: Arc<RwLock<DpiCycles>>,
-    capture: CaptureChannel,
-    registry: ChannelRegistry,
-    receiver_access: ReceiverAccess,
+    dispatcher: ActionDispatcher,
     monitor: SharedEventMonitor,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
@@ -309,7 +347,7 @@ pub fn start(
     }
 
     // Actions never run on the tap callback thread (HID CGEventTap freeze hazard).
-    let action_tx = spawn_action_worker(dpi_cycle, capture, registry, receiver_access);
+    let action_tx = spawn_action_worker(dispatcher);
 
     // The per-hold pointer accumulator lives in the thread-local `HOLD`; the
     // callback must never block — see the freeze-hazard note in `macos.rs`.

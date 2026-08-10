@@ -6,6 +6,7 @@
 //! `openlogi-gui` so the always-on agent process can own the input/device path
 //! without linking gpui.
 
+pub mod action_ring;
 pub mod bindings;
 pub mod capture_plan;
 pub mod device_order;

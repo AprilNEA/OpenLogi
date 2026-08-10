@@ -4,7 +4,7 @@
 //! dedicated thread for the keyboard the orchestrator publishes in
 //! [`SharedKeyboardSpec`], restarts it when the keyboard (or the set of bound
 //! keys) changes, and dispatches each captured key press through the common
-//! action path ([`crate::hook_runtime::dispatch_action`]).
+//! action path ([`crate::hook_runtime::ActionDispatcher`]).
 //!
 //! The mouse capture watcher ([`super::gesture`]) and this one hold *shared*
 //! receiver leases, so both run concurrently; pairing still waits for (and
@@ -24,8 +24,7 @@ use openlogi_hid::{
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::DpiCycles;
-use crate::hook_runtime;
+use crate::hook_runtime::ActionDispatcher;
 use crate::receiver_access::ReceiverAccess;
 use crate::watchers::gesture::should_rearm;
 
@@ -56,11 +55,10 @@ const TARGET_POLL: Duration = Duration::from_secs(1);
 /// dispatches each captured key press.
 pub fn spawn(
     spec: SharedKeyboardSpec,
-    dpi_cycle: Arc<RwLock<DpiCycles>>,
-    mouse_capture: CaptureChannel,
     keyboard_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
     registry: ChannelRegistry,
+    dispatcher: ActionDispatcher,
 ) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -75,11 +73,10 @@ pub fn spawn(
         };
         runtime.block_on(manage(
             spec,
-            dpi_cycle,
-            mouse_capture,
             keyboard_channel,
             receiver_access,
             registry,
+            dispatcher,
         ));
     });
 }
@@ -89,11 +86,10 @@ pub fn spawn(
 /// presses. Runs for the lifetime of the process.
 async fn manage(
     spec: SharedKeyboardSpec,
-    dpi_cycle: Arc<RwLock<DpiCycles>>,
-    mouse_capture: CaptureChannel,
     keyboard_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
     registry: ChannelRegistry,
+    dispatcher: ActionDispatcher,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
     let mut current: Option<(DeviceRoute, BTreeMap<u16, ButtonId>)> = None;
@@ -121,14 +117,7 @@ async fn manage(
                     });
                 if let Some(action) = action {
                     info!(button = %button, action = %action.label(), "keyboard key → executing bound action");
-                    hook_runtime::dispatch_action(
-                        &action,
-                        &dpi_cycle,
-                        None,
-                        &mouse_capture,
-                        Some(&registry),
-                        &receiver_access,
-                    );
+                    dispatcher.dispatch(&action, None);
                 } else {
                     debug!(?button, "keyboard key with no binding — ignored");
                 }

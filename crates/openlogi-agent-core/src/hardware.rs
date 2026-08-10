@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, ChannelRegistry, DeviceRoute, DpiInfo, HidppFeatureErrorKind, HidppOperation,
-    ScrollResolution, SharedChannel, SmartShiftMode, SmartShiftStatus, WriteError,
+    CaptureChannel, ChannelRegistry, DeviceRoute, DpiInfo, HapticWaveform, HidppFeatureErrorKind,
+    HidppOperation, ScrollResolution, SharedChannel, SmartShiftMode, SmartShiftStatus, WriteError,
 };
 use tracing::{debug, warn};
 
@@ -697,6 +697,27 @@ pub async fn apply_smartshift(
     timed(
         HidppOperation::WriteSmartShift,
         openlogi_hid::set_smartshift_on(&shared, mode, auto_disengage, tunable_torque),
+    )
+    .await
+}
+
+/// Play one Actions Ring haptic waveform on the registry-authoritative channel.
+///
+/// Haptics are best-effort feedback: the caller supplies a route only when the
+/// persisted ring setting and the live device capability both allow it, and
+/// failures are logged by the IPC handler without failing the interaction.
+pub async fn play_haptic(
+    capture: &CaptureChannel,
+    registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
+    route: &DeviceRoute,
+    waveform: HapticWaveform,
+) -> Result<(), WriteError> {
+    let shared = authoritative_channel(Some(capture), registry, route)?;
+    let _lease = receiver_access.acquire_for_io().await;
+    timed(
+        HidppOperation::PlayHaptic,
+        openlogi_hid::play_haptic_on(&shared, waveform),
     )
     .await
 }

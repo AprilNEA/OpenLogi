@@ -6,6 +6,9 @@
 //! flow long-polls [`Agent::next_pairing`], which the agent holds open until a
 //! pairing event arrives or the request deadline elapses.
 
+use std::collections::BTreeMap;
+
+use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hid::{
@@ -31,7 +34,9 @@ use serde::{Deserialize, Serialize};
 /// v11: standalone raw-HID inventory, camera state, and light methods appended.
 /// v12: standalone registry model identity appended to `StandaloneDevice`.
 /// v13: `Capabilities::thumbwheel` appended.
-pub const PROTOCOL_VERSION: u32 = 13;
+/// v14: Actions Ring RPCs and haptic capability fields appended.
+/// v15: custom Actions Ring presentation icons and locale appended.
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep
@@ -217,6 +222,38 @@ pub enum MonitorEvent {
     CaptureInterrupted,
 }
 
+/// Non-executable presentation data for one populated Actions Ring slot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionRingPresentation {
+    /// Localization key or user-defined label shown by the overlay.
+    pub label: String,
+    /// Fully resolved icon; the overlay does not need the executable action.
+    pub icon: ActionRingIcon,
+}
+
+/// One request for the overlay helper to display an Actions Ring.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionRingInvocation {
+    /// Opaque session identity used by hover/activate/cancel commands.
+    pub session_id: u64,
+    /// Read-only presentation snapshots. Executable actions never cross into
+    /// the overlay helper and remain in the agent-owned session.
+    pub slots: BTreeMap<ActionRingSlot, ActionRingPresentation>,
+    /// Configured UI locale, or `None` to follow the overlay host's system locale.
+    pub language: Option<String>,
+}
+
+/// Why an Actions Ring interaction command was rejected.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActionRingCommandError {
+    /// The session was replaced, cancelled, expired, or never existed.
+    SessionNotFound,
+    /// The selected position has no action.
+    SlotEmpty,
+}
+
 #[tarpc::service]
 pub trait Agent {
     /// Wire-protocol version, for the connect handshake.
@@ -281,12 +318,28 @@ pub trait Agent {
     /// Drain the events the hook has observed since the last poll, for the GUI's
     /// live event monitor. The first poll enables monitoring; the agent
     /// auto-disables it once polls stop (the GUI closed the panel or died), so
-    /// there is no explicit stop. Appended last — see the method-order note on
-    /// [`Agent::protocol_version`].
+    /// there is no explicit stop. Its position is retained before the Actions
+    /// Ring methods appended by protocol v13/v14.
     async fn poll_event_monitor() -> Vec<MonitorEvent>;
     /// Apply a semantic standalone-light command to a raw HID route.
     async fn set_light(route: DeviceRoute, command: LightCommand) -> Result<(), WriteError>;
     /// Manually override effective power for a camera-linked light until the
     /// next aggregate camera-use transition.
     async fn set_light_manual_power(route: DeviceRoute, enabled: bool) -> Result<(), WriteError>;
+    /// Long-poll the next Actions Ring invocation. The overlay helper keeps this
+    /// request on a dedicated connection so interaction commands are never
+    /// queued behind it.
+    async fn next_action_ring() -> Option<ActionRingInvocation>;
+    /// Report a changed highlighted slot for optional haptic feedback.
+    async fn action_ring_hover(
+        session_id: u64,
+        slot: ActionRingSlot,
+    ) -> Result<(), ActionRingCommandError>;
+    /// Execute the snapshotted action in `slot` and consume the session.
+    async fn action_ring_activate(
+        session_id: u64,
+        slot: ActionRingSlot,
+    ) -> Result<(), ActionRingCommandError>;
+    /// Close a ring without executing an action.
+    async fn action_ring_cancel(session_id: u64);
 }

@@ -19,13 +19,16 @@
 
 #![allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_agent_core::ipc::{
-    AgentRequest, AgentSnapshot, AgentStatus, FoundDevice, InventoryHealth, MonitorEvent,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate,
+    ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
+    AgentSnapshot, AgentStatus, FoundDevice, InventoryHealth, MonitorEvent, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingUpdate,
 };
+use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
@@ -62,7 +65,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 13);
+    assert_eq!(PROTOCOL_VERSION, 15);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -110,6 +113,46 @@ fn request_variant_order() {
         },
         "1103fb6d04fb00c9fb43fffb02020d73657269616c3a41424331323300",
     );
+    assert_wire(&AgentRequest::NextActionRing {}, "12");
+    assert_wire(
+        &AgentRequest::ActionRingHover {
+            session_id: 42,
+            slot: ActionRingSlot::TopRight,
+        },
+        "132a01",
+    );
+    assert_wire(
+        &AgentRequest::ActionRingActivate {
+            session_id: 42,
+            slot: ActionRingSlot::TopRight,
+        },
+        "142a01",
+    );
+    assert_wire(&AgentRequest::ActionRingCancel { session_id: 42 }, "152a");
+}
+
+#[test]
+fn action_ring_types() {
+    assert_wire(
+        &ActionRingInvocation {
+            session_id: 42,
+            slots: BTreeMap::from([(
+                ActionRingSlot::Top,
+                ActionRingPresentation {
+                    label: "Cut".to_string(),
+                    icon: ActionRingIcon::Keyboard,
+                },
+            )]),
+            language: Some("fr".to_string()),
+        },
+        "2a0100034375740701026672",
+    );
+    assert_wire(&ActionRingSlot::Top, "00");
+    assert_wire(&ActionRingSlot::TopLeft, "07");
+    assert_wire(&ActionRingIcon::Keyboard, "01");
+    assert_wire(&ActionRingCommandError::SessionNotFound, "00");
+    assert_wire(&ActionRingCommandError::SlotEmpty, "01");
+    assert_wire(&HidppOperation::PlayHaptic, "0a");
 }
 
 #[test]

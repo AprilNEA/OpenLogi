@@ -16,6 +16,7 @@
 )]
 
 mod launch_agent;
+mod overlay;
 mod pairing;
 mod self_restart;
 mod server;
@@ -31,7 +32,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
+use openlogi_agent_core::hook_runtime::ActionDispatcher;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::{hook_runtime, watchers};
 use openlogi_core::config::Config;
@@ -75,6 +78,7 @@ fn main() {
     // replaces it — see `self_restart`. Only the lock-holding (real) agent
     // watches, so a losing duplicate can't restart anything.
     self_restart::spawn();
+    overlay::spawn();
 
     let config = Config::load_or_default().unwrap_or_else(|e| {
         warn!(error = %e, "could not load config.toml; using defaults");
@@ -123,13 +127,12 @@ fn main() {
 }
 
 /// Start the HID++ background sessions that do not need Accessibility.
-fn spawn_hidpp_watchers(shared: &SharedRuntime) {
+fn spawn_hidpp_watchers(shared: &SharedRuntime, dispatcher: ActionDispatcher) {
     watchers::gesture::spawn(
         shared.capture_plans.clone(),
-        shared.dpi_cycle.clone(),
         shared.capture_channel.clone(),
         shared.receiver_access.clone(),
-        shared.channel_registry.clone(),
+        dispatcher.clone(),
     );
     watchers::host_switch::spawn(
         shared.host_switch_links.clone(),
@@ -138,11 +141,10 @@ fn spawn_hidpp_watchers(shared: &SharedRuntime) {
     );
     watchers::keyboard::spawn(
         shared.keyboard_spec.clone(),
-        shared.dpi_cycle.clone(),
-        shared.capture_channel.clone(),
         shared.keyboard_channel.clone(),
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),
+        dispatcher,
     );
 }
 
@@ -174,6 +176,15 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
     let orchestrator = Arc::new(Mutex::new(Orchestrator::new(config)));
     let shared = orchestrator.lock().await.shared();
     let hook_installed = Arc::new(AtomicBool::new(false));
+    let action_ring = Arc::new(ActionRingManager::default());
+    let (action_ring_tx, mut action_ring_rx) = tokio::sync::mpsc::unbounded_channel();
+    let dispatcher = ActionDispatcher::new(
+        shared.dpi_cycle.clone(),
+        shared.capture_channel.clone(),
+        shared.channel_registry.clone(),
+        shared.receiver_access.clone(),
+        action_ring_tx,
+    );
 
     // Live event monitor: shared between the hook callback (which mirrors events
     // into it) and the IPC server (which the GUI polls). The janitor turns it
@@ -185,7 +196,7 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
     let pairing = Arc::new(pairing::PairingManager::new(shared.clone()));
 
     // HID++ watchers need no Accessibility permission — start them up front.
-    spawn_hidpp_watchers(&shared);
+    spawn_hidpp_watchers(&shared, dispatcher.clone());
 
     let mut inventory_rx = watchers::inventory::spawn_with_registry(
         Duration::from_secs(2),
@@ -204,6 +215,8 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
         hook_installed: Arc::clone(&hook_installed),
         pairing: Arc::clone(&pairing),
         event_monitor: Arc::clone(&event_monitor),
+        action_ring: Arc::clone(&action_ring),
+        dispatcher: dispatcher.clone(),
     };
     tokio::spawn(server::run(server));
 
@@ -259,6 +272,15 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
             Some(bundle) = app_rx.recv() => {
                 orchestrator.lock().await.set_current_app(bundle);
             }
+            Some(device_key) = action_ring_rx.recv() => {
+                let session = orchestrator
+                    .lock()
+                    .await
+                    .action_ring_session(device_key.as_deref());
+                if let Some(session) = session {
+                    action_ring.begin(session);
+                }
+            }
             Some(granted) = accessibility_rx.recv() => {
                 if !granted {
                     hook = None;
@@ -270,10 +292,7 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
                         hook = hook_runtime::start(
                             shared.hook_maps.clone(),
                             shared.keyboard_bindings.clone(),
-                            shared.dpi_cycle.clone(),
-                            shared.capture_channel.clone(),
-                            shared.channel_registry.clone(),
-                            shared.receiver_access.clone(),
+                            dispatcher.clone(),
                             Arc::clone(&event_monitor),
                         );
                         hook_installed.store(hook.is_some(), Ordering::Relaxed);
