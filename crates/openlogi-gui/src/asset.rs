@@ -320,13 +320,20 @@ impl AssetResolver {
                 png_height,
                 "asset hit"
             );
+            let kind = DeviceKind::from_registry_type(&entry.kind);
+            // Only keyboards paint the inter-key glow, and the runtime
+            // fallback decodes the full render — don't pay that for mice.
+            let glow = (kind == DeviceKind::Keyboard)
+                .then(|| self::glow::resolve_glow_geometry(&dir, &image_path))
+                .flatten()
+                .map(Arc::new);
             return Some(ResolvedAsset {
                 depot: depot.to_string(),
                 display_name: entry.display_name.clone(),
-                kind: DeviceKind::from_registry_type(&entry.kind),
+                kind,
                 image_path,
                 hero_image_path,
-                glow: self::glow::load_glow_geometry(&dir).map(Arc::new),
+                glow,
                 metadata,
                 png_width,
                 png_height,

@@ -19,7 +19,13 @@ use serde::Deserialize;
 use tracing::warn;
 
 /// Metadata files to read the precomputed mask from, newest schema first.
-const META_FILES: [&str; 2] = ["core_metadata.json", "metadata.json"];
+const META_FILES: [&str; 3] = ["core_metadata.json", "metadata_full.json", "metadata.json"];
+
+/// Ceiling on a runtime-derived mask's width — the same ~1k scale as the
+/// pipeline-baked masks, and what keeps the flood fill cheap.
+const COMPUTED_MASK_MAX_W: u32 = 1024;
+/// Alpha below this counts as see-through when deriving holes from a render.
+const HOLE_ALPHA: u8 = 96;
 
 /// Sanity bound on a baked mask's stored dimensions. The masks are ~1k px wide;
 /// anything far larger is a corrupt or hostile `metadata.json`. The cap also
@@ -62,14 +68,109 @@ pub(crate) struct GlowGeometry {
     pub segments: Vec<GlowSeg>,
 }
 
+/// The inter-key hole geometry for a depot: the pipeline-baked mask when the
+/// metadata ships one, otherwise derived at resolve time from the render's own
+/// alpha channel — so any keyboard with a transparent render glows, not just
+/// the depots the asset pipeline has processed.
+pub(crate) fn resolve_glow_geometry(dir: &Path, image_path: &Path) -> Option<GlowGeometry> {
+    load_glow_geometry(dir).or_else(|| compute_glow_geometry(image_path))
+}
+
 /// Load and decode the precomputed glow mask from a depot directory's metadata.
-/// `None` when the depot ships no mask (the feature gate) or it's malformed.
-pub(crate) fn load_glow_geometry(dir: &Path) -> Option<GlowGeometry> {
+/// `None` when the depot ships no mask or it's malformed.
+fn load_glow_geometry(dir: &Path) -> Option<GlowGeometry> {
     let mask = META_FILES.iter().find_map(|name| {
         let text = std::fs::read_to_string(dir.join(name)).ok()?;
         serde_json::from_str::<MetaGlow>(&text).ok()?.glow
     })?;
     GlowGeometry::from_mask(&mask)
+}
+
+/// Derive the inter-key holes straight from the render's alpha channel:
+/// flood-fill the see-through field inward from the image border, and whatever
+/// see-through cells remain unreached are enclosed by the silhouette — the
+/// holes. The image is binned to ≤[`COMPUTED_MASK_MAX_W`] cells wide; a cell
+/// is see-through when *any* source pixel in its bin is, so the few-pixel
+/// slits between floating keycaps survive the binning. Border-connected
+/// transparency (including background reachable through open seams) is
+/// "outside" and never glows, which is what keeps the colour inside the
+/// silhouette.
+fn compute_glow_geometry(image_path: &Path) -> Option<GlowGeometry> {
+    let img = image::open(image_path).ok()?.into_rgba8();
+    let (src_w, src_h) = img.dimensions();
+    if src_w == 0 || src_h == 0 || src_w > MAX_MASK_DIM || src_h > MAX_MASK_DIM {
+        return None;
+    }
+    let scale = src_w.div_ceil(COMPUTED_MASK_MAX_W).max(1);
+    let (w, h) = (src_w.div_ceil(scale), src_h.div_ceil(scale));
+
+    // 0 = opaque, 1 = see-through, 2 = see-through and border-connected.
+    let mut cells = vec![0u8; (w as usize) * (h as usize)];
+    for (x, y, pixel) in img.enumerate_pixels() {
+        if pixel.0[3] < HOLE_ALPHA {
+            cells[((y / scale) * w + (x / scale)) as usize] = 1;
+        }
+    }
+
+    let mut queue: std::collections::VecDeque<(u32, u32)> = (0..w)
+        .flat_map(|x| [(x, 0), (x, h - 1)])
+        .chain((0..h).flat_map(|y| [(0, y), (w - 1, y)]))
+        .filter(|&(x, y)| cells[(y * w + x) as usize] == 1)
+        .collect();
+    for &(x, y) in &queue {
+        cells[(y * w + x) as usize] = 2;
+    }
+    while let Some((x, y)) = queue.pop_front() {
+        let neighbors = [
+            (x.wrapping_sub(1), y),
+            (x + 1, y),
+            (x, y.wrapping_sub(1)),
+            (x, y + 1),
+        ];
+        for (nx, ny) in neighbors {
+            if nx < w && ny < h && cells[(ny * w + nx) as usize] == 1 {
+                cells[(ny * w + nx) as usize] = 2;
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "mask coords are < 8192 px — well within f32 mantissa"
+    )]
+    let (wf, hf) = (w as f32, h as f32);
+    let mut segments = Vec::new();
+    for y in 0..h {
+        let mut x = 0;
+        while x < w {
+            if cells[(y * w + x) as usize] == 1 {
+                let start = x;
+                while x < w && cells[(y * w + x) as usize] == 1 {
+                    x += 1;
+                }
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "mask coords are < 8192 px — well within f32 mantissa"
+                )]
+                segments.push(GlowSeg {
+                    x: start as f32 / wf,
+                    y: y as f32 / hf,
+                    w: (x - start) as f32 / wf,
+                    h: 1.0 / hf,
+                });
+            } else {
+                x += 1;
+            }
+        }
+    }
+    if segments.is_empty() {
+        return None;
+    }
+    Some(GlowGeometry {
+        aspect: wf / hf,
+        segments,
+    })
 }
 
 impl GlowGeometry {
@@ -169,5 +270,69 @@ mod tests {
             runs: vec![3, 2], // sums to 5, not 16
         };
         assert!(GlowGeometry::from_mask(&mask).is_none());
+    }
+
+    /// Write an RGBA png where `1` cells are solid and the rest fully
+    /// transparent.
+    fn write_png(dir: &std::path::Path, name: &str, rows: &[&[u8]]) -> std::path::PathBuf {
+        let h = u32::try_from(rows.len()).expect("test image height fits u32");
+        let w = u32::try_from(rows[0].len()).expect("test image width fits u32");
+        let mut img = image::RgbaImage::new(w, h);
+        for (y, row) in rows.iter().enumerate() {
+            for (x, &cell) in row.iter().enumerate() {
+                let alpha = if cell == 1 { 255 } else { 0 };
+                let (x, y) = (
+                    u32::try_from(x).expect("test x fits u32"),
+                    u32::try_from(y).expect("test y fits u32"),
+                );
+                img.put_pixel(x, y, image::Rgba([40, 40, 40, alpha]));
+            }
+        }
+        let path = dir.join(name);
+        img.save(&path).expect("write png");
+        path
+    }
+
+    #[test]
+    fn computed_geometry_finds_only_enclosed_holes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A ring of opaque pixels around one transparent pixel (a hole), with
+        // border-connected transparency everywhere else.
+        let path = write_png(
+            dir.path(),
+            "ring.png",
+            &[
+                &[0, 0, 0, 0, 0],
+                &[0, 1, 1, 1, 0],
+                &[0, 1, 0, 1, 0],
+                &[0, 1, 1, 1, 0],
+                &[0, 0, 0, 0, 0],
+            ],
+        );
+        let geom = compute_glow_geometry(&path).expect("hole found");
+        assert_eq!(geom.segments.len(), 1);
+        let seg = geom.segments[0];
+        assert!((seg.x - 0.4).abs() < 1e-6, "hole at col 2 of 5");
+        assert!((seg.y - 0.4).abs() < 1e-6, "hole at row 2 of 5");
+        assert!((geom.aspect - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn computed_geometry_ignores_border_connected_transparency() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A C-shape: the notch opens to the border, so nothing is enclosed.
+        let path = write_png(
+            dir.path(),
+            "open.png",
+            &[&[1, 1, 1], &[1, 0, 0], &[1, 1, 1]],
+        );
+        assert!(compute_glow_geometry(&path).is_none());
+    }
+
+    #[test]
+    fn computed_geometry_skips_fully_opaque_renders() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_png(dir.path(), "solid.png", &[&[1, 1], &[1, 1]]);
+        assert!(compute_glow_geometry(&path).is_none());
     }
 }
