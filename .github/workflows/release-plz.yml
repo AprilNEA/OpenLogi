@@ -239,7 +239,12 @@ jobs:
             exit 1
           fi
           echo "Checking out version-bump commit ${bump_sha} for ${tag}"
-          git checkout --force "${bump_sha}"
+          # Stay on a real branch with @{upstream} set. A bare SHA checkout
+          # detaches HEAD and release-plz aborts with "cannot determine current
+          # branch". Pin master to the bump commit only for this job's workspace
+          # (does not push, does not bump versions).
+          git switch --force -C master "${bump_sha}"
+          git branch --set-upstream-to=origin/master master
           echo "skip=false" >> "$GITHUB_ENV"
           echo "release_sha=${bump_sha}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
