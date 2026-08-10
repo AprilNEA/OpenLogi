@@ -242,6 +242,10 @@ pub struct SmartShiftApply {
 /// stream while correlating responses only by software id — they cross-talk and
 /// produce the intermittent SmartShift `InvalidArgument` seen in #485. One
 /// sequential writer removes that self-race.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "background reapply keeps one device write lifecycle together"
+)]
 pub fn reapply_mouse_volatile_in_background(
     capture: Option<&CaptureChannel>,
     registry: &ChannelRegistry,

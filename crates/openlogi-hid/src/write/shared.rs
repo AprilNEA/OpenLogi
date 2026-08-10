@@ -39,9 +39,6 @@ impl SharedChannel {
         self.route == *route
     }
 
-    pub(crate) fn same_channel(&self, channel: &Arc<HidppChannel>) -> bool {
-        Arc::ptr_eq(&self.channel, channel)
-    }
 
     pub(crate) fn channel(&self) -> &Arc<HidppChannel> {
         &self.channel
