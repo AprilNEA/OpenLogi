@@ -172,6 +172,9 @@ pub fn camera_authorization() -> crate::CameraAuthorization {
     crate::CameraAuthorization::Granted
 }
 
+/// No-op: Windows has no consent prompt to trigger for desktop apps.
+pub fn request_camera_access() {}
+
 /// The reader thread: builds the Media Foundation graph, reports the outcome
 /// through `setup`, then pulls and decodes samples until told to stop.
 fn reader_thread(unique_id: &str, shared: &Shared, setup: &mpsc::Sender<Result<(), CaptureError>>) {

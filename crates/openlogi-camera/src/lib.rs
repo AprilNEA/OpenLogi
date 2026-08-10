@@ -27,14 +27,16 @@ mod macos;
 mod capture;
 #[cfg(target_os = "macos")]
 pub use capture::{
-    CameraStream, camera_access_granted, camera_authorization, capture_frame, start_stream,
+    CameraStream, camera_access_granted, camera_authorization, capture_frame,
+    request_camera_access, start_stream,
 };
 
 #[cfg(target_os = "windows")]
 mod capture_windows;
 #[cfg(target_os = "windows")]
 pub use capture_windows::{
-    CameraStream, camera_access_granted, camera_authorization, capture_frame, start_stream,
+    CameraStream, camera_access_granted, camera_authorization, capture_frame,
+    request_camera_access, start_stream,
 };
 
 #[cfg(target_os = "macos")]
@@ -58,7 +60,8 @@ mod linux;
 mod capture_linux;
 #[cfg(target_os = "linux")]
 pub use capture_linux::{
-    CameraStream, camera_access_granted, camera_authorization, capture_frame, start_stream,
+    CameraStream, camera_access_granted, camera_authorization, capture_frame,
+    request_camera_access, start_stream,
 };
 
 #[cfg(target_os = "linux")]
@@ -117,10 +120,14 @@ mod capture {
     pub fn camera_authorization() -> crate::CameraAuthorization {
         crate::CameraAuthorization::Undetermined
     }
+
+    /// Stub: no consent prompt exists on this platform.
+    pub fn request_camera_access() {}
 }
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub use capture::{
-    CameraStream, camera_access_granted, camera_authorization, capture_frame, start_stream,
+    CameraStream, camera_access_granted, camera_authorization, capture_frame,
+    request_camera_access, start_stream,
 };
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]

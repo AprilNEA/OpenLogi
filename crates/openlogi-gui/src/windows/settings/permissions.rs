@@ -2,13 +2,13 @@
 
 #[cfg(target_os = "macos")]
 use super::{
-    App, AppState, InteractiveElement, Permission, SharedString, StatefulInteractiveElement,
+    AnyElement, App, AppState, InteractiveElement, Permission, StatefulInteractiveElement,
 };
 use super::{IconName, Palette, SettingPage};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::{
-    IntoElement, ParentElement, PermissionStatus, SettingField, SettingGroup, SettingItem, Styled,
-    div, h_flex, px, rgb, theme,
+    IntoElement, ParentElement, PermissionStatus, SettingField, SettingGroup, SettingItem,
+    SharedString, Styled, div, h_flex, px, rgb, theme,
 };
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::platform::permissions;
@@ -140,6 +140,11 @@ fn status_badge(status: PermissionStatus, pal: Palette) -> impl IntoElement {
         PermissionStatus::Denied => (tr!("Not granted"), theme::STATUS_CONNECTING),
         PermissionStatus::Unknown => (tr!("Unknown"), theme::STATUS_OFFLINE),
     };
+    badge(label, color, pal)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn badge(label: SharedString, color: u32, pal: Palette) -> impl IntoElement {
     h_flex()
         .items_center()
         .gap_1()
@@ -149,8 +154,7 @@ fn status_badge(status: PermissionStatus, pal: Palette) -> impl IntoElement {
         .child(label)
 }
 
-/// The right-side field for one permission row: live status, plus (macOS only)
-/// an "Open" button that deep-links to the relevant System Settings pane.
+/// The right-side field for one permission row: live status plus an action button (a System Settings deep link, or the Camera consent prompt).
 #[cfg(target_os = "macos")]
 fn permission_field(
     id: &'static str,
@@ -158,40 +162,55 @@ fn permission_field(
     permission: Permission,
     pal: Palette,
 ) -> impl IntoElement {
-    let row = h_flex()
+    // "Not determined" means never requested — Bluetooth deliberately never is
+    // (BLE mice go through IOHIDManager) — so don't label it "Unknown".
+    let never_requested = matches!(status, PermissionStatus::Unknown)
+        && matches!(permission, Permission::Bluetooth | Permission::Camera);
+    let status_el: AnyElement = if never_requested {
+        badge(tr!("Not requested"), theme::STATUS_OFFLINE, pal).into_any_element()
+    } else {
+        status_badge(status, pal).into_any_element()
+    };
+    let prompts_here = never_requested && matches!(permission, Permission::Camera);
+    let action_label = if prompts_here {
+        tr!("Grant")
+    } else {
+        tr!("Open")
+    };
+
+    h_flex()
         .flex_shrink_0()
         .items_center()
         .gap_3()
-        .child(status_badge(status, pal));
-
-    #[cfg(target_os = "macos")]
-    let row = row.child(
-        div()
-            .id(id)
-            .px_2()
-            .py_1()
-            .rounded(pal.control_radius)
-            .border_1()
-            .border_color(pal.border)
-            .text_caption()
-            .cursor_pointer()
-            .hover(move |s| s.bg(pal.surface_hover))
-            .child(tr!("Open"))
-            .on_click(move |_, _, cx| {
-                // Accessibility must be prompted in the agent (it owns the
-                // hook); prompting in the GUI would authorize the wrong
-                // binary. Other panes just deep-link to System Settings.
-                if matches!(permission, Permission::Accessibility)
-                    && let Some(state) = cx.try_global::<crate::state::AppState>()
-                {
-                    state.request_accessibility_prompt();
-                }
-                permissions::open_pane(permission);
-            }),
-    );
-
-    #[cfg(not(target_os = "macos"))]
-    let _ = (id, permission, pal);
-
-    row
+        .child(status_el)
+        .child(
+            div()
+                .id(id)
+                .px_2()
+                .py_1()
+                .rounded(pal.control_radius)
+                .border_1()
+                .border_color(pal.border)
+                .text_caption()
+                .cursor_pointer()
+                .hover(move |s| s.bg(pal.surface_hover))
+                .child(action_label)
+                .on_click(move |_, _, cx| {
+                    // Accessibility must be prompted in the agent (it owns the
+                    // hook); prompting in the GUI would authorize the wrong
+                    // binary. Other panes just deep-link to System Settings.
+                    if matches!(permission, Permission::Accessibility)
+                        && let Some(state) = cx.try_global::<crate::state::AppState>()
+                    {
+                        state.request_accessibility_prompt();
+                    }
+                    // The Camera pane only lists an app after its first
+                    // AVFoundation request, so a deep link can't grant it.
+                    if prompts_here {
+                        openlogi_camera::request_camera_access();
+                        return;
+                    }
+                    permissions::open_pane(permission);
+                }),
+        )
 }

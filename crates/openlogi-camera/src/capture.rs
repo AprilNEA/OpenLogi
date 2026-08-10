@@ -252,6 +252,23 @@ pub fn camera_access_granted() -> bool {
     matches!(authorization(), Some(true))
 }
 
+/// Fire the system Camera-permission prompt without blocking; poll
+/// [`camera_authorization`] to observe the outcome.
+pub fn request_camera_access() {
+    let handler = RcBlock::new(move |_granted: Bool| {});
+    let cls = class!(AVCaptureDevice);
+    // SAFETY: documented async class method taking an AVMediaType + a
+    // `void(^)(BOOL)` completion block; AVFoundation copies the heap block, so
+    // it stays valid after `handler` drops.
+    unsafe {
+        let _: () = msg_send![
+            cls,
+            requestAccessForMediaType: AVMediaTypeVideo,
+            completionHandler: &*handler
+        ];
+    }
+}
+
 /// Current Camera permission as a tri-state, without prompting. Lets the
 /// Settings window distinguish Denied from not-yet-asked.
 #[must_use]

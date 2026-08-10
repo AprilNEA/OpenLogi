@@ -489,6 +489,9 @@ pub fn camera_authorization() -> CameraAuthorization {
     }
 }
 
+/// No-op: Linux has no consent prompt — access is device-node permissions.
+pub fn request_camera_access() {}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
