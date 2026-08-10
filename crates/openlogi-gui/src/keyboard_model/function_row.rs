@@ -468,10 +468,14 @@ fn keyboard_pane(
             hovered,
             (img_w, img_h),
         ))
-        .children(slots.iter().cloned().map(|s| {
-            let highlighted = key_is_highlighted(s.idx, selected, hovered);
-            key_callout(s, highlighted, img_w, &view_clone, pal)
-        }))
+        .children({
+            let count = slots.len();
+            let view_for_callouts = view_clone.clone();
+            slots.iter().cloned().map(move |s| {
+                let highlighted = key_is_highlighted(s.idx, selected, hovered);
+                key_callout(s, count, highlighted, img_w, &view_for_callouts, pal)
+            })
+        })
         // Click-targets overlay, centered on each key's marker point.
         .child(
             div()
@@ -487,16 +491,17 @@ fn keyboard_pane(
         )
 }
 
-/// One callout bubble above a function key.
+/// One callout bubble in the band above the keyboard.
 fn key_callout(
     slot: KeySlot,
+    count: usize,
     highlighted: bool,
     img_w: f32,
     view: &Entity<FunctionRowView>,
     pal: &Palette,
 ) -> AnyElement {
     let idx = slot.idx;
-    let left = callout_left_px(slot.x_frac, img_w, KEY_CALLOUT_W);
+    let left = callout_left_px(idx, count, img_w, KEY_CALLOUT_W);
     let top = callout_top_px(idx);
     let view_hover = view.clone();
     let view_click = view.clone();
@@ -683,11 +688,12 @@ fn paint_keyboard_leaders(
     (img_w, img_h): (f32, f32),
     window: &mut Window,
 ) {
+    let count = guides.len();
     for (idx, x_frac, y_frac) in guides {
         let highlighted = key_is_highlighted(idx, selected, hovered);
         let key_x = x_frac * img_w;
         let key_y = CALLOUT_BAND_H + (y_frac * img_h);
-        let callout_x = callout_left_px(x_frac, img_w, KEY_CALLOUT_W) + KEY_CALLOUT_W / 2.;
+        let callout_x = callout_center_x(idx, count, img_w);
         let callout_bottom = callout_top_px(idx) + KEY_CALLOUT_H;
         let start = bounds.origin + point(px(callout_x), px(callout_bottom));
         let elbow = bounds.origin + point(px(callout_x), px(CALLOUT_BAND_H - 14.));
@@ -715,8 +721,20 @@ fn key_is_highlighted(idx: usize, selected: Option<usize>, hovered: Option<usize
     selected == Some(idx) || hovered == Some(idx)
 }
 
-fn callout_left_px(x_frac: f32, image_w: f32, callout_w: f32) -> f32 {
-    (x_frac * image_w - callout_w / 2.0).clamp(0.0, image_w - callout_w)
+/// Callout bubbles lay out *evenly* across the pane instead of over their
+/// keys: a dense F-row (a G513 packs Esc-F12 into half the render width)
+/// would otherwise stack the bubbles into an overlapping wall. The leader
+/// lines fan from each bubble down to its true key position.
+fn callout_center_x(idx: usize, count: usize, image_w: f32) -> f32 {
+    let margin = KEY_CALLOUT_W / 2.0 + 4.0;
+    if count <= 1 {
+        return image_w / 2.0;
+    }
+    margin + (idx as f32) * (image_w - 2.0 * margin) / ((count - 1) as f32)
+}
+
+fn callout_left_px(idx: usize, count: usize, image_w: f32, callout_w: f32) -> f32 {
+    (callout_center_x(idx, count, image_w) - callout_w / 2.0).clamp(0.0, image_w - callout_w)
 }
 
 fn key_target_left_px(x_frac: f32, img_w: f32, target_w: f32) -> f32 {
@@ -1262,10 +1280,30 @@ mod tests {
     }
 
     #[test]
-    fn callout_left_edge_is_clamped_to_keyboard_width() {
-        assert_eq!(callout_left_px(0.0, 700.0, 64.0), 0.0);
-        assert_eq!(callout_left_px(0.5, 700.0, 64.0), 318.0);
-        assert_eq!(callout_left_px(1.0, 700.0, 64.0), 636.0);
+    fn callouts_spread_evenly_from_margin_to_margin() {
+        let margin = KEY_CALLOUT_W / 2.0 + 4.0;
+        assert_approx_eq(callout_center_x(0, 13, 700.0), margin);
+        assert_approx_eq(callout_center_x(12, 13, 700.0), 700.0 - margin);
+        assert_approx_eq(callout_center_x(0, 1, 700.0), 350.0);
+        assert!(callout_left_px(0, 13, 700.0, KEY_CALLOUT_W) >= 0.0);
+        assert!(callout_left_px(12, 13, 700.0, KEY_CALLOUT_W) <= 700.0 - KEY_CALLOUT_W);
+    }
+
+    /// Bubbles share a stagger lane with every second key; same-lane
+    /// neighbours must never overlap for any board size the row can show.
+    #[test]
+    fn same_lane_callouts_never_overlap() {
+        for count in [13usize, 20] {
+            for idx in 0..count.saturating_sub(2) {
+                let gap = callout_center_x(idx + 2, count, KEYBOARD_W)
+                    - callout_center_x(idx, count, KEYBOARD_W);
+                assert!(
+                    gap >= KEY_CALLOUT_W,
+                    "lane neighbours {idx}/{} overlap at count {count}: gap {gap}",
+                    idx + 2
+                );
+            }
+        }
     }
 
     #[test]
