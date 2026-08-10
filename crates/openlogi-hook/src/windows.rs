@@ -263,7 +263,14 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
             },
             _ => return None,
         };
-        return Some(MouseEvent::Button { id, pressed });
+        // Windows WH_MOUSE_LL does not expose a cheap device identity; leave
+        // `device` as None so remapping still works (see hook_runtime: non-macOS
+        // keeps remapping when attribution is absent).
+        return Some(MouseEvent::Button {
+            id,
+            pressed,
+            device: None,
+        });
     }
 
     match wparam as u32 {

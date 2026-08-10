@@ -29,6 +29,9 @@ use std::cfg_select;
 
 pub use openlogi_core::binding::ButtonId;
 
+/// Logitech's USB/Bluetooth vendor id (`0x046D`).
+pub const LOGITECH_VENDOR_ID: u32 = 0x046d;
+
 /// Best-effort identity for the physical device that produced an OS event.
 ///
 /// Platform hooks fill the stable fields they can read cheaply from the native
@@ -44,6 +47,43 @@ pub struct EventDevice {
     pub product_name: Option<String>,
 }
 
+impl EventDevice {
+    /// Whether this looks like a trackpad/touchpad (must never be remapped).
+    #[must_use]
+    pub fn is_trackpad_like(&self) -> bool {
+        self.product_name.as_deref().is_some_and(|n| {
+            let n = n.to_ascii_lowercase();
+            n.contains("trackpad") || n.contains("touchpad") || n.contains("touch pad")
+        })
+    }
+
+    /// Whether this is a Logitech product OpenLogi may remap buttons for.
+    #[must_use]
+    pub fn is_logitech(&self) -> bool {
+        if self.vendor_id == Some(LOGITECH_VENDOR_ID) {
+            return true;
+        }
+        self.product_name.as_deref().is_some_and(|n| {
+            let n = n.to_ascii_lowercase();
+            n.contains("logitech") || n.starts_with("logi ")
+        })
+    }
+}
+
+/// Whether the OS hook may suppress/remap a button event from this source.
+///
+/// Fail-closed on macOS-style attribution: only a known Logitech non-trackpad
+/// source is remappable. Unknown / non-Logitech / trackpad sources always pass
+/// through so a wedged remap policy can never brick the system pointer.
+#[must_use]
+pub fn source_is_remappable(device: Option<&EventDevice>) -> bool {
+    match device {
+        Some(d) if d.is_trackpad_like() => false,
+        Some(d) => d.is_logitech(),
+        None => false,
+    }
+}
+
 /// An event captured at the OS layer.
 #[derive(Clone, Debug)]
 pub enum MouseEvent {
@@ -53,6 +93,9 @@ pub enum MouseEvent {
         id: ButtonId,
         /// `true` = button down; `false` = button up.
         pressed: bool,
+        /// Best-effort physical source. `None` when the platform cannot
+        /// attribute the event (Windows today) or it was synthetic.
+        device: Option<EventDevice>,
     },
     /// A scroll-wheel tick (or continuous momentum scroll).
     Scroll {

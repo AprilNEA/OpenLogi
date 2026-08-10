@@ -2,9 +2,11 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use core_foundation::base::{CFTypeRef, TCFType as _};
 use core_foundation::number::CFNumber;
@@ -261,6 +263,11 @@ fn button_number_to_id(n: i64) -> Option<ButtonId> {
     }
 }
 
+/// Best-effort device identity for a button event's HID sender.
+fn button_source(event: &CGEvent) -> Option<crate::EventDevice> {
+    event_sender_id(event).map(|id| sender_device_info(id).event_device)
+}
+
 /// Convert a `CGEvent` to our [`MouseEvent`] vocabulary. Returns `None`
 /// for event types we don't translate (e.g. move events, unknown buttons).
 fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
@@ -288,26 +295,38 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
         CGEventType::LeftMouseDown => Some(MouseEvent::Button {
             id: ButtonId::LeftClick,
             pressed: true,
+            device: button_source(event),
         }),
         CGEventType::LeftMouseUp => Some(MouseEvent::Button {
             id: ButtonId::LeftClick,
             pressed: false,
+            device: button_source(event),
         }),
         CGEventType::RightMouseDown => Some(MouseEvent::Button {
             id: ButtonId::RightClick,
             pressed: true,
+            device: button_source(event),
         }),
         CGEventType::RightMouseUp => Some(MouseEvent::Button {
             id: ButtonId::RightClick,
             pressed: false,
+            device: button_source(event),
         }),
         CGEventType::OtherMouseDown => {
             let n = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
-            button_number_to_id(n).map(|id| MouseEvent::Button { id, pressed: true })
+            button_number_to_id(n).map(|id| MouseEvent::Button {
+                id,
+                pressed: true,
+                device: button_source(event),
+            })
         }
         CGEventType::OtherMouseUp => {
             let n = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
-            button_number_to_id(n).map(|id| MouseEvent::Button { id, pressed: false })
+            button_number_to_id(n).map(|id| MouseEvent::Button {
+                id,
+                pressed: false,
+                device: button_source(event),
+            })
         }
         CGEventType::ScrollWheel => {
             // axis 1 = vertical scroll; axis 2 = horizontal scroll. Read the
@@ -457,6 +476,91 @@ pub(crate) fn start(
     })
 }
 
+/// How long the tap callback may run before the watchdog treats the agent as
+/// wedging system input and force-exits. An active HID-level tap serialises
+/// every pointer event through this callback; a hang freezes clicks machine-wide.
+const CALLBACK_STUCK_BUDGET: Duration = Duration::from_millis(200);
+
+/// Event types the HID tap observes. Pointer *Dragged variants are required
+/// because a held button makes the OS emit those instead of `MouseMoved`.
+fn hooked_event_types() -> Vec<CGEventType> {
+    vec![
+        CGEventType::LeftMouseDown,
+        CGEventType::LeftMouseUp,
+        CGEventType::RightMouseDown,
+        CGEventType::RightMouseUp,
+        CGEventType::OtherMouseDown,
+        CGEventType::OtherMouseUp,
+        CGEventType::ScrollWheel,
+        CGEventType::MouseMoved,
+        CGEventType::LeftMouseDragged,
+        CGEventType::RightMouseDragged,
+        CGEventType::OtherMouseDragged,
+    ]
+}
+
+/// Invoke the user callback under `catch_unwind`, always failing open.
+fn run_tap_callback(
+    cb: &dyn Fn(MouseEvent) -> EventDisposition,
+    etype: CGEventType,
+    event: &CGEvent,
+) -> CallbackResult {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let Some(mouse_event) = translate(etype, event) else {
+            return CallbackResult::Keep;
+        };
+        match cb(mouse_event) {
+            EventDisposition::PassThrough => CallbackResult::Keep,
+            EventDisposition::Suppress => CallbackResult::Drop,
+        }
+    }));
+    if let Ok(disposition) = result {
+        disposition
+    } else {
+        error!(
+            "OS mouse-hook callback panicked — passing event through to \
+             avoid wedging system input"
+        );
+        CallbackResult::Keep
+    }
+}
+
+/// Sibling watchdog: if the callback is still entered past the budget, abort
+/// the agent so macOS tears the tap down and system input recovers.
+fn spawn_callback_watchdog(
+    stop: Arc<AtomicBool>,
+    in_callback: Arc<AtomicBool>,
+    entered_at_ms: Arc<AtomicU64>,
+) {
+    let budget_ms = u64::try_from(CALLBACK_STUCK_BUDGET.as_millis()).unwrap_or(200);
+    let _ = thread::Builder::new()
+        .name("openlogi-hook-watchdog".into())
+        .spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(20));
+                if !in_callback.load(Ordering::Acquire) {
+                    continue;
+                }
+                let entered = entered_at_ms.load(Ordering::Acquire);
+                if entered == 0 {
+                    continue;
+                }
+                let elapsed = unix_now_ms().saturating_sub(entered);
+                if elapsed < budget_ms {
+                    continue;
+                }
+                error!(
+                    stuck_ms = elapsed,
+                    "OS mouse-hook callback stuck past budget — exiting agent to \
+                     restore system input (HID CGEventTap freeze hazard)"
+                );
+                // Hard exit: disable_tap alone cannot unblock an in-flight
+                // callback, and a live active HID tap freezes all pointer I/O.
+                std::process::exit(78);
+            }
+        });
+}
+
 /// Body of the background hook thread.
 #[allow(
     clippy::needless_pass_by_value,
@@ -467,39 +571,30 @@ fn thread_main(
     rl_tx: mpsc::Sender<CFRunLoop>,
     stop: Arc<AtomicBool>,
 ) {
-    let event_types = vec![
-        CGEventType::LeftMouseDown,
-        CGEventType::LeftMouseUp,
-        CGEventType::RightMouseDown,
-        CGEventType::RightMouseUp,
-        CGEventType::OtherMouseDown,
-        CGEventType::OtherMouseUp,
-        CGEventType::ScrollWheel,
-        // Pointer movement, for gesture-button hold+swipe. A held button makes
-        // the OS emit *Dragged rather than MouseMoved, so all four are needed.
-        // The callback stays lock-light (see `hook_runtime`) so this high-rate
-        // stream can't stall the tap.
-        CGEventType::MouseMoved,
-        CGEventType::LeftMouseDragged,
-        CGEventType::RightMouseDragged,
-        CGEventType::OtherMouseDragged,
-    ];
+    // Watchdog state: the run-loop thread can't observe a stuck callback (it
+    // *is* the callback), so a sibling thread samples these atomics and kills
+    // the process if the budget is exceeded — process death is the only reliable
+    // way to release a wedged HID-level tap and restore system input.
+    let in_callback = Arc::new(AtomicBool::new(false));
+    let entered_at_ms = Arc::new(AtomicU64::new(0));
 
-    let tap_result = CGEventTap::new(
-        CGEventTapLocation::HID,
-        CGEventTapPlacement::HeadInsertEventTap,
-        CGEventTapOptions::Default,
-        event_types,
-        move |_proxy: CGEventTapProxy, etype: CGEventType, event: &CGEvent| {
-            let Some(mouse_event) = translate(etype, event) else {
-                return CallbackResult::Keep;
-            };
-            match cb(mouse_event) {
-                EventDisposition::PassThrough => CallbackResult::Keep,
-                EventDisposition::Suppress => CallbackResult::Drop,
-            }
-        },
-    );
+    let tap_result = {
+        let in_callback = Arc::clone(&in_callback);
+        let entered_at_ms = Arc::clone(&entered_at_ms);
+        CGEventTap::new(
+            CGEventTapLocation::HID,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::Default,
+            hooked_event_types(),
+            move |_proxy: CGEventTapProxy, etype: CGEventType, event: &CGEvent| {
+                in_callback.store(true, Ordering::Release);
+                entered_at_ms.store(unix_now_ms(), Ordering::Release);
+                let disposition = run_tap_callback(cb.as_ref(), etype, event);
+                in_callback.store(false, Ordering::Release);
+                disposition
+            },
+        )
+    };
 
     let Ok(tap) = tap_result else {
         error!("CGEventTapCreate returned null — Accessibility may have been revoked");
@@ -521,9 +616,15 @@ fn thread_main(
         run_loop.add_source(&loop_source, kCFRunLoopCommonModes);
     }
     tap.enable();
+    spawn_callback_watchdog(
+        Arc::clone(&stop),
+        Arc::clone(&in_callback),
+        Arc::clone(&entered_at_ms),
+    );
 
     if rl_tx.send(run_loop).is_err() {
         debug!("hook parent dropped before run loop was ready; stopping");
+        disable_tap(&tap);
         return;
     }
 
@@ -549,7 +650,7 @@ fn thread_main(
         match CFRunLoop::run_in_mode(
             // SAFETY: framework-provided static CFStringRef, 'static.
             unsafe { kCFRunLoopDefaultMode },
-            std::time::Duration::from_millis(500),
+            Duration::from_millis(500),
             false,
         ) {
             CFRunLoopRunResult::Stopped | CFRunLoopRunResult::Finished => break,
@@ -573,6 +674,13 @@ fn thread_main(
     // so input recovers immediately rather than whenever CF happens to
     // release the port.
     disable_tap(&tap);
+}
+
+/// Milliseconds since the Unix epoch for the stuck-callback watchdog.
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Disable an active event tap now. core-graphics only exposes the enable

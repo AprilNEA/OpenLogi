@@ -37,7 +37,7 @@ use x11rb::properties::WmClass;
 use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, Window};
 use x11rb::rust_connection::RustConnection;
 
-use crate::{ButtonId, EventDisposition, HookError, MouseEvent};
+use crate::{ButtonId, EventDisposition, HookError, LOGITECH_VENDOR_ID, MouseEvent};
 
 /// Prefix carried by every uinput device OpenLogi creates — the hook's
 /// pass-through mice ([`VIRTUAL_DEVICE_NAME`]) and openlogi-inject's
@@ -151,19 +151,21 @@ fn create_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
 fn find_mouse_devices() -> Vec<(std::path::PathBuf, Device)> {
     evdev::enumerate()
         .filter(|(path, d)| {
+            let vendor = u32::from(d.input_id().vendor());
             let hookable = is_hookable_mouse(
                 d.name(),
                 d.supported_keys(),
                 d.supported_relative_axes(),
                 d.supported_absolute_axes(),
                 d.properties(),
+                vendor,
             );
             if !hookable
                 && d.supported_keys()
                     .is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT))
             {
                 debug!(
-                    "not hooking {} ({}): has mouse buttons but is not a plain relative-pointer mouse",
+                    "not hooking {} ({}): has mouse buttons but is not a managed Logitech relative-pointer mouse",
                     path.display(),
                     d.name().unwrap_or("unnamed"),
                 );
@@ -183,16 +185,25 @@ fn find_mouse_devices() -> Vec<(std::path::PathBuf, Device)> {
 /// are excluded too: libinput derives their on-button scrolling from the
 /// `POINTING_STICK` input property, which a re-injected uinput stream loses,
 /// and built-in sticks are never OpenLogi's target hardware.
+///
+/// Only Logitech devices are grabbed: OpenLogi remaps Logitech mice, and an
+/// exclusive grab on any other vendor's pointer (or a misclassified built-in
+/// trackpad) would leave that device dead for the life of the agent (#484).
 fn is_hookable_mouse(
     name: Option<&str>,
     keys: Option<&AttributeSetRef<KeyCode>>,
     rel_axes: Option<&AttributeSetRef<RelativeAxisCode>>,
     abs_axes: Option<&AttributeSetRef<AbsoluteAxisCode>>,
     props: &AttributeSetRef<PropType>,
+    vendor_id: u32,
 ) -> bool {
     // Never hook one of our own uinput devices (an unnamed device is fine —
     // ours are always named).
     if name.is_some_and(|n| n.starts_with(OPENLOGI_DEVICE_PREFIX)) {
+        return false;
+    }
+    // OpenLogi only remaps Logitech hardware — never grab foreign vendors.
+    if vendor_id != LOGITECH_VENDOR_ID {
         return false;
     }
     // A mouse clicks and moves relatively; nothing else qualifies. This alone
@@ -298,9 +309,12 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
     match event.destructure() {
         EventSummary::Key(_, key, value) => {
             let id = key_to_button(key)?;
+            // Device is already Logitech-only (see `is_hookable_mouse`); the
+            // agent runtime treats `device: None` as remappable on Linux.
             Some(MouseEvent::Button {
                 id,
                 pressed: value != 0,
+                device: None,
             })
         }
         EventSummary::RelativeAxis(_, axis, value) => match axis {
@@ -576,7 +590,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::LeftClick,
-                pressed: true
+                pressed: true,
+                device: None,
             })
         );
     }
@@ -588,7 +603,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::LeftClick,
-                pressed: false
+                pressed: false,
+                device: None,
             })
         );
     }
@@ -600,7 +616,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::Back,
-                pressed: true
+                pressed: true,
+                device: None,
             })
         );
     }
@@ -612,7 +629,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::Back,
-                pressed: true
+                pressed: true,
+                device: None,
             })
         );
     }
@@ -624,7 +642,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::Forward,
-                pressed: true
+                pressed: true,
+                device: None,
             })
         );
     }
@@ -748,6 +767,7 @@ mod tests {
         rel: Option<AttributeSet<RelativeAxisCode>>,
         abs: Option<AttributeSet<AbsoluteAxisCode>>,
         props: AttributeSet<PropType>,
+        vendor_id: u32,
     }
 
     impl Caps {
@@ -770,6 +790,7 @@ mod tests {
                 ),
                 abs: None,
                 props: AttributeSet::new(),
+                vendor_id: LOGITECH_VENDOR_ID,
             }
         }
 
@@ -780,6 +801,7 @@ mod tests {
                 self.rel.as_deref(),
                 self.abs.as_deref(),
                 &self.props,
+                self.vendor_id,
             )
         }
     }
@@ -797,6 +819,20 @@ mod tests {
             caps.is_hookable(),
             "a missing name must not exclude a device"
         );
+    }
+
+    #[test]
+    fn non_logitech_mouse_is_not_hookable() {
+        let mut caps = Caps::mouse();
+        caps.name = Some("Apple SPI Trackpad");
+        caps.vendor_id = 0x05ac;
+        assert!(
+            !caps.is_hookable(),
+            "foreign vendors must never be exclusively grabbed"
+        );
+        caps.name = Some("Generic USB Mouse");
+        caps.vendor_id = 0x1234;
+        assert!(!caps.is_hookable());
     }
 
     #[test]
