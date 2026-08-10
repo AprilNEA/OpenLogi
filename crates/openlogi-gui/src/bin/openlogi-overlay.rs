@@ -43,7 +43,7 @@ const SLOT_SIZE: f32 = 54.0;
 const RADIUS: f32 = 122.0;
 const DISPLAY_LIFETIME: Duration = Duration::from_secs(15);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OverlayCommand {
     Hover {
         session_id: u64,
@@ -410,19 +410,22 @@ async fn send_commands(rx: &mut mpsc::UnboundedReceiver<OverlayCommand>) {
         while let Ok(next) = rx.try_recv() {
             command = coalesce_command(command, next);
         }
-        let deadline = command
-            .is_terminal()
-            .then(|| Instant::now() + DISPLAY_LIFETIME);
+        let mut deadline = command_deadline(command);
         loop {
+            while let Ok(next) = rx.try_recv() {
+                (command, deadline) = merge_pending(command, deadline, next);
+            }
             if client.is_none() {
                 client = connect().await;
             }
             let Some(active) = client.as_ref() else {
-                if retry_before(deadline) {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-                break;
+                let Some((next, next_deadline)) = wait_for_retry(rx, command, deadline).await
+                else {
+                    break;
+                };
+                command = next;
+                deadline = next_deadline;
+                continue;
             };
             let ctx = context::current();
             let result = match command {
@@ -442,10 +445,51 @@ async fn send_commands(rx: &mut mpsc::UnboundedReceiver<OverlayCommand>) {
                 break;
             }
             client = None;
-            if !retry_before(deadline) {
+            let Some((next, next_deadline)) = wait_for_retry(rx, command, deadline).await else {
                 break;
+            };
+            command = next;
+            deadline = next_deadline;
+        }
+    }
+}
+
+fn command_deadline(command: OverlayCommand) -> Option<Instant> {
+    command
+        .is_terminal()
+        .then(|| Instant::now() + DISPLAY_LIFETIME)
+}
+
+fn merge_pending(
+    command: OverlayCommand,
+    deadline: Option<Instant>,
+    next: OverlayCommand,
+) -> (OverlayCommand, Option<Instant>) {
+    let pending = coalesce_command(command, next);
+    let deadline = if pending == command {
+        deadline
+    } else {
+        command_deadline(pending)
+    };
+    (pending, deadline)
+}
+
+async fn wait_for_retry(
+    rx: &mut mpsc::UnboundedReceiver<OverlayCommand>,
+    command: OverlayCommand,
+    deadline: Option<Instant>,
+) -> Option<(OverlayCommand, Option<Instant>)> {
+    if !retry_before(deadline) {
+        return None;
+    }
+    tokio::select! {
+        () = tokio::time::sleep(Duration::from_millis(100)) => Some((command, deadline)),
+        next = rx.recv() => {
+            let mut pending = merge_pending(command, deadline, next?);
+            while let Ok(next) = rx.try_recv() {
+                pending = merge_pending(pending.0, pending.1, next);
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            Some(pending)
         }
     }
 }
@@ -455,6 +499,11 @@ fn retry_before(deadline: Option<Instant>) -> bool {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "panic helpers are idiomatic in tests"
+)]
 mod tests {
     use super::*;
 
@@ -493,6 +542,27 @@ mod tests {
             coalesce_command(activation, hover),
             OverlayCommand::Activate { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn newer_activation_supersedes_a_stale_retry_immediately() {
+        let stale = OverlayCommand::Cancel { session_id: 1 };
+        let replacement = OverlayCommand::Activate {
+            session_id: 2,
+            slot: ActionRingSlot::Right,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(replacement).unwrap();
+
+        let (pending, _) = tokio::time::timeout(
+            Duration::from_millis(20),
+            wait_for_retry(&mut rx, stale, Some(Instant::now() + DISPLAY_LIFETIME)),
+        )
+        .await
+        .expect("queued replacement should interrupt the retry delay")
+        .expect("replacement command should remain pending");
+
+        assert_eq!(pending, replacement);
     }
 
     #[test]
