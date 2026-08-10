@@ -11,6 +11,7 @@ on:
       - crowdin.yml
       - crates/openlogi-gui/locales/en.yml
       - .github/workflows/crowdin.yml
+      - .github/actions/github-app-token-from-1password/**
 
 permissions:
   contents: read
