@@ -388,7 +388,7 @@ impl Orchestrator {
                 &self.shared.receiver_access,
                 Some(route),
                 fn_lock,
-                );
+            );
         }
     }
 
@@ -506,7 +506,7 @@ impl Orchestrator {
                     &self.shared.receiver_access,
                     dev.route.clone(),
                     fn_lock,
-                    );
+                );
             }
         }
     }
