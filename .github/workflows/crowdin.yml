@@ -64,6 +64,8 @@ jobs:
       # into Crowdin (per language) so the download does not wipe real
       # translations with English fill-in. Crowdin is where people improve
       # translations; the bot PR brings their work back into the repo.
+      # skip_untranslated_strings: never commit English source fill-in for
+      # keys nobody has translated yet (runtime already falls back to en).
       - name: Synchronize with Crowdin
         uses: crowdin/github-action@c7af9bc98b01694653031fef2a0dc6c7888ce9bc # v2.17.0
         with:
@@ -75,6 +77,7 @@ jobs:
           upload_translations: true
           import_eq_suggestions: false
           download_translations: true
+          skip_untranslated_strings: true
           localization_branch_name: crowdin/i18n
           commit_message: "chore(i18n): sync Crowdin translations"
           create_pull_request: true
@@ -82,10 +85,11 @@ jobs:
           pull_request_body: |
             Automated per-language translation sync from Crowdin.
 
-            - `en.yml` is the English source of truth (new UI strings go there).
+            - `en.yml` is the English source of truth (new UI strings go there first).
+            - Feature PRs also add the same keys to every `locales/*.yml` (parity test).
             - Existing non-English catalogs are uploaded to Crowdin first so real translations are not replaced with English fill-in.
+            - Download uses `skip_untranslated_strings` — only real translations land here, never English stubs.
             - This PR is Crowdin → git for translated locales only (`export_languages` in `crowdin.yml`).
-            - Truly untranslated keys may still match English until translators finish them in Crowdin.
           github_user_name: Crowdin Bot
           github_user_email: support+bot@crowdin.com
         env:

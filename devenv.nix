@@ -100,7 +100,7 @@ in
       exec = ''
         set -e
         ${requireXcodeMetal}
-        crowdin download
+        crowdin download --skip-untranslated-strings
         cargo test -p openlogi-gui i18n
       '';
     };
