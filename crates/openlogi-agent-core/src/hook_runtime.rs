@@ -6,7 +6,7 @@
 //! and gesture events.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::thread;
@@ -98,6 +98,10 @@ thread_local! {
     /// Thread-local rather than a shared `Mutex` keeps the hot path lock-free and
     /// free of cross-thread contention on the freeze-sensitive callback.
     static HOLD: RefCell<HoldState> = RefCell::new(HoldState::default());
+    /// Buttons whose physical press was delivered because the action queue
+    /// rejected the remap. Their matching release must also pass through so
+    /// apps never see a stuck auxiliary button (down without up).
+    static FAIL_OPEN_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
 }
 
 /// Whether a button event's physical source may be remapped/suppressed.
@@ -205,11 +209,39 @@ fn handle_button(
     }
     if pressed {
         info!(button = %id, action = %action.label(), "button → executing bound action");
-        if !try_queue_action(action_tx, action) {
-            return EventDisposition::PassThrough;
-        }
+        let queued = try_queue_action(action_tx, action);
+        return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s));
     }
-    EventDisposition::Suppress
+    FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_release_disposition(id, s))
+}
+
+/// Press of a remapped single-action button: suppress when the action was
+/// queued, otherwise pass through and mark `id` so the release pairs.
+fn remapped_press_disposition(
+    id: ButtonId,
+    queued: bool,
+    fail_open: &mut HashSet<ButtonId>,
+) -> EventDisposition {
+    if queued {
+        fail_open.remove(&id);
+        EventDisposition::Suppress
+    } else {
+        fail_open.insert(id);
+        EventDisposition::PassThrough
+    }
+}
+
+/// Release of a remapped single-action button: pass through only when the
+/// matching press was fail-opened (queue rejection), else suppress.
+fn remapped_release_disposition(
+    id: ButtonId,
+    fail_open: &mut HashSet<ButtonId>,
+) -> EventDisposition {
+    if fail_open.remove(&id) {
+        EventDisposition::PassThrough
+    } else {
+        EventDisposition::Suppress
+    }
 }
 
 /// Feed an in-progress gesture hold; always pass motion through so the cursor moves.
@@ -490,6 +522,34 @@ mod tests {
             BTreeMap::from([(GestureDirection::Click, Action::None)]),
         )]);
         assert_eq!(resolve_gesture_click(&off, ButtonId::Back), Action::None);
+    }
+
+    #[test]
+    fn fail_open_press_pairs_release() {
+        let mut fail_open = HashSet::new();
+        // Queue accepted → suppress press and release.
+        assert_eq!(
+            remapped_press_disposition(ButtonId::Back, true, &mut fail_open),
+            EventDisposition::Suppress
+        );
+        assert_eq!(
+            remapped_release_disposition(ButtonId::Back, &mut fail_open),
+            EventDisposition::Suppress
+        );
+        // Queue rejected → pass through press *and* matching release.
+        assert_eq!(
+            remapped_press_disposition(ButtonId::Forward, false, &mut fail_open),
+            EventDisposition::PassThrough
+        );
+        assert_eq!(
+            remapped_release_disposition(ButtonId::Forward, &mut fail_open),
+            EventDisposition::PassThrough
+        );
+        // A later unpaired release of that button suppresses again.
+        assert_eq!(
+            remapped_release_disposition(ButtonId::Forward, &mut fail_open),
+            EventDisposition::Suppress
+        );
     }
 
     #[test]

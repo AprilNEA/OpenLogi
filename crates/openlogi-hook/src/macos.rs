@@ -549,6 +549,13 @@ fn spawn_callback_watchdog(
                 if elapsed < budget_ms {
                     continue;
                 }
+                // Re-sample: a fresh entry may have rewritten the stamp between
+                // the first loads and the budget check.
+                if !in_callback.load(Ordering::Acquire)
+                    || entered_at_ms.load(Ordering::Acquire) != entered
+                {
+                    continue;
+                }
                 error!(
                     stuck_ms = elapsed,
                     "OS mouse-hook callback stuck past budget — exiting agent to \
@@ -587,8 +594,11 @@ fn thread_main(
             CGEventTapOptions::Default,
             hooked_event_types(),
             move |_proxy: CGEventTapProxy, etype: CGEventType, event: &CGEvent| {
+                // Publish the enter timestamp *before* the in-callback flag so
+                // the watchdog never pairs a fresh entry with a stale stamp
+                // (which would false-positive process::exit after a quiet gap).
+                entered_at_ms.store(unix_now_ms(), Ordering::Relaxed);
                 in_callback.store(true, Ordering::Release);
-                entered_at_ms.store(unix_now_ms(), Ordering::Release);
                 let disposition = run_tap_callback(cb.as_ref(), etype, event);
                 in_callback.store(false, Ordering::Release);
                 disposition
