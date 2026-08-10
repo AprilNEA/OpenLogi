@@ -207,7 +207,7 @@ fn permission_field(
                     // The Camera pane only lists an app after its first
                     // AVFoundation request, so a deep link can't grant it.
                     if prompts_here {
-                        openlogi_camera::request_camera_access();
+                        permissions::request_camera_access(cx);
                         return;
                     }
                     permissions::open_pane(permission);

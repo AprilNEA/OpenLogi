@@ -9,9 +9,12 @@
 //! you are looking at it.
 //!
 //! While permission is undetermined the placeholder is a click target that
-//! fires the system consent prompt ([`Self::request_access`]) — the prompt
-//! must originate here because macOS only lists an app under Privacy → Camera
-//! after it has requested access at least once.
+//! fires the system consent prompt
+//! ([`crate::platform::permissions::request_camera_access`]) — the prompt must
+//! originate in-app because macOS only lists an app under Privacy → Camera
+//! after it has requested access at least once. Once the grant lands, the
+//! helper's window refresh re-runs [`Self::set_target`], which starts the
+//! deferred stream.
 //!
 //! While streaming it captures at 720p (Retina-sharp for the 480pt box),
 //! rebuilds the GPU texture only when a new frame arrives, and repaints at the
@@ -33,10 +36,6 @@ use crate::theme::{self, Palette};
 const PREVIEW_W: f32 = 480.;
 const PREVIEW_H: f32 = 270.; // 16:9
 
-/// How long [`Self::request_access`] polls for the consent dialog's outcome.
-const ACCESS_POLL_TICK: Duration = Duration::from_millis(250);
-const ACCESS_POLL_TICKS_MAX: u32 = 2400; // 10 minutes
-
 /// Live preview view. Holds the capture stream + its texture only while the
 /// parent points it at a camera via [`Self::set_target`].
 pub struct CameraPreview {
@@ -49,8 +48,6 @@ pub struct CameraPreview {
     /// Target is set but the stream isn't running because Camera permission
     /// wasn't granted yet; retried once access appears.
     awaiting_access: bool,
-    /// A consent prompt is in flight; suppresses duplicate requests.
-    access_requested: bool,
 }
 
 impl CameraPreview {
@@ -62,7 +59,6 @@ impl CameraPreview {
             last_generation: 0,
             repaint_task: None,
             awaiting_access: false,
-            access_requested: false,
         }
     }
 
@@ -135,42 +131,6 @@ impl CameraPreview {
             }));
         }
     }
-
-    /// Fire the system Camera consent prompt, then poll until it resolves and
-    /// start the deferred stream on a grant.
-    fn request_access(&mut self, cx: &mut Context<Self>) {
-        if self.access_requested {
-            return;
-        }
-        self.access_requested = true;
-        openlogi_camera::request_camera_access();
-        cx.spawn(async move |this, cx| {
-            for _ in 0..ACCESS_POLL_TICKS_MAX {
-                cx.background_executor().timer(ACCESS_POLL_TICK).await;
-                let resolved = this.update(cx, |view, cx| {
-                    match openlogi_camera::camera_authorization() {
-                        CameraAuthorization::Undetermined => false,
-                        CameraAuthorization::Granted => {
-                            view.awaiting_access = false;
-                            view.start_stream(cx);
-                            cx.notify();
-                            true
-                        }
-                        CameraAuthorization::Denied => {
-                            cx.notify();
-                            true
-                        }
-                    }
-                });
-                match resolved {
-                    Ok(false) => {}
-                    _ => break,
-                }
-            }
-            let _ = this.update(cx, |view, _| view.access_requested = false);
-        })
-        .detach();
-    }
 }
 
 impl Render for CameraPreview {
@@ -218,7 +178,7 @@ impl Render for CameraPreview {
                 .cursor_pointer()
                 .hover(|s| s.text_color(pal.text_primary))
                 .child(tr!("Click to enable camera access."))
-                .on_click(cx.listener(|this, _, _, cx| this.request_access(cx)))
+                .on_click(|_, _, cx| crate::platform::permissions::request_camera_access(cx))
                 .into_any_element()
         } else {
             note(tr!("Enable Camera access in Settings to preview."), pal)
