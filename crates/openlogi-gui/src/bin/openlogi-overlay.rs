@@ -514,7 +514,10 @@ mod tests {
     #[test]
     fn terminal_retries_last_only_until_the_session_deadline() {
         assert!(retry_before(Some(Instant::now() + Duration::from_secs(1))));
-        assert!(!retry_before(Some(Instant::now() - Duration::from_secs(1))));
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        assert!(!retry_before(Some(past)));
         assert!(!retry_before(None));
     }
 

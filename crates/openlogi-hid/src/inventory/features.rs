@@ -8,6 +8,7 @@ use hidpp::{
         CreatableFeature, battery_status::BatteryStatusFeature,
         battery_voltage::BatteryVoltageFeature, device_information::DeviceInformationFeature,
         device_type_and_name::DeviceTypeAndNameFeature, gestures2::Gestures2Feature,
+        reprog_controls::{ReprogControlsFeature, control_ids},
         unified_battery::UnifiedBatteryFeature,
     },
 };
@@ -188,10 +189,12 @@ pub(super) async fn probe_features(
     // The enumeration response IS the device's feature-ID table — capture it
     // for capability derivation instead of discarding it.
     let mut battery_probe = None;
+    let mut probe_haptic_controls = false;
     let mut capabilities = match device.enumerate_features().await {
         Ok(Some(features)) => {
             let ids: Vec<u16> = features.iter().map(|f| f.id).collect();
             battery_probe = battery_feature_index(ids.iter().copied());
+            probe_haptic_controls = ids.contains(&0x19b0) || ids.contains(&0x19c0);
             Some(Capabilities::from_feature_ids(&ids))
         }
         Ok(None) => None,
@@ -215,6 +218,11 @@ pub(super) async fn probe_features(
             && let Some(feature) = device.get_feature::<Gestures2Feature>()
         {
             caps.thumbwheel = feature.has_thumbwheel().await.unwrap_or(false);
+        }
+        if probe_haptic_controls
+            && let Some(feature) = device.get_feature::<ReprogControlsFeature>()
+        {
+            caps.haptic_panel = has_haptic_panel(&feature).await;
         }
     }
 
@@ -278,6 +286,21 @@ pub(super) async fn probe_features(
         },
         battery_probe,
     )
+}
+
+async fn has_haptic_panel(feature: &ReprogControlsFeature) -> bool {
+    let Ok(count) = feature.get_count().await else {
+        return false;
+    };
+    for index in 0..count {
+        let Ok(info) = feature.get_cid_info(index).await else {
+            return false;
+        };
+        if info.cid == control_ids::HAPTIC_PANEL {
+            return info.flags.is_divertable();
+        }
+    }
+    false
 }
 
 #[cfg(test)]

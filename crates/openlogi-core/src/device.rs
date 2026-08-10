@@ -120,6 +120,13 @@ pub struct Capabilities {
     /// (gesture id 46, used by MX Master 2S).
     #[serde(default)]
     pub thumbwheel: bool,
+    /// Programmable haptic feedback — reverse-engineered HID++ `0x19b0`.
+    #[serde(default)]
+    pub haptic_feedback: bool,
+    /// A divertable Haptic Sense Panel control (`0x01a0`) was found in the
+    /// device's `0x1b04` control table.
+    #[serde(default)]
+    pub haptic_panel: bool,
 }
 
 impl Capabilities {
@@ -142,6 +149,8 @@ impl Capabilities {
             scroll_inversion: false,
             hires_wheel: ids.contains(&0x2121),
             thumbwheel: ids.contains(&0x2150),
+            haptic_feedback: ids.contains(&0x19b0),
+            haptic_panel: false,
         }
     }
 
@@ -160,6 +169,8 @@ impl Capabilities {
                 scroll_inversion: false,
                 hires_wheel: false,
                 thumbwheel: false,
+                haptic_feedback: false,
+                haptic_panel: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -457,6 +468,8 @@ mod tests {
                     scroll_inversion: false,
                     hires_wheel: false,
                     thumbwheel: false,
+                    haptic_feedback: false,
+                    haptic_panel: false,
                 }),
             }],
         }
@@ -522,6 +535,8 @@ mod tests {
                 scroll_inversion: false,
                 hires_wheel: true,
                 thumbwheel: true,
+                haptic_feedback: false,
+                haptic_panel: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -536,6 +551,8 @@ mod tests {
                 scroll_inversion: false,
                 hires_wheel: false,
                 thumbwheel: false,
+                haptic_feedback: false,
+                haptic_panel: false,
             }
         );
         // No driving features → nothing offered.

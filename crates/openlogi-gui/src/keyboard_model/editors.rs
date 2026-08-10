@@ -322,13 +322,7 @@ fn step_preview(step: &WorkflowStep, pal: Palette) -> AnyElement {
 }
 
 fn key_combo_preview(combo: &KeyCombo) -> String {
-    if !combo.display.is_empty() {
-        combo.display.clone()
-    } else if combo.key_code == 0 {
-        "—".to_string()
-    } else {
-        format!("key 0x{:02X}", combo.key_code)
-    }
+    combo.rendered_label()
 }
 
 #[allow(dead_code, reason = "kept for parity with the mouse picker")]

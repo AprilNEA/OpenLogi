@@ -149,10 +149,10 @@ fn action_ring_types() {
     );
     assert_wire(&ActionRingSlot::Top, "00");
     assert_wire(&ActionRingSlot::TopLeft, "07");
-    assert_wire(&ActionRingIcon::Keyboard, "01");
+    assert_wire(&ActionRingIcon::Keyboard, "07");
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
-    assert_wire(&HidppOperation::PlayHaptic, "0a");
+    assert_wire(&HidppOperation::PlayHaptic, "0e");
 }
 
 #[test]
@@ -254,12 +254,14 @@ fn device_inventory() {
                 scroll_inversion: false,
                 hires_wheel: true,
                 thumbwheel: true,
+                haptic_feedback: true,
+                haptic_panel: true,
             }),
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101",
     );
 }
 
