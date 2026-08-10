@@ -107,7 +107,7 @@ warnings fail there too.
 ### Wire format / IPC (another silent CI red)
 
 If the change touches anything that crosses the agent↔GUI boundary
-(`ipc.rs`, serde enums in hid write errors, `DeviceKind`, `Action`, …):
+(`ipc.rs`, serde enums in hid write errors, `DeviceKind`, …):
 
 - Enums are **append-only** (serde index = wire). New variants go at the end.
 - Bump `PROTOCOL_VERSION` and regenerate
