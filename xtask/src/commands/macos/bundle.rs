@@ -110,6 +110,7 @@ fn run_with_profile(profile: &BundleProfile<'_>) -> Result<()> {
     embed_agent_helper(&root, &app, &xcode_env)?;
     embed_cli(&root, &app, &xcode_env)?;
     verify_bundle_binaries(&app)?;
+    stamp_privacy_usage_descriptions(&app)?;
     match profile {
         BundleProfile::Local => {
             stamp_local_bundle_identity(&app)?;
@@ -221,6 +222,18 @@ fn verify_bundle_binaries(app: &Path) -> Result<()> {
             .with_context(|| format!("missing required bundle binary {}", path.display()))?;
     }
     Ok(())
+}
+
+/// Stamp `NSCameraUsageDescription` (cargo-bundle can't; matches the dev plist) so camera requests prompt instead of killing the app.
+fn stamp_privacy_usage_descriptions(app: &Path) -> Result<()> {
+    println!("==> privacy usage descriptions");
+    stamp_plist_strings(
+        &app.join("Contents/Info.plist"),
+        &[(
+            "NSCameraUsageDescription",
+            "OpenLogi previews your Logitech webcam locally. Video never leaves your Mac.",
+        )],
+    )
 }
 
 fn stamp_bundle_version(info_plist: &Path, version: &str) -> Result<()> {
