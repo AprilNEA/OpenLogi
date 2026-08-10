@@ -523,7 +523,6 @@ fn label_popover(
         binding,
         highlighted: highlighted || hovered == Some(label.id) || active == Some(label.id),
         selected: false,
-        binding_popover,
         view: view.clone(),
     };
     let popover: AnyElement = if label
@@ -588,7 +587,6 @@ struct LabelTrigger {
     binding: BindingLabel,
     highlighted: bool,
     selected: bool,
-    binding_popover: BindingPopover,
     view: Entity<MouseModelView>,
 }
 
@@ -609,8 +607,6 @@ impl RenderOnce for LabelTrigger {
         let selected = self.selected;
         let btn = self.label.id;
         let view = self.view;
-        let view_click = view.clone();
-        let binding_popover = self.binding_popover;
         let pal = theme::palette(cx);
         let binding_color = if highlighted {
             rgb(ACCENT_BLUE).into()
@@ -697,12 +693,9 @@ impl RenderOnce for LabelTrigger {
                             .text_color(pal.text_muted),
                     ),
             )
-            .on_click(move |_event, _window, cx| {
-                view_click.update(cx, |this, vcx| {
-                    this.set_binding_popover_open(binding_popover, !selected);
-                    vcx.notify();
-                });
-            })
+            // Popover owns the trigger gesture and updates controlled state via
+            // `on_open_change`. A second click toggle here would immediately close
+            // the menu on mouse-up, producing the one-frame flash regression.
             .on_hover(move |hovered, _window, cx| {
                 let is_hovered = *hovered;
                 view.update(cx, |this, cx| {
@@ -842,7 +835,6 @@ fn hotspot_popover(
         id: ("hotspot-trigger", idx).into(),
         hotspot,
         hovered: hovered == Some(hotspot.id) || active == Some(hotspot.id),
-        binding_popover,
         view: view.clone(),
         selected: false,
     };
@@ -902,7 +894,6 @@ struct HotspotTrigger {
     id: ElementId,
     hotspot: Hotspot,
     hovered: bool,
-    binding_popover: BindingPopover,
     view: Entity<MouseModelView>,
     selected: bool,
 }
@@ -923,8 +914,6 @@ impl RenderOnce for HotspotTrigger {
         let highlighted = self.hovered || self.selected;
         let selected = self.selected;
         let view = self.view;
-        let view_click = view.clone();
-        let binding_popover = self.binding_popover;
         let hotspot = self.hotspot;
         let btn = hotspot.id;
 
@@ -955,12 +944,9 @@ impl RenderOnce for HotspotTrigger {
                         hsla(0., 0., 0.18, 0.85)
                     }),
             )
-            .on_click(move |_event, _window, cx| {
-                view_click.update(cx, |this, vcx| {
-                    this.set_binding_popover_open(binding_popover, !selected);
-                    vcx.notify();
-                });
-            })
+            // Popover owns the trigger gesture and updates controlled state via
+            // `on_open_change`. A second click toggle here would immediately close
+            // the menu on mouse-up, producing the one-frame flash regression.
             .on_hover(move |hovered, _window, cx| {
                 let is_hovered = *hovered;
                 view.update(cx, |this, cx| {
