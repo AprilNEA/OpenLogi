@@ -277,6 +277,7 @@ mod tests {
             channel_pool: openlogi_hid::ChannelPool::default(),
             keyboard_spec: Arc::new(RwLock::new(None)),
             keyboard_channel: Arc::new(RwLock::new(None)),
+            capture_rearm_generation: Arc::new(0.into()),
             receiver_access: ReceiverAccess::default(),
             host_switch_links: Arc::new(RwLock::new(Vec::new())),
         }

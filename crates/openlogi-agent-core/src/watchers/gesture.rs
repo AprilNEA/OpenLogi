@@ -19,7 +19,7 @@
 //! way regardless.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -83,6 +83,7 @@ pub fn spawn(
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
+    capture_rearm_generation: Arc<AtomicU64>,
     receiver_access: ReceiverAccess,
 ) {
     spawn_inner(
@@ -91,18 +92,24 @@ pub fn spawn(
         dpi_cycle,
         capture_channel,
         thumbwheel_sensitivity,
+        capture_rearm_generation,
         receiver_access,
         None,
     );
 }
 
 /// Spawn capture in Agent mode, reusing only inventory-published channels.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "agent mode needs maps, dpi, rearm, leases, and registry"
+)]
 pub fn spawn_with_registry(
     hook_maps: SharedHookMaps,
     gesture_bindings: GestureBindings,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
+    capture_rearm_generation: Arc<AtomicU64>,
     receiver_access: ReceiverAccess,
     registry: ChannelRegistry,
 ) {
@@ -112,17 +119,23 @@ pub fn spawn_with_registry(
         dpi_cycle,
         capture_channel,
         thumbwheel_sensitivity,
+        capture_rearm_generation,
         receiver_access,
         Some(registry),
     );
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "capture manager needs maps, dpi, rearm, leases, and registry"
+)]
 fn spawn_inner(
     hook_maps: SharedHookMaps,
     gesture_bindings: GestureBindings,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
+    capture_rearm_generation: Arc<AtomicU64>,
     receiver_access: ReceiverAccess,
     registry: Option<ChannelRegistry>,
 ) {
@@ -143,6 +156,7 @@ fn spawn_inner(
             dpi_cycle,
             capture_channel,
             thumbwheel_sensitivity,
+            capture_rearm_generation,
             receiver_access,
             registry,
         ));
@@ -186,6 +200,37 @@ pub(crate) fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -
     done_epoch == live_epoch && has_target
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CaptureTarget {
+    route: DeviceRoute,
+    capture_thumbwheel: bool,
+    divert_gesture_button: bool,
+    rearm_generation: u64,
+}
+
+/// Why to stop the current session when the desired target changes.
+fn stop_for_target_change(
+    want: Option<&CaptureTarget>,
+    current: Option<&CaptureTarget>,
+    connection_is_current: bool,
+) -> Option<CaptureStop> {
+    let cur = current?;
+    if want == Some(cur) {
+        return (!connection_is_current).then_some(CaptureStop::Revoked);
+    }
+    // Same route, new generation (reconnect/wake): skip restore — firmware already reset.
+    if want.is_some_and(|next| {
+        next.route == cur.route && next.rearm_generation != cur.rearm_generation
+    }) {
+        return Some(CaptureStop::Revoked);
+    }
+    Some(CaptureStop::Graceful)
+}
+
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "kept for unit tests of stop policy")
+)]
 fn stop_reason<T: PartialEq>(
     want: Option<&T>,
     current: Option<&T>,
@@ -277,18 +322,22 @@ fn spawn_capture_session(launch: CaptureLaunch) -> oneshot::Sender<CaptureStop> 
 /// Keep one capture session alive for the active device, restarting it when the
 /// device or the thumb-wheel arming changes, and dispatch incoming inputs. Runs
 /// for the lifetime of the process.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "capture manager needs maps, dpi, rearm, leases, and registry"
+)]
 async fn manage(
     hook_maps: SharedHookMaps,
     gesture_bindings: GestureBindings,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
     thumbwheel_sensitivity: ThumbwheelSensitivity,
+    capture_rearm_generation: Arc<AtomicU64>,
     receiver_access: ReceiverAccess,
     registry: Option<ChannelRegistry>,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
-    // (route, capture_thumbwheel, divert_gesture_button)
-    let mut current: Option<(DeviceRoute, bool, bool)> = None;
+    let mut current: Option<CaptureTarget> = None;
     let mut stop: Option<oneshot::Sender<CaptureStop>> = None;
     let mut stopping_epoch: Option<u64> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
@@ -336,12 +385,12 @@ async fn manage(
                     // thread the full config in. Re-evaluated each tick, so a
                     // ReloadConfig owner change restarts the session accordingly.
                     let divert_gesture = gesture_bindings.read().is_ok_and(|g| !g.is_empty());
-                    target.map(|t| {
-                        (
-                            t,
-                            thumbwheel_armed(&hook_maps, sensitivity),
-                            divert_gesture,
-                        )
+                    let rearm_generation = capture_rearm_generation.load(Ordering::Relaxed);
+                    target.map(|route| CaptureTarget {
+                        route,
+                        capture_thumbwheel: thumbwheel_armed(&hook_maps, sensitivity),
+                        divert_gesture_button: divert_gesture,
+                        rearm_generation,
                     })
                 };
                 if stopping_epoch.is_some() {
@@ -350,7 +399,7 @@ async fn manage(
                 let connection_is_current =
                     capture_connection_is_current(registry.as_ref(), &capture_channel);
                 if let Some(reason) =
-                    stop_reason(want.as_ref(), current.as_ref(), connection_is_current)
+                    stop_for_target_change(want.as_ref(), current.as_ref(), connection_is_current)
                 {
                     if let Some(stop) = stop.take() {
                         let _ = stop.send(reason);
@@ -362,17 +411,17 @@ async fn manage(
                 if want == current {
                     continue;
                 }
-                if let Some((route, capture_thumbwheel, divert_gesture_button)) = want {
+                if let Some(target) = want {
                     let Some(receiver_lease) = receiver_access.try_acquire_for_session() else {
                         current = None;
                         continue;
                     };
-                    current = Some((route.clone(), capture_thumbwheel, divert_gesture_button));
+                    current = Some(target.clone());
                     epoch = epoch.wrapping_add(1);
                     stop = Some(spawn_capture_session(CaptureLaunch {
-                        route,
-                        capture_thumbwheel,
-                        divert_gesture_button,
+                        route: target.route,
+                        capture_thumbwheel: target.capture_thumbwheel,
+                        divert_gesture_button: target.divert_gesture_button,
                         sink: tx.clone(),
                         channel_slot: Arc::clone(&capture_channel),
                         receiver_lease,

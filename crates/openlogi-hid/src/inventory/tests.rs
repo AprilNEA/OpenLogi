@@ -10,8 +10,8 @@ use super::cache::{
 };
 use super::probe::{NodeProbe, assemble_bolt_probe, parse_codename_unifying};
 use super::{
-    ChannelCache, Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop, routes_for_inventories,
-    settle_unhealthy_node,
+    ChannelCache, Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop, retained_nodes,
+    routes_for_inventories, settle_unhealthy_node,
 };
 use crate::inventory::features::ProbedFeatures;
 use crate::{DIRECT_DEVICE_INDEX, DeviceRoute};
@@ -509,4 +509,15 @@ fn codename_clamps_overlong_len() {
 #[test]
 fn codename_rejects_short_response() {
     assert_eq!(parse_codename_unifying(&[0x40]), None);
+}
+
+#[test]
+fn live_cached_channel_survives_a_transient_enumeration_gap() {
+    let enumerated = std::collections::HashSet::from([1_u8]);
+    let cached_channels = [(1_u8, true), (2_u8, true), (3_u8, false)];
+    let retained = retained_nodes(&enumerated, cached_channels);
+    assert!(retained.contains(&1));
+    assert!(retained.contains(&2));
+    assert!(!retained.contains(&3));
+    assert_eq!(retained, std::collections::HashSet::from([1, 2]));
 }

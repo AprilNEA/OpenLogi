@@ -308,6 +308,51 @@ const ONESHOT_ATTEMPTS: u8 = 4;
 /// asleep device, so a short pause lets the next attempt read it cleanly.
 const ONESHOT_RETRY_DELAY: Duration = Duration::from_millis(300);
 
+/// Nodes that remain valid for this tick: everything the OS enumerated plus
+/// cached channels whose open transport still reports a live connection.
+fn retained_nodes<K>(
+    enumerated: &HashSet<K>,
+    cached_channels: impl IntoIterator<Item = (K, bool)>,
+) -> HashSet<K>
+where
+    K: Clone + Eq + Hash,
+{
+    let mut retained = enumerated.clone();
+    retained.extend(
+        cached_channels
+            .into_iter()
+            .filter_map(|(node, connected)| connected.then_some(node)),
+    );
+    retained
+}
+
+/// Add cached channels omitted by this OS enumeration while their open
+/// transport still reports a live connection.
+fn append_live_cached_channels(
+    nodes: &mut HashSet<async_hid::DeviceId>,
+    channels: &ChannelCache<async_hid::DeviceId, CachedChannel>,
+    active: &mut Vec<(async_hid::DeviceInfo, Arc<HidppChannel>)>,
+) {
+    let retained = retained_nodes(
+        nodes,
+        channels
+            .active
+            .iter()
+            .map(|(node, open)| (node.clone(), open.channel.is_connected())),
+    );
+    for node in retained.difference(nodes) {
+        if let Some(open) = channels.get(node) {
+            debug!(
+                ?node,
+                name = %open.info.name,
+                "OS enumeration omitted a live HID node; probing cached channel"
+            );
+            active.push((open.info.clone(), Arc::clone(&open.channel)));
+        }
+    }
+    *nodes = retained;
+}
+
 impl Enumerator {
     /// Build a persistent enumerator that publishes its already-open channels
     /// into `registry` after each settled inventory tick.
@@ -356,6 +401,12 @@ impl Enumerator {
                 }
             }
         }
+
+        // IOHIDManager can temporarily omit a Bluetooth device's vendor HID++
+        // collection while its already-open handle and ordinary mouse link are
+        // still live. Keep probing that cached channel instead of turning one
+        // incomplete OS snapshot into an offline device and stopping capture.
+        append_live_cached_channels(&mut seen_nodes, &self.channels, &mut active);
 
         if let Some(registry) = &self.registry {
             registry.retain_nodes(&seen_nodes);

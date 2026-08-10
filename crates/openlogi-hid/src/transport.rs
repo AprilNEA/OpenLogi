@@ -10,6 +10,8 @@
 
 #[cfg(not(target_os = "windows"))]
 use std::error::Error;
+#[cfg(not(target_os = "windows"))]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, LazyLock};
 
@@ -433,6 +435,7 @@ pub(crate) struct AsyncHidChannel {
     reader: Mutex<DeviceReader>,
     writer: Mutex<DeviceWriter>,
     info: DeviceInfo,
+    connected: AtomicBool,
     /// Whether the device exposes only the long HID++ report (a BLE-direct
     /// peripheral on macOS). Reported via `supports_short_long_hidpp` so the
     /// `hidpp` channel up-converts outgoing short messages to long.
@@ -451,7 +454,14 @@ impl AsyncHidChannel {
             reader: Mutex::new(reader),
             writer: Mutex::new(writer),
             info,
+            connected: AtomicBool::new(true),
             long_only,
+        }
+    }
+
+    fn mark_disconnected(&self) {
+        if self.connected.swap(false, Ordering::AcqRel) {
+            debug!(name = %self.info.name, "HID channel disconnected");
         }
     }
 }
@@ -469,8 +479,15 @@ impl RawHidChannel for AsyncHidChannel {
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         let mut w = self.writer.lock().await;
-        w.write_output_report(src).await?;
-        Ok(src.len())
+        match w.write_output_report(src).await {
+            Ok(()) => Ok(src.len()),
+            Err(e) => {
+                if matches!(e, async_hid::HidError::Disconnected) {
+                    self.mark_disconnected();
+                }
+                Err(e.into())
+            }
+        }
     }
 
     async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
@@ -487,9 +504,16 @@ impl RawHidChannel for AsyncHidChannel {
             // until the inventory watcher evicts the channel), so park instead.
             // The contract guarantees every caller races this future against
             // the channel's close signal, which tears the read down on drop.
-            Err(async_hid::HidError::Disconnected) => std::future::pending().await,
+            Err(async_hid::HidError::Disconnected) => {
+                self.mark_disconnected();
+                std::future::pending().await
+            }
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
     }
 
     fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {

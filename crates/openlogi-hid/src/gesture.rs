@@ -66,8 +66,9 @@ pub enum CaptureStop {
     /// The target/configuration changed while the channel is still current, so
     /// diverted controls must be restored before the session exits.
     Graceful,
-    /// Inventory revoked or replaced the underlying connection. Clear local
-    /// ownership without sending restoration requests through the stale channel.
+    /// Inventory revoked or replaced the underlying connection, or the
+    /// transport went down. Clear local ownership without restore writes —
+    /// the device has already discarded volatile diversion state.
     Revoked,
 }
 
@@ -105,6 +106,40 @@ pub enum GestureError {
     /// A HID++ feature call returned an error; inner string carries context.
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+    /// An established HID channel disconnected while capture was active.
+    #[error("HID channel disconnected")]
+    ChannelDisconnected,
+}
+
+const CAPTURE_HEALTH_POLL: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureExit {
+    Stopped(CaptureStop),
+    Disconnected,
+}
+
+async fn wait_for_capture_exit<Shutdown>(
+    chan: &HidppChannel,
+    shutdown: Shutdown,
+    poll_period: Duration,
+) -> CaptureExit
+where
+    Shutdown: std::future::Future<Output = CaptureStop>,
+{
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            stop = &mut shutdown => {
+                return CaptureExit::Stopped(stop);
+            }
+            () = tokio::time::sleep(poll_period) => {
+                if !chan.is_connected() {
+                    return CaptureExit::Disconnected;
+                }
+            }
+        }
+    }
 }
 
 /// Movement + button state accumulated across messages. Lives behind a `Mutex`
@@ -154,8 +189,11 @@ const BACK_FORWARD_DEBOUNCE: Duration = Duration::from_millis(150);
 ///
 /// Opens and holds one HID++ channel, diverts whichever of those controls the
 /// device exposes, and listens. Returns once `shutdown` fires (or its sender is
-/// dropped), after restoring every diverted control. Setup errors are returned;
-/// failures to restore on the way out are logged, not propagated.
+/// dropped), or when the established channel disconnects. A normal shutdown
+/// restores every diverted control; [`CaptureStop::Revoked`] and a disconnect
+/// skip restoration because the device has already reset its volatile mappings.
+/// Setup errors are returned; failures to restore on the way out are logged,
+/// not propagated.
 pub async fn run_capture_session(
     route: DeviceRoute,
     capture_thumbwheel: bool,
@@ -325,23 +363,38 @@ where
         thumbwheel = armed.thumb.is_some(),
         "control capture active"
     );
-    let stop = shutdown.await;
+    let exit = wait_for_capture_exit(&chan, shutdown, CAPTURE_HEALTH_POLL).await;
 
-    teardown_capture(
-        || replace_capture_slot(&channel_slot, None),
-        listener,
-        stop,
-        || armed.disarm(),
-    )
-    .await;
-    debug!(index = device_index, "control capture stopped");
-    Ok(())
+    drop(listener);
+    replace_capture_slot(&channel_slot, None);
+    match exit {
+        CaptureExit::Stopped(CaptureStop::Graceful) => {
+            armed.disarm().await;
+            debug!(index = device_index, "control capture stopped");
+            Ok(())
+        }
+        CaptureExit::Stopped(CaptureStop::Revoked) => {
+            debug!(
+                index = device_index,
+                "control capture abandoned after reconnect"
+            );
+            Ok(())
+        }
+        CaptureExit::Disconnected => {
+            debug!(index = device_index, "control capture channel disconnected");
+            Err(GestureError::ChannelDisconnected)
+        }
+    }
 }
 
 fn replace_capture_slot(slot: &CaptureChannel, value: Option<SharedChannel>) {
     *slot.write().unwrap_or_else(PoisonError::into_inner) = value;
 }
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "used by gesture session unit tests")
+)]
 async fn teardown_capture<Listener, Clear, Disarm, DisarmFuture>(
     clear: Clear,
     listener: Listener,
