@@ -81,6 +81,7 @@ missing_errors_doc = "allow"
 doc_markdown = "allow"
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 tempfile = "3.27.0"
 
 [package.metadata.bundle]

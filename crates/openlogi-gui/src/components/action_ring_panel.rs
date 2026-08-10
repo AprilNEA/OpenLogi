@@ -4,8 +4,8 @@ mod editor;
 
 use gpui::{
     AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Render, Role, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
+    ParentElement, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
@@ -26,6 +26,7 @@ pub struct ActionRingPanel {
     selected_slot: ActionRingSlot,
     application_input: Option<Entity<InputState>>,
     shortcut_input: Option<Entity<InputState>>,
+    library_scroll: ScrollHandle,
     #[allow(dead_code, reason = "held to keep the AppState observer alive")]
     state_obs: Subscription,
 }
@@ -37,6 +38,7 @@ impl ActionRingPanel {
             selected_slot: ActionRingSlot::Top,
             application_input: None,
             shortcut_input: None,
+            library_scroll: ScrollHandle::new(),
             state_obs: cx.observe_global::<AppState>(|_, cx| cx.notify()),
         }
     }
@@ -90,6 +92,7 @@ impl Render for ActionRingPanel {
                         ring.default.slots.get(&self.selected_slot),
                         &application_input,
                         &shortcut_input,
+                        &self.library_scroll,
                         pal,
                     )),
             )

@@ -2,7 +2,8 @@
 
 use gpui::{
     AnyElement, BorrowAppContext as _, Entity, InteractiveElement, IntoElement, ParentElement,
-    Role, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
+    Role, ScrollHandle, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _,
+    px, rgb, svg,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, Sizable as _,
@@ -27,6 +28,7 @@ pub(super) fn action_library(
     current: Option<&ActionRingEntry>,
     application_input: &Entity<InputState>,
     shortcut_input: &Entity<InputState>,
+    library_scroll: &ScrollHandle,
     pal: Palette,
 ) -> impl IntoElement {
     let current_action = current.map(ActionRingEntry::action).cloned();
@@ -71,28 +73,34 @@ pub(super) fn action_library(
                         .child(current_label),
                 ),
         )
-        .child(
-            div()
-                .id("ring-action-library")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scrollbar()
-                .child(
-                    v_flex()
-                        .p_1p5()
-                        .when_some(current_action.as_ref(), |library, action| {
-                            library.child(icon_editor(
-                                slot,
-                                action,
-                                current.and_then(ActionRingEntry::custom_icon),
-                                pal,
-                            ))
-                        })
-                        .child(shortcut_editor(slot, shortcut_input, pal))
-                        .child(path_editor(slot, application_input, pal))
-                        .children(action_rows(slot, current_action.as_ref(), pal)),
-                ),
-        )
+        .child(action_rows_scroller(
+            v_flex()
+                .p_1p5()
+                .when_some(current_action.as_ref(), |library, action| {
+                    library.child(icon_editor(
+                        slot,
+                        action,
+                        current.and_then(ActionRingEntry::custom_icon),
+                        pal,
+                    ))
+                })
+                .child(shortcut_editor(slot, shortcut_input, pal))
+                .child(path_editor(slot, application_input, pal))
+                .children(action_rows(slot, current_action.as_ref(), pal)),
+            library_scroll,
+        ))
+}
+
+fn action_rows_scroller(content: impl IntoElement, scroll: &ScrollHandle) -> impl IntoElement {
+    div()
+        .id("ring-action-library")
+        .flex_1()
+        .min_h_0()
+        .track_scroll(scroll)
+        .overflow_y_scroll()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .vertical_scrollbar(scroll)
+        .child(content)
 }
 
 fn icon_editor(
@@ -321,8 +329,70 @@ fn commit_icon(slot: ActionRingSlot, icon: Option<ActionRingIcon>, cx: &mut gpui
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
+    use gpui::{
+        Context, PlatformInput, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+        TestAppContext, Window, point, size,
+    };
+
     use super::*;
+
+    struct NestedScrollView {
+        page_scroll: ScrollHandle,
+        sidebar_scroll: ScrollHandle,
+    }
+
+    impl Render for NestedScrollView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("page-scroll")
+                .size_full()
+                .track_scroll(&self.page_scroll)
+                .overflow_y_scroll()
+                .child(
+                    v_flex()
+                        .h(px(300.0))
+                        .child(v_flex().h(px(100.0)).child(action_rows_scroller(
+                            div().h(px(240.0)),
+                            &self.sidebar_scroll,
+                        )))
+                        .child(div().h(px(200.0))),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn sidebar_scroll_does_not_move_the_page(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let page_scroll = ScrollHandle::new();
+        let sidebar_scroll = ScrollHandle::new();
+        let window = cx.open_window(size(px(160.0), px(120.0)), {
+            let page_scroll = page_scroll.clone();
+            let sidebar_scroll = sidebar_scroll.clone();
+            move |_, _| NestedScrollView {
+                page_scroll,
+                sidebar_scroll,
+            }
+        });
+        cx.run_until_parked();
+
+        window
+            .update(cx, |_, window, cx| {
+                window.dispatch_event(
+                    PlatformInput::ScrollWheel(ScrollWheelEvent {
+                        position: point(px(80.0), px(50.0)),
+                        delta: ScrollDelta::Pixels(point(px(0.0), px(-20.0))),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            })
+            .unwrap();
+
+        assert_eq!(sidebar_scroll.offset().y, px(-20.0));
+        assert_eq!(page_scroll.offset().y, px(0.0));
+    }
 
     #[test]
     fn ring_catalog_is_categorized_and_excludes_invalid_actions() {
