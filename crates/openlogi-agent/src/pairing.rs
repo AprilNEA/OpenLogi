@@ -261,7 +261,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::RwLock;
 
-    use openlogi_agent_core::DpiCycleState;
+    use openlogi_agent_core::DpiCycles;
     use openlogi_agent_core::hook_runtime::HookMaps;
     use openlogi_agent_core::receiver_access::ReceiverAccess;
 
@@ -270,8 +270,8 @@ mod tests {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(std::collections::HashMap::new())),
             gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
-            dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
-            thumbwheel_sensitivity: Arc::new(0.into()),
+            dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
+            capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: openlogi_hid::ChannelRegistry::default(),
             channel_pool: openlogi_hid::ChannelPool::default(),

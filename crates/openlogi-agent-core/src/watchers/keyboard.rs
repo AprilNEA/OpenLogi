@@ -24,7 +24,7 @@ use openlogi_hid::{
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::DpiCycleState;
+use crate::DpiCycles;
 use crate::hook_runtime;
 use crate::receiver_access::ReceiverAccess;
 use crate::watchers::gesture::should_rearm;
@@ -56,7 +56,7 @@ const TARGET_POLL: Duration = Duration::from_secs(1);
 /// dispatches each captured key press.
 pub fn spawn(
     spec: SharedKeyboardSpec,
-    dpi_cycle: Arc<RwLock<DpiCycleState>>,
+    dpi_cycle: Arc<RwLock<DpiCycles>>,
     mouse_capture: CaptureChannel,
     keyboard_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
@@ -89,7 +89,7 @@ pub fn spawn(
 /// presses. Runs for the lifetime of the process.
 async fn manage(
     spec: SharedKeyboardSpec,
-    dpi_cycle: Arc<RwLock<DpiCycleState>>,
+    dpi_cycle: Arc<RwLock<DpiCycles>>,
     mouse_capture: CaptureChannel,
     keyboard_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
@@ -124,6 +124,7 @@ async fn manage(
                     hook_runtime::dispatch_action(
                         &action,
                         &dpi_cycle,
+                        None,
                         &mouse_capture,
                         Some(&registry),
                         &receiver_access,

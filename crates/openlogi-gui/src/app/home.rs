@@ -58,8 +58,10 @@ const GALLERY_GAP: f32 = 24.;
 /// cards (Logi Options+ style), via [`Carousel`]'s `uniform` mode. Each card
 /// floats the device photo on the window background above its name and battery;
 /// the row centres while the cards fit the viewport and scrolls once they don't.
-/// Clicking a card opens its detail screen and makes it the active device (whose
-/// bindings the hook uses); the active card wears an accent ring and tint.
+/// Clicking a card opens its detail screen and makes it the active device.
+/// Capture runs per device, so which card is current only decides what the
+/// detail screen shows; the active card wears an accent fill. A disabled
+/// device wears a persistent red ring so the unmanaged state stays visible.
 pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
     let (len, active_idx) = cx.try_global::<AppState>().map_or((0, 0), |s| {
         let len = s.device_list.len();
@@ -83,6 +85,9 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                     return div().into_any_element();
                 };
                 let key = record.config_key.clone();
+                let enabled = cx
+                    .try_global::<AppState>()
+                    .is_some_and(|s| s.device_enabled(&record.config_key));
                 let light_enabled = cx.try_global::<AppState>().is_some_and(|state| {
                     record.kind == DeviceKind::Light && state.light_enabled_for(&record.config_key)
                 });
@@ -95,19 +100,27 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                     .try_global::<AppState>()
                     .and_then(|s| keyboard_glow(s, &record));
                 let view = view.clone();
-                device_card(&record, focused, glow, light_enabled, light_settings, pal)
-                    .id(("device-card", idx))
-                    .active(gpui::Styled::shadow_2xs)
-                    .role(Role::Button)
-                    .aria_label(record.display_name.clone())
-                    .aria_description(device_accessibility_description(&record))
-                    .aria_selected(focused)
-                    .cursor_pointer()
-                    .hover(move |s| s.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-                    .on_click(move |_, _, cx| {
-                        view.update(cx, |this, cx| this.open_device(key.clone(), cx));
-                    })
-                    .into_any_element()
+                device_card(
+                    &record,
+                    enabled,
+                    focused,
+                    glow,
+                    light_enabled,
+                    light_settings,
+                    pal,
+                )
+                .id(("device-card", idx))
+                .active(gpui::Styled::shadow_2xs)
+                .role(Role::Button)
+                .aria_label(record.display_name.clone())
+                .aria_description(device_accessibility_description(&record))
+                .aria_selected(focused)
+                .cursor_pointer()
+                .hover(move |s| s.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
+                .on_click(move |_, _, cx| {
+                    view.update(cx, |this, cx| this.open_device(key.clone(), cx));
+                })
+                .into_any_element()
             })
             .on_select(cx.listener(|_, ix: &usize, _, cx| {
                 cx.update_global::<AppState, _>(|state, _| state.set_current_device(*ix));
@@ -211,12 +224,22 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
 /// the hover and click handlers.
 fn device_card(
     record: &DeviceRecord,
+    enabled: bool,
     active: bool,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     light_enabled: bool,
     light_settings: LightSettings,
     pal: Palette,
 ) -> Div {
+    // Disabled devices get a persistent red ring; active managed devices keep
+    // the accent ring; otherwise transparent until hover (wired by the gallery).
+    let ring = if !enabled {
+        rgb(theme::STATUS_DISABLED).into()
+    } else if active {
+        theme::accent()
+    } else {
+        gpui::transparent_black()
+    };
     v_flex()
         .w(px(theme::GALLERY_CARD_W))
         .flex_shrink_0()
@@ -225,11 +248,7 @@ fn device_card(
         .p_3()
         .rounded(pal.card_radius)
         .border_1()
-        .border_color(if active {
-            theme::accent()
-        } else {
-            gpui::transparent_black()
-        })
+        .border_color(ring)
         .shadow_xs()
         .selected_fill(active)
         .child(

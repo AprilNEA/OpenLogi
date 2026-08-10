@@ -124,13 +124,10 @@ fn main() {
 
 /// Start the HID++ background sessions that do not need Accessibility.
 fn spawn_hidpp_watchers(shared: &SharedRuntime) {
-    watchers::gesture::spawn_with_registry(
-        shared.hook_maps.clone(),
-        shared.gesture_bindings.clone(),
+    watchers::gesture::spawn(
+        shared.capture_plans.clone(),
         shared.dpi_cycle.clone(),
         shared.capture_channel.clone(),
-        shared.thumbwheel_sensitivity.clone(),
-        shared.capture_rearm_generation.clone(),
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),
     );

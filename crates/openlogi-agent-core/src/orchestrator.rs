@@ -11,7 +11,7 @@
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::binding::Action;
@@ -25,8 +25,8 @@ use openlogi_hid::{
 };
 use tracing::{debug, info, warn};
 
-use crate::DpiCycleState;
 use crate::bindings::{bindings_for, gesture_bindings_for, oshook_gestures_for};
+use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
 use crate::device_order::DeviceStableId;
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::ipc::InventoryHealth;
@@ -34,6 +34,7 @@ use crate::receiver_access::ReceiverAccess;
 use crate::watchers::gesture::GestureBindings;
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
+use crate::{DpiCycleState, DpiCycles};
 
 /// The minimal per-device facts the agent needs: the config key (binding /
 /// preset lookup), the HID++ route (DPI/SmartShift writes + capture target), and
@@ -71,8 +72,11 @@ pub struct SharedRuntime {
     /// per-app-profile in M1 (spec non-goal), so a single shared map.
     pub keyboard_bindings: crate::hook_runtime::SharedKeyboardBindings,
     pub gesture_bindings: GestureBindings,
-    pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
-    pub thumbwheel_sensitivity: Arc<AtomicI32>,
+    pub dpi_cycle: Arc<RwLock<DpiCycles>>,
+    /// One capture plan per online device — what to divert and how to
+    /// dispatch, keyed by the device the events arrive on. Carries each
+    /// device's effective thumb-wheel sensitivity.
+    pub capture_plans: SharedCapturePlans,
     pub capture_channel: CaptureChannel,
     /// Exact-route channels owned and published by the inventory enumerator.
     pub channel_registry: ChannelRegistry,
@@ -84,9 +88,9 @@ pub struct SharedRuntime {
     /// The keyboard capture session's open channel, reused by Fn-lock writes
     /// (the mouse-oriented [`Self::capture_channel`] points elsewhere).
     pub keyboard_channel: CaptureChannel,
-    /// Incremented when the selected device reconnects or the system wakes, so
-    /// the gesture watcher re-arms volatile HID++ control diversion even when
-    /// the receiver route itself never changed.
+    /// Incremented when a device reconnects or the system wakes, so capture
+    /// sessions re-arm volatile HID++ control diversion even when route and
+    /// online flags look unchanged.
     pub capture_rearm_generation: Arc<AtomicU64>,
     /// Receiver access shared by HID++ sessions and pairing. Pairing/host
     /// transitions are exclusive; capture sessions share under read leases.
@@ -112,11 +116,8 @@ pub struct Orchestrator {
     /// set/route/online state looks identical across the sleep gap, so the
     /// next refresh re-applies volatile settings to every online device.
     reapply_all_next_refresh: bool,
-    /// Config keys of devices first sighted last refresh, mapped to a remaining
-    /// count of confirming re-applies. The first write can race the device's own
-    /// boot and be lost — a cold restart leaves the MX Master 3s slow to enumerate,
-    /// so the volatile write (DPI/SmartShift/wheel/lighting) is retried for a
-    /// bounded run of inventory ticks until the device finishes booting (#189).
+    /// Config keys of devices first sighted recently, with remaining confirming
+    /// re-apply budget: the first write can race the device's own boot and be lost.
     reapply_followup: HashMap<String, u8>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
     /// watcher has not produced its first usable observation yet.
@@ -151,10 +152,8 @@ impl Orchestrator {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
             gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
-            dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
-            thumbwheel_sensitivity: Arc::new(AtomicI32::new(
-                config.app_settings.thumbwheel_sensitivity,
-            )),
+            dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
+            capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: ChannelRegistry::default(),
             channel_pool: ChannelPool::default(),
@@ -193,37 +192,17 @@ impl Orchestrator {
             .map(|d| d.config_key.as_str())
     }
 
-    fn current_route(&self) -> Option<DeviceRoute> {
-        self.devices
-            .get(self.current)
-            .filter(|device| device.online && is_hidpp_device(device))
-            .and_then(|device| device.route.clone())
-    }
-
-    /// Keep the capture/DPI write target aligned with the selected device's
-    /// live connection state without rebuilding the rest of the DPI cycle.
-    ///
-    /// Inventory-only online transitions do not warrant [`Self::rebuild`]
-    /// (which intentionally resets the cycle index), but they do have to stop
-    /// and restart HID++ capture. Easy-Switch preserves the receiver route
-    /// while the device is away, and its volatile control diversion is lost;
-    /// publishing `None` while offline and the route again on return makes the
-    /// capture watcher open a fresh session and re-arm those controls.
-    fn sync_current_route(&self) {
-        let target = self.current_route();
-        match self.shared.dpi_cycle.write() {
-            Ok(mut state) => state.target = target,
-            Err(error) => {
-                warn!(%error, lock = "dpi_cycle", "lock poisoned — keeping stale value");
-            }
-        }
-    }
-
     /// Build the OS-hook callback's maps for `key` + foreground `app`. Both hook
     /// sub-maps are app-scoped (a per-app override can demote the gesture owner),
     /// so they're built together here and published under one lock — keeping
     /// `rebuild` and `set_current_app` from drifting into a half-populated write.
     fn hook_maps_for(&self, key: Option<&str>, app: Option<&str>) -> HookMaps {
+        // A disabled selected device gets empty maps: the OS hook then passes
+        // its events through untouched instead of applying remaps to a device
+        // the user asked OpenLogi to leave alone.
+        if key.is_some_and(|k| !self.config.device_enabled(k)) {
+            return HookMaps::default();
+        }
         HookMaps {
             bindings: bindings_for(&self.config, key, app),
             gestures: oshook_gestures_for(&self.config, key, app),
@@ -285,16 +264,21 @@ impl Orchestrator {
             gesture_bindings_for(&self.config, key),
             "gesture_bindings",
         );
+        self.publish_device_runtime();
+    }
+
+    /// Republish the runtime views derived from the device set + config: the
+    /// capture plans and the per-device DPI-cycle map. One method so the
+    /// inventory fast path (same set, fresh online flags) can't update one and
+    /// forget the other — a waking device needs both its capture session and
+    /// its DPI-cycle slot.
+    fn publish_device_runtime(&self) {
         write_value(
-            &self.shared.dpi_cycle,
-            DpiCycleState {
-                presets: key.map(|k| self.config.dpi_presets(k)).unwrap_or_default(),
-                index: 0,
-                target: self.current_route(),
-                capabilities: None,
-            },
-            "dpi_cycle",
+            &self.shared.capture_plans,
+            self.capture_plans_for(),
+            "capture_plans",
         );
+        self.rebuild_dpi_cycles(self.current_key());
         // Keyboard F-key bindings are global (not per-device), so they key off
         // the top-level config map rather than the selected device. Published
         // here so `reload_config` (GUI commit) takes effect live, not only on
@@ -303,10 +287,6 @@ impl Orchestrator {
             &self.shared.keyboard_bindings,
             self.config.keyboard.bindings.clone(),
             "keyboard_bindings",
-        );
-        self.shared.thumbwheel_sensitivity.store(
-            self.config.app_settings.thumbwheel_sensitivity,
-            Ordering::Relaxed,
         );
         write_value(
             &self.shared.host_switch_links,
@@ -318,6 +298,62 @@ impl Orchestrator {
             self.keyboard_spec_for(),
             "keyboard_spec",
         );
+    }
+
+    /// Rewrite the per-device DPI-cycle map for every online device,
+    /// preserving a device's live cycle index (and lazily discovered
+    /// capabilities) across rebuilds whose presets did not change — a config
+    /// reload must not snap DPI back to `preset[0]`.
+    fn rebuild_dpi_cycles(&self, selected: Option<&str>) {
+        let Ok(mut guard) = self.shared.dpi_cycle.write() else {
+            warn!("dpi_cycle lock poisoned — rebuild skipped");
+            return;
+        };
+        let mut by_key = std::collections::HashMap::new();
+        for dev in self
+            .devices
+            .iter()
+            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+        {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
+            let presets = self.config.dpi_presets(&dev.config_key);
+            let previous = guard
+                .by_key
+                .get(&dev.config_key)
+                .filter(|state| state.presets == presets);
+            by_key.insert(
+                dev.config_key.clone(),
+                DpiCycleState {
+                    index: previous.map_or(0, |state| state.index),
+                    capabilities: previous.and_then(|state| state.capabilities.clone()),
+                    presets,
+                    target: Some(route),
+                },
+            );
+        }
+        guard.selected = selected.map(str::to_owned);
+        guard.by_key = by_key;
+    }
+
+    /// One capture plan per online device, from the current config + app.
+    fn capture_plans_for(&self) -> Vec<DeviceCapturePlan> {
+        let rearm_generation = self.shared.capture_rearm_generation.load(Ordering::Relaxed);
+        self.devices
+            .iter()
+            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+            .filter_map(|dev| {
+                let route = dev.route.clone()?;
+                Some(plan_for_device(
+                    &self.config,
+                    &dev.config_key,
+                    route,
+                    self.current_app.as_deref(),
+                    rearm_generation,
+                ))
+            })
+            .collect()
     }
 
     /// Apply a fresh inventory snapshot. Always refreshes the snapshot the IPC
@@ -349,8 +385,7 @@ impl Orchestrator {
         // flag — a system wake where none of those are observable.
         let reapply_all = std::mem::take(&mut self.reapply_all_next_refresh);
         let next_current = pick_current(&devices, self.config.selected_device());
-        let rearm_capture =
-            selected_needs_capture_rearm(&self.devices, &devices, next_current, reapply_all);
+        let rearm_capture = any_device_needs_capture_rearm(&self.devices, &devices, reapply_all);
         let followup = std::mem::take(&mut self.reapply_followup);
         let (targets, next_followup) =
             plan_reapply(&self.devices, &devices, &followup, reapply_all);
@@ -366,30 +401,28 @@ impl Orchestrator {
                     || a.capabilities != b.capabilities
                     || a.light_capabilities != b.light_capabilities
             });
-        if changed {
-            self.devices = devices;
-            self.current = next_current;
-            self.rebuild();
-        } else {
-            // Same set, routes, and runtime selection — but keep the fresh
-            // `online` flags, or a device that woke this tick would read as a
-            // transition forever.
-            self.devices = devices;
-            self.sync_current_route();
-            write_value(
-                &self.shared.host_switch_links,
-                host_switch_links(&self.config, &self.devices),
-                "host_switch_links",
-            );
-        }
         if rearm_capture {
             let generation = self
                 .shared
                 .capture_rearm_generation
                 .fetch_add(1, Ordering::Relaxed)
                 .wrapping_add(1);
-            debug!(generation, "selected device requires capture re-arm");
+            debug!(generation, "device(s) require capture re-arm");
         }
+        if !changed {
+            // Same set, routes, and runtime selection — but keep the fresh
+            // `online` flags, or a device that woke this tick would read as a
+            // transition forever. The runtime views key on `online`, so
+            // republish them even here or a woken device would get neither its
+            // capture session nor its DPI-cycle slot. A rearm generation bump
+            // also lands through this republish.
+            self.devices = devices;
+            self.publish_device_runtime();
+            return;
+        }
+        self.devices = devices;
+        self.current = next_current;
+        self.rebuild();
     }
 
     /// Force a volatile-settings re-apply for every online device on the next
@@ -407,6 +440,10 @@ impl Orchestrator {
     /// receiver cannot cross-talk (#485); lighting stays a separate path
     /// (keyboards / different feature).
     fn reapply_volatile_settings(&self, dev: &AgentDevice) {
+        // A disabled device is left fully native — no writes of any kind.
+        if !self.config.device_enabled(&dev.config_key) {
+            return;
+        }
         let Some(route) = dev.route.clone() else {
             return;
         };
@@ -600,11 +637,13 @@ impl Orchestrator {
         self.config.app_settings.launch_at_login
     }
 
-    /// Foreground-app change → re-overlay per-app bindings on the hook maps (DPI
-    /// and the dedicated HID++ gesture map are not app-scoped, so they're untouched).
-    /// Both hook maps are recomputed: a per-app override of the gesture owner
-    /// turns it into a single action for that app, dropping it from the OS-hook
-    /// gesture set — so the gesture map is app-scoped too.
+    /// Foreground-app change → re-overlay per-app bindings on the hook maps and
+    /// republish the capture plans, whose binding maps and divert sets are
+    /// per-app effective too (HID++ dispatch reads them at event time). Both
+    /// hook maps are recomputed: a per-app override of the gesture owner turns
+    /// it into a single action for that app, dropping it from the OS-hook
+    /// gesture set — so the gesture map is app-scoped too. The dedicated HID++
+    /// gesture map is not app-scoped and stays untouched.
     pub fn set_current_app(&mut self, bundle: Option<String>) {
         if bundle == self.current_app {
             return;
@@ -615,12 +654,9 @@ impl Orchestrator {
             self.hook_maps_for(self.current_key(), self.current_app.as_deref()),
             "hook_maps",
         );
-        // The keyboard's effective bindings are app-scoped too.
-        write_value(
-            &self.shared.keyboard_spec,
-            self.keyboard_spec_for(),
-            "keyboard_spec",
-        );
+        // Capture plans are app-scoped (per-app binding overlays); republish
+        // them with the keyboard's effective bindings.
+        self.publish_device_runtime();
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.
@@ -850,24 +886,22 @@ fn reapply_targets(prev: &[AgentDevice], next: &[AgentDevice], reapply_all: bool
         .collect()
 }
 
-/// Whether this refresh invalidated the selected device's volatile control
+/// Whether this refresh invalidated any online device's volatile control
 /// diversion. Receiver routes stay connected while a paired mouse sleeps, so
-/// route equality alone cannot tell the capture watcher to re-arm on wake.
-fn selected_needs_capture_rearm(
+/// route equality alone cannot tell capture sessions to re-arm on wake.
+fn any_device_needs_capture_rearm(
     prev: &[AgentDevice],
     next: &[AgentDevice],
-    selected: usize,
     reapply_all: bool,
 ) -> bool {
-    reapply_targets(prev, next, reapply_all).contains(&selected)
+    !reapply_targets(prev, next, reapply_all).is_empty()
 }
 
 /// How many inventory ticks a first-sighted device keeps re-applying its
 /// volatile settings after the initial write. A cold restart leaves a Bolt/
 /// Unifying mouse slow to enumerate, so the first write (and a single confirm)
 /// can both time out against a still-booting device; retrying for ~8s at the 2s
-/// cadence lets the write land once it finishes booting. Bounded rather than
-/// read-back-confirmed — see the note on [`plan_reapply`].
+/// cadence lets the write land once it finishes booting.
 const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
@@ -896,17 +930,14 @@ fn plan_reapply(
         })
         .collect();
     for (idx, dev) in next.iter().enumerate() {
-        if dev.online && dev.route.is_some() && !targets.contains(&idx) {
-            // ponytail: bounded retry, not read-back-confirmed. The upgrade is
-            // to confirm the write took (read DPI back via openlogi_hid and
-            // stop retrying on a match) instead of running out a fixed budget —
-            // that converges faster and drops the redundant writes on a device
-            // that accepted the first one.
-            if let Some(&remaining) = followup.get(&dev.config_key) {
-                targets.push(idx);
-                if remaining > 1 {
-                    next_followup.insert(dev.config_key.clone(), remaining - 1);
-                }
+        if dev.online
+            && dev.route.is_some()
+            && !targets.contains(&idx)
+            && let Some(&remaining) = followup.get(&dev.config_key)
+        {
+            targets.push(idx);
+            if remaining > 1 {
+                next_followup.insert(dev.config_key.clone(), remaining - 1);
             }
         }
     }

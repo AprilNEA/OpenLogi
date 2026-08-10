@@ -150,6 +150,24 @@ fn create_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
 
 fn find_mouse_devices() -> Vec<(std::path::PathBuf, Device)> {
     evdev::enumerate()
+        // Only Logitech mice: the hook exists to remap devices OpenLogi
+        // manages, and grabbing an unrelated vendor's mouse would route its
+        // events through the virtual device and apply foreign remaps to it.
+        // `input_id().vendor()` is u16; crate::LOGITECH_VENDOR_ID is u32.
+        .filter(|(path, d)| {
+            let ours = u32::from(d.input_id().vendor()) == LOGITECH_VENDOR_ID;
+            if !ours
+                && d.supported_keys()
+                    .is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT))
+            {
+                debug!(
+                    "not hooking {} ({}): not a Logitech device",
+                    path.display(),
+                    d.name().unwrap_or("unnamed"),
+                );
+            }
+            ours
+        })
         .filter(|(path, d)| {
             let vendor = u32::from(d.input_id().vendor());
             let hookable = is_hookable_mouse(

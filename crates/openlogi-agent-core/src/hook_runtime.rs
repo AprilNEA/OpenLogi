@@ -22,10 +22,10 @@ use openlogi_hook::{
 };
 use tracing::{info, warn};
 
-use crate::DpiCycleState;
 use crate::event_monitor::SharedEventMonitor;
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::receiver_access::ReceiverAccess;
+use crate::{DpiCycleState, DpiCycles};
 
 /// The two button maps the OS-hook callback reads, kept behind ONE lock so a
 /// config rebuild publishes both atomically — a press during an owner switch can
@@ -146,7 +146,7 @@ fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
 
 /// Off-thread worker for bound actions so the tap callback never injects input.
 fn spawn_action_worker(
-    dpi_cycle: Arc<RwLock<DpiCycleState>>,
+    dpi_cycle: Arc<RwLock<DpiCycles>>,
     capture: CaptureChannel,
     registry: ChannelRegistry,
     receiver_access: ReceiverAccess,
@@ -159,6 +159,7 @@ fn spawn_action_worker(
                 dispatch_action(
                     &action,
                     &dpi_cycle,
+                    None,
                     &capture,
                     Some(&registry),
                     &receiver_access,
@@ -293,7 +294,7 @@ fn handle_moved(
 pub fn start(
     hooks: SharedHookMaps,
     keyboard_bindings: SharedKeyboardBindings,
-    dpi_cycle: Arc<RwLock<DpiCycleState>>,
+    dpi_cycle: Arc<RwLock<DpiCycles>>,
     capture: CaptureChannel,
     registry: ChannelRegistry,
     receiver_access: ReceiverAccess,
@@ -491,28 +492,31 @@ fn browser_nav_debounce_ok(action: &Action) -> bool {
 /// not provide a registry.
 pub fn dispatch_action(
     action: &Action,
-    dpi_cycle: &Arc<RwLock<DpiCycleState>>,
+    dpi_cycle: &Arc<RwLock<DpiCycles>>,
+    device_key: Option<&str>,
     capture: &CaptureChannel,
     registry: Option<&ChannelRegistry>,
     receiver_access: &ReceiverAccess,
 ) {
     let next = match action {
         Action::CycleDpiPresets => match dpi_cycle.write() {
-            Ok(mut guard) => guard.cycle(),
+            Ok(mut guard) => guard.state_for(device_key).and_then(DpiCycleState::cycle),
             Err(e) => {
                 warn!(error = %e, "dpi_cycle lock poisoned — cycle skipped");
                 None
             }
         },
         Action::SetDpiPreset(i) => match dpi_cycle.write() {
-            Ok(mut guard) => guard.set(usize::from(*i)),
+            Ok(mut guard) => guard
+                .state_for(device_key)
+                .and_then(|state| state.set(usize::from(*i))),
             Err(e) => {
                 warn!(error = %e, "dpi_cycle lock poisoned — set skipped");
                 None
             }
         },
         Action::ToggleSmartShift => {
-            let target = dpi_cycle.read().ok().and_then(|g| g.target.clone());
+            let target = dpi_cycle.read().ok().and_then(|g| g.target_for(device_key));
             info!("SmartShift toggle → flipping wheel mode");
             if let Some(registry) = registry {
                 toggle_smartshift_in_background(Some(capture), registry, receiver_access, target);

@@ -1,10 +1,11 @@
 //! Orchestrator inventory/reapply/camera tests.
 
 use super::{
-    AgentDevice, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES, build_devices,
-    configured_wheel_mode, host_switch_links, pick_current, plan_reapply, reapply_targets,
-    selected_needs_capture_rearm,
+    AgentDevice, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES,
+    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
+    pick_current, plan_reapply, reapply_targets,
 };
+use openlogi_core::binding::{Action, ButtonId};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -321,7 +322,7 @@ fn reapply_targets_new_arrivals_and_transitions() {
 }
 
 #[test]
-fn capture_target_tracks_online_state_without_resetting_dpi_cycle() {
+fn dpi_cycle_drops_offline_device_and_restores_on_return() {
     let mut orch = Orchestrator::new(Config::default());
     orch.devices = vec![dev("mouse", 1, true)];
     orch.rebuild();
@@ -329,26 +330,30 @@ fn capture_target_tracks_online_state_without_resetting_dpi_cycle() {
         let Ok(mut dpi) = orch.shared.dpi_cycle.write() else {
             panic!("DPI cycle lock should not be poisoned");
         };
-        dpi.index = 3;
+        if let Some(state) = dpi.by_key.get_mut("mouse") {
+            state.index = 3;
+        }
     }
 
     orch.devices[0].online = false;
-    orch.sync_current_route();
+    orch.publish_device_runtime();
     {
         let Ok(dpi) = orch.shared.dpi_cycle.read() else {
             panic!("DPI cycle lock should not be poisoned");
         };
-        assert_eq!(dpi.target, None);
-        assert_eq!(dpi.index, 3);
+        assert!(!dpi.by_key.contains_key("mouse"));
     }
 
     orch.devices[0].online = true;
-    orch.sync_current_route();
+    orch.publish_device_runtime();
     let Ok(dpi) = orch.shared.dpi_cycle.read() else {
         panic!("DPI cycle lock should not be poisoned");
     };
-    assert_eq!(dpi.target, orch.devices[0].route);
-    assert_eq!(dpi.index, 3);
+    assert_eq!(dpi.by_key.get("mouse").map(|s| s.index), Some(0));
+    assert_eq!(
+        dpi.by_key.get("mouse").and_then(|s| s.target.clone()),
+        orch.devices[0].route
+    );
 }
 
 #[test]
@@ -383,26 +388,30 @@ fn reapply_all_targets_every_online_device() {
 }
 
 #[test]
-fn selected_receiver_reconnect_requests_capture_rearm() {
+fn receiver_reconnect_requests_capture_rearm() {
     let prev = [dev("selected", 1, false), dev("other", 2, true)];
     let next = [dev("selected", 1, true), dev("other", 2, true)];
 
-    assert!(selected_needs_capture_rearm(&prev, &next, 0, false));
-    assert!(!selected_needs_capture_rearm(&prev, &next, 1, false));
+    assert!(any_device_needs_capture_rearm(&prev, &next, false));
+    assert!(!any_device_needs_capture_rearm(
+        &[dev("other", 2, true)],
+        &[dev("other", 2, true)],
+        false
+    ));
 }
 
 #[test]
-fn system_wake_requests_capture_rearm_for_selected_online_device() {
+fn system_wake_requests_capture_rearm_for_online_devices() {
     let devices = [dev("selected", 1, true), dev("other", 2, true)];
 
-    assert!(selected_needs_capture_rearm(&devices, &devices, 0, true));
+    assert!(any_device_needs_capture_rearm(&devices, &devices, true));
 }
 
 #[test]
 fn steady_inventory_does_not_cycle_capture() {
     let devices = [dev("selected", 1, true)];
 
-    assert!(!selected_needs_capture_rearm(&devices, &devices, 0, false));
+    assert!(!any_device_needs_capture_rearm(&devices, &devices, false));
 }
 
 #[test]
@@ -657,4 +666,38 @@ fn config_reload_clears_override_when_camera_mode_changes() {
             .map(|light| light.enabled),
         Some(true)
     );
+}
+
+/// The published capture plan's Back binding for the first device, if any.
+fn published_back_binding(orch: &Orchestrator) -> Option<Action> {
+    orch.shared.capture_plans.read().ok().and_then(|plans| {
+        plans
+            .first()
+            .and_then(|plan| plan.bindings.get(&ButtonId::Back).cloned())
+    })
+}
+
+#[test]
+fn app_switch_republishes_capture_plans() {
+    // HID++ dispatch reads `plan.bindings` at event time, so a
+    // foreground-app change must republish the capture plans — their
+    // binding maps and divert sets are per-app effective — or every
+    // diverted button keeps firing the previous app's actions.
+    let mut config = Config::default();
+    config.set_per_app_binding(
+        "a",
+        "com.example.editor",
+        ButtonId::Back,
+        Some(Action::Undo),
+    );
+    let mut orch = Orchestrator::new(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+    assert_ne!(
+        published_back_binding(&orch),
+        Some(Action::Undo),
+        "no per-app overlay while no app is in front"
+    );
+    orch.set_current_app(Some("com.example.editor".into()));
+    assert_eq!(published_back_binding(&orch), Some(Action::Undo));
 }

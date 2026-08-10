@@ -7,6 +7,7 @@
 //! without linking gpui.
 
 pub mod bindings;
+pub mod capture_plan;
 pub mod device_order;
 mod dpi;
 pub mod event_monitor;
@@ -18,4 +19,4 @@ pub mod receiver_access;
 pub mod transport;
 pub mod watchers;
 
-pub use dpi::DpiCycleState;
+pub use dpi::{DpiCycleState, DpiCycles};
