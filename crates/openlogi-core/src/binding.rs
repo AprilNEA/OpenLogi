@@ -702,7 +702,7 @@ impl Action {
             Action::HorizontalScrollRight => "Scroll Right".into(),
             Action::CustomShortcut(combo) => combo.rendered_label(),
             Action::Sleep => "Sleep".into(),
-            Action::TypeText(s) => format!("Type \"{s}\"").into(),
+            Action::TypeText(s) => format!("Type \"{s}\""),
             Action::RunAppleScript(_) => "Run AppleScript".into(),
             Action::RunShellCommand(_) => "Run Command".into(),
             Action::Workflow(steps) => format!("Workflow ({} steps)", steps.len()),

@@ -290,10 +290,6 @@ fn handle_moved(
 
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not
 /// granted or on an unsupported platform — the app continues without crashing.
-#[expect(
-    clippy::too_many_lines,
-    reason = "single freeze-sensitive callback owns mouse + keyboard dispatch arms"
-)]
 pub fn start(
     hooks: SharedHookMaps,
     keyboard_bindings: SharedKeyboardBindings,
