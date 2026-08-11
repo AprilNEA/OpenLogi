@@ -78,7 +78,7 @@ const UNIFYING_SLOT_PROBE: Duration = Duration::from_millis(3500);
 /// feature-rich device enumerates a large table one round-trip per feature
 /// (the MX Master 4's 45 features take ~1–1.6 s over Bolt even awake), and on
 /// high-latency USB paths (a Bolt receiver behind a KVM's USB emulation) it
-/// takes several seconds — the earlier 1 s cap starved every slot there, so a
+/// takes several seconds — the previous 3 s cap starved every slot there, so a
 /// newly paired device could never acquire model info at all. 10 s is generous
 /// headroom for degraded-but-alive paths while still fitting [`PROBE_BUDGET`]
 /// after the 1.5 s arrival drain and Bolt's sequential pairing-register pass.
