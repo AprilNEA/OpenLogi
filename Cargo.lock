@@ -3397,16 +3397,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "icns"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "467efeb2c1e570cebb9863f9173447f8fe92303d66adc97cb89ac824b60e7a0f"
-dependencies = [
- "byteorder",
- "png 0.18.1",
-]
-
-[[package]]
 name = "icu_collections"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9574,8 +9564,6 @@ dependencies = [
  "anyhow",
  "clap",
  "fs-err",
- "icns",
- "image",
  "path-absolutize",
  "plist",
  "serde",

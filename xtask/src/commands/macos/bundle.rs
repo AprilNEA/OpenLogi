@@ -1,10 +1,7 @@
 use std::env;
-use std::io::BufWriter;
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use icns::{IconFamily, IconType, Image as IcnsImage, PixelFormat};
-use image::imageops::FilterType;
 use plist::Value;
 use xshell::{Shell, cmd};
 
@@ -12,6 +9,7 @@ use crate::support::fs::{command_exists, ensure_dir, ensure_file, repo_root};
 
 pub(crate) fn generate_icns() -> Result<()> {
     let root = repo_root()?;
+    let sh = Shell::new()?;
     let master = root.join("design/icon/openlogi.png");
     let output_dir = root.join("crates/openlogi-gui/icon");
     let output = output_dir.join("AppIcon.icns");
@@ -23,36 +21,42 @@ pub(crate) fn generate_icns() -> Result<()> {
             output_dir.display()
         )
     })?;
-    write_icns(&master, &output)?;
+
+    let work = tempfile::Builder::new()
+        .prefix("openlogi-icns-")
+        .tempdir()
+        .context("could not create temporary iconset directory")?;
+    let iconset = work.path().join("AppIcon.iconset");
+    fs_err::create_dir_all(&iconset)
+        .with_context(|| format!("could not create iconset directory {}", iconset.display()))?;
+
+    render_iconset(&iconset, |size, output| {
+        let size = size.to_string();
+        cmd!(sh, "sips -z {size} {size} {master} --out {output}")
+            .ignore_stdout()
+            .run()?;
+        Ok(())
+    })?;
+
+    // Let Apple's encoder choose the ICNS chunk layout. The Rust `icns` crate
+    // emits `icp4`/`icp5` PNG chunks that current macOS releases decode as
+    // corrupted pixels in small-icon surfaces such as Login Items.
+    cmd!(sh, "iconutil -c icns {iconset} -o {output}").run()?;
     println!("wrote {}", output.display());
     Ok(())
 }
 
-fn write_icns(master: &Path, output: &Path) -> Result<()> {
-    let master = image::open(master)
-        .with_context(|| format!("could not read app icon master {}", master.display()))?;
-    let mut family = IconFamily::new();
-    for (size, icon_type) in [
-        (16, IconType::RGBA32_16x16),
-        (32, IconType::RGBA32_16x16_2x),
-        (32, IconType::RGBA32_32x32),
-        (64, IconType::RGBA32_32x32_2x),
-        (128, IconType::RGBA32_128x128),
-        (256, IconType::RGBA32_128x128_2x),
-        (256, IconType::RGBA32_256x256),
-        (512, IconType::RGBA32_256x256_2x),
-        (512, IconType::RGBA32_512x512),
-        (1024, IconType::RGBA32_512x512_2x),
-    ] {
-        let rgba = master
-            .resize_exact(size, size, FilterType::Lanczos3)
-            .to_rgba8();
-        let icon = IcnsImage::from_data(PixelFormat::RGBA, size, size, rgba.into_raw())?;
-        family.add_icon_with_type(&icon, icon_type)?;
+fn render_iconset<F>(iconset: &Path, mut render: F) -> Result<()>
+where
+    F: FnMut(u16, &Path) -> Result<()>,
+{
+    for size in [16, 32, 128, 256, 512] {
+        render(size, &iconset.join(format!("icon_{size}x{size}.png")))?;
+        render(
+            size * 2,
+            &iconset.join(format!("icon_{size}x{size}@2x.png")),
+        )?;
     }
-    let file = fs_err::File::create(output)
-        .with_context(|| format!("could not create app icon {}", output.display()))?;
-    family.write(BufWriter::new(file))?;
     Ok(())
 }
 
