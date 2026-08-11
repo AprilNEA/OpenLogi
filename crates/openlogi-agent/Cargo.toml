@@ -14,6 +14,13 @@ publish = false
 name = "openlogi-agent"
 path = "src/main.rs"
 
+# Hardware-free mock agent for GUI development: serves a scripted inventory over
+# the real IPC socket. Dev-only — xtask bundles `openlogi-agent` by exact path,
+# so this binary never ships.
+[[bin]]
+name = "openlogi-agent-mock"
+path = "src/bin/mock_agent.rs"
+
 [dependencies]
 openlogi-agent-core = { path = "../openlogi-agent-core" }
 openlogi-core = { path = "../openlogi-core" }
