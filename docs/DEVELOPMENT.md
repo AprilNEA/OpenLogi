@@ -85,6 +85,31 @@ To install the CLI binary on `PATH`:
 cargo install --path .
 ```
 
+## Developing the GUI without hardware
+
+`openlogi-agent-mock` serves the real agent IPC contract from a scripted
+in-memory inventory, so the desktop app can be developed with no Logitech
+device (or receiver) attached:
+
+```sh
+cargo run -p openlogi-agent --bin openlogi-agent-mock  # then, in another terminal:
+cargo run -p openlogi-gui
+```
+
+The mock defaults itself to the `openlogi-dev` profile (as if `OPENLOGI_PROFILE=dev`
+were set), which is the profile the dev app bundle already uses — so it meets the
+dev GUI on the dev socket and the installed production app keeps running
+untouched. The GUI needs no flag or rebuild. Pass `OPENLOGI_PROFILE=prod` to
+serve the production socket instead; the mock then contends for the production
+agent's single-instance lock and refuses to start while it is running.
+
+The script covers an online mouse (DPI and SmartShift writes persist and read
+back, battery drains so poll-driven repaints are visible), an offline mouse, a
+lighting-capable keyboard, a directly-attached device, and a full Bolt pairing
+flow (discovery → passkey → paired). Its agent version carries a `-mock` suffix,
+so a mock session is identifiable in the UI. It is a dev tool only and is never
+bundled.
+
 ## Project layout
 
 ```

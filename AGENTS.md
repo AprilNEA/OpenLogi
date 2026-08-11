@@ -130,6 +130,11 @@ New GUI strings: insert the same key in the **same position** in every
   into `target/dev/OpenLogi.app`. `cargo build` does NOT refresh that bundle,
   and a second instance exits on the singleton lock: quit the old instance and
   re-`run` before judging a UI change "not applied".
+- No hardware attached? `cargo run -p openlogi-agent --bin openlogi-agent-mock`
+  serves a scripted inventory (both route kinds, every capability-gated panel, a
+  pairing flow) over the IPC socket, so the GUI runs unmodified. It defaults to
+  the `openlogi-dev` profile — same socket the dev bundle uses, production app
+  untouched. Details in `docs/DEVELOPMENT.md`.
 
 ## Rust standards
 
