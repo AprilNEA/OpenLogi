@@ -78,7 +78,7 @@ rustPlatform.buildRustPackage {
     outputHashes = {
       "gpui-0.2.2" = "sha256-Av+unZNI39dEb+zwSIU+SkEjqagHWrc7W8KehEgQ4H8=";
       "gpui-component-0.5.2" = gpuiComponentHash;
-      "gpui-updater-0.0.5" = "sha256-H2IW7nDD1q/Zbt7ZSft6VTMv5UpjiCg2FIQSoML/CMc=";
+      "gpui-updater-0.0.6" = "sha256-v8rn8tEkKBi8T2LtBV92uB+XtEeuBwj0qxGcDqEIwIw=";
       "zed-font-kit-0.14.1-zed" = "sha256-KXygi0olNQi5yM8eaJVykNDtbPMDjT+cWPBF8UrtXR4=";
       "zed-reqwest-0.12.15-zed" = "sha256-p4SiUrOrbTlk/3bBrzN/mq/t+1Gzy2ot4nso6w6S+F8=";
       "zed-scap-0.0.8-zed" = "sha256-BihiQHlal/eRsktyf0GI3aSWsUCW7WcICMsC2Xvb7kw=";
