@@ -781,6 +781,12 @@ impl Agent for MockAgent {
         let state = Arc::clone(&self.state);
         tokio::spawn(async move {
             tokio::time::sleep(PASSKEY_DELAY).await;
+            // A cancel in the meantime ends the flow: a plain cancel leaves the
+            // GUI polling this very channel, so sending the prompt anyway would
+            // show it a passkey *after* `Failed(Cancelled)`.
+            if state.lock().await.pairing_session(id).is_none() {
+                return;
+            }
             let _ = tx.send(PairingUpdate::Passkey(PasskeyMethod::Keyboard(
                 "482913".to_string(),
             )));
