@@ -44,9 +44,10 @@ const MAX_BOLT_SLOTS: u8 = 6;
 /// A timed-out node is skipped and re-probed on the next watcher tick (~2 s),
 /// and the first probe usually wakes the device so the retry succeeds fast.
 /// Slots are probed concurrently on both receiver paths, so a receiver's worst
-/// case is the 1.5 s arrival drain plus the sequential register pass plus a
-/// single slot's [`BOLT_SLOT_PROBE`] / [`UNIFYING_SLOT_PROBE`] — not their sum
-/// — which this stays comfortably above, so awake devices never trip it.
+/// case is the 1.5 s arrival drain plus a single slot's [`BOLT_SLOT_PROBE`] /
+/// [`UNIFYING_SLOT_PROBE`] — not their sum — plus, on Bolt only, the
+/// sequential pairing-register pass that precedes the slot walk. This stays
+/// comfortably above that, so awake devices never trip it.
 ///
 /// Sized for the Bluetooth-direct feature walk, the long pole: a ~35-entry
 /// table over a link that drops individual reports, which `hidpp::device`
@@ -80,7 +81,7 @@ const UNIFYING_SLOT_PROBE: Duration = Duration::from_millis(3500);
 /// takes several seconds — the earlier 1 s cap starved every slot there, so a
 /// newly paired device could never acquire model info at all. 10 s is generous
 /// headroom for degraded-but-alive paths while still fitting [`PROBE_BUDGET`]
-/// after the 1.5 s arrival drain and the register pass.
+/// after the 1.5 s arrival drain and Bolt's sequential pairing-register pass.
 const BOLT_SLOT_PROBE: Duration = Duration::from_secs(10);
 
 /// Errors raised while enumerating HID++ devices.
