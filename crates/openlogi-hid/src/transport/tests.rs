@@ -85,6 +85,9 @@ const UNIFYING_RECEIVER: &str = "/sys/devices/pci0000:00/0000:00:14.0/usb3/3-5/3
 // Sysfs path: child of Bolt receiver
 const BOLT_CHILD: &str = "/sys/devices/pci0000:00/0000:00:14.0/usb3/3-5/\
      0003:046D:C548.0001/0003:046D:B037.0002";
+// Sysfs path: child of a Lightspeed receiver (a G915, wpid 407C, on c547)
+const LIGHTSPEED_CHILD: &str = "/sys/devices/pci0000:00/0000:00:14.0/usb3/3-5/\
+     0003:046D:C547.0003/0003:046D:407C.0004";
 // Sysfs path: unrelated non-Logitech device
 const UNRELATED: &str = "/sys/devices/pci0000:00/0000:00:15.0/i2c-0/0018:06CB:CE67.0001";
 
@@ -101,6 +104,11 @@ fn unifying_receiver_itself_is_not_a_child() {
 #[test]
 fn child_of_bolt_receiver_is_detected() {
     assert!(is_receiver_child_sysfs_path(BOLT_CHILD));
+}
+
+#[test]
+fn child_of_lightspeed_receiver_is_detected() {
+    assert!(is_receiver_child_sysfs_path(LIGHTSPEED_CHILD));
 }
 
 #[test]
