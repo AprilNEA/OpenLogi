@@ -25,7 +25,9 @@ mice of the same model independent:
 - `per_app_bindings` — overlays keyed by application id (bundle id such as
   `com.microsoft.VSCode` on macOS, `WM_CLASS` on Linux/X11, or a lower-cased
   executable path on Windows) that take precedence while that app is
-  frontmost.
+  frontmost. Windows also accepts `exe:<filename>.exe`, for example
+  `exe:sharex.exe`, as a stable fallback for Store and self-updating apps. An
+  exact path entry wins when both forms exist.
 - `action_ring` — the enabled state, haptic-feedback preference, default
   eight-slot layout, and complete per-application layouts.
 - `dpi_presets` — the ordered list cycled by the `CycleDpiPresets` action.
@@ -130,6 +132,10 @@ Right = "NextDesktop"
 # Per-app overlay: Back becomes Undo only while VS Code is frontmost.
 [devices.2b042.per_app_bindings."com.microsoft.VSCode"]
 Back = "Undo"
+
+# Stable Windows executable-name selector (exact paths still take precedence).
+[devices.2b042.per_app_bindings."exe:sharex.exe"]
+MiddleClick = { CustomShortcut = { modifiers = 0, key_code = 122, display = "F1" } }
 
 # Actions Ring slots couple an executable action with an optional custom icon.
 [devices.2b042.action_ring]

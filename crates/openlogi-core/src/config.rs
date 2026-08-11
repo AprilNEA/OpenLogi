@@ -442,7 +442,7 @@ impl Config {
         };
         let mut out = device.bindings.clone();
         if let Some(bid) = bundle_id
-            && let Some(overlay) = device.per_app_bindings.get(bid)
+            && let Some(overlay) = app_overlay(&device.per_app_bindings, bid)
         {
             for (k, v) in overlay {
                 out.insert(*k, Binding::Single(v.clone()));
@@ -597,9 +597,7 @@ impl Config {
     #[must_use]
     pub fn has_app_override(&self, device_key: &str, app: &str) -> bool {
         self.devices.get(device_key).is_some_and(|d| {
-            d.per_app_bindings
-                .get(app)
-                .is_some_and(|overlay| !overlay.is_empty())
+            app_overlay(&d.per_app_bindings, app).is_some_and(|overlay| !overlay.is_empty())
         })
     }
 
@@ -814,6 +812,29 @@ impl Config {
             .or_default()
             .thumbwheel_sensitivity = sensitivity;
     }
+}
+
+/// Resolve the most specific application overlay for a foreground identifier.
+///
+/// Exact keys retain precedence. On Windows the foreground identifier is a
+/// lower-cased executable path, so `exe:<filename>` provides a stable fallback
+/// for Store and self-updating applications whose install directory changes
+/// between versions. Recognizing both path separators keeps hand-authored
+/// Windows config inspectable on every platform without changing macOS bundle
+/// identifiers or Linux application classes.
+fn app_overlay<'a, T>(overlays: &'a BTreeMap<String, T>, app: &str) -> Option<&'a T> {
+    overlays.get(app).or_else(|| {
+        let executable_name = app.rsplit(['\\', '/']).next()?;
+        if executable_name.is_empty()
+            || !Path::new(executable_name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+        {
+            return None;
+        }
+
+        overlays.get(&format!("exe:{}", executable_name.to_ascii_lowercase()))
+    })
 }
 
 fn backup_config_once(path: &Path) -> io::Result<()> {
