@@ -71,10 +71,18 @@ pub(super) fn save(path: &Path, cache: &HashMap<CacheKey, Cached>) -> io::Result
     let entries: Vec<PersistedEntry> = cache
         .iter()
         .filter_map(|(key, cached)| {
-            persistable(key).map(|key| PersistedEntry {
-                key,
-                probe: cached.probe.clone(),
-                battery: cached.battery,
+            persistable(key).map(|key| {
+                // The battery *reading* is volatile and re-read live on every
+                // cache hit — persisting it would resurrect a stale value
+                // after a restart. The battery *feature index*
+                // (`PersistedEntry::battery`) is immutable and kept.
+                let mut probe = cached.probe.clone();
+                probe.battery = None;
+                PersistedEntry {
+                    key,
+                    probe,
+                    battery: cached.battery,
+                }
             })
         })
         .collect();

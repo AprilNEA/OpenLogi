@@ -539,7 +539,9 @@ fn probe_cache_roundtrips_through_disk() {
     // A device fully probed once must keep its identity across restarts: the
     // persisted cache is what spares a fresh process the expensive (and on
     // degraded transports, failing) re-interview.
-    use openlogi_core::device::{DeviceModelInfo, DeviceTransports};
+    use openlogi_core::device::{
+        BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports,
+    };
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("probe-cache.json");
@@ -554,6 +556,13 @@ fn probe_cache_roundtrips_through_disk() {
     };
     let probe = ProbedFeatures {
         model_info: Some(model.clone()),
+        // A live reading at save time: volatile, so it must NOT survive the
+        // round trip (the feature index in `battery` below does).
+        battery: Some(BatteryInfo {
+            percentage: 55,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        }),
         ..Default::default()
     };
     let mut cache = std::collections::HashMap::new();
@@ -589,6 +598,10 @@ fn probe_cache_roundtrips_through_disk() {
         .expect("bolt entry survives a save/load cycle");
     assert_eq!(bolt.probe.model_info.as_ref(), Some(&model));
     assert_eq!(bolt.battery, Some(BatteryProbe::Unified(9)));
+    assert!(
+        bolt.probe.battery.is_none(),
+        "the volatile battery reading must not be resurrected across restarts"
+    );
     assert_eq!(
         bolt.probed_tick, 0,
         "loaded entries restart the refresh clock"
