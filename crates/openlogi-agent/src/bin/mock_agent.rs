@@ -1,24 +1,30 @@
 //! Hardware-free mock agent for GUI development.
 //!
-//! Serves the same tarpc [`Agent`] service as the real agent — on the real IPC
-//! socket — from a scripted in-memory inventory: no HID I/O, no input hook, no
-//! Accessibility. The GUI needs zero changes; it connects, handshakes the real
-//! [`PROTOCOL_VERSION`], and renders whatever this binary scripts.
+//! Serves the same tarpc [`Agent`] service as the real agent, from a scripted
+//! in-memory inventory: no HID I/O, no input hook, no Accessibility. The GUI
+//! needs zero changes; it connects, handshakes the real [`PROTOCOL_VERSION`],
+//! and renders whatever this binary scripts.
 //!
 //! ```sh
-//! pkill -x openlogi-agent            # stop the real agent if one is running
 //! cargo run -p openlogi-agent --bin openlogi-agent-mock
-//! cargo run -p openlogi-gui          # in a second terminal
+//! OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-gui   # in a second terminal
 //! ```
 //!
-//! The mock holds the agent's `agent.lock`, so real agents spawned meanwhile
-//! (by the GUI's auto-spawn or launchd) exit as duplicates; conversely the mock
-//! refuses to start while a real agent is running. Scripted behavior:
+//! It defaults to the `openlogi-dev` profile — the one the dev app bundle
+//! already uses — so it meets the dev GUI on the dev socket and the installed
+//! production app is left alone. `OPENLOGI_PROFILE=prod` serves the production
+//! socket instead, where the shared `agent.lock` keeps the mock and a real
+//! agent from running at the same time in either direction.
+//!
+//! Scripted behavior:
 //!
 //! - A Bolt receiver with an online mouse (DPI + SmartShift + battery that
 //!   drains ~1%/minute), an offline mouse, and a lighting-capable keyboard,
 //!   plus one directly-attached mouse — covering every panel and both route
 //!   kinds without hardware.
+//! - A standalone Litra light whose power / brightness / temperature writes
+//!   persist, and a `camera_active` flag that flips every 30s so the
+//!   camera-linked light rendering has something to follow.
 //! - DPI / SmartShift writes persist in memory and read back, so sliders and
 //!   toggles behave like a live device.
 //! - `start_pairing` runs a scripted Bolt flow: discovery → passkey → paired,
@@ -39,12 +45,13 @@ use openlogi_agent_core::transport;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
-    DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+    DeviceModelInfo, DeviceTransports, LightCapabilities, LightValueRange, LightValueUnit,
+    PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::single_instance::{self, InstanceError};
 use openlogi_hid::{
-    DIRECT_DEVICE_INDEX, DeviceRoute, DpiCapabilities, DpiInfo, PasskeyMethod, ReceiverSelector,
-    SmartShiftMode, SmartShiftStatus, WriteError,
+    DIRECT_DEVICE_INDEX, DeviceRoute, DpiCapabilities, DpiInfo, LightCommand, PasskeyMethod,
+    ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
 };
 use tarpc::context::Context;
 use tarpc::server::{BaseChannel, Channel as _};
@@ -62,6 +69,10 @@ const KEYBOARD_SLOT: u8 = 3;
 /// Product ID of the scripted directly-attached mouse; `DeviceRoute::Direct`
 /// is matched against it.
 const DIRECT_PID: u16 = 0xb020;
+/// Product ID of the scripted standalone Litra light (Litra Glow).
+const LITRA_PID: u16 = 0xc900;
+/// How often the scripted `camera_active` flag flips.
+const CAMERA_TOGGLE_PERIOD: Duration = Duration::from_secs(30);
 
 /// BTLE address of the scripted pairing candidate.
 const CANDIDATE_ADDRESS: [u8; 6] = [0xe0, 0x15, 0x27, 0x42, 0x91, 0x3a];
@@ -79,6 +90,7 @@ const PAIRING_HOLD: Duration = Duration::from_secs(2);
 const PAIRING_POLL_TICK: Duration = Duration::from_millis(100);
 
 fn main() -> ExitCode {
+    default_to_dev_profile();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -132,11 +144,37 @@ fn main() -> ExitCode {
     }
 }
 
+/// Claim the `openlogi-dev` profile unless the caller picked one.
+///
+/// A bare `cargo run` binary has no `.dev` bundle to be recognized by, so
+/// without this the mock would resolve the *production* socket, lock and config
+/// while the dev GUI (which does run from a `.dev` bundle) waits on the dev
+/// socket — the two would never meet, and the mock would sit on the installed
+/// app's paths instead.
+fn default_to_dev_profile() {
+    if std::env::var_os("OPENLOGI_PROFILE").is_some() {
+        return;
+    }
+    // SAFETY: `set_var` is unsound only against concurrent env access. This is
+    // the first statement of `main`: no runtime, no tracing subscriber, no
+    // other thread exists yet, and nothing has read the environment.
+    #[expect(
+        unsafe_code,
+        reason = "the profile must be chosen before openlogi_core::paths caches it, and only a process-wide env var selects it"
+    )]
+    unsafe {
+        std::env::set_var("OPENLOGI_PROFILE", "dev");
+    }
+}
+
 /// Accept loop — the mock's copy of `server::run` (kept verbatim rather than
 /// making the production loop generic over its service impl for a dev tool).
 async fn serve(server: MockAgent) -> std::io::Result<()> {
     let listener = transport::bind()?;
-    info!("mock agent listening on the real IPC socket");
+    info!(
+        profile = std::env::var("OPENLOGI_PROFILE").unwrap_or_default(),
+        "mock agent listening"
+    );
     loop {
         let stream = match listener.accept().await {
             Ok(stream) => stream,
@@ -253,6 +291,12 @@ impl State {
         })
     }
 
+    /// Whether a host camera is "in use" right now — flipped on a timer so the
+    /// camera-linked light rendering has a changing input to follow.
+    fn camera_active(&self) -> bool {
+        self.started.elapsed().as_secs() / CAMERA_TOGGLE_PERIOD.as_secs() % 2 == 1
+    }
+
     /// The inventory as polled. Rebuilt per call so the online mouse's battery
     /// is re-derived from elapsed time: successive snapshots visibly differ and
     /// the GUI's poll → repaint loop can be watched working.
@@ -295,6 +339,49 @@ impl State {
         });
         self.settings.insert(slot, DeviceSettings::unsupported());
         slot
+    }
+}
+
+/// The scripted standalone Litra light. The wire form carries the light's
+/// *capabilities*, not its current values — the panel reads those from config —
+/// so this is constant, and writes are answered by [`MockAgent::set_light`].
+fn standalone_light() -> StandaloneDevice {
+    StandaloneDevice {
+        address: RawDeviceAddress {
+            vendor_id: LOGITECH_VID,
+            product_id: LITRA_PID,
+            usage_page: 0xff43,
+            usage_id: 0x0202,
+            identity: "MOCK-LITRA-01".to_string(),
+        },
+        display_name: "Litra Glow".to_string(),
+        manufacturer: Some("Logitech".to_string()),
+        serial_number: Some("MOCKLITRA1".to_string()),
+        unit_id: [0x0d, 0x0e, 0x0f, 0x10],
+        kind: DeviceKind::Unknown,
+        online: true,
+        capabilities: None,
+        light_capabilities: Some(LightCapabilities {
+            power: true,
+            brightness: LightValueRange::new(0, 100, 1, LightValueUnit::Percent).ok(),
+            temperature: LightValueRange::new(2700, 6500, 100, LightValueUnit::Kelvin).ok(),
+            color: false,
+            zones: false,
+        }),
+        driver_id: "litra".to_string(),
+        // Must stay `Some` until #571 is fixed: `registry_model_id` is
+        // `skip_serializing_if`, which truncates the bincode stream when it is
+        // `None` and makes the whole snapshot undecodable. `8c900` is also the
+        // real registry id for a Litra Glow, so the asset lookup resolves.
+        registry_model_id: Some("8c900".to_string()),
+    }
+}
+
+/// The route the GUI addresses the scripted light by.
+fn light_route() -> DeviceRoute {
+    DeviceRoute::Direct {
+        vendor_id: LOGITECH_VID,
+        product_id: LITRA_PID,
     }
 }
 
@@ -363,6 +450,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     lighting: false,
                     scroll_inversion: true,
                     hires_wheel: true,
+                    thumbwheel: true,
                 }),
             },
             PairedDevice {
@@ -407,6 +495,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     lighting: true,
                     scroll_inversion: false,
                     hires_wheel: false,
+                    thumbwheel: false,
                 }),
             },
         ],
@@ -453,6 +542,7 @@ fn direct_inventory() -> DeviceInventory {
                 lighting: false,
                 scroll_inversion: false,
                 hires_wheel: false,
+                thumbwheel: false,
             }),
         }],
     }
@@ -707,13 +797,42 @@ impl Agent for MockAgent {
     }
 
     async fn snapshot(self, _: Context) -> AgentSnapshot {
+        let state = self.state.lock().await;
         AgentSnapshot {
             status: agent_status(),
-            inventory: self.state.lock().await.render_inventory(),
+            inventory: state.render_inventory(),
+            standalone: vec![standalone_light()],
+            camera_active: state.camera_active(),
         }
     }
 
     async fn poll_event_monitor(self, _: Context) -> Vec<MonitorEvent> {
         Vec::new()
+    }
+
+    async fn set_light(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        command: LightCommand,
+    ) -> Result<(), WriteError> {
+        if route != light_route() {
+            return Err(WriteError::DeviceNotFound);
+        }
+        info!(%route, ?command, "set_light");
+        Ok(())
+    }
+
+    async fn set_light_manual_power(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        enabled: bool,
+    ) -> Result<(), WriteError> {
+        if route != light_route() {
+            return Err(WriteError::DeviceNotFound);
+        }
+        info!(%route, enabled, "set_light_manual_power");
+        Ok(())
     }
 }

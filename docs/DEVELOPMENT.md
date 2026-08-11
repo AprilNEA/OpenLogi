@@ -92,16 +92,20 @@ in-memory inventory, so the desktop app can be developed with no Logitech
 device (or receiver) attached:
 
 ```sh
-cargo run -p openlogi-agent --bin openlogi-agent-mock  # then, in another terminal:
-cargo run -p openlogi-gui
+cargo run -p openlogi-agent --bin openlogi-agent-mock   # then, in another terminal:
+OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-gui
 ```
 
 The mock defaults itself to the `openlogi-dev` profile (as if `OPENLOGI_PROFILE=dev`
 were set), which is the profile the dev app bundle already uses — so it meets the
 dev GUI on the dev socket and the installed production app keeps running
-untouched. The GUI needs no flag or rebuild. Pass `OPENLOGI_PROFILE=prod` to
-serve the production socket instead; the mock then contends for the production
-agent's single-instance lock and refuses to start while it is running.
+untouched. `OPENLOGI_DEV_AGENT=0` keeps the runner from building and embedding
+the real agent for the GUI to auto-spawn; add `OPENLOGI_ALLOW_EXTERNAL_AGENT=1`
+if your installed production agent is running, since the runner's guard against
+it predates the profile split and cannot know the dev GUI is on a separate
+socket. Pass `OPENLOGI_PROFILE=prod` to serve the production socket instead; the
+mock then contends for the production agent's single-instance lock and refuses
+to start while it is running.
 
 The script covers an online mouse (DPI and SmartShift writes persist and read
 back, battery drains so poll-driven repaints are visible), an offline mouse, a
