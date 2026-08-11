@@ -73,6 +73,10 @@ const PASSKEY_DELAY: Duration = Duration::from_millis(800);
 const PASSKEY_TYPING_DELAY: Duration = Duration::from_secs(3);
 /// How long `next_pairing` holds an empty long-poll before answering `None`.
 const PAIRING_HOLD: Duration = Duration::from_secs(2);
+/// How often that hold checks for an event. Short enough that a scripted step
+/// reaches the GUI promptly; see [`MockAgent::next_pairing`] for why the hold
+/// polls instead of awaiting the receiver.
+const PAIRING_POLL_TICK: Duration = Duration::from_millis(100);
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -189,7 +193,12 @@ struct PairingSession {
 /// Everything the RPCs read or mutate. Guarded by one async mutex; locks stay
 /// short and never span an await.
 struct State {
-    inventory: Vec<DeviceInventory>,
+    /// Devices added by a scripted pairing session, appended to the Bolt
+    /// receiver's paired list. The scripted devices themselves are rebuilt per
+    /// poll, so this holds only what pairing added.
+    paired_extra: Vec<PairedDevice>,
+    /// Slot the next scripted pairing assigns.
+    next_slot: u8,
     /// Keyed by HID++ device index (Bolt slot / [`DIRECT_DEVICE_INDEX`]),
     /// unique here because the script has a single receiver.
     settings: HashMap<u8, DeviceSettings>,
@@ -236,26 +245,21 @@ impl State {
             },
         );
         Ok(Self {
-            inventory: vec![bolt_inventory(), direct_inventory()],
+            paired_extra: Vec::new(),
+            next_slot: KEYBOARD_SLOT + 1,
             settings,
             pairing: None,
             started: Instant::now(),
         })
     }
 
-    /// The inventory as polled: the template with the online mouse's battery
-    /// re-derived from elapsed time, so successive snapshots visibly differ
-    /// and the GUI's poll → repaint loop can be watched working.
+    /// The inventory as polled. Rebuilt per call so the online mouse's battery
+    /// is re-derived from elapsed time: successive snapshots visibly differ and
+    /// the GUI's poll → repaint loop can be watched working.
     fn render_inventory(&self) -> Vec<DeviceInventory> {
-        let mut inventory = self.inventory.clone();
-        if let Some(mouse) = inventory
-            .iter_mut()
-            .find(|group| group.receiver.unique_id.as_deref() == Some(RECEIVER_UID))
-            .and_then(|group| group.paired.iter_mut().find(|d| d.slot == MOUSE_SLOT))
-        {
-            mouse.battery = Some(draining_battery(self.started.elapsed()));
-        }
-        inventory
+        let mut bolt = bolt_inventory(draining_battery(self.started.elapsed()));
+        bolt.paired.extend_from_slice(&self.paired_extra);
+        vec![bolt, direct_inventory()]
     }
 
     fn settings_for(&self, route: &DeviceRoute) -> Result<&DeviceSettings, WriteError> {
@@ -273,21 +277,9 @@ impl State {
     /// Append the scripted pairing candidate to the Bolt receiver's inventory
     /// and return its assigned slot.
     fn pair_scripted(&mut self, name: &str) -> u8 {
-        let Some(group) = self
-            .inventory
-            .iter_mut()
-            .find(|group| group.receiver.unique_id.as_deref() == Some(RECEIVER_UID))
-        else {
-            return 0;
-        };
-        let slot = group
-            .paired
-            .iter()
-            .map(|d| d.slot)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
-        group.paired.push(PairedDevice {
+        let slot = self.next_slot;
+        self.next_slot = self.next_slot.saturating_add(1);
+        self.paired_extra.push(PairedDevice {
             slot,
             codename: Some(name.to_string()),
             wpid: Some(0x408a),
@@ -334,7 +326,9 @@ fn draining_battery(elapsed: Duration) -> BatteryInfo {
     }
 }
 
-fn bolt_inventory() -> DeviceInventory {
+/// The scripted Bolt receiver and its devices. `mouse_battery` is passed in
+/// because it is the one field that moves between polls.
+fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
     DeviceInventory {
         receiver: ReceiverInfo {
             name: "Logi Bolt Receiver".to_string(),
@@ -349,8 +343,7 @@ fn bolt_inventory() -> DeviceInventory {
                 wpid: Some(0xb034),
                 kind: DeviceKind::Mouse,
                 online: true,
-                // Placeholder; render_inventory() re-derives it per poll.
-                battery: None,
+                battery: Some(mouse_battery),
                 model_info: Some(DeviceModelInfo {
                     entity_count: 3,
                     serial_number: Some("2140LZ00MOCK".to_string()),
@@ -692,19 +685,24 @@ impl Agent for MockAgent {
     }
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {
-        let mut guard = self.pairing_rx.lock().await;
-        if let Some(rx) = guard.as_mut() {
-            match tokio::time::timeout(PAIRING_HOLD, rx.recv()).await {
-                Ok(Some(update)) => return Some(update),
-                // Channel closed and drained — the session is over; drop the
-                // receiver so later polls take the slow path instead of
-                // spinning on an instant `None`.
-                Ok(None) => *guard = None,
-                Err(_elapsed) => return None,
+        // Polled rather than awaiting the receiver directly: the lock is then
+        // never held across an await, so a `start_pairing` arriving mid-hold
+        // isn't stuck behind this poll. A drained-but-open channel and a
+        // finished session look the same here — both simply wait out the hold,
+        // which is what keeps the GUI's poll loop from spinning.
+        let started = Instant::now();
+        while started.elapsed() < PAIRING_HOLD {
+            if let Some(update) = self
+                .pairing_rx
+                .lock()
+                .await
+                .as_mut()
+                .and_then(|rx| rx.try_recv().ok())
+            {
+                return Some(update);
             }
+            tokio::time::sleep(PAIRING_POLL_TICK).await;
         }
-        drop(guard);
-        tokio::time::sleep(PAIRING_HOLD).await;
         None
     }
 
