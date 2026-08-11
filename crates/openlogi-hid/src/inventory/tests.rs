@@ -594,11 +594,12 @@ fn probe_cache_roundtrips_through_disk() {
         "loaded entries restart the refresh clock"
     );
     assert!(
-        loaded.contains_key(&CacheKey::UnifyingSlot {
+        !loaded.contains_key(&CacheKey::UnifyingSlot {
             receiver_uid: "DA2699E1".into(),
             slot: 2,
         }),
-        "unifying entries persist too"
+        "unifying entries are slot-keyed, so a re-pair while the agent is \
+         down could hand them to a different device — never persisted"
     );
 }
 

@@ -7,8 +7,12 @@
 //! fully probed once keeps its identity across restarts, even on transports
 //! where a fresh walk is slow or failing (see `BOLT_SLOT_PROBE`).
 //!
-//! Only receiver-paired identities are persisted: a [`CacheKey::Direct`] is an
-//! OS-runtime node id with no cross-boot stability. Loaded entries get
+//! Only Bolt identities are persisted, because only they are keyed on the
+//! device's *own* identity (the pairing-register unit id), which no re-pairing
+//! can silently reassign. A [`CacheKey::UnifyingSlot`] is `receiver + slot`: a
+//! different device paired into that slot while the agent is down would
+//! inherit the previous occupant's probe on warm start. A [`CacheKey::Direct`]
+//! is an OS-runtime node id with no cross-boot stability. Loaded entries get
 //! `probed_tick = 0`, so the regular [`super::cache::REFRESH_TICKS`]
 //! self-healing pass re-walks them on schedule; until (and unless) that walk
 //! succeeds, the persisted data serves exactly like an in-memory cache hit.
@@ -24,7 +28,8 @@ use super::features::{BatteryProbe, ProbedFeatures};
 
 /// Bumped when the on-disk shape changes; a mismatched file is discarded
 /// (the cache is a warm-start optimization, not data anyone must keep).
-const SCHEMA_VERSION: u32 = 1;
+/// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct PersistedCache {
@@ -39,30 +44,22 @@ struct PersistedEntry {
     battery: Option<BatteryProbe>,
 }
 
-/// The persistable subset of [`CacheKey`] — everything except `Direct`.
-#[derive(Serialize, Deserialize)]
+/// The persistable subset of [`CacheKey`] — Bolt only (see the module docs).
+#[derive(Clone, Copy, Serialize, Deserialize)]
 enum PersistedKey {
     Bolt { unit_id: [u8; 4] },
-    UnifyingSlot { receiver_uid: String, slot: u8 },
 }
 
 fn persistable(key: &CacheKey) -> Option<PersistedKey> {
     match key {
         CacheKey::Bolt { unit_id } => Some(PersistedKey::Bolt { unit_id: *unit_id }),
-        CacheKey::UnifyingSlot { receiver_uid, slot } => Some(PersistedKey::UnifyingSlot {
-            receiver_uid: receiver_uid.clone(),
-            slot: *slot,
-        }),
-        CacheKey::Direct(_) => None,
+        CacheKey::UnifyingSlot { .. } | CacheKey::Direct(_) => None,
     }
 }
 
 fn runtime_key(key: PersistedKey) -> CacheKey {
     match key {
         PersistedKey::Bolt { unit_id } => CacheKey::Bolt { unit_id },
-        PersistedKey::UnifyingSlot { receiver_uid, slot } => {
-            CacheKey::UnifyingSlot { receiver_uid, slot }
-        }
     }
 }
 
