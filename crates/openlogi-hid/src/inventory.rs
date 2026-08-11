@@ -621,11 +621,14 @@ impl Enumerator {
             match outcome {
                 CacheOutcome::Fresh(key, cached) => {
                     seen_keys.insert(key.clone());
+                    // A completed full probe of a persistable device is worth
+                    // writing through; battery `Update`s are not (they would
+                    // rewrite the file every tick for a value that is re-read
+                    // live anyway), and neither are keys `persist::save`
+                    // filters out — dirtying on those would rewrite an
+                    // unchanged file on every refresh of a direct-only system.
+                    self.cache_dirty |= persist::is_persistable(&key);
                     self.cache.insert(key, cached);
-                    // A completed full probe is worth writing through; battery
-                    // `Update`s are not (they would rewrite the file every
-                    // tick for a value that is re-read live anyway).
-                    self.cache_dirty = true;
                 }
                 CacheOutcome::Update(key, cached) => {
                     seen_keys.insert(key.clone());
@@ -658,7 +661,7 @@ impl Enumerator {
             if *misses > CACHE_MISS_GRACE {
                 self.cache.remove(&key);
                 self.misses.remove(&key);
-                self.cache_dirty = true;
+                self.cache_dirty |= persist::is_persistable(&key);
             }
         }
     }

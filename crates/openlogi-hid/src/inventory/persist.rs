@@ -57,6 +57,13 @@ fn persistable(key: &CacheKey) -> Option<PersistedKey> {
     }
 }
 
+/// Whether a cache change under `key` affects the persisted file at all —
+/// gates `cache_dirty` so churn on never-persisted keys (e.g. a direct-only
+/// system's full refresh) doesn't rewrite an unchanged file every pass.
+pub(super) fn is_persistable(key: &CacheKey) -> bool {
+    persistable(key).is_some()
+}
+
 fn runtime_key(key: PersistedKey) -> CacheKey {
     match key {
         PersistedKey::Bolt { unit_id } => CacheKey::Bolt { unit_id },

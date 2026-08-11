@@ -37,6 +37,41 @@ fn direct_codename_prefers_hidpp_marketing_name_over_generic_os_name() {
 }
 
 #[test]
+fn cache_dirty_tracks_only_persistable_keys() {
+    // A system whose devices never persist (direct-only, or Unifying) must not
+    // rewrite probe-cache.json on every refresh pass: the file's content
+    // wouldn't change.
+    let mut e = Enumerator::default();
+    let unifying = CacheKey::UnifyingSlot {
+        receiver_uid: "DA2699E1".into(),
+        slot: 1,
+    };
+    e.apply_outcomes(vec![CacheOutcome::Fresh(unifying.clone(), cache_entry(0))]);
+    assert!(
+        !e.cache_dirty,
+        "non-persistable fresh probe dirtied the cache"
+    );
+
+    // Its eviction is equally invisible to the persisted file.
+    let nobody = HashSet::new();
+    for _ in 0..=CACHE_MISS_GRACE {
+        e.evict_unseen(&nobody);
+    }
+    assert!(!e.cache.contains_key(&unifying), "entry should be evicted");
+    assert!(!e.cache_dirty, "non-persistable eviction dirtied the cache");
+
+    // A Bolt probe is what the file stores — that one dirties it.
+    let bolt = CacheKey::Bolt {
+        unit_id: [1, 2, 3, 4],
+    };
+    e.apply_outcomes(vec![CacheOutcome::Fresh(bolt, cache_entry(0))]);
+    assert!(
+        e.cache_dirty,
+        "persistable fresh probe must dirty the cache"
+    );
+}
+
+#[test]
 fn cache_entry_survives_grace_then_evicts() {
     let mut e = Enumerator::default();
     let key = CacheKey::Bolt {
