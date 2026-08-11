@@ -91,12 +91,14 @@ pub const BOLT_PIDS: &[u16] = &[0xc548];
 /// Unifying, so it routes as [`DeviceRoute::Unifying`].
 pub const UNIFYING_PIDS: &[u16] = &[0xc52b, 0xc532, 0xc539];
 
-/// USB product IDs that identify Logitech Lightspeed nano receivers — the
-/// receivers bundled with G-series wireless mice such as the G305. They speak
-/// the same HID++ 1.0 receiver register protocol as Unifying, so they are
-/// enumerated, routed, and paired through the Unifying code path; only the
-/// user-facing receiver name (see [`receiver_display_name`]) differs.
-pub const LIGHTSPEED_PIDS: &[u16] = &[0xc53f];
+/// USB product IDs that identify Logitech Lightspeed receivers — the
+/// receivers bundled with G-series wireless devices. `0xc53f` is the nano
+/// receiver of wireless mice such as the G305; `0xc547` ships with newer
+/// G-series devices such as the G915 keyboard and the G502 X LIGHTSPEED.
+/// They speak the same HID++ 1.0 receiver register protocol as Unifying, so
+/// they are enumerated, routed, and paired through the Unifying code path;
+/// only the user-facing receiver name (see [`receiver_display_name`]) differs.
+pub const LIGHTSPEED_PIDS: &[u16] = &[0xc53f, 0xc547];
 
 /// Whether `product_id` is a receiver that speaks the Unifying HID++ 1.0
 /// register protocol — a Unifying receiver proper, or a protocol-compatible
@@ -336,6 +338,7 @@ mod tests {
     #[test]
     fn lightspeed_receiver_has_its_own_display_name() {
         assert_eq!(receiver_display_name(0xc53f), "Lightspeed Receiver");
+        assert_eq!(receiver_display_name(0xc547), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc52b), "Unifying Receiver");
     }
 
