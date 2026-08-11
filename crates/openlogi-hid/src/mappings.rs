@@ -4,6 +4,7 @@
 //! `inventory` purely to keep that file within size bounds.
 
 use hidpp::feature::battery_status::LegacyBatteryStatus as HidppLegacyBatteryStatus;
+use hidpp::feature::battery_voltage::VoltageChargingStatus as HidppVoltageChargingStatus;
 use hidpp::feature::device_type_and_name::DeviceType as HidppDeviceType;
 use hidpp::feature::unified_battery::{
     BatteryLevel as HidppBatteryLevel, BatteryStatus as HidppBatteryStatus,
@@ -135,6 +136,69 @@ pub(crate) fn map_legacy_battery_status(status: HidppLegacyBatteryStatus) -> Bat
     }
 }
 
+/// Map a `0x1001` voltage-feature charging status to our [`BatteryStatus`].
+pub(crate) fn map_voltage_battery_status(status: HidppVoltageChargingStatus) -> BatteryStatus {
+    match status {
+        HidppVoltageChargingStatus::Discharging => BatteryStatus::Discharging,
+        // The voltage feature splits "charging" by rate; fast charging is just
+        // "charging" to us, the same folding `0x1000`'s almost-full gets.
+        HidppVoltageChargingStatus::Charging | HidppVoltageChargingStatus::ChargingFast => {
+            BatteryStatus::Charging
+        }
+        HidppVoltageChargingStatus::ChargingSlow => BatteryStatus::ChargingSlow,
+        HidppVoltageChargingStatus::Full => BatteryStatus::Full,
+        // On external power but not charging: the firmware's charge-fault
+        // signal.
+        HidppVoltageChargingStatus::NotCharging => BatteryStatus::Error,
+        _ => BatteryStatus::Unknown,
+    }
+}
+
+/// Estimate a charge percentage from a `0x1001` battery voltage reading.
+///
+/// The feature reports millivolt, not percent, so the discharge curve is ours
+/// to model. The thresholds and linear interpolation between them are
+/// reverse-engineered, matching Solaar's `estimate_battery_level_percentage`
+/// table for the single-cell Li-Po batteries these devices carry; libratbag
+/// carries an equivalent mapping.
+pub(crate) fn voltage_battery_percentage(voltage_mv: u16) -> u8 {
+    /// Solaar's measured (millivolt, percent) discharge curve, descending.
+    const CURVE: [(u16, u8); 13] = [
+        (4186, 100),
+        (4067, 90),
+        (3989, 80),
+        (3922, 70),
+        (3859, 60),
+        (3811, 50),
+        (3778, 40),
+        (3751, 30),
+        (3717, 20),
+        (3671, 10),
+        (3646, 5),
+        (3579, 2),
+        (3500, 0),
+    ];
+
+    let (top_mv, top_percent) = CURVE[0];
+    if voltage_mv >= top_mv {
+        return top_percent;
+    }
+    for (&(high_mv, high_percent), &(low_mv, low_percent)) in CURVE.iter().zip(CURVE.iter().skip(1))
+    {
+        if voltage_mv >= low_mv {
+            // Linear interpolation inside the segment, rounded to nearest.
+            let span_mv = u32::from(high_mv - low_mv);
+            let span_percent = u32::from(high_percent - low_percent);
+            let above_low = u32::from(voltage_mv - low_mv);
+            let interpolated =
+                u32::from(low_percent) + (span_percent * above_low + span_mv / 2) / span_mv;
+            return u8::try_from(interpolated).unwrap_or(high_percent);
+        }
+    }
+    // Below the curve's floor: empty.
+    0
+}
+
 /// Derive a coarse [`BatteryLevel`] from a discharge percentage. The legacy
 /// `0x1000` feature reports a percentage but, unlike `0x1004`, no level bitmask,
 /// so the bucket is ours to pick.
@@ -154,7 +218,7 @@ pub(crate) fn legacy_battery_level_from_percentage(percentage: u8) -> BatteryLev
 mod tests {
     use super::{
         BatteryLevel, DeviceKind, UnifyingDeviceKind, legacy_battery_level_from_percentage,
-        map_unifying_kind, resolve_device_kind,
+        map_unifying_kind, resolve_device_kind, voltage_battery_percentage,
     };
 
     #[test]
@@ -215,6 +279,44 @@ mod tests {
             legacy_battery_level_from_percentage(0),
             BatteryLevel::Critical
         );
+    }
+
+    #[test]
+    fn voltage_percentage_clamps_at_the_curve_ends() {
+        assert_eq!(voltage_battery_percentage(4400), 100);
+        assert_eq!(voltage_battery_percentage(4186), 100);
+        assert_eq!(voltage_battery_percentage(3500), 0);
+        assert_eq!(voltage_battery_percentage(3200), 0);
+    }
+
+    #[test]
+    fn voltage_percentage_hits_the_curve_points_exactly() {
+        assert_eq!(voltage_battery_percentage(4067), 90);
+        assert_eq!(voltage_battery_percentage(3811), 50);
+        assert_eq!(voltage_battery_percentage(3646), 5);
+    }
+
+    #[test]
+    fn voltage_percentage_interpolates_between_curve_points() {
+        // Midway through the 3811 (50%) → 3778 (40%) segment.
+        let midpoint = voltage_battery_percentage(3795);
+        assert!(
+            (44..=46).contains(&midpoint),
+            "expected ~45%, got {midpoint}%"
+        );
+    }
+
+    #[test]
+    fn voltage_percentage_is_monotonic() {
+        let mut last = voltage_battery_percentage(3400);
+        for mv in 3400..=4300 {
+            let percent = voltage_battery_percentage(mv);
+            assert!(
+                percent >= last,
+                "{mv} mV mapped to {percent}%, below the {last}% of the previous millivolt"
+            );
+            last = percent;
+        }
     }
 
     #[test]

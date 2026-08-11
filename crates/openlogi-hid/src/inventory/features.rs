@@ -6,19 +6,20 @@ use hidpp::{
     feature::hires_wheel::HiResWheelFeature,
     feature::{
         CreatableFeature, battery_status::BatteryStatusFeature,
-        device_information::DeviceInformationFeature,
+        battery_voltage::BatteryVoltageFeature, device_information::DeviceInformationFeature,
         device_type_and_name::DeviceTypeAndNameFeature, gestures2::Gestures2Feature,
         unified_battery::UnifiedBatteryFeature,
     },
 };
 use openlogi_core::device::{
-    BatteryInfo, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
+    BatteryInfo, BatteryLevel, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
 };
 use tracing::debug;
 
 use crate::mappings::{
     legacy_battery_level_from_percentage, map_battery_level, map_battery_status, map_device_type,
-    map_legacy_battery_status, normalize_serial_number,
+    map_legacy_battery_status, map_voltage_battery_status, normalize_serial_number,
+    voltage_battery_percentage,
 };
 
 /// Everything a single device probe yields. Any field is `None` when the
@@ -42,10 +43,13 @@ pub(super) struct ProbedFeatures {
 /// Which battery feature a device exposes plus its runtime feature index. Newer
 /// devices answer the unified `0x1004`; MX2S-era ones only the legacy `0x1000`
 /// — the same enhanced-then-legacy split SmartShift has with `0x2111`/`0x2110`.
+/// G-series wireless gaming devices (G915, G903 LS) expose neither and report
+/// battery only as a voltage via `0x1001`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BatteryProbe {
     Unified(u8),
     Legacy(u8),
+    Voltage(u8),
 }
 
 /// Read just the battery by addressing its feature at the known runtime index —
@@ -83,17 +87,36 @@ pub(super) async fn read_battery(
                     status: map_legacy_battery_status(info.status),
                 })
         }
+        BatteryProbe::Voltage(feature_index) => {
+            let feature = BatteryVoltageFeature::new(Arc::clone(channel), slot, feature_index);
+            feature.get_battery_info().await.ok().map(|info| {
+                let percentage = voltage_battery_percentage(info.voltage_mv);
+                BatteryInfo {
+                    percentage,
+                    // The firmware's own critical marker outranks our
+                    // estimated bucket.
+                    level: if info.critical {
+                        BatteryLevel::Critical
+                    } else {
+                        legacy_battery_level_from_percentage(percentage)
+                    },
+                    status: map_voltage_battery_status(info.status),
+                }
+            })
+        }
     }
 }
 
 /// Locate a device's battery feature in an enumerated feature-ID table,
-/// preferring the unified `0x1004` and falling back to the legacy `0x1000`. The
-/// table is 1-based (index 0 is the implicit root feature, which enumeration
-/// omits).
+/// preferring the unified `0x1004`, then the legacy `0x1000`, then the
+/// voltage-only `0x1001` (which reports no percentage, so a direct source
+/// always outranks it). The table is 1-based (index 0 is the implicit root
+/// feature, which enumeration omits).
 pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Option<BatteryProbe> {
     // A feature table holds at most `u8::MAX` entries (its count is a u8), so a
     // 1-based index always fits.
     let mut legacy = None;
+    let mut voltage = None;
     for (pos, id) in ids.into_iter().enumerate() {
         // Stop gracefully past u8::MAX instead of `?`-returning None, which would
         // discard a `legacy` already found. (The table caps at 255, so unreachable.)
@@ -106,8 +129,11 @@ pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Optio
         if id == BatteryStatusFeature::ID && legacy.is_none() {
             legacy = Some(BatteryProbe::Legacy(index));
         }
+        if id == BatteryVoltageFeature::ID && voltage.is_none() {
+            voltage = Some(BatteryProbe::Voltage(index));
+        }
     }
-    legacy
+    legacy.or(voltage)
 }
 
 /// Read the marketing identity from HID++ `0x0005` when the device exposes it.
@@ -258,7 +284,7 @@ pub(super) async fn probe_features(
 mod tests {
     use hidpp::feature::{
         CreatableFeature as _, battery_status::BatteryStatusFeature,
-        unified_battery::UnifiedBatteryFeature,
+        battery_voltage::BatteryVoltageFeature, unified_battery::UnifiedBatteryFeature,
     };
 
     use super::{BatteryProbe, battery_feature_index};
@@ -286,6 +312,21 @@ mod tests {
     fn unified_battery_is_preferred_over_legacy() {
         let table = [BatteryStatusFeature::ID, 0x0001, UnifiedBatteryFeature::ID];
         assert_eq!(battery_feature_index(table), Some(BatteryProbe::Unified(3)));
+    }
+
+    #[test]
+    fn voltage_battery_is_found_when_it_is_the_only_source() {
+        // The G915 / G903 LS case: 0x1001 with neither 0x1000 nor 0x1004.
+        let table = [0x0001, BatteryVoltageFeature::ID, 0x2201];
+        assert_eq!(battery_feature_index(table), Some(BatteryProbe::Voltage(2)));
+    }
+
+    #[test]
+    fn direct_percentage_sources_outrank_the_voltage_estimate() {
+        let table = [BatteryVoltageFeature::ID, BatteryStatusFeature::ID];
+        assert_eq!(battery_feature_index(table), Some(BatteryProbe::Legacy(2)));
+        let table = [BatteryVoltageFeature::ID, UnifiedBatteryFeature::ID];
+        assert_eq!(battery_feature_index(table), Some(BatteryProbe::Unified(2)));
     }
 
     #[test]

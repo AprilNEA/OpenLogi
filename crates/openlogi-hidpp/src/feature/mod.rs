@@ -11,6 +11,7 @@ use crate::{
 pub mod adjustable_dpi;
 pub mod backlight;
 pub mod battery_status;
+pub mod battery_voltage;
 pub mod brightness_control;
 pub mod change_host;
 pub mod color_led_effects;
