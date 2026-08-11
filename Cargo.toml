@@ -120,4 +120,3 @@ strip = "symbols"
 # SDK). See third_party/tarpc/README.md.
 [patch.crates-io]
 tarpc = { path = "third_party/tarpc" }
-
