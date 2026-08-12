@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 
+use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 
 use super::cache::{CacheKey, Cached};
@@ -70,10 +71,11 @@ fn runtime_key(key: PersistedKey) -> CacheKey {
     }
 }
 
-/// Write the persistable subset of `cache` to `path`, atomically via a sibling
-/// temp file so a crash mid-write can't leave a torn file. Errors are the
-/// caller's to log — persistence is best-effort and must never fail
-/// enumeration.
+/// Write the persistable subset of `cache` to `path`, atomically via
+/// [`AtomicWriteFile`] so a crash mid-write can't leave a torn file (and the
+/// replace works on Windows, where a plain rename onto an existing file
+/// fails). Errors are the caller's to log — persistence is best-effort and
+/// must never fail enumeration.
 pub(super) fn save(path: &Path, cache: &HashMap<CacheKey, Cached>) -> io::Result<()> {
     let entries: Vec<PersistedEntry> = cache
         .iter()
@@ -101,9 +103,9 @@ pub(super) fn save(path: &Path, cache: &HashMap<CacheKey, Cached>) -> io::Result
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, path)
+    let mut out = AtomicWriteFile::open(path)?;
+    io::Write::write_all(&mut out, &json)?;
+    out.commit()
 }
 
 /// Load a previously saved cache. Any failure — missing file, unreadable

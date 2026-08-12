@@ -5166,6 +5166,7 @@ name = "openlogi-hid"
 version = "0.6.26"
 dependencies = [
  "async-hid",
+ "atomic-write-file",
  "futures-concurrency",
  "futures-lite",
  "num_enum",
