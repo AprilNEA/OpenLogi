@@ -12,11 +12,11 @@
 //! over every component, and [`verify`] reads it back before anything signs,
 //! packages or notarizes the result.
 
-use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use clap::ValueEnum;
+use strum::{Display, VariantArray};
 
 use super::{read_plist_string, stamp_plist_strings};
 
@@ -29,7 +29,11 @@ pub(crate) const APP_BUNDLE_ID: &str = "org.openlogi.openlogi";
 const ICON_STEM: &str = "AppIcon";
 
 /// Which identity family a bundle carries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+///
+/// `Display` renders the same spelling `--channel` accepts: clap renders the
+/// flag's default through it and parses the result back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Display)]
+#[strum(serialize_all = "kebab-case")]
 pub(crate) enum Channel {
     /// What ships. Users' permission grants and config directory are keyed to it.
     Production,
@@ -39,32 +43,26 @@ pub(crate) enum Channel {
     Dev,
 }
 
-impl fmt::Display for Channel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Production => "production",
-            Self::Dev => "dev",
-        })
-    }
-}
-
 /// A bundle whose identity xtask owns: the app plus each nested login-item
 /// helper it embeds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// `VariantArray` supplies `VARIANTS`, so every pass over the bundle covers a
+/// newly added component without anyone remembering to extend a list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Display, VariantArray)]
 pub(crate) enum Component {
     /// `OpenLogi.app` itself.
+    #[strum(serialize = "app")]
     App,
     /// The always-on agent: the process that owns the hook and holds the
     /// Accessibility grant.
+    #[strum(serialize = "agent helper")]
     Agent,
     /// The Actions Ring renderer.
+    #[strum(serialize = "overlay helper")]
     Overlay,
 }
 
 impl Component {
-    /// Every component a finished bundle contains.
-    pub(crate) const ALL: [Self; 3] = [Self::App, Self::Agent, Self::Overlay];
-
     /// Where this component lives inside the app bundle; `None` is the app itself.
     pub(super) fn nested_bundle(self) -> Option<&'static str> {
         match self {
@@ -105,16 +103,6 @@ impl Component {
     }
 }
 
-impl fmt::Display for Component {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::App => "app",
-            Self::Agent => "agent helper",
-            Self::Overlay => "overlay helper",
-        })
-    }
-}
-
 /// What one component is called on one channel.
 pub(crate) struct Identity {
     /// `CFBundleIdentifier` — what TCC and the config profile key off.
@@ -152,7 +140,7 @@ fn identity_entries(identity: &Identity) -> [(&str, &str); 3] {
 /// Runs before codesigning, which seals the `Info.plist` it stamps.
 pub(crate) fn stamp(app: &Path, channel: Channel) -> Result<()> {
     println!("==> bundle identity ({channel})");
-    for component in Component::ALL {
+    for &component in Component::VARIANTS {
         let identity = channel.identity(component);
         stamp_plist_strings(&component.info_plist(app), &identity_entries(&identity))?;
         println!(
@@ -168,7 +156,7 @@ pub(crate) fn stamp(app: &Path, channel: Channel) -> Result<()> {
 /// This is the gate a distribution artifact passes before it is signed or
 /// packaged, so a bundle built for local use can never be shipped by mistake.
 pub(crate) fn verify(app: &Path, channel: Channel) -> Result<()> {
-    for component in Component::ALL {
+    for &component in Component::VARIANTS {
         let expected = channel.identity(component);
         let plist = component.info_plist(app);
         for (key, want) in identity_entries(&expected) {
@@ -188,7 +176,7 @@ pub(crate) fn verify(app: &Path, channel: Channel) -> Result<()> {
 /// no surface that lists OpenLogi's processes — System Settings' privacy panes,
 /// Login Items — shows a blank icon for one of them.
 pub(crate) fn verify_icons(app: &Path) -> Result<()> {
-    for component in Component::ALL {
+    for &component in Component::VARIANTS {
         let icon = component.icon(app);
         if !icon.is_file() {
             bail!(
@@ -220,7 +208,7 @@ mod tests {
     /// A bundle skeleton with an empty `Info.plist` per component.
     fn bundle() -> tempfile::TempDir {
         let app = tempfile::tempdir().unwrap();
-        for component in Component::ALL {
+        for &component in Component::VARIANTS {
             let plist = component.info_plist(app.path());
             fs_err::create_dir_all(plist.parent().unwrap()).unwrap();
             plist::Value::Dictionary(plist::Dictionary::new())
@@ -246,12 +234,12 @@ mod tests {
 
     #[test]
     fn a_dev_bundle_can_never_collide_with_a_shipped_one() {
-        let shipped: Vec<Identity> = Component::ALL
-            .into_iter()
-            .map(|component| Channel::Production.identity(component))
+        let shipped: Vec<Identity> = Component::VARIANTS
+            .iter()
+            .map(|&component| Channel::Production.identity(component))
             .collect();
 
-        for component in Component::ALL {
+        for &component in Component::VARIANTS {
             let dev = Channel::Dev.identity(component);
             assert!(
                 shipped.iter().all(|other| other.bundle_id != dev.bundle_id),
@@ -268,9 +256,9 @@ mod tests {
 
     #[test]
     fn shipped_identities_are_distinct_per_component() {
-        let ids: Vec<String> = Component::ALL
-            .into_iter()
-            .map(|component| Channel::Production.identity(component).bundle_id)
+        let ids: Vec<String> = Component::VARIANTS
+            .iter()
+            .map(|&component| Channel::Production.identity(component).bundle_id)
             .collect();
         for (index, id) in ids.iter().enumerate() {
             assert!(

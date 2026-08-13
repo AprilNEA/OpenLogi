@@ -497,7 +497,23 @@ fn quoted_identity(line: &str) -> Option<String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
+    use strum::VariantArray as _;
+
     use super::*;
+
+    /// Identity work iterates every `Component`, so a component added without a
+    /// `Helper` to embed it would only surface as a stamping failure during a
+    /// real build.
+    #[test]
+    fn every_nested_component_is_embedded_by_a_helper() {
+        for &component in Component::VARIANTS {
+            assert!(
+                component == Component::App
+                    || HELPERS.iter().any(|helper| helper.component == component),
+                "{component} has no Helper entry to embed it"
+            );
+        }
+    }
 
     fn app_with_binaries(binaries: &[&str]) -> tempfile::TempDir {
         let app = tempfile::tempdir().unwrap();
