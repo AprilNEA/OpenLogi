@@ -42,7 +42,11 @@ fn cached_feature(channel: &Arc<HidppChannel>, index: u8) -> Option<Arc<HapticFe
     (*ptr == Arc::as_ptr(channel) as usize && *idx == index).then(|| Arc::clone(feature))
 }
 
-fn store_cached_feature(channel: &Arc<HidppChannel>, index: u8, feature: &Arc<HapticFeedbackFeature>) {
+fn store_cached_feature(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    feature: &Arc<HapticFeedbackFeature>,
+) {
     if let Ok(mut guard) = CACHED_FEATURE.lock() {
         *guard = Some((Arc::as_ptr(channel) as usize, index, Arc::clone(feature)));
     }

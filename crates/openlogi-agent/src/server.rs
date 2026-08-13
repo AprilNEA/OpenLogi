@@ -296,16 +296,27 @@ pub struct RingHapticPlayer {
 impl RingHapticPlayer {
     /// Spawn the single-flight worker. Must be called from a tokio runtime.
     pub fn spawn(shared: SharedRuntime) -> Self {
-        let (tx, mut rx) =
-            tokio::sync::watch::channel::<Option<(DeviceRoute, HapticWaveform, &'static str)>>(
-                None,
-            );
+        let (tx, mut rx) = tokio::sync::watch::channel::<
+            Option<(DeviceRoute, HapticWaveform, &'static str)>,
+        >(None);
         tokio::spawn(async move {
+            let mut consecutive_failures = 0u32;
+            let mut cooldown_until: Option<std::time::Instant> = None;
             while rx.changed().await.is_ok() {
                 let request = rx.borrow_and_update().clone();
                 let Some((route, waveform, interaction)) = request else {
                     continue;
                 };
+                // Circuit breaker: when replies keep getting lost, further
+                // attempts only keep the channel saturated (and starve
+                // unrelated writes). Skip haptics for a short cool-down so
+                // the pipe drains; feedback resumes on the next buzz after.
+                if let Some(until) = cooldown_until {
+                    if std::time::Instant::now() < until {
+                        continue;
+                    }
+                    cooldown_until = None;
+                }
                 // A busy receiver drops HID++ replies under concurrent
                 // pointer traffic, so a single attempt fails exactly when the
                 // user is actively hovering. Retry a couple of times — unless
@@ -321,11 +332,27 @@ impl RingHapticPlayer {
                     )
                     .await
                     {
-                        Ok(()) => break,
+                        Ok(()) => {
+                            consecutive_failures = 0;
+                            break;
+                        }
                         Err(error) => {
                             let superseded = rx.has_changed().unwrap_or(true);
                             if attempt == 3 || superseded {
-                                warn!(%error, interaction, attempt, superseded, "Actions Ring haptic failed");
+                                consecutive_failures += 1;
+                                if consecutive_failures >= 3 {
+                                    cooldown_until = Some(
+                                        std::time::Instant::now()
+                                            + std::time::Duration::from_secs(4),
+                                    );
+                                    consecutive_failures = 0;
+                                    info!(
+                                        interaction,
+                                        "ring haptics cooling down after repeated HID++ loss"
+                                    );
+                                } else {
+                                    warn!(%error, interaction, attempt, superseded, "Actions Ring haptic failed");
+                                }
                                 break;
                             }
                         }
@@ -337,7 +364,12 @@ impl RingHapticPlayer {
     }
 
     /// Queue `waveform`, replacing any not-yet-played request.
-    fn play(&self, route: Option<DeviceRoute>, waveform: HapticWaveform, interaction: &'static str) {
+    fn play(
+        &self,
+        route: Option<DeviceRoute>,
+        waveform: HapticWaveform,
+        interaction: &'static str,
+    ) {
         let Some(route) = route else {
             return;
         };
