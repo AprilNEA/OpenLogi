@@ -376,17 +376,26 @@ impl HidppChannel {
                             res = raw_channel.read_report(&mut buf).fuse() => res
                         };
 
-                        let Ok(len) = res else {
-                            continue;
+                        let len = match res {
+                            Ok(len) => len,
+                            Err(error) => {
+                                // A silently erroring handle is indistinguishable
+                                // from a deaf one without this line.
+                                trace!(?error, "read_report error");
+                                continue;
+                            }
                         };
 
                         let Some(msg) = HidppMessage::read_raw(&buf[..len]) else {
+                            trace!(len, "report not HID++ — dropped");
                             continue;
                         };
 
                         let mut matched = false;
+                        let pending_count;
                         {
                             let mut msgs = pending_messages.lock().unwrap();
+                            pending_count = msgs.len();
                             if let Some(pos) =
                                 msgs.iter().position(|elem| (elem.response_predicate)(&msg))
                             {
@@ -395,6 +404,14 @@ impl HidppChannel {
                                 matched = true;
                             }
                         }
+
+                        trace!(
+                            len,
+                            matched,
+                            pending_count,
+                            payload = format!("{:02x?}", &buf[..len.min(16)]),
+                            "raw report received"
+                        );
 
                         let listeners: Vec<_> = message_listeners
                             .lock()
