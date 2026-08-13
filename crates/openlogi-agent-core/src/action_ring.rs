@@ -321,7 +321,10 @@ mod tests {
 
         // Second press: dismissed via an empty invocation on the same poll.
         assert!(manager.dismiss_active());
-        let dismissal = manager.next_invocation().await.expect("dismissal queued");
+        let dismissal = manager
+            .next_invocation()
+            .await
+            .unwrap_or_else(|| panic!("dismissal queued"));
         assert!(dismissal.slots.is_empty());
         assert_ne!(dismissal.session_id, opened.session_id);
 
