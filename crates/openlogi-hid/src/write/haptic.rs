@@ -27,15 +27,58 @@ async fn feature_on_channel(
     open_feature::<HapticFeedbackFeature>(&mut device).await
 }
 
+/// Last successfully-opened haptic feature, keyed by channel identity and
+/// device index. Haptic plays are fired per ring hover, and the open sequence
+/// (device ping + feature lookup) costs two extra HID++ round-trips per play —
+/// on a busy receiver each round-trip is a fresh chance to lose the reply
+/// under concurrent pointer traffic. One entry suffices: haptics come from
+/// one pointing device at a time.
+static CACHED_FEATURE: std::sync::Mutex<Option<(usize, u8, Arc<HapticFeedbackFeature>)>> =
+    std::sync::Mutex::new(None);
+
+fn cached_feature(channel: &Arc<HidppChannel>, index: u8) -> Option<Arc<HapticFeedbackFeature>> {
+    let guard = CACHED_FEATURE.lock().ok()?;
+    let (ptr, idx, feature) = guard.as_ref()?;
+    (*ptr == Arc::as_ptr(channel) as usize && *idx == index).then(|| Arc::clone(feature))
+}
+
+fn store_cached_feature(channel: &Arc<HidppChannel>, index: u8, feature: &Arc<HapticFeedbackFeature>) {
+    if let Ok(mut guard) = CACHED_FEATURE.lock() {
+        *guard = Some((Arc::as_ptr(channel) as usize, index, Arc::clone(feature)));
+    }
+}
+
+fn clear_cached_feature() {
+    if let Ok(mut guard) = CACHED_FEATURE.lock() {
+        *guard = None;
+    }
+}
+
 /// Play a waveform immediately on an open capture channel.
+///
+/// Reuses the cached feature handle when it belongs to this channel (one
+/// round-trip); any error invalidates the cache and the play is retried once
+/// through a fresh open, so a rebuilt channel or stale index self-heals.
 pub async fn play_haptic_on(
     shared: &SharedChannel,
     waveform: HapticWaveform,
 ) -> Result<(), WriteError> {
-    let feature = feature_on_channel(shared.channel(), shared.device_index()).await?;
-    feature.play(waveform).await.map_err(|error| {
+    let channel = shared.channel();
+    let index = shared.device_index();
+    if let Some(feature) = cached_feature(channel, index) {
+        if feature.play(waveform).await.is_ok() {
+            return Ok(());
+        }
+        clear_cached_feature();
+    }
+    let feature = feature_on_channel(channel, index).await?;
+    let result = feature.play(waveform).await.map_err(|error| {
         classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
-    })
+    });
+    if result.is_ok() {
+        store_cached_feature(channel, index, &feature);
+    }
+    result
 }
 
 /// Play a waveform immediately by route.

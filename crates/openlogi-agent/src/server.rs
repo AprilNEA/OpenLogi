@@ -306,16 +306,30 @@ impl RingHapticPlayer {
                 let Some((route, waveform, interaction)) = request else {
                     continue;
                 };
-                if let Err(error) = hardware::play_haptic(
-                    &shared.capture_channel,
-                    &shared.channel_registry,
-                    &shared.receiver_access,
-                    &route,
-                    waveform,
-                )
-                .await
-                {
-                    warn!(%error, interaction, "Actions Ring haptic failed");
+                // A busy receiver drops HID++ replies under concurrent
+                // pointer traffic, so a single attempt fails exactly when the
+                // user is actively hovering. Retry a couple of times — unless
+                // a newer request superseded this one, in which case the
+                // stale buzz is worthless and the newest plays instead.
+                for attempt in 1..=3u8 {
+                    match hardware::play_haptic(
+                        &shared.capture_channel,
+                        &shared.channel_registry,
+                        &shared.receiver_access,
+                        &route,
+                        waveform,
+                    )
+                    .await
+                    {
+                        Ok(()) => break,
+                        Err(error) => {
+                            let superseded = rx.has_changed().unwrap_or(true);
+                            if attempt == 3 || superseded {
+                                warn!(%error, interaction, attempt, superseded, "Actions Ring haptic failed");
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         });
