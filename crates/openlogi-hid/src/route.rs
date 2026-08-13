@@ -109,6 +109,13 @@ pub fn speaks_unifying_protocol(product_id: u16) -> bool {
     UNIFYING_PIDS.contains(&product_id) || LIGHTSPEED_PIDS.contains(&product_id)
 }
 
+/// Whether `product_id` is a known Logitech receiver dongle of any family
+/// (Bolt, Unifying, or Lightspeed).
+#[must_use]
+pub fn is_receiver_pid(product_id: u16) -> bool {
+    BOLT_PIDS.contains(&product_id) || speaks_unifying_protocol(product_id)
+}
+
 /// Human-readable name for a receiver identified by `product_id`, used to label
 /// it in the inventory. Lightspeed receivers share the Unifying protocol path
 /// but are surfaced under their own name.

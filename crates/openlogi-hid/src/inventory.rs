@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 
 use crate::channel_registry::ChannelRegistry;
 use crate::node_ledger::NodeLedger;
-use crate::route::DeviceRoute;
+use crate::route::{DeviceRoute, is_receiver_pid};
 use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
 mod cache;
@@ -56,6 +56,26 @@ const MAX_BOLT_SLOTS: u8 = 6;
 /// re-asks for per entry. At 6 s one lost report consumed the whole budget and
 /// the walk was abandoned mid-table, surfacing as a mouse that never appeared.
 const PROBE_BUDGET: Duration = Duration::from_secs(25);
+
+/// Probe budget for receiver nodes (Bolt/Unifying/Lightspeed dongles).
+///
+/// The 25 s [`PROBE_BUDGET`] is sized for Bluetooth-direct feature walks that
+/// receivers never perform. Keeping the receiver budget tighter matters
+/// because a full-budget timeout is also the detection path for a channel
+/// whose input-report delivery died (observed on macOS with concurrent opens
+/// of the same node: requests keep being written and answered, but the
+/// replies are delivered only to the other open handle). Until the channel is
+/// replaced every write on it stalls — DPI, SmartShift, ring haptics — so
+/// this budget bounds that outage.
+///
+/// It must still fit a receiver probe's real worst case, which is NOT the
+/// millisecond register reads but a paired device's full HID++ 2.0 feature
+/// walk: 1.5 s arrival drain + the sequential pairing-register pass + one
+/// slot's [`BOLT_SLOT_PROBE`] (10 s). 6 s proved too tight — a legitimate
+/// deep walk tripped the dead-delivery eviction, the surfaced-empty inventory
+/// tore down capture plans, and a pinned stale channel Arc then deadlocked
+/// recovery (dead buttons until restart). 13 s clears the honest worst case.
+const RECEIVER_PROBE_BUDGET: Duration = Duration::from_secs(13);
 
 /// Per-slot budget for the HID++ 2.0 feature walk on a Unifying paired device.
 ///
@@ -528,12 +548,23 @@ impl Enumerator {
                 .into_iter()
                 .map(|(info, channel)| async move {
                     let node = info.id.clone();
+                    // Receivers answer register reads over local USB in
+                    // milliseconds; only direct (esp. Bluetooth) devices need
+                    // the long feature-walk budget. A tight receiver budget
+                    // bounds the outage when its channel's input-report
+                    // delivery dies (writes accepted, replies never seen —
+                    // observed on macOS with concurrent opens of one node).
+                    let budget = if is_receiver_pid(info.product_id) {
+                        RECEIVER_PROBE_BUDGET
+                    } else {
+                        PROBE_BUDGET
+                    };
                     let probe = timeout(
-                        PROBE_BUDGET,
+                        budget,
                         probe_one(info, Arc::clone(&channel), cache, tick),
                     )
                     .await;
-                    (node, channel, probe)
+                    (node, channel, probe, budget)
                 })
                 .collect::<Vec<_>>()
                 .join()
@@ -548,22 +579,27 @@ impl Enumerator {
         // governed by `probe.healthy`.
         let mut all_complete = true;
         let mut all_healthy = true;
-        for (node, channel, result) in results {
+        for (node, channel, result, budget) in results {
+            let mut budget_timeout = false;
             let probe = if let Ok(probe) = result {
                 probe
             } else {
                 // The probe burned the whole budget — an asleep direct device,
-                // or a channel whose read loop parked on a dead handle (see
-                // `AsyncHidChannel::read_report`). Either way: "couldn't
+                // or a channel whose input-report delivery died (writes
+                // accepted, replies never seen). Either way: "couldn't
                 // check", not "nothing there".
-                warn!(budget = ?PROBE_BUDGET, "device probe timed out — treating as a failed probe");
+                warn!(?budget, "device probe timed out — treating as a failed probe");
+                budget_timeout = true;
                 NodeProbe::failed()
             };
             all_complete &= probe.complete;
             all_healthy &= probe.healthy;
             outcomes.extend(probe.outcomes);
             let settled = self.ledger.settle(&node, probe.healthy, probe.inventory);
-            if settled.evict_channel {
+            // A full-budget timeout is the dead-delivery signature — such a
+            // channel never recovers on its own, so don't wait for the
+            // ledger's consecutive-failure threshold to replace it.
+            if settled.evict_channel || budget_timeout {
                 if let Some(registry) = &self.registry {
                     registry.remove_node(&node);
                 }
