@@ -215,15 +215,24 @@ jobs:
             cargo run -p xtask -- macos package
           fi
 
+      # xtask stamps and verifies this itself; re-checking the artifact here is
+      # deliberate redundancy, because a bundle that ships with the `.dev`
+      # identity voids every user's permission grants and moves them to a
+      # different config directory (releases 0.6.24–0.6.26).
       - name: Verify production bundle identities
         run: |
           set -euo pipefail
           app="target/release/bundle/osx/OpenLogi.app"
-          helper="$app/Contents/Library/LoginItems/OpenLogiAgent.app"
-          overlay="$app/Contents/Library/LoginItems/OpenLogiOverlay.app"
-          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = "org.openlogi.openlogi" ]
-          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$helper/Contents/Info.plist")" = "org.openlogi.agent" ]
-          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$overlay/Contents/Info.plist")" = "org.openlogi.overlay" ]
+          plist() { /usr/libexec/PlistBuddy -c "Print :$2" "$1/Contents/Info.plist"; }
+          check() { # bundle expected-id expected-name
+            [ "$(plist "$1" CFBundleIdentifier)" = "$2" ]
+            [ "$(plist "$1" CFBundleName)" = "$3" ]
+            [ "$(plist "$1" CFBundleDisplayName)" = "$3" ]
+            [ -f "$1/Contents/Resources/AppIcon.icns" ]
+          }
+          check "$app" "org.openlogi.openlogi" "OpenLogi"
+          check "$app/Contents/Library/LoginItems/OpenLogiAgent.app" "org.openlogi.agent" "OpenLogi Agent"
+          check "$app/Contents/Library/LoginItems/OpenLogiOverlay.app" "org.openlogi.overlay" "OpenLogi Overlay"
 
       - name: Verify signed app bundle
         if: ${{ inputs.sign }}

@@ -79,6 +79,14 @@ Packaged local dev bundles (`cargo run` and
 GUI and agent from sharing the installed production app's Accessibility grant,
 single-instance lock, config, or IPC socket.
 
+Those identifiers are a channel, not a guess from the build type:
+`macos bundle` takes `--channel dev|production` (dev by default) and verifies
+what it stamped, and `macos dmg` refuses a non-production bundle once it is
+given a signing identity. Reproduce the shipped layout locally with
+`--channel production`, but don't sign and run it — it would take over the
+installed app's grants and config, which is exactly what releases
+0.6.24–0.6.26 did in reverse.
+
 To install the CLI binary on `PATH`:
 
 ```sh

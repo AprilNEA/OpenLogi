@@ -9,6 +9,8 @@
   <string>OpenLogi Overlay</string>
   <key>CFBundleExecutable</key>
   <string>openlogi-overlay</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
   <string>org.openlogi.overlay</string>
   <key>CFBundlePackageType</key>
