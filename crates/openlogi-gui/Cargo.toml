@@ -64,8 +64,10 @@ embed-resource = "3.0.9"
 # `Retained<T>`-owned AppKit bindings so the status-item code can't leak (#99).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance", "NSWindow"] }
+objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance", "NSWindow", "NSEvent", "block2"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSProcessInfo"] }
+# NSEvent global-monitor handlers are ObjC blocks (overlay click-away dismissal).
+block2 = { workspace = true }
 
 # unsafe_code stays denied; the status-item/tray modules opt in locally with
 # #[expect(unsafe_code)] for the few objc2 calls (init-with-action, set-target,

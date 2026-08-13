@@ -247,6 +247,7 @@ fn main() -> Result<()> {
     let app = gpui_platform::application().with_assets(app_assets::AppAssets);
     app.run(move |cx| {
         overlay_platform::configure_application();
+        spawn_click_away_dismissal(cx);
         cx.spawn(async move |cx| {
             while let Some(invocation) = invocations.recv().await {
                 rust_i18n::set_locale(locale::resolve(invocation.language.as_deref()));
@@ -287,6 +288,48 @@ fn main() -> Result<()> {
         .detach();
     });
     Ok(())
+}
+
+/// Dismiss a showing ring when the user clicks anywhere off it, the way a
+/// transient popup closes on click-away — without swallowing that click.
+///
+/// The ring window only covers its own 360×360 bounds, so an outside click
+/// never reaches the window's handlers. A global monitor closes the gap:
+/// macOS only delivers it events routed to *other* applications, so clicks on
+/// the ring itself can't race the slot/cancel handlers, and monitors can't
+/// consume events, so the click lands where the user aimed it. The handler
+/// only pings a channel; window teardown runs on the GPUI side, where a
+/// re-entrant AppKit callback can't find the App borrowed.
+fn spawn_click_away_dismissal(cx: &mut gpui::App) {
+    let (clicks_tx, mut clicks) = mpsc::unbounded_channel::<()>();
+    let monitor = overlay_platform::watch_clicks_outside(move || {
+        let _ = clicks_tx.send(());
+    });
+    if monitor.is_none() && cfg!(target_os = "macos") {
+        warn!(
+            "could not install the click-away monitor; the ring will not dismiss on outside clicks"
+        );
+    }
+    cx.spawn(async move |cx| {
+        // The native monitor lives (and drops) with this task.
+        let _monitor = monitor;
+        while clicks.recv().await.is_some() {
+            cx.update(|cx| {
+                for handle in cx.windows() {
+                    let Some(ring) = handle.downcast::<RingView>() else {
+                        continue;
+                    };
+                    let _ = ring.update(cx, |view, window, _| {
+                        let _ = view.commands.send(OverlayCommand::Cancel {
+                            session_id: view.invocation.session_id,
+                        });
+                        window.remove_window();
+                    });
+                }
+            });
+        }
+    })
+    .detach();
 }
 
 #[allow(

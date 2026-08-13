@@ -83,6 +83,9 @@ evdev = "0.13"
 objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"
 objc2-foundation = "0.3.2"
+# The block ABI crate objc2's generated bindings use for handler arguments;
+# same unified-version rationale as the objc2 crates above.
+block2 = "0.6.2"
 
 # gpui / gpui_platform track zed's default branch, matching how gpui-component
 # declares them (an explicit rev here would fork the git source and conflict).

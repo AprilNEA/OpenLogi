@@ -5152,6 +5152,7 @@ version = "0.6.26"
 dependencies = [
  "anyhow",
  "backon",
+ "block2 0.6.2",
  "disclaim",
  "embed-resource",
  "fluent-langneg",
