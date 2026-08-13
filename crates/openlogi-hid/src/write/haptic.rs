@@ -58,6 +58,17 @@ fn clear_cached_feature() {
     }
 }
 
+/// Drop the cached haptic feature handle (and with it the `Arc<HidppChannel>`
+/// it pins). MUST be called whenever route resolution fails: the inventory
+/// enumerator only reopens a retired node once every clone of its channel has
+/// dropped (`Arc::strong_count == 1`), and a stale cache entry otherwise
+/// deadlocks recovery — the node can't reopen because the cache pins the old
+/// channel, and the cache is never invalidated because route lookups fail
+/// before any haptic I/O touches it.
+pub fn clear_haptic_feature_cache() {
+    clear_cached_feature();
+}
+
 /// Ensure the firmware haptic engine is armed: enabled, with a non-zero
 /// intensity. Returns `true` when a repair write was needed.
 ///

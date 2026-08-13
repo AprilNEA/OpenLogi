@@ -73,7 +73,15 @@ fn authoritative_channel(
         |channel| registry.is_current(channel),
         || registry.lookup(route),
     )
-    .ok_or(WriteError::DeviceNotFound)
+    .ok_or_else(|| {
+        // Route resolution failing means every known channel for this route is
+        // gone — a cached haptic feature handle pinning one of them would
+        // deadlock the enumerator's reopen (it waits for the old channel's
+        // last Arc to drop) while itself never being invalidated, because no
+        // haptic I/O reaches the cache without a resolvable route.
+        openlogi_hid::clear_haptic_feature_cache();
+        WriteError::DeviceNotFound
+    })
 }
 
 fn choose_authoritative<T>(
