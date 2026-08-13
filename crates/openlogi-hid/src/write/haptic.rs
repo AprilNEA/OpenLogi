@@ -33,28 +33,91 @@ async fn feature_on_channel(
 /// on a busy receiver each round-trip is a fresh chance to lose the reply
 /// under concurrent pointer traffic. One entry suffices: haptics come from
 /// one pointing device at a time.
-static CACHED_FEATURE: std::sync::Mutex<Option<(usize, u8, Arc<HapticFeedbackFeature>)>> =
-    std::sync::Mutex::new(None);
+///
+/// Stores are epoch-guarded: opening the feature awaits HID++ round-trips, and
+/// the enumerator may retire the channel (and clear this cache) while that
+/// open is in flight. An unguarded store would then re-pin the retired
+/// channel's `Arc` after the retire-time clear ran — recreating the reopen
+/// deadlock the clear exists to break. Every clear bumps the epoch, and a
+/// store whose resolution began before the clear is discarded.
+struct EpochGuarded<T> {
+    epoch: u64,
+    entry: Option<(usize, u8, T)>,
+}
+
+impl<T: Clone> EpochGuarded<T> {
+    const fn new() -> Self {
+        Self {
+            epoch: 0,
+            entry: None,
+        }
+    }
+
+    fn get(&self, ptr: usize, index: u8) -> Option<T> {
+        let (entry_ptr, entry_index, value) = self.entry.as_ref()?;
+        (*entry_ptr == ptr && *entry_index == index).then(|| value.clone())
+    }
+
+    /// Store `value`, unless a clear ran since `epoch` was snapshotted.
+    fn store(&mut self, epoch: u64, ptr: usize, index: u8, value: T) {
+        if self.epoch == epoch {
+            self.entry = Some((ptr, index, value));
+        }
+    }
+
+    fn clear(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.entry = None;
+    }
+
+    /// Drop the entry if it belongs to `ptr`. Always bumps the epoch: the
+    /// caller is retiring that channel, so a store racing this clear must be
+    /// discarded even when nothing (or another channel's entry) is cached yet.
+    fn clear_for(&mut self, ptr: usize) {
+        self.epoch = self.epoch.wrapping_add(1);
+        if self
+            .entry
+            .as_ref()
+            .is_some_and(|(entry_ptr, _, _)| *entry_ptr == ptr)
+        {
+            self.entry = None;
+        }
+    }
+}
+
+static CACHED_FEATURE: std::sync::Mutex<EpochGuarded<Arc<HapticFeedbackFeature>>> =
+    std::sync::Mutex::new(EpochGuarded::new());
+
+/// Snapshot the cache epoch before starting a feature open; pass the result to
+/// [`store_cached_feature`] so a clear that lands mid-open wins over the store.
+fn cache_epoch() -> u64 {
+    CACHED_FEATURE.lock().map_or(0, |guard| guard.epoch)
+}
 
 fn cached_feature(channel: &Arc<HidppChannel>, index: u8) -> Option<Arc<HapticFeedbackFeature>> {
     let guard = CACHED_FEATURE.lock().ok()?;
-    let (ptr, idx, feature) = guard.as_ref()?;
-    (*ptr == Arc::as_ptr(channel) as usize && *idx == index).then(|| Arc::clone(feature))
+    guard.get(Arc::as_ptr(channel) as usize, index)
 }
 
 fn store_cached_feature(
+    epoch: u64,
     channel: &Arc<HidppChannel>,
     index: u8,
     feature: &Arc<HapticFeedbackFeature>,
 ) {
     if let Ok(mut guard) = CACHED_FEATURE.lock() {
-        *guard = Some((Arc::as_ptr(channel) as usize, index, Arc::clone(feature)));
+        guard.store(
+            epoch,
+            Arc::as_ptr(channel) as usize,
+            index,
+            Arc::clone(feature),
+        );
     }
 }
 
 fn clear_cached_feature() {
     if let Ok(mut guard) = CACHED_FEATURE.lock() {
-        *guard = None;
+        guard.clear();
     }
 }
 
@@ -77,12 +140,8 @@ pub fn clear_haptic_feature_cache() {
 /// trigger is itself a diverted control that died with capture. The cache
 /// entry then pins the retired channel forever and the node never reopens.
 pub(crate) fn clear_haptic_feature_cache_for(channel: &Arc<HidppChannel>) {
-    if let Ok(mut guard) = CACHED_FEATURE.lock()
-        && guard
-            .as_ref()
-            .is_some_and(|(ptr, _, _)| *ptr == Arc::as_ptr(channel) as usize)
-    {
-        *guard = None;
+    if let Ok(mut guard) = CACHED_FEATURE.lock() {
+        guard.clear_for(Arc::as_ptr(channel) as usize);
     }
 }
 
@@ -99,8 +158,9 @@ pub async fn ensure_haptics_armed_on(shared: &SharedChannel) -> Result<bool, Wri
     let feature = if let Some(feature) = cached_feature(channel, index) {
         feature
     } else {
+        let epoch = cache_epoch();
         let feature = feature_on_channel(channel, index).await?;
-        store_cached_feature(channel, index, &feature);
+        store_cached_feature(epoch, channel, index, &feature);
         feature
     };
     let config = feature.get_configuration().await.map_err(|error| {
@@ -142,12 +202,13 @@ pub async fn play_haptic_on(
         }
         clear_cached_feature();
     }
+    let epoch = cache_epoch();
     let feature = feature_on_channel(channel, index).await?;
     let result = feature.play(waveform).await.map_err(|error| {
         classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
     });
     if result.is_ok() {
-        store_cached_feature(channel, index, &feature);
+        store_cached_feature(epoch, channel, index, &feature);
     }
     result
 }
@@ -162,4 +223,51 @@ pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Resul
         })
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EpochGuarded;
+
+    #[test]
+    fn a_store_started_before_a_clear_is_discarded() {
+        let mut cache = EpochGuarded::new();
+        let epoch = cache.epoch;
+        // The channel retires while the feature open is in flight…
+        cache.clear_for(0xA);
+        // …so the open's belated success must not re-pin the channel.
+        cache.store(epoch, 0xA, 2, "stale");
+        assert_eq!(cache.get(0xA, 2), None);
+    }
+
+    #[test]
+    fn a_store_with_a_current_epoch_lands() {
+        let mut cache = EpochGuarded::new();
+        cache.store(cache.epoch, 0xA, 2, "fresh");
+        assert_eq!(cache.get(0xA, 2), Some("fresh"));
+        assert_eq!(cache.get(0xB, 2), None);
+        assert_eq!(cache.get(0xA, 3), None);
+    }
+
+    #[test]
+    fn retiring_one_channel_keeps_anothers_entry_but_blocks_stale_stores() {
+        let mut cache = EpochGuarded::new();
+        cache.store(cache.epoch, 0xA, 2, "kept");
+        let epoch = cache.epoch;
+        cache.clear_for(0xB);
+        assert_eq!(cache.get(0xA, 2), Some("kept"));
+        cache.store(epoch, 0xB, 1, "stale");
+        assert_eq!(cache.get(0xB, 1), None);
+    }
+
+    #[test]
+    fn a_full_clear_empties_the_entry_and_blocks_stale_stores() {
+        let mut cache = EpochGuarded::new();
+        let epoch = cache.epoch;
+        cache.store(epoch, 0xA, 2, "cached");
+        cache.clear();
+        assert_eq!(cache.get(0xA, 2), None);
+        cache.store(epoch, 0xA, 2, "stale");
+        assert_eq!(cache.get(0xA, 2), None);
+    }
 }
