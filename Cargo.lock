@@ -5153,6 +5153,7 @@ dependencies = [
  "anyhow",
  "backon",
  "block2 0.6.2",
+ "core-graphics 0.25.0",
  "disclaim",
  "embed-resource",
  "fluent-langneg",
