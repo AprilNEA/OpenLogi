@@ -11,6 +11,7 @@ pub(super) const TAP_SHUTDOWN_BUDGET: Duration = Duration::from_millis(1_500);
 #[repr(u8)]
 pub(super) enum TapPhase {
     Starting,
+    Arming,
     Armed,
     TapStopped,
     ThreadExited,
@@ -55,9 +56,10 @@ impl WatchdogSignals {
     pub fn phase(&self) -> TapPhase {
         match self.phase.load(Ordering::Acquire) {
             0 => TapPhase::Starting,
-            1 => TapPhase::Armed,
-            2 => TapPhase::TapStopped,
-            3 => TapPhase::ThreadExited,
+            1 => TapPhase::Arming,
+            2 => TapPhase::Armed,
+            3 => TapPhase::TapStopped,
+            4 => TapPhase::ThreadExited,
             _ => unreachable!("invalid tap lifecycle phase"),
         }
     }
@@ -137,7 +139,7 @@ impl LifecycleWatchdog {
         match observation.phase {
             TapPhase::Starting => return LifecycleDecision::Continue,
             TapPhase::ThreadExited => return LifecycleDecision::Complete,
-            TapPhase::Armed | TapPhase::TapStopped => {}
+            TapPhase::Arming | TapPhase::Armed | TapPhase::TapStopped => {}
         }
 
         if observation.stop_requested {
@@ -149,7 +151,7 @@ impl LifecycleWatchdog {
 
         let timeout = if let Some(stopped) = self.stop_at {
             Some((LifecycleExitReason::StopTimedOut, stopped))
-        } else if observation.phase == TapPhase::Armed {
+        } else if matches!(observation.phase, TapPhase::Arming | TapPhase::Armed) {
             Some((
                 LifecycleExitReason::TapThreadStalled,
                 observation.tap_progress_at,
@@ -229,6 +231,28 @@ mod tests {
                 observation(TapPhase::TapStopped, false, Duration::ZERO)
             ),
             LifecycleDecision::Complete
+        );
+    }
+
+    #[test]
+    fn tap_activation_stall_exits_at_budget() {
+        let mut watchdog = LifecycleWatchdog::default();
+        assert_eq!(
+            watchdog.evaluate(
+                Duration::from_nanos(1_499_999_999),
+                observation(TapPhase::Arming, false, Duration::ZERO)
+            ),
+            LifecycleDecision::Continue
+        );
+        assert_eq!(
+            watchdog.evaluate(
+                TAP_SHUTDOWN_BUDGET,
+                observation(TapPhase::Arming, false, Duration::ZERO)
+            ),
+            LifecycleDecision::Exit {
+                reason: LifecycleExitReason::TapThreadStalled,
+                elapsed: TAP_SHUTDOWN_BUDGET,
+            }
         );
     }
 

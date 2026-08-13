@@ -674,7 +674,9 @@ fn spawn_lifecycle_watchdog(
                         // the decision. Only a still-hazardous phase may exit.
                         let phase = signals.phase();
                         let still_hazardous = match reason {
-                            LifecycleExitReason::TapThreadStalled => phase == TapPhase::Armed,
+                            LifecycleExitReason::TapThreadStalled => {
+                                matches!(phase, TapPhase::Arming | TapPhase::Armed)
+                            }
                             LifecycleExitReason::StopTimedOut => phase != TapPhase::ThreadExited,
                         };
                         if !still_hazardous {
@@ -766,6 +768,10 @@ fn thread_main(
         error!(%error, "could not spawn callback watchdog — refusing to arm HID tap");
         return;
     }
+    // Publish the hazardous activation interval before entering CoreGraphics:
+    // TCC revocation can stop this call from returning.
+    signals.mark_tap_progress();
+    signals.set_phase(TapPhase::Arming);
     tap.enable();
     signals.mark_tap_progress();
     signals.set_phase(TapPhase::Armed);
