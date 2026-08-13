@@ -170,10 +170,9 @@ impl<Node: Eq + Hash + Clone, Channel> ChannelCache<Node, Channel> {
         self.active.insert(node, channel);
     }
 
-    fn retire_node(&mut self, node: &Node) -> Option<()> {
+    fn retire_node(&mut self, node: &Node) -> Option<&Channel> {
         let channel = self.active.remove(node)?;
-        self.retiring.insert(node.clone(), channel);
-        Some(())
+        Some(self.retiring.entry(node.clone()).or_insert(channel))
     }
 
     /// Whether this node may be opened during the current tick. A quiescent
@@ -188,7 +187,7 @@ impl<Node: Eq + Hash + Clone, Channel> ChannelCache<Node, Channel> {
         false
     }
 
-    fn retire_absent(&mut self, seen: &HashSet<Node>) {
+    fn retire_absent(&mut self, seen: &HashSet<Node>, mut on_retire: impl FnMut(&Channel)) {
         let absent = self
             .active
             .keys()
@@ -196,7 +195,9 @@ impl<Node: Eq + Hash + Clone, Channel> ChannelCache<Node, Channel> {
             .cloned()
             .collect::<Vec<_>>();
         for node in absent {
-            let _ = self.retire_node(&node);
+            if let Some(channel) = self.retire_node(&node) {
+                on_retire(channel);
+            }
         }
     }
 
@@ -416,6 +417,7 @@ impl Enumerator {
                 .channels
                 .prepare_open(&node, |cached| Arc::strong_count(&cached.channel) == 1)
             {
+                debug!("node still retiring — waiting for its channel's remaining users to drop");
                 retiring.push(node);
                 continue;
             }
@@ -451,7 +453,9 @@ impl Enumerator {
         if let Some(registry) = &self.registry {
             registry.retain_nodes(&seen_nodes);
         }
-        self.channels.retire_absent(&seen_nodes);
+        self.channels.retire_absent(&seen_nodes, |cached| {
+            crate::write::clear_haptic_feature_cache_for(&cached.channel);
+        });
         self.channels.reap_absent(&seen_nodes, |cached| {
             Arc::strong_count(&cached.channel) == 1
         });
@@ -567,7 +571,11 @@ impl Enumerator {
                 if let Some(registry) = &self.registry {
                     registry.remove_node(&node);
                 }
-                if self.channels.retire_node(&node).is_some() {
+                if let Some(cached) = self.channels.retire_node(&node) {
+                    // Release the haptic cache's pin on this channel NOW —
+                    // waiting for the next haptic route-miss deadlocks when
+                    // capture dies with it (see clear_haptic_feature_cache_for).
+                    crate::write::clear_haptic_feature_cache_for(&cached.channel);
                     warn!("node probe keeps failing — retiring its channel before reopen");
                 }
             } else if let Some(registry) = &self.registry {

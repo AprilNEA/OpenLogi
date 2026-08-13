@@ -69,6 +69,23 @@ pub fn clear_haptic_feature_cache() {
     clear_cached_feature();
 }
 
+/// Drop the cached haptic feature handle if it belongs to `channel`.
+///
+/// The enumerator calls this the moment it retires a channel. Clearing only on
+/// route-miss (above) is not enough: a route miss requires a haptic attempt,
+/// and once capture has died no haptic attempt can happen — the Actions Ring
+/// trigger is itself a diverted control that died with capture. The cache
+/// entry then pins the retired channel forever and the node never reopens.
+pub(crate) fn clear_haptic_feature_cache_for(channel: &Arc<HidppChannel>) {
+    if let Ok(mut guard) = CACHED_FEATURE.lock()
+        && guard
+            .as_ref()
+            .is_some_and(|(ptr, _, _)| *ptr == Arc::as_ptr(channel) as usize)
+    {
+        *guard = None;
+    }
+}
+
 /// Ensure the firmware haptic engine is armed: enabled, with a non-zero
 /// intensity. Returns `true` when a repair write was needed.
 ///

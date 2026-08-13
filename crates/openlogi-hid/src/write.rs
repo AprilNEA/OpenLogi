@@ -34,6 +34,7 @@ pub use diagnostics::{
 pub use dpi::{DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, set_dpi};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::set_fn_lock;
+pub(crate) use haptic::clear_haptic_feature_cache_for;
 pub use haptic::{
     clear_haptic_feature_cache, ensure_haptics_armed_on, play_haptic, play_haptic_on,
 };
