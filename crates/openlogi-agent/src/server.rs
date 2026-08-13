@@ -49,6 +49,31 @@ pub struct AgentServer {
     pub ring_haptics: RingHapticPlayer,
 }
 
+impl AgentServer {
+    /// Build a server and start the coalescing Actions Ring haptic worker.
+    pub fn new(
+        orchestrator: Arc<Mutex<Orchestrator>>,
+        shared: SharedRuntime,
+        hook_installed: Arc<AtomicBool>,
+        pairing: Arc<PairingManager>,
+        event_monitor: SharedEventMonitor,
+        action_ring: Arc<ActionRingManager>,
+        dispatcher: ActionDispatcher,
+    ) -> Self {
+        let ring_haptics = RingHapticPlayer::spawn(shared.clone());
+        Self {
+            orchestrator,
+            shared,
+            hook_installed,
+            pairing,
+            event_monitor,
+            action_ring,
+            dispatcher,
+            ring_haptics,
+        }
+    }
+}
+
 impl Agent for AgentServer {
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
@@ -310,7 +335,10 @@ impl RingHapticPlayer {
                 // guaranteed to complete before the session's first buzz —
                 // spawning it separately let the first hover race (and lose
                 // to) a disarmed haptic engine.
-                let arm_route = worker_arm.lock().unwrap().take();
+                let arm_route = worker_arm
+                    .lock()
+                    .ok()
+                    .and_then(|mut pending| pending.take());
                 if let Some(route) = arm_route {
                     for attempt in 1..=2u8 {
                         match hardware::ensure_ring_haptics_armed(
@@ -401,7 +429,9 @@ impl RingHapticPlayer {
         let Some(route) = route else {
             return;
         };
-        *self.pending_arm.lock().unwrap() = Some(route);
+        if let Ok(mut pending) = self.pending_arm.lock() {
+            *pending = Some(route);
+        }
         let _ = self.tx.send(None);
     }
 

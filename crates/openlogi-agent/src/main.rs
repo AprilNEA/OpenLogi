@@ -236,17 +236,16 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
     // IPC server: the GUI connects here for device state + "apply now" commands.
     // The endpoint (Unix socket / Windows named pipe) is resolved inside
     // `transport::bind`, called by `server::run`.
-    let ring_haptics = server::RingHapticPlayer::spawn(shared.clone());
-    let server = AgentServer {
-        orchestrator: Arc::clone(&orchestrator),
-        shared: shared.clone(),
-        hook_installed: Arc::clone(&hook_installed),
-        pairing: Arc::clone(&pairing),
-        event_monitor: Arc::clone(&event_monitor),
-        action_ring: Arc::clone(&action_ring),
-        dispatcher: dispatcher.clone(),
-        ring_haptics: ring_haptics.clone(),
-    };
+    let server = AgentServer::new(
+        Arc::clone(&orchestrator),
+        shared.clone(),
+        Arc::clone(&hook_installed),
+        Arc::clone(&pairing),
+        Arc::clone(&event_monitor),
+        Arc::clone(&action_ring),
+        dispatcher.clone(),
+    );
+    let ring_haptics = server.ring_haptics.clone();
     tokio::spawn(server::run(server));
 
     // The CGEventTap hook is installed once Accessibility is granted and dropped
