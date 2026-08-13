@@ -238,6 +238,7 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
         event_monitor: Arc::clone(&event_monitor),
         action_ring: Arc::clone(&action_ring),
         dispatcher: dispatcher.clone(),
+        ring_haptics: server::RingHapticPlayer::spawn(shared.clone()),
     };
     tokio::spawn(server::run(server));
 
