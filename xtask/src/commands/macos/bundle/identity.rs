@@ -230,6 +230,20 @@ mod tests {
         app
     }
 
+    /// `--channel`'s default is rendered through `Display` and then parsed back
+    /// by clap's value parser, so a name only one of the two knows would break
+    /// `macos bundle` the moment the flag is omitted.
+    #[test]
+    fn each_channel_renders_as_the_flag_value_it_parses_from() {
+        for channel in [Channel::Production, Channel::Dev] {
+            assert_eq!(
+                Channel::from_str(&channel.to_string(), false).ok(),
+                Some(channel),
+                "{channel} does not round-trip through the value parser"
+            );
+        }
+    }
+
     #[test]
     fn a_dev_bundle_can_never_collide_with_a_shipped_one() {
         let shipped: Vec<Identity> = Component::ALL
