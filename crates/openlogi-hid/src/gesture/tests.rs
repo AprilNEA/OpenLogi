@@ -525,35 +525,14 @@ fn a_dpi_button_re_presses_after_a_release() {
 }
 
 #[test]
-fn rotation_only_capture_suppresses_taps_but_forwards_rotation() {
+fn diverted_report_forwards_tap_and_rotation_for_live_agent_policy() {
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    forward_thumbwheel_event(
-        thumbwheel_event(7, true),
-        ThumbwheelCaptureMode::DivertedRotation,
-        &tx,
-    );
-
-    assert_eq!(rx.try_recv(), Ok(CapturedInput::Scroll(7)));
-    assert!(
-        rx.try_recv().is_err(),
-        "rotation-only capture must not deliver the tap"
-    );
-}
-
-#[test]
-fn rotation_and_tap_capture_forwards_each_input_once() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-
-    forward_thumbwheel_event(
-        thumbwheel_event(-4, true),
-        ThumbwheelCaptureMode::DivertedRotationAndTap,
-        &tx,
-    );
+    forward_thumbwheel_event(thumbwheel_event(-4, true), &tx);
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonPressed(ButtonId::Thumbwheel))
+        Ok(CapturedInput::ButtonPressed(ButtonId::Thumbwheel, None))
     );
     assert_eq!(rx.try_recv(), Ok(CapturedInput::Scroll(-4)));
     assert!(
@@ -566,24 +545,7 @@ fn rotation_and_tap_capture_forwards_each_input_once() {
 fn zero_motion_without_a_tap_emits_nothing() {
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    forward_thumbwheel_event(
-        thumbwheel_event(0, false),
-        ThumbwheelCaptureMode::DivertedRotationAndTap,
-        &tx,
-    );
-
-    assert!(rx.try_recv().is_err());
-}
-
-#[test]
-fn native_mode_ignores_a_decoded_thumbwheel_report() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-
-    forward_thumbwheel_event(
-        thumbwheel_event(3, true),
-        ThumbwheelCaptureMode::Native,
-        &tx,
-    );
+    forward_thumbwheel_event(thumbwheel_event(0, false), &tx);
 
     assert!(rx.try_recv().is_err());
 }
@@ -601,8 +563,11 @@ async fn partial_arm_failure_restores_every_diverted_control() {
         arm_controls(
             &channel,
             1,
-            ThumbwheelCaptureMode::DivertedRotationAndTap,
-            true,
+            &CaptureSpec {
+                thumbwheel_mode: ThumbwheelCaptureMode::Diverted,
+                divert_gesture_sources: vec![reprog_controls::GESTURE_BUTTON_CID],
+                divert_buttons: Vec::new(),
+            },
         ),
     )
     .await;

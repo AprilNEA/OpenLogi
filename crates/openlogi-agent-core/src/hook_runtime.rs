@@ -797,6 +797,7 @@ mod tests {
                 (ButtonId::ThumbwheelScrollDown, Action::PrevTab),
             ]),
             gestures: BTreeMap::new(),
+            thumbwheel_tap_bound: false,
         };
         assert_eq!(
             rebound_thumbwheel_action(&maps, 1.0),
@@ -823,6 +824,7 @@ mod tests {
                 ),
             ]),
             gestures: BTreeMap::new(),
+            thumbwheel_tap_bound: false,
         };
         assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
         assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
