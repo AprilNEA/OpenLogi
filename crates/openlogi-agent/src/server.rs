@@ -291,6 +291,7 @@ impl Agent for AgentServer {
 #[derive(Clone)]
 pub struct RingHapticPlayer {
     tx: tokio::sync::watch::Sender<Option<(DeviceRoute, HapticWaveform, &'static str)>>,
+    pending_arm: Arc<std::sync::Mutex<Option<DeviceRoute>>>,
 }
 
 impl RingHapticPlayer {
@@ -299,10 +300,40 @@ impl RingHapticPlayer {
         let (tx, mut rx) = tokio::sync::watch::channel::<
             Option<(DeviceRoute, HapticWaveform, &'static str)>,
         >(None);
+        let pending_arm = Arc::new(std::sync::Mutex::new(None::<DeviceRoute>));
+        let worker_arm = Arc::clone(&pending_arm);
         tokio::spawn(async move {
             let mut consecutive_failures = 0u32;
             let mut cooldown_until: Option<std::time::Instant> = None;
             while rx.changed().await.is_ok() {
+                // Firmware arming is sequenced through this worker so it is
+                // guaranteed to complete before the session's first buzz —
+                // spawning it separately let the first hover race (and lose
+                // to) a disarmed haptic engine.
+                let arm_route = worker_arm.lock().unwrap().take();
+                if let Some(route) = arm_route {
+                    for attempt in 1..=2u8 {
+                        match hardware::ensure_ring_haptics_armed(
+                            &shared.capture_channel,
+                            &shared.channel_registry,
+                            &shared.receiver_access,
+                            &route,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                info!("firmware haptics were disarmed — re-enabled");
+                                break;
+                            }
+                            Ok(false) => break,
+                            Err(error) => {
+                                if attempt == 2 {
+                                    warn!(%error, "could not verify firmware haptic state");
+                                }
+                            }
+                        }
+                    }
+                }
                 let request = rx.borrow_and_update().clone();
                 let Some((route, waveform, interaction)) = request else {
                     continue;
@@ -360,7 +391,18 @@ impl RingHapticPlayer {
                 }
             }
         });
-        Self { tx }
+        Self { tx, pending_arm }
+    }
+
+    /// Queue a firmware arming check to run before the session's first buzz.
+    /// The wake-up send also clears any stale not-yet-played waveform from a
+    /// previous session so it cannot replay.
+    pub fn arm(&self, route: Option<DeviceRoute>) {
+        let Some(route) = route else {
+            return;
+        };
+        *self.pending_arm.lock().unwrap() = Some(route);
+        let _ = self.tx.send(None);
     }
 
     /// Queue `waveform`, replacing any not-yet-played request.
