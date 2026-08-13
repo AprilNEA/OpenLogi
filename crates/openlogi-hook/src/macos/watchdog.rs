@@ -10,7 +10,9 @@ pub(super) const TAP_SHUTDOWN_BUDGET: Duration = Duration::from_millis(1_500);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub(super) enum TapPhase {
+    /// The tap thread has not begun CoreGraphics tap creation, so no tap can exist.
     Starting,
+    /// The tap thread is creating or activating a tap that may already exist.
     Arming,
     Armed,
     TapStopped,
@@ -235,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn tap_activation_stall_exits_at_budget() {
+    fn tap_creation_or_activation_stall_exits_at_budget() {
         let mut watchdog = LifecycleWatchdog::default();
         assert_eq!(
             watchdog.evaluate(

@@ -683,6 +683,9 @@ fn spawn_lifecycle_watchdog(
                             continue;
                         }
                         let reason = match reason {
+                            LifecycleExitReason::TapThreadStalled if phase == TapPhase::Arming => {
+                                "HID tap creation or activation stopped making progress"
+                            }
                             LifecycleExitReason::TapThreadStalled => {
                                 "HID tap thread stopped making progress while tap remained active"
                             }
@@ -694,7 +697,7 @@ fn spawn_lifecycle_watchdog(
                             reason,
                             elapsed_ms = duration_millis(elapsed),
                             ?phase,
-                            "HID CGEventTap shutdown was not confirmed before deadline — \
+                            "HID CGEventTap lifecycle did not make progress before deadline — \
                              exiting agent to restore system input"
                         );
                         std::process::exit(FREEZE_HAZARD_EXIT_CODE);
@@ -719,6 +722,12 @@ fn thread_main(
     // loop locals have unwound. The lifecycle watchdog treats this notification
     // as proof that an explicit stop has completed, not merely been requested.
     let _thread_exit = signals.thread_exit_guard();
+
+    // A successful CGEventTapCreate may install the HID tap before returning,
+    // so lifecycle monitoring must be armed before entering CoreGraphics.
+    signals.mark_tap_progress();
+    signals.set_phase(TapPhase::Arming);
+
     let in_callback = Arc::new(AtomicBool::new(false));
     let entered_at_ms = Arc::new(AtomicU64::new(0));
 
@@ -747,11 +756,13 @@ fn thread_main(
         // which we surface as MacOsTap.
         return;
     };
+    signals.mark_tap_progress();
 
     let Ok(loop_source) = tap.mach_port().create_runloop_source(0) else {
         error!("CFRunLoopSourceCreate failed for event tap");
         return;
     };
+    signals.mark_tap_progress();
 
     let run_loop = CFRunLoop::get_current();
 
@@ -760,6 +771,7 @@ fn thread_main(
     unsafe {
         run_loop.add_source(&loop_source, kCFRunLoopCommonModes);
     }
+    signals.mark_tap_progress();
     if let Err(error) = spawn_callback_watchdog(
         Arc::clone(&signals),
         Arc::clone(&in_callback),
@@ -768,10 +780,7 @@ fn thread_main(
         error!(%error, "could not spawn callback watchdog — refusing to arm HID tap");
         return;
     }
-    // Publish the hazardous activation interval before entering CoreGraphics:
-    // TCC revocation can stop this call from returning.
     signals.mark_tap_progress();
-    signals.set_phase(TapPhase::Arming);
     tap.enable();
     signals.mark_tap_progress();
     signals.set_phase(TapPhase::Armed);
