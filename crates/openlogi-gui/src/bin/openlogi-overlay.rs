@@ -127,14 +127,16 @@ impl RingView {
                         .size(px(22.0))
                         .text_color(hsla(0.0, 0.0, 0.98, 1.0)),
                 )
-                .on_hover(cx.listener(move |this, hovered, _, _| {
+                .on_hover(cx.listener(move |this, hovered, _, cx| {
                     if *hovered && this.hovered != Some(slot) {
                         this.hovered = Some(slot);
                         let _ = this
                             .commands
                             .send(OverlayCommand::Hover { session_id, slot });
+                        cx.notify();
                     } else if !*hovered && this.hovered == Some(slot) {
                         this.hovered = None;
+                        cx.notify();
                     }
                 }))
                 .on_click(move |_, window, cx| {
