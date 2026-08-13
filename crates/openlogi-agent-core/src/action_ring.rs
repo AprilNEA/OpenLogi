@@ -138,6 +138,42 @@ impl ActionRingManager {
         invocation
     }
 
+    /// Dismiss the showing session, if any, and return whether one was
+    /// dismissed. Queues an **empty invocation** (zero slots) — the overlay
+    /// treats that as "close the ring without opening a new one", which keeps
+    /// the dismissal inside the existing `next_action_ring` wire format. Lets
+    /// a second press of the ring trigger toggle the ring closed.
+    ///
+    /// The empty placeholder session is not "showing" (it has no actions), so
+    /// a trigger press racing the overlay's close acknowledgement re-opens the
+    /// ring instead of dismissing nothing.
+    pub fn dismiss_active(&self) -> bool {
+        let mut state = self.state();
+        state.expire();
+        match state.active.take() {
+            Some(session) if !session.actions.is_empty() => {
+                let session_id = self.next_session.fetch_add(1, Ordering::Relaxed);
+                state.active = Some(Session {
+                    invocation: ActionRingInvocation {
+                        session_id,
+                        slots: BTreeMap::new(),
+                        language: None,
+                    },
+                    pending: true,
+                    device_key: session.device_key,
+                    haptic_route: session.haptic_route,
+                    actions: BTreeMap::new(),
+                    hovered: None,
+                    opened_at: Instant::now(),
+                });
+                drop(state);
+                self.changed.notify_one();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Wait for the next invocation, returning `None` when the hold window
     /// elapses so the overlay can check its agent connection and poll again.
     pub async fn next_invocation(&self) -> Option<ActionRingInvocation> {
@@ -272,6 +308,32 @@ mod tests {
             }
         );
         assert_eq!(invocation.language.as_deref(), Some("fr"));
+    }
+
+    #[tokio::test]
+    async fn second_trigger_press_dismisses_and_third_reopens() {
+        let manager = ActionRingManager::default();
+
+        // Nothing showing yet: the first press must open, not dismiss.
+        assert!(!manager.dismiss_active());
+        let opened = manager.begin(spec());
+        assert_eq!(manager.next_invocation().await, Some(opened.clone()));
+
+        // Second press: dismissed via an empty invocation on the same poll.
+        assert!(manager.dismiss_active());
+        let dismissal = manager.next_invocation().await.expect("dismissal queued");
+        assert!(dismissal.slots.is_empty());
+        assert_ne!(dismissal.session_id, opened.session_id);
+
+        // The placeholder is not "showing": a third press opens again.
+        assert!(!manager.dismiss_active());
+        let reopened = manager.begin(spec());
+        assert!(!reopened.slots.is_empty());
+
+        // The overlay's Cancel for the dismissal id must not kill the new
+        // session.
+        manager.cancel(dismissal.session_id);
+        assert!(manager.dismiss_active());
     }
 
     #[test]

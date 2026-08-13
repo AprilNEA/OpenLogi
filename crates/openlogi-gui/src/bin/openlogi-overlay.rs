@@ -249,6 +249,20 @@ fn main() -> Result<()> {
         overlay_platform::configure_application();
         cx.spawn(async move |cx| {
             while let Some(invocation) = invocations.recv().await {
+                // An empty invocation is the agent's dismissal signal (second
+                // trigger press): close any showing ring, open nothing, and
+                // acknowledge so the agent can clear the placeholder session.
+                if invocation.slots.is_empty() {
+                    cx.update(|cx| {
+                        for handle in cx.windows() {
+                            let _ = handle.update(cx, |_, window, _| window.remove_window());
+                        }
+                    });
+                    let _ = commands.send(OverlayCommand::Cancel {
+                        session_id: invocation.session_id,
+                    });
+                    continue;
+                }
                 rust_i18n::set_locale(locale::resolve(invocation.language.as_deref()));
                 cx.update(|cx| {
                     for handle in cx.windows() {

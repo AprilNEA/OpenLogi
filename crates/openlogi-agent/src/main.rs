@@ -172,6 +172,10 @@ async fn begin_action_ring(
     action_ring: &ActionRingManager,
     device_key: Option<&str>,
 ) {
+    // A second trigger press while the ring is showing closes it.
+    if action_ring.dismiss_active() {
+        return;
+    }
     if let Some(session) = orchestrator.lock().await.action_ring_session(device_key) {
         action_ring.begin(session);
     }

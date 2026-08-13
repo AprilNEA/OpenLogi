@@ -184,7 +184,8 @@ temperature_kelvin = 4600
 
 Action names are the catalog's variant names (`LeftClick`, `MouseBack`,
 `Copy`, `PlayPause`, `CycleDpiPresets`, …). `ShowActionsRing` opens the ring;
-a detected Haptic Sense Panel uses it by default. Ring slots reject
+a detected Haptic Sense Panel uses it by default, and pressing the trigger
+again while the ring is showing dismisses it. Ring slots reject
 `ShowActionsRing` itself to prevent recursive sessions. `OpenApplication`
 accepts an application, folder, filesystem path, or URL. A leading `~` is
 expanded when the action runs; for example:
