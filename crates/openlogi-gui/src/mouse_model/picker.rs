@@ -270,6 +270,21 @@ pub(crate) fn menu_card(pal: Palette) -> gpui::Div {
         .p_1p5()
 }
 
+/// The action a missing gesture-map entry actually performs at runtime, so the
+/// menu never shows a swipe or tap doing something it would not.
+///
+/// Only an OS-hook button's raw (hand-edited, sparse) map can be missing an
+/// entry — HID++ sources come fully seeded (see
+/// [`AppState::current_gesture_maps`]). A tap without a `Click` entry falls
+/// through to the button's plain click action ([`default_binding`]); an
+/// unbound swipe does nothing.
+fn sparse_gesture_fallback(btn: ButtonId, dir: GestureDirection) -> Action {
+    match dir {
+        GestureDirection::Click => default_binding(btn),
+        _ => Action::None,
+    }
+}
+
 /// Level 1: the plus navigator. `Up` on top, `Left`/`Click`/`Right` across the
 /// middle, `Down` on the bottom. Each cell shows its glyph + label and bound
 /// action; the `active` cell (if any) is accented. Clicking a cell activates
@@ -293,7 +308,7 @@ fn plus_card(
                         .and_then(|m| m.get(&d))
                         .cloned()
                 })
-                .unwrap_or_else(|| default_gesture_binding(d));
+                .unwrap_or_else(|| sparse_gesture_fallback(btn, d));
             (d, action)
         })
         .collect();
@@ -437,7 +452,7 @@ fn flyout_card(
                 .and_then(|m| m.get(&dir))
                 .cloned()
         })
-        .unwrap_or_else(|| default_gesture_binding(dir));
+        .unwrap_or_else(|| sparse_gesture_fallback(btn, dir));
 
     let view_pick = view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
