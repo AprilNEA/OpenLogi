@@ -170,9 +170,30 @@ fn action_ring_runtime(
 async fn begin_action_ring(
     orchestrator: &Mutex<Orchestrator>,
     action_ring: &ActionRingManager,
+    shared: &SharedRuntime,
     device_key: Option<&str>,
 ) {
     if let Some(session) = orchestrator.lock().await.action_ring_session(device_key) {
+        // Arm the firmware haptic engine before the first hover: some power
+        // transitions clear its enabled state, after which plays are accepted
+        // without any physical feedback. One round-trip per ring open.
+        if let Some(route) = session.haptic_route.clone() {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match openlogi_agent_core::hardware::ensure_ring_haptics_armed(
+                    &shared.capture_channel,
+                    &shared.channel_registry,
+                    &shared.receiver_access,
+                    &route,
+                )
+                .await
+                {
+                    Ok(true) => info!("firmware haptics were disarmed — re-enabled"),
+                    Ok(false) => {}
+                    Err(error) => warn!(%error, "could not verify firmware haptic state"),
+                }
+            });
+        }
         action_ring.begin(session);
     }
 }
@@ -295,7 +316,7 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
                 orchestrator.lock().await.set_current_app(bundle);
             }
             Some(device_key) = action_ring_rx.recv() => {
-                begin_action_ring(&orchestrator, &action_ring, device_key.as_deref()).await;
+                begin_action_ring(&orchestrator, &action_ring, &shared, device_key.as_deref()).await;
             }
             Some(granted) = accessibility_rx.recv() => {
                 if !granted {

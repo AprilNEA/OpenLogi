@@ -5,7 +5,7 @@ use hidpp::{
     device::Device,
     feature::{
         CreatableFeature as _,
-        haptic_feedback::{HapticFeedbackFeature, HapticWaveform},
+        haptic_feedback::{HapticFeedbackFeature, HapticIntensity, HapticWaveform},
     },
 };
 
@@ -56,6 +56,45 @@ fn clear_cached_feature() {
     if let Ok(mut guard) = CACHED_FEATURE.lock() {
         *guard = None;
     }
+}
+
+/// Ensure the firmware haptic engine is armed: enabled, with a non-zero
+/// intensity. Returns `true` when a repair write was needed.
+///
+/// Nothing else in the stack ever asserts this state — devices historically
+/// inherited it from Logi Options+, and some power transitions clear it, after
+/// which `play` calls are accepted but produce no physical feedback. Callers
+/// arm once per Actions Ring session, before the first hover.
+pub async fn ensure_haptics_armed_on(shared: &SharedChannel) -> Result<bool, WriteError> {
+    let channel = shared.channel();
+    let index = shared.device_index();
+    let feature = if let Some(feature) = cached_feature(channel, index) {
+        feature
+    } else {
+        let feature = feature_on_channel(channel, index).await?;
+        store_cached_feature(channel, index, &feature);
+        feature
+    };
+    let config = feature.get_configuration().await.map_err(|error| {
+        clear_cached_feature();
+        classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+    })?;
+    let intensity = if config.intensity.get() == 0 {
+        HapticIntensity::new(25).unwrap_or(config.intensity)
+    } else {
+        config.intensity
+    };
+    if config.enabled && intensity == config.intensity {
+        return Ok(false);
+    }
+    feature
+        .set_configuration(true, intensity)
+        .await
+        .map_err(|error| {
+            clear_cached_feature();
+            classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
+        })?;
+    Ok(true)
 }
 
 /// Play a waveform immediately on an open capture channel.

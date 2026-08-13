@@ -701,6 +701,25 @@ pub async fn apply_smartshift(
     .await
 }
 
+/// Arm the firmware haptic engine (enable + non-zero intensity) for the
+/// device at `route`. Called once per Actions Ring session before the first
+/// hover — some power transitions clear the firmware state, after which plays
+/// are accepted silently. Returns `true` when a repair write was needed.
+pub async fn ensure_ring_haptics_armed(
+    capture: &CaptureChannel,
+    registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
+    route: &DeviceRoute,
+) -> Result<bool, WriteError> {
+    let _lease = receiver_access.acquire_for_io().await;
+    let shared = authoritative_channel(Some(capture), registry, route)?;
+    timed(
+        HidppOperation::PlayHaptic,
+        openlogi_hid::ensure_haptics_armed_on(&shared),
+    )
+    .await
+}
+
 /// Play one Actions Ring haptic waveform on the registry-authoritative channel.
 ///
 /// Haptics are best-effort feedback: the caller supplies a route only when the

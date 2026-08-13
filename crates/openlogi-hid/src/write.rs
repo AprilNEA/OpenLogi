@@ -34,7 +34,7 @@ pub use diagnostics::{
 pub use dpi::{DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, set_dpi};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::set_fn_lock;
-pub use haptic::{play_haptic, play_haptic_on};
+pub use haptic::{ensure_haptics_armed_on, play_haptic, play_haptic_on};
 pub use hidpp::feature::haptic_feedback::HapticWaveform;
 pub use lighting::{LightingMethod, set_keyboard_color, set_keyboard_color_with};
 pub use litra::{
