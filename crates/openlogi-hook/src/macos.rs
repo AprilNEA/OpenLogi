@@ -1,12 +1,14 @@
 //! macOS `CGEventTap` implementation of the OS-level mouse hook.
 
+mod watchdog;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use core_foundation::base::{CFTypeRef, TCFType as _};
 use core_foundation::number::CFNumber;
@@ -25,17 +27,23 @@ use crate::{
     ButtonId, EventDevice, EventDisposition, EventTapInfo, HookError, HookEvent, KeyEvent,
     KeyModifiers, MouseEvent, TapLocation,
 };
+use watchdog::{
+    LifecycleDecision, LifecycleExitReason, LifecycleObservation, LifecycleWatchdog, TapPhase,
+    WatchdogSignals, stuck_callback,
+};
 
 /// Everything `Hook` needs to control the background thread.
 pub(crate) struct HookInner {
     thread: thread::JoinHandle<()>,
+    lifecycle_watchdog: thread::JoinHandle<()>,
     run_loop: CFRunLoop,
-    /// Termination flag, re-checked at the top of every run-loop slice.
+    /// Lifecycle signals re-checked at the top of every run-loop slice.
     /// `run_loop.stop()` only interrupts the loop while it is *inside* a
     /// `run_in_mode` slice; a stop landing in the gap between slices is
-    /// dropped, so this flag — not the CF stop alone — is the reliable
-    /// shutdown signal that guarantees the thread can never hang forever.
-    stop: Arc<AtomicBool>,
+    /// dropped, so the stop latch — not the CF stop alone — is the reliable
+    /// shutdown signal. The independent lifecycle watchdog keeps observing
+    /// that latch until the tap thread proves the tap is gone.
+    signals: Arc<WatchdogSignals>,
 }
 
 // SAFETY: CFRunLoop is a Core Foundation ref-counted object. The CF
@@ -481,38 +489,55 @@ pub(crate) fn start(
     // clone rather than by move — avoids a second Box allocation.
     let cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
 
-    let stop = Arc::new(AtomicBool::new(false));
+    let signals = Arc::new(WatchdogSignals::default());
+    let lifecycle_watchdog = spawn_lifecycle_watchdog(Arc::clone(&signals))?;
     let (rl_tx, rl_rx) = mpsc::channel::<CFRunLoop>();
 
     let thread = {
-        let stop = Arc::clone(&stop);
-        thread::Builder::new()
+        let thread_signals = Arc::clone(&signals);
+        match thread::Builder::new()
             .name("openlogi-hook".into())
-            .spawn(move || thread_main(cb, rl_tx, stop))
-            .map_err(|e| HookError::MacOsTap(e.to_string()))?
+            .spawn(move || thread_main(cb, rl_tx, thread_signals))
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                signals.set_phase(TapPhase::ThreadExited);
+                lifecycle_watchdog.thread().unpark();
+                let _ = lifecycle_watchdog.join();
+                return Err(HookError::MacOsTap(error.to_string()));
+            }
+        }
     };
 
     // Block until the background thread confirms the run loop is live, or
     // reports failure by dropping its sender.
-    let run_loop = rl_rx.recv().map_err(|_| {
-        HookError::MacOsTap(
+    let Ok(run_loop) = rl_rx.recv() else {
+        let error = HookError::MacOsTap(
             "background thread exited before the run loop started; \
              CGEventTapCreate likely returned null"
                 .into(),
-        )
-    })?;
+        );
+        if let Err(panic) = thread.join() {
+            error!(?panic, "hook thread panicked during startup");
+        }
+        lifecycle_watchdog.thread().unpark();
+        if let Err(panic) = lifecycle_watchdog.join() {
+            error!(?panic, "hook lifecycle watchdog panicked during startup");
+        }
+        return Err(error);
+    };
 
     Ok(HookInner {
         thread,
+        lifecycle_watchdog,
         run_loop,
-        stop,
+        signals,
     })
 }
 
-/// How long the tap callback may run before the watchdog treats the agent as
-/// wedging system input and force-exits. An active HID-level tap serialises
-/// every pointer event through this callback; a hang freezes clicks machine-wide.
-const CALLBACK_STUCK_BUDGET: Duration = Duration::from_millis(200);
+const CALLBACK_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const LIFECYCLE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const FREEZE_HAZARD_EXIT_CODE: i32 = 78;
 
 /// Event types the HID tap observes. Pointer *Dragged variants are required
 /// because a held button makes the OS emit those instead of `MouseMoved`.
@@ -570,16 +595,19 @@ fn run_tap_callback(
 /// Sibling watchdog: if the callback is still entered past the budget, abort
 /// the agent so macOS tears the tap down and system input recovers.
 fn spawn_callback_watchdog(
-    stop: Arc<AtomicBool>,
+    signals: Arc<WatchdogSignals>,
     in_callback: Arc<AtomicBool>,
     entered_at_ms: Arc<AtomicU64>,
-) {
-    let budget_ms = u64::try_from(CALLBACK_STUCK_BUDGET.as_millis()).unwrap_or(200);
-    let _ = thread::Builder::new()
+) -> std::io::Result<()> {
+    thread::Builder::new()
         .name("openlogi-hook-watchdog".into())
         .spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(20));
+            loop {
+                let phase = signals.phase();
+                if matches!(phase, TapPhase::TapStopped | TapPhase::ThreadExited) {
+                    return;
+                }
+                thread::sleep(CALLBACK_WATCHDOG_POLL_INTERVAL);
                 if !in_callback.load(Ordering::Acquire) {
                     continue;
                 }
@@ -587,27 +615,92 @@ fn spawn_callback_watchdog(
                 if entered == 0 {
                     continue;
                 }
-                let elapsed = unix_now_ms().saturating_sub(entered);
-                if elapsed < budget_ms {
+                let Some(elapsed) = stuck_callback(signals.now_millis(), entered) else {
                     continue;
-                }
-                // Re-sample: a fresh entry may have rewritten the stamp between
-                // the first loads and the budget check.
+                };
+                // Re-sample: a fresh high-frequency event may have rewritten
+                // the stamp between the first loads and the budget check.
                 if !in_callback.load(Ordering::Acquire)
                     || entered_at_ms.load(Ordering::Acquire) != entered
                 {
                     continue;
                 }
+                if signals.phase() != TapPhase::Armed {
+                    continue;
+                }
                 error!(
-                    stuck_ms = elapsed,
+                    stuck_ms = duration_millis(elapsed),
                     "OS mouse-hook callback stuck past budget — exiting agent to \
                      restore system input (HID CGEventTap freeze hazard)"
                 );
                 // Hard exit: disable_tap alone cannot unblock an in-flight
                 // callback, and a live active HID tap freezes all pointer I/O.
-                std::process::exit(78);
+                std::process::exit(FREEZE_HAZARD_EXIT_CODE);
             }
-        });
+        })
+        .map(|_| ())
+}
+
+/// Independent lifecycle watchdog for paths that never enter the Rust tap
+/// callback (for example, TCC revocation wedging `CFRunLoopRunInMode` or the
+/// Accessibility query itself).
+///
+/// This thread is started before the tap thread, uses only atomics and a
+/// monotonic clock, and remains armed after a stop request. It deliberately
+/// does not call `has_accessibility()`: that query can itself stop returning
+/// after TCC revocation. It disarms only after the tap thread reports that the
+/// tap was synchronously disabled and destroyed, or (for explicit shutdown)
+/// after that thread has exited.
+fn spawn_lifecycle_watchdog(
+    signals: Arc<WatchdogSignals>,
+) -> Result<thread::JoinHandle<()>, HookError> {
+    thread::Builder::new()
+        .name("openlogi-hook-lifecycle-watchdog".into())
+        .spawn(move || {
+            let mut watchdog = LifecycleWatchdog::default();
+            loop {
+                let observation = LifecycleObservation {
+                    phase: signals.phase(),
+                    stop_requested: signals.stop_requested(),
+                    tap_progress_at: signals.tap_progress_at(),
+                };
+                match watchdog.evaluate(signals.now(), observation) {
+                    LifecycleDecision::Continue => {
+                        thread::park_timeout(LIFECYCLE_WATCHDOG_POLL_INTERVAL);
+                    }
+                    LifecycleDecision::Complete => return,
+                    LifecycleDecision::Exit { reason, elapsed } => {
+                        // The tap thread may have completed immediately after
+                        // the decision. Only a still-hazardous phase may exit.
+                        let phase = signals.phase();
+                        let still_hazardous = match reason {
+                            LifecycleExitReason::TapThreadStalled => phase == TapPhase::Armed,
+                            LifecycleExitReason::StopTimedOut => phase != TapPhase::ThreadExited,
+                        };
+                        if !still_hazardous {
+                            continue;
+                        }
+                        let reason = match reason {
+                            LifecycleExitReason::TapThreadStalled => {
+                                "HID tap thread stopped making progress while tap remained active"
+                            }
+                            LifecycleExitReason::StopTimedOut => {
+                                "hook stop requested but tap thread did not exit"
+                            }
+                        };
+                        error!(
+                            reason,
+                            elapsed_ms = duration_millis(elapsed),
+                            ?phase,
+                            "HID CGEventTap shutdown was not confirmed before deadline — \
+                             exiting agent to restore system input"
+                        );
+                        std::process::exit(FREEZE_HAZARD_EXIT_CODE);
+                    }
+                }
+            }
+        })
+        .map_err(|error| HookError::MacOsTap(format!("could not spawn tap watchdog: {error}")))
 }
 
 /// Body of the background hook thread.
@@ -618,16 +711,17 @@ fn spawn_callback_watchdog(
 fn thread_main(
     cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync>,
     rl_tx: mpsc::Sender<CFRunLoop>,
-    stop: Arc<AtomicBool>,
+    signals: Arc<WatchdogSignals>,
 ) {
-    // Watchdog state: the run-loop thread can't observe a stuck callback (it
-    // *is* the callback), so a sibling thread samples these atomics and kills
-    // the process if the budget is exceeded — process death is the only reliable
-    // way to release a wedged HID-level tap and restore system input.
+    // Declared first so it drops last, after the tap, callback, source, and run
+    // loop locals have unwound. The lifecycle watchdog treats this notification
+    // as proof that an explicit stop has completed, not merely been requested.
+    let _thread_exit = signals.thread_exit_guard();
     let in_callback = Arc::new(AtomicBool::new(false));
     let entered_at_ms = Arc::new(AtomicU64::new(0));
 
     let tap_result = {
+        let callback_signals = Arc::clone(&signals);
         let in_callback = Arc::clone(&in_callback);
         let entered_at_ms = Arc::clone(&entered_at_ms);
         CGEventTap::new(
@@ -636,10 +730,7 @@ fn thread_main(
             CGEventTapOptions::Default,
             hooked_event_types(),
             move |_proxy: CGEventTapProxy, etype: CGEventType, event: &CGEvent| {
-                // Publish the enter timestamp *before* the in-callback flag so
-                // the watchdog never pairs a fresh entry with a stale stamp
-                // (which would false-positive process::exit after a quiet gap).
-                entered_at_ms.store(unix_now_ms(), Ordering::Relaxed);
+                entered_at_ms.store(callback_signals.now_millis(), Ordering::Relaxed);
                 in_callback.store(true, Ordering::Release);
                 let disposition = run_tap_callback(cb.as_ref(), etype, event);
                 in_callback.store(false, Ordering::Release);
@@ -667,16 +758,26 @@ fn thread_main(
     unsafe {
         run_loop.add_source(&loop_source, kCFRunLoopCommonModes);
     }
-    tap.enable();
-    spawn_callback_watchdog(
-        Arc::clone(&stop),
+    if let Err(error) = spawn_callback_watchdog(
+        Arc::clone(&signals),
         Arc::clone(&in_callback),
         Arc::clone(&entered_at_ms),
-    );
+    ) {
+        error!(%error, "could not spawn callback watchdog — refusing to arm HID tap");
+        return;
+    }
+    tap.enable();
+    signals.mark_tap_progress();
+    signals.set_phase(TapPhase::Armed);
 
-    if rl_tx.send(run_loop).is_err() {
+    if rl_tx.send(run_loop.clone()).is_err() {
         debug!("hook parent dropped before run loop was ready; stopping");
         disable_tap(&tap);
+        // SAFETY: framework-provided static CFStringRef, 'static.
+        run_loop.remove_source(&loop_source, unsafe { kCFRunLoopCommonModes });
+        drop(loop_source);
+        drop(tap);
+        signals.set_phase(TapPhase::TapStopped);
         return;
     }
 
@@ -688,17 +789,18 @@ fn thread_main(
     // down right here, on the tap's own thread, so input is restored even
     // when the UI thread is already stuck.
     //
-    // `stop()` requests shutdown two ways: it sets `stop` and calls
+    // `stop()` requests shutdown two ways: it sets the stop latch and calls
     // `run_loop.stop()`. The CF stop returns `Stopped` and breaks promptly
     // while a slice is running, but is a no-op if it lands in the gap
-    // between slices (CFRunLoopStop only acts on a running loop). The `stop`
-    // flag, checked at the top of every slice, is the reliable signal: in
+    // between slices (CFRunLoopStop only acts on a running loop). The latch,
+    // checked at the top of every slice, is the reliable signal: in
     // that race the thread notices one 500 ms slice later instead of joining
     // forever.
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if signals.stop_requested() {
             break;
         }
+        signals.mark_tap_progress();
         match CFRunLoop::run_in_mode(
             // SAFETY: framework-provided static CFStringRef, 'static.
             unsafe { kCFRunLoopDefaultMode },
@@ -708,6 +810,7 @@ fn thread_main(
             CFRunLoopRunResult::Stopped | CFRunLoopRunResult::Finished => break,
             CFRunLoopRunResult::TimedOut | CFRunLoopRunResult::HandledSource => {}
         }
+        signals.mark_tap_progress();
         if !has_accessibility() {
             warn!(
                 "Accessibility revoked while the event tap was live — \
@@ -726,13 +829,15 @@ fn thread_main(
     // so input recovers immediately rather than whenever CF happens to
     // release the port.
     disable_tap(&tap);
+    // SAFETY: framework-provided static CFStringRef, 'static.
+    run_loop.remove_source(&loop_source, unsafe { kCFRunLoopCommonModes });
+    drop(loop_source);
+    drop(tap);
+    signals.set_phase(TapPhase::TapStopped);
 }
 
-/// Milliseconds since the Unix epoch for the stuck-callback watchdog.
-fn unix_now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Disable an active event tap now. core-graphics only exposes the enable
@@ -858,13 +963,48 @@ fn process_name(pid: i32) -> Option<String> {
 
 /// Signal the run loop to stop and join the background thread.
 pub(crate) fn stop(inner: HookInner) {
-    // Set the flag *before* waking the loop: if `run_loop.stop()` lands in
-    // the gap between slices and is dropped, the thread still observes the
-    // flag at the next slice top. Relaxed suffices — the flag carries no
-    // other data, and `thread.join()` below is the final synchronisation.
-    inner.stop.store(true, Ordering::Relaxed);
+    // Latch stop before waking either thread. The lifecycle watchdog stays
+    // armed across the blocking join and accepts only `ThreadExited` as proof
+    // that explicit shutdown completed.
+    inner.signals.request_stop();
+    inner.lifecycle_watchdog.thread().unpark();
     inner.run_loop.stop();
     if let Err(e) = inner.thread.join() {
         error!("hook thread panicked on shutdown: {e:?}");
+    }
+    inner.lifecycle_watchdog.thread().unpark();
+    if let Err(e) = inner.lifecycle_watchdog.join() {
+        error!("hook lifecycle watchdog panicked on shutdown: {e:?}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    use super::*;
+
+    #[test]
+    fn tap_callback_suppresses_normally_and_passes_through_panics() {
+        let source = CGEventSource::new(CGEventSourceStateID::Private)
+            .unwrap_or_else(|()| panic!("CGEventSourceCreate failed"));
+        let event = CGEvent::new(source).unwrap_or_else(|()| panic!("CGEventCreate failed"));
+
+        assert!(matches!(
+            run_tap_callback(
+                &|_| EventDisposition::Suppress,
+                CGEventType::MouseMoved,
+                &event
+            ),
+            CallbackResult::Drop
+        ));
+        assert!(matches!(
+            run_tap_callback(
+                &|_| panic!("test callback panic"),
+                CGEventType::MouseMoved,
+                &event
+            ),
+            CallbackResult::Keep
+        ));
     }
 }

@@ -16,6 +16,11 @@ paths:
   An active HID-level tap serialises every pointer event; a hang freezes clicks
   machine-wide. Only suppress events from remappable Logitech sources
   (`source_is_remappable`) — never the built-in trackpad.
+- A macOS tap stop request is not proof of teardown. Keep the independent lifecycle
+  watchdog armed until the tap thread reports the tap destroyed (and, for an explicit
+  stop, the thread exited). The watchdog must not call the Accessibility trust API —
+  that query can stall during TCC revocation; monitor tap-thread progress instead, and
+  force-exit the agent if revocation or shutdown stalls so macOS releases the HID tap.
 - The off-main `frontmost_bundle_id` read keeps its explicit `autoreleasepool` — the
   watcher thread has no run loop; that is the only place in this crate a pool belongs.
 - This crate ships non-macOS implementations (evdev/uinput, WH_MOUSE_LL) that a
