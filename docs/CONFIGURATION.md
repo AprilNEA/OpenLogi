@@ -98,7 +98,8 @@ haptics = true
 # optional hover label. Omit `icon` to use the action's normal icon; omit
 # `label` to use the action's generic name (useful for `RunShellCommand`
 # slots, which otherwise all read "Run Command"); omit the slot to leave it
-# empty.
+# empty. Custom labels always render exactly as written — they are never
+# passed through localization, even when they match a built-in action name.
 [devices."receiver:aabbccdd:slot:1".action_ring.default.slots]
 Top = { action = "Copy", icon = "Keyboard" }
 TopRight = { action = "Paste", label = "Paste It" }

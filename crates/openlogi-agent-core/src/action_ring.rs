@@ -107,10 +107,12 @@ impl ActionRingManager {
         let mut slots = BTreeMap::new();
         for (slot, entry) in spec.layout.slots {
             let (action, custom_icon, custom_label) = entry.into_parts();
+            let literal = custom_label.is_some();
             slots.insert(
                 slot,
                 ActionRingPresentation {
                     label: custom_label.unwrap_or_else(|| action.label()),
+                    literal,
                     icon: custom_icon.unwrap_or_else(|| ActionRingIcon::for_action(&action)),
                 },
             );
@@ -265,6 +267,7 @@ mod tests {
             invocation.slots[&ActionRingSlot::Top],
             ActionRingPresentation {
                 label: "Cut".to_string(),
+                literal: false,
                 icon: ActionRingIcon::Keyboard,
             }
         );
@@ -279,6 +282,9 @@ mod tests {
             .set_label(ActionRingSlot::Top, Some("Copy Invoice".to_string()));
         let invocation = manager.begin(spec);
         assert_eq!(invocation.slots[&ActionRingSlot::Top].label, "Copy Invoice");
+        // Custom labels are literal so the overlay renders them verbatim even
+        // when they collide with a localization key.
+        assert!(invocation.slots[&ActionRingSlot::Top].literal);
     }
 
     #[test]

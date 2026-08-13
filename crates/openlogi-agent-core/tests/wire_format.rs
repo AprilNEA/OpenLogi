@@ -65,7 +65,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 15);
+    assert_eq!(PROTOCOL_VERSION, 16);
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is
@@ -140,12 +140,22 @@ fn action_ring_types() {
                 ActionRingSlot::Top,
                 ActionRingPresentation {
                     label: "Cut".to_string(),
+                    literal: false,
                     icon: ActionRingIcon::Keyboard,
                 },
             )]),
             language: Some("fr".to_string()),
         },
-        "2a0100034375740701026672",
+        "2a010003437574000701026672",
+    );
+    // The literal flag is one byte between label and icon.
+    assert_wire(
+        &ActionRingPresentation {
+            label: "Cut".to_string(),
+            literal: true,
+            icon: ActionRingIcon::Keyboard,
+        },
+        "034375740107",
     );
     assert_wire(&ActionRingSlot::Top, "00");
     assert_wire(&ActionRingSlot::TopLeft, "07");

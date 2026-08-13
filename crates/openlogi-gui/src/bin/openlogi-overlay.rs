@@ -154,9 +154,15 @@ impl Render for RingView {
         let center_commands = self.commands.clone();
         let hovered_label = self.hovered.and_then(|slot| {
             let presentation = self.invocation.slots.get(&slot)?;
-            Some(SharedString::from(
-                rust_i18n::t!(presentation.label.as_str()).into_owned(),
-            ))
+            // User-authored labels render verbatim: passing them through the
+            // localization table would translate any label that happens to
+            // collide with a known key ("Copy" → "Copier" under fr).
+            let label = if presentation.literal {
+                presentation.label.clone()
+            } else {
+                rust_i18n::t!(presentation.label.as_str()).into_owned()
+            };
+            Some(SharedString::from(label))
         });
         let slots = ActionRingSlot::ALL
             .into_iter()

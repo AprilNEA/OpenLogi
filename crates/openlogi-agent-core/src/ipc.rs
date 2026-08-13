@@ -36,7 +36,9 @@ use serde::{Deserialize, Serialize};
 /// v13: `Capabilities::thumbwheel` appended.
 /// v14: Actions Ring RPCs and haptic capability fields appended.
 /// v15: custom Actions Ring presentation icons and locale appended.
-pub const PROTOCOL_VERSION: u32 = 15;
+/// v16: `ActionRingPresentation::literal` inserted (custom labels render
+///      verbatim instead of passing through localization).
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep
@@ -227,6 +229,10 @@ pub enum MonitorEvent {
 pub struct ActionRingPresentation {
     /// Localization key or user-defined label shown by the overlay.
     pub label: String,
+    /// When set, `label` is user-authored free text and renders verbatim —
+    /// without this a custom label that collides with a localization key
+    /// ("Copy") would be translated on non-English locales.
+    pub literal: bool,
     /// Fully resolved icon; the overlay does not need the executable action.
     pub icon: ActionRingIcon,
 }
