@@ -25,6 +25,10 @@ mod overlay_platform;
 use std::{
     future::Future,
     pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -247,11 +251,13 @@ fn main() -> Result<()> {
     let app = gpui_platform::application().with_assets(app_assets::AppAssets);
     app.run(move |cx| {
         overlay_platform::configure_application();
-        spawn_click_away_dismissal(cx);
+        let live_session = Arc::new(ClickAwaySession::new());
+        spawn_click_away_dismissal(cx, Arc::clone(&live_session));
         cx.spawn(async move |cx| {
             while let Some(invocation) = invocations.recv().await {
                 rust_i18n::set_locale(locale::resolve(invocation.language.as_deref()));
                 cx.update(|cx| {
+                    live_session.clear();
                     for handle in cx.windows() {
                         let _ = handle.update(cx, |_, window, _| window.remove_window());
                     }
@@ -267,6 +273,7 @@ fn main() -> Result<()> {
                         })
                     }) {
                         Ok(handle) => {
+                            live_session.set(session_id);
                             overlay_platform::configure_windows();
                             cx.spawn(async move |cx| {
                                 cx.background_executor().timer(DISPLAY_LIFETIME).await;
@@ -290,6 +297,40 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Session the click-away monitor may dismiss; `0` means no ring is showing.
+struct ClickAwaySession(AtomicU64);
+
+impl ClickAwaySession {
+    const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+
+    /// Publish which ring is showing, or `0` while none is.
+    fn set(&self, session_id: u64) {
+        self.0.store(session_id, Ordering::Release);
+    }
+
+    /// Forget the showing session so later clicks cannot name it.
+    fn clear(&self) {
+        self.set(0);
+    }
+
+    /// Session id at click time, or `None` when no ring is showing.
+    #[must_use]
+    fn observe(&self) -> Option<u64> {
+        match self.0.load(Ordering::Acquire) {
+            0 => None,
+            session_id => Some(session_id),
+        }
+    }
+}
+
+/// True when the click still names the ring that is open.
+#[must_use]
+const fn click_away_targets(observed: u64, open: u64) -> bool {
+    observed != 0 && observed == open
+}
+
 /// Dismiss a showing ring when the user clicks anywhere off it, the way a
 /// transient popup closes on click-away — without swallowing that click.
 ///
@@ -298,12 +339,15 @@ fn main() -> Result<()> {
 /// macOS only delivers it events routed to *other* applications, so clicks on
 /// the ring itself can't race the slot/cancel handlers, and monitors can't
 /// consume events, so the click lands where the user aimed it. The handler
-/// only pings a channel; window teardown runs on the GPUI side, where a
-/// re-entrant AppKit callback can't find the App borrowed.
-fn spawn_click_away_dismissal(cx: &mut gpui::App) {
-    let (clicks_tx, mut clicks) = mpsc::unbounded_channel::<()>();
+/// snapshots the showing session onto a channel; teardown runs on the GPUI
+/// side, and only that session is cancelled so a queued click cannot close a
+/// ring that opened afterward.
+fn spawn_click_away_dismissal(cx: &mut gpui::App, live: Arc<ClickAwaySession>) {
+    let (clicks_tx, mut clicks) = mpsc::unbounded_channel();
     let monitor = overlay_platform::watch_clicks_outside(move || {
-        let _ = clicks_tx.send(());
+        if let Some(session_id) = live.observe() {
+            let _ = clicks_tx.send(session_id);
+        }
     });
     if monitor.is_none() && cfg!(target_os = "macos") {
         warn!(
@@ -311,25 +355,37 @@ fn spawn_click_away_dismissal(cx: &mut gpui::App) {
         );
     }
     cx.spawn(async move |cx| {
-        // The native monitor lives (and drops) with this task.
+        #[cfg(target_os = "macos")]
         let _monitor = monitor;
-        while clicks.recv().await.is_some() {
-            cx.update(|cx| {
-                for handle in cx.windows() {
-                    let Some(ring) = handle.downcast::<RingView>() else {
-                        continue;
-                    };
-                    let _ = ring.update(cx, |view, window, _| {
-                        let _ = view.commands.send(OverlayCommand::Cancel {
-                            session_id: view.invocation.session_id,
-                        });
-                        window.remove_window();
-                    });
-                }
-            });
+        #[cfg(not(target_os = "macos"))]
+        drop_unused_click_away_monitor(monitor);
+        while let Some(session_id) = clicks.recv().await {
+            cx.update(|cx| dismiss_click_away(cx, session_id));
         }
     })
     .detach();
+}
+
+/// Drop the stub monitor; non-macOS has no native owner to keep alive.
+#[cfg(not(target_os = "macos"))]
+const fn drop_unused_click_away_monitor(_monitor: Option<overlay_platform::ClickAwayMonitor>) {}
+
+/// Cancel the open ring only if it is still the session the click named.
+fn dismiss_click_away(cx: &mut gpui::App, session_id: u64) {
+    for handle in cx.windows() {
+        let Some(ring) = handle.downcast::<RingView>() else {
+            continue;
+        };
+        let _ = ring.update(cx, |view, window, _| {
+            if !click_away_targets(session_id, view.invocation.session_id) {
+                return;
+            }
+            let _ = view.commands.send(OverlayCommand::Cancel {
+                session_id: view.invocation.session_id,
+            });
+            window.remove_window();
+        });
+    }
 }
 
 #[allow(
@@ -817,5 +873,34 @@ mod tests {
             clamp_window_origin(desired, Size::new(px(400.0), px(400.0)), display),
             desired
         );
+    }
+
+    #[test]
+    fn no_click_is_observed_when_no_ring_is_showing() {
+        let live = ClickAwaySession::new();
+        assert_eq!(live.observe(), None);
+        live.set(11);
+        live.clear();
+        assert_eq!(live.observe(), None);
+    }
+
+    #[test]
+    fn a_click_queued_before_a_new_ring_does_not_target_it() {
+        let live = ClickAwaySession::new();
+        live.set(11);
+        let queued = live.observe().expect("a showing ring is observable");
+        live.set(12);
+        assert!(
+            !click_away_targets(queued, live.observe().expect("replacement is showing")),
+            "a click snapshotted against the previous session must not close the new ring"
+        );
+    }
+
+    #[test]
+    fn a_click_against_the_showing_ring_targets_it() {
+        let live = ClickAwaySession::new();
+        live.set(7);
+        let queued = live.observe().expect("a showing ring is observable");
+        assert!(click_away_targets(queued, 7));
     }
 }
