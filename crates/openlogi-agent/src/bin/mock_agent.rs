@@ -38,10 +38,12 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 use interprocess::local_socket::traits::tokio::Listener as _;
 use openlogi_agent_core::ipc::{
-    Agent, AgentSnapshot, AgentStatus, FoundDevice, InventoryHealth, MonitorEvent,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, FoundDevice,
+    InventoryHealth, MonitorEvent, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    PairingUpdate,
 };
 use openlogi_agent_core::transport;
+use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
@@ -485,6 +487,8 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     scroll_inversion: true,
                     hires_wheel: true,
                     thumbwheel: true,
+                    haptic_feedback: true,
+                    haptic_panel: true,
                 }),
             },
             PairedDevice {
@@ -530,6 +534,8 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                     scroll_inversion: false,
                     hires_wheel: false,
                     thumbwheel: false,
+                    haptic_feedback: false,
+                    haptic_panel: false,
                 }),
             },
         ],
@@ -577,6 +583,8 @@ fn direct_inventory() -> DeviceInventory {
                 scroll_inversion: false,
                 hires_wheel: false,
                 thumbwheel: false,
+                haptic_feedback: false,
+                haptic_panel: false,
             }),
         }],
     }
@@ -637,6 +645,34 @@ impl Agent for MockAgent {
     async fn reload_config(self, _: Context) {
         info!("reload_config (no-op in the mock)");
     }
+
+    // The mock has no Actions Ring hardware: long-polls idle until the
+    // overlay's request deadline (returning immediately would hot-loop it),
+    // and interaction commands answer like an expired session.
+    async fn next_action_ring(self, _: Context) -> Option<ActionRingInvocation> {
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        None
+    }
+
+    async fn action_ring_hover(
+        self,
+        _: Context,
+        _session_id: u64,
+        _slot: ActionRingSlot,
+    ) -> Result<(), ActionRingCommandError> {
+        Err(ActionRingCommandError::SessionNotFound)
+    }
+
+    async fn action_ring_activate(
+        self,
+        _: Context,
+        _session_id: u64,
+        _slot: ActionRingSlot,
+    ) -> Result<(), ActionRingCommandError> {
+        Err(ActionRingCommandError::SessionNotFound)
+    }
+
+    async fn action_ring_cancel(self, _: Context, _session_id: u64) {}
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: u32) -> Result<(), WriteError> {
         let mut state = self.state.lock().await;
