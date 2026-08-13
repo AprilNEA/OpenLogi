@@ -49,7 +49,18 @@ jobs:
   build:
     name: nix build (Linux)
     runs-on: ubuntu-latest
+    # GHA cache upload for store paths (magic-nix-cache). Read is enough for
+    # restoring; write is needed when the job is allowed to populate the cache
+    # (push to master / same-repo PR). Fork PRs still restore but cannot write.
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+        with:
+          # Prefer GitHub Actions cache only — no FlakeHub account required.
+          use-gha-cache: enabled
+          use-flakehub: disabled
       - run: nix build .#openlogi -L
