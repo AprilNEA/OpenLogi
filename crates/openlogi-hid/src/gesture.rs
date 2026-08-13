@@ -244,12 +244,11 @@ pub async fn run_capture_session(
     // — is gone (a sleeping/unreachable device still gets us an error *reply*,
     // which proves delivery and resets the count). Exiting lets the manager
     // re-arm on a fresh channel.
-    let root =
-        <hidpp::feature::root::RootFeature as hidpp::feature::CreatableFeature>::new(
-            Arc::clone(&chan),
-            device_index,
-            0,
-        );
+    let root = <hidpp::feature::root::RootFeature as hidpp::feature::CreatableFeature>::new(
+        Arc::clone(&chan),
+        device_index,
+        0,
+    );
     let mut shutdown = std::pin::pin!(shutdown);
     let mut silent_pings = 0u8;
     let channel_dead = loop {
