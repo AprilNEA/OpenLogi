@@ -554,17 +554,15 @@ impl Enumerator {
                     // bounds the outage when its channel's input-report
                     // delivery dies (writes accepted, replies never seen —
                     // observed on macOS with concurrent opens of one node).
-                    let budget = if is_receiver_pid(info.product_id) {
+                    let receiver = is_receiver_pid(info.product_id);
+                    let budget = if receiver {
                         RECEIVER_PROBE_BUDGET
                     } else {
                         PROBE_BUDGET
                     };
-                    let probe = timeout(
-                        budget,
-                        probe_one(info, Arc::clone(&channel), cache, tick),
-                    )
-                    .await;
-                    (node, channel, probe, budget)
+                    let probe =
+                        timeout(budget, probe_one(info, Arc::clone(&channel), cache, tick)).await;
+                    (node, channel, probe, budget, receiver)
                 })
                 .collect::<Vec<_>>()
                 .join()
@@ -579,7 +577,7 @@ impl Enumerator {
         // governed by `probe.healthy`.
         let mut all_complete = true;
         let mut all_healthy = true;
-        for (node, channel, result, budget) in results {
+        for (node, channel, result, budget, receiver) in results {
             let mut budget_timeout = false;
             let probe = if let Ok(probe) = result {
                 probe
@@ -588,7 +586,10 @@ impl Enumerator {
                 // or a channel whose input-report delivery died (writes
                 // accepted, replies never seen). Either way: "couldn't
                 // check", not "nothing there".
-                warn!(?budget, "device probe timed out — treating as a failed probe");
+                warn!(
+                    ?budget,
+                    "device probe timed out — treating as a failed probe"
+                );
                 budget_timeout = true;
                 NodeProbe::failed()
             };
@@ -596,10 +597,13 @@ impl Enumerator {
             all_healthy &= probe.healthy;
             outcomes.extend(probe.outcomes);
             let settled = self.ledger.settle(&node, probe.healthy, probe.inventory);
-            // A full-budget timeout is the dead-delivery signature — such a
-            // channel never recovers on its own, so don't wait for the
-            // ledger's consecutive-failure threshold to replace it.
-            if settled.evict_channel || budget_timeout {
+            // A full-budget timeout on a receiver is the dead-delivery
+            // signature — such a channel never recovers on its own, so don't
+            // wait for the ledger's consecutive-failure threshold to replace
+            // it. A direct (especially Bluetooth) device that burns its budget
+            // may simply be asleep: keep the ledger's replay grace and
+            // two-strike policy for those.
+            if settled.evict_channel || (budget_timeout && receiver) {
                 if let Some(registry) = &self.registry {
                     registry.remove_node(&node);
                 }
