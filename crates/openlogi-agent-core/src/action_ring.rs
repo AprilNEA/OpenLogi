@@ -106,11 +106,11 @@ impl ActionRingManager {
         let mut actions = BTreeMap::new();
         let mut slots = BTreeMap::new();
         for (slot, entry) in spec.layout.slots {
-            let (action, custom_icon) = entry.into_parts();
+            let (action, custom_icon, custom_label) = entry.into_parts();
             slots.insert(
                 slot,
                 ActionRingPresentation {
-                    label: action.label(),
+                    label: custom_label.unwrap_or_else(|| action.label()),
                     icon: custom_icon.unwrap_or_else(|| ActionRingIcon::for_action(&action)),
                 },
             );
@@ -269,6 +269,16 @@ mod tests {
             }
         );
         assert_eq!(invocation.language.as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn custom_slot_labels_override_the_action_label() {
+        let manager = ActionRingManager::default();
+        let mut spec = spec();
+        spec.layout
+            .set_label(ActionRingSlot::Top, Some("Copy Invoice".to_string()));
+        let invocation = manager.begin(spec);
+        assert_eq!(invocation.slots[&ActionRingSlot::Top].label, "Copy Invoice");
     }
 
     #[test]

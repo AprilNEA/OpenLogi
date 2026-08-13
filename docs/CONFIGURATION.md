@@ -94,11 +94,14 @@ host_switch_targets = ["receiver:aabbccdd:slot:2"]
 enabled = true
 haptics = true
 
-# Each populated slot owns its action and optional presentation icon.
-# Omit `icon` to use the action's normal icon; omit the slot to leave it empty.
+# Each populated slot owns its action, an optional presentation icon, and an
+# optional hover label. Omit `icon` to use the action's normal icon; omit
+# `label` to use the action's generic name (useful for `RunShellCommand`
+# slots, which otherwise all read "Run Command"); omit the slot to leave it
+# empty.
 [devices."receiver:aabbccdd:slot:1".action_ring.default.slots]
 Top = { action = "Copy", icon = "Keyboard" }
-TopRight = { action = "Paste" }
+TopRight = { action = "Paste", label = "Paste It" }
 Right = { action = "BrowserForward" }
 BottomRight = { action = "NextTab" }
 Bottom = { action = "ShowDesktop", icon = "Applications" }

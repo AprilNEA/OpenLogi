@@ -146,13 +146,19 @@ pub struct ActionRingEntry {
     action: RingAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     icon: Option<ActionRingIcon>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
 }
 
 impl ActionRingEntry {
-    /// Create a slot with its action-derived icon.
+    /// Create a slot with its action-derived icon and label.
     #[must_use]
     pub const fn new(action: RingAction) -> Self {
-        Self { action, icon: None }
+        Self {
+            action,
+            icon: None,
+            label: None,
+        }
     }
 
     /// Executable action for this slot.
@@ -167,10 +173,19 @@ impl ActionRingEntry {
         self.icon
     }
 
-    /// Consume the entry into its executable action and icon override.
+    /// User-provided display label, or `None` to derive one from
+    /// [`Self::action`]. Free text: the overlay's localization pass returns
+    /// unknown keys verbatim, so user labels render as written.
     #[must_use]
-    pub fn into_parts(self) -> (Action, Option<ActionRingIcon>) {
-        (self.action.into_action(), self.icon)
+    pub fn custom_label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    /// Consume the entry into its executable action and presentation
+    /// overrides (icon, label).
+    #[must_use]
+    pub fn into_parts(self) -> (Action, Option<ActionRingIcon>, Option<String>) {
+        (self.action.into_action(), self.icon, self.label)
     }
 
     fn replace_action(&mut self, action: RingAction) {
@@ -179,6 +194,10 @@ impl ActionRingEntry {
 
     fn set_icon(&mut self, icon: Option<ActionRingIcon>) {
         self.icon = icon;
+    }
+
+    fn set_label(&mut self, label: Option<String>) {
+        self.label = label;
     }
 }
 
@@ -209,6 +228,13 @@ impl ActionRingLayout {
     pub fn set_icon(&mut self, slot: ActionRingSlot, icon: Option<ActionRingIcon>) {
         if let Some(entry) = self.slots.get_mut(&slot) {
             entry.set_icon(icon);
+        }
+    }
+
+    /// Set a custom label for a populated slot. Empty slots remain empty.
+    pub fn set_label(&mut self, slot: ActionRingSlot, label: Option<String>) {
+        if let Some(entry) = self.slots.get_mut(&slot) {
+            entry.set_label(label);
         }
     }
 }
@@ -323,6 +349,45 @@ mod tests {
         let encoded = toml::to_string(&Wrapper { action })
             .unwrap_or_else(|error| panic!("could not serialize ring action: {error}"));
         assert_eq!(encoded, "action = \"Copy\"\n");
+    }
+
+    #[test]
+    fn custom_labels_roundtrip_and_survive_action_replacement() {
+        let mut layout: ActionRingLayout = toml::from_str(
+            r#"
+            [slots]
+            Top = { action = "Copy", label = "Copy Invoice" }
+            "#,
+        )
+        .unwrap_or_else(|error| panic!("could not deserialize labelled layout: {error}"));
+        assert_eq!(
+            layout.slots[&ActionRingSlot::Top].custom_label(),
+            Some("Copy Invoice")
+        );
+
+        let encoded = toml::to_string(&layout)
+            .unwrap_or_else(|error| panic!("could not serialize labelled layout: {error}"));
+        let decoded = toml::from_str::<ActionRingLayout>(&encoded)
+            .unwrap_or_else(|error| panic!("could not deserialize labelled layout: {error}"));
+        assert_eq!(decoded, layout);
+
+        // Like icons, a label sticks to its slot when the action is replaced.
+        layout.set_action(
+            ActionRingSlot::Top,
+            Some(RingAction::new(Action::Paste).unwrap_or_else(|error| panic!("{error}"))),
+        );
+        assert_eq!(
+            layout.slots[&ActionRingSlot::Top].custom_label(),
+            Some("Copy Invoice")
+        );
+    }
+
+    #[test]
+    fn unlabelled_entries_serialize_without_a_label_key() {
+        let layout = ActionRingLayout::default();
+        let encoded = toml::to_string(&layout)
+            .unwrap_or_else(|error| panic!("could not serialize ring layout: {error}"));
+        assert!(!encoded.contains("label"));
     }
 
     #[test]
