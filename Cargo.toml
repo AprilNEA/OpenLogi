@@ -31,7 +31,6 @@ members = [
     "crates/openlogi-cli",
     "crates/openlogi-agent-core",
     "crates/openlogi-agent",
-    "crates/openlogi-gui",
     "crates/openlogi-hook",
     "xtask",
 ]

@@ -93,11 +93,11 @@ pub fn spawn(
     });
 }
 
-/// Select how the selected device's thumb wheel is captured over HID++.
+/// Select the thumb wheel's hardware reporting state over HID++.
 ///
 /// Non-default sensitivity or rotation bindings require diversion so OpenLogi
-/// can re-synthesise the rotation. Tap reports are delivered only when the
-/// click binding was explicitly configured.
+/// can re-synthesise the rotation. An explicit tap binding also requires
+/// diversion; whether a forwarded tap is dispatched remains live agent policy.
 pub(crate) fn thumbwheel_capture_mode(
     hook_maps: &SharedHookMaps,
     sensitivity: i32,
@@ -105,7 +105,7 @@ pub(crate) fn thumbwheel_capture_mode(
     let sensitivity_changed = sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY;
     let Ok(maps) = hook_maps.read() else {
         return if sensitivity_changed {
-            ThumbwheelCaptureMode::DivertedRotation
+            ThumbwheelCaptureMode::Diverted
         } else {
             ThumbwheelCaptureMode::Native
         };
@@ -116,47 +116,61 @@ pub(crate) fn thumbwheel_capture_mode(
             .is_some_and(|action| *action != default_binding(button))
     };
 
-    if maps.thumbwheel_tap_bound {
-        ThumbwheelCaptureMode::DivertedRotationAndTap
-    } else if sensitivity_changed
+    if maps.thumbwheel_tap_bound
+        || sensitivity_changed
         || [ButtonId::ThumbwheelScrollUp, ButtonId::ThumbwheelScrollDown]
             .iter()
             .any(|&button| binding_changed(button))
     {
-        ThumbwheelCaptureMode::DivertedRotation
+        ThumbwheelCaptureMode::Diverted
     } else {
         ThumbwheelCaptureMode::Native
     }
 }
 
-/// Select the action-aware thumb-wheel mode from one per-device capture plan.
+/// Whether this device's thumb wheel must leave its native HID reporting mode.
+///
+/// Only the two physical states exist. Tap intent is deliberately NOT encoded
+/// here: both "diverted for rotation" and "diverted for rotation and tap" arm
+/// the identical `set_reporting(true, false)`, so folding tap policy into the
+/// mode would restart an otherwise-identical session on every app/profile
+/// switch. The agent decides tap delivery from the live binding map instead.
 fn thumbwheel_capture_mode_for_plan(plan: &DeviceCapturePlan) -> ThumbwheelCaptureMode {
+    if thumbwheel_diversion_required(plan) {
+        ThumbwheelCaptureMode::Diverted
+    } else {
+        ThumbwheelCaptureMode::Native
+    }
+}
+
+/// Whether an explicit tap binding is armed for this device.
+///
+/// Carried alongside the mode rather than inside it, so tap provenance survives
+/// without becoming part of the capture session's identity.
+fn thumbwheel_tap_armed(plan: &DeviceCapturePlan) -> bool {
+    plan.bindings
+        .get(&ButtonId::Thumbwheel)
+        .is_some_and(|action| *action != default_binding(ButtonId::Thumbwheel))
+}
+
+fn thumbwheel_diversion_required(plan: &DeviceCapturePlan) -> bool {
     let binding_changed = |button| {
         plan.bindings
             .get(&button)
             .is_some_and(|action| *action != default_binding(button))
     };
 
-    if binding_changed(ButtonId::Thumbwheel) {
-        ThumbwheelCaptureMode::DivertedRotationAndTap
-    } else if plan.thumbwheel_sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY
+    thumbwheel_tap_armed(plan)
+        || plan.thumbwheel_sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY
         || [ButtonId::ThumbwheelScrollUp, ButtonId::ThumbwheelScrollDown]
             .iter()
             .any(|&button| binding_changed(button))
-    {
-        ThumbwheelCaptureMode::DivertedRotation
-    } else {
-        ThumbwheelCaptureMode::Native
-    }
 }
 
 /// The [`CaptureSpec`] one device's session should run with right now.
 fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
     CaptureSpec {
-        thumbwheel_mode: match thumbwheel_capture_mode_for_plan(plan) {
-            ThumbwheelCaptureMode::Native => ThumbwheelCaptureMode::Native,
-            _ => ThumbwheelCaptureMode::DivertedRotation,
-        },
+        thumbwheel_mode: thumbwheel_capture_mode_for_plan(plan),
         // Derived from the dispatch maps, so the armed diverts and the maps
         // resolving their events can never drift apart.
         divert_gesture_sources: GESTURE_SOURCE_BUTTONS
@@ -191,22 +205,6 @@ enum DoneAction {
     Remove { unexpected: bool },
 }
 
-/// Reduce the action-aware policy to the two physical wheel reporting states.
-///
-/// Once diverted, the HID session forwards tap reports and the latest hook maps
-/// decide whether to dispatch them. Keeping tap provenance out of the session
-/// identity lets an app/profile switch update tap intent without restarting an
-/// otherwise-required diverted session.
-pub(crate) fn capture_session_thumbwheel_mode(
-    hook_maps: &SharedHookMaps,
-    sensitivity: i32,
-) -> ThumbwheelCaptureMode {
-    match thumbwheel_capture_mode(hook_maps, sensitivity) {
-        ThumbwheelCaptureMode::Native => ThumbwheelCaptureMode::Native,
-        _ => ThumbwheelCaptureMode::DivertedRotation,
-    }
-}
-
 /// Resolve a captured button press against the latest published hook maps.
 ///
 /// A diverted thumb wheel can keep reporting taps while an app/profile switch
@@ -226,9 +224,10 @@ pub(crate) fn captured_button_action(
 
 /// Resolve a captured button press against one device's latest plan.
 fn captured_button_action_for_plan(plan: &DeviceCapturePlan, button: ButtonId) -> Option<Action> {
-    if button == ButtonId::Thumbwheel
-        && thumbwheel_capture_mode_for_plan(plan) != ThumbwheelCaptureMode::DivertedRotationAndTap
-    {
+    // Tap delivery follows the binding's provenance, not the session mode:
+    // an explicit tap stays deliverable while rotation or sensitivity keeps the
+    // wheel diverted for other reasons.
+    if button == ButtonId::Thumbwheel && !thumbwheel_tap_armed(plan) {
         return None;
     }
     plan.bindings.get(&button).cloned()
@@ -652,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn swapped_rotation_bindings_divert_without_delivering_taps() {
+    fn swapped_rotation_bindings_divert_the_hardware() {
         let mut plan = default_thumbwheel_plan();
         set_binding(
             &mut plan,
@@ -667,17 +666,25 @@ mod tests {
 
         assert_eq!(
             thumbwheel_capture_mode_for_plan(&plan),
-            ThumbwheelCaptureMode::DivertedRotation
+            ThumbwheelCaptureMode::Diverted
+        );
+        assert!(
+            !thumbwheel_tap_armed(&plan),
+            "swapped rotation diverts the wheel without arming tap delivery"
         );
     }
 
     #[test]
-    fn custom_sensitivity_diverts_without_delivering_taps() {
+    fn custom_sensitivity_diverts_the_hardware() {
         let mut plan = default_thumbwheel_plan();
         plan.thumbwheel_sensitivity = DEFAULT_THUMBWHEEL_SENSITIVITY + 1;
         assert_eq!(
             thumbwheel_capture_mode_for_plan(&plan),
-            ThumbwheelCaptureMode::DivertedRotation
+            ThumbwheelCaptureMode::Diverted
+        );
+        assert!(
+            !thumbwheel_tap_armed(&plan),
+            "a sensitivity change diverts the wheel without arming tap delivery"
         );
     }
 
@@ -688,7 +695,11 @@ mod tests {
 
         assert_eq!(
             thumbwheel_capture_mode_for_plan(&plan),
-            ThumbwheelCaptureMode::DivertedRotationAndTap
+            ThumbwheelCaptureMode::Diverted
+        );
+        assert!(
+            thumbwheel_tap_armed(&plan),
+            "an explicitly rebound tap stays deliverable"
         );
     }
 

@@ -10,13 +10,14 @@
 //! its input-report stream, so all captured controls share this session.
 //!
 //! The session is transport-only — it has no opinion on what an input *does*.
-//! The GUI maps each [`CapturedInput`] to the user's bound action and dispatches
+//! The agent maps each [`CapturedInput`] to the user's bound action and dispatches
 //! it, mirroring how the CGEventTap hook handles the side buttons. The thumb
-//! wheel is special: diverting it stops native horizontal scroll, so the GUI
-//! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas. A diverted
-//! session forwards tap reports too; the agent checks the latest binding map
-//! before dispatching them. The wheel stays native while the user's thumbwheel
-//! config is at its defaults.
+//! wheel is special: diverting it stops native horizontal scroll, so the agent
+//! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas — the wheel
+//! is therefore only diverted when the user's thumbwheel config leaves its
+//! defaults (click bound, rotation rebound, or sensitivity changed). While
+//! diverted, the transport forwards every report; the agent applies the current
+//! app/profile policy before dispatching a tap.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
@@ -52,10 +53,8 @@ pub enum ThumbwheelCaptureMode {
     /// Leave the wheel in its native HID reporting mode.
     #[default]
     Native,
-    /// Divert the wheel and forward rotation, but suppress single-tap reports.
-    DivertedRotation,
-    /// Divert the wheel and forward both rotation and single-tap reports.
-    DivertedRotationAndTap,
+    /// Divert the wheel to HID++ and forward all decoded reports to the agent.
+    Diverted,
 }
 
 /// One input captured from the active device.
@@ -221,14 +220,7 @@ pub async fn run_capture_session(
             if let Some(idx) = thumb_index
                 && let Some(event) = thumbwheel::decode_event(&msg, device_index, idx)
             {
-                // Once the wheel is physically diverted, forward every part of
-                // its report. The agent filters taps against the latest binding
-                // provenance without restarting this hardware session.
-                forward_thumbwheel_event(
-                    event,
-                    ThumbwheelCaptureMode::DivertedRotationAndTap,
-                    &sink,
-                );
+                forward_thumbwheel_event(event, &sink);
             }
         }
     });
@@ -261,6 +253,19 @@ pub async fn run_capture_session(
     Ok(())
 }
 
+/// Forward every actionable part of a decoded diverted thumb-wheel report.
+///
+/// Tap intent is deliberately not captured here: app/profile changes update the
+/// agent's live policy without restarting this hardware session.
+fn forward_thumbwheel_event(event: ThumbwheelEvent, sink: &mpsc::UnboundedSender<CapturedInput>) {
+    if event.single_tap {
+        let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::Thumbwheel, None));
+    }
+    if event.rotation != 0 {
+        let _ = sink.send(CapturedInput::Scroll(event.rotation));
+    }
+}
+
 /// Reason-aware capture: maps stop reasons onto a unit oneshot shutdown.
 pub async fn run_capture_session_with_stop_reason(
     route: DeviceRoute,
@@ -277,7 +282,7 @@ pub async fn run_capture_session_with_stop_reason(
     });
     let spec = CaptureSpec {
         thumbwheel_mode: if capture_thumbwheel {
-            ThumbwheelCaptureMode::DivertedRotationAndTap
+            ThumbwheelCaptureMode::Diverted
         } else {
             ThumbwheelCaptureMode::Native
         },
@@ -311,23 +316,6 @@ pub async fn run_capture_session_with_registry(
         channel_slot,
     )
     .await
-}
-
-/// Forward the parts of a decoded thumb-wheel report enabled by `mode`.
-fn forward_thumbwheel_event(
-    event: ThumbwheelEvent,
-    mode: ThumbwheelCaptureMode,
-    sink: &mpsc::UnboundedSender<CapturedInput>,
-) {
-    if mode == ThumbwheelCaptureMode::Native {
-        return;
-    }
-    if event.single_tap && mode == ThumbwheelCaptureMode::DivertedRotationAndTap {
-        let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::Thumbwheel, None));
-    }
-    if event.rotation != 0 {
-        let _ = sink.send(CapturedInput::Scroll(event.rotation));
-    }
 }
 
 /// The set of controls a session has diverted, kept so they can be handed back
