@@ -6,9 +6,10 @@ use std::sync::Arc;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-    channel::{HidppChannel, MessageListenerGuard},
-    event::EventEmitter,
-    feature::{CreatableFeature, EmittingFeature, Feature, FeatureEndpoint, event_payload},
+    channel::HidppChannel,
+    feature::{
+        CreatableFeature, DecodeEvent, EmittingFeature, EventSource, Feature, FeatureEndpoint,
+    },
     protocol::v20::Hidpp20Error,
 };
 
@@ -17,11 +18,8 @@ pub struct ThumbwheelFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
-    /// The emitter used to emit events.
-    emitter: Arc<EventEmitter<ThumbwheelEvent>>,
-
-    /// Removes the message listener when the feature is dropped.
-    _msg_listener: MessageListenerGuard,
+    /// Publishes decoded events to listeners.
+    events: EventSource<ThumbwheelEvent>,
 }
 
 impl CreatableFeature for ThumbwheelFeature {
@@ -29,41 +27,10 @@ impl CreatableFeature for ThumbwheelFeature {
     const STARTING_VERSION: u8 = 0;
 
     fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let emitter = Arc::new(EventEmitter::new());
-
-        let listener = chan.add_msg_listener_guarded({
-            let emitter = Arc::clone(&emitter);
-
-            move |raw, matched| {
-                let Some((func, payload)) =
-                    event_payload(raw, matched, device_index, feature_index)
-                else {
-                    return;
-                };
-                // The status update is the only event and carries sub-id 0.
-                if func.to_lo() != 0 {
-                    return;
-                }
-
-                let Ok(rotation_status) = ThumbwheelRotationStatus::try_from(payload[4]) else {
-                    return;
-                };
-
-                emitter.emit(ThumbwheelEvent::StatusUpdate(ThumbwheelStatusUpdate {
-                    rotation: i16::from_be_bytes(payload[0..=1].try_into().unwrap()),
-                    time_elapsed: u16::from_be_bytes(payload[2..=3].try_into().unwrap()),
-                    rotation_status,
-                    touch: payload[5] & (1 << 1) != 0,
-                    proxy: payload[5] & (1 << 2) != 0,
-                    single_tap: payload[5] & (1 << 3) != 0,
-                }));
-            }
-        });
-
+        let events = EventSource::attach(&chan, device_index, feature_index);
         Self {
             endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            emitter,
-            _msg_listener: listener,
+            events,
         }
     }
 }
@@ -72,7 +39,27 @@ impl Feature for ThumbwheelFeature {}
 
 impl EmittingFeature<ThumbwheelEvent> for ThumbwheelFeature {
     fn listen(&self) -> async_channel::Receiver<ThumbwheelEvent> {
-        self.emitter.create_receiver()
+        self.events.listen()
+    }
+}
+
+impl DecodeEvent for ThumbwheelEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        // The status update is the only event and carries sub-id 0.
+        if sub_id != 0 {
+            return None;
+        }
+
+        let rotation_status = ThumbwheelRotationStatus::try_from(payload[4]).ok()?;
+
+        Some(ThumbwheelEvent::StatusUpdate(ThumbwheelStatusUpdate {
+            rotation: i16::from_be_bytes(payload[0..=1].try_into().unwrap()),
+            time_elapsed: u16::from_be_bytes(payload[2..=3].try_into().unwrap()),
+            rotation_status,
+            touch: payload[5] & (1 << 1) != 0,
+            proxy: payload[5] & (1 << 2) != 0,
+            single_tap: payload[5] & (1 << 3) != 0,
+        }))
     }
 }
 

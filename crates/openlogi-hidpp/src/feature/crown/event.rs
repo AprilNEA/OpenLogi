@@ -2,6 +2,8 @@
 
 use num_enum::{FromPrimitive, IntoPrimitive};
 
+use crate::feature::DecodeEvent;
+
 /// Rotation phase reported in a [`CrownUpdate`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -129,5 +131,11 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<CrownEvent>
             speed: i16::from_be_bytes([payload[14], payload[15]]),
         })),
         _ => None,
+    }
+}
+
+impl DecodeEvent for CrownEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        decode_event(sub_id, payload)
     }
 }

@@ -6,9 +6,10 @@ use std::{collections::HashSet, hash::Hash, sync::Arc};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-    channel::{HidppChannel, MessageListenerGuard},
-    event::EventEmitter,
-    feature::{CreatableFeature, EmittingFeature, Feature, FeatureEndpoint, event_payload},
+    channel::HidppChannel,
+    feature::{
+        CreatableFeature, DecodeEvent, EmittingFeature, EventSource, Feature, FeatureEndpoint,
+    },
     protocol::v20::Hidpp20Error,
 };
 
@@ -17,11 +18,8 @@ pub struct UnifiedBatteryFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
-    /// The emitter used to emit events.
-    emitter: Arc<EventEmitter<BatteryEvent>>,
-
-    /// Removes the message listener when the feature is dropped.
-    _msg_listener: MessageListenerGuard,
+    /// Publishes decoded events to listeners.
+    events: EventSource<BatteryEvent>,
 }
 
 impl CreatableFeature for UnifiedBatteryFeature {
@@ -29,41 +27,10 @@ impl CreatableFeature for UnifiedBatteryFeature {
     const STARTING_VERSION: u8 = 0;
 
     fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let emitter = Arc::new(EventEmitter::new());
-
-        let listener = chan.add_msg_listener_guarded({
-            let emitter = Arc::clone(&emitter);
-
-            move |raw, matched| {
-                let Some((func, payload)) =
-                    event_payload(raw, matched, device_index, feature_index)
-                else {
-                    return;
-                };
-                // The battery broadcast is the only event and carries sub-id 0.
-                if func.to_lo() != 0 {
-                    return;
-                }
-
-                let (Ok(level), Ok(status)) = (
-                    BatteryLevel::try_from(payload[1]),
-                    BatteryStatus::try_from(payload[2]),
-                ) else {
-                    return;
-                };
-
-                emitter.emit(BatteryEvent::InfoUpdate(BatteryInfo {
-                    charging_percentage: payload[0],
-                    level,
-                    status,
-                }));
-            }
-        });
-
+        let events = EventSource::attach(&chan, device_index, feature_index);
         Self {
             endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            emitter,
-            _msg_listener: listener,
+            events,
         }
     }
 }
@@ -72,7 +39,29 @@ impl Feature for UnifiedBatteryFeature {}
 
 impl EmittingFeature<BatteryEvent> for UnifiedBatteryFeature {
     fn listen(&self) -> async_channel::Receiver<BatteryEvent> {
-        self.emitter.create_receiver()
+        self.events.listen()
+    }
+}
+
+impl DecodeEvent for BatteryEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        // The battery broadcast is the only event and carries sub-id 0.
+        if sub_id != 0 {
+            return None;
+        }
+
+        let (Ok(level), Ok(status)) = (
+            BatteryLevel::try_from(payload[1]),
+            BatteryStatus::try_from(payload[2]),
+        ) else {
+            return None;
+        };
+
+        Some(BatteryEvent::InfoUpdate(BatteryInfo {
+            charging_percentage: payload[0],
+            level,
+            status,
+        }))
     }
 }
 

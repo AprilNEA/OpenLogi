@@ -3,7 +3,8 @@
 use std::{any::Any, sync::Arc};
 
 use crate::{
-    channel::{HidppChannel, HidppMessage, LONG_REPORT_LENGTH},
+    channel::{HidppChannel, HidppMessage, LONG_REPORT_LENGTH, MessageListenerGuard},
+    event::EventEmitter,
     nibble::U4,
     protocol::v20::{self, Hidpp20Error},
 };
@@ -73,6 +74,73 @@ pub trait EmittingFeature<T>: Feature {
     /// Creates a receiver that is being notified whenever a new event of type
     /// `T` is emitted by the feature.
     fn listen(&self) -> async_channel::Receiver<T>;
+}
+
+/// Decodes a feature's event payload from its HID++2.0 event sub-id.
+///
+/// Implemented by a feature's event enum. [`EventSource::attach`] calls
+/// [`Self::decode`] for every unsolicited broadcast addressed to the feature,
+/// so this is the only part of a feature's event handling that has to vary —
+/// [`EventSource`] owns the listener registration, the [`event_payload`]
+/// filtering, and the emitting. Returning `None` drops the report exactly
+/// like the hand-rolled per-feature listeners this replaced did on an
+/// unrecognised sub-id or an unparsable payload.
+pub(crate) trait DecodeEvent: Clone + Send + Sync + 'static {
+    /// Decodes `payload` for event sub-id `sub_id`, or returns `None` to drop
+    /// the report.
+    fn decode(sub_id: u8, payload: &[u8; LONG_REPORT_LENGTH - 4]) -> Option<Self>
+    where
+        Self: Sized;
+}
+
+/// Owns the [`EventEmitter`] and message listener backing an
+/// [`EmittingFeature`] implementation.
+///
+/// Every emitting feature used to hand-roll the same listener ceremony in its
+/// `CreatableFeature::new`: build an `Arc<EventEmitter<E>>`, register a
+/// guarded message listener, filter the raw report through [`event_payload`],
+/// and emit whatever the feature's own decode step produced. A feature now
+/// holds one `EventSource<E>` field, builds it with [`Self::attach`], and
+/// implements [`EmittingFeature`] with a one-line [`Self::listen`] delegate.
+pub(crate) struct EventSource<E: DecodeEvent> {
+    emitter: Arc<EventEmitter<E>>,
+
+    /// Removes the message listener when the source is dropped.
+    _listener: MessageListenerGuard,
+}
+
+impl<E: DecodeEvent> EventSource<E> {
+    /// Registers a listener on `chan` that decodes broadcasts addressed to
+    /// `(device_index, feature_index)` via [`DecodeEvent::decode`] and emits
+    /// them to receivers created by [`Self::listen`].
+    pub(crate) fn attach(chan: &Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
+        let emitter = Arc::new(EventEmitter::new());
+
+        let listener = chan.add_msg_listener_guarded({
+            let emitter = Arc::clone(&emitter);
+
+            move |raw, matched| {
+                let Some((func, payload)) =
+                    event_payload(raw, matched, device_index, feature_index)
+                else {
+                    return;
+                };
+                if let Some(event) = E::decode(func.to_lo(), &payload) {
+                    emitter.emit(event);
+                }
+            }
+        });
+
+        Self {
+            emitter,
+            _listener: listener,
+        }
+    }
+
+    /// Creates a receiver notified of every event this source decodes.
+    pub(crate) fn listen(&self) -> async_channel::Receiver<E> {
+        self.emitter.create_receiver()
+    }
 }
 
 /// A feature's addressable `(device, feature)` endpoint on a channel.

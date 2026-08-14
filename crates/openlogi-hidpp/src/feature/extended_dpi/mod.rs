@@ -23,9 +23,8 @@ pub use types::{
 
 use self::types::{parse_dpi_list, parse_dpi_ranges, parse_lod_list, terminated_word_len};
 use crate::{
-    channel::{HidppChannel, MessageListenerGuard},
-    event::EventEmitter,
-    feature::{CreatableFeature, EmittingFeature, Feature, FeatureEndpoint, event_payload},
+    channel::HidppChannel,
+    feature::{CreatableFeature, EmittingFeature, EventSource, Feature, FeatureEndpoint},
     protocol::v20::Hidpp20Error,
 };
 
@@ -38,11 +37,8 @@ pub struct ExtendedDpiFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
-    /// The emitter used to publish decoded events.
-    emitter: Arc<EventEmitter<ExtendedDpiEvent>>,
-
-    /// Removes the message listener when the feature is dropped.
-    _msg_listener: MessageListenerGuard,
+    /// Publishes decoded events to listeners.
+    events: EventSource<ExtendedDpiEvent>,
 }
 
 impl CreatableFeature for ExtendedDpiFeature {
@@ -50,28 +46,10 @@ impl CreatableFeature for ExtendedDpiFeature {
     const STARTING_VERSION: u8 = 0;
 
     fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let emitter = Arc::new(EventEmitter::new());
-
-        let listener = chan.add_msg_listener_guarded({
-            let emitter = Arc::clone(&emitter);
-
-            move |raw, matched| {
-                let Some((func, payload)) =
-                    event_payload(raw, matched, device_index, feature_index)
-                else {
-                    return;
-                };
-
-                if let Some(event) = event::decode_event(func.to_lo(), &payload) {
-                    emitter.emit(event);
-                }
-            }
-        });
-
+        let events = EventSource::attach(&chan, device_index, feature_index);
         Self {
             endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            emitter,
-            _msg_listener: listener,
+            events,
         }
     }
 }
@@ -80,7 +58,7 @@ impl Feature for ExtendedDpiFeature {}
 
 impl EmittingFeature<ExtendedDpiEvent> for ExtendedDpiFeature {
     fn listen(&self) -> async_channel::Receiver<ExtendedDpiEvent> {
-        self.emitter.create_receiver()
+        self.events.listen()
     }
 }
 

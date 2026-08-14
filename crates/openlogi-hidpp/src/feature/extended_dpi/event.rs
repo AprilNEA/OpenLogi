@@ -1,6 +1,7 @@
 //! Events emitted by `ExtendedAdjustableDpi` (`0x2202`).
 
 use super::types::{DpiDirection, Lod};
+use crate::feature::DecodeEvent;
 
 /// An event emitted by [`ExtendedDpiFeature`](super::ExtendedDpiFeature).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -78,5 +79,11 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<ExtendedDpi
             },
         )),
         _ => None,
+    }
+}
+
+impl DecodeEvent for ExtendedDpiEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        decode_event(sub_id, payload)
     }
 }

@@ -10,9 +10,10 @@ use std::sync::Arc;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-    channel::{HidppChannel, MessageListenerGuard},
-    event::EventEmitter,
-    feature::{CreatableFeature, EmittingFeature, Feature, FeatureEndpoint, event_payload},
+    channel::HidppChannel,
+    feature::{
+        CreatableFeature, DecodeEvent, EmittingFeature, EventSource, Feature, FeatureEndpoint,
+    },
     protocol::v20::Hidpp20Error,
 };
 
@@ -45,11 +46,8 @@ pub struct DualPlatformFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
-    /// The emitter used to publish decoded events.
-    emitter: Arc<EventEmitter<DualPlatformEvent>>,
-
-    /// Removes the message listener when the feature is dropped.
-    _msg_listener: MessageListenerGuard,
+    /// Publishes decoded events to listeners.
+    events: EventSource<DualPlatformEvent>,
 }
 
 impl CreatableFeature for DualPlatformFeature {
@@ -57,31 +55,10 @@ impl CreatableFeature for DualPlatformFeature {
     const STARTING_VERSION: u8 = 0;
 
     fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let emitter = Arc::new(EventEmitter::new());
-
-        let listener = chan.add_msg_listener_guarded({
-            let emitter = Arc::clone(&emitter);
-
-            move |raw, matched| {
-                let Some((func, payload)) =
-                    event_payload(raw, matched, device_index, feature_index)
-                else {
-                    return;
-                };
-                // PlatformChange is the only event and carries sub-id 0.
-                if func.to_lo() != 0 {
-                    return;
-                }
-                if let Ok(platform) = DualPlatformSelection::try_from(payload[0]) {
-                    emitter.emit(DualPlatformEvent::PlatformChanged(platform));
-                }
-            }
-        });
-
+        let events = EventSource::attach(&chan, device_index, feature_index);
         Self {
             endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            emitter,
-            _msg_listener: listener,
+            events,
         }
     }
 }
@@ -90,7 +67,19 @@ impl Feature for DualPlatformFeature {}
 
 impl EmittingFeature<DualPlatformEvent> for DualPlatformFeature {
     fn listen(&self) -> async_channel::Receiver<DualPlatformEvent> {
-        self.emitter.create_receiver()
+        self.events.listen()
+    }
+}
+
+impl DecodeEvent for DualPlatformEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        // PlatformChange is the only event and carries sub-id 0.
+        if sub_id != 0 {
+            return None;
+        }
+        DualPlatformSelection::try_from(payload[0])
+            .ok()
+            .map(DualPlatformEvent::PlatformChanged)
     }
 }
 

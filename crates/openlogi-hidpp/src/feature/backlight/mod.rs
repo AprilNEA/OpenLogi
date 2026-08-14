@@ -13,9 +13,10 @@ use std::sync::Arc;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-    channel::{HidppChannel, MessageListenerGuard},
-    event::EventEmitter,
-    feature::{CreatableFeature, EmittingFeature, Feature, FeatureEndpoint, event_payload},
+    channel::HidppChannel,
+    feature::{
+        CreatableFeature, DecodeEvent, EmittingFeature, EventSource, Feature, FeatureEndpoint,
+    },
     protocol::v20::Hidpp20Error,
 };
 
@@ -242,11 +243,8 @@ pub struct BacklightFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
-    /// The emitter used to publish decoded events.
-    emitter: Arc<EventEmitter<BacklightEvent>>,
-
-    /// Removes the message listener when the feature is dropped.
-    _msg_listener: MessageListenerGuard,
+    /// Publishes decoded events to listeners.
+    events: EventSource<BacklightEvent>,
 }
 
 impl CreatableFeature for BacklightFeature {
@@ -254,31 +252,10 @@ impl CreatableFeature for BacklightFeature {
     const STARTING_VERSION: u8 = 3;
 
     fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let emitter = Arc::new(EventEmitter::new());
-
-        let listener = chan.add_msg_listener_guarded({
-            let emitter = Arc::clone(&emitter);
-
-            move |raw, matched| {
-                let Some((func, payload)) =
-                    event_payload(raw, matched, device_index, feature_index)
-                else {
-                    return;
-                };
-                // backlightInfoEvent is the only event and carries sub-id 0.
-                if func.to_lo() != 0 {
-                    return;
-                }
-                if let Ok(update) = BacklightInfoUpdate::from_payload(&payload) {
-                    emitter.emit(BacklightEvent::InfoChanged(update));
-                }
-            }
-        });
-
+        let events = EventSource::attach(&chan, device_index, feature_index);
         Self {
             endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            emitter,
-            _msg_listener: listener,
+            events,
         }
     }
 }
@@ -287,7 +264,19 @@ impl Feature for BacklightFeature {}
 
 impl EmittingFeature<BacklightEvent> for BacklightFeature {
     fn listen(&self) -> async_channel::Receiver<BacklightEvent> {
-        self.emitter.create_receiver()
+        self.events.listen()
+    }
+}
+
+impl DecodeEvent for BacklightEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        // backlightInfoEvent is the only event and carries sub-id 0.
+        if sub_id != 0 {
+            return None;
+        }
+        BacklightInfoUpdate::from_payload(payload)
+            .ok()
+            .map(BacklightEvent::InfoChanged)
     }
 }
 

@@ -6,18 +6,14 @@ use std::sync::Arc;
 use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::{
-    channel::{HidppChannel, MessageListenerGuard},
-    event::EventEmitter,
-    feature::{CreatableFeature, EmittingFeature, Feature, event_payload},
+    channel::HidppChannel,
+    feature::{CreatableFeature, DecodeEvent, EmittingFeature, EventSource, Feature},
 };
 
 /// Implements the `WirelessDeviceStatus` / `0x1d4b` feature.
 pub struct WirelessDeviceStatusFeature {
-    /// The emitter used to emit events.
-    emitter: Arc<EventEmitter<WirelessDeviceStatusEvent>>,
-
-    /// Removes the message listener when the feature is dropped.
-    _msg_listener: MessageListenerGuard,
+    /// Publishes decoded events to listeners.
+    events: EventSource<WirelessDeviceStatusEvent>,
 }
 
 impl CreatableFeature for WirelessDeviceStatusFeature {
@@ -25,38 +21,8 @@ impl CreatableFeature for WirelessDeviceStatusFeature {
     const STARTING_VERSION: u8 = 0;
 
     fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let emitter = Arc::new(EventEmitter::new());
-
-        let listener = chan.add_msg_listener_guarded({
-            let emitter = Arc::clone(&emitter);
-
-            move |raw, matched| {
-                let Some((func, payload)) =
-                    event_payload(raw, matched, device_index, feature_index)
-                else {
-                    return;
-                };
-                // The reconnection broadcast is the only event and carries sub-id 0.
-                if func.to_lo() != 0 {
-                    return;
-                }
-
-                // This broadcast is the device's (re)connection signal; an
-                // unrecognised field value must not swallow it, so every
-                // field decodes infallibly and carries unknown raw bytes.
-                emitter.emit(WirelessDeviceStatusEvent::StatusBroadcast(
-                    WirelessDeviceStatusBroadcast {
-                        status: WirelessDeviceStatus::from(payload[0]),
-                        request: WirelessDeviceStatusRequest::from(payload[1]),
-                        reason: WirelessDeviceStatusReason::from(payload[2]),
-                    },
-                ));
-            }
-        });
-
         Self {
-            emitter,
-            _msg_listener: listener,
+            events: EventSource::attach(&chan, device_index, feature_index),
         }
     }
 }
@@ -65,7 +31,27 @@ impl Feature for WirelessDeviceStatusFeature {}
 
 impl EmittingFeature<WirelessDeviceStatusEvent> for WirelessDeviceStatusFeature {
     fn listen(&self) -> async_channel::Receiver<WirelessDeviceStatusEvent> {
-        self.emitter.create_receiver()
+        self.events.listen()
+    }
+}
+
+impl DecodeEvent for WirelessDeviceStatusEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        // The reconnection broadcast is the only event and carries sub-id 0.
+        if sub_id != 0 {
+            return None;
+        }
+
+        // This broadcast is the device's (re)connection signal; an
+        // unrecognised field value must not swallow it, so every field
+        // decodes infallibly and carries unknown raw bytes.
+        Some(WirelessDeviceStatusEvent::StatusBroadcast(
+            WirelessDeviceStatusBroadcast {
+                status: WirelessDeviceStatus::from(payload[0]),
+                request: WirelessDeviceStatusRequest::from(payload[1]),
+                reason: WirelessDeviceStatusReason::from(payload[2]),
+            },
+        ))
     }
 }
 

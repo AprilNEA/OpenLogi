@@ -8,9 +8,8 @@
 use std::sync::Arc;
 
 use crate::{
-    channel::{HidppChannel, MessageListenerGuard},
-    event::EventEmitter,
-    feature::{CreatableFeature, EmittingFeature, Feature, FeatureEndpoint, event_payload},
+    channel::HidppChannel,
+    feature::{CreatableFeature, EmittingFeature, EventSource, Feature, FeatureEndpoint},
     protocol::v20::Hidpp20Error,
 };
 
@@ -18,14 +17,12 @@ pub mod control_ids;
 mod event;
 pub mod task_ids;
 
-use event::decode_event_payload;
 pub use event::{AnalyticsKeyEvent, RawWheelResolution, ReprogControlsEvent, decode_event};
 
 /// Implements the `SpecialKeysMseButtons` / `0x1b04` feature.
 pub struct ReprogControlsFeature {
     endpoint: FeatureEndpoint,
-    emitter: Arc<EventEmitter<ReprogControlsEvent>>,
-    _msg_listener: MessageListenerGuard,
+    events: EventSource<ReprogControlsEvent>,
 }
 
 impl CreatableFeature for ReprogControlsFeature {
@@ -33,28 +30,10 @@ impl CreatableFeature for ReprogControlsFeature {
     const STARTING_VERSION: u8 = 0;
 
     fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let emitter = Arc::new(EventEmitter::new());
-
-        let listener = chan.add_msg_listener_guarded({
-            let emitter = Arc::clone(&emitter);
-
-            move |raw, matched| {
-                let Some((func, payload)) =
-                    event_payload(raw, matched, device_index, feature_index)
-                else {
-                    return;
-                };
-                let Some(event) = decode_event_payload(func.to_lo(), &payload) else {
-                    return;
-                };
-                emitter.emit(event);
-            }
-        });
-
+        let events = EventSource::attach(&chan, device_index, feature_index);
         Self {
             endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            emitter,
-            _msg_listener: listener,
+            events,
         }
     }
 }
@@ -63,7 +42,7 @@ impl Feature for ReprogControlsFeature {}
 
 impl EmittingFeature<ReprogControlsEvent> for ReprogControlsFeature {
     fn listen(&self) -> async_channel::Receiver<ReprogControlsEvent> {
-        self.emitter.create_receiver()
+        self.events.listen()
     }
 }
 
