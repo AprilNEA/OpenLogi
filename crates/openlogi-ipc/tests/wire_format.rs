@@ -38,7 +38,7 @@ use openlogi_core::hid::{
     Click, DeviceRoute, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
     LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
 };
-use openlogi_ipc::ipc::{
+use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, FoundDevice, InventoryHealth, MonitorEvent, PROTOCOL_VERSION,
     PairingCommandError, PairingFailure, PairingUpdate,

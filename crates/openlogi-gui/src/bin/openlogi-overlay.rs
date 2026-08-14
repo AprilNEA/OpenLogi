@@ -41,7 +41,7 @@ use gpui::{
 };
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_ipc::ipc::{ActionRingInvocation, AgentClient, PROTOCOL_VERSION};
+use openlogi_ipc::{ActionRingInvocation, AgentClient, PROTOCOL_VERSION};
 use tarpc::{client, context};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};

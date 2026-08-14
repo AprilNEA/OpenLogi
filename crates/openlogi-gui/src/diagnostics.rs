@@ -9,7 +9,7 @@ use openlogi_core::diagnostics::{
     ReceiverDiag, RenderState,
 };
 use openlogi_core::hid::DeviceRoute;
-use openlogi_ipc::ipc::{InventoryHealth, PROTOCOL_VERSION};
+use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION};
 
 use crate::asset::AssetResolver;
 use crate::state::{AppState, DpiStatus};

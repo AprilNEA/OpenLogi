@@ -93,7 +93,7 @@ pub enum AgentLink {
     /// keep showing a live-looking but frozen UI.
     OutdatedGui,
     /// Connected and current: the agent's latest status snapshot.
-    Ready(openlogi_ipc::ipc::AgentStatus),
+    Ready(openlogi_ipc::AgentStatus),
 }
 
 /// Where [`AppState`] may persist configuration mutations.
@@ -186,7 +186,7 @@ pub struct AppState {
     config_persistence: ConfigPersistence,
     /// Raw inventory from the last *completed* enumeration, kept for the
     /// diagnostics report (receivers + transports). The poll path only stores
-    /// [`InventoryHealth::Ready`](openlogi_ipc::ipc::InventoryHealth)
+    /// [`InventoryHealth::Ready`](openlogi_ipc::InventoryHealth)
     /// snapshots, so an agent restart's empty pre-enumeration list never
     /// blanks a report copied during the reconnect window.
     last_inventory: Vec<DeviceInventory>,
@@ -194,7 +194,7 @@ pub struct AppState {
     /// on the Diagnostics page. Bounded; only filled while the Settings window's
     /// poll loop runs (debug macOS builds only).
     #[cfg(all(target_os = "macos", debug_assertions))]
-    monitor_events: std::collections::VecDeque<openlogi_ipc::ipc::MonitorEvent>,
+    monitor_events: std::collections::VecDeque<openlogi_ipc::MonitorEvent>,
     /// Cached event-tap snapshot for the Diagnostics page, refreshed on the same
     /// ~300ms tick as [`Self::monitor_events`]. Lets that page's per-frame render
     /// read this cache instead of issuing `CGGetEventTapList` syscalls on every
@@ -306,7 +306,7 @@ impl AppState {
         self.ipc_commands.clone()
     }
     /// Cache a *completed* inventory snapshot for the diagnostics report.
-    /// Callers gate on [`InventoryHealth::Ready`](openlogi_ipc::ipc::InventoryHealth) —
+    /// Callers gate on [`InventoryHealth::Ready`](openlogi_ipc::InventoryHealth) —
     /// see [`Self::last_inventory`].
     pub fn store_inventory_snapshot(&mut self, inventory: &[DeviceInventory]) {
         self.last_inventory = inventory.to_vec();

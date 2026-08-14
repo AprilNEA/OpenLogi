@@ -25,7 +25,7 @@ use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceRoute,
     KEYBOARD_KEY_CIDS,
 };
-use openlogi_ipc::ipc::InventoryHealth;
+use openlogi_ipc::InventoryHealth;
 use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;

@@ -332,7 +332,7 @@ fn main() -> Result<()> {
                         // Refresh / Clear arm — a not-yet-ready agent's empty
                         // pre-enumeration list must not shrink it.
                         let inventory_ready =
-                            update.status.inventory == openlogi_ipc::ipc::InventoryHealth::Ready;
+                            update.status.inventory == openlogi_ipc::InventoryHealth::Ready;
                         if inventory_ready {
                             latest_inv.clone_from(&update.inventory);
                             latest_standalone.clone_from(&update.standalone);

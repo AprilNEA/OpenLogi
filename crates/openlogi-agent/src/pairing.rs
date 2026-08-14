@@ -22,7 +22,7 @@ use openlogi_agent_core::orchestrator::SharedRuntime;
 use openlogi_agent_core::receiver_access::{ExclusiveAccessReason, ExclusiveReceiverLease};
 use openlogi_agent_core::watchers::pairing::{self, Control};
 use openlogi_hid::{DiscoveredDevice, PairingEvent, ReceiverSelector};
-use openlogi_ipc::ipc::{FoundDevice, PairingCommandError, PairingUpdate};
+use openlogi_ipc::{FoundDevice, PairingCommandError, PairingUpdate};
 use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
 

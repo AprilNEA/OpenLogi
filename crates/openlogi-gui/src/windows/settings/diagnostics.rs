@@ -150,8 +150,8 @@ fn monitor_list(pal: Palette, cx: &mut App) -> impl IntoElement {
 }
 
 #[cfg(debug_assertions)]
-fn format_monitor_event(event: &openlogi_ipc::ipc::MonitorEvent) -> String {
-    use openlogi_ipc::ipc::MonitorEvent;
+fn format_monitor_event(event: &openlogi_ipc::MonitorEvent) -> String {
+    use openlogi_ipc::MonitorEvent;
     match event {
         MonitorEvent::Button { button, pressed } => {
             format!("button {button} {}", if *pressed { "down" } else { "up" })

@@ -25,7 +25,7 @@ use openlogi_core::hid::{
     DeviceRoute, DpiInfo, LightCommand, ReceiverSelector, SmartShiftMode, SmartShiftStatus,
     WriteError,
 };
-use openlogi_ipc::ipc::{
+use openlogi_ipc::{
     AgentClient, AgentStatus, InventoryHealth, PROTOCOL_VERSION, PairingCommandError,
     PairingFailure, PairingUpdate,
 };
@@ -117,7 +117,7 @@ pub enum Command {
     /// monitor. The first poll enables monitoring agent-side; the agent
     /// auto-disables it once polls stop.
     #[cfg(all(target_os = "macos", debug_assertions))]
-    PollEventMonitor(oneshot::Sender<Vec<openlogi_ipc::ipc::MonitorEvent>>),
+    PollEventMonitor(oneshot::Sender<Vec<openlogi_ipc::MonitorEvent>>),
 }
 
 /// Handle the GUI holds to talk to the agent: a stream of poll updates, a

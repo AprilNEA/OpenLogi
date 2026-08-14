@@ -61,7 +61,7 @@ pub fn try_replace_stale() -> Option<InstanceGuard> {
 
 #[cfg(unix)]
 fn replace_stale() -> Option<InstanceGuard> {
-    use openlogi_ipc::ipc::{AgentClient, PROTOCOL_VERSION};
+    use openlogi_ipc::{AgentClient, PROTOCOL_VERSION};
     use std::ffi::OsStr;
     use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
     use tarpc::{client, context};

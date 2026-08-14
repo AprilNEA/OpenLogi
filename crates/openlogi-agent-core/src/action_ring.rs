@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::{Action, ActionRingIcon, ActionRingLayout, ActionRingSlot};
 use openlogi_hid::DeviceRoute;
-use openlogi_ipc::ipc::{ActionRingCommandError, ActionRingInvocation, ActionRingPresentation};
+use openlogi_ipc::{ActionRingCommandError, ActionRingInvocation, ActionRingPresentation};
 use tokio::sync::Notify;
 
 const LONG_POLL_HOLD: Duration = Duration::from_secs(20);

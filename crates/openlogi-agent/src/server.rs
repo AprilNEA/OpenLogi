@@ -22,11 +22,11 @@ use openlogi_hid::{
     DeviceRoute, DpiInfo, HapticWaveform, HidppOperation, LightCommand, ReceiverSelector,
     SmartShiftMode, SmartShiftStatus, WriteError,
 };
-use openlogi_ipc::ipc::{
+use openlogi_ipc::transport;
+use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, MonitorEvent,
     PROTOCOL_VERSION, PairingCommandError, PairingUpdate,
 };
-use openlogi_ipc::transport;
 
 use crate::pairing::PairingManager;
 // Brings `Listener::accept` into scope for the concrete listener `transport::bind`

@@ -49,12 +49,12 @@ use openlogi_hid::{
     DIRECT_DEVICE_INDEX, DeviceRoute, DpiCapabilities, DpiInfo, LightCommand, PasskeyMethod,
     ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
 };
-use openlogi_ipc::ipc::{
+use openlogi_ipc::transport;
+use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, FoundDevice,
     InventoryHealth, MonitorEvent, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
     PairingUpdate,
 };
-use openlogi_ipc::transport;
 use tarpc::context::Context;
 use tarpc::server::{BaseChannel, Channel as _};
 use tokio::sync::Mutex;

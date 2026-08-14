@@ -10,7 +10,7 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
-use openlogi_ipc::ipc::InventoryHealth;
+use openlogi_ipc::InventoryHealth;
 use tracing::info;
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
