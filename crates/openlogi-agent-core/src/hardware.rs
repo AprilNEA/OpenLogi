@@ -190,17 +190,14 @@ impl<'a> DeviceOp<'a> {
     }
 
     /// Core of [`Self::detach`], with the outcome handed to `log` instead of
-    /// an assumed logging shape — native wheel-mode writes log a
-    /// `FeatureUnsupported` result at `debug` (unsupported HiRes wheel/
-    /// inversion is expected on plenty of mice), unlike every other
-    /// background write's `warn`.
-    ///
-    /// Carries the calling thread's current tracing span onto the spawned OS
-    /// thread and stays inside it for the whole write: a caller that opens
-    /// `tracing::debug_span!("…", field = value)` around the `detach`/
-    /// `spawn_write` call gets `field` attached to every log line this
-    /// function and `log` emit — the generic `label`-only outcome log doesn't
-    /// have to be the only detail a background write leaves behind.
+    /// an assumed logging shape. Used directly (bypassing `detach`) by any
+    /// write whose input carries a value worth logging — a written DPI, a
+    /// SmartShift config, an `on`/`off` flag, an RGB triple — so that value
+    /// stays in the log line instead of collapsing to the generic
+    /// `label`-only outcome message; native wheel-mode writes use the same
+    /// seam to log a `FeatureUnsupported` result at `debug` (unsupported
+    /// HiRes wheel/inversion is expected on plenty of mice), unlike every
+    /// other background write's `warn`.
     fn spawn_write<F, Fut, T>(
         self,
         label: &'static str,
@@ -215,9 +212,7 @@ impl<'a> DeviceOp<'a> {
             return;
         };
         let receiver_access = self.receiver_access.clone();
-        let span = tracing::Span::current();
         std::thread::spawn(move || {
-            let _guard = span.enter();
             let Some(rt) = one_shot_runtime(label) else {
                 return;
             };
@@ -260,17 +255,17 @@ pub fn toggle_smartshift_in_background(
         debug!("no target device — SmartShift toggle skipped");
         return;
     };
-    // The toggled-to mode is only known once the write replies, so the span
-    // starts with an empty field and the closure records it on success —
-    // `detach`'s outcome log (and any other log line emitted while this span
-    // is entered) then carries it instead of just the generic `label`.
-    let _span = tracing::debug_span!("SmartShift toggle", mode = tracing::field::Empty).entered();
-    DeviceOp::new(capture, registry, receiver_access, &target).detach(
+    let index = target.device_index();
+    DeviceOp::new(capture, registry, receiver_access, &target).spawn_write(
         "SmartShift toggle",
-        |c| async move {
-            let mode = openlogi_hid::toggle_smartshift_on(&c).await?;
-            tracing::Span::current().record("mode", tracing::field::debug(mode));
-            Ok(())
+        |c| async move { openlogi_hid::toggle_smartshift_on(&c).await },
+        move |result| match result {
+            Ok(Ok(mode)) => debug!(index, ?mode, "SmartShift toggled"),
+            Ok(Err(e)) => warn!(error = ?e, "SmartShift toggle failed"),
+            Err(_) => warn!(
+                index,
+                "SmartShift toggle timed out (device asleep/unresponsive)"
+            ),
         },
     );
 }
@@ -324,12 +319,25 @@ pub fn write_smartshift_in_background(
         debug!("no target device — SmartShift write skipped");
         return;
     };
-    let _span =
-        tracing::debug_span!("SmartShift write", ?mode, auto_disengage, tunable_torque).entered();
-    DeviceOp::new(capture, registry, receiver_access, &target).detach(
+    let index = target.device_index();
+    DeviceOp::new(capture, registry, receiver_access, &target).spawn_write(
         "SmartShift write",
         move |c| async move {
             openlogi_hid::set_smartshift_on(&c, mode, auto_disengage, tunable_torque).await
+        },
+        move |result| match result {
+            Ok(Ok(())) => debug!(
+                index,
+                ?mode,
+                auto_disengage,
+                tunable_torque,
+                "SmartShift config written"
+            ),
+            Ok(Err(e)) => warn!(error = ?e, "SmartShift write failed"),
+            Err(_) => warn!(
+                index,
+                "SmartShift write timed out (device asleep/unresponsive)"
+            ),
         },
     );
 }
@@ -339,10 +347,19 @@ pub fn write_smartshift_in_background(
 /// keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion) are
 /// logged.
 pub fn write_fn_lock_in_background(op: DeviceOp<'_>, on: bool) {
-    let _span = tracing::debug_span!("Fn-lock write", on).entered();
-    op.detach("Fn-lock write", move |c| async move {
-        openlogi_hid::set_fn_lock_on(&c, on).await
-    });
+    let index = op.route.device_index();
+    op.spawn_write(
+        "Fn-lock write",
+        move |c| async move { openlogi_hid::set_fn_lock_on(&c, on).await },
+        move |result| match result {
+            Ok(Ok(())) => debug!(index, on, "Fn-lock written"),
+            Ok(Err(e)) => warn!(error = ?e, "Fn-lock write failed"),
+            Err(_) => warn!(
+                index,
+                "Fn-lock write timed out (device asleep/unresponsive)"
+            ),
+        },
+    );
 }
 
 /// Desired SmartShift values for a reconnect re-apply.
@@ -514,11 +531,19 @@ pub fn write_dpi_in_background(
         warn!(dpi, "DPI exceeds the HID++ u16 wire field; write skipped");
         return;
     };
-    let _span = tracing::debug_span!("DPI write", dpi = dpi_u16).entered();
-    DeviceOp::new(capture, registry, receiver_access, &target)
-        .detach("DPI write", move |c| async move {
-            openlogi_hid::set_dpi_on(&c, dpi_u16).await
-        });
+    let index = target.device_index();
+    DeviceOp::new(capture, registry, receiver_access, &target).spawn_write(
+        "DPI write",
+        move |c| async move { openlogi_hid::set_dpi_on(&c, dpi_u16).await },
+        move |result| match result {
+            Ok(Ok(())) => debug!(index, dpi = dpi_u16, "DPI written to device"),
+            Ok(Err(e)) => warn!(error = ?e, "DPI write failed"),
+            Err(_) => warn!(
+                dpi = dpi_u16,
+                "DPI write timed out (device asleep/unresponsive)"
+            ),
+        },
+    );
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -588,10 +613,18 @@ pub fn write_scroll_wheel_mode_in_background(
 /// failures are logged, not surfaced.
 pub fn set_lighting_in_background(op: DeviceOp<'_>, lighting: &Lighting) {
     let (r, g, b) = lighting_rgb(lighting);
-    let _span = tracing::debug_span!("lighting write", r, g, b).entered();
-    op.detach("lighting write", move |c| async move {
-        openlogi_hid::set_keyboard_color_on(&c, r, g, b).await
-    });
+    op.spawn_write(
+        "lighting write",
+        move |c| async move { openlogi_hid::set_keyboard_color_on(&c, r, g, b).await },
+        move |result| match result {
+            Ok(Ok(())) => debug!(r, g, b, "lighting written to keyboard"),
+            Ok(Err(e)) => warn!(error = ?e, "lighting write failed"),
+            Err(_) => warn!(
+                r,
+                g, b, "lighting write timed out (device asleep/unresponsive)"
+            ),
+        },
+    );
 }
 
 /// Resolve a [`Lighting`] config to an `(r, g, b)` triple: the configured
