@@ -101,9 +101,14 @@ fn key_trigger_parses_and_displays_extended_function_keys() {
 
 #[test]
 fn key_trigger_rejects_unknown() {
-    assert!("f99".parse::<KeyTrigger>().is_err());
-    assert!("shift+".parse::<KeyTrigger>().is_err());
-    assert!("".parse::<KeyTrigger>().is_err());
+    "f99"
+        .parse::<KeyTrigger>()
+        .expect_err("f99 is not a known key name");
+    "shift+"
+        .parse::<KeyTrigger>()
+        .expect_err("a modifier with no key must be rejected");
+    "".parse::<KeyTrigger>()
+        .expect_err("an empty trigger must be rejected");
 }
 
 #[test]

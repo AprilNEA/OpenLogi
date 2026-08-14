@@ -233,14 +233,15 @@ mod tests {
     #[test]
     fn selection_requires_disambiguation_and_supports_name_queries() {
         let devices = vec![device("Litra Glow"), device("Litra Beam")];
-        assert!(select(&devices, None).is_err());
+        select(&devices, None).expect_err("two lights and no --device must be ambiguous");
         assert_eq!(
             select(&devices, Some("beam"))
                 .expect("matching device")
                 .display_name,
             "Litra Beam"
         );
-        assert!(select(&devices, Some("litra")).is_err());
+        select(&devices, Some("litra"))
+            .expect_err("a --device query matching both lights must be ambiguous");
         assert_eq!(
             select(&devices[..1], None)
                 .expect("single device")

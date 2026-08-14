@@ -381,7 +381,18 @@ mod tests {
 
     #[test]
     fn rejects_unknown_serialized_usage_and_modifier_bits() {
-        assert!(toml::from_str::<KeyboardUsage>("255").is_err());
+        // A bare `255` is not a TOML document, so the usage has to arrive in a
+        // wire field — otherwise the parse fails on syntax and never reaches
+        // the `try_from = "u8"` guard.
+        let Err(error) = toml::from_str::<KeyComboWire>("modifiers = 0\nkey = 255") else {
+            panic!("usage 255 is not a supported HID keyboard usage and must be rejected")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(&KeyboardUsageError(255).to_string()),
+            "expected the usage guard to reject 255, got: {error}"
+        );
         assert_eq!(
             KeyCombo::try_from(KeyComboWire {
                 modifiers: 128,

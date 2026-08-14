@@ -336,8 +336,12 @@ mod tests {
 
     #[test]
     fn glow_temperature_accepts_only_aligned_inclusive_boundaries() {
-        assert!(encode_command(LitraModel::Glow, LightCommand::TemperatureKelvin(2700)).is_ok());
-        assert!(encode_command(LitraModel::Glow, LightCommand::TemperatureKelvin(6500)).is_ok());
+        let minimum = encode_command(LitraModel::Glow, LightCommand::TemperatureKelvin(2700))
+            .expect("2700 K is the inclusive lower bound");
+        let maximum = encode_command(LitraModel::Glow, LightCommand::TemperatureKelvin(6500))
+            .expect("6500 K is the inclusive upper bound");
+        assert_eq!(&minimum[3..6], &[COMMAND_TEMPERATURE, 0x0a, 0x8c]);
+        assert_eq!(&maximum[3..6], &[COMMAND_TEMPERATURE, 0x19, 0x64]);
         for invalid in [2600, 2750, 6600] {
             assert_matches!(
                 encode_command(LitraModel::Glow, LightCommand::TemperatureKelvin(invalid)),

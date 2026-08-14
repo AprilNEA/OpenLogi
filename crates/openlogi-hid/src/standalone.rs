@@ -139,6 +139,10 @@ mod tests {
     #[test]
     fn distinct_serials_can_share_the_same_hid_tuple() {
         let devices = vec![raw("serial:one"), raw("serial:two")];
-        assert!(validate_no_ambiguous_nodes(&devices).is_ok());
+        let validation = validate_no_ambiguous_nodes(&devices);
+        assert!(
+            validation.is_ok(),
+            "serial-backed nodes stay distinguishable: {validation:?}"
+        );
     }
 }

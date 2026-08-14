@@ -437,8 +437,19 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
 
     #[test]
     fn recursive_action_fails_deserialization() {
-        let parsed = toml::from_str::<RingAction>("\"ShowActionsRing\"");
-        assert!(parsed.is_err());
+        // A bare `"ShowActionsRing"` is not a TOML document, so the slot has to
+        // be deserialized the way config.toml stores it — otherwise the parse
+        // fails on syntax and never reaches the recursion guard.
+        let error = match toml::from_str::<ActionRingEntry>("action = \"ShowActionsRing\"") {
+            Ok(entry) => panic!("a ring slot must not recursively open the ring, got {entry:?}"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(&RingActionError::RecursiveTrigger.to_string()),
+            "expected the recursion guard to reject the slot, got: {error}"
+        );
     }
 
     #[test]

@@ -598,10 +598,14 @@ mod tests {
 
     #[test]
     fn light_ranges_reject_invalid_grids_and_units() {
-        assert!(LightValueRange::new(10, 1, 1, LightValueUnit::Lumens).is_err());
-        assert!(LightValueRange::new(0, 10, 0, LightValueUnit::Lumens).is_err());
-        assert!(LightValueRange::new(0, 10, 3, LightValueUnit::Lumens).is_err());
-        assert!(LightValueRange::new(0, 101, 1, LightValueUnit::Percent).is_err());
+        LightValueRange::new(10, 1, 1, LightValueUnit::Lumens)
+            .expect_err("a minimum above the maximum must be rejected");
+        LightValueRange::new(0, 10, 0, LightValueUnit::Lumens)
+            .expect_err("a zero step must be rejected");
+        LightValueRange::new(0, 10, 3, LightValueUnit::Lumens)
+            .expect_err("a step that does not divide the span must be rejected");
+        LightValueRange::new(0, 101, 1, LightValueUnit::Percent)
+            .expect_err("a percent range above 100 must be rejected");
     }
 
     #[test]
@@ -619,6 +623,6 @@ mod tests {
         let result = toml::from_str::<LightValueRange>(
             "min = 2700\nmax = 6500\nstep = 0\nunit = 'kelvin'\n",
         );
-        assert!(result.is_err());
+        result.expect_err("a zero step must not survive deserialization");
     }
 }

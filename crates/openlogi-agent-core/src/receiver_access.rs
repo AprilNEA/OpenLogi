@@ -211,6 +211,11 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(!waiting.is_finished());
         drop(transition);
-        assert!(waiting.await.is_ok());
+        let acquired = waiting.await;
+        assert!(
+            acquired.is_ok(),
+            "bounded io must acquire its lease once the host transition releases: {:?}",
+            acquired.as_ref().err()
+        );
     }
 }

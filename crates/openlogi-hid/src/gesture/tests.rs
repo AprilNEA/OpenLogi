@@ -521,5 +521,8 @@ fn a_dpi_button_re_presses_after_a_release() {
         Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle, None)),
         "a release re-arms the rising edge"
     );
-    assert!(rx.try_recv().is_err());
+    assert!(
+        rx.try_recv().is_err(),
+        "press → release → press emits exactly two presses"
+    );
 }

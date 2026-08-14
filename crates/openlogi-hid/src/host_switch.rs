@@ -542,7 +542,10 @@ mod tests {
 
     #[test]
     fn host_outside_device_range_is_rejected() {
-        assert!(host_change_required(0, 2, 2).is_err());
+        assert!(
+            host_change_required(0, 2, 2).is_err(),
+            "host 2 is outside a device that reports 2 hosts and must be rejected"
+        );
     }
 
     #[test]

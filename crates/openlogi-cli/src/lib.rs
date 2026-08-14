@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn backlight_rejects_an_unknown_action() {
         let result = Cli::try_parse_from(["openlogi", "backlight", "dim"]);
-        assert!(result.is_err());
+        result.expect_err("an unknown backlight action must be rejected");
     }
 
     #[test]
@@ -109,7 +109,7 @@ mod tests {
             "--sensitivity",
             "10",
         ]);
-        assert!(result.is_err());
+        result.expect_err("--leave-flipped and --sensitivity must conflict");
     }
 
     #[test]
@@ -117,7 +117,7 @@ mod tests {
         // `--sensitivity` is a `NonZeroU8`; 0 must fail to parse rather than
         // silently becoming "no change" downstream.
         let result = Cli::try_parse_from(["openlogi", "diag", "smartshift", "--sensitivity", "0"]);
-        assert!(result.is_err());
+        result.expect_err("a zero --sensitivity must fail to parse");
     }
 
     #[test]
@@ -163,7 +163,7 @@ mod tests {
         let result = Cli::try_parse_from([
             "openlogi", "diag", "lighting", "ff0000", "--method", "bogus",
         ]);
-        assert!(result.is_err());
+        result.expect_err("an unknown lighting method must be rejected");
     }
 
     #[test]

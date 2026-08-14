@@ -321,7 +321,11 @@ mod tests {
         let result = manager.cancel();
 
         assert_eq!(result, Ok(()));
-        assert!(ctrl_rx.try_recv().is_err());
+        let sent = ctrl_rx.try_recv();
+        assert!(
+            sent.is_err(),
+            "cancel without an active session must not reach the watcher, got {sent:?}"
+        );
     }
 
     #[tokio::test]
@@ -391,6 +395,10 @@ mod tests {
             panic!("test device cache lock should not be poisoned");
         };
         assert_eq!(devices.len(), 1);
-        assert!(ctrl_rx.try_recv().is_err());
+        let sent = ctrl_rx.try_recv();
+        assert!(
+            sent.is_err(),
+            "an overlapping start must not reach the watcher, got {sent:?}"
+        );
     }
 }

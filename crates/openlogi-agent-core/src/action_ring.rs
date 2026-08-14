@@ -417,10 +417,11 @@ mod tests {
             manager.activate(first.session_id, ActionRingSlot::Top),
             Err(ActionRingCommandError::SessionNotFound)
         ));
+        let reactivated = manager.activate(second.session_id, ActionRingSlot::Top);
         assert!(
-            manager
-                .activate(second.session_id, ActionRingSlot::Top)
-                .is_ok()
+            reactivated.is_ok(),
+            "the replacement session must still be activatable: {:?}",
+            reactivated.as_ref().err()
         );
     }
 
