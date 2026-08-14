@@ -1,48 +1,32 @@
 name: Nix CI
 
 # Build the Nix package (flake `.#openlogi`) so it can't silently rot — the
-# failure mode that killed the previous flake (#262). With the importCargoLock
-# approach the only thing that can go stale is a git-pin hash in
-# nix/package.nix `outputHashes`, and that only when a git pin (gpui,
-# gpui-component, ...) is bumped in Cargo.lock. This workflow makes that
-# failure happen in the PR that bumps the pin — the error message prints the
-# correct hash to paste — instead of silently on master afterwards. The path
-# filter only skips files that cannot feed the Linux build (docs, other
-# platforms' packaging, unrelated workflows); everything the build consumes —
-# lockfile, manifests, build scripts, toolchain, Rust source, and the
-# Nix/packaging files themselves — triggers it, so no change can bypass this
-# job and rot master.
+# failure mode that killed the previous flake (#262).
+#
+# It runs weekly rather than per change, because the cost and the risk are
+# wildly mismatched. A full Linux build of this workspace takes ~20 minutes
+# and is by far the most expensive job in CI, while in 60 runs this one has
+# never failed — and the flake is not an install path anyone is pointed at:
+# the README ships `.deb` / `.rpm` / `.pkg.tar.zst` for Linux. What can rot it
+# is nixpkgs-unstable drifting, a new `-sys` dependency needing a buildInput,
+# or a bumped git pin invalidating an `outputHashes` entry. None of those are
+# urgent enough to make every contributor wait for them; noticing within a
+# week is fine, and the failing build prints the hash to paste.
+#
+# Editing the flake or the package expression *is* the moment a break is
+# likely and the feedback is worth having immediately, so those paths still
+# trigger it on their own PR. `workflow_dispatch` covers "I want to check
+# this now" — e.g. after bumping a git pin in Cargo.lock.
 on:
-  push:
-    branches: [master]
-    paths:
-      - "Cargo.lock"
-      - "**/Cargo.toml"
-      - "**/build.rs"
-      - "rust-toolchain.toml"
-      - "src/**"
-      - "crates/**"
-      - "third_party/**"
-      - "flake.nix"
-      - "flake.lock"
-      - "nix/**"
-      - "packaging/linux/**"
-      - "design/icon/openlogi.png"
-      - ".github/workflows/nix.yml"
+  schedule:
+    # Mondays, 04:17 UTC. Off-peak, and far from the release cadence.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
   pull_request:
     paths:
-      - "Cargo.lock"
-      - "**/Cargo.toml"
-      - "**/build.rs"
-      - "rust-toolchain.toml"
-      - "src/**"
-      - "crates/**"
-      - "third_party/**"
       - "flake.nix"
       - "flake.lock"
       - "nix/**"
-      - "packaging/linux/**"
-      - "design/icon/openlogi.png"
       - ".github/workflows/nix.yml"
 
 jobs:
