@@ -12,6 +12,7 @@ use crate::state::devices::{
     DeviceRecord, adopt_transient_record, build_device_list, direct_key_prefix, sort_device_list,
 };
 
+use super::device_key::DeviceKey;
 use super::load::Load;
 use super::{AppState, INVENTORY_MISS_GRACE};
 
@@ -110,22 +111,22 @@ impl AppState {
 
         // A device that came back on a different route must re-discover DPI —
         // its cached status/attempts were keyed to the now-dead route.
-        let rerouted: Vec<String> = merged_list
+        let rerouted: Vec<DeviceKey> = merged_list
             .iter()
             .filter(|new| {
                 self.device_list
                     .iter()
                     .any(|old| old.config_key == new.config_key && old.route != new.route)
             })
-            .map(|new| new.config_key.clone())
+            .map(DeviceRecord::device_key)
             .collect();
 
         self.device_list = merged_list;
         for key in &rerouted {
             self.dpi_data.remove(key);
             self.smartshift_data.remove(key);
-            self.smartshift_pending_confirm.remove(key);
-            self.smartshift_write_status.remove(key);
+            self.smartshift_pending_confirm.remove(key.as_str());
+            self.smartshift_write_status.remove(key.as_str());
         }
         let present = |key: &str| {
             self.device_list
@@ -298,13 +299,13 @@ impl AppState {
         self.current_device = idx;
         // A device left in `Failed` (transient read errors exhausted its retry
         // budget) gets one fresh attempt each time it is re-selected.
-        if let Some(key) = self.current_record().map(|r| r.config_key.clone()) {
+        if let Some(key) = self.current_record().map(DeviceRecord::device_key) {
             if matches!(self.dpi_data.get(&key), Some(Load::Failed(_))) {
                 self.dpi_data.retry(&key);
             }
             if matches!(self.smartshift_data.get(&key), Some(Load::Failed(_))) {
                 self.smartshift_data.retry(&key);
-                self.smartshift_write_status.remove(&key);
+                self.smartshift_write_status.remove(key.as_str());
             }
         }
         // `self.dpi` is the active device's value; adopt the newly-selected

@@ -12,6 +12,7 @@ use openlogi_core::device::{
 use openlogi_hid::DeviceRoute;
 use tracing::debug;
 
+use super::device_key::DeviceKey;
 use crate::asset::{AssetResolver, ResolvedAsset};
 
 /// One paired device with everything the UI needs to switch to it in O(1):
@@ -64,6 +65,13 @@ pub struct DeviceRecord {
 }
 
 impl DeviceRecord {
+    /// Typed key for `AppState`'s per-device UI caches (DPI/SmartShift load
+    /// state, standalone-light overrides, inventory-miss counters). Wraps
+    /// [`Self::config_key`] — see [`DeviceKey`].
+    pub(crate) fn device_key(&self) -> DeviceKey {
+        DeviceKey::from(self.config_key.as_str())
+    }
+
     /// Return the configuration key only when it identifies one physical
     /// device and is therefore safe to persist.
     pub(super) fn persistent_config_key(&self) -> Option<&str> {

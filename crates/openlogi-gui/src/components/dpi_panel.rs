@@ -20,7 +20,7 @@ use tracing::debug;
 
 use crate::components::device_read::issue_device_read;
 use crate::components::status::{retry_line, status_line};
-use crate::state::{AppState, DpiStatus};
+use crate::state::{AppState, DeviceKey, DpiStatus};
 use crate::theme::{self, Palette, SelectableStyle, Typography as _};
 
 pub struct DpiPanel {
@@ -39,7 +39,7 @@ struct SliderShape {
 }
 
 struct DpiPanelSnapshot {
-    device_key: String,
+    device_key: DeviceKey,
     dpi: u32,
     presets: Vec<u32>,
     status: DpiStatus,
@@ -181,7 +181,7 @@ impl Render for DpiPanel {
 
         if let DpiStatus::Ready(info) = &snapshot.status {
             self.ensure_slider(
-                &snapshot.device_key,
+                snapshot.device_key.as_str(),
                 &info.capabilities,
                 snapshot.dpi,
                 window,
@@ -271,7 +271,7 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
         .and_then(|s| {
             let record = s.current_record()?;
             Some(DpiPanelSnapshot {
-                device_key: record.config_key.clone(),
+                device_key: record.device_key(),
                 dpi: s.dpi,
                 presets: s.dpi_presets(),
                 status: s.current_dpi_status(),
@@ -279,7 +279,7 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
             })
         })
         .unwrap_or_else(|| DpiPanelSnapshot {
-            device_key: String::new(),
+            device_key: DeviceKey::default(),
             dpi: crate::state::DEFAULT_DPI,
             presets: Vec::new(),
             status: DpiStatus::Unsupported(tr!("No active device").to_string()),
@@ -429,13 +429,13 @@ fn add_preset_chip() -> AnyElement {
         .into_any_element()
 }
 
-fn dpi_load_target(cx: &mut Context<DpiPanel>) -> Option<(String, DeviceRoute)> {
+fn dpi_load_target(cx: &mut Context<DpiPanel>) -> Option<(DeviceKey, DeviceRoute)> {
     cx.try_global::<AppState>().and_then(|state| {
         if !state.current_dpi_unqueried() {
             return None;
         }
         let record = state.current_record()?;
-        Some((record.config_key.clone(), record.route.clone()?))
+        Some((record.device_key(), record.route.clone()?))
     })
 }
 

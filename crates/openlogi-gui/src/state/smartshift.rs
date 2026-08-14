@@ -3,6 +3,8 @@
 use openlogi_hid::{DeviceRoute, SmartShiftMode, SmartShiftStatus, WriteError};
 use tracing::debug;
 
+use super::device_key::DeviceKey;
+use super::devices::DeviceRecord;
 use super::load::SmartShiftLoad;
 use super::{AppState, SmartShiftWriteStatus};
 
@@ -12,7 +14,7 @@ impl AppState {
     pub fn current_smartshift_status(&self) -> SmartShiftLoad {
         self.current_record()
             .map_or(SmartShiftLoad::Unknown, |record| {
-                self.smartshift_data.status(&record.config_key)
+                self.smartshift_data.status(&record.device_key())
             })
     }
     /// Whether the active device still needs a SmartShift read (no status
@@ -21,7 +23,7 @@ impl AppState {
     #[must_use]
     pub fn current_smartshift_unqueried(&self) -> bool {
         self.current_record()
-            .is_some_and(|record| self.smartshift_data.unqueried(&record.config_key))
+            .is_some_and(|record| self.smartshift_data.unqueried(&record.device_key()))
     }
     /// The active device's resolved SmartShift config, if the read succeeded.
     /// Callers use it to preserve fields they don't mean to change (e.g.
@@ -29,7 +31,7 @@ impl AppState {
     #[must_use]
     pub fn current_smartshift_ready(&self) -> Option<SmartShiftStatus> {
         self.current_record()
-            .and_then(|record| self.smartshift_data.get(&record.config_key))
+            .and_then(|record| self.smartshift_data.get(&record.device_key()))
             .and_then(|status| match status {
                 SmartShiftLoad::Ready(s) => Some(*s),
                 SmartShiftLoad::Unknown
@@ -48,21 +50,21 @@ impl AppState {
         })
     }
     /// Mark SmartShift discovery as in flight for `key`.
-    pub fn mark_smartshift_loading(&mut self, key: &str) {
+    pub fn mark_smartshift_loading(&mut self, key: &DeviceKey) {
         self.smartshift_data.mark_loading(key);
     }
     /// Reset a stuck `Loading` for `key` back to `Unknown` — called when the
     /// read worker vanished without delivering a result.
-    pub fn clear_smartshift_loading(&mut self, key: &str) {
+    pub fn clear_smartshift_loading(&mut self, key: &DeviceKey) {
         self.smartshift_data.clear_loading(key);
     }
     /// Drop the active device's recorded SmartShift status so the next render
     /// re-runs discovery. Backs the "click to retry" affordance on a
     /// [`SmartShiftLoad::Failed`] device.
     pub fn retry_active_smartshift(&mut self) {
-        if let Some(key) = self.current_record().map(|r| r.config_key.clone()) {
+        if let Some(key) = self.current_record().map(DeviceRecord::device_key) {
             self.smartshift_data.retry(&key);
-            self.smartshift_write_status.remove(&key);
+            self.smartshift_write_status.remove(key.as_str());
         }
     }
     /// Store a SmartShift read result if it still matches the known device
@@ -70,24 +72,24 @@ impl AppState {
     /// permanent-unsupported handling as [`Self::store_dpi_info`].
     pub fn store_smartshift_status(
         &mut self,
-        key: String,
+        key: DeviceKey,
         route: &DeviceRoute,
         write_id: Option<u64>,
         result: Result<SmartShiftStatus, WriteError>,
     ) {
-        if !smartshift_read_is_current(write_id, self.smartshift_write_status.get(&key)) {
-            debug!(key, ?write_id, "stale SmartShift read result ignored");
+        if !smartshift_read_is_current(write_id, self.smartshift_write_status.get(key.as_str())) {
+            debug!(key = %key, ?write_id, "stale SmartShift read result ignored");
             return;
         }
         let matches_route = self
             .device_list
             .iter()
-            .any(|record| record.config_key == key && record.route.as_ref() == Some(route));
+            .any(|record| record.device_key() == key && record.route.as_ref() == Some(route));
         let still_present = self
             .device_list
             .iter()
-            .any(|record| record.config_key == key);
-        let status_key = key.clone();
+            .any(|record| record.device_key() == key);
+        let status_key = key.to_string();
         self.smartshift_data.store(
             key,
             result,
@@ -101,7 +103,11 @@ impl AppState {
             Some(SmartShiftWriteStatus::Confirmed | SmartShiftWriteStatus::Failed) | None => None,
         };
         if let Some(status) = expected.and_then(|expected| {
-            smartshift_write_outcome(expected, self.smartshift_data.get(&status_key))
+            smartshift_write_outcome(
+                expected,
+                self.smartshift_data
+                    .get(&DeviceKey::from(status_key.as_str())),
+            )
         }) {
             self.smartshift_write_status.insert(status_key, status);
         }
@@ -154,7 +160,8 @@ impl AppState {
             auto_disengage,
             tunable_torque,
         };
-        self.smartshift_data.set_ready(key.clone(), expected);
+        self.smartshift_data
+            .set_ready(DeviceKey::from(key.as_str()), expected);
         let write_id = can_confirm.then(|| {
             let write_id = self.next_smartshift_write_id;
             self.next_smartshift_write_id = self.next_smartshift_write_id.saturating_add(1);
@@ -174,18 +181,18 @@ impl AppState {
     /// `(config_key, route, write_id)` for a one-shot re-read that replaces the
     /// optimistic value with the device's real state; consumed once so it
     /// doesn't re-fire.
-    pub fn take_active_smartshift_confirm(&mut self) -> Option<(String, DeviceRoute, u64)> {
+    pub fn take_active_smartshift_confirm(&mut self) -> Option<(DeviceKey, DeviceRoute, u64)> {
         let record = self.current_record()?;
-        let key = record.config_key.clone();
+        let key = record.device_key();
         let route = record.route.clone()?;
         self.smartshift_pending_confirm
-            .remove(&key)
+            .remove(key.as_str())
             .map(|write_id| (key, route, write_id))
     }
     /// Mark a post-write confirmation as failed when its reply channel closes.
-    pub fn fail_smartshift_confirm(&mut self, key: &str, write_id: u64) {
+    pub fn fail_smartshift_confirm(&mut self, key: &DeviceKey, write_id: u64) {
         if matches!(
-            self.smartshift_write_status.get(key),
+            self.smartshift_write_status.get(key.as_str()),
             Some(SmartShiftWriteStatus::Applying {
                 write_id: current,
                 ..

@@ -11,7 +11,7 @@ use openlogi_hid::DeviceRoute;
 use tokio::sync::oneshot;
 
 use crate::ipc_client::Command;
-use crate::state::AppState;
+use crate::state::{AppState, DeviceKey};
 
 /// Issue a one-shot device read over IPC and apply its typed result to
 /// [`AppState`], off the render thread.
@@ -24,11 +24,11 @@ use crate::state::AppState;
 /// re-read so the optimistic value stays on screen until the real one lands.
 pub fn issue_device_read<P, T>(
     cx: &mut Context<P>,
-    key: String,
+    key: DeviceKey,
     route: DeviceRoute,
     make_command: impl FnOnce(DeviceRoute, oneshot::Sender<T>) -> Command,
-    store: impl FnOnce(&mut AppState, String, &DeviceRoute, T) + 'static,
-    clear: impl Fn(&mut AppState, &str) + 'static,
+    store: impl FnOnce(&mut AppState, DeviceKey, &DeviceRoute, T) + 'static,
+    clear: impl Fn(&mut AppState, &DeviceKey) + 'static,
 ) where
     P: 'static,
     T: 'static,

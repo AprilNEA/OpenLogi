@@ -18,6 +18,7 @@ use openlogi_hid::{DpiInfo, SmartShiftStatus};
 use tokio::sync::mpsc;
 use tracing::warn;
 
+pub(crate) use device_key::DeviceKey;
 pub use devices::DeviceRecord;
 pub use light::LightCommandStatus;
 #[cfg(test)]
@@ -52,6 +53,7 @@ use openlogi_core::binding::{ActionRingConfig, ActionRingIcon, ActionRingSlot, R
 mod agent;
 mod bindings;
 mod camera;
+mod device_key;
 mod devices;
 mod dpi;
 mod inventory;

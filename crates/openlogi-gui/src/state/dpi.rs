@@ -5,13 +5,14 @@ use tracing::debug;
 
 use crate::state::devices::DeviceRecord;
 
+use super::device_key::DeviceKey;
 use super::load::DpiStatus;
 use super::{AppState, DEFAULT_DPI};
 
 impl AppState {
     /// The cached DPI-discovery status for `key`, for the diagnostics report.
     #[must_use]
-    pub fn dpi_status_for(&self, key: &str) -> Option<DpiStatus> {
+    pub fn dpi_status_for(&self, key: &DeviceKey) -> Option<DpiStatus> {
         self.dpi_data.get(key).cloned()
     }
     /// Replace the DPI preset list for the currently selected device. The
@@ -47,7 +48,7 @@ impl AppState {
     #[must_use]
     pub fn current_dpi_status(&self) -> DpiStatus {
         self.current_record().map_or(DpiStatus::Unknown, |record| {
-            self.dpi_data.status(&record.config_key)
+            self.dpi_data.status(&record.device_key())
         })
     }
     /// Whether the active device still needs a DPI read (no status recorded —
@@ -56,14 +57,14 @@ impl AppState {
     #[must_use]
     pub fn current_dpi_unqueried(&self) -> bool {
         self.current_record()
-            .is_some_and(|record| self.dpi_data.unqueried(&record.config_key))
+            .is_some_and(|record| self.dpi_data.unqueried(&record.device_key()))
     }
     /// The active device's known DPI, falling back to [`DEFAULT_DPI`] until its
     /// capability read completes. Used to seed `self.dpi` on a device switch.
     #[must_use]
     pub(crate) fn dpi_for_current(&self) -> u32 {
         self.current_record()
-            .and_then(|record| self.dpi_data.get(&record.config_key))
+            .and_then(|record| self.dpi_data.get(&record.device_key()))
             .and_then(|status| match status {
                 DpiStatus::Ready(info) => Some(u32::from(info.current)),
                 _ => None,
@@ -71,13 +72,13 @@ impl AppState {
             .unwrap_or(DEFAULT_DPI)
     }
     /// Mark DPI capability discovery as in flight for `key`.
-    pub fn mark_dpi_loading(&mut self, key: &str) {
+    pub fn mark_dpi_loading(&mut self, key: &DeviceKey) {
         self.dpi_data.mark_loading(key);
     }
     /// Reset a stuck `Loading` for `key` back to `Unknown`. Called when the
     /// discovery worker vanished without delivering a result (e.g. it panicked),
     /// so the device isn't wedged on "Reading…" with no path to retry.
-    pub fn clear_dpi_loading(&mut self, key: &str) {
+    pub fn clear_dpi_loading(&mut self, key: &DeviceKey) {
         self.dpi_data.clear_loading(key);
     }
     /// Drop the active device's recorded DPI status so the next render
@@ -85,7 +86,7 @@ impl AppState {
     /// [`DpiStatus::Failed`] device, which is the only recovery path when the
     /// carousel has a single device (re-selecting it is a no-op).
     pub fn retry_active_dpi(&mut self) {
-        if let Some(key) = self.current_record().map(|r| r.config_key.clone()) {
+        if let Some(key) = self.current_record().map(DeviceRecord::device_key) {
             self.dpi_data.retry(&key);
         }
     }
@@ -94,19 +95,19 @@ impl AppState {
     /// carousel or inventory changed.
     pub fn store_dpi_info(
         &mut self,
-        key: String,
+        key: DeviceKey,
         route: &DeviceRoute,
         result: Result<DpiInfo, WriteError>,
     ) {
-        let is_active = self.current_record().map(|r| r.config_key.as_str()) == Some(key.as_str());
+        let is_active = self.current_record().is_some_and(|r| r.device_key() == key);
         let matches_route = self
             .device_list
             .iter()
-            .any(|record| record.config_key == key && record.route.as_ref() == Some(route));
+            .any(|record| record.device_key() == key && record.route.as_ref() == Some(route));
         let still_present = self
             .device_list
             .iter()
-            .any(|record| record.config_key == key);
+            .any(|record| record.device_key() == key);
         // Only the active device owns the shared `self.dpi`; a result landing for
         // a background device after a carousel switch must not clobber the
         // visible value.
@@ -126,7 +127,7 @@ impl AppState {
     #[must_use]
     pub fn active_dpi_capabilities(&self) -> Option<&DpiCapabilities> {
         self.current_record()
-            .and_then(|record| self.dpi_data.get(&record.config_key))
+            .and_then(|record| self.dpi_data.get(&record.device_key()))
             .and_then(|status| match status {
                 DpiStatus::Ready(info) => Some(&info.capabilities),
                 DpiStatus::Unknown

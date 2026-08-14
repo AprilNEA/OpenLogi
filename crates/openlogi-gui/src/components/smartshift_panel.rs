@@ -31,7 +31,7 @@ use openlogi_hid::{AUTO_DISENGAGE_PERMANENT, DeviceRoute, SmartShiftMode, SmartS
 
 use crate::components::device_read::issue_device_read;
 use crate::components::status::{retry_line, status_line};
-use crate::state::{AppState, SmartShiftLoad, SmartShiftWriteStatus};
+use crate::state::{AppState, DeviceKey, SmartShiftLoad, SmartShiftWriteStatus};
 use crate::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
 /// Friendly slider range for the `autoDisengage` threshold. The wire field is
@@ -186,10 +186,10 @@ impl SmartShiftPanel {
     /// so a permanent `FeatureUnsupported` reaches `store_smartshift_status`
     /// intact and the panel stops re-probing instead of retrying every reselect.
     fn issue_smartshift_read(
-        key: String,
+        key: DeviceKey,
         route: DeviceRoute,
         write_id: Option<u64>,
-        clear: impl Fn(&mut AppState, &str) + 'static,
+        clear: impl Fn(&mut AppState, &DeviceKey) + 'static,
         cx: &mut Context<Self>,
     ) {
         issue_device_read(
@@ -433,7 +433,7 @@ fn smartshift_write_feedback(
 
 fn smartshift_load_target(
     cx: &mut Context<SmartShiftPanel>,
-) -> Option<(String, DeviceRoute, Option<u64>)> {
+) -> Option<(DeviceKey, DeviceRoute, Option<u64>)> {
     cx.try_global::<AppState>().and_then(|state| {
         if !state.current_smartshift_unqueried() {
             return None;
@@ -443,7 +443,7 @@ fn smartshift_load_target(
             Some(SmartShiftWriteStatus::Applying { write_id, .. }) => Some(write_id),
             Some(SmartShiftWriteStatus::Confirmed | SmartShiftWriteStatus::Failed) | None => None,
         };
-        Some((record.config_key.clone(), record.route.clone()?, write_id))
+        Some((record.device_key(), record.route.clone()?, write_id))
     })
 }
 
