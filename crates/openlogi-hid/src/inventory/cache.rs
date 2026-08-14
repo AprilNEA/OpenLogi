@@ -145,6 +145,16 @@ pub(super) async fn probe_or_reuse(
             if fresh.identity_incomplete && cached.is_none() {
                 return (fresh, seen(id));
             }
+            // Same reasoning for a capability read that failed part-way: the
+            // walk understates the device, and memoizing that hides a panel in
+            // the GUI for `REFRESH_TICKS`. A previous complete walk outranks
+            // this partial one, so defer to it and re-probe next tick.
+            if fresh.capabilities_incomplete {
+                if let Some(c) = cached {
+                    keep_known_capabilities(&mut fresh, &c.probe);
+                }
+                return (fresh, seen(id));
+            }
             return match id {
                 Some(key) => {
                     let value = Cached {
@@ -185,6 +195,20 @@ pub(super) async fn probe_or_reuse(
             (c.probe.clone(), seen(id))
         }
         None => (ProbedFeatures::default(), seen(id)),
+    }
+}
+
+/// Carry a previous *complete* capability walk forward over one that a lost
+/// reply cut short.
+///
+/// A partial walk understates the device — a control-table read that failed
+/// half way reads exactly like "this device has no haptic panel" — and the GUI
+/// gates its panels on capabilities, so publishing the shrunken set makes a
+/// feature vanish. A probe whose capability reads all succeeded is returned
+/// untouched, including one that legitimately lost a capability.
+pub(super) fn keep_known_capabilities(fresh: &mut ProbedFeatures, cached: &ProbedFeatures) {
+    if fresh.capabilities_incomplete && cached.capabilities.is_some() {
+        fresh.capabilities.clone_from(&cached.capabilities);
     }
 }
 

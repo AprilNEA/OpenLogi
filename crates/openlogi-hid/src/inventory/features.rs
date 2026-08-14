@@ -43,6 +43,10 @@ pub(super) struct ProbedFeatures {
     /// A `DeviceInformation` read *failed* (vs. the feature being absent), so
     /// the identity fields above may be missing data the device does have.
     pub(super) identity_incomplete: bool,
+    /// A capability read *failed* (vs. the device not having the capability),
+    /// so `capabilities` above understates what the device can do. Memoizing
+    /// that would hide a panel in the GUI for `REFRESH_TICKS`.
+    pub(super) capabilities_incomplete: bool,
 }
 
 /// Which battery feature a device exposes plus its runtime feature index. Newer
@@ -207,27 +211,11 @@ pub(super) async fn probe_features(
             return (ProbedFeatures::default(), None);
         }
     };
+    let mut capabilities_incomplete = false;
     if let Some(caps) = capabilities.as_mut() {
-        if let Some(feature) = device.get_feature::<HiResWheelFeature>() {
-            caps.scroll_inversion = feature
-                .get_wheel_capabilities()
-                .await
-                .is_ok_and(|wheel| wheel.has_invert);
-        }
-        // Older MX mice (notably MX Master 2S) expose the horizontal wheel as
-        // Gestures2 gesture id 46 instead of the newer dedicated 0x2150
-        // Thumbwheel feature. Inspect the descriptor table so a generic 0x6501
-        // touch device does not become a false-positive thumbwheel device.
-        if !caps.thumbwheel
-            && let Some(feature) = device.get_feature::<Gestures2Feature>()
-        {
-            caps.thumbwheel = feature.has_thumbwheel().await.unwrap_or(false);
-        }
-        if probe_haptic_controls
-            && let Some(feature) = device.get_feature::<ReprogControlsFeature>()
-        {
-            caps.haptic_panel = has_haptic_panel(&feature).await;
-        }
+        capabilities_incomplete = probe_extra_capabilities(&device, caps, probe_haptic_controls)
+            .await
+            .is_err();
     }
 
     let battery = match battery_probe {
@@ -287,24 +275,62 @@ pub(super) async fn probe_features(
             marketing_name,
             capabilities,
             identity_incomplete,
+            capabilities_incomplete,
         },
         battery_probe,
     )
 }
 
-async fn has_haptic_panel(feature: &ReprogControlsFeature) -> bool {
-    let Ok(count) = feature.get_count().await else {
-        return false;
-    };
-    for index in 0..count {
-        let Ok(info) = feature.get_cid_info(index).await else {
-            return false;
-        };
-        if info.cid == control_ids::HAPTIC_PANEL {
-            return info.flags.is_divertable();
+/// Fill in the capabilities the feature table alone can't answer, each of which
+/// costs its own round-trips.
+///
+/// `Err(())` means a read failed, so the set now understates the device — the
+/// caller must not let that be memoized. A capability whose read merely says
+/// "no" is not an error: only an unanswered read is.
+async fn probe_extra_capabilities(
+    device: &Device,
+    caps: &mut Capabilities,
+    probe_haptic_controls: bool,
+) -> Result<(), ()> {
+    if let Some(feature) = device.get_feature::<HiResWheelFeature>() {
+        caps.scroll_inversion = feature
+            .get_wheel_capabilities()
+            .await
+            .is_ok_and(|wheel| wheel.has_invert);
+    }
+    // Older MX mice (notably MX Master 2S) expose the horizontal wheel as
+    // Gestures2 gesture id 46 instead of the newer dedicated 0x2150
+    // Thumbwheel feature. Inspect the descriptor table so a generic 0x6501
+    // touch device does not become a false-positive thumbwheel device.
+    if !caps.thumbwheel
+        && let Some(feature) = device.get_feature::<Gestures2Feature>()
+    {
+        caps.thumbwheel = feature.has_thumbwheel().await.unwrap_or(false);
+    }
+    if probe_haptic_controls && let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
+        match has_haptic_panel(&feature).await {
+            Some(found) => caps.haptic_panel = found,
+            None => return Err(()),
         }
     }
-    false
+    Ok(())
+}
+
+/// Whether the device exposes a divertable haptic panel, or `None` when a read
+/// failed part-way through the ~40-entry control walk.
+///
+/// The distinction matters because the answer is memoized for `REFRESH_TICKS`:
+/// reporting a lost reply as `false` hides the Actions Ring binding for half a
+/// minute on a device that has the panel.
+async fn has_haptic_panel(feature: &ReprogControlsFeature) -> Option<bool> {
+    let count = feature.get_count().await.ok()?;
+    for index in 0..count {
+        let info = feature.get_cid_info(index).await.ok()?;
+        if info.cid == control_ids::HAPTIC_PANEL {
+            return Some(info.flags.is_divertable());
+        }
+    }
+    Some(false)
 }
 
 #[cfg(test)]

@@ -192,7 +192,13 @@ impl<Node: Eq + Hash + Clone, Channel> ChannelCache<Node, Channel> {
 
     fn retire_node(&mut self, node: &Node) -> Option<&Channel> {
         let channel = self.active.remove(node)?;
-        Some(self.retiring.entry(node.clone()).or_insert(channel))
+        // Overwrite rather than keep an older retirement. Holding a node in
+        // both maps is a bug `insert` only debug-asserts against, and the
+        // caller uses what comes back to release *this* channel's cache pin —
+        // handed the stale one, it would clear the wrong pointer and leave the
+        // real pin in place, which is what blocks a node from reopening.
+        self.retiring.insert(node.clone(), channel);
+        self.retiring.get(node)
     }
 
     /// Whether this node may be opened during the current tick. A quiescent

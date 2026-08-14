@@ -2,11 +2,13 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use openlogi_core::device::{
-    DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+    Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice,
+    ReceiverInfo,
 };
 
 use super::cache::{
     CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_TICKS, backfill_identity, is_stale,
+    keep_known_capabilities,
 };
 use super::persist;
 use super::probe::{
@@ -465,6 +467,48 @@ fn probed(model_info: Option<DeviceModelInfo>, identity_incomplete: bool) -> Pro
         kind: Some(DeviceKind::Mouse),
         ..ProbedFeatures::default()
     }
+}
+
+/// A control-table read that fails half way reads exactly like "no haptic
+/// panel", and the answer is memoized for `REFRESH_TICKS` — so the Actions Ring
+/// binding would vanish from the GUI for half a minute on a device that has it.
+#[test]
+fn an_incomplete_capability_walk_keeps_the_last_complete_answer() {
+    let mut fresh = probed(None, false);
+    fresh.capabilities_incomplete = true;
+    fresh.capabilities = Some(Capabilities::default());
+    let mut cached = probed(None, false);
+    cached.capabilities = Some(Capabilities {
+        haptic_panel: true,
+        ..Capabilities::default()
+    });
+
+    keep_known_capabilities(&mut fresh, &cached);
+
+    assert_eq!(
+        fresh.capabilities.map(|caps| caps.haptic_panel),
+        Some(true),
+        "the panel the last complete walk saw must survive a lost reply"
+    );
+}
+
+/// A device that genuinely lost a capability must still be able to say so.
+#[test]
+fn a_complete_capability_walk_is_left_alone() {
+    let mut fresh = probed(None, false);
+    fresh.capabilities = Some(Capabilities::default());
+    let mut cached = probed(None, false);
+    cached.capabilities = Some(Capabilities {
+        haptic_panel: true,
+        ..Capabilities::default()
+    });
+
+    keep_known_capabilities(&mut fresh, &cached);
+
+    assert_eq!(
+        fresh.capabilities.map(|caps| caps.haptic_panel),
+        Some(false)
+    );
 }
 
 #[test]
