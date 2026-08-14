@@ -1,3 +1,9 @@
+//! HID++ read/write error vocabulary — pure data, no I/O.
+//!
+//! The conversions from `hidpp`/`async_hid` error types into [`WriteError`]
+//! live in `openlogi_hid::write::error`, which this crate must never depend
+//! on.
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

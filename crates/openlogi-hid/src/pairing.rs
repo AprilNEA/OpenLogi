@@ -29,12 +29,15 @@ use hidpp::{
     channel::{HidppChannel, HidppMessage},
     receiver::{self, Receiver},
 };
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
+// Click / PasskeyMethod / ReceiverSelector are pure IPC wire data with no
+// HID++ I/O, so they live in `openlogi_core::hid::pairing`; re-exported here
+// unchanged so this module's own API surface doesn't churn.
+pub use openlogi_core::hid::pairing::{Click, PasskeyMethod, ReceiverSelector};
 
 use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
@@ -97,19 +100,6 @@ pub struct PairingReceiver {
     pub product_id: u16,
 }
 
-/// Selects which receiver a pairing operation targets.
-///
-/// Crosses the agent↔GUI IPC (`start_pairing`), so variant order is wire
-/// format — changes require a `PROTOCOL_VERSION` bump (guarded by
-/// `openlogi-agent-core/tests/wire_format.rs`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ReceiverSelector {
-    /// The first supported receiver found — fine for the common single-receiver case.
-    First,
-    /// A specific Bolt receiver by its unique ID.
-    BoltUid(String),
-}
-
 /// A nearby unpaired device surfaced by Bolt discovery.
 #[derive(Clone, Debug)]
 pub struct DiscoveredDevice {
@@ -139,35 +129,6 @@ impl DiscoveredDevice {
             10
         }
     }
-}
-
-/// A single click in a pointer passkey sequence.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Click {
-    /// Left mouse button click.
-    Left,
-    /// Right mouse button click.
-    Right,
-}
-
-/// How the user authenticates the device during Bolt pairing.
-///
-/// Crosses the agent↔GUI IPC (inside `PairingUpdate::Passkey`, [`Click`]
-/// included), so variant and field order are wire format — changes require a
-/// `PROTOCOL_VERSION` bump (guarded by
-/// `openlogi-agent-core/tests/wire_format.rs`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum PasskeyMethod {
-    /// Type these digits on the new keyboard, then press Enter.
-    Keyboard(String),
-    /// On the new pointer, perform this left/right click sequence, then click
-    /// both buttons together.
-    Pointer {
-        /// Numeric passkey shown by the device.
-        passkey: String,
-        /// MSB-first click sequence derived from the passkey.
-        clicks: Vec<Click>,
-    },
 }
 
 /// Renders a Bolt passkey value as a 10-bit MSB-first left/right click sequence.

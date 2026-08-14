@@ -1,4 +1,3 @@
-use std::assert_matches;
 use std::error::Error;
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -6,8 +5,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 use super::*;
 use hidpp::channel::{HidppChannel, RawHidChannel};
 use hidpp::feature::smartshift::WheelMode;
-use openlogi_core::config::LightSettings;
-use openlogi_core::device::{LightCapabilities, LightValueRange, LightValueUnit};
 use tokio::sync::mpsc;
 
 use crate::SmartShiftMode;
@@ -18,78 +15,6 @@ use crate::write::smartshift::{
     status_matches_desired, wheel_mode_to_smartshift,
 };
 use crate::write::{HidppFeatureErrorKind, HidppOperation};
-
-#[test]
-fn light_settings_expand_only_to_advertised_controls() {
-    let Ok(brightness) = LightValueRange::new(0, 100, 1, LightValueUnit::Percent) else {
-        panic!("valid brightness fixture");
-    };
-    let settings = LightSettings::new(false, 37, Some(4600));
-    let commands = commands_for_light_settings(
-        settings,
-        LightCapabilities {
-            brightness: Some(brightness),
-            ..LightCapabilities::default()
-        },
-    );
-
-    assert_eq!(commands, vec![LightCommand::BrightnessPercent(37)]);
-}
-
-#[test]
-fn capabilities_sort_and_deduplicate_values() -> Result<(), WriteError> {
-    let caps = DpiCapabilities::new(vec![1600, 400, 800, 800])?;
-
-    assert_eq!(caps.values(), [400, 800, 1600]);
-    assert_eq!(caps.min(), 400);
-    assert_eq!(caps.max(), 1600);
-    Ok(())
-}
-
-#[test]
-fn capabilities_reject_empty_list() {
-    assert_matches!(
-        DpiCapabilities::new(Vec::new()),
-        Err(WriteError::EmptyDpiList)
-    );
-}
-
-#[test]
-fn nearest_returns_closest_supported_value() -> Result<(), WriteError> {
-    let caps = DpiCapabilities::new(vec![400, 800, 1600])?;
-
-    assert_eq!(caps.nearest(390), 400);
-    assert_eq!(caps.nearest(1000), 800);
-    assert_eq!(caps.nearest(2000), 1600);
-    Ok(())
-}
-
-#[test]
-fn step_hint_returns_smallest_positive_gap() -> Result<(), WriteError> {
-    let caps = DpiCapabilities::new(vec![400, 800, 1200, 2000])?;
-
-    assert_eq!(caps.step_hint(), 400);
-    Ok(())
-}
-
-#[test]
-fn adjacent_test_target_prefers_next_then_previous_value() -> Result<(), WriteError> {
-    let caps = DpiCapabilities::new(vec![400, 800, 1600])?;
-
-    assert_eq!(caps.adjacent_test_target(400), Some(800));
-    assert_eq!(caps.adjacent_test_target(800), Some(1600));
-    assert_eq!(caps.adjacent_test_target(1600), Some(800));
-    Ok(())
-}
-
-#[test]
-fn adjacent_test_target_handles_current_outside_list() -> Result<(), WriteError> {
-    let caps = DpiCapabilities::new(vec![400, 800, 1600])?;
-
-    assert_eq!(caps.adjacent_test_target(1000), Some(1600));
-    assert_eq!(caps.adjacent_test_target(2000), Some(1600));
-    Ok(())
-}
 
 #[test]
 fn smartshift_and_wheel_mode_byte_encodings_match() {

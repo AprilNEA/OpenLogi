@@ -27,7 +27,7 @@ use hidpp::{async_trait, channel::RawHidChannel};
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::write::{WriteError, matches_litra};
+use crate::write::{WriteError, hid_error_to_write_error, matches_litra};
 
 /// Bitmask of leased HID++ software ids (`1..=15`; bit `N` means id `N` is taken).
 ///
@@ -264,12 +264,12 @@ pub(crate) async fn open_route_writer(
     route: &crate::route::DeviceRoute,
 ) -> Result<Option<DeviceWriter>, WriteError> {
     let candidates = match route {
-        crate::route::DeviceRoute::Direct { .. } => {
-            enumerate_hidpp_devices().await.map_err(WriteError::from)?
-        }
-        crate::route::DeviceRoute::RawHid { .. } => {
-            enumerate_devices().await.map_err(WriteError::from)?
-        }
+        crate::route::DeviceRoute::Direct { .. } => enumerate_hidpp_devices()
+            .await
+            .map_err(|e| hid_error_to_write_error(&e))?,
+        crate::route::DeviceRoute::RawHid { .. } => enumerate_devices()
+            .await
+            .map_err(|e| hid_error_to_write_error(&e))?,
         _ => return Ok(None),
     };
     let mut matched = None;
@@ -296,7 +296,8 @@ pub(crate) async fn open_route_writer(
         };
         if is_match {
             if matches!(route, crate::route::DeviceRoute::Direct { .. }) {
-                let (_reader, writer) = dev.open().await.map_err(WriteError::from)?;
+                let (_reader, writer) =
+                    dev.open().await.map_err(|e| hid_error_to_write_error(&e))?;
                 return Ok(Some(writer));
             }
             if matched.is_some() {
@@ -308,7 +309,7 @@ pub(crate) async fn open_route_writer(
     }
     match matched {
         Some(dev) => {
-            let (_reader, writer) = dev.open().await.map_err(WriteError::from)?;
+            let (_reader, writer) = dev.open().await.map_err(|e| hid_error_to_write_error(&e))?;
             Ok(Some(writer))
         }
         None => Ok(None),

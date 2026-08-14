@@ -31,9 +31,13 @@ pub mod inventory;
 pub mod keyboard;
 pub mod pairing;
 pub mod reprog_controls;
-pub mod smartshift;
 pub mod thumbwheel;
 pub mod write;
+
+/// SmartShift mode/status wire types. Pure data with no HID++ I/O, so they
+/// live in `openlogi_core::hid::smartshift`; re-exported here as a module so
+/// `crate::smartshift::X` keeps resolving for existing callers.
+pub use openlogi_core::hid::smartshift;
 
 pub use backlight::{BacklightMode, BacklightState, BacklightStatus};
 pub use channel_pool::ChannelPool;

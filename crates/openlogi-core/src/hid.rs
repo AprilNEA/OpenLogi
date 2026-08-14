@@ -8,12 +8,12 @@
 //! I/O of its own) depends on this module directly instead of linking the
 //! HID stack.
 
-mod dpi;
-mod error;
-mod light;
-mod pairing;
-mod route;
-mod smartshift;
+pub mod dpi;
+pub mod error;
+pub mod light;
+pub mod pairing;
+pub mod route;
+pub mod smartshift;
 
 pub use dpi::{DpiCapabilities, DpiInfo};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
