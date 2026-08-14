@@ -12,5 +12,6 @@ pub mod color;
 pub mod config;
 pub mod device;
 pub mod diagnostics;
+pub mod hid;
 pub mod paths;
 pub mod single_instance;

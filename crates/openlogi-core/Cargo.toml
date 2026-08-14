@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 etcetera = "0.11.0"
 atomic-write-file = { workspace = true }
+num_enum = { workspace = true }
 strum = { version = "0.27", features = ["derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

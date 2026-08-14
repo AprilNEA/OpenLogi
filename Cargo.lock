@@ -5149,6 +5149,7 @@ version = "0.6.27"
 dependencies = [
  "atomic-write-file",
  "etcetera",
+ "num_enum",
  "plist",
  "serde",
  "strum",
