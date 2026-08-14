@@ -8,7 +8,9 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
 use core_foundation::base::TCFType as _;
-use openlogi_core::binding::{Action, KeyCombo, WorkflowStep};
+use openlogi_core::binding::{
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -18,127 +20,136 @@ const NX_KEYTYPE_PLAY: i32 = 16;
 const NX_KEYTYPE_NEXT: i32 = 17;
 const NX_KEYTYPE_PREVIOUS: i32 = 18;
 
-// ── macOS virtual key codes ────────────────────────────────────────────────
-// Source: <HIToolbox/Events.h> kVK_* constants. Values are layout-independent
-// for the US ANSI keyboard.
-const VK_A: u16 = 0x00;
-const VK_C: u16 = 0x08;
-const VK_F: u16 = 0x03;
-const VK_R: u16 = 0x0F;
-const VK_S: u16 = 0x01;
-const VK_T: u16 = 0x11;
-const VK_V: u16 = 0x09;
-const VK_W: u16 = 0x0D;
-const VK_X: u16 = 0x07;
-const VK_Z: u16 = 0x06;
-const VK_TAB: u16 = 0x30;
-
-/// macOS implementation: dispatch to the appropriate event helper.
+/// macOS implementation: classify `action` into an [`Effect`] and dispatch
+/// to the appropriate event helper.
 pub(super) fn execute(action: &Action) {
-    // Modifier bit shorthands.
-    let cmd = CGEventFlags::CGEventFlagCommand;
-    let shift = CGEventFlags::CGEventFlagShift;
-    let ctrl = CGEventFlags::CGEventFlagControl;
-
-    match action {
+    match action.effect() {
         // Suppressed input: captured but deliberately produces no event.
-        Action::None => {}
-        // ── Mouse clicks: synthesise a click at the cursor ────────────────
+        Effect::None => {}
         // Remapping a *different* button to a click lands here (e.g. Back →
         // MiddleClick). A button left on its own native click never reaches
         // this — the hook passes it straight through to the OS.
-        Action::LeftClick => post_click(CGMouseButton::Left),
-        Action::RightClick => post_click(CGMouseButton::Right),
-        Action::MiddleClick => post_click(CGMouseButton::Center),
-        // Extra mouse buttons: post the real button4/5 the OS treats as
-        // back/forward. Button numbers are 0-indexed (3 = back / "button 4",
-        // 4 = forward / "button 5").
-        Action::MouseBack => post_other_button(3),
-        Action::MouseForward => post_other_button(4),
-        // ── Editing ───────────────────────────────────────────────────────
-        Action::Copy => post_key(VK_C, cmd),
-        Action::Paste => post_key(VK_V, cmd),
-        Action::Cut => post_key(VK_X, cmd),
-        Action::Undo => post_key(VK_Z, cmd),
-        Action::Redo => post_key(VK_Z, cmd | shift),
-        Action::SelectAll => post_key(VK_A, cmd),
-        Action::Find => post_key(VK_F, cmd),
-        Action::Save => post_key(VK_S, cmd),
-        // ── Browser / Navigation ──────────────────────────────────────────
-        // BrowserBack/Forward: Cmd+[ / Cmd+] for Chrome and other apps.
-        // Safari is handled upstream via ax_navigate_browser() with the PID
-        // captured at press time — by the time execute() is called the AX path
-        // has already run, so this fallback is for non-Safari browsers only.
-        // kVK_ANSI_LeftBracket = 0x21, kVK_ANSI_RightBracket = 0x1E
-        Action::BrowserBack => post_key(0x21, cmd),
-        Action::BrowserForward => post_key(0x1E, cmd),
-        Action::NewTab => post_key(VK_T, cmd),
-        Action::CloseTab => post_key(VK_W, cmd),
-        Action::ReopenTab => post_key(VK_T, cmd | shift),
-        Action::NextTab => post_key(VK_TAB, ctrl),
-        Action::PrevTab => post_key(VK_TAB, ctrl | shift),
-        Action::ReloadPage => post_key(VK_R, cmd),
-        // ── Navigation / Window: posted straight to the Dock ──────────────
-        // Synthesising these shortcuts is unreliable — the WindowServer
-        // matcher needs the exact configured key (incl. the Fn flag) and
-        // Show Desktop ignores synthetic events entirely — so they go to the
-        // Dock via `CoreDockSendNotification`, which fires regardless of the
-        // user's keyboard settings.
-        Action::MissionControl => mission_control(),
-        Action::AppExpose => app_expose(),
-        Action::PreviousDesktop => previous_desktop(),
-        Action::NextDesktop => next_desktop(),
-        Action::ShowDesktop => show_desktop(),
-        Action::LaunchpadShow => launchpad(),
-        // ── System ────────────────────────────────────────────────────────
-        // Lock screen = Cmd+Ctrl+Q (kVK_ANSI_Q = 0x0C)
-        Action::LockScreen => post_key(0x0C, cmd | ctrl),
-        // Screenshot = Cmd+Shift+3 (kVK_ANSI_3 = 0x14)
-        Action::Screenshot => post_key(0x14, cmd | shift),
-        // Capture region to clipboard = Cmd+Shift+Ctrl+4 (kVK_ANSI_4 = 0x15)
-        Action::CaptureRegion => post_key(0x15, cmd | shift | ctrl),
-        // Sleep has no CGEvent equivalent (the WindowServer ignores a
-        // synthesised power key), so ask powermanagement directly. `pmset
-        // sleepnow` works for the console user without privileges.
-        Action::Sleep => sleep_system(),
-        // ── Media ─────────────────────────────────────────────────────────
+        Effect::Click(button) => dispatch_click(button),
+        Effect::Shortcut(shortcut) => post_keycombo(&combo(shortcut)),
+        Effect::Key(combo) => post_keycombo(combo),
+        Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
         // CGEventCreateKeyboardEvent is ignored by macOS' volume handler.
-        Action::PlayPause => post_media_key(NX_KEYTYPE_PLAY),
-        Action::NextTrack => post_media_key(NX_KEYTYPE_NEXT),
-        Action::PrevTrack => post_media_key(NX_KEYTYPE_PREVIOUS),
-        Action::VolumeUp => post_media_key(NX_KEYTYPE_SOUND_UP),
-        Action::VolumeDown => post_media_key(NX_KEYTYPE_SOUND_DOWN),
-        Action::MuteVolume => post_media_key(NX_KEYTYPE_MUTE),
-        // ── DPI / SmartShift: handled at hook/HID layer ───────────────────
-        Action::CycleDpiPresets
-        | Action::SetDpiPreset(_)
-        | Action::ToggleSmartShift
-        | Action::ShowActionsRing
-        | Action::OpenApplication(_) => {
+        Effect::Media(key) => post_media_key(nx_key(key)),
+        Effect::Native(native) => dispatch_native(native),
+        Effect::Script(script) => dispatch_script(script),
+        // TypeText emits a unicode string, layout-independent.
+        Effect::Text(text) => post_unicode(text),
+        Effect::AgentSide => {
             tracing::debug!(
                 action = action.label(),
                 "device action handled by hook/HID layer"
             );
         }
-        // ── Scroll ────────────────────────────────────────────────────────
-        Action::ScrollUp
-        | Action::ScrollDown
-        | Action::HorizontalScrollLeft
-        | Action::HorizontalScrollRight => post_scroll(action),
-        // ── Custom ────────────────────────────────────────────────────────
-        Action::CustomShortcut(combo) => {
-            post_keycombo(combo);
-        }
-        // TypeText emits a unicode string, layout-independent.
-        Action::TypeText(text) => post_unicode(text),
-        // Run actions spawn off the tap thread: the callback must not block
-        // (posting a key while waiting on a child process would wedge input).
-        Action::RunAppleScript(src) => run_apple_script_async(src.clone()),
-        Action::RunShellCommand(cmd) => run_shell_command_async(cmd.clone()),
-        // Workflows can sleep between steps, so they also run off the tap thread.
-        Action::Workflow(steps) => run_workflow_async(steps.clone()),
+    }
+}
+
+/// Synthesise a click for `button` at the cursor location. Extra buttons
+/// post the real button4/5 the OS treats as back/forward.
+fn dispatch_click(button: MouseButton) {
+    match button {
+        MouseButton::Left => post_click(CGMouseButton::Left),
+        MouseButton::Right => post_click(CGMouseButton::Right),
+        MouseButton::Middle => post_click(CGMouseButton::Center),
+        // Button numbers are 0-indexed (3 = back / "button 4", 4 = forward /
+        // "button 5").
+        MouseButton::Back => post_other_button(3),
+        MouseButton::Forward => post_other_button(4),
+    }
+}
+
+/// The macOS chord for each named [`Shortcut`].
+///
+/// Parsed through [`KeyCombo`]'s existing, tested `FromStr` rather than
+/// hand-built modifier bits — the table stays a flat, auditable list of
+/// chord strings instead of a second bit-packing call site.
+fn combo(shortcut: Shortcut) -> KeyCombo {
+    let text = match shortcut {
+        Shortcut::Copy => "Cmd+C",
+        Shortcut::Paste => "Cmd+V",
+        Shortcut::Cut => "Cmd+X",
+        Shortcut::Undo => "Cmd+Z",
+        Shortcut::Redo => "Cmd+Shift+Z",
+        Shortcut::SelectAll => "Cmd+A",
+        Shortcut::Find => "Cmd+F",
+        Shortcut::Save => "Cmd+S",
+        // Cmd+[ / Cmd+] for Chrome and other apps. Safari is handled
+        // upstream via ax_navigate_browser() with the PID captured at press
+        // time — by the time execute() is called the AX path has already
+        // run, so this is the fallback for non-Safari browsers only.
+        Shortcut::BrowserBack => "Cmd+[",
+        Shortcut::BrowserForward => "Cmd+]",
+        Shortcut::NewTab => "Cmd+T",
+        Shortcut::CloseTab => "Cmd+W",
+        Shortcut::ReopenTab => "Cmd+Shift+T",
+        Shortcut::NextTab => "Ctrl+Tab",
+        Shortcut::PrevTab => "Ctrl+Shift+Tab",
+        Shortcut::ReloadPage => "Cmd+R",
+    };
+    parse_shortcut(text)
+}
+
+fn parse_shortcut(text: &str) -> KeyCombo {
+    text.parse()
+        .unwrap_or_else(|error| unreachable!("hardcoded shortcut table entry {text:?}: {error}"))
+}
+
+/// Dispatch a window-manager or power [`NativeAction`].
+///
+/// These are all posted straight to the Dock or WindowServer via private
+/// SPIs rather than a synthesised keyboard chord — see the module docs on
+/// [`mission_control`] and friends for why.
+fn dispatch_native(native: NativeAction) {
+    let cmd = CGEventFlags::CGEventFlagCommand;
+    let shift = CGEventFlags::CGEventFlagShift;
+    let ctrl = CGEventFlags::CGEventFlagControl;
+    match native {
+        NativeAction::MissionControl => mission_control(),
+        NativeAction::AppExpose => app_expose(),
+        NativeAction::PreviousDesktop => previous_desktop(),
+        NativeAction::NextDesktop => next_desktop(),
+        NativeAction::ShowDesktop => show_desktop(),
+        NativeAction::LaunchpadShow => launchpad(),
+        // Lock screen = Cmd+Ctrl+Q (kVK_ANSI_Q = 0x0C)
+        NativeAction::LockScreen => post_key(0x0C, cmd | ctrl),
+        // Screenshot = Cmd+Shift+3 (kVK_ANSI_3 = 0x14)
+        NativeAction::Screenshot => post_key(0x14, cmd | shift),
+        // Capture region to clipboard = Cmd+Shift+Ctrl+4 (kVK_ANSI_4 = 0x15)
+        NativeAction::CaptureRegion => post_key(0x15, cmd | shift | ctrl),
+        // Sleep has no CGEvent equivalent (the WindowServer ignores a
+        // synthesised power key), so ask powermanagement directly. `pmset
+        // sleepnow` works for the console user without privileges.
+        NativeAction::Sleep => sleep_system(),
+    }
+}
+
+fn nx_key(key: MediaKey) -> i32 {
+    match key {
+        MediaKey::PlayPause => NX_KEYTYPE_PLAY,
+        MediaKey::NextTrack => NX_KEYTYPE_NEXT,
+        MediaKey::PrevTrack => NX_KEYTYPE_PREVIOUS,
+        MediaKey::VolumeUp => NX_KEYTYPE_SOUND_UP,
+        MediaKey::VolumeDown => NX_KEYTYPE_SOUND_DOWN,
+        MediaKey::Mute => NX_KEYTYPE_MUTE,
+    }
+}
+
+/// Dispatch a power-user scripting [`Script`] action.
+///
+/// All three spawn off the tap thread: the callback must not block (posting
+/// a key while waiting on a child process, or sleeping through a workflow
+/// `Delay`, would wedge input).
+fn dispatch_script(script: Script<'_>) {
+    match script {
+        Script::AppleScript(src) => run_apple_script_async(src.to_string()),
+        Script::ShellCommand(cmd) => run_shell_command_async(cmd.to_string()),
+        Script::Workflow(steps) => run_workflow_async(steps.to_vec()),
     }
 }
 
@@ -326,7 +337,9 @@ fn hid_usage_to_macos(usage: u8) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::hid_usage_to_macos;
+    use openlogi_core::binding::Shortcut;
+
+    use super::{combo, hid_usage_to_macos};
 
     #[test]
     fn hid_usages_map_to_macos_virtual_keys() {
@@ -336,6 +349,46 @@ mod tests {
         assert_eq!(hid_usage_to_macos(0x3a), Some(0x7a));
         assert_eq!(hid_usage_to_macos(0x6f), Some(0x5a));
         assert_eq!(hid_usage_to_macos(0xff), None);
+    }
+
+    /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
+    /// edit to the table can't silently change what ⌘C sends. macOS and
+    /// Linux only overlap on the letter-key chords: both `BrowserBack` and
+    /// `Redo` differ across the three backends by design (see the module
+    /// doc on `combo`), so each backend pins its own rows independently.
+    #[test]
+    fn combo_table_pins_representative_shortcuts() {
+        assert_eq!(combo(Shortcut::Copy).rendered_label(), "Cmd+C");
+        assert_eq!(combo(Shortcut::Redo).rendered_label(), "Cmd+Shift+Z");
+        assert_eq!(combo(Shortcut::BrowserBack).rendered_label(), "Cmd+[");
+        assert_eq!(combo(Shortcut::NextTab).rendered_label(), "Ctrl+Tab");
+        // hid_usage_to_macos must actually resolve every table entry, or a
+        // `Shortcut` silently no-ops instead of pressing anything (see
+        // `post_keycombo`'s warn-and-drop path).
+        for shortcut in [
+            Shortcut::Copy,
+            Shortcut::Paste,
+            Shortcut::Cut,
+            Shortcut::Undo,
+            Shortcut::Redo,
+            Shortcut::SelectAll,
+            Shortcut::Find,
+            Shortcut::Save,
+            Shortcut::BrowserBack,
+            Shortcut::BrowserForward,
+            Shortcut::NewTab,
+            Shortcut::CloseTab,
+            Shortcut::ReopenTab,
+            Shortcut::NextTab,
+            Shortcut::PrevTab,
+            Shortcut::ReloadPage,
+        ] {
+            let key = combo(shortcut).key().code();
+            assert!(
+                hid_usage_to_macos(key).is_some(),
+                "{shortcut:?} table entry has no macOS virtual-key mapping"
+            );
+        }
     }
 }
 
@@ -442,19 +495,16 @@ fn sleep_system() {
     }
 }
 
-/// Post a synthetic scroll event for `action` (one of the `Scroll*` variants).
-fn post_scroll(action: &Action) {
+/// Post a synthetic scroll event for one tick in direction `(dx, dy)`. Unit
+/// direction (-1/0/1) scaled by the fixed "one tick" pixel magnitude the
+/// four `Scroll*`/`HorizontalScroll*` actions have always used.
+fn dispatch_scroll(dx: i8, dy: i8) {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed for scroll");
         return;
     };
-    let (v, h): (i32, i32) = match action {
-        Action::ScrollUp => (3, 0),
-        Action::ScrollDown => (-3, 0),
-        Action::HorizontalScrollLeft => (0, -3),
-        Action::HorizontalScrollRight => (0, 3),
-        _ => return,
-    };
+    let v = i32::from(dy) * 3;
+    let h = i32::from(dx) * 3;
     let Ok(ev) = CGEvent::new_scroll_event(src, ScrollEventUnit::PIXEL, 2, v, h, 0) else {
         tracing::warn!("CGEvent::new_scroll_event failed");
         return;
