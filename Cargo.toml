@@ -115,6 +115,20 @@ unwrap_used = "warn"
 expect_used = "warn"
 missing_errors_doc = "allow"
 doc_markdown = "allow"
+# Shared lint set, kept in sync with
+# https://gist.github.com/AprilNEA/cdf81f76840fcb883a32503ee7caa539.
+# `cast_*` and `ptr_as_ptr` are pedantic members already; they are listed
+# explicitly so the set stands on its own if the pedantic group ever moves.
+assertions_on_result_states = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+error_impl_error = "warn"
+exit = "warn"
+or_fun_call = "warn"
+ptr_as_ptr = "warn"
+tests_outside_test_module = "warn"
+undocumented_unsafe_blocks = "warn"
 
 [profile.release]
 lto = "fat"

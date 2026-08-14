@@ -138,11 +138,30 @@ New GUI strings: insert the same key in the **same position** in every
 
 ## Rust standards
 
-Edition 2024, MSRV 1.96. Workspace lints (root `Cargo.toml`): `unsafe_code = "deny"`
-(opt out per item with `#[expect(unsafe_code, reason = "…")]` plus a `// SAFETY:`
-comment), `clippy::pedantic` at warn, `unwrap_used`/`expect_used` at warn.
-`openlogi-hidpp` deliberately does not inherit workspace lints (vendored code). Any
-lint suppression carries a `reason`.
+Edition 2024, MSRV 1.96. There is exactly **one** lint table, in the root `Cargo.toml`,
+and every crate inherits it with `[lints] workspace = true` — never a private copy, or
+the next lint added to the workspace silently skips that crate. A crate needing a
+different level opts out **in source** (the `openlogi-hook` platform modules carry
+`#![allow(unsafe_code, reason = "…")]`), because Cargo rejects mixing `workspace = true`
+with local overrides. `openlogi-hidpp` deliberately stays out of the table (vendored).
+
+The table: `unsafe_code = "deny"` (opt out per item with `#[expect(unsafe_code,
+reason = "…")]` plus a `// SAFETY:` comment), `clippy::pedantic` at warn,
+`unwrap_used`/`expect_used` at warn, plus the shared lint set —
+`assertions_on_result_states`, `cast_possible_truncation`, `cast_possible_wrap`,
+`cast_sign_loss`, `error_impl_error`, `exit`, `or_fun_call`, `ptr_as_ptr`,
+`tests_outside_test_module`, `undocumented_unsafe_blocks`. Any lint suppression carries
+a `reason`. What that changes day to day:
+
+- Every `unsafe` block needs a `// SAFETY:` comment saying why it is sound.
+- `assert!(r.is_ok())` / `assert!(r.is_err())` are rejected — unwrap the `Result` (in a
+  test module that already allows it) or give the assertion a message.
+- A test module gated on more than `test` needs stacked attributes (`#[cfg(test)]` then
+  `#[cfg(unix)]`), not `#[cfg(all(test, unix))]`, which clippy reads as a test outside a
+  test module. Integration tests under `tests/` carry a file-level
+  `#![expect(clippy::tests_outside_test_module, reason = "…")]`.
+- `std::process::exit` needs `#[expect(clippy::exit, reason = "…")]` naming why that call
+  site cannot hand an `ExitCode` back to `main` instead.
 
 Encode invariants in the type system instead of checking them at runtime:
 
