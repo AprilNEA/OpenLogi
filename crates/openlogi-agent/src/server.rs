@@ -477,6 +477,13 @@ impl RingHapticPlayer {
                     .ok()
                     .and_then(|mut pending| pending.take());
                 if let Some(route) = arm_route {
+                    // A new session starts the breaker over. Both counters are
+                    // worker-lifetime state, so without this a session that
+                    // ended two failures deep makes the next session's first
+                    // failure trip the cool-down, and a cool-down opened at the
+                    // tail of one ring silences the opening of the next.
+                    consecutive_failures = 0;
+                    cooldown_until = None;
                     arm_firmware_haptics(&shared, &route).await;
                 }
                 let request = rx.borrow_and_update().clone();
