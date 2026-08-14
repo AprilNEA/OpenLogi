@@ -35,7 +35,7 @@ use openlogi_core::config::CameraControls;
 use tracing::debug;
 
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette};
+use crate::theme::{self, ACCENT_BLUE, Palette, WashStyle as _};
 
 /// Built-in profiles: `values` are fractions of each control's own range, so
 /// they scale to whatever the camera reports. Auto modes all engage — the
@@ -764,7 +764,7 @@ fn profiles_row(key: &str, pal: Palette, cx: &mut Context<CameraControlsPanel>) 
             .border_color(pal.border)
             .text_xs()
             .text_color(pal.text_muted)
-            .hover(|s| s.bg(pal.surface_hover))
+            .hover_wash(pal)
             .child(format!("+ {}", tr!("New")))
             .on_click(cx.listener(|panel, _: &ClickEvent, _window, cx| {
                 panel.save_profile(cx);
@@ -795,7 +795,7 @@ fn profile_chip(
             pal.text_muted
         })
         .when(active, |s| s.bg(pal.surface))
-        .hover(move |s| s.bg(pal.surface_hover))
+        .hover_wash(pal)
         .child(label)
         .on_click(on_click)
         .into_any_element()
@@ -830,7 +830,7 @@ fn custom_profile_chip(
             pal.text_muted
         })
         .when(active, |s| s.bg(pal.surface))
-        .hover(move |s| s.bg(pal.surface_hover))
+        .hover_wash(pal)
         .child(SharedString::from(name))
         .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
             panel.apply_profile(&apply_name, window, cx);
@@ -841,7 +841,7 @@ fn custom_profile_chip(
                 .px_0p5()
                 .rounded_full()
                 .text_color(pal.text_muted)
-                .hover(|s| s.text_color(gpui::white()))
+                .hover(|s| s.text_color(pal.text_primary))
                 .child("×")
                 .on_click(cx.listener(move |panel, _: &ClickEvent, _window, cx| {
                     cx.stop_propagation();
@@ -939,7 +939,7 @@ fn control_row(
                 .border_color(if on { accent.into() } else { pal.border })
                 .text_xs()
                 .text_color(if on { accent.into() } else { pal.text_muted })
-                .hover(|s| s.bg(pal.surface_hover))
+                .hover_wash(pal)
                 .child(tr!("Auto"))
                 .on_click(cx.listener(move |panel, _: &ClickEvent, _window, cx| {
                     panel.toggle_auto(auto_ix, cx);
@@ -964,7 +964,7 @@ fn reset_button(pal: Palette, cx: &mut Context<CameraControlsPanel>) -> AnyEleme
                 .border_1()
                 .border_color(pal.border)
                 .bg(pal.surface)
-                .hover(|s| s.bg(pal.surface_hover))
+                .hover_wash(pal)
                 .text_xs()
                 .text_color(pal.text_muted)
                 .child(tr!("Reset to defaults"))

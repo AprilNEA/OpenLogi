@@ -21,7 +21,7 @@ use tracing::debug;
 use crate::components::device_read::issue_device_read;
 use crate::components::status::{retry_line, status_line};
 use crate::state::{AppState, DpiStatus};
-use crate::theme::{self, Palette, SelectableStyle, Typography as _};
+use crate::theme::{self, Palette, SelectableStyle, Typography as _, WashStyle as _};
 
 pub struct DpiPanel {
     slider_state: Option<Entity<SliderState>>,
@@ -366,7 +366,7 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
         .selected_border(active, pal)
         .bg(pal.surface)
         .selected_fill(active)
-        .hover(|s| s.bg(pal.surface_hover))
+        .hover_wash(pal)
         .child(
             Button::new(("dpi-preset-apply", idx))
                 .compact()
@@ -395,6 +395,7 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
                 .xsmall()
                 .ghost()
                 .icon(IconName::Close)
+                .tooltip(tr!("Remove preset"))
                 .on_click(move |_event, _window, cx| {
                     let mut next = presets_for_remove.clone();
                     if idx < next.len() {

@@ -37,7 +37,7 @@ use crate::data::mouse_buttons::{
 use crate::mouse_model::thumbwheel::ThumbwheelPreset;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
+use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _, WashStyle as _};
 
 /// Floor width for the [`action_picker`] popover. The action labels drive the
 /// actual width; this only stops the list from collapsing too narrow. Matches
@@ -408,7 +408,7 @@ fn direction_cell(
         .rounded(pal.control_radius)
         .selected_border(active, pal)
         .selected_fill(active)
-        .hover(move |s| s.bg(pal.surface_hover))
+        .hover_wash(pal)
         .child(div().text_caption().text_color(pal.text_muted).child(header))
         .child(
             div()
@@ -639,7 +639,7 @@ pub(crate) fn menu_row(
             s.bg(if selected {
                 theme::accent_tint_hover()
             } else {
-                pal.surface_hover
+                pal.wash
             })
         })
 }

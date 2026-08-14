@@ -1,7 +1,10 @@
 //! Capability-driven controls for standalone lights.
 
 use crate::state::{AppState, LightCommandStatus};
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle as _, Typography as _};
+use crate::theme::{
+    self, ACCENT_BLUE, ControlStyle as _, Palette, SelectableStyle as _, Typography as _,
+    WashStyle as _,
+};
 use gpui::{
     AppContext as _, BorrowAppContext as _, BoxShadow, Context, Entity, Hsla, InteractiveElement,
     IntoElement, ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription,
@@ -266,7 +269,7 @@ fn light_emblem(enabled: bool, pal: Palette) -> impl IntoElement {
     let halo = if enabled {
         hsla(0.105, 0.9, 0.66, 0.22)
     } else {
-        pal.surface_hover
+        pal.wash_strong
     };
     let icon_color: Hsla = if enabled {
         hsla(0.105, 0.9, 0.66, 1.)
@@ -323,7 +326,7 @@ fn camera_automation(current: LightSettings, pal: Palette) -> impl IntoElement {
         .bg(if current.auto_camera {
             hsla(0.105, 0.9, 0.66, 0.08)
         } else {
-            pal.surface_hover
+            pal.wash
         })
         .p_3()
         .child(
@@ -359,8 +362,9 @@ fn camera_automation(current: LightSettings, pal: Palette) -> impl IntoElement {
                 } else {
                     pal.text_muted
                 })
-                .cursor_pointer()
-                .hover(|style| style.bg(pal.surface_hover))
+                .control(pal)
+                .press_wash(pal)
+                .hover_wash(pal)
                 .child(if current.auto_camera {
                     tr!("On")
                 } else {
@@ -406,7 +410,7 @@ fn control_well(
         .rounded(pal.control_radius)
         .border_1()
         .border_color(pal.border)
-        .bg(pal.surface_hover)
+        .bg(pal.wash)
         .p_3()
         .child(
             h_flex()
@@ -448,8 +452,9 @@ fn toggle(effective_enabled: bool, pal: Palette) -> impl IntoElement {
         .selected_fill(on)
         .text_caption()
         .text_color(if on { pal.text_primary } else { pal.text_muted })
-        .cursor_pointer()
-        .hover(|style| style.bg(pal.surface_hover))
+        .control(pal)
+        .press_wash(pal)
+        .hover_wash(pal)
         .child(Icon::new(icon).size_3())
         .child(if on { tr!("On") } else { tr!("Off") })
         .on_click(move |_event, _window, cx| {

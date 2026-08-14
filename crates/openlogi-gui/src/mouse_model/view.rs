@@ -25,7 +25,7 @@ use crate::mouse_model::picker::{
 };
 use crate::mouse_model::thumbwheel::ThumbwheelPreset;
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::theme::{self, ACCENT_BLUE, ControlStyle as _, Palette, Typography as _};
 
 const SIDE_W: f32 = 180.;
 const SIDE_GAP: f32 = 24.;
@@ -39,7 +39,15 @@ const HOTSPOT_DOT: f32 = 12.;
 /// Vertical space around the model that it can't draw into: the detail header
 /// and footer, plus the buttons-tab padding. The model scales to fit whatever
 /// viewport height remains.
-const MODEL_VERTICAL_RESERVE: f32 = 224.;
+///
+/// Derived rather than measured: the three terms the theme owns come from it,
+/// so shrinking the chrome hands the model the space instead of leaving it
+/// budgeted for a header that is no longer that tall. The residual is the tab
+/// strip between them.
+const MODEL_VERTICAL_RESERVE: f32 =
+    theme::HEADER_H + theme::FOOTER_H + 2. * theme::SCREEN_PAD + DETAIL_TAB_STRIP_H;
+/// Height the detail tab strip occupies between the header and a tab body.
+const DETAIL_TAB_STRIP_H: f32 = 54.;
 /// Floor for the scaled model height. Below this the evenly-slotted side labels
 /// (≈[`LABEL_H`] each) start to overlap; the window's minimum height is sized to
 /// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
@@ -258,7 +266,10 @@ fn leader_canvas(
 ) -> impl IntoElement {
     canvas(
         move |_bounds, _, _| (hotspots, labels, highlight),
-        move |bounds, payload, window, _app| {
+        // Resolved at paint time rather than captured: the canvas outlives an
+        // appearance flip, and a captured palette would keep painting the old
+        // theme's lines until something else forced a rebuild.
+        move |bounds, payload, window, app| {
             let (hotspots, labels, highlight) = payload;
             paint_leader_lines(
                 bounds,
@@ -270,6 +281,7 @@ fn leader_canvas(
                 &hotspots,
                 &labels,
                 highlight,
+                theme::palette(app),
                 window,
             );
         },
@@ -533,12 +545,20 @@ impl RenderOnce for LabelTrigger {
                 pal.border
             })
             .bg(if highlighted {
-                pal.surface
+                theme::accent_tint()
             } else {
-                pal.surface_hover
+                pal.wash
             })
-            .cursor_pointer()
-            .hover(move |s| s.bg(pal.surface))
+            // No press wash: this chip carries the selection tint, which a
+            // neutral fill would momentarily erase.
+            .control(pal)
+            .hover(move |s| {
+                s.bg(if highlighted {
+                    theme::accent_tint_hover()
+                } else {
+                    pal.wash_strong
+                })
+            })
             // Button name — the caption (xs / muted), the same size as the
             // popover title and category headers it shares the binding flow with.
             .child(
@@ -679,8 +699,8 @@ fn silhouette(w: f32, h: f32, pal: Palette) -> impl IntoElement {
         .h(px(h))
         .rounded_3xl()
         .border_1()
-        .border_color(pal.text_muted)
-        .bg(pal.surface_hover)
+        .border_color(pal.text_ghost)
+        .bg(pal.wash)
         .child(
             div()
                 .absolute()

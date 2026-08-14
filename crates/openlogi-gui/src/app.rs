@@ -26,7 +26,7 @@ use crate::components::smartshift_panel::SmartShiftPanel;
 use crate::keyboard_model::function_row::FunctionRowView;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AgentLink, AppState, DeviceRecord};
-use crate::theme::{self, Palette, Typography as _};
+use crate::theme::{self, ControlStyle as _, Palette, Typography as _};
 
 mod detail;
 mod home;
@@ -304,7 +304,9 @@ impl AppView {
     fn accessibility_gate(pal: Palette, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .size_full()
-            .bg(pal.bg)
+            // No fill: like the connecting / unreachable frames, this sits on
+            // the backdrop the root already establishes. Repainting it here
+            // would stack a second translucent layer on macOS.
             .text_color(pal.text_primary)
             .items_center()
             .justify_center()
@@ -359,7 +361,7 @@ impl AppView {
                     .id("skip-accessibility")
                     .text_caption()
                     .text_color(pal.text_muted)
-                    .cursor_pointer()
+                    .control(pal).press_wash(pal)
                     .hover(|s| s.text_color(pal.text_primary))
                     .child(tr!("Not now (use DPI and other features only)"))
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -415,7 +417,7 @@ impl Render for AppView {
         // first frame on, not only once the full UI is up.
         let root = v_flex()
             .size_full()
-            .bg(pal.bg)
+            .bg(pal.backdrop)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
@@ -448,6 +450,12 @@ impl Render for AppView {
             AgentLink::Unreachable => {
                 window.set_window_title("OpenLogi");
                 return root.child(status::unreachable_body(pal)).into_any_element();
+            }
+            AgentLink::OutdatedAgent => {
+                window.set_window_title("OpenLogi");
+                return root
+                    .child(status::outdated_agent_body(pal))
+                    .into_any_element();
             }
             AgentLink::OutdatedGui => {
                 window.set_window_title("OpenLogi");
@@ -559,6 +567,9 @@ impl Render for AppView {
             )
         };
 
+        // No second fill between here and the root: the backdrop is one
+        // translucent layer on macOS, and a nested surface repainting it would
+        // stack alpha and show as a brighter band behind the body.
         root.child(header_el)
             .child(content_el)
             .child(status::footer(pal, granted))

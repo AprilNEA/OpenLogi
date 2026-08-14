@@ -68,13 +68,18 @@ embed-resource = "3.0.9"
 # (its bounds are display-relative). C FFI, so core-graphics per platform/AGENTS.md.
 core-graphics = { workspace = true }
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance", "NSWindow", "NSEvent", "block2"] }
+objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance", "NSVisualEffectView", "NSWindow", "NSEvent", "block2"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSProcessInfo"] }
 # Input-Monitoring status (`IOHIDCheckAccess`) with typed request/access enums —
 # see platform/permissions.rs.
 objc2-io-kit = { workspace = true, features = ["std", "hidsystem"] }
 # NSEvent global-monitor handlers are ObjC blocks (overlay click-away dismissal).
 block2 = { workspace = true }
+# Reaching gpui's `NSView` to retarget the window's visual-effect material
+# (platform::os::configure_window_material). The exact version already in
+# Cargo.lock as gpui's own dependency, so the resolve adds an edge, not a crate,
+# and the pinned gpui rev cannot move.
+raw-window-handle = "0.6"
 
 # unsafe_code stays denied; the status-item/tray modules opt in locally with
 # #[expect(unsafe_code)] for the few objc2 calls (init-with-action, set-target,

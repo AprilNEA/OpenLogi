@@ -12,7 +12,10 @@
 //!   own widgets — which is what keeps a popover from rendering white under
 //!   an otherwise dark UI (see `main.rs`'s appearance wiring).
 
-use gpui::{App, FontWeight, Hsla, Pixels, Rgba, Styled, Window, hsla, px, relative, rgb};
+use gpui::{
+    App, BoxShadow, FontWeight, Hsla, InteractiveElement, Pixels, Rgba, StatefulInteractiveElement,
+    Styled, Window, hsla, point, px, relative, rgb,
+};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 use openlogi_core::config::Appearance;
 
@@ -30,8 +33,14 @@ pub const STATUS_OFFLINE: u32 = 0x006b_7280;
 pub const STATUS_DISABLED: u32 = 0x00ef_4444;
 
 /// Sizes that several components need to agree on.
-pub const HEADER_H: f32 = 80.;
-pub const FOOTER_H: f32 = 50.;
+///
+/// Chrome heights are sized for a macOS toolbar and status bar rather than a
+/// web banner: at 80px the header read as a page masthead, which is most of
+/// why the window looked like a site instead of an app. Shrinking them frees
+/// real estate the device model can use, so the two `*_VERTICAL_RESERVE`
+/// constants that budget around them track these values.
+pub const HEADER_H: f32 = 56.;
+pub const FOOTER_H: f32 = 34.;
 
 /// Semantic spacing tokens (px), so surfaces that must agree share one value
 /// instead of each call site hand-picking a `p_*` / `gap_*` step.
@@ -41,12 +50,21 @@ pub const FOOTER_H: f32 = 50.;
 ///   two-column grid is sized against this exact value; see its card min-width).
 /// - `CARD_PAD` / `CARD_GAP` — a card's inner padding and its title-to-content
 ///   gap, so every [`panel_card`](crate::app) reads the same.
-pub const SCREEN_PAD: f32 = 20.;
-pub const CARD_PAD: f32 = 16.;
-pub const CARD_GAP: f32 = 12.;
+pub const SCREEN_PAD: f32 = 16.;
+pub const CARD_PAD: f32 = 12.;
+pub const CARD_GAP: f32 = 10.;
 
 /// Apple HIG / WCAG minimum contrast for normal text up to 17pt.
 const MIN_TEXT_CONTRAST: f32 = 4.5;
+
+/// How much of the macOS window material [`Palette::backdrop`] lets through.
+///
+/// High on purpose, but not so high the material stops reading: at 0.9 the
+/// bleed was invisible against a dark desktop, which is the whole effect
+/// wasted. The ceiling is legibility — the muted text ramp is normalised for
+/// contrast against the *opaque* colour, so a deeper bleed than this would
+/// quietly undercut [`MIN_TEXT_CONTRAST`] over a bright wallpaper.
+const BACKDROP_ALPHA: f32 = 0.8;
 
 /// Fixed footprint of a device card in the Home gallery. Equal-width cards lay
 /// out in a horizontally scrollable row (centred when they fit, scrollable when
@@ -68,25 +86,71 @@ pub const GALLERY_PHOTO_H: f32 = 230.;
 pub struct Palette {
     /// Window background.
     pub bg: Hsla,
+    /// The main window's backdrop — the fill every screen sits on, below the
+    /// cards and panels that paint their own surfaces.
+    ///
+    /// On macOS this is [`Palette::bg`] at [`BACKDROP_ALPHA`], because that
+    /// window is backed by a real `NSVisualEffectView` (see
+    /// [`crate::platform::os::configure_window_material`]). The theme still
+    /// owns the colour — only the last tenth of it is the live material
+    /// underneath, which is what makes the window read as glass rather than as
+    /// a flat fill.
+    ///
+    /// A single translucent layer is the whole trick: everything above it
+    /// (cards, panels, popovers) is opaque, so no two translucent GPUI
+    /// surfaces ever stack and accumulate alpha into a muddy patch.
+    ///
+    /// Everywhere else this *is* `bg`: auxiliary windows and the non-macOS
+    /// main window are ordinary opaque surfaces.
+    pub backdrop: Hsla,
     /// Raised card / panel fill.
     pub surface: Hsla,
-    /// Card hover / armed fill.
-    pub surface_hover: Hsla,
     /// Hairline border between cards and surface.
     pub border: Hsla,
+    /// The hairline, raised — a hovered or otherwise emphasised edge. An alpha
+    /// tint rather than a second opaque value, so "emphasised" is the same
+    /// *step* on every surface; call sites used to reach for `text_muted` here,
+    /// which is a text weight and reads as an outline rather than an edge.
+    pub border_strong: Hsla,
     /// Foreground text.
     pub text_primary: Hsla,
-    /// De-emphasised labels / metadata.
+    /// De-emphasised labels / metadata. The contrast-normalised step (see
+    /// [`accessible_muted_text`]), so it is the *floor* for anything the user
+    /// has to read — the step below it is deliberately under AA.
     pub text_muted: Hsla,
+    /// Decorative marks only — leader lines, placeholder outlines, disabled
+    /// glyphs. Deliberately under AA: never body copy, and never the only
+    /// carrier of a meaning.
+    pub text_ghost: Hsla,
+    /// The one neutral interaction wash: hover, and any transient highlight.
+    ///
+    /// An alpha tint of the foreground rather than an opaque fill, so it
+    /// composites correctly over *any* surface it lands on (window, card,
+    /// nested card) instead of matching exactly one of them — and so hover
+    /// reads the same on all three without a per-surface variant. Reach for
+    /// this before inventing a fill: hover states had drifted into four
+    /// dialects before it existed.
+    pub wash: Hsla,
+    /// The same wash, deeper. Two jobs, both "neutral but more committed than
+    /// hover": an armed / highlighted resting state, and a recessed well such
+    /// as a meter track.
+    pub wash_strong: Hsla,
+    /// Keyboard focus ring. The theme's own `ring` token, so a hand-painted
+    /// control's focus treatment matches the framework widgets' beside it.
+    pub ring: Hsla,
     /// Corner radius for the bespoke card / panel surfaces. Derived from the
     /// active gpui-component theme radius (`cx.theme().radius`) so the
     /// hand-painted cards follow the Appearance → radius slider — which the old
     /// hard-coded `rounded_*` helpers (fixed px, blind to the slider) could not.
     ///
-    /// Scaled `× 1.5` above the base control radius so a card reads as rounder
+    /// Scaled `× 2` above the base control radius so a card reads as rounder
     /// than the small controls nested inside it — the concentric-corner
     /// relationship (outer radius > inner radius) that a single flat radius
     /// can't express.
+    ///
+    /// At the theme's default 6px control radius that puts cards at 12, the
+    /// step native apps use. The previous `× 1.5` landed on 9, close enough to
+    /// the controls inside that the nesting stopped reading.
     pub card_radius: Pixels,
     /// Corner radius for the small controls nested inside cards — chips, pills,
     /// segmented items, toggles. The base `cx.theme().radius`, i.e. the same
@@ -158,21 +222,38 @@ fn normalize_theme_text_contrast(theme: &mut Theme) {
 /// tokens, so the hand-painted surfaces (window, cards, mouse model) re-skin
 /// with the selected theme exactly as the framework widgets do.
 ///
-/// - `bg` ← `background` (window)
-/// - `surface` ← `group_box` (content cards), while `surface_hover` keeps the
-///   theme's interactive `secondary_hover` state.
+/// - `bg` ← `background` (window), `surface` ← `group_box` (content cards).
 /// - `border`, `text_primary` ← `foreground`, `text_muted` ← `muted_foreground`.
+///
+/// `text_ghost` fades `muted_foreground` toward whatever it is painted on
+/// rather than picking its own colour. That keeps the ramp ordered by
+/// construction — an alpha below 1 can only move a colour toward its
+/// background — so no user-selected theme can invert it past `muted`, and it
+/// inherits the AA normalisation already applied to `muted`.
+///
+/// The washes and `border_strong` tint `foreground` instead, which is what lets
+/// one value serve every surface: 6% of the text colour over a card and over
+/// the window are different pixels but the same *step*.
 #[must_use]
 pub fn palette(cx: &App) -> Palette {
     let t = cx.theme();
     Palette {
         bg: t.background,
+        backdrop: if cfg!(target_os = "macos") {
+            t.background.opacity(BACKDROP_ALPHA)
+        } else {
+            t.background
+        },
         surface: t.group_box,
-        surface_hover: t.secondary_hover,
         border: t.border,
+        border_strong: t.foreground.opacity(0.2),
         text_primary: t.foreground,
         text_muted: t.muted_foreground,
-        card_radius: t.radius * 1.5,
+        text_ghost: t.muted_foreground.opacity(0.5),
+        wash: t.foreground.opacity(0.06),
+        wash_strong: t.foreground.opacity(0.1),
+        ring: t.ring,
+        card_radius: t.radius * 2.,
         control_radius: t.radius,
     }
 }
@@ -334,55 +415,141 @@ pub trait SelectableStyle: Styled + Sized {
 
 impl<E: Styled> SelectableStyle for E {}
 
+/// The neutral hover decision, in one place — the counterpart to
+/// [`SelectableStyle`] for the *transient* half of interaction.
+///
+/// The split is deliberate and is the whole point of the two-axis colour
+/// system: an accent tint means "this is the chosen one" (a fact about state),
+/// a neutral wash means "the pointer is here" (a fact about the pointer). A row
+/// that is both keeps its accent fill and takes [`accent_tint_hover`] instead,
+/// so the two axes never fight over the same pixel.
+pub trait WashStyle: InteractiveElement + Sized {
+    /// The neutral wash under the pointer.
+    #[must_use]
+    fn hover_wash(self, pal: Palette) -> Self {
+        self.hover(move |style| style.bg(pal.wash))
+    }
+}
+
+impl<E: InteractiveElement> WashStyle for E {}
+
+/// What separates a hand-painted `div` from a real control: a native cursor,
+/// a tab stop, and a visible keyboard focus ring.
+///
+/// Framework widgets ([`gpui_component::button::Button`] and friends) already
+/// carry this. These methods are for the surfaces we paint ourselves — gallery
+/// cards, mouse-model labels, key targets, theme swatches — which had none of
+/// it and were reachable by mouse only.
+///
+/// **Activation comes free.** gpui maps enter / space to an element's click
+/// listeners while it is focused, so making the element focusable is the whole
+/// job; `on_click` stays exactly as the caller wrote it. gpui also keeps the
+/// focus handle for us, in element state under the element's id, so a control
+/// needs no `FocusHandle` field of its own — it only needs an `.id(..)`.
+pub trait ControlStyle: StatefulInteractiveElement + Styled + Sized {
+    /// Cursor, tab stop, and focus ring — the part every control wants, and
+    /// nothing that touches the element's fill.
+    ///
+    /// Fills stay separate because they are not universal: a neutral row wants
+    /// [`WashStyle::hover_wash`] and [`Self::press_wash`], a selectable one
+    /// wants [`accent_tint_hover`], and an element that paints its own colour
+    /// (a page dot, a peeking card) wants neither — a wash would overwrite the
+    /// very thing that identifies it.
+    #[must_use]
+    fn control(self, pal: Palette) -> Self {
+        self.cursor_default()
+            .tab_index(0)
+            .focus_visible(move |style| style.shadow(vec![focus_ring(pal)]))
+    }
+
+    /// The pressed state, one step past [`WashStyle::hover_wash`].
+    #[must_use]
+    fn press_wash(self, pal: Palette) -> Self {
+        self.active(move |style| style.bg(pal.wash_strong))
+    }
+}
+
+impl<E: StatefulInteractiveElement + Styled> ControlStyle for E {}
+
+/// The focus ring: an outer glow, not a border.
+///
+/// A border would resize the element the moment it takes focus, and these
+/// controls sit in tight rows and grids where one pixel of growth reflows the
+/// whole line. A shadow with no blur and a small spread draws the same ring
+/// outside the bounds, follows the corner radius, and costs no layout.
+fn focus_ring(pal: Palette) -> BoxShadow {
+    BoxShadow {
+        color: pal.ring.opacity(0.6),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(2.),
+        inset: false,
+    }
+}
+
 /// The app's type ramp as semantic roles, so a heading is `.text_heading()`
 /// everywhere instead of each call site re-picking a `text_*` size and a
-/// `font_weight`. Sizes, weights, and line heights live here once — an
-/// Apple-HIG-inspired scale, more generous and higher-contrast than the raw
-/// Tailwind steps it replaces — and every screen re-skins by editing this trait.
+/// `font_weight`. Sizes, weights, and line heights live here once, and every
+/// screen re-skins by editing this trait.
+///
+/// The sizes are AppKit's own text styles — title1 22, title2 17, headline /
+/// body 13, subheadline 11 — not a scale "inspired by" them. An earlier pass
+/// deliberately ran a rung larger and heavier than HIG; the result read as a
+/// web page rather than a Mac app, which is most of what "rough" meant. Native
+/// chrome is small text with roomy leading, so the *leading ratios are
+/// unchanged* — density comes from the size, not from crowding the lines.
+///
+/// Weight tops out at SEMIBOLD, again as HIG does: hierarchy is carried by the
+/// colour ramp ([`Palette::text_primary`] → `text_muted` → `text_ghost`), which
+/// is a quieter signal than size and weight both shouting.
 ///
 /// Blanket-implemented for every [`Styled`] element, the same way
 /// [`SelectableStyle`] extends styling. Colour stays a separate axis (the caller
 /// still picks `pal.text_primary` / `text_muted`); this trait only fixes size,
 /// weight, and leading.
 pub trait Typography: Styled + Sized {
-    /// Page / dialog hero title (empty states, connection notices). The
-    /// heaviest, largest step — the one place Bold is used.
+    /// Page / dialog hero title (empty states, connection notices). AppKit
+    /// title1.
     #[must_use]
     fn text_title(self) -> Self {
-        self.text_size(px(26.))
-            .font_weight(FontWeight::BOLD)
+        self.text_size(px(22.))
+            .font_weight(FontWeight::SEMIBOLD)
             .line_height(relative(1.2))
     }
 
     /// Screen / section heading — the Home title, a device name, a window's
-    /// primary heading.
+    /// primary heading. AppKit title2.
     #[must_use]
     fn text_heading(self) -> Self {
-        self.text_size(px(20.))
+        self.text_size(px(17.))
             .font_weight(FontWeight::SEMIBOLD)
             .line_height(relative(1.3))
     }
 
     /// Card / group title and item names — a heading one rung down, sitting
-    /// inside a card rather than titling a screen.
+    /// inside a card rather than titling a screen. AppKit headline: body size
+    /// at semibold, so a card title aligns with the values under it instead of
+    /// stepping out of the grid.
     #[must_use]
     fn text_subheading(self) -> Self {
-        self.text_size(px(15.))
+        self.text_size(px(13.))
             .font_weight(FontWeight::SEMIBOLD)
             .line_height(relative(1.4))
     }
 
-    /// Default body copy — control labels, descriptions, values.
+    /// Default body copy — control labels, descriptions, values. AppKit body,
+    /// which is also the system control size.
     #[must_use]
     fn text_body(self) -> Self {
-        self.text_size(px(15.)).line_height(relative(1.45))
+        self.text_size(px(13.)).line_height(relative(1.45))
     }
 
     /// De-emphasised metadata and helper text — the muted line under a label,
-    /// battery readouts, hints. Pair with `pal.text_muted`.
+    /// battery readouts, hints. AppKit subheadline. Pair with
+    /// `pal.text_muted`.
     #[must_use]
     fn text_caption(self) -> Self {
-        self.text_size(px(12.)).line_height(relative(1.4))
+        self.text_size(px(11.)).line_height(relative(1.4))
     }
 }
 

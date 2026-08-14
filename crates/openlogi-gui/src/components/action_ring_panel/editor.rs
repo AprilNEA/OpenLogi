@@ -21,7 +21,7 @@ use openlogi_core::binding::{
 use crate::action_icons::action_icon_path;
 use crate::action_ring_icons::ring_icon_path;
 use crate::state::AppState;
-use crate::theme::{self, Palette, SelectableStyle as _, Typography as _};
+use crate::theme::{self, Palette, SelectableStyle as _, Typography as _, WashStyle as _};
 
 pub(super) fn action_library(
     slot: ActionRingSlot,
@@ -265,7 +265,7 @@ fn action_rows(slot: ActionRingSlot, current: Option<&Action>, pal: Palette) -> 
                                 .text_color(rgb(theme::ACCENT_BLUE)),
                         )
                     })
-                    .hover(move |row| row.bg(pal.surface_hover))
+                    .hover_wash(pal)
                     .on_click(move |_, _, cx| {
                         commit_action(slot, action_to_commit.clone(), cx);
                     })

@@ -31,7 +31,7 @@ use gpui_component::v_flex;
 use image::{Frame as ImageFrame, RgbaImage};
 use openlogi_camera::{CameraAuthorization, CameraStream, Frame};
 
-use crate::theme::{self, Palette};
+use crate::theme::{self, ControlStyle as _, Palette};
 
 const PREVIEW_W: f32 = 480.;
 const PREVIEW_H: f32 = 270.; // 16:9
@@ -175,7 +175,8 @@ impl Render for CameraPreview {
                 .id("camera-request-access")
                 .text_sm()
                 .text_color(pal.text_muted)
-                .cursor_pointer()
+                .control(pal)
+                .press_wash(pal)
                 .hover(|s| s.text_color(pal.text_primary))
                 .child(tr!("Click to enable camera access."))
                 .on_click(|_, _, cx| crate::platform::permissions::request_camera_access(cx))

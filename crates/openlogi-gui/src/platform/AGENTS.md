@@ -5,8 +5,15 @@ on **`objc2`** (0.6 / framework crates 0.3): `Retained<T>` smart pointers, typed
 AppKit objects, `define_class!` for subclasses. The whole workspace's ObjC-runtime
 FFI is exactly these files — keep them in sync:
 
-- `status_item.rs` — safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem`.
-- `tray.rs` — the OpenLogi menu-bar semantics + the `OpenLogiMenuTarget` (`define_class!`).
+- `os.rs` — `NSProcessInfo` version read, `NSApp.appearance` override, and
+  `configure_window_material` (retargets the `NSVisualEffectView` gpui installs under a
+  `Blurred` window; reaches gpui's `NSView` via `raw-window-handle`).
+- `overlay.rs` — window policy for the Actions Ring overlay: `NSApplicationActivationPolicy`,
+  borderless/shadowless panels, and the `NSEvent` global monitor behind its click-away.
+- `crates/openlogi-agent/src/status_item.rs` — safe `objc2` wrappers over `NSStatusItem` /
+  `NSMenu` / `NSMenuItem`.
+- `crates/openlogi-agent/src/tray.rs` — the OpenLogi menu-bar semantics + the
+  `OpenLogiMenuTarget` (`define_class!`).
 - `permissions.rs` — `CBCentralManager.authorization` (`objc2` class lookup) + `IOHIDCheckAccess`
   (`objc2-io-kit`).
 - `crates/openlogi-hook/src/macos.rs` — CGEventTap (on `core-graphics`, see below), the

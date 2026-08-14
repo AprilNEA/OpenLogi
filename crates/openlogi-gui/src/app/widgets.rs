@@ -164,11 +164,7 @@ pub(super) fn battery_summary(battery: &BatteryInfo, pal: Palette) -> impl IntoE
                 }),
         )
         .child({
-            let track = div()
-                .h(px(6.))
-                .w_full()
-                .rounded_full()
-                .bg(pal.surface_hover);
+            let track = div().h(px(6.)).w_full().rounded_full().bg(pal.wash_strong);
             // Charging with no reliable %: leave the track empty rather than
             // drawing the 1%-wide red critical sliver that percentage==0 yields.
             if battery_charging_no_reading(battery) {

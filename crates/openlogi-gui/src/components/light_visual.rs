@@ -102,7 +102,7 @@ fn generated_visual(
         .bg(if powered {
             glow.opacity(0.08 + brightness * 0.18)
         } else {
-            pal.surface_hover
+            pal.wash_strong
         });
     let halo = if powered {
         halo.shadow(vec![BoxShadow {

@@ -9,7 +9,7 @@ use super::{
     Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter, ThemeMode, ThemeRegistry, div, h_flex, px,
     rgb, theme, v_flex,
 };
-use crate::theme::Typography as _;
+use crate::theme::{ControlStyle as _, Typography as _};
 
 /// The Appearance page: light/dark mode, the theme grid, corner radius, and the
 /// interface language. Every theme here re-skins the whole app — the bespoke
@@ -183,7 +183,8 @@ fn mode_card(
         .id(id)
         .gap(px(6.))
         .items_center()
-        .cursor_pointer()
+        .control(pal)
+        .press_wash(pal)
         .child(thumb)
         .child(
             h_flex()
@@ -460,13 +461,14 @@ fn theme_card(
         .border_color(if selected { swatch.primary } else { pal.border })
         .bg(pal.surface)
         .shadow_xs()
-        .cursor_pointer()
+        // No press wash: the card presses by dropping its shadow, below.
+        .control(pal)
         .hover(move |style| {
             let style = style.shadow_sm();
             if selected {
                 style
             } else {
-                style.border_color(pal.text_muted)
+                style.border_color(pal.border_strong)
             }
         })
         .active(gpui::Styled::shadow_2xs)
@@ -557,7 +559,8 @@ fn filter_chip(
         .rounded_full()
         .border_1()
         .text_caption()
-        .cursor_pointer()
+        .control(pal)
+        .press_wash(pal)
         .map(|this| {
             if selected {
                 this.border_color(pal.text_primary)
@@ -565,7 +568,7 @@ fn filter_chip(
             } else {
                 this.border_color(pal.border)
                     .text_color(pal.text_muted)
-                    .hover(|h| h.border_color(pal.text_muted))
+                    .hover(|h| h.border_color(pal.border_strong))
             }
         })
         .child(label)

@@ -29,7 +29,7 @@ use openlogi_hid::{Click, PasskeyMethod, ReceiverSelector};
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::ipc_client::Command;
 use crate::state::AppState;
-use crate::theme::{self, Palette, Typography as _};
+use crate::theme::{self, ControlStyle as _, Palette, Typography as _, WashStyle as _};
 use crate::windows::{self, AuxWindow};
 
 /// The pairing flow's current UI state. Mirrors the [`PairingUpdate`] stream.
@@ -314,8 +314,9 @@ fn device_row(idx: usize, device: &FoundDevice, pal: Palette) -> impl IntoElemen
         .rounded(pal.control_radius)
         .border_1()
         .border_color(pal.border)
-        .cursor_pointer()
-        .hover(|s| s.bg(pal.surface_hover))
+        .control(pal)
+        .press_wash(pal)
+        .hover_wash(pal)
         .child(
             div()
                 .text_body()

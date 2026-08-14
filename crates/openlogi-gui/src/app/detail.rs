@@ -272,9 +272,9 @@ fn pointer_tab(
 
 fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
     // Two cards plus one 16 px gap fit exactly inside the 720 px window minimum
-    // after this tab's `SCREEN_PAD` (20 px) side inset, while still leaving a
-    // usable slider: 332·2 + 16 + 20·2 = 720.
-    div().min_w(px(332.)).flex_1().h_full().child(card)
+    // after this tab's `SCREEN_PAD` side inset, while still leaving a usable
+    // slider: 336·2 + 16 + 16·2 = 720.
+    div().min_w(px(336.)).flex_1().h_full().child(card)
 }
 
 /// Scrolling card: per-device native inversion and wheel-resolution controls.

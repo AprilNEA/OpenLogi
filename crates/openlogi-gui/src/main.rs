@@ -59,9 +59,10 @@ use std::time::Instant;
 
 use anyhow::Result;
 use gpui::{
-    AppContext, BorrowAppContext as _, Bounds, Size, Styled, WindowBounds, WindowOptions, px,
+    AppContext, BorrowAppContext as _, Bounds, Size, Styled, WindowBackgroundAppearance,
+    WindowBounds, WindowOptions, px,
 };
-use gpui_component::{ActiveTheme, Root};
+use gpui_component::Root;
 use openlogi_core::brand::{APP_ID, DeeplinkCommand};
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
@@ -199,6 +200,10 @@ fn main() -> Result<()> {
     app.run(move |cx| {
         gpui_component::init(cx);
         theme::register_builtin_themes(cx);
+        // Before any window: gpui's animations read this flag, and a window
+        // that opened while it was still at its default would animate once
+        // against the user's stated preference.
+        platform::os::init_reduce_motion(cx);
         app_menu::install(cx);
 
         // Seed the Add Device window's initial state. Its buttons drive pairing
@@ -438,6 +443,9 @@ fn main() -> Result<()> {
                         Some(ipc_client::GuiUpdate::OutdatedGui) => {
                             cx.update(|cx| set_agent_link(state::AgentLink::OutdatedGui, cx));
                         }
+                        Some(ipc_client::GuiUpdate::OutdatedAgent) => {
+                            cx.update(|cx| set_agent_link(state::AgentLink::OutdatedAgent, cx));
+                        }
                         Some(ipc_client::GuiUpdate::LightCommandResult {
                             key,
                             request_id,
@@ -592,11 +600,24 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
         // Min height keeps the buttons tab's mouse model above its scale floor
         // (`MODEL_MIN_H` + the chrome/padding reserve) so its side labels never
         // overlap; below this the model can't shrink further without crowding.
-        window_min_size: Some(Size::new(px(720.), px(680.))),
+        // The floor dropped with the chrome: a 56 px header and 34 px footer
+        // need 176 px of reserve, not 224.
+        window_min_size: Some(Size::new(px(720.), px(640.))),
         // Linux: transparent chrome so `AppView::render` can draw a client-side
         // `TitleBar` (the compositor declines server-side decorations and gpui's
         // fallback is unpainted). macOS/Windows keep their native titlebar.
         titlebar: Some(windows::titlebar_options("OpenLogi")),
+        // macOS: back the window with a real `NSVisualEffectView`, which gpui
+        // installs for `Blurred`, so the window sits on a live blur instead of
+        // being an opaque rectangle. `platform::os::configure_window_material`
+        // picks its material once the window exists, and `Palette::backdrop`
+        // supplies the theme colour over it. Elsewhere the window stays an
+        // ordinary opaque surface.
+        window_background: if cfg!(target_os = "macos") {
+            WindowBackgroundAppearance::Blurred
+        } else {
+            WindowBackgroundAppearance::Opaque
+        },
         ..WindowOptions::default()
     }
 }
@@ -627,12 +648,18 @@ fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
         });
         view.update(cx, |v, _| v.set_appearance_obs(appearance_obs));
 
-        cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
+        cx.new(|cx| Root::new(view, window, cx).bg(theme::palette(cx).backdrop))
     });
 
     match opened {
         Ok(handle) => {
-            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            let _ = handle.update(cx, |_, window, _| {
+                // After the window exists: gpui creates the visual-effect view
+                // while applying `window_background`, so there is nothing to
+                // retarget until then.
+                platform::os::configure_window_material(window);
+                window.activate_window();
+            });
             cx.default_global::<windows::WindowRegistry>().main = Some(handle);
             cx.activate(true);
         }

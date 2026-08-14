@@ -18,7 +18,7 @@ use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
 use crate::state::AppState;
-use crate::theme::{self, Palette, SelectableStyle, Typography as _};
+use crate::theme::{self, ControlStyle as _, Palette, SelectableStyle, Typography as _};
 
 const SWATCH: f32 = 28.;
 
@@ -159,7 +159,9 @@ fn swatch(idx: usize, color: Rgb, current: &Lighting, pal: Palette) -> AnyElemen
             pal.border
         })
         .bg(rgb(color.packed()))
-        .cursor_pointer()
+        // No press wash: the swatch *is* the colour, so a neutral fill over it
+        // would read as the colour changing.
+        .control(pal)
         .on_click(move |_event, _window, cx| {
             cx.update_global::<AppState, _>(|state, _| {
                 let mut next = state.lighting();
@@ -184,7 +186,8 @@ fn toggle(current: &Lighting, pal: Palette) -> AnyElement {
         .selected_fill(on)
         .text_caption()
         .text_color(if on { pal.text_primary } else { pal.text_muted })
-        .cursor_pointer()
+        .control(pal)
+        .press_wash(pal)
         .child(if on { tr!("On") } else { tr!("Off") })
         .on_click(|_event, _window, cx| {
             cx.update_global::<AppState, _>(|state, _| {

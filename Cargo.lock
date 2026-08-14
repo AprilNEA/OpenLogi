@@ -5185,6 +5185,7 @@ dependencies = [
  "openlogi-core",
  "openlogi-hid",
  "openlogi-hook",
+ "raw-window-handle",
  "rust-i18n",
  "serde",
  "serde_json",

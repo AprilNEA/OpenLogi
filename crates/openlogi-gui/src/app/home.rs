@@ -27,7 +27,9 @@ use crate::asset::GlowGeometry;
 use crate::components::carousel::Carousel;
 use crate::components::light_visual;
 use crate::state::{AppState, DeviceRecord};
-use crate::theme::{self, HEADER_H, Palette, SelectableStyle as _, Typography as _};
+use crate::theme::{
+    self, ControlStyle as _, HEADER_H, Palette, SelectableStyle as _, Typography as _,
+};
 
 /// Home (gallery) top bar: the "Devices" title, a Settings gear, and the
 /// Add-Device button — the entry points the old carousel header used to carry.
@@ -121,7 +123,8 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                 .aria_label(record.display_name.clone())
                 .aria_description(device_accessibility_description(&record))
                 .aria_selected(focused)
-                .cursor_pointer()
+                .control(pal)
+                .press_wash(pal)
                 .hover(move |s| s.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
                 .on_click(move |_, _, cx| {
                     view.update(cx, |this, cx| this.open_device(key.clone(), cx));

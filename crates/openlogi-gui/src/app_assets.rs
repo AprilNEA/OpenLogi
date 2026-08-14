@@ -59,6 +59,7 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/list-checks.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/list-checks.svg"))),
     ("action-icons/lock.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/lock.svg"))),
     ("action-icons/monitor.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/monitor.svg"))),
+    ("action-icons/moon.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/moon.svg"))),
     ("action-icons/mouse-pointer-click.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/mouse-pointer-click.svg"))),
     ("action-icons/mouse.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/mouse.svg"))),
     ("action-icons/move.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/move.svg"))),
@@ -108,5 +109,53 @@ impl AssetSource for AppAssets {
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         gpui_component_assets::Assets.list(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::expect_used,
+        reason = "a test that cannot read its own crate directory should fail loudly"
+    )]
+
+    use super::*;
+
+    /// Every vendored SVG is registered, and every registration has a file.
+    ///
+    /// The half that matters is disk → registry: `include_bytes!` already
+    /// fails the build for a registration with no file, but a *file* that
+    /// nobody registered compiles fine and then fails at runtime as a blank
+    /// icon, because `load` only consults this table. That is how
+    /// `Action::Sleep`'s `moon.svg` went missing from the binding picker.
+    ///
+    /// Not covered: a path literal that matches neither — the call sites spell
+    /// their icons inline and `Action` carries data, so there is no set to
+    /// iterate. `ActionRingIcon::ALL` covers the enum-driven family in
+    /// `action_ring_icons`.
+    #[test]
+    fn every_vendored_icon_is_registered() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons");
+        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+            .expect("action-icons directory should exist")
+            .map(|entry| entry.expect("readable dir entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "svg"))
+            .filter_map(|path| {
+                path.file_name()
+                    .map(|name| format!("action-icons/{}", name.to_string_lossy()))
+            })
+            .collect();
+        on_disk.sort();
+
+        let mut registered: Vec<String> = ACTION_ICONS
+            .iter()
+            .map(|(path, _)| (*path).to_owned())
+            .collect();
+        registered.sort();
+
+        assert_eq!(
+            on_disk, registered,
+            "action-icons/ and ACTION_ICONS disagree; an unregistered file renders as a blank icon"
+        );
     }
 }

@@ -89,6 +89,13 @@ pub enum AgentLink {
     /// running. Only relaunching helps; without this state the window would
     /// keep showing a live-looking but frozen UI.
     OutdatedGui,
+    /// The mirror image of [`Self::OutdatedGui`]: the agent answered with an
+    /// *older* protocol, so a stale agent binary still holds the socket.
+    ///
+    /// Its own state rather than [`Self::Unreachable`] because the two need
+    /// opposite advice — the socket is answering, so "try reinstalling" sends
+    /// the user the wrong way when the fix is to let the new agent take over.
+    OutdatedAgent,
     /// Connected and current: the agent's latest status snapshot.
     Ready(openlogi_agent_core::ipc::AgentStatus),
 }

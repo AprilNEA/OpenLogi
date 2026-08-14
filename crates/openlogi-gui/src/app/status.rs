@@ -12,6 +12,10 @@ use gpui_component::{
 };
 
 use crate::theme::{self, FOOTER_H, Palette, Typography as _};
+// The footer's only control is the macOS Accessibility indicator; every other
+// platform renders the footer as passive text.
+#[cfg(target_os = "macos")]
+use crate::theme::ControlStyle as _;
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"
 /// body shared by the pre-connection frame and the scanning state, so the two
@@ -75,6 +79,24 @@ pub(super) fn unreachable_body(pal: Palette) -> AnyElement {
     notice_body(
         tr!("Can't reach the background service"),
         tr!("OpenLogi keeps retrying — if this persists, try reinstalling the app."),
+        pal,
+    )
+    .size_full()
+    .into_any_element()
+}
+
+/// Whole-window frame when the agent answered with an *older* IPC protocol
+/// than this process speaks: a stale agent binary still holds the socket,
+/// usually because the app was updated while the old agent kept running.
+///
+/// Deliberately not [`unreachable_body`]: the socket is answering, so the
+/// "try reinstalling" advice there would send the user the wrong way. The
+/// spawn retry and the agent-side takeover already drive the replacement, so
+/// this frame only has to say what is happening.
+pub(super) fn outdated_agent_body(pal: Palette) -> AnyElement {
+    notice_body(
+        tr!("Waiting for the background service to update"),
+        tr!("An older version of the service is still running — it will be replaced shortly."),
         pal,
     )
     .size_full()
@@ -170,7 +192,8 @@ fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
             .items_center()
             .text_caption()
             .text_color(pal.text_primary)
-            .cursor_pointer()
+            .control(pal)
+            .press_wash(pal)
             .child(
                 div()
                     .size_1p5()
