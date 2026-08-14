@@ -30,7 +30,7 @@ pub use diagnostics::{
     FeatureEntry, ReprogControlEntry, dump_features, dump_reprog_controls, read_battery_raw,
 };
 pub use dpi::{DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, set_dpi};
-pub(crate) use error::hid_error_to_write_error;
+pub(crate) use error::classify_hid_error;
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::set_fn_lock;
 pub(crate) use haptic::clear_haptic_feature_cache_for;
@@ -87,7 +87,7 @@ where
 {
     match open_route_channel(route)
         .await
-        .map_err(|e| hid_error_to_write_error(&e))?
+        .map_err(|e| classify_hid_error(&e))?
     {
         Some(channel) => f(channel).await,
         None => Err(WriteError::DeviceNotFound),

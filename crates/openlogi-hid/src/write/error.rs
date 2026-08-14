@@ -52,6 +52,6 @@ pub(crate) fn classify_hidpp_error(
 /// in `openlogi-core`, `impl From<async_hid::HidError> for WriteError` here
 /// would implement a foreign trait for a foreign type and violate the
 /// orphan rule.
-pub(crate) fn hid_error_to_write_error(error: &async_hid::HidError) -> WriteError {
+pub(crate) fn classify_hid_error(error: &async_hid::HidError) -> WriteError {
     WriteError::Hid(error.to_string())
 }

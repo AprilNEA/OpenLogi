@@ -16,7 +16,7 @@ use tracing::debug;
 
 use crate::route::DeviceRoute;
 
-use super::{WriteError, hid_error_to_write_error};
+use super::{WriteError, classify_hid_error};
 
 // LightCommand is pure IPC wire data with no HID++ I/O, so it lives in
 // `openlogi_core::hid::light`; re-exported here unchanged so this module's
@@ -257,7 +257,7 @@ pub async fn apply(
         .map_err(|_| WriteError::RequestTimedOut {
             operation: super::HidppOperation::Light,
         })?
-        .map_err(|e| hid_error_to_write_error(&e))?;
+        .map_err(|e| classify_hid_error(&e))?;
     debug!(route = %route, "applied raw Litra command");
     Ok(())
 }
