@@ -349,10 +349,12 @@ unsafe fn activate_source(unique_id: &str) -> Result<IMFMediaSource, CaptureErro
     // the thread. `MFEnumDeviceSources` fills `devices` with one CoTaskMem
     // allocation holding exactly `count` nullable interface pointers —
     // `Option<IMFActivate>` is a pointer-sized niche over that — so the slice
-    // spans only memory MF allocated, and it is freed once, after the loop and
-    // after the chosen activate has been retained out of it by `clone`.
-    // `GetAllocatedString` hands back a CoTaskMem PWSTR that is copied into
-    // `link_str` before being freed, so nothing outlives its allocation.
+    // spans only memory MF allocated, and the null case is ruled out before it
+    // is built. Every element is moved out with `take`, which is what carries
+    // MF's reference into Rust's ownership, and the array itself is freed once,
+    // after the borrow ends. `GetAllocatedString` hands back a CoTaskMem PWSTR
+    // that is copied into `link_str` before being freed, so nothing outlives
+    // its allocation.
     unsafe {
         let mut enum_attrs = None;
         MFCreateAttributes(&raw mut enum_attrs, 1).map_err(setup_err)?;
@@ -366,9 +368,21 @@ unsafe fn activate_source(unique_id: &str) -> Result<IMFMediaSource, CaptureErro
 
         let (mut devices, mut count) = (std::ptr::null_mut::<Option<IMFActivate>>(), 0u32);
         MFEnumDeviceSources(&enum_attrs, &raw mut devices, &raw mut count).map_err(setup_err)?;
-        let list = std::slice::from_raw_parts(devices, count as usize);
+        if devices.is_null() {
+            return Err(CaptureError::NotFound);
+        }
+        let list = std::slice::from_raw_parts_mut(devices, count as usize);
         let mut chosen = None;
-        for activate in list.iter().flatten() {
+        for slot in &mut *list {
+            // MF hands the caller one reference per device and freeing the
+            // array releases none of them, so every activate is moved out —
+            // the ones that are not chosen are released when they drop below.
+            let Some(activate) = slot.take() else {
+                continue;
+            };
+            if chosen.is_some() {
+                continue;
+            }
             let (mut link, mut len) = (windows::core::PWSTR::null(), 0u32);
             if activate
                 .GetAllocatedString(
@@ -383,8 +397,7 @@ unsafe fn activate_source(unique_id: &str) -> Result<IMFMediaSource, CaptureErro
             let link_str = link.to_string().unwrap_or_default();
             CoTaskMemFree(Some(link.as_ptr().cast()));
             if device_instance(&link_str).eq_ignore_ascii_case(device_instance(unique_id)) {
-                chosen = Some(activate.clone());
-                break;
+                chosen = Some(activate);
             }
         }
         let result = match chosen {
