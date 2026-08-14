@@ -527,6 +527,21 @@ fn video_control_topology(device: &SeizedDevice) -> Option<VcTopology> {
         .find_map(scan_descriptors)
 }
 
+/// The VideoControl interface the descriptor walk is currently inside, and the
+/// entities seen in it so far.
+///
+/// A class-specific descriptor belongs to the interface it follows, so this is
+/// dropped on leaving the block: VideoStreaming reuses descriptor type `0x24`
+/// with its own subtype numbering, in which `0x05` is a frame descriptor rather
+/// than a Processing Unit and `0x02` an output header rather than an input
+/// terminal. Tracking the block — instead of a bare "have we seen a
+/// VideoControl interface" flag — is what keeps a frame index from being read
+/// as a Processing-Unit id on a camera whose VideoControl block has none.
+struct VcBlock {
+    interface: u8,
+    camera_terminal: Option<u8>,
+}
+
 /// Walk a configuration-descriptor blob, collecting the first VideoControl
 /// interface's Processing-Unit and camera-terminal entity ids.
 ///
@@ -535,8 +550,7 @@ fn video_control_topology(device: &SeizedDevice) -> Option<VcTopology> {
 /// misreading the bytes after it.
 fn scan_descriptors(blob: &[u8]) -> Option<VcTopology> {
     let mut rest = blob;
-    let mut vc_interface: Option<u8> = None;
-    let mut camera_terminal: Option<u8> = None;
+    let mut block: Option<VcBlock> = None;
     while rest.len() >= 2 {
         let len = usize::from(rest[0]);
         let dtype = rest[1];
@@ -549,15 +563,19 @@ fn scan_descriptors(blob: &[u8]) -> Option<VcTopology> {
         if dtype == DESC_INTERFACE {
             // bInterfaceNumber, bInterfaceClass and bInterfaceSubClass sit at
             // offsets 2, 5 and 6 of an interface descriptor.
-            if let (Some(&number), Some(&class), Some(&subclass)) =
-                (descriptor.get(2), descriptor.get(5), descriptor.get(6))
-                && class == CC_VIDEO
-                && subclass == SC_VIDEOCONTROL
-            {
-                vc_interface = Some(number);
-            }
+            block = match (descriptor.get(2), descriptor.get(5), descriptor.get(6)) {
+                (Some(&interface), Some(&class), Some(&subclass))
+                    if class == CC_VIDEO && subclass == SC_VIDEOCONTROL =>
+                {
+                    Some(VcBlock {
+                        interface,
+                        camera_terminal: None,
+                    })
+                }
+                _ => None,
+            };
         } else if dtype == DESC_CS_INTERFACE
-            && let Some(vc) = vc_interface
+            && let Some(block) = block.as_mut()
             && let (Some(&subtype), Some(&entity)) = (descriptor.get(2), descriptor.get(3))
         {
             // bUnitID / bTerminalID sit at offset 3 in both descriptors; an
@@ -565,14 +583,14 @@ fn scan_descriptors(blob: &[u8]) -> Option<VcTopology> {
             // sensor — skip composite/other input terminals.
             if subtype == VC_INPUT_TERMINAL && descriptor.len() >= 8 {
                 let terminal_type = u16::from(descriptor[4]) | (u16::from(descriptor[5]) << 8);
-                if terminal_type == ITT_CAMERA && camera_terminal.is_none() {
-                    camera_terminal = Some(entity);
+                if terminal_type == ITT_CAMERA && block.camera_terminal.is_none() {
+                    block.camera_terminal = Some(entity);
                 }
             } else if subtype == VC_PROCESSING_UNIT {
                 return Some(VcTopology {
-                    vc_interface: vc,
+                    vc_interface: block.interface,
                     processing_unit: entity,
-                    camera_terminal,
+                    camera_terminal: block.camera_terminal,
                 });
             }
         }
@@ -676,6 +694,32 @@ mod tests {
         let blob: Vec<u8> = [
             interface(0, 0x01, 0x01), // audio
             processing_unit(9),
+        ]
+        .concat();
+        assert_eq!(scan_descriptors(&blob), None);
+    }
+
+    /// …and neither do the ones *after* it. VideoStreaming reuses descriptor
+    /// type 0x24 with its own subtype numbering, where 0x05 is
+    /// VS_FRAME_UNCOMPRESSED rather than VC_PROCESSING_UNIT. A camera whose
+    /// VideoControl block has no Processing Unit must report none, not the
+    /// first frame descriptor's bFrameIndex — which would send every image
+    /// control to whatever entity happens to share that id.
+    #[test]
+    fn a_videostreaming_frame_descriptor_is_not_a_processing_unit() {
+        // A real VS_FRAME_UNCOMPRESSED: 30 bytes, descriptor type 0x24 like a
+        // VideoControl unit, subtype 0x05, and bFrameIndex sitting exactly
+        // where a unit keeps its bUnitID.
+        let mut vs_frame = vec![0u8; 30];
+        vs_frame[0] = 30;
+        vs_frame[1] = 0x24;
+        vs_frame[2] = 0x05;
+        vs_frame[3] = 1;
+        let blob: Vec<u8> = [
+            interface(0, 0x0E, 0x01), // VideoControl — no processing unit
+            input_terminal(1, ITT_CAMERA),
+            interface(1, 0x0E, 0x02), // VideoStreaming
+            vs_frame,
         ]
         .concat();
         assert_eq!(scan_descriptors(&blob), None);
