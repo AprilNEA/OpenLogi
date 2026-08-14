@@ -6,7 +6,7 @@ impl AppState {
     /// Append a batch of live-monitor events, capping the retained history so the
     /// buffer can't grow without bound while the monitor is open.
     #[cfg(all(target_os = "macos", debug_assertions))]
-    pub fn push_monitor_events(&mut self, events: Vec<openlogi_agent_core::ipc::MonitorEvent>) {
+    pub fn push_monitor_events(&mut self, events: Vec<openlogi_ipc::ipc::MonitorEvent>) {
         const MAX: usize = 200;
         self.monitor_events.extend(events);
         let overflow = self.monitor_events.len().saturating_sub(MAX);
@@ -15,9 +15,7 @@ impl AppState {
     /// Recent live-monitor events, oldest first.
     #[cfg(all(target_os = "macos", debug_assertions))]
     #[must_use]
-    pub fn monitor_events(
-        &self,
-    ) -> &std::collections::VecDeque<openlogi_agent_core::ipc::MonitorEvent> {
+    pub fn monitor_events(&self) -> &std::collections::VecDeque<openlogi_ipc::ipc::MonitorEvent> {
         &self.monitor_events
     }
     /// Replace the cached event-tap snapshot the Diagnostics page renders.
@@ -48,7 +46,7 @@ impl AppState {
     /// non-[`AgentLink::Ready`] state), which readers like the Settings
     /// permission rows surface as "unknown", not "denied".
     #[must_use]
-    pub fn agent_status(&self) -> Option<&openlogi_agent_core::ipc::AgentStatus> {
+    pub fn agent_status(&self) -> Option<&openlogi_ipc::ipc::AgentStatus> {
         match &self.agent_link {
             AgentLink::Ready(status) => Some(status),
             _ => None,

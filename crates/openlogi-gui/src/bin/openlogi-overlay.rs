@@ -39,9 +39,9 @@ use gpui::{
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, hsla, point,
     prelude::FluentBuilder as _, px, svg,
 };
-use openlogi_agent_core::action_ring::DISPLAY_LIFETIME;
-use openlogi_agent_core::ipc::{ActionRingInvocation, AgentClient, PROTOCOL_VERSION};
+use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
+use openlogi_ipc::ipc::{ActionRingInvocation, AgentClient, PROTOCOL_VERSION};
 use tarpc::{client, context};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -510,8 +510,8 @@ fn spawn_ipc() -> Ipc {
 }
 
 async fn connect() -> Option<AgentClient> {
-    let stream = openlogi_agent_core::transport::connect().await.ok()?;
-    let transport = openlogi_agent_core::transport::wrap(stream);
+    let stream = openlogi_ipc::transport::connect().await.ok()?;
+    let transport = openlogi_ipc::transport::wrap(stream);
     let client = AgentClient::new(client::Config::default(), transport).spawn();
     let version = client.protocol_version(context::current()).await.ok()?;
     (version == PROTOCOL_VERSION).then_some(client)

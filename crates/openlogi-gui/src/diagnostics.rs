@@ -3,13 +3,13 @@
 use std::path::Path;
 
 use gpui::App;
-use openlogi_agent_core::ipc::{InventoryHealth, PROTOCOL_VERSION};
 use openlogi_core::device::{DeviceInventory, PairedDevice};
 use openlogi_core::diagnostics::{
     AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport, InventoryState,
     ReceiverDiag, RenderState,
 };
 use openlogi_core::hid::DeviceRoute;
+use openlogi_ipc::ipc::{InventoryHealth, PROTOCOL_VERSION};
 
 use crate::asset::AssetResolver;
 use crate::state::{AppState, DpiStatus};

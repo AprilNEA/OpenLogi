@@ -23,8 +23,8 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     v_flex,
 };
-use openlogi_agent_core::ipc::{FoundDevice, PairingFailure, PairingUpdate};
 use openlogi_core::hid::{Click, PasskeyMethod, ReceiverSelector};
+use openlogi_ipc::ipc::{FoundDevice, PairingFailure, PairingUpdate};
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::ipc_client::Command;

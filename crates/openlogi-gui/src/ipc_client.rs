@@ -19,15 +19,15 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use openlogi_agent_core::ipc::{
-    AgentClient, AgentStatus, InventoryHealth, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingUpdate,
-};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
     DeviceRoute, DpiInfo, LightCommand, ReceiverSelector, SmartShiftMode, SmartShiftStatus,
     WriteError,
+};
+use openlogi_ipc::ipc::{
+    AgentClient, AgentStatus, InventoryHealth, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingUpdate,
 };
 use tarpc::client;
 use tarpc::context;
@@ -117,7 +117,7 @@ pub enum Command {
     /// monitor. The first poll enables monitoring agent-side; the agent
     /// auto-disables it once polls stop.
     #[cfg(all(target_os = "macos", debug_assertions))]
-    PollEventMonitor(oneshot::Sender<Vec<openlogi_agent_core::ipc::MonitorEvent>>),
+    PollEventMonitor(oneshot::Sender<Vec<openlogi_ipc::ipc::MonitorEvent>>),
 }
 
 /// Handle the GUI holds to talk to the agent: a stream of poll updates, a
@@ -444,10 +444,10 @@ enum ConnectFailure {
 /// Ensure a live client, connecting on demand.
 async fn ensure(client: &mut Option<AgentClient>) -> Result<&AgentClient, ConnectFailure> {
     if client.is_none() {
-        let stream = openlogi_agent_core::transport::connect()
+        let stream = openlogi_ipc::transport::connect()
             .await
             .map_err(|_| ConnectFailure::Unreachable)?;
-        let transport = openlogi_agent_core::transport::wrap(stream);
+        let transport = openlogi_ipc::transport::wrap(stream);
         let fresh = AgentClient::new(client::Config::default(), transport).spawn();
         // Protocol handshake before any real RPC: mismatched bincode layouts
         // would otherwise surface only as opaque RpcErrors and a silently

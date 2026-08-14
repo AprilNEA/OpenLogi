@@ -25,9 +25,8 @@ openlogi-core = { path = "../openlogi-core" }
 openlogi-camera = { path = "../openlogi-camera" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-assets = { path = "../openlogi-assets" }
-openlogi-agent-core = { path = "../openlogi-agent-core" }
+openlogi-ipc = { path = "../openlogi-ipc" }
 tarpc = { workspace = true }
-interprocess = { workspace = true }
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
 gpui-component = { workspace = true }
