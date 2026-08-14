@@ -2,13 +2,13 @@
 
 use std::collections::HashSet;
 
-use openlogi_agent_core::device_order::{DeviceStableId, PhysicalDeviceKey};
 use openlogi_camera::Camera;
 use openlogi_core::config::{Config, DeviceIdentity};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
     LightCapabilities, StandaloneDevice,
 };
+use openlogi_core::device_order::{DeviceStableId, PhysicalDeviceKey};
 use openlogi_core::hid::DeviceRoute;
 use tracing::debug;
 

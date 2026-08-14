@@ -1,7 +1,7 @@
 //! Per-device RGB keyboard lighting settings.
 
-use openlogi_agent_core::device_order::PhysicalDeviceKey;
 use openlogi_core::config::Lighting;
+use openlogi_core::device_order::PhysicalDeviceKey;
 use tracing::debug;
 
 use crate::state::devices::DeviceRecord;

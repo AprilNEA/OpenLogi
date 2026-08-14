@@ -6,11 +6,14 @@
 
 #![deny(missing_docs)]
 
+pub mod action_ring;
 pub mod binding;
+pub mod bindings;
 pub mod brand;
 pub mod color;
 pub mod config;
 pub mod device;
+pub mod device_order;
 pub mod diagnostics;
 pub mod hid;
 pub mod paths;

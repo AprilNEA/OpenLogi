@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use openlogi_agent_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
+use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::KeyTrigger;
 use tracing::debug;
 
