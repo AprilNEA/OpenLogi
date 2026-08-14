@@ -5117,6 +5117,8 @@ version = "0.6.27"
 dependencies = [
  "block2 0.6.2",
  "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-io-kit",
  "serde",
  "tracing",
  "v4l",

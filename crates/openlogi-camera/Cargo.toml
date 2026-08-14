@@ -19,9 +19,30 @@ tracing = { workspace = true }
 # permissions, the hook's NSWorkspace read): leak-proof `Retained<T>` ownership,
 # `define_class!` for the frame delegate (matching the agent tray target), and
 # `block2` for the `requestAccess…` completion block.
+#
+# The UVC control path is IOKit rather than AVFoundation, and gets the same
+# treatment from the objc2 bindings: `CFRetained` for CoreFoundation values,
+# `IOServiceGetMatchingServices` taking the matching dictionary *by value*
+# (it consumes a reference), and the real `IOUSBDeviceInterface182` vtable —
+# so nothing here declares its own `extern "C"` block.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
 block2 = "0.6"
+objc2-core-foundation = { workspace = true, features = [
+    "std",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+    "CFUUID",
+] }
+objc2-io-kit = { workspace = true, features = [
+    "std",
+    "libc",
+    "usb",
+    "AppleUSBDefinitions",
+    "IOUSBLib",
+    "USB",
+] }
 
 # DirectShow enumeration + IAMVideoProcAmp / IAMCameraControl UVC controls.
 [target.'cfg(target_os = "windows")'.dependencies]
