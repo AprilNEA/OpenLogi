@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use openlogi_hid::{DpiInfo, SmartShiftStatus, WriteError};
+use openlogi_core::hid::{DpiInfo, SmartShiftStatus, WriteError};
 use tracing::debug;
 
 use super::device_key::DeviceKey;

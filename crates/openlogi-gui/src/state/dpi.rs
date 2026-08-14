@@ -1,7 +1,7 @@
 //! DPI presets and live writes. Capability discovery itself lives in
 //! [`super::load::LazyDeviceData`], reached directly as `self.reads.dpi`.
 
-use openlogi_hid::{DeviceRoute, DpiCapabilities, DpiInfo, WriteError};
+use openlogi_core::hid::{DeviceRoute, DpiCapabilities, DpiInfo, WriteError};
 use tracing::debug;
 
 use crate::state::devices::DeviceRecord;

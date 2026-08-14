@@ -7,7 +7,7 @@
 //! panels inject them as their own `AppState` method references.
 
 use gpui::{BorrowAppContext as _, Context};
-use openlogi_hid::DeviceRoute;
+use openlogi_core::hid::DeviceRoute;
 use tokio::sync::oneshot;
 
 use crate::ipc_client::Command;

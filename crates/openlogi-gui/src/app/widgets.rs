@@ -12,7 +12,7 @@ use gpui_component::{
     h_flex, v_flex,
 };
 use openlogi_core::device::{BatteryInfo, BatteryStatus, DeviceKind};
-use openlogi_hid::DeviceRoute;
+use openlogi_core::hid::DeviceRoute;
 
 use super::AppView;
 use crate::state::AppState;

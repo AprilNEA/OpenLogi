@@ -15,7 +15,7 @@ use gpui_component::{
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
-use openlogi_hid::{DeviceRoute, DpiCapabilities};
+use openlogi_core::hid::{DeviceRoute, DpiCapabilities};
 use tracing::debug;
 
 use crate::components::device_read::issue_device_read;

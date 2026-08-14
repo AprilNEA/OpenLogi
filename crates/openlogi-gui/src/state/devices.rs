@@ -9,7 +9,7 @@ use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
     LightCapabilities, StandaloneDevice,
 };
-use openlogi_hid::DeviceRoute;
+use openlogi_core::hid::DeviceRoute;
 use tracing::debug;
 
 use super::device_key::DeviceKey;
@@ -280,7 +280,7 @@ fn append_standalone(
         });
         let stable_id = DeviceStableId::from_parts(
             route.as_ref(),
-            openlogi_hid::DIRECT_DEVICE_INDEX,
+            openlogi_core::hid::DIRECT_DEVICE_INDEX,
             device.serial_number.as_deref(),
             device.unit_id,
         );
@@ -318,7 +318,7 @@ fn append_standalone(
             kind: device.kind,
             capabilities: device.capabilities,
             light_capabilities: device.light_capabilities,
-            slot: openlogi_hid::DIRECT_DEVICE_INDEX,
+            slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
             online: device.online,
             battery: None,
         });
@@ -707,7 +707,7 @@ mod tests {
                 unique_id: None,
             },
             paired: vec![PairedDevice {
-                slot: openlogi_hid::DIRECT_DEVICE_INDEX,
+                slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
                 codename: Some("MX Master 3S".into()),
                 wpid: None,
                 kind: DeviceKind::Mouse,

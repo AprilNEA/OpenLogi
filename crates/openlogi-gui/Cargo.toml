@@ -22,7 +22,6 @@ path = "src/bin/openlogi-overlay.rs"
 
 [dependencies]
 openlogi-core = { path = "../openlogi-core" }
-openlogi-hid = { path = "../openlogi-hid" }
 openlogi-camera = { path = "../openlogi-camera" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-assets = { path = "../openlogi-assets" }

@@ -9,7 +9,7 @@ use openlogi_core::diagnostics::{
     AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport, InventoryState,
     ReceiverDiag, RenderState,
 };
-use openlogi_hid::DeviceRoute;
+use openlogi_core::hid::DeviceRoute;
 
 use crate::asset::AssetResolver;
 use crate::state::{AppState, DpiStatus};

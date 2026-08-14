@@ -11,13 +11,13 @@ use openlogi_core::device::{
     LightCapabilities, LightValueRange, LightValueUnit, PairedDevice, RawDeviceAddress,
     ReceiverInfo, StandaloneDevice,
 };
-use openlogi_hid::WriteError;
+use openlogi_core::hid::WriteError;
 
 use crate::asset::AssetResolver;
 use crate::data::mouse_buttons::{Action, Binding, ButtonId};
 use crate::mouse_model::thumbwheel::ThumbwheelPreset;
 
-use openlogi_hid::{SmartShiftMode, SmartShiftStatus};
+use openlogi_core::hid::{SmartShiftMode, SmartShiftStatus};
 
 use super::bindings::apply_thumbwheel_pair;
 use super::devices::build_device_list;
@@ -34,7 +34,7 @@ fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
             unique_id: None,
         },
         paired: vec![PairedDevice {
-            slot: openlogi_hid::DIRECT_DEVICE_INDEX,
+            slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
             codename: Some("MX Master 3S".to_string()),
             wpid: None,
             kind: DeviceKind::Mouse,
@@ -83,7 +83,7 @@ fn superseded_litra_light() -> StandaloneDevice {
 
 fn next_light_command(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<crate::ipc_client::Command>,
-) -> (openlogi_hid::LightCommand, u64) {
+) -> (openlogi_core::hid::LightCommand, u64) {
     let Ok(crate::ipc_client::Command::SetLight(_, command, _, request_id)) = receiver.try_recv()
     else {
         panic!("expected a light command");
@@ -603,7 +603,7 @@ fn light_write_failure_reaches_the_gui_state() {
     state.commit_light(requested);
     let Ok(crate::ipc_client::Command::SetLight(
         _,
-        openlogi_hid::LightCommand::Power(false),
+        openlogi_core::hid::LightCommand::Power(false),
         _,
         request_id,
     )) = receiver.try_recv()
@@ -612,7 +612,7 @@ fn light_write_failure_reaches_the_gui_state() {
     };
     let Ok(crate::ipc_client::Command::SetLight(
         _,
-        openlogi_hid::LightCommand::BrightnessPercent(50),
+        openlogi_core::hid::LightCommand::BrightnessPercent(50),
         _,
         brightness_request_id,
     )) = receiver.try_recv()
@@ -629,14 +629,14 @@ fn light_write_failure_reaches_the_gui_state() {
     assert!(state.apply_light_command_result(
         key.clone(),
         request_id,
-        openlogi_hid::LightCommand::Power(false),
+        openlogi_core::hid::LightCommand::Power(false),
         Ok(()),
     ));
     assert_eq!(state.light(), requested);
     assert!(state.apply_light_command_result(
         key.clone(),
         request_id,
-        openlogi_hid::LightCommand::BrightnessPercent(50),
+        openlogi_core::hid::LightCommand::BrightnessPercent(50),
         Err(WriteError::AmbiguousRawDevice),
     ));
     assert!(matches!(
@@ -672,20 +672,20 @@ fn superseded_light_write_keeps_prior_successes_for_reconciliation() {
     state.commit_light(LightSettings::new(false, 40, None));
     let (first_power, first_request_id) = next_light_command(&mut receiver);
     let (first_brightness, first_brightness_request_id) = next_light_command(&mut receiver);
-    assert_eq!(first_power, openlogi_hid::LightCommand::Power(false));
+    assert_eq!(first_power, openlogi_core::hid::LightCommand::Power(false));
     assert_eq!(
         first_brightness,
-        openlogi_hid::LightCommand::BrightnessPercent(40)
+        openlogi_core::hid::LightCommand::BrightnessPercent(40)
     );
     assert_eq!(first_brightness_request_id, first_request_id);
 
     state.commit_light(LightSettings::new(true, 60, None));
     let (second_power, second_request_id) = next_light_command(&mut receiver);
     let (second_brightness, second_brightness_request_id) = next_light_command(&mut receiver);
-    assert_eq!(second_power, openlogi_hid::LightCommand::Power(true));
+    assert_eq!(second_power, openlogi_core::hid::LightCommand::Power(true));
     assert_eq!(
         second_brightness,
-        openlogi_hid::LightCommand::BrightnessPercent(60)
+        openlogi_core::hid::LightCommand::BrightnessPercent(60)
     );
     assert_ne!(second_request_id, first_request_id);
     assert_eq!(second_brightness_request_id, second_request_id);
@@ -693,13 +693,13 @@ fn superseded_light_write_keeps_prior_successes_for_reconciliation() {
     assert!(state.apply_light_command_result(
         key.clone(),
         second_request_id,
-        openlogi_hid::LightCommand::Power(true),
+        openlogi_core::hid::LightCommand::Power(true),
         Ok(()),
     ));
     assert!(state.apply_light_command_result(
         key.clone(),
         second_request_id,
-        openlogi_hid::LightCommand::BrightnessPercent(60),
+        openlogi_core::hid::LightCommand::BrightnessPercent(60),
         Err(WriteError::AmbiguousRawDevice),
     ));
     assert_eq!(state.light(), LightSettings::new(true, 60, None));
@@ -711,13 +711,13 @@ fn superseded_light_write_keeps_prior_successes_for_reconciliation() {
     assert!(state.apply_light_command_result(
         key.clone(),
         first_request_id,
-        openlogi_hid::LightCommand::Power(false),
+        openlogi_core::hid::LightCommand::Power(false),
         Ok(()),
     ));
     assert!(state.apply_light_command_result(
         key.clone(),
         first_request_id,
-        openlogi_hid::LightCommand::BrightnessPercent(40),
+        openlogi_core::hid::LightCommand::BrightnessPercent(40),
         Ok(()),
     ));
 
@@ -776,7 +776,7 @@ fn transient_light_state_is_kept_in_memory_and_only_supported_commands_are_sent(
         receiver.try_recv(),
         Ok(crate::ipc_client::Command::SetLight(
             _,
-            openlogi_hid::LightCommand::BrightnessPercent(37),
+            openlogi_core::hid::LightCommand::BrightnessPercent(37),
             _,
             _
         ))
@@ -904,7 +904,7 @@ fn enabling_camera_automation_queues_effective_camera_power() {
         receiver.try_recv(),
         Ok(crate::ipc_client::Command::SetLight(
             _,
-            openlogi_hid::LightCommand::Power(true),
+            openlogi_core::hid::LightCommand::Power(true),
             _,
             _
         ))

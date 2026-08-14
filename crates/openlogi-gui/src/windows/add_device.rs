@@ -24,7 +24,7 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_agent_core::ipc::{FoundDevice, PairingFailure, PairingUpdate};
-use openlogi_hid::{Click, PasskeyMethod, ReceiverSelector};
+use openlogi_core::hid::{Click, PasskeyMethod, ReceiverSelector};
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::ipc_client::Command;

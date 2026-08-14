@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use gpui::Global;
 use openlogi_core::config::{Config, KeyTrigger};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_hid::SmartShiftStatus;
+use openlogi_core::hid::SmartShiftStatus;
 use tokio::sync::mpsc;
 use tracing::warn;
 

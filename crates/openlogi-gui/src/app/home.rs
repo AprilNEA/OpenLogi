@@ -18,7 +18,7 @@ use openlogi_core::config::LightSettings;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind, DeviceTransports,
 };
-use openlogi_hid::DeviceRoute;
+use openlogi_core::hid::DeviceRoute;
 
 use super::AppView;
 use super::status::{loading_body, notice_body};

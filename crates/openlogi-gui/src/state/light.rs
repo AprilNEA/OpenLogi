@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use openlogi_core::config::LightSettings;
-use openlogi_hid::{DeviceRoute, LightCommand, WriteError};
+use openlogi_core::hid::{DeviceRoute, LightCommand, WriteError};
 use tracing::debug;
 
 use super::AppState;
@@ -402,7 +402,7 @@ impl AppState {
         let mut effective = light;
         effective.enabled = effective_enabled;
         let commands = capabilities.map_or_else(Vec::new, |capabilities| {
-            openlogi_hid::commands_for_light_settings(effective, capabilities)
+            openlogi_core::hid::commands_for_light_settings(effective, capabilities)
         });
         // If this request supersedes another optimistic write, both must roll
         // back to the last accepted value—not to the superseded pending value.

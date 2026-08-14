@@ -2,7 +2,7 @@
 //! cache itself lives in [`super::load::LazyDeviceData`], reached directly as
 //! `self.reads.smartshift`.
 
-use openlogi_hid::{DeviceRoute, SmartShiftMode, SmartShiftStatus, WriteError};
+use openlogi_core::hid::{DeviceRoute, SmartShiftMode, SmartShiftStatus, WriteError};
 use tracing::debug;
 
 use super::device_key::DeviceKey;

@@ -25,7 +25,7 @@ use openlogi_agent_core::ipc::{
 };
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_hid::{
+use openlogi_core::hid::{
     DeviceRoute, DpiInfo, LightCommand, ReceiverSelector, SmartShiftMode, SmartShiftStatus,
     WriteError,
 };

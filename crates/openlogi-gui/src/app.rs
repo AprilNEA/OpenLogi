@@ -579,7 +579,7 @@ mod tests {
         BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities,
         LightValueRange, LightValueUnit,
     };
-    use openlogi_hid::DeviceRoute;
+    use openlogi_core::hid::DeviceRoute;
 
     /// "Charging" replaces the bogus percentage only when charging *and* the
     /// reading is still 0% (cold start, no cached pre-charge value). A non-zero

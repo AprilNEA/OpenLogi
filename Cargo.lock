@@ -5187,7 +5187,6 @@ dependencies = [
  "openlogi-assets",
  "openlogi-camera",
  "openlogi-core",
- "openlogi-hid",
  "openlogi-hook",
  "rust-i18n",
  "serde",
