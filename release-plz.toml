@@ -63,6 +63,16 @@ version_group = "openlogi"
 name = "openlogi-assets"
 version_group = "openlogi"
 
+# UVC webcam discovery. Published because `openlogi-cli` (published) depends on
+# it by an exact version — a crates.io package cannot depend on an unpublished
+# path dependency. It must stay in the version group for that same reason: with
+# an independently computed next version it can disagree with the group on the
+# single shared `version.workspace` field, and a cli published against a
+# camera version that was never pushed to crates.io is a hard publish failure.
+[[package]]
+name = "openlogi-camera"
+version_group = "openlogi"
+
 [[package]]
 name = "openlogi-cli"
 version_group = "openlogi"
