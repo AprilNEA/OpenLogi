@@ -37,12 +37,6 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use interprocess::local_socket::traits::tokio::Listener as _;
-use openlogi_agent_core::ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, FoundDevice,
-    InventoryHealth, MonitorEvent, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingUpdate,
-};
-use openlogi_agent_core::transport;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::{
@@ -55,6 +49,12 @@ use openlogi_hid::{
     DIRECT_DEVICE_INDEX, DeviceRoute, DpiCapabilities, DpiInfo, LightCommand, PasskeyMethod,
     ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
 };
+use openlogi_ipc::ipc::{
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, FoundDevice,
+    InventoryHealth, MonitorEvent, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    PairingUpdate,
+};
+use openlogi_ipc::transport;
 use tarpc::context::Context;
 use tarpc::server::{BaseChannel, Channel as _};
 use tokio::sync::Mutex;

@@ -12,13 +12,9 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
+use openlogi_agent_core::hardware;
 use openlogi_agent_core::hook_runtime::ActionDispatcher;
-use openlogi_agent_core::ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, MonitorEvent,
-    PROTOCOL_VERSION, PairingCommandError, PairingUpdate,
-};
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
-use openlogi_agent_core::{hardware, transport};
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
@@ -26,6 +22,11 @@ use openlogi_hid::{
     DeviceRoute, DpiInfo, HapticWaveform, HidppOperation, LightCommand, ReceiverSelector,
     SmartShiftMode, SmartShiftStatus, WriteError,
 };
+use openlogi_ipc::ipc::{
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, MonitorEvent,
+    PROTOCOL_VERSION, PairingCommandError, PairingUpdate,
+};
+use openlogi_ipc::transport;
 
 use crate::pairing::PairingManager;
 // Brings `Listener::accept` into scope for the concrete listener `transport::bind`
