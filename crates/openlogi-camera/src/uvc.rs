@@ -45,61 +45,81 @@ pub use crate::controls::{
     AutoState, AutoToggle, CameraControl, CameraState, ControlError, ControlRange,
 };
 
-impl CameraControl {
-    fn unit(self) -> Unit {
-        match self {
-            Self::Zoom | Self::Focus | Self::Exposure => Unit::CameraTerminal,
-            _ => Unit::Processing,
-        }
-    }
+/// The wire type of a control's value: how many bytes it occupies on the bus
+/// and how a read is sign-extended. UVC controls have exactly one of these
+/// per selector — `len` and `signed` are not independent, so this collapses
+/// them into the one combination each control actually uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Payload {
+    /// 2-byte unsigned (most controls).
+    U16,
+    /// 2-byte signed (brightness, hue).
+    I16,
+    /// 4-byte unsigned (exposure time, a dwExposureTimeAbsolute).
+    U32,
+}
 
-    /// UVC control selector (Camera Terminal §A.9.4, Processing Unit §A.9.5).
-    #[allow(
-        clippy::match_same_arms,
-        reason = "Focus (CT) and Tint (PU) share 0x06 by coincidence — they address different units"
-    )]
-    fn selector(self) -> u16 {
+impl Payload {
+    /// Size in bytes on the wire.
+    const fn len(self) -> usize {
         match self {
-            Self::Zoom => 0x0B,         // CT_ZOOM_ABSOLUTE_CONTROL
-            Self::Focus => 0x06,        // CT_FOCUS_ABSOLUTE_CONTROL
-            Self::Exposure => 0x04,     // CT_EXPOSURE_TIME_ABSOLUTE_CONTROL
-            Self::Brightness => 0x02,   // PU_BRIGHTNESS_CONTROL
-            Self::Contrast => 0x03,     // PU_CONTRAST_CONTROL
-            Self::Saturation => 0x07,   // PU_SATURATION_CONTROL
-            Self::Sharpness => 0x08,    // PU_SHARPNESS_CONTROL
-            Self::WhiteBalance => 0x0A, // PU_WHITE_BALANCE_TEMPERATURE_CONTROL
-            Self::Tint => 0x06,         // PU_HUE_CONTROL
+            Self::U16 | Self::I16 => 2,
+            Self::U32 => 4,
         }
-    }
-
-    /// Payload size in bytes (exposure time is a dwExposureTimeAbsolute u32).
-    fn len(self) -> usize {
-        match self {
-            Self::Exposure => 4,
-            _ => 2,
-        }
-    }
-
-    /// Brightness and hue are signed controls; the rest are unsigned.
-    fn signed(self) -> bool {
-        matches!(self, Self::Brightness | Self::Tint)
     }
 }
 
-impl AutoToggle {
-    fn unit(self) -> Unit {
-        match self {
-            Self::Focus | Self::Exposure => Unit::CameraTerminal,
-            Self::WhiteBalance => Unit::Processing,
+/// A control's complete UVC wire description: the entity it addresses, its
+/// selector, and its payload type.
+struct ControlSpec {
+    unit: Unit,
+    selector: u16,
+    payload: Payload,
+}
+
+impl CameraControl {
+    /// UVC entity, control selector (Camera Terminal §A.9.4, Processing Unit
+    /// §A.9.5), and wire payload type for this control.
+    const fn spec(self) -> ControlSpec {
+        use Payload::{I16, U16, U32};
+        use Unit::{CameraTerminal, Processing};
+        let (unit, selector, payload) = match self {
+            Self::Zoom => (CameraTerminal, 0x0B, U16), // CT_ZOOM_ABSOLUTE_CONTROL
+            Self::Focus => (CameraTerminal, 0x06, U16), // CT_FOCUS_ABSOLUTE_CONTROL
+            Self::Exposure => (CameraTerminal, 0x04, U32), // CT_EXPOSURE_TIME_ABSOLUTE_CONTROL
+            Self::Brightness => (Processing, 0x02, I16), // PU_BRIGHTNESS_CONTROL
+            Self::Contrast => (Processing, 0x03, U16), // PU_CONTRAST_CONTROL
+            Self::Saturation => (Processing, 0x07, U16), // PU_SATURATION_CONTROL
+            Self::Sharpness => (Processing, 0x08, U16), // PU_SHARPNESS_CONTROL
+            Self::WhiteBalance => (Processing, 0x0A, U16), // PU_WHITE_BALANCE_TEMPERATURE_CONTROL
+            Self::Tint => (Processing, 0x06, I16),     // PU_HUE_CONTROL
+        };
+        ControlSpec {
+            unit,
+            selector,
+            payload,
         }
     }
+}
 
-    fn selector(self) -> u16 {
-        match self {
-            Self::Focus => 0x08,        // CT_FOCUS_AUTO_CONTROL
-            Self::Exposure => 0x02,     // CT_AE_MODE_CONTROL
-            Self::WhiteBalance => 0x0B, // PU_WHITE_BALANCE_TEMPERATURE_AUTO_CONTROL
-        }
+/// An auto toggle's complete UVC wire description: the entity it addresses
+/// and its selector.
+struct ToggleSpec {
+    unit: Unit,
+    selector: u16,
+}
+
+impl AutoToggle {
+    /// UVC entity and control selector (Camera Terminal §A.9.4, Processing
+    /// Unit §A.9.5) for this auto toggle.
+    const fn spec(self) -> ToggleSpec {
+        use Unit::{CameraTerminal, Processing};
+        let (unit, selector) = match self {
+            Self::Focus => (CameraTerminal, 0x08), // CT_FOCUS_AUTO_CONTROL
+            Self::Exposure => (CameraTerminal, 0x02), // CT_AE_MODE_CONTROL
+            Self::WhiteBalance => (Processing, 0x0B), // PU_WHITE_BALANCE_TEMPERATURE_AUTO_CONTROL
+        };
+        ToggleSpec { unit, selector }
     }
 }
 
@@ -414,37 +434,46 @@ impl UsbDevice {
     /// Issue a UVC GET request (`req` = GET_MIN/MAX/DEF/CUR), returning the
     /// control-sized little-endian value, sign-extended per the control.
     fn get(&self, control: CameraControl, req: u8) -> Result<i32, ControlError> {
-        let entity = self.entity(control.unit())?;
+        let ControlSpec {
+            unit,
+            selector,
+            payload,
+        } = control.spec();
+        let entity = self.entity(unit)?;
         let mut buf = [0u8; 4];
-        let len = control.len();
-        self.transfer(RT_GET, req, control.selector(), entity, &mut buf[..len])?;
-        Ok(match (len, control.signed()) {
-            (4, _) => i32::try_from(u32::from_le_bytes(buf)).unwrap_or(i32::MAX),
-            (_, true) => i32::from(i16::from_le_bytes([buf[0], buf[1]])),
-            (_, false) => i32::from(u16::from_le_bytes([buf[0], buf[1]])),
+        self.transfer(RT_GET, req, selector, entity, &mut buf[..payload.len()])?;
+        Ok(match payload {
+            Payload::U32 => i32::try_from(u32::from_le_bytes(buf)).unwrap_or(i32::MAX),
+            Payload::I16 => i32::from(i16::from_le_bytes([buf[0], buf[1]])),
+            Payload::U16 => i32::from(u16::from_le_bytes([buf[0], buf[1]])),
         })
     }
 
     /// Issue a UVC SET_CUR request with `value` truncated to the control's size.
     fn set(&self, control: CameraControl, value: i32) -> Result<(), ControlError> {
-        let entity = self.entity(control.unit())?;
+        let ControlSpec {
+            unit,
+            selector,
+            payload,
+        } = control.spec();
+        let entity = self.entity(unit)?;
         let mut buf = (value as u32).to_le_bytes();
-        let len = control.len();
         self.transfer(
             RT_SET,
             UVC_SET_CUR,
-            control.selector(),
+            selector,
             entity,
-            &mut buf[..len],
+            &mut buf[..payload.len()],
         )
     }
 
     /// Read an auto toggle (`req` = GET_CUR/GET_DEF) as a boolean. For the
     /// AE-mode bitmap anything but fully-manual counts as auto.
     fn get_auto(&self, toggle: AutoToggle, req: u8) -> Result<bool, ControlError> {
-        let entity = self.entity(toggle.unit())?;
+        let ToggleSpec { unit, selector } = toggle.spec();
+        let entity = self.entity(unit)?;
         let mut buf = [0u8; 1];
-        self.transfer(RT_GET, req, toggle.selector(), entity, &mut buf)?;
+        self.transfer(RT_GET, req, selector, entity, &mut buf)?;
         Ok(match toggle {
             AutoToggle::Exposure => buf[0] != AE_MANUAL,
             _ => buf[0] != 0,
@@ -454,8 +483,8 @@ impl UsbDevice {
     /// Switch an auto toggle. Enabling auto-exposure tries each AE mode the
     /// camera might support, most-automatic first.
     fn set_auto(&self, toggle: AutoToggle, on: bool) -> Result<(), ControlError> {
-        let entity = self.entity(toggle.unit())?;
-        let selector = toggle.selector();
+        let ToggleSpec { unit, selector } = toggle.spec();
+        let entity = self.entity(unit)?;
         let candidates: &[u8] = match (toggle, on) {
             (AutoToggle::Exposure, true) => &AE_AUTO_MODES,
             (AutoToggle::Exposure, false) => &[AE_MANUAL],
