@@ -1,6 +1,8 @@
 //! OpenLogi CLI implementation. The `openlogi` binary is a thin wrapper that
 //! calls [`run`]; the command tree and argument parsing live here.
 
+use std::process::ExitCode;
+
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -21,7 +23,10 @@ struct Cli {
 }
 
 /// Initialise logging, parse arguments, and dispatch the chosen subcommand.
-pub async fn run() -> Result<()> {
+///
+/// Returns the exit status the process should terminate with — `list` uses a
+/// distinct one to report that no hardware is connected.
+pub async fn run() -> Result<ExitCode> {
     fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(

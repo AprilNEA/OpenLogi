@@ -643,6 +643,10 @@ fn spawn_callback_watchdog(
                 );
                 // Hard exit: disable_tap alone cannot unblock an in-flight
                 // callback, and a live active HID tap freezes all pointer I/O.
+                #[expect(
+                    clippy::exit,
+                    reason = "this watchdog thread has no caller to return to and the stuck callback owns the active HID tap, which serialises every pointer event machine-wide; only process death makes macOS tear the tap down"
+                )]
                 std::process::exit(FREEZE_HAZARD_EXIT_CODE);
             }
         })
@@ -708,6 +712,10 @@ fn spawn_lifecycle_watchdog(
                             "HID CGEventTap lifecycle did not make progress before deadline — \
                              exiting agent to restore system input"
                         );
+                        #[expect(
+                            clippy::exit,
+                            reason = "the tap thread is wedged (TCC revocation can stall it inside CoreGraphics), so no unwinding path can reach it from this watchdog thread; a live HID tap left behind freezes all input until the process dies"
+                        )]
                         std::process::exit(FREEZE_HAZARD_EXIT_CODE);
                     }
                 }

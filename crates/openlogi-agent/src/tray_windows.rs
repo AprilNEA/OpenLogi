@@ -418,6 +418,10 @@ fn quit(hwnd: HWND) {
         Shell_NotifyIconW(NIM_DELETE, &raw const nid);
     }
     info!("tray Quit — exiting agent");
+    #[expect(
+        clippy::exit,
+        reason = "reached from the window procedure on the tray thread: the status cannot travel back through an `extern \"system\"` callback, and ending the message pump would only end this thread while `main` keeps running the agent core"
+    )]
     std::process::exit(0);
 }
 

@@ -1,3 +1,5 @@
+use std::process::ExitCode;
+
 use anyhow::{Context, Result};
 use clap::Args;
 use openlogi_camera::Camera;
@@ -6,7 +8,16 @@ use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceModelInfo, Paire
 #[derive(Debug, Args)]
 pub struct ListArgs {}
 
-pub async fn run(_args: ListArgs) -> Result<()> {
+/// Exit status for "the scan succeeded, but nothing is connected" — distinct
+/// from the failure status a real enumeration error produces.
+const NOTHING_FOUND: u8 = 2;
+
+/// Print every connected receiver, paired device and Logitech webcam.
+///
+/// Returns the `NOTHING_FOUND` status when neither a HID++ device nor a webcam
+/// is present, so scripts can tell "no hardware" apart from a failed
+/// enumeration.
+pub async fn run(_args: ListArgs) -> Result<ExitCode> {
     let inventories = openlogi_hid::enumerate()
         .await
         .context("failed to enumerate HID++ devices")?;
@@ -25,7 +36,7 @@ pub async fn run(_args: ListArgs) -> Result<()> {
             "  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548); other \
              receivers (Unifying) aren't surfaced yet."
         );
-        std::process::exit(2);
+        return Ok(ExitCode::from(NOTHING_FOUND));
     }
 
     for (i, inv) in inventories.iter().enumerate() {
@@ -42,7 +53,7 @@ pub async fn run(_args: ListArgs) -> Result<()> {
         print_cameras(&cameras);
     }
 
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 fn print_cameras(cameras: &[Camera]) {

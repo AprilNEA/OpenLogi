@@ -1,3 +1,5 @@
+use std::process::ExitCode;
+
 use anyhow::Result;
 use clap::Subcommand;
 
@@ -31,18 +33,23 @@ pub enum Command {
 }
 
 impl Command {
-    pub async fn run(self) -> Result<()> {
+    /// Dispatch the parsed subcommand and report the process exit status.
+    ///
+    /// Only `list` reports a status of its own (nothing connected); every
+    /// other subcommand either succeeds or fails outright.
+    pub async fn run(self) -> Result<ExitCode> {
         match self {
-            Self::List(args) => list::run(args).await,
-            Self::Backlight(args) => backlight::run(args).await,
+            Self::List(args) => return list::run(args).await,
+            Self::Backlight(args) => backlight::run(args).await?,
             // Camera capture is blocking AVFoundation — no need for the async runtime.
-            Self::Snapshot(args) => snapshot::run(args),
+            Self::Snapshot(args) => snapshot::run(args)?,
             // UVC control transfers are blocking IOKit — no async runtime needed.
-            Self::Camera(args) => camera::run(args),
+            Self::Camera(args) => camera::run(args)?,
             // `assets sync` is blocking HTTP — no need for the async runtime.
-            Self::Assets(cmd) => cmd.run(),
-            Self::Diag(cmd) => cmd.run().await,
-            Self::Light(cmd) => cmd.run().await,
+            Self::Assets(cmd) => cmd.run()?,
+            Self::Diag(cmd) => cmd.run().await?,
+            Self::Light(cmd) => cmd.run().await?,
         }
+        Ok(ExitCode::SUCCESS)
     }
 }
