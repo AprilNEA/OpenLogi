@@ -123,7 +123,6 @@ impl AutoToggle {
     }
 }
 
-// ── UVC constants ────────────────────────────────────────────────────────────
 const UVC_SET_CUR: u8 = 0x01;
 const UVC_GET_CUR: u8 = 0x81;
 const UVC_GET_MIN: u8 = 0x82;
