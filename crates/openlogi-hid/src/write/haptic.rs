@@ -9,6 +9,7 @@ use hidpp::{
     },
 };
 
+use crate::channel_registry::ChannelRegistry;
 use crate::route::DeviceRoute;
 
 use super::{
@@ -34,12 +35,16 @@ async fn feature_on_channel(
 /// under concurrent pointer traffic. One entry suffices: haptics come from
 /// one pointing device at a time.
 ///
-/// Stores are epoch-guarded: opening the feature awaits HID++ round-trips, and
-/// the enumerator may retire the channel (and clear this cache) while that
-/// open is in flight. An unguarded store would then re-pin the retired
-/// channel's `Arc` after the retire-time clear ran — recreating the reopen
-/// deadlock the clear exists to break. Every clear bumps the epoch, and a
-/// store whose resolution began before the clear is discarded.
+/// Stores are guarded twice, because a retire can land on either side of an
+/// open and both leave the same wreckage: an entry pinning a channel's `Arc`
+/// after the retire-time clear ran, which recreates the exact reopen deadlock
+/// that clear exists to break.
+///
+/// - A retire *during* the open is caught by the epoch: every clear bumps it,
+///   and a store whose snapshot predates the clear is discarded.
+/// - A retire *before* the open is invisible to the epoch — the snapshot is
+///   already post-clear — so the store additionally asks the registry whether
+///   it still publishes the channel.
 struct EpochGuarded<T> {
     epoch: u64,
     entry: Option<(usize, u8, T)>,
@@ -58,9 +63,25 @@ impl<T: Clone> EpochGuarded<T> {
         (*entry_ptr == ptr && *entry_index == index).then(|| value.clone())
     }
 
-    /// Store `value`, unless a clear ran since `epoch` was snapshotted.
-    fn store(&mut self, epoch: u64, ptr: usize, index: u8, value: T) {
-        if self.epoch == epoch {
+    /// Store `value`, unless a clear ran since `epoch` was snapshotted or
+    /// `still_current` reports the channel is no longer published.
+    ///
+    /// The epoch alone only sees a clear that lands *during* the open. A
+    /// channel retired *before* it began leaves nothing to violate: the
+    /// snapshot is already post-clear, so the store would land and re-pin a
+    /// dead channel. `still_current` is what closes that half, and it is
+    /// evaluated here — under the caller's lock — on purpose: checked earlier,
+    /// it could be overtaken by a retire that both unpublishes the channel and
+    /// clears this cache, leaving the entry pinning it forever.
+    fn store(
+        &mut self,
+        epoch: u64,
+        ptr: usize,
+        index: u8,
+        value: T,
+        still_current: impl FnOnce() -> bool,
+    ) {
+        if self.epoch == epoch && still_current() {
             self.entry = Some((ptr, index, value));
         }
     }
@@ -99,18 +120,21 @@ fn cached_feature(channel: &Arc<HidppChannel>, index: u8) -> Option<Arc<HapticFe
     guard.get(Arc::as_ptr(channel) as usize, index)
 }
 
+/// Cache the freshly-opened feature, unless the enumerator retired its channel
+/// while the open was under way — in either direction, see [`EpochGuarded`].
 fn store_cached_feature(
     epoch: u64,
-    channel: &Arc<HidppChannel>,
-    index: u8,
+    registry: &ChannelRegistry,
+    shared: &SharedChannel,
     feature: &Arc<HapticFeedbackFeature>,
 ) {
     if let Ok(mut guard) = CACHED_FEATURE.lock() {
         guard.store(
             epoch,
-            Arc::as_ptr(channel) as usize,
-            index,
+            Arc::as_ptr(shared.channel()) as usize,
+            shared.device_index(),
             Arc::clone(feature),
+            || registry.is_current(shared),
         );
     }
 }
@@ -152,7 +176,10 @@ pub(crate) fn clear_haptic_feature_cache_for(channel: &Arc<HidppChannel>) {
 /// inherited it from Logi Options+, and some power transitions clear it, after
 /// which `play` calls are accepted but produce no physical feedback. Callers
 /// arm once per Actions Ring session, before the first hover.
-pub async fn ensure_haptics_armed_on(shared: &SharedChannel) -> Result<bool, WriteError> {
+pub async fn ensure_haptics_armed_on(
+    registry: &ChannelRegistry,
+    shared: &SharedChannel,
+) -> Result<bool, WriteError> {
     let channel = shared.channel();
     let index = shared.device_index();
     let feature = if let Some(feature) = cached_feature(channel, index) {
@@ -160,7 +187,7 @@ pub async fn ensure_haptics_armed_on(shared: &SharedChannel) -> Result<bool, Wri
     } else {
         let epoch = cache_epoch();
         let feature = feature_on_channel(channel, index).await?;
-        store_cached_feature(epoch, channel, index, &feature);
+        store_cached_feature(epoch, registry, shared, &feature);
         feature
     };
     let config = feature.get_configuration().await.map_err(|error| {
@@ -191,6 +218,7 @@ pub async fn ensure_haptics_armed_on(shared: &SharedChannel) -> Result<bool, Wri
 /// round-trip); any error invalidates the cache and the play is retried once
 /// through a fresh open, so a rebuilt channel or stale index self-heals.
 pub async fn play_haptic_on(
+    registry: &ChannelRegistry,
     shared: &SharedChannel,
     waveform: HapticWaveform,
 ) -> Result<(), WriteError> {
@@ -208,7 +236,7 @@ pub async fn play_haptic_on(
         classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
     });
     if result.is_ok() {
-        store_cached_feature(epoch, channel, index, &feature);
+        store_cached_feature(epoch, registry, shared, &feature);
     }
     result
 }
@@ -229,6 +257,11 @@ pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Resul
 mod tests {
     use super::EpochGuarded;
 
+    /// The registry still publishes the channel the open resolved.
+    const CURRENT: fn() -> bool = || true;
+    /// The registry has dropped it — the enumerator retired the node.
+    const RETIRED: fn() -> bool = || false;
+
     #[test]
     fn a_store_started_before_a_clear_is_discarded() {
         let mut cache = EpochGuarded::new();
@@ -236,14 +269,43 @@ mod tests {
         // The channel retires while the feature open is in flight…
         cache.clear_for(0xA);
         // …so the open's belated success must not re-pin the channel.
-        cache.store(epoch, 0xA, 2, "stale");
+        cache.store(epoch, 0xA, 2, "stale", CURRENT);
         assert_eq!(cache.get(0xA, 2), None);
+    }
+
+    /// The mirror of the case above, and the one an epoch alone cannot see:
+    /// the retire lands *before* the open begins rather than during it.
+    ///
+    /// `hardware::play_haptic` resolves the channel from the registry and then
+    /// awaits its I/O lease. A retire during that wait already ran
+    /// `clear_for`, so by the time `play_haptic_on` snapshots the epoch there
+    /// is nothing left to violate: the play succeeds on the still-writable
+    /// handle and the store would re-pin the retired channel. The enumerator
+    /// reopens a node only once every clone of its channel is gone
+    /// (`Arc::strong_count == 1`), so that entry wedges the node for good —
+    /// the Actions Ring trigger died with capture, so no later haptic can come
+    /// along to invalidate it. Only the registry can still tell.
+    #[test]
+    fn a_store_for_a_channel_retired_before_the_open_is_discarded() {
+        let mut cache = EpochGuarded::new();
+        // The enumerator retires the channel while the play waits for its lease…
+        cache.clear_for(0xA);
+        // …so the open that follows snapshots an epoch that is already current.
+        let epoch = cache.epoch;
+
+        cache.store(epoch, 0xA, 2, "retired", RETIRED);
+
+        assert_eq!(
+            cache.get(0xA, 2),
+            None,
+            "a channel the enumerator has retired must never be cached again"
+        );
     }
 
     #[test]
     fn a_store_with_a_current_epoch_lands() {
         let mut cache = EpochGuarded::new();
-        cache.store(cache.epoch, 0xA, 2, "fresh");
+        cache.store(cache.epoch, 0xA, 2, "fresh", CURRENT);
         assert_eq!(cache.get(0xA, 2), Some("fresh"));
         assert_eq!(cache.get(0xB, 2), None);
         assert_eq!(cache.get(0xA, 3), None);
@@ -252,11 +314,11 @@ mod tests {
     #[test]
     fn retiring_one_channel_keeps_anothers_entry_but_blocks_stale_stores() {
         let mut cache = EpochGuarded::new();
-        cache.store(cache.epoch, 0xA, 2, "kept");
+        cache.store(cache.epoch, 0xA, 2, "kept", CURRENT);
         let epoch = cache.epoch;
         cache.clear_for(0xB);
         assert_eq!(cache.get(0xA, 2), Some("kept"));
-        cache.store(epoch, 0xB, 1, "stale");
+        cache.store(epoch, 0xB, 1, "stale", CURRENT);
         assert_eq!(cache.get(0xB, 1), None);
     }
 
@@ -264,10 +326,10 @@ mod tests {
     fn a_full_clear_empties_the_entry_and_blocks_stale_stores() {
         let mut cache = EpochGuarded::new();
         let epoch = cache.epoch;
-        cache.store(epoch, 0xA, 2, "cached");
+        cache.store(epoch, 0xA, 2, "cached", CURRENT);
         cache.clear();
         assert_eq!(cache.get(0xA, 2), None);
-        cache.store(epoch, 0xA, 2, "stale");
+        cache.store(epoch, 0xA, 2, "stale", CURRENT);
         assert_eq!(cache.get(0xA, 2), None);
     }
 }

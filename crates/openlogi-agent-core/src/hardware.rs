@@ -723,7 +723,7 @@ pub async fn ensure_ring_haptics_armed(
     let shared = authoritative_channel(Some(capture), registry, route)?;
     timed(
         HidppOperation::PlayHaptic,
-        openlogi_hid::ensure_haptics_armed_on(&shared),
+        openlogi_hid::ensure_haptics_armed_on(registry, &shared),
     )
     .await
 }
@@ -740,11 +740,15 @@ pub async fn play_haptic(
     route: &DeviceRoute,
     waveform: HapticWaveform,
 ) -> Result<(), WriteError> {
-    let shared = authoritative_channel(Some(capture), registry, route)?;
+    // Lease first, resolve second — the wait is unbounded, and a channel
+    // resolved before it can be retired by the enumerator while we queue. The
+    // play itself would still succeed on the retired handle; it is the feature
+    // cache that must not outlive the channel (see `EpochGuarded::store`).
     let _lease = receiver_access.acquire_for_io().await;
+    let shared = authoritative_channel(Some(capture), registry, route)?;
     timed(
         HidppOperation::PlayHaptic,
-        openlogi_hid::play_haptic_on(&shared, waveform),
+        openlogi_hid::play_haptic_on(registry, &shared, waveform),
     )
     .await
 }
