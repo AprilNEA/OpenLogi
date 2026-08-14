@@ -365,27 +365,19 @@ mod tests {
         assert_eq!(combo(Shortcut::BrowserForward), Err(VK_BROWSER_FORWARD));
         // Every chord-shaped row must actually resolve through
         // hid_usage_to_windows, or a `Shortcut` silently no-ops instead of
-        // pressing anything (see `post_custom_shortcut`'s warn-and-drop path).
-        for shortcut in [
-            Shortcut::Copy,
-            Shortcut::Paste,
-            Shortcut::Cut,
-            Shortcut::Undo,
-            Shortcut::Redo,
-            Shortcut::SelectAll,
-            Shortcut::Find,
-            Shortcut::Save,
-            Shortcut::NewTab,
-            Shortcut::CloseTab,
-            Shortcut::ReopenTab,
-            Shortcut::NextTab,
-            Shortcut::PrevTab,
-            Shortcut::ReloadPage,
-        ] {
-            let key = combo(shortcut)
-                .unwrap_or_else(|vk| panic!("{shortcut:?} should be a chord, not raw vk {vk:#x}"))
-                .key()
-                .code();
+        // pressing anything (see `post_custom_shortcut`'s warn-and-drop
+        // path). Iterates `Shortcut::ALL` rather than a hand-copied list,
+        // so a newly added `Shortcut` variant is checked here
+        // automatically instead of depending on someone remembering to
+        // extend a second, independent list. The two raw-vk exceptions
+        // (pinned individually above) are skipped here, not silently
+        // missed: `combo`'s own match already forces every `Shortcut`
+        // variant to be classified as one or the other.
+        for shortcut in Shortcut::ALL {
+            let Ok(chord) = combo(shortcut) else {
+                continue;
+            };
+            let key = chord.key().code();
             assert!(
                 super::super::hid_usage_to_windows(key).is_some(),
                 "{shortcut:?} table entry has no Windows virtual-key mapping"

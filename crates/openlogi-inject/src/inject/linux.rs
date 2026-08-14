@@ -649,25 +649,11 @@ mod tests {
         assert_eq!(combo(Shortcut::NextTab).rendered_label(), "Ctrl+Tab");
         // hid_usage_to_linux must actually resolve every table entry, or a
         // `Shortcut` silently no-ops instead of pressing anything (see
-        // `press_combo`'s warn-and-drop path).
-        for shortcut in [
-            Shortcut::Copy,
-            Shortcut::Paste,
-            Shortcut::Cut,
-            Shortcut::Undo,
-            Shortcut::Redo,
-            Shortcut::SelectAll,
-            Shortcut::Find,
-            Shortcut::Save,
-            Shortcut::BrowserBack,
-            Shortcut::BrowserForward,
-            Shortcut::NewTab,
-            Shortcut::CloseTab,
-            Shortcut::ReopenTab,
-            Shortcut::NextTab,
-            Shortcut::PrevTab,
-            Shortcut::ReloadPage,
-        ] {
+        // `press_combo`'s warn-and-drop path). Iterates `Shortcut::ALL`
+        // rather than a hand-copied list, so a newly added `Shortcut`
+        // variant is checked here automatically instead of depending on
+        // someone remembering to extend a second, independent list.
+        for shortcut in Shortcut::ALL {
             let key = combo(shortcut).key().code();
             assert!(
                 hid_usage_to_linux(key).is_some(),
