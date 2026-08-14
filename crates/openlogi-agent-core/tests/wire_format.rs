@@ -18,6 +18,10 @@
 //! golden with the actual hex from the assertion message.
 
 #![allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
+#![expect(
+    clippy::tests_outside_test_module,
+    reason = "an integration test file is already its own test-only crate"
+)]
 
 use std::collections::BTreeMap;
 use std::fmt::Write;

@@ -394,39 +394,6 @@ fn helper_bundle(path: &std::path::Path) -> Option<&std::path::Path> {
     (bundle.extension()? == "app").then_some(bundle)
 }
 
-#[cfg(all(test, target_os = "macos"))]
-mod tests {
-    use std::path::Path;
-
-    use super::helper_bundle;
-
-    #[test]
-    fn helper_bundle_resolves_only_the_packaged_layout() {
-        let packaged = Path::new(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
-        );
-        assert_eq!(
-            helper_bundle(packaged),
-            Some(Path::new(
-                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app"
-            ))
-        );
-        let dev = Path::new(
-            "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
-        );
-        assert_eq!(
-            helper_bundle(dev),
-            Some(Path::new(
-                "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app"
-            ))
-        );
-        assert_eq!(
-            helper_bundle(Path::new("target/debug/openlogi-agent")),
-            None
-        );
-    }
-}
-
 /// Resolve the agent executable relative to the running GUI: a sibling in the
 /// cargo target dir (dev, and the flat Windows install layout), else the
 /// embedded `OpenLogiAgent.app` login-item helper (packaged macOS build).
@@ -723,5 +690,39 @@ fn reply_disconnected(
         }
         Command::CancelPairing => {}
         _ => {}
+    }
+}
+
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod tests {
+    use std::path::Path;
+
+    use super::helper_bundle;
+
+    #[test]
+    fn helper_bundle_resolves_only_the_packaged_layout() {
+        let packaged = Path::new(
+            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
+        );
+        assert_eq!(
+            helper_bundle(packaged),
+            Some(Path::new(
+                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app"
+            ))
+        );
+        let dev = Path::new(
+            "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
+        );
+        assert_eq!(
+            helper_bundle(dev),
+            Some(Path::new(
+                "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app"
+            ))
+        );
+        assert_eq!(
+            helper_bundle(Path::new("target/debug/openlogi-agent")),
+            None
+        );
     }
 }
