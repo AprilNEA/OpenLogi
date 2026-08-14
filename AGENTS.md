@@ -144,7 +144,9 @@ and every crate inherits it with `[lints] workspace = true` — never a private 
 the next lint added to the workspace silently skips that crate. A crate needing a
 different level opts out **in source** (the `openlogi-hook` platform modules carry
 `#![allow(unsafe_code, reason = "…")]`), because Cargo rejects mixing `workspace = true`
-with local overrides. `openlogi-hidpp` deliberately stays out of the table (vendored).
+with local overrides. `openlogi-hidpp` currently stays out of the table — it is a **hard
+fork**, so the "third-party code" rationale for that opt-out no longer holds; whether it
+should now inherit is an open question, costed in `crates/openlogi-hidpp/AGENTS.md`.
 
 The table: `unsafe_code = "deny"` (opt out per item with `#[expect(unsafe_code,
 reason = "…")]` plus a `// SAFETY:` comment), `clippy::pedantic` at warn,
