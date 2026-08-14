@@ -29,6 +29,7 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::bindings::{bindings_for, oshook_gestures_for};
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
 use crate::device_order::DeviceStableId;
+use crate::hardware::DeviceOp;
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::ipc::InventoryHealth;
 use crate::receiver_access::ReceiverAccess;
@@ -96,6 +97,34 @@ pub struct SharedRuntime {
     pub receiver_access: ReceiverAccess,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+}
+
+impl SharedRuntime {
+    /// Bind a device operation to `route` on the mouse/pointer capture
+    /// channel — the registry-confirmed capture channel or the exact current
+    /// inventory channel that every device write already resolves through.
+    #[must_use]
+    pub fn device(&self, route: &DeviceRoute) -> DeviceOp<'_> {
+        DeviceOp::new(
+            &self.capture_channel,
+            &self.channel_registry,
+            &self.receiver_access,
+            route,
+        )
+    }
+
+    /// Same, but against the keyboard capture channel — Fn-lock writes run on
+    /// the keyboard's own capture session, not the mouse-oriented
+    /// [`Self::capture_channel`].
+    #[must_use]
+    pub fn keyboard_device(&self, route: &DeviceRoute) -> DeviceOp<'_> {
+        DeviceOp::new(
+            &self.keyboard_channel,
+            &self.channel_registry,
+            &self.receiver_access,
+            route,
+        )
+    }
 }
 
 /// Owns the config + device selection and keeps [`SharedRuntime`] in sync.
@@ -453,10 +482,7 @@ impl Orchestrator {
             });
         if resolution.is_some() || inverted.is_some() || dpi.is_some() || smartshift.is_some() {
             crate::hardware::reapply_mouse_volatile_in_background(
-                Some(&self.shared.capture_channel),
-                &self.shared.channel_registry,
-                &self.shared.receiver_access,
-                route.clone(),
+                &self.shared.device(&route),
                 resolution,
                 inverted,
                 dpi,
@@ -464,20 +490,11 @@ impl Orchestrator {
             );
         }
         if let Some(lighting) = self.config.lighting(key).filter(|l| l.enabled) {
-            crate::hardware::set_lighting_in_background(
-                Some(&self.shared.capture_channel),
-                &self.shared.channel_registry,
-                &self.shared.receiver_access,
-                Some(route.clone()),
-                &lighting,
-            );
+            crate::hardware::set_lighting_in_background(self.shared.device(&route), &lighting);
         }
         if let Some(fn_lock) = self.config.fn_lock(key) {
             crate::hardware::write_fn_lock_in_background(
-                Some(&self.shared.keyboard_channel),
-                &self.shared.channel_registry,
-                &self.shared.receiver_access,
-                Some(route.clone()),
+                self.shared.keyboard_device(&route),
                 fn_lock,
             );
         }
@@ -557,19 +574,13 @@ impl Orchestrator {
     /// it on every reload costs at most one wheel-mode read per device — and
     /// still recovers a device whose earlier write timed out while it was waking.
     fn apply_native_wheel_modes(&self) {
-        for dev in self
-            .devices
-            .iter()
-            .filter(|dev| dev.online && dev.route.is_some())
-        {
+        for dev in self.devices.iter().filter(|dev| dev.online) {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
             let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
             crate::hardware::write_scroll_wheel_mode_in_background(
-                Some(&self.shared.capture_channel),
-                &self.shared.channel_registry,
-                &self.shared.receiver_access,
-                (resolution.is_some() || inverted.is_some())
-                    .then(|| dev.route.clone())
-                    .flatten(),
+                self.shared.device(&route),
                 resolution,
                 inverted,
             );
@@ -718,17 +729,13 @@ impl Orchestrator {
     /// [`Self::reapply_volatile_settings`]); the write is a single HID++ call,
     /// so re-applying an unchanged state is cheap.
     fn apply_fn_locks(&self) {
-        for dev in self
-            .devices
-            .iter()
-            .filter(|dev| dev.online && dev.route.is_some())
-        {
+        for dev in self.devices.iter().filter(|dev| dev.online) {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
             if let Some(fn_lock) = self.config.fn_lock(&dev.config_key) {
                 crate::hardware::write_fn_lock_in_background(
-                    Some(&self.shared.keyboard_channel),
-                    &self.shared.channel_registry,
-                    &self.shared.receiver_access,
-                    dev.route.clone(),
+                    self.shared.keyboard_device(&route),
                     fn_lock,
                 );
             }

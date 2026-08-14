@@ -595,7 +595,7 @@ pub fn dispatch_action(
             let target = dpi_cycle.read().ok().and_then(|g| g.target_for(device_key));
             info!("SmartShift toggle → flipping wheel mode");
             if let Some(registry) = registry {
-                toggle_smartshift_in_background(Some(capture), registry, receiver_access, target);
+                toggle_smartshift_in_background(capture, registry, receiver_access, target);
             } else {
                 warn!("no inventory registry — SmartShift toggle skipped");
             }
@@ -625,7 +625,7 @@ pub fn dispatch_action(
     if let Some((dpi, target)) = next {
         info!(dpi, "DPI action → writing to device");
         if let Some(registry) = registry {
-            write_dpi_in_background(Some(capture), registry, receiver_access, target, dpi);
+            write_dpi_in_background(capture, registry, receiver_access, target, dpi);
         } else {
             warn!("no inventory registry — DPI action skipped");
         }
