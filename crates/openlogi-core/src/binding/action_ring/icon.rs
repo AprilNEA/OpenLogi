@@ -177,56 +177,6 @@ impl ActionRingIcon {
         Self::Ban,
     ];
 
-    /// Default icon for an executable action.
-    #[must_use]
-    pub fn for_action(action: &Action) -> Self {
-        match action {
-            Action::None => Self::Ban,
-            Action::LeftClick | Action::RightClick => Self::Pointer,
-            Action::MiddleClick => Self::Mouse,
-            Action::MouseBack => Self::MouseBack,
-            Action::MouseForward => Self::MouseForward,
-            Action::Copy => Self::Copy,
-            Action::Paste => Self::Paste,
-            Action::Cut => Self::Cut,
-            Action::Undo => Self::Undo,
-            Action::Redo => Self::Redo,
-            Action::SelectAll => Self::SelectAll,
-            Action::Find => Self::Search,
-            Action::Save => Self::Save,
-            Action::BrowserBack => Self::ArrowLeft,
-            Action::BrowserForward => Self::ArrowRight,
-            Action::NewTab => Self::NewTab,
-            Action::CloseTab => Self::CloseTab,
-            Action::ReopenTab => Self::ReopenTab,
-            Action::NextTab => Self::NextTab,
-            Action::PrevTab => Self::PreviousTab,
-            Action::ReloadPage => Self::Reload,
-            Action::MissionControl | Action::ShowActionsRing => Self::Grid,
-            Action::AppExpose => Self::Layers,
-            Action::PreviousDesktop => Self::PreviousDesktop,
-            Action::NextDesktop => Self::NextDesktop,
-            Action::ShowDesktop | Action::Sleep => Self::Monitor,
-            Action::LaunchpadShow | Action::OpenApplication(_) => Self::Applications,
-            Action::LockScreen => Self::Lock,
-            Action::Screenshot | Action::CaptureRegion => Self::Camera,
-            Action::PlayPause => Self::Play,
-            Action::NextTrack => Self::NextTrack,
-            Action::PrevTrack => Self::PreviousTrack,
-            Action::VolumeUp => Self::Volume,
-            Action::VolumeDown => Self::VolumeDown,
-            Action::MuteVolume => Self::Mute,
-            Action::CycleDpiPresets | Action::SetDpiPreset(_) => Self::Gauge,
-            Action::ToggleSmartShift => Self::Refresh,
-            Action::ScrollUp => Self::ArrowUp,
-            Action::ScrollDown => Self::ArrowDown,
-            Action::HorizontalScrollLeft => Self::ScrollLeft,
-            Action::HorizontalScrollRight => Self::ScrollRight,
-            Action::CustomShortcut(_) | Action::TypeText(_) | Action::Workflow(_) => Self::Keyboard,
-            Action::RunAppleScript(_) | Action::RunShellCommand(_) => Self::Terminal,
-        }
-    }
-
     /// Existing localization key used as this icon's accessible label.
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -286,3 +236,29 @@ impl ActionRingIcon {
         }
     }
 }
+
+/// Builds [`ActionRingIcon::for_action`] from
+/// [`for_each_unit_action!`](super::super::action::for_each_unit_action)'s
+/// rows, splicing in the hand-written arms for payload-carrying variants so
+/// the generated `match` still covers every [`Action`] variant exhaustively.
+macro_rules! derive_action_icon {
+    ( $( $variant:ident $label:literal $category:ident $icon:ident $( $tag:ident )? ),* $(,)? ) => {
+        impl ActionRingIcon {
+            /// Default icon for an executable action.
+            #[must_use]
+            pub fn for_action(action: &Action) -> Self {
+                match action {
+                    $( Action::$variant => Self::$icon, )*
+                    Action::SetDpiPreset(_) => Self::Gauge,
+                    Action::CustomShortcut(_) | Action::TypeText(_) | Action::Workflow(_) => {
+                        Self::Keyboard
+                    }
+                    Action::RunAppleScript(_) | Action::RunShellCommand(_) => Self::Terminal,
+                    Action::OpenApplication(_) => Self::Applications,
+                }
+            }
+        }
+    };
+}
+
+super::super::action::for_each_unit_action!(derive_action_icon);
