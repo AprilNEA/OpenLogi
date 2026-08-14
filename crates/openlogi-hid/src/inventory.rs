@@ -582,7 +582,6 @@ impl Enumerator {
         let mut all_complete = true;
         let mut all_healthy = true;
         for (node, channel, result, budget, receiver) in results {
-            let mut budget_timeout = false;
             let probe = if let Ok(probe) = result {
                 probe
             } else {
@@ -592,22 +591,26 @@ impl Enumerator {
                 // check", not "nothing there".
                 warn!(
                     ?budget,
-                    "device probe timed out — treating as a failed probe"
+                    receiver, "device probe timed out — treating as a failed probe"
                 );
-                budget_timeout = true;
                 NodeProbe::failed()
             };
             all_complete &= probe.complete;
             all_healthy &= probe.healthy;
             outcomes.extend(probe.outcomes);
             let settled = self.ledger.settle(&node, probe.healthy, probe.inventory);
-            // A full-budget timeout on a receiver is the dead-delivery
-            // signature — such a channel never recovers on its own, so don't
-            // wait for the ledger's consecutive-failure threshold to replace
-            // it. A direct (especially Bluetooth) device that burns its budget
-            // may simply be asleep: keep the ledger's replay grace and
-            // two-strike policy for those.
-            if settled.evict_channel || (budget_timeout && receiver) {
+            // Every node waits for the ledger's consecutive-failure threshold,
+            // receivers included. One full-budget timeout is not evidence of
+            // dead delivery: [`RECEIVER_PROBE_BUDGET`] leaves barely a second
+            // over its own documented worst case, so a legitimate deep walk
+            // plus a single lost reply (5 s `SEND_RESPONSE_TIMEOUT`) already
+            // exceeds it. Evicting on that unpublishes *every* device behind
+            // the receiver — a Bolt publishes all six slots under one node —
+            // and tears down each one's capture plan. A channel whose delivery
+            // really is dead times out again on the next tick and is replaced
+            // then, with the ledger replaying its last-good inventory
+            // meanwhile, so nothing disappears from the GUI in between.
+            if settled.evict_channel {
                 if let Some(registry) = &self.registry {
                     registry.remove_node(&node);
                 }
