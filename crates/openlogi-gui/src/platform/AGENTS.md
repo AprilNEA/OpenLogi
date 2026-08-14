@@ -7,8 +7,11 @@ FFI is exactly these files — keep them in sync:
 
 - `status_item.rs` — safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem`.
 - `tray.rs` — the OpenLogi menu-bar semantics + the `OpenLogiMenuTarget` (`define_class!`).
-- `permissions.rs` — `CBCentralManager.authorization` (`objc2` class lookup) + `IOHIDCheckAccess` (C FFI).
-- `crates/openlogi-hook/src/macos.rs` — CGEventTap (on `core-graphics`, see below) + the `NSWorkspace` frontmost-app read (`objc2`).
+- `permissions.rs` — `CBCentralManager.authorization` (`objc2` class lookup) + `IOHIDCheckAccess`
+  (`objc2-io-kit`).
+- `crates/openlogi-hook/src/macos.rs` — CGEventTap (on `core-graphics`, see below), the
+  `NSWorkspace` frontmost-app read (`objc2`), and the Accessibility-trust check/prompt
+  (`objc2-application-services` + `objc2-core-foundation`).
 
 Spawning the agent under its own macOS TCC identity (so its Accessibility /
 Input-Monitoring grants aren't attributed to the GUI, issue #214) lives in the
@@ -49,6 +52,50 @@ That is *why* this code can't reproduce issue #99 (a `+1` `NSString` leaked on e
   `NSThread.isMainThread` + `dispatch2` runtime-check idiom here — we use the compile-time
   `MainThreadMarker` guarantee.
 
+## Privacy permissions (TCC): typed framework crates, never a hand-rolled `extern`
+
+There is no general TCC API, and no crate that wraps one: Apple ships no public way to
+enumerate or request TCC state generically, and `TCC.db` is SIP-protected (reading it needs
+Full Disk Access). Every permission is its own framework call, so "the TCC layer" is just
+this table:
+
+| Permission | Crate | Symbol |
+|---|---|---|
+| Accessibility | `objc2-application-services` (`HIServices` + `AXUIElement`) | `AXIsProcessTrusted` / `AXIsProcessTrustedWithOptions` |
+| Input Monitoring / Post Event | `objc2-io-kit` (`hidsystem`) | `IOHIDCheckAccess` / `IOHIDRequestAccess` |
+| Bluetooth | `objc2` class lookup (see below) | `+[CBManager authorization]` |
+| Camera / microphone | `openlogi-camera` (`capture.rs`) | `+[AVCaptureDevice authorizationStatusForMediaType:]` |
+| Screen Recording (unused) | `objc2-core-graphics` | `CGPreflightScreenCaptureAccess` |
+| Full Disk Access (unused) | — | no API; only a probe of a protected path |
+
+Rules:
+
+- **Never re-declare these in a `#[link(name = "…", kind = "framework")] extern "C"` block**
+  and never hardcode their discriminants. The generated bindings are typed
+  (`IOHIDRequestType::ListenEvent`, `IOHIDAccessType::Granted`), which is the workspace rule
+  about wire values in another guise — a bare `IOHIDCheckAccess(1) == 0` says nothing.
+  `IOHIDCheckAccess` is a *safe* fn in `objc2-io-kit`; the AX pair is `unsafe` only because
+  the options dictionary is untyped.
+- Add these crates with `cargo add … --no-default-features --features <modules>` (they are
+  huge and gated per C header), then declare the version once in the workspace table with
+  `default-features = false` and pick features per crate. **Umbrella-feature trap:** a leaf
+  feature is not enough — `AXUIElement` also needs `HIServices`, or the symbols silently
+  don't exist.
+- **Checking never prompts; prompting belongs to whoever owns the resource.** The agent
+  raises the Accessibility prompt (it owns the tap) and opens HID; the GUI only reads status
+  and deep-links to System Settings (`open_pane`). Don't call `IOHIDRequestAccess` or the
+  `kAXTrustedCheckOptionPrompt` variant from the GUI — the grant would land on the wrong
+  code-signing identity (issue #214, see `disclaim`).
+- `CBCentralManager.authorization` deliberately stays an `AnyClass::get` + `msg_send!` lookup
+  rather than `objc2-core-bluetooth`: a missing class must degrade to `Unknown`, not panic.
+- Deliberate raw-FFI exceptions, all of them symbols with no bindings to migrate to:
+  `CGEventCopyIOHIDEvent` / `IOHIDEventGetSenderID` (undocumented, in the hook) and
+  `responsibility_spawnattrs_setdisclaim` (private SPI, in the `disclaim` crate).
+- Not migrated yet, don't copy the pattern: `openlogi-inject`'s `ax_nav` block (raw
+  `AXUIElement` navigation + manual `CFRetain`/`CFRelease`) and `openlogi-camera`'s
+  `AVAuthorizationStatus` integers — both have typed homes (`objc2-application-services`,
+  `objc2-av-foundation`) whenever someone touches them next.
+
 ## The `unsafe` that remains (and the `# SAFETY` rule)
 
 `objc2` marks only a few calls `unsafe`; each `unsafe` block does one operation with a
@@ -58,7 +105,9 @@ That is *why* this code can't reproduce issue #99 (a `+1` `NSString` leaked on e
   *weak* reference, so the tray retains `MenuTarget` for the app's lifetime).
 - `msg_send![super(this), init]` in `MenuTarget::new`.
 - `NSString::to_str(pool)` in the hook (borrow tied to the pool).
-- the hook's accessibility C FFI + the `CBCentralManager` class-method send.
+- the hook's `AXIsProcessTrusted[WithOptions]` calls and the two extern statics they need
+  (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`), plus the `CBCentralManager`
+  class-method send. `IOHIDCheckAccess` needs none — `objc2-io-kit` exposes it as safe.
 
 `status_item.rs`/`tray.rs` opt into `#[expect(unsafe_code)]` locally; `unsafe_code` stays
 `deny` for the gui crate otherwise.
@@ -86,6 +135,12 @@ pool belongs. (`openlogi-core`'s `post_media_key` follows the same pattern for m
 crates, then **verify the `zed`/`gpui-component` git pins in `Cargo.lock` didn't move** (the
 gpui pin is held only by the lock; a resolve can bump it — restore with `cargo update -p gpui
 --precise <commit>`).
+
+Every objc2 framework crate is declared once in the workspace table (`objc2-app-kit`,
+`objc2-foundation`, `objc2-core-foundation`, `objc2-application-services`, `objc2-io-kit`)
+with `default-features = false`, and each member picks only the feature modules it uses. A
+new one belongs in that table too, not inline in a member manifest — the unified version is
+what keeps a resolve from dragging the gpui pin along.
 
 ## Build & verify
 
