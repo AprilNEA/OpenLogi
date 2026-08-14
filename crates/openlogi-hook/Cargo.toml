@@ -36,6 +36,11 @@ foreign-types-shared = "0.3"
 objc2 = { workspace = true }
 objc2-foundation = { workspace = true, features = ["NSString"] }
 objc2-app-kit = { workspace = true, features = ["NSWorkspace", "NSRunningApplication"] }
+# Accessibility-trust query + prompt (`AXIsProcessTrusted[WithOptions]`) and the
+# `kAXTrustedCheckOptionPrompt` dictionary it takes — typed, so no hand-written
+# ApplicationServices `extern` block.
+objc2-application-services = { workspace = true, features = ["std", "HIServices", "AXUIElement"] }
+objc2-core-foundation = { workspace = true, features = ["std", "CFDictionary", "CFNumber"] }
 
 # WH_MOUSE_LL low-level mouse hook + foreground-process path (GetForegroundWindow
 # / QueryFullProcessImageNameW).

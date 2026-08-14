@@ -22,6 +22,7 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use foreign_types_shared::ForeignType as _;
+use objc2_application_services::{AXIsProcessTrusted, AXIsProcessTrustedWithOptions};
 use tracing::{debug, error, warn};
 
 use crate::{
@@ -51,16 +52,6 @@ pub(crate) struct HookInner {
 // documentation states that CFRunLoop objects can be passed between
 // threads; only CFRunLoopRun must be called on the owning thread.
 unsafe impl Send for HookInner {}
-
-// Raw FFI for `AXIsProcessTrustedWithOptions` from the Accessibility
-// framework. Passing `NULL` queries trust state without prompting; passing
-// a dictionary with `kAXTrustedCheckOptionPrompt = true` raises the system
-// permission dialog and registers the process in the Accessibility list.
-#[link(name = "ApplicationServices", kind = "framework")]
-unsafe extern "C" {
-    fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
-    static kAXTrustedCheckOptionPrompt: core_foundation::string::CFStringRef;
-}
 
 /// Opaque `IOHIDEventRef` — the HID event backing a `CGEvent`.
 type IOHIDEventRef = *mut std::ffi::c_void;
@@ -210,29 +201,30 @@ fn sender_device_info(sender_id: u64) -> SenderDeviceInfo {
 
 /// Check whether this process has been granted Accessibility access.
 pub(crate) fn has_accessibility() -> bool {
-    // SAFETY: NULL is documented as a valid argument; it queries the current
-    // trust state without raising a permission dialog.
-    unsafe { AXIsProcessTrustedWithOptions(std::ptr::null()) }
+    // SAFETY: takes no arguments and only reads the current trust state — the
+    // non-prompting counterpart of `AXIsProcessTrustedWithOptions`.
+    unsafe { AXIsProcessTrusted() }
 }
 
 /// Raise the Accessibility prompt + register the process. See
 /// [`super::Hook::prompt_accessibility`].
+///
+/// The `kAXTrustedCheckOptionPrompt = true` option is what makes macOS surface
+/// the dialog and list the process in System Settings; without it this is just
+/// [`has_accessibility`].
 pub(crate) fn prompt_accessibility() {
-    use core_foundation::base::TCFType as _;
-    use core_foundation::boolean::CFBoolean;
-    use core_foundation::dictionary::CFDictionary;
-    use core_foundation::string::CFString;
+    use objc2_application_services::kAXTrustedCheckOptionPrompt;
+    use objc2_core_foundation::{CFDictionary, kCFBooleanTrue};
 
-    // SAFETY: `kAXTrustedCheckOptionPrompt` is a framework-provided
-    // `CFStringRef` constant; wrapping under the get rule borrows it
-    // without taking ownership.
-    let key = unsafe { CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt) };
-    let options =
-        CFDictionary::from_CFType_pairs(&[(key.as_CFType(), CFBoolean::true_value().as_CFType())]);
-    // SAFETY: `options` is a valid `CFDictionaryRef` for the lifetime of
-    // the call; the function reads it and (if untrusted) shows the dialog.
-    // The returned trust state is observed separately via the watcher.
-    let _trusted = unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef().cast()) };
+    // SAFETY: both are framework-provided constants, live for the process
+    // lifetime; reading them copies a `&'static` reference.
+    let (key, value) = unsafe { (kAXTrustedCheckOptionPrompt, kCFBooleanTrue) };
+    let Some(value) = value else { return };
+    let options = CFDictionary::from_slices(&[key], &[value]);
+    // SAFETY: the dictionary holds exactly the documented key/value types
+    // (`kAXTrustedCheckOptionPrompt` → `CFBoolean`). The returned trust state is
+    // observed separately via the watcher, so it is deliberately dropped here.
+    let _trusted = unsafe { AXIsProcessTrustedWithOptions(Some(options.as_opaque())) };
 }
 
 /// Read the frontmost application's bundle identifier via `NSWorkspace`.

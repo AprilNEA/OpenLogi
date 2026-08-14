@@ -70,6 +70,9 @@ core-graphics = { workspace = true }
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance", "NSWindow", "NSEvent", "block2"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSProcessInfo"] }
+# Input-Monitoring status (`IOHIDCheckAccess`) with typed request/access enums —
+# see platform/permissions.rs.
+objc2-io-kit = { workspace = true, features = ["std", "hidsystem"] }
 # NSEvent global-monitor handlers are ObjC blocks (overlay click-away dismissal).
 block2 = { workspace = true }
 

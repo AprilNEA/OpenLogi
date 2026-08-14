@@ -175,21 +175,14 @@ pub fn request_camera_access(_cx: &mut gpui::App) {}
 mod macos {
     #![expect(
         unsafe_code,
-        reason = "IOKit (IOHIDCheckAccess) + CoreBluetooth privacy-permission FFI"
+        reason = "CoreBluetooth force-link + `+[CBManager authorization]` class-method send"
     )]
 
     use objc2::msg_send;
     use objc2::runtime::AnyClass;
+    use objc2_io_kit::{IOHIDAccessType, IOHIDCheckAccess, IOHIDRequestType};
 
     use super::PermissionStatus;
-
-    // Query the current HID access without prompting. `IOHIDRequestType`:
-    // PostEvent = 0, ListenEvent = 1. Returned `IOHIDAccessType`: Granted = 0,
-    // Denied = 1, Unknown = 2.
-    #[link(name = "IOKit", kind = "framework")]
-    unsafe extern "C" {
-        fn IOHIDCheckAccess(request_type: u32) -> u32;
-    }
 
     // Force-link CoreBluetooth so the `CBCentralManager` class is normally
     // registered for the `Class::get` lookup in `bluetooth()` (which degrades
@@ -197,14 +190,13 @@ mod macos {
     #[link(name = "CoreBluetooth", kind = "framework")]
     unsafe extern "C" {}
 
-    const REQUEST_TYPE_LISTEN_EVENT: u32 = 1;
-
     pub(super) fn input_monitoring() -> PermissionStatus {
-        // SAFETY: `IOHIDCheckAccess` is a side-effect-free query taking a valid
-        // `IOHIDRequestType` discriminant.
-        match unsafe { IOHIDCheckAccess(REQUEST_TYPE_LISTEN_EVENT) } {
-            0 => PermissionStatus::Granted,
-            1 => PermissionStatus::Denied,
+        // `IOHIDCheckAccess` queries the current HID access without prompting;
+        // `IOHIDRequestAccess` is the prompting variant we deliberately don't
+        // call here (the agent owns HID I/O, so it must raise the prompt).
+        match IOHIDCheckAccess(IOHIDRequestType::ListenEvent) {
+            IOHIDAccessType::Granted => PermissionStatus::Granted,
+            IOHIDAccessType::Denied => PermissionStatus::Denied,
             _ => PermissionStatus::Unknown,
         }
     }
