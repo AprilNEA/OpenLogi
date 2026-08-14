@@ -1,25 +1,17 @@
 name: Nix CI
 
 # Build the Nix package (flake `.#openlogi`) so it can't silently rot — the
-# failure mode that killed the previous flake (#262).
-#
-# On master this watches everything the Linux build consumes, so nothing can
-# rot it unnoticed. On PRs it watches a much narrower set, because the two
-# cases are not equally likely and the job is not cheap:
-#
-# - What a PR realistically breaks is the packaging *inputs* — the flake, the
-#   package expression, the lockfile and manifests (a new `-sys` dependency
-#   needs a new `buildInput`), the toolchain, the packaged unit/desktop/udev
-#   files. Those gate the job here, so the break still lands in the PR that
-#   causes it.
-# - What only master needs to catch is the rarer kind: source that compiles
-#   under the dev toolchain but not in the Nix sandbox, with no manifest
-#   change to announce it. Running every source PR through a full Linux build
-#   to catch that costs far more than fixing it on master does.
-#
-# The `outputHashes` staleness this job was originally built around no longer
-# exists: crane fetches git dependencies by the revision Cargo.lock already
-# pins (see nix/package.nix), so there is no hash left to go stale.
+# failure mode that killed the previous flake (#262). With the importCargoLock
+# approach the only thing that can go stale is a git-pin hash in
+# nix/package.nix `outputHashes`, and that only when a git pin (gpui,
+# gpui-component, ...) is bumped in Cargo.lock. This workflow makes that
+# failure happen in the PR that bumps the pin — the error message prints the
+# correct hash to paste — instead of silently on master afterwards. The path
+# filter only skips files that cannot feed the Linux build (docs, other
+# platforms' packaging, unrelated workflows); everything the build consumes —
+# lockfile, manifests, build scripts, toolchain, Rust source, and the
+# Nix/packaging files themselves — triggers it, so no change can bypass this
+# job and rot master.
 on:
   push:
     branches: [master]
@@ -41,11 +33,16 @@ on:
     paths:
       - "Cargo.lock"
       - "**/Cargo.toml"
+      - "**/build.rs"
       - "rust-toolchain.toml"
+      - "src/**"
+      - "crates/**"
+      - "third_party/**"
       - "flake.nix"
       - "flake.lock"
       - "nix/**"
       - "packaging/linux/**"
+      - "design/icon/openlogi.png"
       - ".github/workflows/nix.yml"
 
 jobs:
