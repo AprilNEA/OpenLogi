@@ -187,6 +187,33 @@ async fn begin_action_ring(
     }
 }
 
+/// Fire the macOS permission prompts this process needs, at startup.
+///
+/// The agent (not the GUI) owns both the CGEventTap and every HID++ device
+/// open, so it must be the binary the user authorizes for Accessibility and
+/// Input Monitoring — a grant is scoped to the code-signing identity that
+/// asks for it. macOS only shows a dialog when the process isn't already
+/// listed, so this doesn't nag on every login. The GUI's Accessibility grant
+/// button drives the same prompt on demand over IPC
+/// (`request_accessibility_prompt`); Input Monitoring has no on-demand IPC
+/// path yet, so it is only requested here, at startup.
+fn prompt_missing_permissions(capture_mouse_events: bool) {
+    // With the hook disabled the agent needs no Accessibility at all, so the
+    // opt-out also silences that prompt.
+    if capture_mouse_events && !Hook::has_accessibility() {
+        Hook::prompt_accessibility();
+    }
+
+    // Without this, macOS never registers a decision at all:
+    // `IOHIDDeviceOpen` is silently denied, the permission never appears in
+    // System Settings for the user to grant, and no HID++ device is ever
+    // discovered. `request_access` blocks on the consent dialog, so it runs
+    // on a blocking thread rather than stalling startup.
+    if !openlogi_hid::permissions::has_access() {
+        tokio::task::spawn_blocking(openlogi_hid::permissions::request_access);
+    }
+}
+
 async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<AtomicBool>) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
     // LaunchAgent, before `config` moves into the orchestrator.
@@ -197,17 +224,7 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
     // an agent restart, which the config docs state.
     let capture_mouse_events = config.app_settings.capture_mouse_events;
 
-    // The agent owns the CGEventTap, so it must be the binary the user authorizes
-    // for Accessibility. Fire the prompt at startup when we're not yet trusted so
-    // openlogi-agent appears (named correctly) in System Settings even on a
-    // launchd start with no GUI. macOS only shows the dialog when we're not
-    // already in the list, so this doesn't nag on every login. The GUI's grant
-    // button drives the same prompt over IPC (`request_accessibility_prompt`).
-    // With the hook disabled the agent needs no Accessibility at all, so the
-    // opt-out also silences the permission prompt.
-    if capture_mouse_events && !Hook::has_accessibility() {
-        Hook::prompt_accessibility();
-    }
+    prompt_missing_permissions(capture_mouse_events);
 
     // The orchestrator is shared with the IPC server (which serves inventory /
     // reload / status) and mutated by the watcher select loop, so it lives

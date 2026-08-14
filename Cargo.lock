@@ -5211,6 +5211,7 @@ dependencies = [
  "num_enum",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
+ "objc2-io-kit",
  "openlogi-core",
  "openlogi-hidpp",
  "serde",
