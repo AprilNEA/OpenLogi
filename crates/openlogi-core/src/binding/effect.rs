@@ -127,6 +127,35 @@ pub enum Shortcut {
     ReloadPage,
 }
 
+impl Shortcut {
+    /// Every named shortcut, in declaration order.
+    ///
+    /// The single shared iteration source for per-backend `Shortcut ->
+    /// KeyCombo` table-completeness tests, so those tests can't drift into
+    /// three independently-maintained copies of "every `Shortcut`
+    /// variant" — see `tests::all_is_exhaustive` below, which pairs this
+    /// with a wildcard-free match: adding a variant without extending
+    /// both fails to compile.
+    pub const ALL: [Shortcut; 16] = [
+        Shortcut::Copy,
+        Shortcut::Paste,
+        Shortcut::Cut,
+        Shortcut::Undo,
+        Shortcut::Redo,
+        Shortcut::SelectAll,
+        Shortcut::Find,
+        Shortcut::Save,
+        Shortcut::BrowserBack,
+        Shortcut::BrowserForward,
+        Shortcut::NewTab,
+        Shortcut::CloseTab,
+        Shortcut::ReopenTab,
+        Shortcut::NextTab,
+        Shortcut::PrevTab,
+        Shortcut::ReloadPage,
+    ];
+}
+
 /// A media/volume key.
 ///
 /// Every backend reaches these through a dedicated OS mechanism — NX
@@ -262,6 +291,44 @@ impl Action {
             Action::RunAppleScript(src) => Effect::Script(Script::AppleScript(src)),
             Action::RunShellCommand(cmd) => Effect::Script(Script::ShellCommand(cmd)),
             Action::Workflow(steps) => Effect::Script(Script::Workflow(steps)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Shortcut;
+
+    /// Pairs with [`Shortcut::ALL`]: this match has no wildcard arm, so
+    /// adding a `Shortcut` variant without adding it *here* fails to
+    /// compile — which is the prompt to also add it to `ALL` a few lines
+    /// up, instead of three per-backend test lists silently going stale.
+    #[test]
+    fn all_is_exhaustive() {
+        assert_eq!(
+            Shortcut::ALL.len(),
+            16,
+            "Shortcut::ALL grew or shrank without updating this test"
+        );
+        for shortcut in Shortcut::ALL {
+            match shortcut {
+                Shortcut::Copy
+                | Shortcut::Paste
+                | Shortcut::Cut
+                | Shortcut::Undo
+                | Shortcut::Redo
+                | Shortcut::SelectAll
+                | Shortcut::Find
+                | Shortcut::Save
+                | Shortcut::BrowserBack
+                | Shortcut::BrowserForward
+                | Shortcut::NewTab
+                | Shortcut::CloseTab
+                | Shortcut::ReopenTab
+                | Shortcut::NextTab
+                | Shortcut::PrevTab
+                | Shortcut::ReloadPage => {}
+            }
         }
     }
 }
