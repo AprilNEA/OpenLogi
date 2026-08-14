@@ -512,7 +512,7 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
             .registry_model_id
             .or_else(|| known.registry_model_id.clone()),
         route: live.route,
-        capture_id: live.capture_id.or(known.capture_id.clone()),
+        capture_id: live.capture_id.or_else(|| known.capture_id.clone()),
         kind: if known.kind == DeviceKind::Unknown {
             live.kind
         } else {

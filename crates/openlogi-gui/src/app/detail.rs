@@ -495,13 +495,15 @@ fn light_tab(
     pal: Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
-    let (asset, online, enabled, settings) = cx.try_global::<AppState>().map_or(
-        (
-            None,
-            false,
-            false,
-            openlogi_core::config::LightSettings::default(),
-        ),
+    let (asset, online, enabled, settings) = cx.try_global::<AppState>().map_or_else(
+        || {
+            (
+                None,
+                false,
+                false,
+                openlogi_core::config::LightSettings::default(),
+            )
+        },
         |state| {
             let record = state.current_record();
             (
@@ -602,23 +604,25 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                 .map(|r| state.device_enabled(&r.config_key))
         })
         .unwrap_or(true);
-    let (binding_count, gesture_count, preset_count, app_profile) = cx
-        .try_global::<AppState>()
-        .map_or((0, 0, 0, tr!("Default profile").to_string()), |state| {
-            (
-                state.button_bindings.len(),
-                state
-                    .gesture_bindings
-                    .values()
-                    .map(std::collections::BTreeMap::len)
-                    .sum::<usize>(),
-                state.dpi_presets().len(),
-                state
-                    .current_app_bundle
-                    .clone()
-                    .unwrap_or_else(|| tr!("Default profile").to_string()),
-            )
-        });
+    let (binding_count, gesture_count, preset_count, app_profile) =
+        cx.try_global::<AppState>().map_or_else(
+            || (0, 0, 0, tr!("Default profile").to_string()),
+            |state| {
+                (
+                    state.button_bindings.len(),
+                    state
+                        .gesture_bindings
+                        .values()
+                        .map(std::collections::BTreeMap::len)
+                        .sum::<usize>(),
+                    state.dpi_presets().len(),
+                    state
+                        .current_app_bundle
+                        .clone()
+                        .unwrap_or_else(|| tr!("Default profile").to_string()),
+                )
+            },
+        );
 
     let content = v_flex()
         .gap_3()

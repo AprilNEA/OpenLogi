@@ -83,7 +83,7 @@ impl LightPanel {
         if let Some(range) = brightness_range {
             let value = range
                 .native_for_percent(settings.brightness_percent)
-                .unwrap_or(range.min());
+                .unwrap_or_else(|| range.min());
             let slider = cx.new(|_| {
                 SliderState::new()
                     .max(f32::from(range.max()))
@@ -170,7 +170,7 @@ impl Render for LightPanel {
             if let (Some(range), Some(slider)) = (self.brightness_range, &self.brightness) {
                 let value = range
                     .native_for_percent(settings.brightness_percent)
-                    .unwrap_or(range.min());
+                    .unwrap_or_else(|| range.min());
                 slider.update(cx, |slider, cx| {
                     slider.set_value(f32::from(value), window, cx);
                 });
@@ -210,7 +210,7 @@ impl Render for LightPanel {
         if let (Some(range), Some(slider)) = (self.brightness_range, &self.brightness) {
             let value = range
                 .native_for_percent(settings.brightness_percent)
-                .unwrap_or(range.min());
+                .unwrap_or_else(|| range.min());
             panel = panel.child(control_well(
                 tr!("BRIGHTNESS"),
                 format_light_value(value, range.unit()),

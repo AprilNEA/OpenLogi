@@ -156,7 +156,8 @@ fn post_click(button: CGMouseButton) {
     };
     // A fresh event reports the current pointer location; mouse events need
     // an explicit position or they land at (0, 0).
-    let location = CGEvent::new(src.clone()).map_or(CGPoint::new(0., 0.), |e| e.location());
+    let location =
+        CGEvent::new(src.clone()).map_or_else(|()| CGPoint::new(0., 0.), |e| e.location());
     let (down, up) = match button {
         CGMouseButton::Left => (CGEventType::LeftMouseDown, CGEventType::LeftMouseUp),
         CGMouseButton::Right => (CGEventType::RightMouseDown, CGEventType::RightMouseUp),
@@ -185,7 +186,8 @@ fn post_other_button(button_number: i64) {
         tracing::warn!("CGEventSource::new failed for extra mouse button");
         return;
     };
-    let location = CGEvent::new(src.clone()).map_or(CGPoint::new(0., 0.), |e| e.location());
+    let location =
+        CGEvent::new(src.clone()).map_or_else(|()| CGPoint::new(0., 0.), |e| e.location());
     for (kind, phase) in [
         (CGEventType::OtherMouseDown, "down"),
         (CGEventType::OtherMouseUp, "up"),

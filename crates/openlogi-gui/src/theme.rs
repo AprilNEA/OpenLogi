@@ -218,17 +218,18 @@ pub fn register_builtin_themes(cx: &mut App) {
 /// appearance is read directly and it repaints; pass `None` from a settings
 /// edit (no window in hand) — every open window is refreshed instead.
 pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
-    let (appearance, light_name, dark_name, radius) =
-        cx.try_global::<AppState>()
-            .map_or((Appearance::default(), None, None, None), |state| {
-                let s = state.app_settings();
-                (
-                    s.appearance,
-                    s.theme_light.clone(),
-                    s.theme_dark.clone(),
-                    s.ui_radius,
-                )
-            });
+    let (appearance, light_name, dark_name, radius) = cx.try_global::<AppState>().map_or_else(
+        || (Appearance::default(), None, None, None),
+        |state| {
+            let s = state.app_settings();
+            (
+                s.appearance,
+                s.theme_light.clone(),
+                s.theme_dark.clone(),
+                s.ui_radius,
+            )
+        },
+    );
 
     // Sync the native window chrome (titlebar) to the pref first, so the
     // `System` branch below reads the *real* OS appearance rather than a stale
