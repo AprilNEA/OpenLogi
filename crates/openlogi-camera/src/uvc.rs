@@ -324,6 +324,14 @@ unsafe fn registry_location_and_serial(
     service: IoService,
     serial_key: *const c_void,
 ) -> Option<(u32, String)> {
+    // SAFETY: `service` is a live io_service_t the enumeration loop holds for
+    // the whole call (it releases it only after this returns), so both registry
+    // reads address a valid IOKit object, and `serial_key` is the caller's
+    // CFString, only borrowed here. `IORegistryEntryCreateCFProperty` follows
+    // the Create rule: each +1 CFTypeRef it returns is handed straight to
+    // `cf_number_u32` / `cf_string_value`, which release it on every path, and
+    // the `locationID` key created for the fallback is released before it
+    // returns.
     unsafe {
         // Prefer the USB device interface for location (matches control open);
         // fall back to the registry number property when the plug-in is busy.
@@ -351,6 +359,18 @@ unsafe fn registry_location_and_serial(
 
 /// Location id via a transient `IOUSBDeviceInterface` (no open/seize).
 unsafe fn device_location_id(service: IoService) -> Option<u32> {
+    // SAFETY: `service` is a live io_service_t held by the caller for the whole
+    // call. The two +1 CFUUIDs are released once
+    // `IOCreatePlugInInterfaceForService` — which only borrows them — has
+    // returned, and `plugin` is used only after its status/null check.
+    // `query_interface` follows the IOKit plug-in ABI: the interface pointer
+    // itself is the `this` argument, and `PlugInInterface` mirrors
+    // IOCFPlugInInterface's IUnknown head. The device interface it yields
+    // carries its own reference, and this path never opens the device, so the
+    // stop-then-release `IODestroyPlugInInterface` performs leaves `dev` valid;
+    // it is the `kIOUSBDeviceInterfaceID182` vtable `UsbDeviceInterface`
+    // describes, `get_location_id` writes only the local `location`, and the
+    // paired `release` balances the `query_interface` retain before returning.
     unsafe {
         let user_client = make_uuid(&KIO_USB_DEVICE_USER_CLIENT_TYPE_ID);
         let plugin_type = make_uuid(&KIO_CF_PLUGIN_INTERFACE_ID);
@@ -398,6 +418,15 @@ unsafe fn cf_string_value(cf: *const c_void) -> Option<String> {
     if cf.is_null() {
         return None;
     }
+    // SAFETY: `cf` is non-null (checked above) and a +1 CFTypeRef its callers
+    // hand over from a Create/Copy call; nothing reads it after the `CFRelease`
+    // that balances it, and the only returns that skip that release are the
+    // capacity checks, which need a string a quarter of the address space long
+    // — no CFString reaches them. The type check gates the CFString calls, so
+    // `CFStringGetLength`/`CFStringGetCString` only ever see a CFStringRef, and
+    // the buffer passed to the conversion is `cap` bytes long with `cap` given
+    // as its size — enough for UTF-8's worst case plus the NUL, and bounded by
+    // CFString either way.
     unsafe {
         if CFGetTypeID(cf) != CFStringGetTypeID() {
             CFRelease(cf);
@@ -426,6 +455,10 @@ unsafe fn cf_number_u32(cf: *const c_void) -> Option<u32> {
     if cf.is_null() {
         return None;
     }
+    // SAFETY: `cf` is non-null (checked above) and a +1 CFTypeRef we own, so the
+    // one `CFRelease` on each path balances it. The type check ahead of
+    // `CFNumberGetValue` means it sees a CFNumberRef, and the destination is a
+    // local `u32` — exactly the size and alignment `kCFNumberSInt32Type` writes.
     unsafe {
         if CFGetTypeID(cf) != CFNumberGetTypeID() {
             CFRelease(cf);
@@ -799,6 +832,20 @@ impl UsbDevice {
         want_vid: u16,
         _want_location: Option<u32>,
     ) -> Option<Opened> {
+        // SAFETY: `service` is a live io_service_t `open_for` holds across this
+        // call. The two +1 CFUUIDs are released once
+        // `IOCreatePlugInInterfaceForService` — which only borrows them — has
+        // returned, and `plugin`/`dev_ptr` are used only after their
+        // status/null checks. `query_interface` gets the plug-in pointer itself
+        // as the `this` argument, per the IOKit plug-in ABI, and asks for
+        // `kIOUSBDeviceInterfaceID182`, the vtable `UsbDeviceInterface`
+        // describes; the interface it yields holds its own reference, and the
+        // seize below has not run yet, so the stop-then-release
+        // `IODestroyPlugInInterface` performs leaves `dev` valid.
+        // `get_device_vendor` and `get_location_id` write only the locals passed
+        // to them, every return taken after `dev` exists releases it (closing it
+        // first once the seize succeeded), and on the success path that teardown
+        // becomes `UsbDevice`'s `Drop`.
         unsafe {
             let user_client = make_uuid(&KIO_USB_DEVICE_USER_CLIENT_TYPE_ID);
             let plugin_type = make_uuid(&KIO_CF_PLUGIN_INTERFACE_ID);
@@ -878,6 +925,15 @@ struct VcTopology {
 /// Parse the configuration descriptor for the VideoControl interface number,
 /// the Processing-Unit id, and the camera (input) terminal id.
 unsafe fn video_control_topology(dev: *mut *mut UsbDeviceInterface) -> Option<VcTopology> {
+    // SAFETY: `dev` is the interface `try_open` opened and still owns for the
+    // whole call, so its vtable entries are live and
+    // `get_number_of_configurations` writes only the local. On success
+    // `get_configuration_descriptor_ptr` hands back the interface's cached
+    // configuration-descriptor blob, which stays valid while `dev` is open and
+    // is at least the nine-byte header the USB spec mandates — so reading
+    // wTotalLength at offsets 2 and 3 is in bounds. IOUSBLib sized that blob
+    // from the very wTotalLength read here, which is the bound
+    // `scan_descriptors` then stays inside.
     unsafe {
         let mut num_configs: u8 = 0;
         ((**dev).get_number_of_configurations)(dev.cast::<c_void>(), &raw mut num_configs);
@@ -902,6 +958,13 @@ unsafe fn video_control_topology(dev: *mut *mut UsbDeviceInterface) -> Option<Vc
 /// Walk a configuration descriptor blob, collecting the first VideoControl
 /// interface's Processing-Unit and camera-terminal entity ids.
 unsafe fn scan_descriptors(base: *const u8, total: usize) -> Option<VcTopology> {
+    // SAFETY: the caller passes a configuration-descriptor blob together with
+    // its own wTotalLength, so `base` is readable for `total` bytes and outlives
+    // the walk. Every read stays in that window: a descriptor is only entered
+    // when `off + 2 <= total` and `off + len <= total`, and each field is read
+    // after checking that the descriptor's own `bLength` covers it — 9 bytes for
+    // an interface descriptor's number/class/subclass, 4 for a class-specific
+    // subtype and entity id, 8 for an input terminal's wTerminalType.
     unsafe {
         let mut off = 0usize;
         let mut vc_interface: Option<u8> = None;
@@ -944,6 +1007,11 @@ unsafe fn scan_descriptors(base: *const u8, total: usize) -> Option<VcTopology> 
 }
 
 unsafe fn make_uuid(bytes: &[u8; 16]) -> CfUuidRef {
+    // SAFETY: `CfUuidBytes` is `#[repr(C)]` around `[u8; 16]`, so it matches
+    // CFUUIDBytes' sixteen `UInt8` fields in size, alignment and by-value ABI,
+    // and it is passed as a copy — nothing of the caller's is borrowed past the
+    // call. The null allocator selects the default one, and the +1 CFUUIDRef
+    // returned is released by every caller.
     unsafe { CFUUIDCreateFromUUIDBytes(ptr::null(), CfUuidBytes { bytes: *bytes }) }
 }
 

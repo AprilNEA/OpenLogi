@@ -258,6 +258,9 @@ fn poll_fd(fd: libc::c_int, deadline: Instant) -> bool {
         if timeout_ms == 0 {
             return false;
         }
+        // SAFETY: `pfd` is a live, correctly aligned single `pollfd` we own for
+        // the whole call and the length argument matches that one element;
+        // `poll` only writes `revents` back into it.
         let r = unsafe { libc::poll(&raw mut pfd, 1, timeout_ms) };
         if r > 0 {
             return true;
@@ -266,6 +269,9 @@ fn poll_fd(fd: libc::c_int, deadline: Instant) -> bool {
             return false;
         }
         // r < 0 — check errno
+        // SAFETY: `__errno_location` always returns a valid, aligned pointer to
+        // this thread's own errno slot, live for the thread's lifetime, and it
+        // is read here on the same thread that made the failing `poll` call.
         let e = unsafe { *libc::__errno_location() };
         if e != libc::EINTR {
             return false;

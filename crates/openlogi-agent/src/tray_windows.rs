@@ -149,6 +149,10 @@ unsafe extern "system" fn wnd_proc(
         WM_TRAY => {
             match lparam as u32 {
                 WM_LBUTTONUP => open_or_focus_gui(),
+                // SAFETY: win32 dispatches this callback on the tray thread —
+                // the one that created `hwnd` and pumps its messages — so the
+                // handle is live for the whole call, and `TrackPopupMenu` gets
+                // the owning thread it requires.
                 WM_RBUTTONUP | WM_CONTEXTMENU => unsafe { show_menu(hwnd) },
                 _ => {}
             }
@@ -156,9 +160,16 @@ unsafe extern "system" fn wnd_proc(
         }
         m if m != 0 && m == TASKBAR_CREATED.load(Ordering::Relaxed) => {
             // Explorer restarted; every tray icon was dropped. Re-add ours.
+            // SAFETY: `hwnd` is our own window, still live while its window
+            // procedure runs, and this is the thread that created it — the
+            // same conditions under which `run_tray_loop` first added the icon.
             unsafe { add_tray_icon(hwnd) };
             0
         }
+        // SAFETY: handing the system back the message it just delivered,
+        // unchanged: `hwnd` is live for the duration of the callback and
+        // `wparam`/`lparam` are the payload win32 paired with `msg`, which is
+        // exactly what the default handler expects.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }

@@ -157,13 +157,13 @@ fn default_to_dev_profile() {
     if std::env::var_os("OPENLOGI_PROFILE").is_some() {
         return;
     }
-    // SAFETY: `set_var` is unsound only against concurrent env access. This is
-    // the first statement of `main`: no runtime, no tracing subscriber, no
-    // other thread exists yet, and nothing has read the environment.
     #[expect(
         unsafe_code,
         reason = "the profile must be chosen before openlogi_core::paths caches it, and only a process-wide env var selects it"
     )]
+    // SAFETY: `set_var` is unsound only against concurrent env access. This is
+    // the first statement of `main`: no runtime, no tracing subscriber, no
+    // other thread exists yet, and nothing has read the environment.
     unsafe {
         std::env::set_var("OPENLOGI_PROFILE", "dev");
     }

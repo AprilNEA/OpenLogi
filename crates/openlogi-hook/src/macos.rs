@@ -176,14 +176,16 @@ fn sender_device_info(sender_id: u64) -> SenderDeviceInfo {
                         .map(|p| unsafe { CFString::wrap_under_create_rule(p.cast()) }.to_string())
                 };
                 let num_prop = |k| {
-                    // SAFETY: a numeric property is a +1 CFNumber; wrap takes ownership.
                     service_property(service, k)
                         .and_then(|p| {
+                            // SAFETY: `service_property` only yields a non-null, +1 CF
+                            // value, and every key passed below is published by IOKit as
+                            // a CFNumber, so the cast keeps the type; the create rule
+                            // hands that retain to the wrapper, which releases it on drop.
                             unsafe { CFNumber::wrap_under_create_rule(p.cast()) }.to_i64()
                         })
                         .and_then(|n| u32::try_from(n).ok())
                 };
-                // SAFETY: a String property is a +1 CFString; wrap takes ownership.
                 let product_name = string_prop("Product");
                 let info = SenderDeviceInfo {
                     is_trackpad: product_name
@@ -935,6 +937,10 @@ pub(crate) fn list_event_taps() -> Vec<EventTapInfo> {
     // pattern is a valid instance (`enabled = false`, all numeric fields 0).
     // `CGGetEventTapList` overwrites each slot it fills.
     let mut taps: Vec<CGEventTapInformation> = vec![unsafe { std::mem::zeroed() }; count as usize];
+    // SAFETY: `taps` holds exactly `count` initialised, correctly aligned slots
+    // and stays alive for the call, and that same `count` is the maximum passed
+    // in, so the C side cannot write past the allocation; the out-parameter
+    // points at a live local it may only overwrite.
     let err = unsafe { CGGetEventTapList(count, taps.as_mut_ptr(), &raw mut count) };
     if err != 0 {
         return Vec::new();

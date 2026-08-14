@@ -245,6 +245,15 @@ struct StrideHint {
 /// pick the native format closest to [`TARGET_WIDTH`], and negotiate RGB32
 /// output (Media Foundation inserts the decoder/converter).
 unsafe fn open_reader(unique_id: &str) -> Result<(IMFSourceReader, StrideHint), CaptureError> {
+    // SAFETY: only `reader_thread` calls this, after `CoInitializeEx` and
+    // `MFStartup` on that same thread and while MF stays started for the
+    // reader's lifetime — the precondition every call below needs.
+    // `MFCreateAttributes` writes its +1 `IMFAttributes` into the local
+    // `Option`, which is checked before use; that attribute set, the reader, the
+    // media types the enumeration keeps and the output type are all refcounted
+    // wrappers released when they drop. Each method call runs on this thread
+    // against a live interface, and the reader is handed back to the very thread
+    // that will pull samples from it.
     unsafe {
         let source = activate_source(unique_id)?;
 
@@ -335,6 +344,15 @@ unsafe fn open_reader(unique_id: &str) -> Result<(IMFSourceReader, StrideHint), 
 /// interface-class GUIDs, so they are matched on the shared device-instance
 /// portion (see [`device_instance`]).
 unsafe fn activate_source(unique_id: &str) -> Result<IMFMediaSource, CaptureError> {
+    // SAFETY: reached only from `open_reader` on the reader thread, i.e. after
+    // `CoInitializeEx` and `MFStartup`, which is what these MF calls require of
+    // the thread. `MFEnumDeviceSources` fills `devices` with one CoTaskMem
+    // allocation holding exactly `count` nullable interface pointers —
+    // `Option<IMFActivate>` is a pointer-sized niche over that — so the slice
+    // spans only memory MF allocated, and it is freed once, after the loop and
+    // after the chosen activate has been retained out of it by `clone`.
+    // `GetAllocatedString` hands back a CoTaskMem PWSTR that is copied into
+    // `link_str` before being freed, so nothing outlives its allocation.
     unsafe {
         let mut enum_attrs = None;
         MFCreateAttributes(&raw mut enum_attrs, 1).map_err(setup_err)?;
