@@ -95,12 +95,12 @@ pub(super) fn device_gallery(cx: &mut Context<AppView>) -> impl IntoElement {
                     .try_global::<AppState>()
                     .is_some_and(|s| s.device_enabled(&record.config_key));
                 let light_enabled = cx.try_global::<AppState>().is_some_and(|state| {
-                    record.kind == DeviceKind::Light && state.light_enabled_for(&record.config_key)
+                    record.kind == DeviceKind::Light && state.light_enabled_for(&record.device_key())
                 });
                 let light_settings = cx
                     .try_global::<AppState>()
                     .map_or_else(LightSettings::default, |state| {
-                        state.light_for(&record.config_key)
+                        state.light_for(&record.device_key())
                     });
                 let glow = cx
                     .try_global::<AppState>()

@@ -13,6 +13,7 @@ use crate::state::devices::{
 };
 
 use super::device_key::DeviceKey;
+use super::device_ui::DeviceUiState;
 use super::load::Load;
 use super::{AppState, INVENTORY_MISS_GRACE};
 
@@ -125,8 +126,10 @@ impl AppState {
         for key in &rerouted {
             self.dpi_data.remove(key);
             self.smartshift_data.remove(key);
-            self.smartshift_pending_confirm.remove(key.as_str());
-            self.smartshift_write_status.remove(key.as_str());
+            if let Some(entry) = self.device_ui.get_mut(key) {
+                entry.smartshift_pending_confirm = None;
+                entry.smartshift_write_status = None;
+            }
         }
         let present = |key: &str| {
             self.device_list
@@ -135,9 +138,6 @@ impl AppState {
         };
         self.dpi_data.retain_present(present);
         self.smartshift_data.retain_present(present);
-        self.smartshift_pending_confirm
-            .retain(|key, _| present(key));
-        self.smartshift_write_status.retain(|key, _| present(key));
         self.current_device = new_index;
         // The active device may have changed (selection fell back to index 0
         // when the previous one vanished); re-seed the displayed DPI so it
@@ -163,13 +163,13 @@ impl AppState {
         for previous in &self.device_list {
             let inv = previous.inventory_key();
             if let Some(record) = by_key.remove(&inv) {
-                self.inventory_misses.remove(&inv);
+                clear_inventory_misses(&mut self.device_ui, &inv);
                 merged.push(record);
                 continue;
             }
 
             if let Some(record) = adopted.remove(&inv) {
-                self.inventory_misses.remove(&inv);
+                clear_inventory_misses(&mut self.device_ui, &inv);
                 merged.push(record);
                 continue;
             }
@@ -178,23 +178,27 @@ impl AppState {
             // the next snapshot resolves a physical serial/unit key, retaining
             // this record through the normal miss grace would show both cards.
             if !previous.is_persistent() {
-                self.inventory_misses.remove(&inv);
+                clear_inventory_misses(&mut self.device_ui, &inv);
                 continue;
             }
 
             // Cameras reappear under a new capture id after a port change —
             // do not grace-keep a stale cam-live entry beside the new one.
             if previous.kind == openlogi_core::device::DeviceKind::Camera {
-                self.inventory_misses.remove(&inv);
+                clear_inventory_misses(&mut self.device_ui, &inv);
                 continue;
             }
 
-            let misses = self.inventory_misses.entry(inv.clone()).or_insert(0);
-            *misses = misses.saturating_add(1);
-            if *misses <= INVENTORY_MISS_GRACE {
+            let entry = self
+                .device_ui
+                .entry(DeviceKey::from(inv.as_str()))
+                .or_default();
+            entry.inventory_misses = entry.inventory_misses.saturating_add(1);
+            let misses = entry.inventory_misses;
+            if misses <= INVENTORY_MISS_GRACE {
                 debug!(
                     key = %inv,
-                    misses = *misses,
+                    misses,
                     "keeping device through transient inventory miss"
                 );
                 merged.push(previous.clone());
@@ -202,14 +206,14 @@ impl AppState {
         }
 
         for (key, record) in by_key {
-            self.inventory_misses.remove(&key);
+            clear_inventory_misses(&mut self.device_ui, &key);
             merged.push(record);
         }
         // Adopted records whose known card was never in the previous list
         // (identity known only from config) still belong in the carousel.
         merged.extend(adopted.into_values());
-        self.inventory_misses
-            .retain(|key, _| merged.iter().any(|record| record.inventory_key() == *key));
+        let live: HashSet<String> = merged.iter().map(DeviceRecord::inventory_key).collect();
+        self.device_ui.retain(|key, _| live.contains(key.as_str()));
         // `merged` is `previous-order + newly-appeared`, so re-apply the
         // canonical route order or a new device would be stuck at the end of
         // the carousel permanently.
@@ -305,7 +309,9 @@ impl AppState {
             }
             if matches!(self.smartshift_data.get(&key), Some(Load::Failed(_))) {
                 self.smartshift_data.retry(&key);
-                self.smartshift_write_status.remove(key.as_str());
+                if let Some(entry) = self.device_ui.get_mut(&key) {
+                    entry.smartshift_write_status = None;
+                }
             }
         }
         // `self.dpi` is the active device's value; adopt the newly-selected
@@ -361,4 +367,15 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
         }
     }
     changed
+}
+
+/// Reset `key`'s consecutive-miss counter — the device was just confirmed
+/// present (live, adopted, or freshly appeared) or is a kind that never earns
+/// grace (transient, camera). Leaves the rest of the device's UI row
+/// untouched. A free function, not an `AppState` method, so callers can hold
+/// it alongside a live borrow of `self.device_list`.
+fn clear_inventory_misses(device_ui: &mut BTreeMap<DeviceKey, DeviceUiState>, key: &str) {
+    if let Some(entry) = device_ui.get_mut(key) {
+        entry.inventory_misses = 0;
+    }
 }
