@@ -91,7 +91,7 @@ pub enum MouseButton {
 /// Each backend owns a `Shortcut -> KeyCombo` table (plus, for the couple of
 /// shortcuts a given OS has no ordinary chord for, a small override) rather
 /// than sharing one table — see the per-backend `combo`/`press_shortcut`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, strum::VariantArray)]
 pub enum Shortcut {
     /// Copy the selection.
     Copy,
@@ -130,30 +130,14 @@ pub enum Shortcut {
 impl Shortcut {
     /// Every named shortcut, in declaration order.
     ///
-    /// The single shared iteration source for per-backend `Shortcut ->
-    /// KeyCombo` table-completeness tests, so those tests can't drift into
-    /// three independently-maintained copies of "every `Shortcut`
-    /// variant" — see `tests::all_is_exhaustive` below, which pairs this
-    /// with a wildcard-free match: adding a variant without extending
-    /// both fails to compile.
-    pub const ALL: [Shortcut; 16] = [
-        Shortcut::Copy,
-        Shortcut::Paste,
-        Shortcut::Cut,
-        Shortcut::Undo,
-        Shortcut::Redo,
-        Shortcut::SelectAll,
-        Shortcut::Find,
-        Shortcut::Save,
-        Shortcut::BrowserBack,
-        Shortcut::BrowserForward,
-        Shortcut::NewTab,
-        Shortcut::CloseTab,
-        Shortcut::ReopenTab,
-        Shortcut::NextTab,
-        Shortcut::PrevTab,
-        Shortcut::ReloadPage,
-    ];
+    /// `#[derive(strum::VariantArray)]` generates this straight from the
+    /// enum's variant list at compile time, so it cannot go stale the way a
+    /// hand-written array literal could: there is no second, independently
+    /// editable list for it to drift from — a variant that's missing here
+    /// would mean the enum itself doesn't have it. The single shared
+    /// iteration source for each backend's `Shortcut -> KeyCombo`
+    /// table-completeness test.
+    pub const ALL: &'static [Shortcut] = <Shortcut as strum::VariantArray>::VARIANTS;
 }
 
 /// A media/volume key.
@@ -291,44 +275,6 @@ impl Action {
             Action::RunAppleScript(src) => Effect::Script(Script::AppleScript(src)),
             Action::RunShellCommand(cmd) => Effect::Script(Script::ShellCommand(cmd)),
             Action::Workflow(steps) => Effect::Script(Script::Workflow(steps)),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Shortcut;
-
-    /// Pairs with [`Shortcut::ALL`]: this match has no wildcard arm, so
-    /// adding a `Shortcut` variant without adding it *here* fails to
-    /// compile — which is the prompt to also add it to `ALL` a few lines
-    /// up, instead of three per-backend test lists silently going stale.
-    #[test]
-    fn all_is_exhaustive() {
-        assert_eq!(
-            Shortcut::ALL.len(),
-            16,
-            "Shortcut::ALL grew or shrank without updating this test"
-        );
-        for shortcut in Shortcut::ALL {
-            match shortcut {
-                Shortcut::Copy
-                | Shortcut::Paste
-                | Shortcut::Cut
-                | Shortcut::Undo
-                | Shortcut::Redo
-                | Shortcut::SelectAll
-                | Shortcut::Find
-                | Shortcut::Save
-                | Shortcut::BrowserBack
-                | Shortcut::BrowserForward
-                | Shortcut::NewTab
-                | Shortcut::CloseTab
-                | Shortcut::ReopenTab
-                | Shortcut::NextTab
-                | Shortcut::PrevTab
-                | Shortcut::ReloadPage => {}
-            }
         }
     }
 }

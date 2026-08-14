@@ -373,7 +373,7 @@ mod tests {
         // (pinned individually above) are skipped here, not silently
         // missed: `combo`'s own match already forces every `Shortcut`
         // variant to be classified as one or the other.
-        for shortcut in Shortcut::ALL {
+        for &shortcut in Shortcut::ALL {
             let Ok(chord) = combo(shortcut) else {
                 continue;
             };

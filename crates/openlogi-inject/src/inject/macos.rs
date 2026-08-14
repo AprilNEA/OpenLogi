@@ -368,7 +368,7 @@ mod tests {
         // rather than a hand-copied list, so a newly added `Shortcut`
         // variant is checked here automatically instead of depending on
         // someone remembering to extend a second, independent list.
-        for shortcut in Shortcut::ALL {
+        for &shortcut in Shortcut::ALL {
             let key = combo(shortcut).key().code();
             assert!(
                 hid_usage_to_macos(key).is_some(),
