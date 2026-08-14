@@ -1,15 +1,13 @@
 //! Implements the `HiResWheel` feature (ID `0x2121`) that allows configuring
 //! and using high-resolution scrolling.
 
-use std::{hash::Hash, sync::Arc};
+use std::hash::Hash;
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
 use crate::{
-    channel::HidppChannel,
-    feature::{
-        CreatableFeature, DecodeEvent, EmittingFeature, EventSource, Feature, FeatureEndpoint,
-    },
+    feature::{DecodeEvent, EventSource, FeatureEndpoint},
     nibble::U4,
     protocol::v20::Hidpp20Error,
 };
@@ -18,33 +16,14 @@ use crate::{
 ///
 /// The analytics part of the feature is not implemented here as its data
 /// structure lacks any documentation.
+#[derive(Feature)]
+#[creatable(id = 0x2121, version = 0)]
 pub struct HiResWheelFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
     /// Publishes decoded events to listeners.
     events: EventSource<HiResWheelEvent>,
-}
-
-impl CreatableFeature for HiResWheelFeature {
-    const ID: u16 = 0x2121;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let events = EventSource::attach(&chan, device_index, feature_index);
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            events,
-        }
-    }
-}
-
-impl Feature for HiResWheelFeature {}
-
-impl EmittingFeature<HiResWheelEvent> for HiResWheelFeature {
-    fn listen(&self) -> async_channel::Receiver<HiResWheelEvent> {
-        self.events.listen()
-    }
 }
 
 impl DecodeEvent for HiResWheelEvent {

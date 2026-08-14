@@ -1,15 +1,10 @@
 //! Implements the `MousePointer` feature (ID `0x2200`) that reports a mouse's
 //! basic optical-sensor properties and pointer-tuning hints.
 
-use std::sync::Arc;
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 /// The pointer-acceleration ("ballistics") curve a device suggests, based on its
 /// physical characteristics.
@@ -60,24 +55,12 @@ pub struct MousePointerInfo {
 }
 
 /// Implements the `MousePointer` / `0x2200` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x2200, version = 0)]
 pub struct MousePointerFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for MousePointerFeature {
-    const ID: u16 = 0x2200;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for MousePointerFeature {}
 
 impl MousePointerFeature {
     /// Retrieves the sensor resolution and pointer-tuning hints of the mouse.

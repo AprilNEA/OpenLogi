@@ -4,13 +4,9 @@
 //! For disabling arbitrary keys by HID usage, see
 //! [`DisableKeysByUsage`](super::disable_keys_by_usage) (`0x4522`).
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 bitflags::bitflags! {
     /// The set of keys a [`DisableKeysFeature`] device can disable.
@@ -34,24 +30,12 @@ bitflags::bitflags! {
 }
 
 /// Implements the `DisableKeys` / `0x4521` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x4521, version = 0)]
 pub struct DisableKeysFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for DisableKeysFeature {
-    const ID: u16 = 0x4521;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for DisableKeysFeature {}
 
 impl DisableKeysFeature {
     /// Retrieves the set of keys the device allows software to disable.

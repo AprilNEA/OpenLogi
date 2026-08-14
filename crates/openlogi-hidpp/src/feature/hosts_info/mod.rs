@@ -1,14 +1,9 @@
 //! Implements `HostsInfo` (feature `0x1815`) for multi-host devices.
 
-use std::sync::Arc;
-
 use num_enum::TryFromPrimitive;
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 bitflags::bitflags! {
     /// Host-management capabilities.
@@ -156,24 +151,12 @@ pub struct HostDescriptorPage {
 }
 
 /// Implements the `HostsInfo` / `0x1815` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x1815, version = 2)]
 pub struct HostsInfoFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for HostsInfoFeature {
-    const ID: u16 = 0x1815;
-    const STARTING_VERSION: u8 = 2;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for HostsInfoFeature {}
 
 impl HostsInfoFeature {
     /// Retrieves feature capabilities and host-slot count.

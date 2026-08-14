@@ -1,33 +1,17 @@
 //! Implements the `DeviceFriendlyName` feature (ID `0x0007`) that provides
 //! functionality to set and retrieve a custom device name.
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 /// Implements the `DeviceFriendlyName` / `0x0007` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x0007, version = 0)]
 pub struct DeviceFriendlyNameFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for DeviceFriendlyNameFeature {
-    const ID: u16 = 0x0007;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for DeviceFriendlyNameFeature {}
 
 impl DeviceFriendlyNameFeature {
     /// Retrieves the length data of the friendly device name feature.

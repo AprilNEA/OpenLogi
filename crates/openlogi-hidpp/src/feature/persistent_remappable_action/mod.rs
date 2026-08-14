@@ -9,16 +9,11 @@
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
 use crate::{
-    channel::HidppChannel,
-    feature::{
-        CreatableFeature, Feature, FeatureEndpoint, hosts_info::HostIndex,
-        reprog_controls::ControlId,
-    },
+    feature::{FeatureEndpoint, hosts_info::HostIndex, reprog_controls::ControlId},
     protocol::v20::Hidpp20Error,
 };
 
@@ -176,24 +171,12 @@ pub struct PersistentActionConfig {
 }
 
 /// Implements the `PersistentRemappableAction` / `0x1c00` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x1c00, version = 0)]
 pub struct PersistentRemappableActionFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for PersistentRemappableActionFeature {
-    const ID: u16 = 0x1c00;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for PersistentRemappableActionFeature {}
 
 impl PersistentRemappableActionFeature {
     /// Retrieves which HID outputs the device's remapping can produce.

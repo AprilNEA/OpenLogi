@@ -5,15 +5,11 @@
 //! (`0x4531`); a device exposing `0x4531` should be driven through that feature
 //! instead.
 
-use std::sync::Arc;
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
 use crate::{
-    channel::HidppChannel,
-    feature::{
-        CreatableFeature, DecodeEvent, EmittingFeature, EventSource, Feature, FeatureEndpoint,
-    },
+    feature::{DecodeEvent, EventSource, FeatureEndpoint},
     protocol::v20::Hidpp20Error,
 };
 
@@ -42,33 +38,14 @@ pub enum DualPlatformEvent {
 }
 
 /// Implements the `DualPlatform` / `0x4530` feature.
+#[derive(Feature)]
+#[creatable(id = 0x4530, version = 0)]
 pub struct DualPlatformFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
     /// Publishes decoded events to listeners.
     events: EventSource<DualPlatformEvent>,
-}
-
-impl CreatableFeature for DualPlatformFeature {
-    const ID: u16 = 0x4530;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let events = EventSource::attach(&chan, device_index, feature_index);
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            events,
-        }
-    }
-}
-
-impl Feature for DualPlatformFeature {}
-
-impl EmittingFeature<DualPlatformEvent> for DualPlatformFeature {
-    fn listen(&self) -> async_channel::Receiver<DualPlatformEvent> {
-        self.events.listen()
-    }
 }
 
 impl DecodeEvent for DualPlatformEvent {

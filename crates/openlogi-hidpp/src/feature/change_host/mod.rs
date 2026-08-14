@@ -1,13 +1,9 @@
 //! Implements the `ChangeHost` feature (ID `0x1814`) that selects which host /
 //! RF channel a multi-host device is connected to.
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 bitflags::bitflags! {
     /// Host-switching capabilities reported by [`ChangeHostFeature::get_host_info`].
@@ -35,24 +31,12 @@ pub struct ChangeHostInfo {
 }
 
 /// Implements the `ChangeHost` / `0x1814` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x1814, version = 0)]
 pub struct ChangeHostFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for ChangeHostFeature {
-    const ID: u16 = 0x1814;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for ChangeHostFeature {}
 
 impl ChangeHostFeature {
     /// Retrieves the host count, current host and host-switching flags.

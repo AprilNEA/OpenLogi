@@ -1,12 +1,8 @@
 //! Implements `BrightnessControl` (feature `0x8040`).
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 bitflags::bitflags! {
     /// Capabilities reported by `BrightnessControl`.
@@ -42,24 +38,12 @@ pub struct BrightnessInfo {
 }
 
 /// Implements the `BrightnessControl` / `0x8040` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x8040, version = 1)]
 pub struct BrightnessControlFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for BrightnessControlFeature {
-    const ID: u16 = 0x8040;
-    const STARTING_VERSION: u8 = 1;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for BrightnessControlFeature {}
 
 impl BrightnessControlFeature {
     /// Retrieves brightness range and capability information.

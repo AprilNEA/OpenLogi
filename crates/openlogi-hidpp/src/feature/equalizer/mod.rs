@@ -8,15 +8,10 @@
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 /// Maximum number of frequencies a single `getFrequencies` response carries.
 const FREQUENCIES_PER_PAGE: u8 = 7;
@@ -104,24 +99,12 @@ impl EqInfo {
 }
 
 /// Implements the `Equalizer` / `0x8310` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x8310, version = 2)]
 pub struct EqualizerFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for EqualizerFeature {
-    const ID: u16 = 0x8310;
-    const STARTING_VERSION: u8 = 2;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for EqualizerFeature {}
 
 impl EqualizerFeature {
     /// Retrieves the EQ table's band count, gain range and storage capabilities.

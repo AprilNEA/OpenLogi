@@ -1,36 +1,18 @@
 //! Implements the `DeviceInformation` feature (ID `0x0003`) that provides some
 //! general information about the device.
 
-use std::sync::Arc;
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    bcd,
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{bcd, feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 /// Implements the `DeviceInformation` / `0x0003` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x0003, version = 0)]
 pub struct DeviceInformationFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for DeviceInformationFeature {
-    const ID: u16 = 0x0003;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for DeviceInformationFeature {}
 
 impl DeviceInformationFeature {
     /// Retrieves general information about the device and its capabilities.

@@ -12,7 +12,7 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
 pub use event::{DpiCalibrationCompleted, DpiParametersChanged, ExtendedDpiEvent};
 pub use types::{
@@ -23,8 +23,7 @@ pub use types::{
 
 use self::types::{parse_dpi_list, parse_dpi_ranges, parse_lod_list, terminated_word_len};
 use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, EmittingFeature, EventSource, Feature, FeatureEndpoint},
+    feature::{EventSource, FeatureEndpoint},
     protocol::v20::Hidpp20Error,
 };
 
@@ -33,33 +32,14 @@ use crate::{
 const MAX_RANGE_PAGES: u8 = 16;
 
 /// Implements the `ExtendedAdjustableDpi` / `0x2202` feature.
+#[derive(Feature)]
+#[creatable(id = 0x2202, version = 0)]
 pub struct ExtendedDpiFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
     /// Publishes decoded events to listeners.
     events: EventSource<ExtendedDpiEvent>,
-}
-
-impl CreatableFeature for ExtendedDpiFeature {
-    const ID: u16 = 0x2202;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let events = EventSource::attach(&chan, device_index, feature_index);
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            events,
-        }
-    }
-}
-
-impl Feature for ExtendedDpiFeature {}
-
-impl EmittingFeature<ExtendedDpiEvent> for ExtendedDpiFeature {
-    fn listen(&self) -> async_channel::Receiver<ExtendedDpiEvent> {
-        self.events.listen()
-    }
 }
 
 impl ExtendedDpiFeature {

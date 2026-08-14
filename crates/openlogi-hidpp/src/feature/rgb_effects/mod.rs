@@ -21,7 +21,7 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
 pub use event::RgbEffectsEvent;
 pub use types::{
@@ -34,8 +34,7 @@ pub use types::{
 
 use self::types::{ALL_CLUSTERS, ALL_EFFECTS, GetOrSet, be16};
 use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, EmittingFeature, EventSource, Feature, FeatureEndpoint},
+    feature::{EventSource, FeatureEndpoint},
     protocol::v20::Hidpp20Error,
 };
 
@@ -49,33 +48,14 @@ const GET_BACKUP: u8 = 0x02;
 const POWER_TARGET_SHIFT: u8 = 2;
 
 /// Implements the `RgbEffects` / `0x8071` feature.
+#[derive(Feature)]
+#[creatable(id = 0x8071, version = 0)]
 pub struct RgbEffectsFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
     /// Publishes decoded events to listeners.
     events: EventSource<RgbEffectsEvent>,
-}
-
-impl CreatableFeature for RgbEffectsFeature {
-    const ID: u16 = 0x8071;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let events = EventSource::attach(&chan, device_index, feature_index);
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            events,
-        }
-    }
-}
-
-impl Feature for RgbEffectsFeature {}
-
-impl EmittingFeature<RgbEffectsEvent> for RgbEffectsFeature {
-    fn listen(&self) -> async_channel::Receiver<RgbEffectsEvent> {
-        self.events.listen()
-    }
 }
 
 impl RgbEffectsFeature {

@@ -5,11 +5,10 @@
 //! them, and emits notifications for diverted buttons, raw XY, analytics key
 //! events, and raw wheel movement.
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
 use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, EmittingFeature, EventSource, Feature, FeatureEndpoint},
+    feature::{EventSource, FeatureEndpoint},
     protocol::v20::Hidpp20Error,
 };
 
@@ -20,30 +19,11 @@ pub mod task_ids;
 pub use event::{AnalyticsKeyEvent, RawWheelResolution, ReprogControlsEvent, decode_event};
 
 /// Implements the `SpecialKeysMseButtons` / `0x1b04` feature.
+#[derive(Feature)]
+#[creatable(id = 0x1b04, version = 0)]
 pub struct ReprogControlsFeature {
     endpoint: FeatureEndpoint,
     events: EventSource<ReprogControlsEvent>,
-}
-
-impl CreatableFeature for ReprogControlsFeature {
-    const ID: u16 = 0x1b04;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let events = EventSource::attach(&chan, device_index, feature_index);
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            events,
-        }
-    }
-}
-
-impl Feature for ReprogControlsFeature {}
-
-impl EmittingFeature<ReprogControlsEvent> for ReprogControlsFeature {
-    fn listen(&self) -> async_channel::Receiver<ReprogControlsEvent> {
-        self.events.listen()
-    }
 }
 
 impl ReprogControlsFeature {

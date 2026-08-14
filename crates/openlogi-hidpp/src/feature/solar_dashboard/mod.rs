@@ -7,15 +7,13 @@ pub mod event;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
 pub use event::{SolarEvent, SolarStatus};
 
 use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, EmittingFeature, EventSource, Feature, FeatureEndpoint},
+    feature::{EventSource, FeatureEndpoint},
     protocol::v20::Hidpp20Error,
 };
 
@@ -36,33 +34,14 @@ pub enum LedId {
 }
 
 /// Implements the `SolarKeyboardDashboard` / `0x4301` feature.
+#[derive(Feature)]
+#[creatable(id = 0x4301, version = 0)]
 pub struct SolarDashboardFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
     /// Publishes decoded events to listeners.
     events: EventSource<SolarEvent>,
-}
-
-impl CreatableFeature for SolarDashboardFeature {
-    const ID: u16 = 0x4301;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let events = EventSource::attach(&chan, device_index, feature_index);
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            events,
-        }
-    }
-}
-
-impl Feature for SolarDashboardFeature {}
-
-impl EmittingFeature<SolarEvent> for SolarDashboardFeature {
-    fn listen(&self) -> async_channel::Receiver<SolarEvent> {
-        self.events.listen()
-    }
 }
 
 impl SolarDashboardFeature {

@@ -1,12 +1,8 @@
 //! Implements `Sidetone` (feature `0x8300`) for audio devices.
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 /// Per-channel sidetone mute statuses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -28,24 +24,12 @@ pub struct SidetoneMuteChange {
 }
 
 /// Implements the `Sidetone` / `0x8300` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x8300, version = 1)]
 pub struct SidetoneFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for SidetoneFeature {
-    const ID: u16 = 0x8300;
-    const STARTING_VERSION: u8 = 1;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for SidetoneFeature {}
 
 impl SidetoneFeature {
     /// Retrieves the sidetone level, in the documented `0..=100` range.

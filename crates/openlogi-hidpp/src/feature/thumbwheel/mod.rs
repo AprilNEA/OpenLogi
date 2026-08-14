@@ -1,46 +1,23 @@
 //! Implements the `Thumbwheel` feature (ID `0x2150`) that allows configuration
 //! and diversion of thumbwheel events.
 
-use std::sync::Arc;
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
 use crate::{
-    channel::HidppChannel,
-    feature::{
-        CreatableFeature, DecodeEvent, EmittingFeature, EventSource, Feature, FeatureEndpoint,
-    },
+    feature::{DecodeEvent, EventSource, FeatureEndpoint},
     protocol::v20::Hidpp20Error,
 };
 
 /// Implements the `Thumbwheel` / `0x2150` feature.
+#[derive(Feature)]
+#[creatable(id = 0x2150, version = 0)]
 pub struct ThumbwheelFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
     /// Publishes decoded events to listeners.
     events: EventSource<ThumbwheelEvent>,
-}
-
-impl CreatableFeature for ThumbwheelFeature {
-    const ID: u16 = 0x2150;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let events = EventSource::attach(&chan, device_index, feature_index);
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            events,
-        }
-    }
-}
-
-impl Feature for ThumbwheelFeature {}
-
-impl EmittingFeature<ThumbwheelEvent> for ThumbwheelFeature {
-    fn listen(&self) -> async_channel::Receiver<ThumbwheelEvent> {
-        self.events.listen()
-    }
 }
 
 impl DecodeEvent for ThumbwheelEvent {

@@ -1,12 +1,10 @@
 //! Implements function-key inversion features.
 
-use std::sync::Arc;
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
 use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint, hosts_info::HostIndex},
+    feature::{FeatureEndpoint, hosts_info::HostIndex},
     protocol::v20::Hidpp20Error,
 };
 
@@ -54,24 +52,12 @@ pub struct FnInversionInfo {
 }
 
 /// Implements `FnInversionForMultiHostDevices` / `0x40a3`.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x40a3, version = 0)]
 pub struct FnInversionMultiHostFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for FnInversionMultiHostFeature {
-    const ID: u16 = 0x40a3;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for FnInversionMultiHostFeature {}
 
 impl FnInversionMultiHostFeature {
     /// Retrieves global Fn inversion for `host`.
@@ -148,24 +134,12 @@ impl GlobalFnInversion {
 /// This is the single-host predecessor of
 /// [`FnInversionMultiHostFeature`] (`0x40a3`): the inversion state is global
 /// rather than per host slot.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x40a2, version = 0)]
 pub struct FnInversionWithDefaultStateFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for FnInversionWithDefaultStateFeature {
-    const ID: u16 = 0x40a2;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for FnInversionWithDefaultStateFeature {}
 
 impl FnInversionWithDefaultStateFeature {
     /// Retrieves the global Fn inversion state and its default.

@@ -1,35 +1,21 @@
 //! Implements the `DeviceTypeAndName` feature (ID `0x0005`) that provides some
 //! information about the marketing type and name of a device.
 
-use std::sync::Arc;
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
 use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
+    feature::FeatureEndpoint,
     protocol::v20::{self, Hidpp20Error},
 };
 
 /// Implements the `DeviceTypeAndName` / `0x0005` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x0005, version = 0)]
 pub struct DeviceTypeAndNameFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for DeviceTypeAndNameFeature {
-    const ID: u16 = 0x0005;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for DeviceTypeAndNameFeature {}
 
 impl DeviceTypeAndNameFeature {
     /// Retrieves the amount of characters in the marketing name of the device.

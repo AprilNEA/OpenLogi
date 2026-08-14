@@ -7,15 +7,13 @@ pub mod event;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
 pub use event::{DualXyData, TouchPoint, TouchpadRawEvent};
 
 use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, EmittingFeature, EventSource, Feature, FeatureEndpoint},
+    feature::{EventSource, FeatureEndpoint},
     protocol::v20::Hidpp20Error,
 };
 
@@ -107,33 +105,14 @@ impl TouchpadInfo {
 }
 
 /// Implements the `TouchpadRawXy` / `0x6100` feature.
+#[derive(Feature)]
+#[creatable(id = 0x6100, version = 0)]
 pub struct TouchpadRawXyFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
     /// Publishes decoded events to listeners.
     events: EventSource<TouchpadRawEvent>,
-}
-
-impl CreatableFeature for TouchpadRawXyFeature {
-    const ID: u16 = 0x6100;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let events = EventSource::attach(&chan, device_index, feature_index);
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            events,
-        }
-    }
-}
-
-impl Feature for TouchpadRawXyFeature {}
-
-impl EmittingFeature<TouchpadRawEvent> for TouchpadRawXyFeature {
-    fn listen(&self) -> async_channel::Receiver<TouchpadRawEvent> {
-        self.events.listen()
-    }
 }
 
 impl TouchpadRawXyFeature {

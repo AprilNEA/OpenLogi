@@ -1,46 +1,25 @@
 //! Implements the `UnifiedBattery` feature (ID `0x1004`) that provides
 //! information about the battery status of the device.
 
-use std::{collections::HashSet, hash::Hash, sync::Arc};
+use std::{collections::HashSet, hash::Hash};
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
 use crate::{
-    channel::HidppChannel,
-    feature::{
-        CreatableFeature, DecodeEvent, EmittingFeature, EventSource, Feature, FeatureEndpoint,
-    },
+    feature::{DecodeEvent, EventSource, FeatureEndpoint},
     protocol::v20::Hidpp20Error,
 };
 
 /// Implements the `UnifiedBattery` / `0x1004` feature.
+#[derive(Feature)]
+#[creatable(id = 0x1004, version = 0)]
 pub struct UnifiedBatteryFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
     /// Publishes decoded events to listeners.
     events: EventSource<BatteryEvent>,
-}
-
-impl CreatableFeature for UnifiedBatteryFeature {
-    const ID: u16 = 0x1004;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let events = EventSource::attach(&chan, device_index, feature_index);
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            events,
-        }
-    }
-}
-
-impl Feature for UnifiedBatteryFeature {}
-
-impl EmittingFeature<BatteryEvent> for UnifiedBatteryFeature {
-    fn listen(&self) -> async_channel::Receiver<BatteryEvent> {
-        self.events.listen()
-    }
 }
 
 impl DecodeEvent for BatteryEvent {

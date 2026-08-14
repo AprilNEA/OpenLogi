@@ -44,3 +44,7 @@ bitflags = { version = "2", features = ["serde"] }
 # OpenLogi-specific: request-level wire tracing at trace!. Off by default
 # (level-gated); enable with OPENLOGI_LOG=hidpp=trace. Not in upstream hidpp.
 tracing = { workspace = true }
+# OpenLogi-specific: generates the mechanical CreatableFeature/Feature impls
+# for feature structs shaped `{ endpoint: FeatureEndpoint }` or `{ endpoint,
+# events: EventSource<Event> }`. Not in upstream hidpp; used only here.
+openlogi-hidpp-derive = { version = "0.6.27", path = "../openlogi-hidpp-derive" }

@@ -1,34 +1,20 @@
 //! Implements the `SmartShift` feature (ID `0x2110`) that allows controlling a
 //! smart shift enhanced scroll wheel.
 
-use std::{hash::Hash, sync::Arc};
+use std::hash::Hash;
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 /// Implements the `SmartShift` / `0x2110` feature.
+#[derive(Feature)]
+#[creatable(id = 0x2110, version = 0)]
 pub struct SmartShiftFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for SmartShiftFeature {
-    const ID: u16 = 0x2110;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for SmartShiftFeature {}
 
 impl SmartShiftFeature {
     /// Retrieves the current ratchet control mode.

@@ -1,12 +1,8 @@
 //! Implements `ModeStatus` (feature `0x8090`).
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 bitflags::bitflags! {
     /// The first mode-status byte.
@@ -56,24 +52,12 @@ pub struct ModeStatusChange {
 }
 
 /// Implements the `ModeStatus` / `0x8090` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x8090, version = 1)]
 pub struct ModeStatusFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for ModeStatusFeature {
-    const ID: u16 = 0x8090;
-    const STARTING_VERSION: u8 = 1;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for ModeStatusFeature {}
 
 impl ModeStatusFeature {
     /// Retrieves the current mode status.

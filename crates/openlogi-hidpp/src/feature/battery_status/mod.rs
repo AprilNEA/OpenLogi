@@ -10,34 +10,20 @@
 //! `getBatteryCapability` (function `1`) and the broadcast event aren't needed
 //! to display a charge reading.
 
-use std::{hash::Hash, sync::Arc};
+use std::hash::Hash;
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 /// Implements the legacy `BatteryStatus` / `0x1000` feature.
+#[derive(Feature)]
+#[creatable(id = 0x1000, version = 0)]
 pub struct BatteryStatusFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for BatteryStatusFeature {
-    const ID: u16 = 0x1000;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for BatteryStatusFeature {}
 
 impl BatteryStatusFeature {
     /// Reads the current battery level and charging status (function `0`,

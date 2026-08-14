@@ -1,12 +1,10 @@
 //! Implements `MultiPlatform` (feature `0x4531`).
 
-use std::sync::Arc;
-
 use num_enum::TryFromPrimitive;
+use openlogi_hidpp_derive::Feature;
 
 use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint, hosts_info::HostIndex},
+    feature::{FeatureEndpoint, hosts_info::HostIndex},
     protocol::v20::Hidpp20Error,
 };
 
@@ -124,24 +122,12 @@ pub struct HostPlatform {
 }
 
 /// Implements the `MultiPlatform` / `0x4531` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x4531, version = 1)]
 pub struct MultiPlatformFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for MultiPlatformFeature {
-    const ID: u16 = 0x4531;
-    const STARTING_VERSION: u8 = 1;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for MultiPlatformFeature {}
 
 impl MultiPlatformFeature {
     /// Retrieves feature capabilities and platform counts.

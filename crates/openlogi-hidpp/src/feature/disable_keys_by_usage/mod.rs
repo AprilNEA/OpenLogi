@@ -4,11 +4,10 @@
 //! Unlike [`DisableKeys`](super::disable_keys) (`0x4521`), which toggles a fixed
 //! set of lock keys, this feature operates on any 8-bit keyboard HID usage.
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
 use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
+    feature::FeatureEndpoint,
     protocol::v20::{ErrorType, Hidpp20Error},
 };
 
@@ -16,24 +15,12 @@ use crate::{
 const USAGES_PER_PACKET: usize = 16;
 
 /// Implements the `DisableKeysByUsage` / `0x4522` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x4522, version = 0)]
 pub struct DisableKeysByUsageFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for DisableKeysByUsageFeature {
-    const ID: u16 = 0x4522;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for DisableKeysByUsageFeature {}
 
 impl DisableKeysByUsageFeature {
     /// Retrieves the maximum number of usages that can be disabled at once.

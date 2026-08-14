@@ -1,33 +1,17 @@
 //! Implements the `AdjustableDpi` feature (ID `0x2201`) that allows reading
 //! and changing a mouse sensor's DPI.
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 /// Implements the `AdjustableDpi` / `0x2201` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x2201, version = 0)]
 pub struct AdjustableDpiFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for AdjustableDpiFeature {
-    const ID: u16 = 0x2201;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for AdjustableDpiFeature {}
 
 impl AdjustableDpiFeature {
     /// Retrieves the number of sensors the device exposes.

@@ -1,12 +1,8 @@
 //! Implements the legacy `ReportRate` feature (ID `0x8060`).
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 bitflags::bitflags! {
     /// Report-rate values supported by a `0x8060` device, encoded as milliseconds.
@@ -33,24 +29,12 @@ bitflags::bitflags! {
 }
 
 /// Implements the `ReportRate` / `0x8060` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x8060, version = 0)]
 pub struct ReportRateFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for ReportRateFeature {
-    const ID: u16 = 0x8060;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for ReportRateFeature {}
 
 impl ReportRateFeature {
     /// Retrieves the supported report intervals in milliseconds.

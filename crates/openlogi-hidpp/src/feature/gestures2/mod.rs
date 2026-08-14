@@ -3,13 +3,9 @@
 //! MX Master 2S exposes its horizontal thumb wheel as gesture id 46 under
 //! `0x6501`, not through the newer dedicated `0x2150 Thumbwheel` feature.
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 /// Gestures2 gesture id for the horizontal thumb wheel.
 pub const THUMBWHEEL_GESTURE_ID: u8 = 46;
@@ -74,23 +70,11 @@ fn diversion_write_payload(index: u16, diverted: bool) -> Result<[u8; 16], Hidpp
 }
 
 /// Typed accessor for legacy `Gestures2` descriptor discovery.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x6501, version = 0)]
 pub struct Gestures2Feature {
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for Gestures2Feature {
-    const ID: u16 = 0x6501;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for Gestures2Feature {}
 
 impl Gestures2Feature {
     /// Find gesture id 46 (Thumbwheel) and its diversion index. Merely exposing

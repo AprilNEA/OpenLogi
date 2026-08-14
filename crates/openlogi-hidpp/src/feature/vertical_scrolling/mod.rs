@@ -1,14 +1,9 @@
 //! Implements `VerticalScrolling` (feature `0x2100`).
 
-use std::sync::Arc;
-
 use num_enum::TryFromPrimitive;
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 /// Roller type reported by `VerticalScrolling`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, TryFromPrimitive)]
@@ -55,24 +50,12 @@ pub struct RollerInfo {
 }
 
 /// Implements the `VerticalScrolling` / `0x2100` feature.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x2100, version = 0)]
 pub struct VerticalScrollingFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for VerticalScrollingFeature {
-    const ID: u16 = 0x2100;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for VerticalScrollingFeature {}
 
 impl VerticalScrollingFeature {
     /// Retrieves roller information.

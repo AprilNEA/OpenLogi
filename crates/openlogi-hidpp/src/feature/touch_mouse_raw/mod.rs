@@ -7,15 +7,13 @@ pub mod event;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
 pub use event::{TouchMousePoint, TouchMouseRawEvent, TouchMouseStatus};
 
 use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, EmittingFeature, EventSource, Feature, FeatureEndpoint},
+    feature::{EventSource, FeatureEndpoint},
     protocol::v20::Hidpp20Error,
 };
 
@@ -88,33 +86,14 @@ impl TouchMouseInfo {
 }
 
 /// Implements the `TouchMouseRaw` / `0x6110` feature.
+#[derive(Feature)]
+#[creatable(id = 0x6110, version = 0)]
 pub struct TouchMouseRawFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
     /// Publishes decoded events to listeners.
     events: EventSource<TouchMouseRawEvent>,
-}
-
-impl CreatableFeature for TouchMouseRawFeature {
-    const ID: u16 = 0x6110;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let events = EventSource::attach(&chan, device_index, feature_index);
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            events,
-        }
-    }
-}
-
-impl Feature for TouchMouseRawFeature {}
-
-impl EmittingFeature<TouchMouseRawEvent> for TouchMouseRawFeature {
-    fn listen(&self) -> async_channel::Receiver<TouchMouseRawEvent> {
-        self.events.listen()
-    }
 }
 
 impl TouchMouseRawFeature {

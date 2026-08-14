@@ -15,7 +15,7 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
 pub use event::IlluminationEvent;
 pub use types::{
@@ -25,8 +25,7 @@ pub use types::{
 
 use self::types::{be16, illumination_state};
 use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, EmittingFeature, EventSource, Feature, FeatureEndpoint},
+    feature::{EventSource, FeatureEndpoint},
     protocol::v20::{ErrorType, Hidpp20Error},
 };
 
@@ -47,33 +46,14 @@ const FN_SET_COLOR_TEMPERATURE_LEVELS: u8 = 11;
 const FN_GET_BRIGHTNESS_EFFECTIVE_MAX: u8 = 12;
 
 /// Implements the `Illumination` / `0x1990` feature.
+#[derive(Feature)]
+#[creatable(id = 0x1990, version = 0)]
 pub struct IlluminationFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 
     /// Publishes decoded events to listeners.
     events: EventSource<IlluminationEvent>,
-}
-
-impl CreatableFeature for IlluminationFeature {
-    const ID: u16 = 0x1990;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        let events = EventSource::attach(&chan, device_index, feature_index);
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-            events,
-        }
-    }
-}
-
-impl Feature for IlluminationFeature {}
-
-impl EmittingFeature<IlluminationEvent> for IlluminationFeature {
-    fn listen(&self) -> async_channel::Receiver<IlluminationEvent> {
-        self.events.listen()
-    }
 }
 
 impl IlluminationFeature {

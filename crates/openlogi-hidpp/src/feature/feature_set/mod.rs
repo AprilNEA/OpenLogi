@@ -1,11 +1,10 @@
 //! Implements the `FeatureSet` feature (ID `0x0001`) that allows enumerating
 //! all the features supported by a device.
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
 use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint, FeatureType},
+    feature::{FeatureEndpoint, FeatureType},
     protocol::v20::Hidpp20Error,
 };
 
@@ -16,24 +15,12 @@ use crate::{
 /// supported features (excluding the root feature). Then call
 /// [`Self::get_feature`] for every `i in 1..=count` (1-based, as accessing the
 /// root feature is not allowed).
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x0001, version = 0)]
 pub struct FeatureSetFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for FeatureSetFeature {
-    const ID: u16 = 0x0001;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for FeatureSetFeature {}
 
 impl FeatureSetFeature {
     /// Retrieves the amount of features supported by the device, not including

@@ -16,32 +16,17 @@
 //! reverse-engineered, and the decoding here follows Solaar
 //! (`decipher_battery_voltage`) and libratbag's consensus on the flag bits.
 
-use std::sync::Arc;
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 /// Implements the `BatteryVoltage` / `0x1001` feature.
+#[derive(Feature)]
+#[creatable(id = 0x1001, version = 0)]
 pub struct BatteryVoltageFeature {
     /// The endpoint this feature talks to.
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for BatteryVoltageFeature {
-    const ID: u16 = 0x1001;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for BatteryVoltageFeature {}
 
 impl BatteryVoltageFeature {
     /// Reads the measured battery voltage and charging state (function `0`,
