@@ -631,8 +631,10 @@ async fn timed<T>(
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::sync::RwLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    use super::choose_authoritative;
+    use super::*;
 
     #[test]
     fn current_capture_wins_without_consulting_the_registry_again() {
@@ -662,5 +664,94 @@ mod tests {
         let selected = choose_authoritative(Some("stale"), |_| false, || None);
 
         assert_eq!(selected, None);
+    }
+
+    fn unresolvable_route() -> DeviceRoute {
+        // A route no capture/registry in this test ever publishes — every
+        // resolve attempt against it takes the registry-miss path.
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc52b,
+        }
+    }
+
+    /// `DeviceOp::run` must fail fast on a registry miss ([`DeviceNotFound`],
+    /// the same path `authoritative_channel` uses to clear the haptic feature
+    /// cache) and must never invoke `f` — a route that can't be resolved has no
+    /// channel to hand it, so running the caller's write would be a bug, not a
+    /// no-op.
+    #[tokio::test]
+    async fn run_on_a_registry_miss_returns_device_not_found_without_calling_f() {
+        let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
+        let registry = ChannelRegistry::default();
+        let receiver_access = ReceiverAccess::default();
+        let route = unresolvable_route();
+        let called = std::sync::Arc::new(AtomicBool::new(false));
+        let called_for_closure = std::sync::Arc::clone(&called);
+
+        let result = DeviceOp::new(&capture, &registry, &receiver_access, &route)
+            .run(HidppOperation::WriteDpi, move |_shared| {
+                called_for_closure.store(true, Ordering::SeqCst);
+                async move { Ok::<(), WriteError>(()) }
+            })
+            .await;
+
+        assert!(matches!(result, Err(WriteError::DeviceNotFound)));
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "f must not run when the route can't be resolved"
+        );
+    }
+
+    /// `DeviceOp::detach` resolves before spawning, so a registry miss must
+    /// return synchronously (no thread, no lease wait) and never call `f`.
+    #[tokio::test]
+    async fn detach_on_a_registry_miss_never_calls_f() {
+        let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
+        let registry = ChannelRegistry::default();
+        let receiver_access = ReceiverAccess::default();
+        let route = unresolvable_route();
+        let called = std::sync::Arc::new(AtomicBool::new(false));
+        let called_for_closure = std::sync::Arc::clone(&called);
+
+        DeviceOp::new(&capture, &registry, &receiver_access, &route).detach(
+            "test write",
+            move |_shared| {
+                called_for_closure.store(true, Ordering::SeqCst);
+                async move { Ok::<(), WriteError>(()) }
+            },
+        );
+
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "f must not run when the route can't be resolved"
+        );
+    }
+
+    /// The timeout every [`DeviceOp::run`] call relies on: a write that never
+    /// resolves within `WRITE_BUDGET` must map to
+    /// [`WriteError::RequestTimedOut`] carrying the operation, not hang
+    /// forever. Uses a paused clock so the test doesn't spend `WRITE_BUDGET`
+    /// (5s) of real wall-clock time.
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used, reason = "expect is idiomatic in tests")]
+    async fn timed_maps_an_elapsed_deadline_to_request_timed_out() {
+        let handle = tokio::spawn(timed(
+            HidppOperation::WriteDpi,
+            std::future::pending::<Result<(), WriteError>>(),
+        ));
+        // Let the spawned task run up to its first await point so the
+        // underlying sleep is armed before we fast-forward the clock past it.
+        tokio::task::yield_now().await;
+        tokio::time::advance(WRITE_BUDGET + Duration::from_millis(1)).await;
+
+        let result = handle.await.expect("timed task must not panic");
+
+        assert!(matches!(
+            result,
+            Err(WriteError::RequestTimedOut {
+                operation: HidppOperation::WriteDpi
+            })
+        ));
     }
 }
