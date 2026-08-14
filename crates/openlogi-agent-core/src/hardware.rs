@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, ChannelRegistry, DeviceRoute, DpiInfo, HapticWaveform, HidppFeatureErrorKind,
-    HidppOperation, ScrollResolution, SharedChannel, SmartShiftMode, SmartShiftStatus, WriteError,
+    CaptureChannel, ChannelRegistry, DeviceRoute, DpiInfo, HidppFeatureErrorKind, HidppOperation,
+    ScrollResolution, SharedChannel, SmartShiftMode, SmartShiftStatus, WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
@@ -596,7 +596,8 @@ pub fn set_lighting_in_background(op: DeviceOp<'_>, lighting: &Lighting) {
 
 /// Resolve a [`Lighting`] config to an `(r, g, b)` triple: the configured
 /// colour scaled by brightness, or black when lighting is off.
-fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
+#[must_use]
+pub fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
     if !lighting.enabled {
         return (0, 0, 0);
     }
@@ -606,147 +607,14 @@ fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
     (scale(r), scale(g), scale(b))
 }
 
-// Async, awaitable variants used by the IPC server (the GUI routes "apply now"
-// / "read" device commands through the agent, which awaits and reports the
-// result). They use a registry-confirmed capture channel or the exact current
-// inventory channel, exactly like the fire-and-forget `*_in_background`
-// helpers, so the daemon never opens a second channel to a device it holds.
-
-/// Apply `dpi` to `route` on its current inventory-owned channel.
-pub async fn apply_dpi(
-    capture: &CaptureChannel,
-    registry: &ChannelRegistry,
-    receiver_access: &ReceiverAccess,
-    route: &DeviceRoute,
-    dpi: u32,
-) -> Result<(), WriteError> {
-    // Reject a DPI beyond the HID++ u16 wire field the same way the device
-    // itself would reject an out-of-range argument.
-    let dpi = u16::try_from(dpi).map_err(|_| WriteError::HidppFeature {
+/// Reject a DPI beyond the HID++ `u16` wire field the same way the device
+/// itself would reject an out-of-range argument, rather than clamping it.
+pub fn dpi_wire_value(dpi: u32) -> Result<u16, WriteError> {
+    u16::try_from(dpi).map_err(|_| WriteError::HidppFeature {
         operation: HidppOperation::WriteDpi,
         feature_hex: 0x2201,
         kind: HidppFeatureErrorKind::OutOfRange,
-    })?;
-    let _lease = receiver_access.acquire_for_io().await;
-    let shared = authoritative_channel(Some(capture), registry, route)?;
-    timed(
-        HidppOperation::WriteDpi,
-        openlogi_hid::set_dpi_on(&shared, dpi),
-    )
-    .await
-}
-
-/// Apply a full SmartShift config to `route` (capture-channel-aware).
-pub async fn apply_smartshift(
-    capture: &CaptureChannel,
-    registry: &ChannelRegistry,
-    receiver_access: &ReceiverAccess,
-    route: &DeviceRoute,
-    mode: SmartShiftMode,
-    auto_disengage: u8,
-    tunable_torque: u8,
-) -> Result<(), WriteError> {
-    let _lease = receiver_access.acquire_for_io().await;
-    let shared = authoritative_channel(Some(capture), registry, route)?;
-    timed(
-        HidppOperation::WriteSmartShift,
-        openlogi_hid::set_smartshift_on(&shared, mode, auto_disengage, tunable_torque),
-    )
-    .await
-}
-
-/// Arm the firmware haptic engine (enable + non-zero intensity) for the
-/// device at `route`. Called once per Actions Ring session before the first
-/// hover — some power transitions clear the firmware state, after which plays
-/// are accepted silently. Returns `true` when a repair write was needed.
-pub async fn ensure_ring_haptics_armed(
-    capture: &CaptureChannel,
-    registry: &ChannelRegistry,
-    receiver_access: &ReceiverAccess,
-    route: &DeviceRoute,
-) -> Result<bool, WriteError> {
-    let _lease = receiver_access.acquire_for_io().await;
-    let shared = authoritative_channel(Some(capture), registry, route)?;
-    timed(
-        HidppOperation::PlayHaptic,
-        openlogi_hid::ensure_haptics_armed_on(registry, &shared),
-    )
-    .await
-}
-
-/// Play one Actions Ring haptic waveform on the registry-authoritative channel.
-///
-/// Haptics are best-effort feedback: the caller supplies a route only when the
-/// persisted ring setting and the live device capability both allow it, and
-/// failures are logged by the IPC handler without failing the interaction.
-pub async fn play_haptic(
-    capture: &CaptureChannel,
-    registry: &ChannelRegistry,
-    receiver_access: &ReceiverAccess,
-    route: &DeviceRoute,
-    waveform: HapticWaveform,
-) -> Result<(), WriteError> {
-    // Lease first, resolve second — the wait is unbounded, and a channel
-    // resolved before it can be retired by the enumerator while we queue. The
-    // play itself would still succeed on the retired handle; it is the feature
-    // cache that must not outlive the channel (see `EpochGuarded::store`).
-    let _lease = receiver_access.acquire_for_io().await;
-    let shared = authoritative_channel(Some(capture), registry, route)?;
-    timed(
-        HidppOperation::PlayHaptic,
-        openlogi_hid::play_haptic_on(registry, &shared, waveform),
-    )
-    .await
-}
-
-/// Apply a lighting config to the keyboard at `route`.
-pub async fn apply_lighting(
-    capture: &CaptureChannel,
-    registry: &ChannelRegistry,
-    receiver_access: &ReceiverAccess,
-    route: &DeviceRoute,
-    lighting: &Lighting,
-) -> Result<(), WriteError> {
-    let _lease = receiver_access.acquire_for_io().await;
-    let shared = authoritative_channel(Some(capture), registry, route)?;
-    let (r, g, b) = lighting_rgb(lighting);
-    timed(
-        HidppOperation::Lighting,
-        openlogi_hid::set_keyboard_color_on(&shared, r, g, b),
-    )
-    .await
-}
-
-/// Read the current DPI + supported values from `route`.
-pub async fn read_dpi(
-    capture: &CaptureChannel,
-    registry: &ChannelRegistry,
-    receiver_access: &ReceiverAccess,
-    route: &DeviceRoute,
-) -> Result<DpiInfo, WriteError> {
-    let _lease = receiver_access.acquire_for_io().await;
-    let shared = authoritative_channel(Some(capture), registry, route)?;
-    timed(
-        HidppOperation::ReadDpiCapabilities,
-        openlogi_hid::get_dpi_info_on(&shared),
-    )
-    .await
-}
-
-/// Read the current SmartShift config from `route`.
-pub async fn read_smartshift(
-    capture: &CaptureChannel,
-    registry: &ChannelRegistry,
-    receiver_access: &ReceiverAccess,
-    route: &DeviceRoute,
-) -> Result<SmartShiftStatus, WriteError> {
-    let _lease = receiver_access.acquire_for_io().await;
-    let shared = authoritative_channel(Some(capture), registry, route)?;
-    timed(
-        HidppOperation::ReadSmartShift,
-        openlogi_hid::get_smartshift_status_on(&shared),
-    )
-    .await
+    })
 }
 
 /// Bound any single HID++ call by [`WRITE_BUDGET`] so an asleep / unresponsive

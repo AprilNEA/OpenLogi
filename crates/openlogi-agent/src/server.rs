@@ -23,8 +23,8 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, DpiInfo, HapticWaveform, LightCommand, ReceiverSelector, SmartShiftMode,
-    SmartShiftStatus, WriteError,
+    DeviceRoute, DpiInfo, HapticWaveform, HidppOperation, LightCommand, ReceiverSelector,
+    SmartShiftMode, SmartShiftStatus, WriteError,
 };
 
 use crate::pairing::PairingManager;
@@ -113,14 +113,13 @@ impl Agent for AgentServer {
     }
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: u32) -> Result<(), WriteError> {
-        hardware::apply_dpi(
-            &self.shared.capture_channel,
-            &self.shared.channel_registry,
-            &self.shared.receiver_access,
-            &route,
-            dpi,
-        )
-        .await
+        let dpi = hardware::dpi_wire_value(dpi)?;
+        self.shared
+            .device(&route)
+            .run(HidppOperation::WriteDpi, |c| async move {
+                openlogi_hid::set_dpi_on(&c, dpi).await
+            })
+            .await
     }
 
     async fn set_lighting(
@@ -129,14 +128,13 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         lighting: Lighting,
     ) -> Result<(), WriteError> {
-        hardware::apply_lighting(
-            &self.shared.capture_channel,
-            &self.shared.channel_registry,
-            &self.shared.receiver_access,
-            &route,
-            &lighting,
-        )
-        .await
+        let (r, g, b) = hardware::lighting_rgb(&lighting);
+        self.shared
+            .device(&route)
+            .run(HidppOperation::Lighting, |c| async move {
+                openlogi_hid::set_keyboard_color_on(&c, r, g, b).await
+            })
+            .await
     }
 
     async fn set_smartshift(
@@ -147,26 +145,21 @@ impl Agent for AgentServer {
         auto_disengage: u8,
         tunable_torque: u8,
     ) -> Result<(), WriteError> {
-        hardware::apply_smartshift(
-            &self.shared.capture_channel,
-            &self.shared.channel_registry,
-            &self.shared.receiver_access,
-            &route,
-            mode,
-            auto_disengage,
-            tunable_torque,
-        )
-        .await
+        self.shared
+            .device(&route)
+            .run(HidppOperation::WriteSmartShift, |c| async move {
+                openlogi_hid::set_smartshift_on(&c, mode, auto_disengage, tunable_torque).await
+            })
+            .await
     }
 
     async fn read_dpi(self, _: Context, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
-        hardware::read_dpi(
-            &self.shared.capture_channel,
-            &self.shared.channel_registry,
-            &self.shared.receiver_access,
-            &route,
-        )
-        .await
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadDpiCapabilities, |c| async move {
+                openlogi_hid::get_dpi_info_on(&c).await
+            })
+            .await
     }
 
     async fn read_smartshift(
@@ -174,13 +167,12 @@ impl Agent for AgentServer {
         _: Context,
         route: DeviceRoute,
     ) -> Result<SmartShiftStatus, WriteError> {
-        hardware::read_smartshift(
-            &self.shared.capture_channel,
-            &self.shared.channel_registry,
-            &self.shared.receiver_access,
-            &route,
-        )
-        .await
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadSmartShift, |c| async move {
+                openlogi_hid::get_smartshift_status_on(&c).await
+            })
+            .await
     }
 
     async fn request_accessibility_prompt(self, _: Context) {
@@ -352,12 +344,11 @@ async fn arm_firmware_haptics(shared: &SharedRuntime, route: &DeviceRoute) {
         };
         match tokio::time::timeout(
             remaining,
-            hardware::ensure_ring_haptics_armed(
-                &shared.capture_channel,
-                &shared.channel_registry,
-                &shared.receiver_access,
-                route,
-            ),
+            shared
+                .device(route)
+                .run(HidppOperation::PlayHaptic, |c| async move {
+                    openlogi_hid::ensure_haptics_armed_on(&shared.channel_registry, &c).await
+                }),
         )
         .await
         {
@@ -402,13 +393,11 @@ async fn play_within_budget(
         };
         match tokio::time::timeout(
             remaining,
-            hardware::play_haptic(
-                &shared.capture_channel,
-                &shared.channel_registry,
-                &shared.receiver_access,
-                route,
-                waveform,
-            ),
+            shared
+                .device(route)
+                .run(HidppOperation::PlayHaptic, |c| async move {
+                    openlogi_hid::play_haptic_on(&shared.channel_registry, &c, waveform).await
+                }),
         )
         .await
         {
