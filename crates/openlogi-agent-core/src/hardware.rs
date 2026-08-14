@@ -639,11 +639,19 @@ pub fn set_lighting_in_background(
         };
         let result = rt.block_on(async {
             let _lease = receiver_access.acquire_for_io().await;
-            openlogi_hid::set_keyboard_color_on(&shared, r, g, b).await
+            tokio::time::timeout(
+                WRITE_BUDGET,
+                openlogi_hid::set_keyboard_color_on(&shared, r, g, b),
+            )
+            .await
         });
         match result {
-            Ok(()) => debug!(r, g, b, "lighting written to keyboard"),
-            Err(e) => warn!(error = ?e, "lighting write failed"),
+            Ok(Ok(())) => debug!(r, g, b, "lighting written to keyboard"),
+            Ok(Err(e)) => warn!(error = ?e, "lighting write failed"),
+            Err(_) => warn!(
+                r,
+                g, b, "lighting write timed out (device asleep/unresponsive)"
+            ),
         }
     });
 }
