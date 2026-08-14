@@ -10,7 +10,7 @@ use thiserror::Error;
 ///
 /// Crosses the agent↔GUI IPC (`start_pairing`), so variant order is wire
 /// format — changes require a `PROTOCOL_VERSION` bump (guarded by
-/// `openlogi-agent-core/tests/wire_format.rs`).
+/// `openlogi-ipc/tests/wire_format.rs`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ReceiverSelector {
     /// The first supported receiver found — fine for the common single-receiver case.
@@ -33,7 +33,7 @@ pub enum Click {
 /// Crosses the agent↔GUI IPC (inside `PairingUpdate::Passkey`, [`Click`]
 /// included), so variant and field order are wire format — changes require a
 /// `PROTOCOL_VERSION` bump (guarded by
-/// `openlogi-agent-core/tests/wire_format.rs`).
+/// `openlogi-ipc/tests/wire_format.rs`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PasskeyMethod {
     /// Type these digits on the new keyboard, then press Enter.
@@ -51,7 +51,7 @@ pub enum PasskeyMethod {
 /// Errors raised by pairing operations.
 ///
 /// Pure data — no `hidpp`/`async-hid` types — but not itself a wire type:
-/// the agent maps it to `openlogi_ipc::ipc::PairingFailure`, which crosses
+/// the agent maps it to `openlogi_ipc::PairingFailure`, which crosses
 /// the IPC boundary. The conversion from `async_hid::HidError` lives in
 /// `openlogi_hid::pairing`, which this crate must never depend on.
 #[derive(Clone, Debug, Error)]

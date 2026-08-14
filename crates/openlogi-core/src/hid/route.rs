@@ -27,7 +27,7 @@ pub const DIRECT_DEVICE_INDEX: u8 = 0xff;
 ///
 /// Crosses the agent↔GUI IPC (every per-device RPC takes one), so variant and
 /// field order are wire format — changes require a `PROTOCOL_VERSION` bump
-/// (guarded by `openlogi-agent-core/tests/wire_format.rs`).
+/// (guarded by `openlogi-ipc/tests/wire_format.rs`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceRoute {
     /// Paired to a Logi Bolt receiver. `receiver_uid` disambiguates multiple

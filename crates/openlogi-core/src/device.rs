@@ -405,7 +405,7 @@ pub struct StandaloneDevice {
 /// [`PairedDevice`], battery/model-info/capability types). bincode encodes
 /// field and variant *order*, so reordering, retyping, or wrapping any field
 /// in this tree is a wire-format change and requires a `PROTOCOL_VERSION`
-/// bump (guarded by `openlogi-agent-core/tests/wire_format.rs`).
+/// bump (guarded by `openlogi-ipc/tests/wire_format.rs`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceInventory {
     /// The receiver's identity — synthetic (mirroring the device itself)

@@ -105,7 +105,7 @@ impl DpiCapabilities {
 ///
 /// Crosses the agent↔GUI IPC (`read_dpi`, [`DpiCapabilities`] included), so
 /// field order is wire format — changes require a `PROTOCOL_VERSION` bump
-/// (guarded by `openlogi-agent-core/tests/wire_format.rs`).
+/// (guarded by `openlogi-ipc/tests/wire_format.rs`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DpiInfo {
     /// DPI currently configured on sensor 0.

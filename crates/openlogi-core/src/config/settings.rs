@@ -209,7 +209,7 @@ const fn default_thumbwheel_sensitivity() -> i32 {
 ///
 /// Crosses the agent↔GUI IPC (`set_lighting`), so field order is wire format —
 /// changes require a `PROTOCOL_VERSION` bump (guarded by
-/// `openlogi-agent-core/tests/wire_format.rs`).
+/// `openlogi-ipc/tests/wire_format.rs`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lighting {
     /// Master on/off for the device's lighting. The color and brightness

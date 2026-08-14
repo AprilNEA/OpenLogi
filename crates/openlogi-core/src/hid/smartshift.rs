@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// Also crosses the agent↔GUI IPC — where serde encodes the variant *index*
 /// (Free=0, Ratchet=1), not the `#[repr(u8)]` firmware discriminant — so
 /// variant order is wire format and changes require a `PROTOCOL_VERSION` bump
-/// (guarded by `openlogi-agent-core/tests/wire_format.rs`).
+/// (guarded by `openlogi-ipc/tests/wire_format.rs`).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize,
 )]
@@ -78,7 +78,7 @@ pub const AUTO_DISENGAGE_PERMANENT: u8 = 0xff;
 ///
 /// Crosses the agent↔GUI IPC (`read_smartshift`), so field order is wire
 /// format — changes require a `PROTOCOL_VERSION` bump (guarded by
-/// `openlogi-agent-core/tests/wire_format.rs`).
+/// `openlogi-ipc/tests/wire_format.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmartShiftStatus {
     /// Current wheel mode.

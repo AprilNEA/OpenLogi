@@ -26,7 +26,8 @@ sits beneath both.
 | `crates/openlogi-cli` | `clap` command tree: `list`, `assets`, `diag` |
 | `crates/openlogi-hook` | OS input capture: CGEventTap / evdev+uinput / WH_MOUSE_LL |
 | `crates/openlogi-inject` | OS input synthesis: CGEvent / uinput+MPRIS / SendInput |
-| `crates/openlogi-agent-core` | Shared orchestration + the tarpc IPC contract (`src/ipc.rs`) |
+| `crates/openlogi-agent-core` | Shared agent orchestration: hook runtime, HID++ writes, DPI cycle, Actions Ring session state |
+| `crates/openlogi-ipc` | The tarpc IPC contract (`src/ipc.rs`) + its local-socket transport, shared by agent and GUI |
 | `crates/openlogi-agent` | The `openlogi-agent` binary — hook + device I/O server |
 | `crates/openlogi-gui` | GPUI + gpui-component desktop app — polls the agent, no device I/O |
 | `xtask` | `cargo xtask` maintenance: bundling, packaging, release manifest |
@@ -107,13 +108,13 @@ warnings fail there too.
 ### Wire format / IPC (another silent CI red)
 
 If the change touches anything that crosses the agent↔GUI boundary
-(`ipc.rs`, serde enums in hid write errors, `DeviceKind`, …):
+(`crates/openlogi-ipc/src/ipc.rs`, serde enums in hid write errors, `DeviceKind`, …):
 
 - Enums are **append-only** (serde index = wire). New variants go at the end.
 - Bump `PROTOCOL_VERSION` and regenerate
-  `crates/openlogi-agent-core/tests/wire_format.rs` goldens from the failure
+  `crates/openlogi-ipc/tests/wire_format.rs` goldens from the failure
   message (`left` is the new encoding).
-- Run `cargo test -p openlogi-agent-core --test wire_format` before push.
+- Run `cargo test -p openlogi-ipc --test wire_format` before push.
 
 ### i18n
 
@@ -292,7 +293,7 @@ before editing that area.
 |---|---|
 | `crates/openlogi-gui/**` (GPUI app) | `.claude/rules/gui.md` |
 | `crates/openlogi-gui/locales/**`, `src/i18n.rs` | `.claude/rules/i18n.md` |
-| `crates/openlogi-agent-core/**`, `crates/openlogi-agent/**` (IPC wire) | `.claude/rules/ipc-protocol.md` |
+| `crates/openlogi-agent-core/**`, `crates/openlogi-agent/**`, `crates/openlogi-ipc/**` (IPC wire) | `.claude/rules/ipc-protocol.md` |
 | `crates/openlogi-hidpp/**`, `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |
 | `crates/openlogi-hook/**` (event taps) | `.claude/rules/hook.md` |
 | `xtask/**`, `packaging/**`, `scripts/**` | `.claude/rules/xtask.md` (+ `xtask/README.md`) |
