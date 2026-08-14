@@ -29,6 +29,7 @@ members = [
     "crates/openlogi-camera",
     "crates/openlogi-assets",
     "crates/openlogi-cli",
+    "crates/openlogi-ipc",
     "crates/openlogi-agent-core",
     "crates/openlogi-agent",
     "crates/openlogi-gui",

@@ -93,3 +93,13 @@ publish = false
 name = "openlogi-agent"
 release = false
 publish = false
+
+# Leaf IPC contract crate for the agent<->GUI boundary. Only the two app
+# crates above depend on it, so it stays unpublished like they do; if a
+# published crate (openlogi-cli, openlogi-hid, …) ever depends on it, it must
+# move into the "openlogi" version_group instead — a published crate cannot
+# depend on an unpublished path dependency.
+[[package]]
+name = "openlogi-ipc"
+release = false
+publish = false

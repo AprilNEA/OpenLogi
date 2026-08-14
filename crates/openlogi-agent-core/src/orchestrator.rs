@@ -15,23 +15,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::binding::Action;
+use openlogi_core::bindings::{bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
 };
+use openlogi_core::device_order::DeviceStableId;
 use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceRoute,
     KEYBOARD_KEY_CIDS,
 };
+use openlogi_ipc::ipc::InventoryHealth;
 use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
-use crate::bindings::{bindings_for, oshook_gestures_for};
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
-use crate::device_order::DeviceStableId;
 use crate::hardware::DeviceOp;
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
-use crate::ipc::InventoryHealth;
 use crate::receiver_access::ReceiverAccess;
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
@@ -40,7 +40,7 @@ use crate::{DpiCycleState, DpiCycles};
 /// The minimal per-device facts the agent needs: the config key (binding /
 /// preset lookup), the HID++ route (DPI/SmartShift writes + capture target), and
 /// the identity fields the canonical ordering keys on (so the no-selection
-/// fallback agrees with the GUI carousel — see [`crate::device_order`]).
+/// fallback agrees with the GUI carousel — see [`openlogi_core::device_order`]).
 struct AgentDevice {
     config_key: String,
     model_key: String,

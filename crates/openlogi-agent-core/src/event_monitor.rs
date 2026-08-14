@@ -15,8 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use openlogi_hook::MouseEvent;
-
-use crate::ipc::MonitorEvent;
+use openlogi_ipc::ipc::MonitorEvent;
 
 /// A shared [`EventMonitor`], threaded between the hook callback (writer) and
 /// the IPC server (reader/poller).

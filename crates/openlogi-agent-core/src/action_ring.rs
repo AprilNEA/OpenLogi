@@ -9,19 +9,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::{Action, ActionRingIcon, ActionRingLayout, ActionRingSlot};
 use openlogi_hid::DeviceRoute;
+use openlogi_ipc::ipc::{ActionRingCommandError, ActionRingInvocation, ActionRingPresentation};
 use tokio::sync::Notify;
 
-use crate::ipc::{ActionRingCommandError, ActionRingInvocation, ActionRingPresentation};
-
 const LONG_POLL_HOLD: Duration = Duration::from_secs(20);
-
-/// How long the overlay keeps the ring on screen, counted from the moment its
-/// window opens. The overlay owns the display; the constant lives here so the
-/// session that has to outlive it is derived from it rather than kept in step
-/// by hand.
-pub const DISPLAY_LIFETIME: Duration = Duration::from_secs(15);
 
 /// Slack between the window closing and the session expiring.
 ///

@@ -5068,6 +5068,7 @@ dependencies = [
  "openlogi-core",
  "openlogi-hid",
  "openlogi-hook",
+ "openlogi-ipc",
  "plist",
  "sysinfo 0.38.4",
  "tarpc",
@@ -5083,15 +5084,12 @@ name = "openlogi-agent-core"
 version = "0.6.27"
 dependencies = [
  "async-hid",
- "bincode",
  "futures-lite",
- "interprocess",
  "openlogi-core",
  "openlogi-hid",
  "openlogi-hook",
  "openlogi-inject",
- "serde",
- "tarpc",
+ "openlogi-ipc",
  "tokio",
  "tracing",
 ]
@@ -5177,17 +5175,16 @@ dependencies = [
  "gpui-updater",
  "gpui_platform",
  "image",
- "interprocess",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "objc2-io-kit",
  "opener",
- "openlogi-agent-core",
  "openlogi-assets",
  "openlogi-camera",
  "openlogi-core",
  "openlogi-hook",
+ "openlogi-ipc",
  "rust-i18n",
  "serde",
  "serde_json",
@@ -5289,6 +5286,18 @@ dependencies = [
  "tracing-subscriber",
  "windows-sys 0.61.2",
  "zbus",
+]
+
+[[package]]
+name = "openlogi-ipc"
+version = "0.6.27"
+dependencies = [
+ "bincode",
+ "interprocess",
+ "openlogi-core",
+ "serde",
+ "tarpc",
+ "tokio",
 ]
 
 [[package]]
