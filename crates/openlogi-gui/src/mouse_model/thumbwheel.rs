@@ -23,13 +23,14 @@ pub(crate) enum ThumbwheelPreset {
     Desktops,
     Tracks,
     Volume,
+    VolumeReversed,
     CycleDpi,
     VerticalScroll,
     HorizontalScroll,
 }
 
 impl ThumbwheelPreset {
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::BackForward,
         Self::UndoRedo,
         Self::BrowserHistory,
@@ -37,6 +38,7 @@ impl ThumbwheelPreset {
         Self::Desktops,
         Self::Tracks,
         Self::Volume,
+        Self::VolumeReversed,
         Self::CycleDpi,
         Self::VerticalScroll,
         Self::HorizontalScroll,
@@ -52,6 +54,7 @@ impl ThumbwheelPreset {
             Self::Desktops => (Action::PreviousDesktop, Action::NextDesktop),
             Self::Tracks => (Action::PrevTrack, Action::NextTrack),
             Self::Volume => (Action::VolumeDown, Action::VolumeUp),
+            Self::VolumeReversed => (Action::VolumeUp, Action::VolumeDown),
             Self::CycleDpi => (Action::CycleDpiPresets, Action::CycleDpiPresets),
             Self::VerticalScroll => (Action::ScrollDown, Action::ScrollUp),
             Self::HorizontalScroll => (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
@@ -79,6 +82,7 @@ impl ThumbwheelPreset {
             Self::Desktops => "Previous / Next Desktop",
             Self::Tracks => "Previous / Next Track",
             Self::Volume => "Volume Down / Up",
+            Self::VolumeReversed => "Volume Up / Down",
             Self::CycleDpi => "Cycle DPI Presets",
             Self::VerticalScroll => "Vertical Scroll",
             Self::HorizontalScroll => "Horizontal Scroll",
@@ -94,7 +98,7 @@ impl ThumbwheelPreset {
             Self::Tabs => "action-icons/chevron-right.svg",
             Self::Desktops => "action-icons/square-arrow-right.svg",
             Self::Tracks => "action-icons/skip-forward.svg",
-            Self::Volume => "action-icons/volume-2.svg",
+            Self::Volume | Self::VolumeReversed => "action-icons/volume-2.svg",
             Self::CycleDpi => "action-icons/gauge.svg",
             Self::VerticalScroll => "action-icons/chevrons-up.svg",
             Self::HorizontalScroll => "action-icons/chevrons-right.svg",
@@ -116,6 +120,7 @@ mod tests {
             (Action::PreviousDesktop, Action::NextDesktop),
             (Action::PrevTrack, Action::NextTrack),
             (Action::VolumeDown, Action::VolumeUp),
+            (Action::VolumeUp, Action::VolumeDown),
             (Action::CycleDpiPresets, Action::CycleDpiPresets),
             (Action::ScrollDown, Action::ScrollUp),
             (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
