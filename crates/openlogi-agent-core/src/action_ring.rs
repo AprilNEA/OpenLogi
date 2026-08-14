@@ -16,7 +16,25 @@ use tokio::sync::Notify;
 use crate::ipc::{ActionRingCommandError, ActionRingInvocation, ActionRingPresentation};
 
 const LONG_POLL_HOLD: Duration = Duration::from_secs(20);
-const SESSION_LIFETIME: Duration = Duration::from_secs(15);
+
+/// How long the overlay keeps the ring on screen, counted from the moment its
+/// window opens. The overlay owns the display; the constant lives here so the
+/// session that has to outlive it is derived from it rather than kept in step
+/// by hand.
+pub const DISPLAY_LIFETIME: Duration = Duration::from_secs(15);
+
+/// Slack between the window closing and the session expiring.
+///
+/// The two clocks do not start together: a session is stamped in `begin`,
+/// while the overlay's timer starts only once the long poll has delivered the
+/// invocation and the window is up. Giving them equal durations expired the
+/// session *before* the ring the user could still click disappeared, and a
+/// click landing in that tail returned `SessionNotFound` — the window closed
+/// and the action silently did not run. This covers that gap plus the click's
+/// round-trip back.
+const SESSION_GRACE: Duration = Duration::from_secs(3);
+
+const SESSION_LIFETIME: Duration = DISPLAY_LIFETIME.saturating_add(SESSION_GRACE);
 
 /// Immutable input used to open one ring session.
 pub struct ActionRingSessionSpec {
@@ -403,6 +421,18 @@ mod tests {
             manager
                 .activate(second.session_id, ActionRingSlot::Top)
                 .is_ok()
+        );
+    }
+
+    /// The two clocks start at different moments — the session when `begin`
+    /// stamps it, the window once the long poll has delivered and the overlay
+    /// is up — so equal durations expire the session while the ring is still
+    /// on screen, and the click that lands there is silently dropped.
+    #[test]
+    fn a_session_outlives_the_window_it_serves() {
+        assert!(
+            SESSION_LIFETIME > DISPLAY_LIFETIME,
+            "a click on a still-visible ring must still find its session"
         );
     }
 

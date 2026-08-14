@@ -39,6 +39,7 @@ use gpui::{
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, hsla, point,
     prelude::FluentBuilder as _, px, svg,
 };
+use openlogi_agent_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_agent_core::ipc::{ActionRingInvocation, AgentClient, PROTOCOL_VERSION};
 use openlogi_core::binding::ActionRingSlot;
 use tarpc::{client, context};
@@ -49,7 +50,6 @@ use tracing_subscriber::EnvFilter;
 const WINDOW_SIZE: f32 = 360.0;
 const SLOT_SIZE: f32 = 54.0;
 const RADIUS: f32 = 122.0;
-const DISPLAY_LIFETIME: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OverlayCommand {
@@ -544,16 +544,25 @@ async fn poll_invocations(tx: mpsc::UnboundedSender<ActionRingInvocation>) {
     }
 }
 
+/// Fold a newly-produced command into the one still waiting to be sent.
+///
+/// A hover is dropped once its own session has already been activated or
+/// cancelled — the buzz would be for a ring that is closing. It must be the
+/// *same* session though: rings open back to back, and the view only emits a
+/// hover when the hovered slot changes, so swallowing the new ring's first
+/// hover loses it for as long as the pointer stays where it is.
 fn coalesce_command(current: OverlayCommand, next: OverlayCommand) -> OverlayCommand {
-    match next {
-        OverlayCommand::Hover { .. }
-            if matches!(
-                current,
-                OverlayCommand::Activate { .. } | OverlayCommand::Cancel { .. }
-            ) =>
-        {
-            current
-        }
+    match (next, current) {
+        (
+            OverlayCommand::Hover { session_id, .. },
+            OverlayCommand::Activate {
+                session_id: closing,
+                ..
+            }
+            | OverlayCommand::Cancel {
+                session_id: closing,
+            },
+        ) if session_id == closing => current,
         _ => next,
     }
 }
@@ -771,6 +780,25 @@ mod tests {
         assert!(matches!(
             coalesce_command(activation, hover),
             OverlayCommand::Activate { .. }
+        ));
+    }
+
+    /// Rings open back to back — dismiss one, open the next — and the view
+    /// only emits a hover when the hovered slot *changes*. Swallowing the new
+    /// ring's first hover therefore loses it entirely for as long as the
+    /// pointer stays put: no hover buzz, and the agent believing nothing is
+    /// hovered.
+    #[test]
+    fn a_new_sessions_hover_survives_the_previous_sessions_dismissal() {
+        let closing = OverlayCommand::Cancel { session_id: 1 };
+        let hover = OverlayCommand::Hover {
+            session_id: 2,
+            slot: ActionRingSlot::Top,
+        };
+
+        assert!(matches!(
+            coalesce_command(closing, hover),
+            OverlayCommand::Hover { session_id: 2, .. }
         ));
     }
 
