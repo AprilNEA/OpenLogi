@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::ActionRingManager;
@@ -319,6 +320,142 @@ pub struct RingHapticPlayer {
     pending_arm: Arc<std::sync::Mutex<Option<DeviceRoute>>>,
 }
 
+/// How long every attempt at one buzz may take together.
+///
+/// The write path bounds a single call at its own 5 s, which is sized for a
+/// user-visible setting write, not for feedback: three attempts of it outlast
+/// the ring's own 15 s lifetime, so one hover on a lossy channel could consume
+/// a whole session while every later interaction — the activation buzz
+/// included — was dropped by this worker's latest-wins channel. Past a couple
+/// of seconds a buzz is not feedback any more anyway.
+const PLAY_BUDGET: Duration = Duration::from_secs(2);
+
+/// How long the firmware arming check may take before the first buzz.
+///
+/// Arming is a repair: a play works without it on any device that never lost
+/// the state, so it must not be the thing that makes a session feel dead. Two
+/// attempts at the write path's budget put 10 s in front of the first buzz.
+const ARM_BUDGET: Duration = Duration::from_secs(1);
+
+/// Re-assert the firmware haptic engine before the session's first buzz,
+/// within [`ARM_BUDGET`].
+///
+/// Best-effort by design: a device that never lost the state plays fine
+/// without this, so a silent channel must cost the session a bounded delay
+/// rather than its whole haptic budget.
+async fn arm_firmware_haptics(shared: &SharedRuntime, route: &DeviceRoute) {
+    let budget = Budget::starting_at(Instant::now(), ARM_BUDGET);
+    for attempt in 1..=2u8 {
+        let Some(remaining) = budget.remaining(Instant::now()) else {
+            warn!("firmware haptic check ran out of time — leaving it to the buzz");
+            return;
+        };
+        match tokio::time::timeout(
+            remaining,
+            hardware::ensure_ring_haptics_armed(
+                &shared.capture_channel,
+                &shared.channel_registry,
+                &shared.receiver_access,
+                route,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(true)) => {
+                info!("firmware haptics were disarmed — re-enabled");
+                return;
+            }
+            Ok(Ok(false)) => return,
+            Ok(Err(error)) => {
+                if attempt == 2 {
+                    warn!(%error, "could not verify firmware haptic state");
+                }
+            }
+            // Out of budget mid-attempt; the loop head reports it and returns.
+            Err(_elapsed) => {}
+        }
+    }
+}
+
+/// Play one waveform, retrying within [`PLAY_BUDGET`]. Returns whether it played.
+///
+/// A busy receiver drops HID++ replies under concurrent pointer traffic, so a
+/// single attempt fails exactly when the user is actively hovering. Retrying
+/// is worth it — but only until either the budget is gone or a newer request
+/// supersedes this one, since a stale buzz has no value and this worker is
+/// single-flight.
+async fn play_within_budget(
+    shared: &SharedRuntime,
+    rx: &tokio::sync::watch::Receiver<Option<(DeviceRoute, HapticWaveform, &'static str)>>,
+    route: &DeviceRoute,
+    waveform: HapticWaveform,
+    interaction: &'static str,
+) -> bool {
+    let budget = Budget::starting_at(Instant::now(), PLAY_BUDGET);
+    for attempt in 1..=3u8 {
+        let Some(remaining) = budget.remaining(Instant::now()) else {
+            warn!(
+                interaction,
+                "ring haptic gave up — out of time to be feedback"
+            );
+            return false;
+        };
+        match tokio::time::timeout(
+            remaining,
+            hardware::play_haptic(
+                &shared.capture_channel,
+                &shared.channel_registry,
+                &shared.receiver_access,
+                route,
+                waveform,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(())) => return true,
+            Ok(Err(error)) => {
+                let superseded = rx.has_changed().unwrap_or(true);
+                if attempt == 3 || superseded {
+                    warn!(%error, interaction, attempt, superseded, "Actions Ring haptic failed");
+                    return false;
+                }
+            }
+            // Out of budget mid-attempt; the loop head reports it and stops,
+            // so a lost reply and a slow one stay distinguishable in the log.
+            Err(_elapsed) => {}
+        }
+    }
+    false
+}
+
+/// A wall-clock allowance shared by every attempt at one interaction.
+///
+/// The worker is single-flight, so time one buzz spends retrying is time the
+/// next interaction spends waiting. Attempts therefore share a budget rather
+/// than each getting the write path's full one.
+#[derive(Clone, Copy)]
+struct Budget {
+    deadline: Instant,
+}
+
+impl Budget {
+    fn starting_at(now: Instant, total: Duration) -> Self {
+        Self {
+            deadline: now + total,
+        }
+    }
+
+    /// How long the next attempt may take, or `None` when nothing is left.
+    ///
+    /// A spent budget is deliberately `None` rather than `Some(ZERO)`:
+    /// `timeout(ZERO, …)` elapses before the call it wraps can run, which
+    /// would log a device failure that never happened.
+    fn remaining(self, now: Instant) -> Option<Duration> {
+        let left = self.deadline.saturating_duration_since(now);
+        (!left.is_zero()).then_some(left)
+    }
+}
+
 impl RingHapticPlayer {
     /// Spawn the single-flight worker. Must be called from a tokio runtime.
     pub fn spawn(shared: SharedRuntime) -> Self {
@@ -329,7 +466,7 @@ impl RingHapticPlayer {
         let worker_arm = Arc::clone(&pending_arm);
         tokio::spawn(async move {
             let mut consecutive_failures = 0u32;
-            let mut cooldown_until: Option<std::time::Instant> = None;
+            let mut cooldown_until: Option<Instant> = None;
             while rx.changed().await.is_ok() {
                 // Firmware arming is sequenced through this worker so it is
                 // guaranteed to complete before the session's first buzz —
@@ -340,27 +477,7 @@ impl RingHapticPlayer {
                     .ok()
                     .and_then(|mut pending| pending.take());
                 if let Some(route) = arm_route {
-                    for attempt in 1..=2u8 {
-                        match hardware::ensure_ring_haptics_armed(
-                            &shared.capture_channel,
-                            &shared.channel_registry,
-                            &shared.receiver_access,
-                            &route,
-                        )
-                        .await
-                        {
-                            Ok(true) => {
-                                info!("firmware haptics were disarmed — re-enabled");
-                                break;
-                            }
-                            Ok(false) => break,
-                            Err(error) => {
-                                if attempt == 2 {
-                                    warn!(%error, "could not verify firmware haptic state");
-                                }
-                            }
-                        }
-                    }
+                    arm_firmware_haptics(&shared, &route).await;
                 }
                 let request = rx.borrow_and_update().clone();
                 let Some((route, waveform, interaction)) = request else {
@@ -371,50 +488,22 @@ impl RingHapticPlayer {
                 // unrelated writes). Skip haptics for a short cool-down so
                 // the pipe drains; feedback resumes on the next buzz after.
                 if let Some(until) = cooldown_until {
-                    if std::time::Instant::now() < until {
+                    if Instant::now() < until {
                         continue;
                     }
                     cooldown_until = None;
                 }
-                // A busy receiver drops HID++ replies under concurrent
-                // pointer traffic, so a single attempt fails exactly when the
-                // user is actively hovering. Retry a couple of times — unless
-                // a newer request superseded this one, in which case the
-                // stale buzz is worthless and the newest plays instead.
-                for attempt in 1..=3u8 {
-                    match hardware::play_haptic(
-                        &shared.capture_channel,
-                        &shared.channel_registry,
-                        &shared.receiver_access,
-                        &route,
-                        waveform,
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            consecutive_failures = 0;
-                            break;
-                        }
-                        Err(error) => {
-                            let superseded = rx.has_changed().unwrap_or(true);
-                            if attempt == 3 || superseded {
-                                consecutive_failures += 1;
-                                if consecutive_failures >= 3 {
-                                    cooldown_until = Some(
-                                        std::time::Instant::now()
-                                            + std::time::Duration::from_secs(4),
-                                    );
-                                    consecutive_failures = 0;
-                                    info!(
-                                        interaction,
-                                        "ring haptics cooling down after repeated HID++ loss"
-                                    );
-                                } else {
-                                    warn!(%error, interaction, attempt, superseded, "Actions Ring haptic failed");
-                                }
-                                break;
-                            }
-                        }
+                if play_within_budget(&shared, &rx, &route, waveform, interaction).await {
+                    consecutive_failures = 0;
+                } else {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= 3 {
+                        cooldown_until = Some(Instant::now() + Duration::from_secs(4));
+                        consecutive_failures = 0;
+                        info!(
+                            interaction,
+                            "ring haptics cooling down after repeated HID++ loss"
+                        );
                     }
                 }
             }
@@ -480,5 +569,46 @@ pub async fn run(server: AgentServer) {
                     tokio::spawn(response);
                 }),
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
+mod tests {
+    use super::{ARM_BUDGET, Budget, PLAY_BUDGET};
+    use std::time::{Duration, Instant};
+
+    /// Attempts share one allowance, so the second gets what the first left —
+    /// not another full one, which is how three retries came to outlast the
+    /// ring they were giving feedback for.
+    #[test]
+    fn a_partly_spent_budget_offers_only_the_remainder() {
+        let start = Instant::now();
+        let budget = Budget::starting_at(start, Duration::from_secs(2));
+
+        let left = budget
+            .remaining(start + Duration::from_millis(1500))
+            .unwrap();
+
+        assert_eq!(left, Duration::from_millis(500));
+    }
+
+    /// `timeout(ZERO, …)` elapses before the call it wraps can run, so a spent
+    /// budget has to read as "stop", not as "you have no time".
+    #[test]
+    fn a_spent_budget_offers_nothing_rather_than_zero() {
+        let start = Instant::now();
+        let budget = Budget::starting_at(start, Duration::from_secs(2));
+
+        assert_eq!(budget.remaining(start + Duration::from_secs(2)), None);
+        assert_eq!(budget.remaining(start + Duration::from_secs(5)), None);
+    }
+
+    /// Both budgets exist to keep one interaction from eating the 15 s session
+    /// the ring is open for, and arming must not outlast the buzz it precedes.
+    #[test]
+    fn the_budgets_stay_within_a_ring_session() {
+        assert!(ARM_BUDGET < PLAY_BUDGET);
+        assert!(ARM_BUDGET + PLAY_BUDGET < Duration::from_secs(15));
     }
 }
