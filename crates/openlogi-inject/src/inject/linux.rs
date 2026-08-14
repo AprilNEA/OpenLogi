@@ -12,112 +12,160 @@ use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::blocking::Connection as DbusConn;
 
-use openlogi_core::binding::{Action, WorkflowStep};
+use openlogi_core::binding::{
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+};
 
-/// Linux implementation: inject events via a shared `uinput` virtual device.
+/// Linux implementation: classify `action` into an [`Effect`] and inject the
+/// resulting events via a shared `uinput` virtual device.
 pub(super) fn execute(action: &Action) {
-    let ctrl = KeyCode::KEY_LEFTCTRL;
-    let shift = KeyCode::KEY_LEFTSHIFT;
-    let alt = KeyCode::KEY_LEFTALT;
-    match action {
-        // ── Mouse clicks ──────────────────────────────────────────────────
-        Action::LeftClick => click(KeyCode::BTN_LEFT),
-        Action::RightClick => click(KeyCode::BTN_RIGHT),
-        Action::MiddleClick => click(KeyCode::BTN_MIDDLE),
+    match action.effect() {
+        Effect::None => {}
         // Extra mouse buttons: BTN_SIDE/BTN_EXTRA are the evdev side
         // buttons ("back"/"forward") browsers handle natively.
-        Action::MouseBack => click(KeyCode::BTN_SIDE),
-        Action::MouseForward => click(KeyCode::BTN_EXTRA),
-        // ── Editing ───────────────────────────────────────────────────────
-        Action::Copy => press_key(&[ctrl], KeyCode::KEY_C),
-        Action::Paste => press_key(&[ctrl], KeyCode::KEY_V),
-        Action::Cut => press_key(&[ctrl], KeyCode::KEY_X),
-        Action::Undo => press_key(&[ctrl], KeyCode::KEY_Z),
-        // Redo is Ctrl+Shift+Z on Linux (matches macOS ⌘⇧Z convention).
-        Action::Redo => press_key(&[ctrl, shift], KeyCode::KEY_Z),
-        Action::SelectAll => press_key(&[ctrl], KeyCode::KEY_A),
-        Action::Find => press_key(&[ctrl], KeyCode::KEY_F),
-        Action::Save => press_key(&[ctrl], KeyCode::KEY_S),
-        // ── Browser / Navigation ──────────────────────────────────────────
-        Action::BrowserBack => press_key(&[alt], KeyCode::KEY_LEFT),
-        Action::BrowserForward => press_key(&[alt], KeyCode::KEY_RIGHT),
-        Action::NewTab => press_key(&[ctrl], KeyCode::KEY_T),
-        Action::CloseTab => press_key(&[ctrl], KeyCode::KEY_W),
-        Action::ReopenTab => press_key(&[ctrl, shift], KeyCode::KEY_T),
-        Action::NextTab => press_key(&[ctrl], KeyCode::KEY_TAB),
-        Action::PrevTab => press_key(&[ctrl, shift], KeyCode::KEY_TAB),
-        Action::ReloadPage => press_key(&[ctrl], KeyCode::KEY_R),
-        // ── Navigation — macOS-specific ───────────────────────────────────
+        Effect::Click(button) => click(mouse_button_code(button)),
+        Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
+        Effect::Key(combo) => press_combo(combo),
+        Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
+        Effect::Media(key) => dispatch_media(key),
+        Effect::Native(native) => dispatch_native(action, native),
+        Effect::Script(script) => dispatch_script(script),
+        Effect::Text(text) => {
+            tracing::warn!(
+                chars = text.chars().count(),
+                "TypeText injection is not implemented on Linux yet"
+            );
+        }
+        Effect::AgentSide => {
+            tracing::debug!(
+                action = action.label(),
+                "device action handled by hook/HID layer"
+            );
+        }
+    }
+}
+
+fn mouse_button_code(button: MouseButton) -> KeyCode {
+    match button {
+        MouseButton::Left => KeyCode::BTN_LEFT,
+        MouseButton::Right => KeyCode::BTN_RIGHT,
+        MouseButton::Middle => KeyCode::BTN_MIDDLE,
+        MouseButton::Back => KeyCode::BTN_SIDE,
+        MouseButton::Forward => KeyCode::BTN_EXTRA,
+    }
+}
+
+/// The Linux chord for each named [`Shortcut`].
+///
+/// Parsed through [`KeyCombo`]'s existing, tested `FromStr` rather than
+/// hand-built keycode lists — the table stays a flat, auditable list of
+/// chord strings instead of a second modifier-encoding call site.
+fn combo(shortcut: Shortcut) -> KeyCombo {
+    let text = match shortcut {
+        Shortcut::Copy => "Ctrl+C",
+        Shortcut::Paste => "Ctrl+V",
+        Shortcut::Cut => "Ctrl+X",
+        Shortcut::Undo => "Ctrl+Z",
+        // Ctrl+Shift+Z matches the macOS ⌘⇧Z convention (see `Shortcut::Redo`
+        // doc on `Action`); Ctrl+Y is the GTK/LibreOffice convention and is
+        // left to a `CustomShortcut` binding.
+        Shortcut::Redo => "Ctrl+Shift+Z",
+        Shortcut::SelectAll => "Ctrl+A",
+        Shortcut::Find => "Ctrl+F",
+        Shortcut::Save => "Ctrl+S",
+        Shortcut::BrowserBack => "Alt+Left",
+        Shortcut::BrowserForward => "Alt+Right",
+        Shortcut::NewTab => "Ctrl+T",
+        Shortcut::CloseTab => "Ctrl+W",
+        Shortcut::ReopenTab => "Ctrl+Shift+T",
+        Shortcut::NextTab => "Ctrl+Tab",
+        Shortcut::PrevTab => "Ctrl+Shift+Tab",
+        Shortcut::ReloadPage => "Ctrl+R",
+    };
+    parse_shortcut(text)
+}
+
+fn parse_shortcut(text: &str) -> KeyCombo {
+    text.parse()
+        .unwrap_or_else(|error| unreachable!("hardcoded shortcut table entry {text:?}: {error}"))
+}
+
+/// Press an already-resolved chord: a table lookup from [`combo`] or a
+/// user-recorded [`Action::CustomShortcut`]/`WorkflowStep::PressKey`.
+fn press_combo(combo: &KeyCombo) {
+    let Some(key) = hid_usage_to_linux(combo.key().code()) else {
+        tracing::warn!(
+            usage = combo.key().code(),
+            "shortcut usage has no Linux mapping — press ignored"
+        );
+        return;
+    };
+    press_key(&modifiers_to_keycodes(combo), key);
+}
+
+/// MPRIS targets the running media player; XF86 volume keys go to the
+/// system mixer (PulseAudio/PipeWire) which is what users expect.
+fn dispatch_media(key: MediaKey) {
+    match key {
+        MediaKey::PlayPause => mpris_command("PlayPause"),
+        MediaKey::NextTrack => mpris_command("Next"),
+        MediaKey::PrevTrack => mpris_command("Previous"),
+        MediaKey::VolumeUp => press_key(&[], KeyCode::KEY_VOLUMEUP),
+        MediaKey::VolumeDown => press_key(&[], KeyCode::KEY_VOLUMEDOWN),
+        MediaKey::Mute => press_key(&[], KeyCode::KEY_MUTE),
+    }
+}
+
+/// Dispatch a window-manager or power [`NativeAction`]. `action` is only
+/// used for its label in the "no Linux equivalent" debug log.
+fn dispatch_native(action: &Action, native: NativeAction) {
+    let ctrl = KeyCode::KEY_LEFTCTRL;
+    let alt = KeyCode::KEY_LEFTALT;
+    match native {
         // No universal Linux equivalent; the compositor shortcut varies.
-        Action::MissionControl
-        | Action::AppExpose
-        | Action::ShowDesktop
-        | Action::LaunchpadShow => {
+        NativeAction::MissionControl
+        | NativeAction::AppExpose
+        | NativeAction::ShowDesktop
+        | NativeAction::LaunchpadShow => {
             tracing::debug!(
                 action = action.label(),
                 "no Linux equivalent — action skipped"
             );
         }
         // Ctrl+Alt+←/→ is the default in GNOME and KDE.
-        Action::PreviousDesktop => press_key(&[ctrl, alt], KeyCode::KEY_LEFT),
-        Action::NextDesktop => press_key(&[ctrl, alt], KeyCode::KEY_RIGHT),
-        // ── System ────────────────────────────────────────────────────────
-        // logind LockSessions() via the system bus; falls back to Super+L.
-        Action::LockScreen => lock_screen(),
-        // logind Suspend() via the system bus.
-        Action::Sleep => sleep_system(),
+        NativeAction::PreviousDesktop => press_key(&[ctrl, alt], KeyCode::KEY_LEFT),
+        NativeAction::NextDesktop => press_key(&[ctrl, alt], KeyCode::KEY_RIGHT),
+        // logind LockSession() via the system bus; falls back to Super+L.
+        NativeAction::LockScreen => lock_screen(),
         // Region vs full-screen capture depends on the desktop environment's
         // screenshot handler for Print Screen, so both map to the same key.
-        Action::Screenshot | Action::CaptureRegion => press_key(&[], KeyCode::KEY_SYSRQ),
-        // ── Media ─────────────────────────────────────────────────────────
-        // MPRIS targets the running media player; XF86 volume keys go to the
-        // system mixer (PulseAudio/PipeWire) which is what users expect.
-        Action::PlayPause => mpris_command("PlayPause"),
-        Action::NextTrack => mpris_command("Next"),
-        Action::PrevTrack => mpris_command("Previous"),
-        Action::VolumeUp => press_key(&[], KeyCode::KEY_VOLUMEUP),
-        Action::VolumeDown => press_key(&[], KeyCode::KEY_VOLUMEDOWN),
-        Action::MuteVolume => press_key(&[], KeyCode::KEY_MUTE),
-        // ── DPI / SmartShift: handled at hook/HID layer ───────────────────
-        Action::CycleDpiPresets
-        | Action::SetDpiPreset(_)
-        | Action::ToggleSmartShift
-        | Action::ShowActionsRing
-        | Action::OpenApplication(_) => {
-            tracing::debug!(
-                action = action.label(),
-                "device action handled by hook/HID layer"
-            );
+        NativeAction::Screenshot | NativeAction::CaptureRegion => {
+            press_key(&[], KeyCode::KEY_SYSRQ);
         }
-        // ── Scroll ────────────────────────────────────────────────────────
-        Action::ScrollUp => scroll(RelativeAxisCode::REL_WHEEL, 3),
-        Action::ScrollDown => scroll(RelativeAxisCode::REL_WHEEL, -3),
-        Action::HorizontalScrollLeft => scroll(RelativeAxisCode::REL_HWHEEL, -3),
-        Action::HorizontalScrollRight => scroll(RelativeAxisCode::REL_HWHEEL, 3),
-        // ── No-op ─────────────────────────────────────────────────────────
-        Action::None => {}
-        // ── Custom shortcut ───────────────────────────────────────────────
-        Action::CustomShortcut(combo) => {
-            let Some(key) = hid_usage_to_linux(combo.key().code()) else {
-                tracing::warn!(
-                    usage = combo.key().code(),
-                    "CustomShortcut usage has no Linux mapping — press ignored"
-                );
-                return;
-            };
-            press_key(&modifiers_to_keycodes(combo), key);
-        }
-        Action::TypeText(text) => {
-            tracing::warn!(
-                chars = text.chars().count(),
-                "TypeText injection is not implemented on Linux yet"
-            );
-        }
-        Action::RunAppleScript(_) => {
+        // logind Suspend() via the system bus.
+        NativeAction::Sleep => sleep_system(),
+    }
+}
+
+fn dispatch_script(script: Script<'_>) {
+    match script {
+        Script::AppleScript(_) => {
             tracing::warn!("RunAppleScript is only supported on macOS");
         }
-        Action::RunShellCommand(cmd) => run_shell_command_async(cmd.clone()),
-        Action::Workflow(steps) => run_workflow_async(steps.clone()),
+        Script::ShellCommand(cmd) => run_shell_command_async(cmd.to_string()),
+        Script::Workflow(steps) => run_workflow_async(steps.to_vec()),
+    }
+}
+
+/// Synthesise one scroll tick in direction `(dx, dy)`. Unit direction
+/// (-1/0/1) scaled by the fixed relative-axis magnitude the four
+/// `Scroll*`/`HorizontalScroll*` actions have always used.
+fn dispatch_scroll(dx: i8, dy: i8) {
+    if dy != 0 {
+        scroll(RelativeAxisCode::REL_WHEEL, i32::from(dy) * 3);
+    }
+    if dx != 0 {
+        scroll(RelativeAxisCode::REL_HWHEEL, i32::from(dx) * 3);
     }
 }
 
@@ -561,9 +609,9 @@ fn try_mpris_command(command: &str) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use evdev::KeyCode;
-    use openlogi_core::binding::KeyCombo;
+    use openlogi_core::binding::{KeyCombo, Shortcut};
 
-    use super::{hid_usage_to_linux, modifiers_to_keycodes};
+    use super::{combo, hid_usage_to_linux, modifiers_to_keycodes};
 
     #[test]
     fn modifiers_map_to_linux_without_duplicate_control() {
@@ -587,5 +635,44 @@ mod tests {
         assert_eq!(hid_usage_to_linux(0x3a), Some(KeyCode::KEY_F1));
         assert_eq!(hid_usage_to_linux(0x6f), Some(KeyCode::KEY_F20));
         assert_eq!(hid_usage_to_linux(0xff), None);
+    }
+
+    /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
+    /// edit to the table can't silently change what Ctrl+C sends.
+    /// `BrowserBack` and `Redo` differ from macOS/Windows by design (see
+    /// the module doc on `combo`), so each backend pins its own rows.
+    #[test]
+    fn combo_table_pins_representative_shortcuts() {
+        assert_eq!(combo(Shortcut::Copy).rendered_label(), "Ctrl+C");
+        assert_eq!(combo(Shortcut::Redo).rendered_label(), "Ctrl+Shift+Z");
+        assert_eq!(combo(Shortcut::BrowserBack).rendered_label(), "Alt+Left");
+        assert_eq!(combo(Shortcut::NextTab).rendered_label(), "Ctrl+Tab");
+        // hid_usage_to_linux must actually resolve every table entry, or a
+        // `Shortcut` silently no-ops instead of pressing anything (see
+        // `press_combo`'s warn-and-drop path).
+        for shortcut in [
+            Shortcut::Copy,
+            Shortcut::Paste,
+            Shortcut::Cut,
+            Shortcut::Undo,
+            Shortcut::Redo,
+            Shortcut::SelectAll,
+            Shortcut::Find,
+            Shortcut::Save,
+            Shortcut::BrowserBack,
+            Shortcut::BrowserForward,
+            Shortcut::NewTab,
+            Shortcut::CloseTab,
+            Shortcut::ReopenTab,
+            Shortcut::NextTab,
+            Shortcut::PrevTab,
+            Shortcut::ReloadPage,
+        ] {
+            let key = combo(shortcut).key().code();
+            assert!(
+                hid_usage_to_linux(key).is_some(),
+                "{shortcut:?} table entry has no Linux keycode mapping"
+            );
+        }
     }
 }
