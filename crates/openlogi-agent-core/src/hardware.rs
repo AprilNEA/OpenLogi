@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, ChannelRegistry, DeviceRoute, DpiInfo, HidppFeatureErrorKind, HidppOperation,
-    ScrollResolution, SharedChannel, SmartShiftMode, SmartShiftStatus, WriteError,
+    CaptureChannel, ChannelRegistry, DeviceRoute, HidppFeatureErrorKind, HidppOperation,
+    ScrollResolution, SharedChannel, SmartShiftMode, WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
@@ -39,32 +39,6 @@ pub use light::{apply_light, cancel_light_reapply, set_light_in_background};
 /// this background thread forever; a write to a live device completes in well
 /// under a second.
 const WRITE_BUDGET: Duration = Duration::from_secs(5);
-
-/// Read the current DPI and supported DPI values on a background worker.
-///
-/// This helper is intentionally blocking so GPUI callers can run it via
-/// `cx.background_spawn` without making the UI thread own a Tokio runtime.
-pub fn read_dpi_info_blocking(
-    capture: Option<&CaptureChannel>,
-    registry: &ChannelRegistry,
-    target: &DeviceRoute,
-) -> Result<DpiInfo, WriteError> {
-    let shared = authoritative_channel(capture, registry, target)?;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| WriteError::RuntimeInit {
-            message: e.to_string(),
-        })?;
-
-    rt.block_on(async {
-        tokio::time::timeout(WRITE_BUDGET, openlogi_hid::get_dpi_info_on(&shared))
-            .await
-            .map_err(|_| WriteError::RequestTimedOut {
-                operation: HidppOperation::ReadDpiCapabilities,
-            })?
-    })
-}
 
 /// Select the only Agent-authoritative channel for `route`.
 fn authoritative_channel(
@@ -265,78 +239,6 @@ pub fn toggle_smartshift_in_background(
             Err(_) => warn!(
                 index,
                 "SmartShift toggle timed out (device asleep/unresponsive)"
-            ),
-        },
-    );
-}
-
-/// Read the device's current SmartShift configuration (wheel mode +
-/// auto-disengage threshold + tunable torque) on a background worker.
-///
-/// Blocking, like [`read_dpi_info_blocking`], so the SmartShift panel can run
-/// it off a dedicated OS thread without the UI thread owning a Tokio runtime.
-pub fn read_smartshift_status_blocking(
-    capture: Option<&CaptureChannel>,
-    registry: &ChannelRegistry,
-    target: &DeviceRoute,
-) -> Result<SmartShiftStatus, WriteError> {
-    let shared = authoritative_channel(capture, registry, target)?;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| WriteError::RuntimeInit {
-            message: e.to_string(),
-        })?;
-
-    rt.block_on(async {
-        tokio::time::timeout(
-            WRITE_BUDGET,
-            openlogi_hid::get_smartshift_status_on(&shared),
-        )
-        .await
-        .map_err(|_| WriteError::RequestTimedOut {
-            operation: HidppOperation::ReadSmartShift,
-        })?
-    })
-}
-
-/// Spawn an OS thread that writes a full SmartShift configuration to the device
-/// at `target` via its current shared channel. Returns immediately;
-/// failures (incl. devices that expose neither `0x2111` nor the older `0x2110`
-/// SmartShift feature) are logged.
-///
-/// `target == None` is a no-op (dev environment without a real device).
-pub fn write_smartshift_in_background(
-    capture: &CaptureChannel,
-    registry: &ChannelRegistry,
-    receiver_access: &ReceiverAccess,
-    target: Option<DeviceRoute>,
-    mode: SmartShiftMode,
-    auto_disengage: u8,
-    tunable_torque: u8,
-) {
-    let Some(target) = target else {
-        debug!("no target device — SmartShift write skipped");
-        return;
-    };
-    let index = target.device_index();
-    DeviceOp::new(capture, registry, receiver_access, &target).spawn_write(
-        "SmartShift write",
-        move |c| async move {
-            openlogi_hid::set_smartshift_on(&c, mode, auto_disengage, tunable_torque).await
-        },
-        move |result| match result {
-            Ok(Ok(())) => debug!(
-                index,
-                ?mode,
-                auto_disengage,
-                tunable_torque,
-                "SmartShift config written"
-            ),
-            Ok(Err(e)) => warn!(error = ?e, "SmartShift write failed"),
-            Err(_) => warn!(
-                index,
-                "SmartShift write timed out (device asleep/unresponsive)"
             ),
         },
     );
