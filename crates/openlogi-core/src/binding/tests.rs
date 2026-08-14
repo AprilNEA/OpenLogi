@@ -392,3 +392,81 @@ fn haptic_panel_defaults_to_opening_the_actions_ring() {
     );
     assert!(ButtonId::ALL.contains(&ButtonId::HapticPanel));
 }
+
+// ── Effect classification ─────────────────────────────────────────────────
+//
+// `Action::effect()` is the platform-neutral IR `openlogi-inject`'s three
+// backends dispatch on instead of matching `Action` directly. These tests
+// don't re-derive the match (that would be tautological) — they assert the
+// one property every caller actually depends on: every pickable action
+// lowers to *some* real effect, and only `Action::None` is `Effect::None`.
+
+#[test]
+fn catalog_actions_lower_to_a_non_none_effect_except_none() {
+    for action in Action::catalog() {
+        let is_none_effect = matches!(action.effect(), Effect::None);
+        assert_eq!(
+            is_none_effect,
+            action == Action::None,
+            "{action:?} effect classification disagrees with being Action::None"
+        );
+    }
+}
+
+#[test]
+fn power_user_and_device_side_actions_lower_to_the_expected_bucket() {
+    let combo: KeyCombo = "Cmd+P"
+        .parse()
+        .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
+    let custom_shortcut = Action::CustomShortcut(combo);
+    assert_matches!(custom_shortcut.effect(), Effect::Key(_));
+
+    let type_text = Action::TypeText("hi".into());
+    assert_matches!(type_text.effect(), Effect::Text("hi"));
+
+    let run_apple_script = Action::RunAppleScript("beep".into());
+    assert_matches!(
+        run_apple_script.effect(),
+        Effect::Script(Script::AppleScript("beep"))
+    );
+
+    let run_shell_command = Action::RunShellCommand("date".into());
+    assert_matches!(
+        run_shell_command.effect(),
+        Effect::Script(Script::ShellCommand("date"))
+    );
+
+    let workflow = Action::Workflow(vec![]);
+    assert_matches!(workflow.effect(), Effect::Script(Script::Workflow(&[])));
+
+    // DPI/SmartShift/the Actions Ring/OpenApplication are all handled above
+    // or beside the injector, never inside a backend's own dispatch.
+    for action in [
+        Action::CycleDpiPresets,
+        Action::SetDpiPreset(2),
+        Action::ToggleSmartShift,
+        Action::ShowActionsRing,
+    ] {
+        assert_matches!(action.effect(), Effect::AgentSide);
+    }
+    let target = ApplicationTarget::new("/Applications/Safari.app", "")
+        .unwrap_or_else(|error| panic!("valid target failed: {error}"));
+    assert_matches!(Action::OpenApplication(target).effect(), Effect::AgentSide);
+}
+
+#[test]
+fn scroll_actions_lower_to_unit_direction() {
+    assert_eq!(Action::ScrollUp.effect(), Effect::Scroll { dx: 0, dy: 1 });
+    assert_eq!(
+        Action::ScrollDown.effect(),
+        Effect::Scroll { dx: 0, dy: -1 }
+    );
+    assert_eq!(
+        Action::HorizontalScrollLeft.effect(),
+        Effect::Scroll { dx: -1, dy: 0 }
+    );
+    assert_eq!(
+        Action::HorizontalScrollRight.effect(),
+        Effect::Scroll { dx: 1, dy: 0 }
+    );
+}
