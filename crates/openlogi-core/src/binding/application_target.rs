@@ -58,6 +58,7 @@ impl ApplicationTarget {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ApplicationTargetWire {
     path: String,
     #[serde(default)]

@@ -2,7 +2,9 @@
 
 use super::AppState;
 use gpui::App;
-use openlogi_core::config::{AppSettings, Appearance, AssetSourcePreference};
+use openlogi_core::config::{
+    AppSettings, Appearance, AssetSourcePreference, clamp_thumbwheel_sensitivity,
+};
 
 impl AppState {
     /// App-wide settings backing the Settings window (launch-at-login,
@@ -14,8 +16,8 @@ impl AppState {
     }
     /// Toggle launch-at-login, persist to `config.toml`, and reconcile the
     /// macOS `LaunchAgent` plist so the change takes effect without a
-    /// restart. No-op when the value is unchanged. Disk failures are logged,
-    /// not propagated — the Settings UI shouldn't crash on a full volume.
+    /// restart. No-op when the value is unchanged. Disk failures restore the
+    /// persisted value and surface a configuration error without crashing.
     pub fn set_launch_at_login(&mut self, enabled: bool) {
         if self.config.app_settings.launch_at_login == enabled {
             return;
@@ -128,10 +130,7 @@ impl AppState {
     /// default forever. The agent picks the change up through the reloaded
     /// capture plans. No-op when the stored override would not change.
     pub fn set_device_thumbwheel_sensitivity(&mut self, key: &str, sensitivity: i32) {
-        let sensitivity = sensitivity.clamp(
-            openlogi_core::config::MIN_THUMBWHEEL_SENSITIVITY,
-            openlogi_core::config::MAX_THUMBWHEEL_SENSITIVITY,
-        );
+        let sensitivity = clamp_thumbwheel_sensitivity(sensitivity);
         let override_value =
             (sensitivity != self.config.app_settings.thumbwheel_sensitivity).then_some(sensitivity);
         let stored = self
@@ -150,12 +149,9 @@ impl AppState {
     /// Set the app-wide default thumb-wheel sensitivity (clamped to the valid
     /// range) and persist it — devices without a per-device override follow it
     /// through the reloaded capture plans. No-op when unchanged. Disk failures
-    /// are logged, not propagated.
+    /// restore the persisted value and surface a configuration error.
     pub fn set_thumbwheel_sensitivity(&mut self, sensitivity: i32) {
-        let sensitivity = sensitivity.clamp(
-            openlogi_core::config::MIN_THUMBWHEEL_SENSITIVITY,
-            openlogi_core::config::MAX_THUMBWHEEL_SENSITIVITY,
-        );
+        let sensitivity = clamp_thumbwheel_sensitivity(sensitivity);
         if self.config.app_settings.thumbwheel_sensitivity == sensitivity {
             return;
         }

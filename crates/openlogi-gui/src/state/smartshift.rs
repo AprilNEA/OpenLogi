@@ -114,14 +114,6 @@ impl AppState {
         let persistent_key = record.persistent_config_key().map(str::to_string);
         let route = record.route.clone();
         let can_confirm = route.is_some();
-        if let Some(route) = route {
-            self.send_ipc(crate::ipc_client::Command::SetSmartShift(
-                route,
-                mode,
-                auto_disengage,
-                tunable_torque,
-            ));
-        }
         if let Some(persistent_key) = persistent_key {
             self.config.set_smartshift(
                 &persistent_key,
@@ -131,7 +123,17 @@ impl AppState {
                     tunable_torque,
                 },
             );
-            self.persist_and_reload("SmartShift");
+            if !self.persist_and_reload("SmartShift") {
+                return;
+            }
+        }
+        if let Some(route) = route {
+            self.send_ipc(crate::ipc_client::Command::SetSmartShift(
+                route,
+                mode,
+                auto_disengage,
+                tunable_torque,
+            ));
         }
         // Reflect the write immediately so the panel doesn't flicker back to
         // the previous value before a re-read lands, but queue a confirming

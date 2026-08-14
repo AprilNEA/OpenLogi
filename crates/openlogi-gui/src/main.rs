@@ -63,7 +63,7 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme, Root};
 use openlogi_core::brand::{APP_ID, DeeplinkCommand};
-use openlogi_core::config::Config;
+use openlogi_core::config::{Config, ConfigFile};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -145,10 +145,16 @@ fn main() -> Result<()> {
     let inventories: Vec<DeviceInventory> = Vec::new();
     let standalone = Vec::new();
 
-    let initial_config = Config::load_or_default().unwrap_or_else(|e| {
-        warn!(error = %e, "could not load config.toml; using defaults");
-        Config::default()
-    });
+    let (initial_config, config_persistence) = match ConfigFile::load_or_default() {
+        Ok((config, file)) => (config, ConfigPersistence::UserFile(file)),
+        Err(error) => {
+            warn!(error = %error, "could not load config.toml; disabling config writes");
+            (
+                Config::ephemeral(),
+                ConfigPersistence::ReadOnly(error.to_string()),
+            )
+        }
+    };
 
     // Resolve the UI locale before any menu or window is built so the first
     // frame already renders in the right language.
@@ -245,7 +251,7 @@ fn main() -> Result<()> {
                         &standalone,
                         &cache,
                         &latest_cams,
-                        ConfigPersistence::UserFile,
+                        config_persistence,
                         ipc_commands,
                     ));
                 }
@@ -446,6 +452,14 @@ fn main() -> Result<()> {
                         }) => {
                             let changed = cx.update_global::<AppState, _>(|state, _| {
                                 state.apply_light_command_result(key, request_id, command, result)
+                            });
+                            if changed {
+                                cx.update(gpui::App::refresh_windows);
+                            }
+                        }
+                        Some(ipc_client::GuiUpdate::ConfigReloadResult(result)) => {
+                            let changed = cx.update_global::<AppState, _>(|state, _| {
+                                state.apply_config_reload_result(result)
                             });
                             if changed {
                                 cx.update(gpui::App::refresh_windows);

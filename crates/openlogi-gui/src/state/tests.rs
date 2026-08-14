@@ -25,6 +25,53 @@ use super::scroll::set_scroll_resolution_if_supported;
 use super::smartshift::{smartshift_read_is_current, smartshift_write_outcome};
 use super::{AppState, ConfigPersistence, LightCommandStatus, Load, SmartShiftWriteStatus};
 
+#[test]
+fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
+    let cache = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::ReadOnly("invalid config".into()),
+        commands,
+    );
+
+    state.set_thumbwheel_sensitivity(50);
+
+    assert_eq!(
+        state.app_settings().thumbwheel_sensitivity,
+        openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY
+    );
+    assert_eq!(state.config_issue(), Some("invalid config"));
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn agent_reload_error_stays_visible_until_a_successful_confirmation() {
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+    assert!(
+        state.apply_config_reload_result(Err(openlogi_ipc::ConfigReloadError {
+            message: "agent rejected config".into(),
+        }))
+    );
+    assert_eq!(state.config_issue(), Some("agent rejected config"));
+    assert!(state.apply_config_reload_result(Ok(())));
+    assert_eq!(state.config_issue(), None);
+}
+
 fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
     DeviceInventory {
         receiver: ReceiverInfo {

@@ -103,7 +103,7 @@ pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
 /// mouse bindings these are not per-app-profile (M1 scope — per the spec's
 /// non-goals), so a single map suffices. Keyed by the config `KeyTrigger`
 /// (keycode + modifiers).
-pub type SharedKeyboardBindings = Arc<RwLock<std::collections::HashMap<KeyTrigger, Action>>>;
+pub type SharedKeyboardBindings = Arc<RwLock<BTreeMap<KeyTrigger, Action>>>;
 
 /// Convert the hook-layer modifier state into the config-layer type (the two
 /// live in different crates — core is leaf-level and duplicates the four

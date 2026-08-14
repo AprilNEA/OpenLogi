@@ -40,20 +40,19 @@ impl AppState {
         };
         let key = record.persistent_config_key().map(str::to_string);
         let target = record.route.clone();
-        if let Some(route) = target {
-            self.send_ipc(crate::ipc_client::Command::SetLighting(
-                route,
-                lighting.clone(),
-            ));
-        }
-        let Some(key) = key else {
+        if let Some(key) = key {
+            self.config.set_lighting(&key, lighting.clone());
+            // Keep the agent's config copy fresh: it re-applies the saved colour
+            // when the keyboard reconnects, and without the reload it would
+            // replay whatever was saved the last time something *else* reloaded.
+            if !self.persist_and_reload("lighting") {
+                return;
+            }
+        } else {
             debug!("transient device lighting applied without persistence");
-            return;
-        };
-        self.config.set_lighting(&key, lighting);
-        // Keep the agent's config copy fresh: it re-applies the saved colour
-        // when the keyboard reconnects, and without the reload it would
-        // replay whatever was saved the last time something *else* reloaded.
-        self.persist_and_reload("lighting");
+        }
+        if let Some(route) = target {
+            self.send_ipc(crate::ipc_client::Command::SetLighting(route, lighting));
+        }
     }
 }

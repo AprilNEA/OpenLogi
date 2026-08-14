@@ -59,10 +59,9 @@ Things OpenLogi does that Options+ won't:
 - **Run on Linux.** Options+ ships for macOS and Windows only. OpenLogi treats
   Linux as a first-class platform: evdev/uinput hook, udev rules, a systemd
   user unit, and `.deb` / `.rpm` / `.pkg.tar.zst` packages.
-- **Move the Gesture Button.** Pick which physical button owns the gesture
-  role — the dedicated Gesture Button, middle, back, or forward — with per-direction swipe
-  bindings, or turn gestures off entirely. Options+ pins the gesture role to
-  the dedicated Gesture Button.
+- **Put gestures on any button.** The dedicated Gesture Button, middle, back,
+  and forward buttons can each have their own per-direction swipe bindings.
+  Options+ pins gestures to the dedicated Gesture Button.
 - **Keep config in plain text.** Everything is one TOML file you can read,
   diff, version-control, and copy between machines.
 - **Script it.** A real CLI: device inventory, asset prefetch, and on-device

@@ -247,6 +247,98 @@ fn all_catalog_variants_roundtrip_toml() {
 }
 
 #[test]
+fn persisted_action_variant_names_are_stable() {
+    let mut actions = Action::catalog();
+    actions.extend([
+        Action::SetDpiPreset(0),
+        Action::CustomShortcut(
+            "F1".parse()
+                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+        ),
+        Action::TypeText(String::new()),
+        Action::RunAppleScript(String::new()),
+        Action::RunShellCommand(String::new()),
+        Action::Workflow(Vec::new()),
+        Action::ShowActionsRing,
+        Action::OpenApplication(
+            ApplicationTarget::new("/Applications/OpenLogi.app", "OpenLogi")
+                .unwrap_or_else(|error| panic!("valid target failed: {error}")),
+        ),
+    ]);
+    let mut actual: Vec<String> = actions
+        .into_iter()
+        .map(
+            |action| match toml::Value::try_from(action).expect("serialize action") {
+                toml::Value::String(name) => name,
+                toml::Value::Table(table) if table.len() == 1 => table
+                    .into_iter()
+                    .next()
+                    .map(|(key, _)| key)
+                    .expect("one variant key"),
+                value => panic!("unexpected action shape: {value:?}"),
+            },
+        )
+        .collect();
+    actual.sort();
+    let mut expected = [
+        "AppExpose",
+        "BrowserBack",
+        "BrowserForward",
+        "CaptureRegion",
+        "CloseTab",
+        "Copy",
+        "CustomShortcut",
+        "Cut",
+        "CycleDpiPresets",
+        "Find",
+        "HorizontalScrollLeft",
+        "HorizontalScrollRight",
+        "LaunchpadShow",
+        "LeftClick",
+        "LockScreen",
+        "MiddleClick",
+        "MissionControl",
+        "MouseBack",
+        "MouseForward",
+        "MuteVolume",
+        "NewTab",
+        "NextDesktop",
+        "NextTab",
+        "NextTrack",
+        "None",
+        "OpenApplication",
+        "Paste",
+        "PlayPause",
+        "PrevTab",
+        "PrevTrack",
+        "PreviousDesktop",
+        "Redo",
+        "ReloadPage",
+        "ReopenTab",
+        "RightClick",
+        "RunAppleScript",
+        "RunShellCommand",
+        "Save",
+        "Screenshot",
+        "ScrollDown",
+        "ScrollUp",
+        "SelectAll",
+        "SetDpiPreset",
+        "ShowActionsRing",
+        "ShowDesktop",
+        "Sleep",
+        "ToggleSmartShift",
+        "TypeText",
+        "Undo",
+        "VolumeDown",
+        "VolumeUp",
+        "Workflow",
+    ];
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn custom_shortcut_roundtrips_toml() {
     let action = Action::CustomShortcut("Cmd+Shift+P".parse().expect("valid shortcut failed"));
     assert_eq!(roundtrip(&action), action);

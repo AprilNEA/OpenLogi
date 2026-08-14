@@ -41,9 +41,8 @@ impl AppState {
     /// Update a single binding in memory, on disk, and in the shared hook
     /// map for the currently selected device.
     ///
-    /// Disk failures and poisoned hook locks are logged at `warn` instead
-    /// of bubbling up: the UI thread shouldn't crash because the user's
-    /// home volume is full or because the hook thread panicked.
+    /// Disk failures restore the persisted projection and surface a config
+    /// error instead of crashing the UI thread.
     pub fn commit_binding(&mut self, button: ButtonId, action: Action) {
         self.button_bindings.insert(button, action.clone());
 

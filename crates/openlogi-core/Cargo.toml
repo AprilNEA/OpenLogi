@@ -19,6 +19,7 @@ etcetera = "0.11.0"
 atomic-write-file = { workspace = true }
 num_enum = { workspace = true }
 strum = { version = "0.27", features = ["derive"] }
+toml_edit = "0.22"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1.10.0"

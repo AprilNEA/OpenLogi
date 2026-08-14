@@ -267,7 +267,7 @@ mod tests {
     fn shared_runtime() -> SharedRuntime {
         SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
-            keyboard_bindings: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            keyboard_bindings: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),

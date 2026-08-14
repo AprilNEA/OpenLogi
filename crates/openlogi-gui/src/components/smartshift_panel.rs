@@ -38,7 +38,7 @@ use crate::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 /// `0x01`–`0xFE` (0.25 turn/s steps); the slider exposes the usable band
 /// [`SMARTSHIFT_MIN_AUTO_DISENGAGE`]–`50` (≈2–12.5 turn/s, default ~16).
 /// Thresholds below the floor free-spin on everyday scrolling (#317), so the
-/// floor and default are shared with the `openlogi-core` config heal. A device
+/// floor and default are shared with the `openlogi-core` config contract. A device
 /// reporting a value outside the band is normalised for display by
 /// [`clamp_threshold`]; it is only rewritten once the user drags the slider.
 const THRESHOLD_MIN: u8 = SMARTSHIFT_MIN_AUTO_DISENGAGE;
@@ -585,7 +585,7 @@ fn raw_to_threshold(raw: f32) -> u8 {
 /// "do not change"/unset sentinel — releases the wheel into free-spin on the
 /// gentlest scroll (#317), so it must never seed the slider or the
 /// permanent-ratchet restore at that runaway value. Such values are normalised
-/// to the default (matching the `openlogi-core` config heal); values above the
+/// to the default (the config parser rejects such persisted values); values above the
 /// band clamp down to [`THRESHOLD_MAX`]. (`0xFF` permanent ratchet never reaches
 /// here — the caller handles it before clamping.)
 fn clamp_threshold(value: u8) -> u8 {

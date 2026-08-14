@@ -24,8 +24,8 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, MonitorEvent,
-    PROTOCOL_VERSION, PairingCommandError, PairingUpdate,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
+    ConfigReloadError, MonitorEvent, PROTOCOL_VERSION, PairingCommandError, PairingUpdate,
 };
 
 use crate::pairing::PairingManager;
@@ -100,7 +100,7 @@ impl Agent for AgentServer {
         self.orchestrator.lock().await.inventory()
     }
 
-    async fn reload_config(self, _: Context) {
+    async fn reload_config(self, _: Context) -> Result<(), ConfigReloadError> {
         match Config::load_or_default() {
             Ok(config) => {
                 let launch_at_login = config.app_settings.launch_at_login;
@@ -108,8 +108,14 @@ impl Agent for AgentServer {
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
                 crate::launch_agent::reconcile(launch_at_login);
+                Ok(())
             }
-            Err(e) => warn!(error = %e, "reload_config: parse failed; keeping current config"),
+            Err(error) => {
+                warn!(error = %error, "reload_config: parse failed; keeping current config");
+                Err(ConfigReloadError {
+                    message: error.to_string(),
+                })
+            }
         }
     }
 

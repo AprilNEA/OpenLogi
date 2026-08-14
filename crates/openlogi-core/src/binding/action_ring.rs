@@ -142,6 +142,7 @@ impl<'de> Deserialize<'de> for RingAction {
 /// Keeping the action and optional presentation icon in one value makes an
 /// orphan icon impossible: clearing a slot removes the complete entry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionRingEntry {
     action: RingAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -203,6 +204,7 @@ impl ActionRingEntry {
 
 /// The actions displayed at the eight fixed ring positions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionRingLayout {
     /// Populated ring positions. An absent key is an intentionally empty slot.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -263,6 +265,7 @@ impl Default for ActionRingLayout {
 
 /// Per-device Actions Ring settings and application-specific layouts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionRingConfig {
     /// Whether `ShowActionsRing` opens this device's ring.
     #[serde(default = "default_true")]

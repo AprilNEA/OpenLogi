@@ -40,8 +40,8 @@ use openlogi_core::hid::{
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
-    AgentSnapshot, AgentStatus, FoundDevice, InventoryHealth, MonitorEvent, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingUpdate,
+    AgentSnapshot, AgentStatus, ConfigReloadError, FoundDevice, InventoryHealth, MonitorEvent,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate,
 };
 
 /// Serialize exactly as the transport does (`tokio_serde::formats::Bincode`
@@ -69,7 +69,17 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 16);
+    assert_eq!(PROTOCOL_VERSION, 17);
+}
+
+#[test]
+fn config_reload_result() {
+    let error = ConfigReloadError {
+        message: "bad".into(),
+    };
+    assert_wire(&error, "03626164");
+    assert_wire(&Ok::<(), ConfigReloadError>(()), "00");
+    assert_wire(&Err::<(), ConfigReloadError>(error), "0103626164");
 }
 
 /// tarpc encodes the request enum's variant index, so trait *method order* is

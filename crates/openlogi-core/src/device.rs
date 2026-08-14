@@ -94,6 +94,7 @@ impl DeviceKind {
 /// (issue #127): kind is an identity guess, capability is what the firmware
 /// actually announced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "capabilities is a serialized feature-bit DTO; independent booleans keep the IPC/config shape explicit"
@@ -254,6 +255,7 @@ pub struct ReceiverInfo {
 /// of an extended-model byte and one of these PIDs, so callers usually want
 /// to format `extended_model_id` + `model_ids[N]` to match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceModelInfo {
     /// Number of firmware entities (main firmware, bootloader, …) the
     /// device reports.
@@ -298,6 +300,7 @@ impl DeviceModelInfo {
     reason = "bitfield mirroring HID++ DeviceInformation; transports are independent flags"
 )]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceTransports {
     /// Wired USB.
     pub usb: bool,

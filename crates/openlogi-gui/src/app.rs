@@ -429,6 +429,17 @@ impl Render for AppView {
             });
         let root = Self::with_back_navigation(root, cx);
 
+        if let Some(issue) = cx
+            .try_global::<AppState>()
+            .and_then(AppState::config_issue)
+            .map(gpui::SharedString::from)
+        {
+            window.set_window_title("OpenLogi");
+            return root
+                .child(status::config_issue_body(issue, pal))
+                .into_any_element();
+        }
+
         // The agent is the source of truth for both the permission state and
         // the device list; `AgentLink` is everything the GUI knows about it.
         // Until the first snapshot lands, hold a neutral connecting frame:

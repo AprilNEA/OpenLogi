@@ -26,8 +26,8 @@ use openlogi_core::hid::{
     WriteError,
 };
 use openlogi_ipc::{
-    AgentClient, AgentStatus, InventoryHealth, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingUpdate,
+    AgentClient, AgentStatus, ConfigReloadError, InventoryHealth, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingUpdate,
 };
 use tarpc::client;
 use tarpc::context;
@@ -78,6 +78,8 @@ pub enum GuiUpdate {
         /// Agent acceptance or typed device failure.
         result: Result<(), WriteError>,
     },
+    /// Whether the agent adopted the config currently on disk.
+    ConfigReloadResult(Result<(), ConfigReloadError>),
 }
 
 /// A poll snapshot pushed to the GPUI loop on every successful poll round.
@@ -569,7 +571,10 @@ async fn handle(
         Command::ReadSmartShift(route, reply) => {
             let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
         }
-        Command::ReloadConfig => client.reload_config(ctx).await.map_err(|_| ())?,
+        Command::ReloadConfig => {
+            let result = client.reload_config(ctx).await.map_err(|_| ())?;
+            let _ = update_tx.send(GuiUpdate::ConfigReloadResult(result));
+        }
         Command::RequestAccessibilityPrompt => client
             .request_accessibility_prompt(ctx)
             .await

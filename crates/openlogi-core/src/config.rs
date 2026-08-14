@@ -6,19 +6,12 @@
 //! as `"receiver:abc123:slot:2"`. Schema migrations branch on
 //! [`Config::schema_version`].
 
-use std::{
-    collections::{BTreeMap, HashSet},
-    ffi::OsString,
-    fs, io,
-    path::{Path, PathBuf},
-    sync::{Mutex, OnceLock, PoisonError},
-};
+use std::{collections::BTreeMap, path::Path};
 
-use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 mod device;
+mod file;
 mod key_trigger;
 mod settings;
 
@@ -26,24 +19,26 @@ mod settings;
 mod tests;
 
 pub use device::{DeviceConfig, DeviceIdentity};
+pub use file::{ConfigError, ConfigFile};
+#[cfg(test)]
+use file::{backup_existing_config, config_backup_path};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use settings::LightSettings;
 pub use settings::{
     AppSettings, Appearance, AssetSourcePreference, CameraControls, DEFAULT_THUMBWHEEL_SENSITIVITY,
-    GestureOwner, Lighting, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
+    Lighting, MAX_THUMBWHEEL_SENSITIVITY, MIN_THUMBWHEEL_SENSITIVITY,
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
-    WheelMode,
+    WheelMode, clamp_thumbwheel_sensitivity,
 };
 
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureDirection,
     RingAction, default_binding, default_binding_for, default_gesture_binding,
 };
-use crate::paths::{self, PathsError};
-
-/// The schema version the current build produces. Bumped on breaking layout
-/// changes; readers branch on the parsed value before consuming the rest of
-/// the file.
+use settings::GestureOwner;
+/// The schema version the current build produces. Bumped whenever the
+/// persisted shape or enum vocabulary changes; readers inspect this value
+/// before consuming the rest of the file.
 ///
 /// v4 removes the one-gesture-button-per-device owner lock: gesture mode is a
 /// per-button fact read from the binding shape, so `gesture_owner` no longer
@@ -60,19 +55,18 @@ use crate::paths::{self, PathsError};
 /// v2 merged the per-device `button_bindings` + `gesture_bindings` maps into a
 /// single `bindings: BTreeMap<ButtonId, Binding>`. A v1 file still loads (the
 /// `RawDeviceConfig` shim folds the legacy fields) and self-heals to v2 on the
-/// next save; [`Config::load_from_path`] rejects only versions *newer* than this
-/// so a forward file fails loudly instead of silently losing bindings.
+/// next save; [`Config::load_from_path`] accepts supported versions `1` through
+/// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
+/// silently losing bindings.
 pub const SCHEMA_VERSION: u32 = 4;
-
-const CONFIG_BACKUP_GENERATIONS: usize = 5;
-static BACKED_UP_CONFIGS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Schema version the file was written with. Compared against
-    /// [`SCHEMA_VERSION`] on load: older layouts migrate, newer ones are
-    /// rejected loudly rather than silently losing settings.
+    /// [`SCHEMA_VERSION`] on load: supported older layouts migrate, while zero
+    /// and newer layouts are rejected rather than silently losing settings.
     pub schema_version: u32,
     /// Non-device-scoped preferences (autostart, tray, language, …).
     #[serde(default, skip_serializing_if = "AppSettings::is_default")]
@@ -112,111 +106,7 @@ impl Default for Config {
     }
 }
 
-/// Failure loading or persisting `config.toml`. The file-scoped variants
-/// carry the offending path so callers can surface an actionable message.
-#[derive(Debug, Error)]
-pub enum ConfigError {
-    /// The platform config directory could not be resolved (no home
-    /// directory for the current user).
-    #[error("could not resolve config path")]
-    Path(#[from] PathsError),
-    /// Reading the config file from disk failed.
-    #[error("could not read config at {path}")]
-    Read {
-        /// The config file the read targeted.
-        path: PathBuf,
-        /// The underlying I/O error.
-        #[source]
-        source: io::Error,
-    },
-    /// The file was read but is not valid TOML for this schema.
-    #[error("could not parse config at {path}")]
-    Parse {
-        /// The config file that failed to parse.
-        path: PathBuf,
-        /// The underlying TOML deserialization error.
-        #[source]
-        source: toml::de::Error,
-    },
-    /// Writing the updated config back to disk failed.
-    #[error("could not write config at {path}")]
-    Write {
-        /// The config file the write targeted.
-        path: PathBuf,
-        /// The underlying I/O error.
-        #[source]
-        source: io::Error,
-    },
-    /// The in-memory config could not be serialized to TOML — a bug in the
-    /// config types rather than user error, since [`Config`] always
-    /// serializes cleanly.
-    #[error("could not serialize config")]
-    Serialize(#[from] toml::ser::Error),
-    /// The file declares a `schema_version` newer than this build
-    /// understands; failing loudly avoids silently dropping settings a newer
-    /// build wrote.
-    #[error("config at {path} has unsupported schema_version {found}")]
-    UnsupportedSchemaVersion {
-        /// The config file carrying the unsupported version.
-        path: PathBuf,
-        /// The `schema_version` the file declared.
-        found: u32,
-    },
-}
-
-#[allow(
-    clippy::result_large_err,
-    reason = "Config I/O keeps rich parse/write context and is not a hot path"
-)]
 impl Config {
-    /// Loads the config from the default user path, returning
-    /// [`Config::default`] if the file does not exist yet.
-    pub fn load_or_default() -> Result<Self, ConfigError> {
-        Self::load_from_path(&paths::config_path()?)
-    }
-
-    /// Same as [`Self::load_or_default`] but reads from `path`. Used by tests
-    /// to avoid touching the real user config.
-    pub fn load_from_path(path: &Path) -> Result<Self, ConfigError> {
-        match fs::read_to_string(path) {
-            Ok(text) => {
-                let mut config: Self =
-                    toml::from_str(&text).map_err(|source| ConfigError::Parse {
-                        path: path.to_path_buf(),
-                        source,
-                    })?;
-                // Accept any version up to the current one: older files migrate
-                // through the per-device [`RawDeviceConfig`] shim and self-heal on
-                // the next save. Only a *newer* file is rejected — loudly, so a
-                // downgraded binary refuses to load (and silently wipe) a config
-                // it can't represent.
-                if config.schema_version > SCHEMA_VERSION {
-                    return Err(ConfigError::UnsupportedSchemaVersion {
-                        path: path.to_path_buf(),
-                        found: config.schema_version,
-                    });
-                }
-                // An owner-locked file (v3 and older) rewrites its gesture
-                // shapes to shape-driven form. Version-gated: on a v4 file
-                // several gesture-shaped buttons are a deliberate state that
-                // must round-trip untouched.
-                if config.schema_version <= 3 {
-                    config.migrate_owner_locked_gestures();
-                }
-                // Stamp the in-memory doc to the current version so a re-save
-                // writes the migrated shape (the device shim already folded
-                // the legacy fields during deserialize).
-                config.schema_version = SCHEMA_VERSION;
-                Ok(config)
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(source) => Err(ConfigError::Read {
-                path: path.to_path_buf(),
-                source,
-            }),
-        }
-    }
-
     /// A config that never touches the on-disk file: [`Self::save_atomic`] is
     /// a no-op. For tests that drive the state layer's persistence paths —
     /// with a default config those would overwrite the developer's real
@@ -227,35 +117,6 @@ impl Config {
             ephemeral: true,
             ..Self::default()
         }
-    }
-
-    /// Writes the config atomically to the default user path: serialize to a
-    /// sibling temp file, then rename over the target. On Unix the temp file
-    /// is created with mode 0600. No-op for an [`Self::ephemeral`] config.
-    pub fn save_atomic(&self) -> Result<(), ConfigError> {
-        if self.ephemeral {
-            return Ok(());
-        }
-        self.save_to_path(&paths::config_path()?)
-    }
-
-    /// Same as [`Self::save_atomic`] but writes to `path`. Used by tests.
-    pub fn save_to_path(&self, path: &Path) -> Result<(), ConfigError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        }
-        let body = toml::to_string_pretty(self)?;
-        backup_config_once(path).map_err(|source| ConfigError::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        write_atomic(path, body.as_bytes()).map_err(|source| ConfigError::Write {
-            path: path.to_path_buf(),
-            source,
-        })
     }
 
     /// Returns the bindings stored for `device_key`, or an empty map if the
@@ -297,7 +158,7 @@ impl Config {
 
     /// The global keyboard F-key bindings (read accessor).
     #[must_use]
-    pub fn keyboard_bindings(&self) -> &std::collections::HashMap<KeyTrigger, Action> {
+    pub fn keyboard_bindings(&self) -> &BTreeMap<KeyTrigger, Action> {
         &self.keyboard.bindings
     }
 
@@ -693,7 +554,7 @@ impl Config {
         self.devices
             .entry(device_key.to_string())
             .or_default()
-            .identity = Some(identity);
+            .identity = Some(identity.without_unit_identifiers());
     }
 
     /// Whether `device_key` has a non-empty per-app binding overlay for the
@@ -916,7 +777,7 @@ impl Config {
         self.devices
             .entry(device_key.to_string())
             .or_default()
-            .thumbwheel_sensitivity = sensitivity;
+            .thumbwheel_sensitivity = sensitivity.map(clamp_thumbwheel_sensitivity);
     }
 }
 
@@ -941,63 +802,4 @@ fn app_overlay<'a, T>(overlays: &'a BTreeMap<String, T>, app: &str) -> Option<&'
 
         overlays.get(&format!("exe:{}", executable_name.to_ascii_lowercase()))
     })
-}
-
-fn backup_config_once(path: &Path) -> io::Result<()> {
-    let backed_up = BACKED_UP_CONFIGS.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut backed_up = backed_up.lock().unwrap_or_else(PoisonError::into_inner);
-    if backed_up.contains(path) {
-        return Ok(());
-    }
-    match fs::metadata(path) {
-        Ok(_) => backup_existing_config(path)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    backed_up.insert(path.to_path_buf());
-    Ok(())
-}
-
-fn backup_existing_config(path: &Path) -> io::Result<()> {
-    for generation in (1..CONFIG_BACKUP_GENERATIONS).rev() {
-        let source = config_backup_path(path, generation)?;
-        match fs::read(&source) {
-            Ok(bytes) => write_atomic(&config_backup_path(path, generation + 1)?, &bytes)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    write_atomic(&config_backup_path(path, 1)?, &fs::read(path)?)
-}
-
-fn config_backup_path(path: &Path, generation: usize) -> io::Result<PathBuf> {
-    let Some(file_name) = path.file_name() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "config path has no file name",
-        ));
-    };
-    let mut backup_name = OsString::from(file_name);
-    backup_name.push(format!(".backup.{generation}"));
-    Ok(path.with_file_name(backup_name))
-}
-
-/// Write `bytes` to `path` atomically via a randomized temp file + rename,
-/// with the directory fsync the old hand-rolled writer lacked.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    #[cfg_attr(
-        not(unix),
-        expect(unused_mut, reason = "only the unix path mutates the options")
-    )]
-    let mut options = AtomicWriteFile::options();
-    #[cfg(unix)]
-    {
-        use atomic_write_file::unix::OpenOptionsExt as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        // Force 0600 on every save, matching the previous writer.
-        options.preserve_mode(false).mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    io::Write::write_all(&mut file, bytes)?;
-    file.commit()
 }

@@ -51,9 +51,9 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, FoundDevice,
-    InventoryHealth, MonitorEvent, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingUpdate,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
+    ConfigReloadError, FoundDevice, InventoryHealth, MonitorEvent, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingUpdate,
 };
 use tarpc::context::Context;
 use tarpc::server::{BaseChannel, Channel as _};
@@ -642,8 +642,9 @@ impl Agent for MockAgent {
         self.state.lock().await.render_inventory()
     }
 
-    async fn reload_config(self, _: Context) {
+    async fn reload_config(self, _: Context) -> Result<(), ConfigReloadError> {
         info!("reload_config (no-op in the mock)");
+        Ok(())
     }
 
     // The mock has no Actions Ring hardware: long-polls idle until the

@@ -1,7 +1,5 @@
 //! Webcam control state and camera profiles.
 
-use tracing::warn;
-
 use openlogi_camera::CameraControl;
 
 use super::AppState;
@@ -58,9 +56,7 @@ impl AppState {
         let mut controls = self.config.camera_controls(config_key).unwrap_or_default();
         controls.0.insert(name.to_string(), value);
         self.config.set_camera_controls(config_key, controls);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist camera controls");
-        }
+        self.persist_config("camera controls");
     }
     /// Lift settings from the legacy port-bound `camera-<unique_id>` key onto
     /// the stable serial/model key when the latter has none. Inventory identity
@@ -86,9 +82,7 @@ impl AppState {
                 .set_camera_active_profile(config_key, Some(active));
         }
         self.config.devices.remove(&port_key);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist camera key migration");
-        }
+        self.persist_config("camera key migration");
     }
     fn camera_key_has_settings(&self, key: &str) -> bool {
         self.config.camera_controls(key).is_some()
@@ -111,16 +105,12 @@ impl AppState {
         snap: openlogi_core::config::CameraControls,
     ) {
         self.config.save_camera_profile(config_key, name, snap);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist camera profile");
-        }
+        self.persist_config("camera profile");
     }
     /// Delete a custom camera profile and persist the removal.
     pub fn delete_camera_profile(&mut self, config_key: &str, name: &str) {
         self.config.delete_camera_profile(config_key, name);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist camera profile removal");
-        }
+        self.persist_config("camera profile removal");
     }
     /// The camera profile last applied for `config_key`, if any.
     #[must_use]
@@ -130,8 +120,6 @@ impl AppState {
     /// Record (and persist) which camera profile `config_key` last applied.
     pub fn set_camera_active_profile(&mut self, config_key: &str, name: Option<String>) {
         self.config.set_camera_active_profile(config_key, name);
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, "could not persist camera profile selection");
-        }
+        self.persist_config("camera profile selection");
     }
 }

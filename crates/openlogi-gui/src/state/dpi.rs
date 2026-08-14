@@ -116,17 +116,19 @@ impl AppState {
         };
         let persistent_key = record.persistent_config_key().map(str::to_string);
         let route = record.route.clone();
-        if let Some(route) = route {
-            self.send_ipc(crate::ipc_client::Command::SetDpi(route, dpi));
-        }
         if let Some(persistent_key) = persistent_key {
             self.config.set_dpi(&persistent_key, dpi);
-            self.persist_and_reload("DPI");
+            if !self.persist_and_reload("DPI") {
+                return;
+            }
         } else {
             debug!(
                 key = record.config_key.as_str(),
                 "transient device DPI applied without persistence"
             );
+        }
+        if let Some(route) = route {
+            self.send_ipc(crate::ipc_client::Command::SetDpi(route, dpi));
         }
     }
 }

@@ -11,6 +11,7 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::app_menu::OpenConfigFolder;
 use crate::theme::{self, FOOTER_H, Palette, Typography as _};
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"
@@ -99,6 +100,28 @@ pub(super) fn outdated_gui_body(pal: Palette) -> AnyElement {
             .on_click(|_, _, cx| cx.restart()),
     )
     .into_any_element()
+}
+
+/// Fail-closed frame for config load/save/conflict/reload failures.
+pub(super) fn config_issue_body(message: SharedString, pal: Palette) -> AnyElement {
+    notice_body(tr!("Configuration"), message, pal)
+        .size_full()
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("open-config-folder")
+                        .label(tr!("Open Configuration Folder"))
+                        .on_click(|_, _, cx| cx.dispatch_action(&OpenConfigFolder)),
+                )
+                .child(
+                    Button::new("restart-after-config-error")
+                        .primary()
+                        .label(tr!("Relaunch OpenLogi"))
+                        .on_click(|_, _, cx| cx.restart()),
+                ),
+        )
+        .into_any_element()
 }
 
 /// Footer status bar: passive state only. Left — the Accessibility-permission

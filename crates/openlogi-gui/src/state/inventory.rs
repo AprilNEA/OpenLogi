@@ -349,15 +349,12 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
             kind: record.kind,
             capabilities,
             light_capabilities: record.light_capabilities,
-            model_info: record.model_info.clone().map(|mut model| {
-                model.serial_number = None;
-                model.unit_id = [0; 4];
-                model
-            }),
+            model_info: record.model_info.clone(),
             codename: record.codename.clone(),
             driver_id: record.driver_id.clone(),
             registry_model_id: record.registry_model_id.clone(),
-        };
+        }
+        .without_unit_identifiers();
         if config.device_identity(config_key) != Some(&identity) {
             config.set_device_identity(config_key, identity);
             changed = true;

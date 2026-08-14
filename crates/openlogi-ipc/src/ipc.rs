@@ -38,7 +38,15 @@ use serde::{Deserialize, Serialize};
 /// v15: custom Actions Ring presentation icons and locale appended.
 /// v16: `ActionRingPresentation::literal` inserted (custom labels render
 ///      verbatim instead of passing through localization).
-pub const PROTOCOL_VERSION: u32 = 16;
+/// v17: `reload_config` returns a typed parse/validation result.
+pub const PROTOCOL_VERSION: u32 = 17;
+
+/// Why the agent refused to adopt the config currently on disk.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigReloadError {
+    /// Actionable config error including path and TOML location when known.
+    pub message: String,
+}
 
 /// Where the agent's device enumeration stands. The distinction matters
 /// because an empty inventory list is ambiguous on its own: the GUI must keep
@@ -281,7 +289,7 @@ pub trait Agent {
     async fn inventory() -> Vec<DeviceInventory>;
     /// Re-read `config.toml` and rebuild the live binding/DPI maps. Called by
     /// the GUI after it saves a config change.
-    async fn reload_config();
+    async fn reload_config() -> Result<(), ConfigReloadError>;
     /// Apply a DPI value to `route` now (slider preview / commit).
     async fn set_dpi(route: DeviceRoute, dpi: u32) -> Result<(), WriteError>;
     /// Apply a lighting config to `route` now.

@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 
 use gpui::Global;
-use openlogi_core::config::{Config, KeyTrigger};
+use openlogi_core::config::{Config, ConfigFile, KeyTrigger};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::SmartShiftStatus;
 use tokio::sync::mpsc;
@@ -101,12 +101,30 @@ pub enum AgentLink {
 /// Runtime state uses [`Self::UserFile`]. Tests opt into
 /// [`Self::MemoryOnly`] so realistic device fixtures can never modify the
 /// developer's actual `config.toml`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ConfigPersistence {
-    /// Persist to OpenLogi's default per-user configuration file.
-    UserFile,
+    /// Persist through the tracked user file, preserving comments and refusing
+    /// to overwrite edits made after startup.
+    UserFile(ConfigFile),
+    /// A load error made the config unsafe to write for this process lifetime.
+    ReadOnly(String),
     /// Keep changes in the in-memory [`Config`] only.
+    #[cfg_attr(not(test), allow(dead_code, reason = "test-only persistence boundary"))]
     MemoryOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConfigIssue {
+    Persistence(String),
+    Reload(String),
+}
+
+impl ConfigIssue {
+    fn message(&self) -> &str {
+        match self {
+            Self::Persistence(message) | Self::Reload(message) => message,
+        }
+    }
 }
 
 /// Inventory snapshots can briefly miss a real device while another HID++
@@ -176,6 +194,9 @@ pub struct AppState {
     /// [`Self::set_current_device`] so restarts preserve user bindings and
     /// the last-selected device.
     config: Config,
+    /// Last config revision that reached disk. Restored when a save fails so
+    /// the UI cannot continue presenting an unsaved value as committed.
+    persisted_config: Config,
     /// Sender to the IPC client thread. The agent owns the hook + all device
     /// I/O, so binding / setting writes persist to `config.toml` and then send
     /// [`Command::ReloadConfig`](crate::ipc_client::Command) for the agent to
@@ -184,6 +205,8 @@ pub struct AppState {
     ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
     /// Explicit persistence boundary; tests use an in-memory-only state.
     config_persistence: ConfigPersistence,
+    /// User-visible load, save, conflict, or agent-reload failure.
+    config_issue: Option<ConfigIssue>,
     /// Raw inventory from the last *completed* enumeration, kept for the
     /// diagnostics report (receivers + transports). The poll path only stores
     /// [`InventoryHealth::Ready`](openlogi_ipc::InventoryHealth)
@@ -219,6 +242,11 @@ impl AppState {
         config_persistence: ConfigPersistence,
         ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
     ) -> Self {
+        let persisted_config = config.clone();
+        let config_issue = match &config_persistence {
+            ConfigPersistence::ReadOnly(error) => Some(ConfigIssue::Persistence(error.clone())),
+            ConfigPersistence::UserFile(_) | ConfigPersistence::MemoryOnly => None,
+        };
         let device_list = build_device_list(inventories, standalone, cache, &config, cameras);
         // Record any device probed at launch so it survives the next cold start.
         let identities_changed = inventory::persist_identities(&mut config, &device_list);
@@ -243,8 +271,10 @@ impl AppState {
             next_smartshift_write_id: 0,
             device_list,
             config,
+            persisted_config,
             ipc_commands,
             config_persistence,
+            config_issue,
             last_inventory: Vec::new(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             monitor_events: std::collections::VecDeque::new(),
@@ -265,6 +295,11 @@ impl AppState {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        if state.config_issue.is_none()
+            && matches!(&state.config_persistence, ConfigPersistence::UserFile(_))
+        {
+            state.send_ipc(crate::ipc_client::Command::ReloadConfig);
+        }
         state
     }
     /// Send a device command to the agent over IPC, logging a dropped channel
@@ -282,21 +317,72 @@ impl AppState {
     /// The order matters: on a failed write the on-disk file still holds the
     /// *previous* config, so a reload would hand the agent stale values and
     /// (for volatile settings) silently re-apply the old DPI/SmartShift on the
-    /// next reconnect or wake. Skipping the reload keeps the agent on whatever
-    /// it already runs; the GUI keeps the new value in memory either way.
-    fn persist_and_reload(&self, what: &str) {
+    /// next reconnect or wake. A failed write restores the last persisted
+    /// config and surfaces the persistence error in the GUI.
+    fn persist_and_reload(&mut self, what: &str) -> bool {
         if self.persist_config(what) {
             self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+            true
+        } else {
+            false
         }
     }
-    fn persist_config(&self, what: &str) -> bool {
-        if self.config_persistence == ConfigPersistence::MemoryOnly {
-            return true;
-        }
-        if let Err(e) = self.config.save_atomic() {
-            warn!(error = %e, what, "could not persist to config.toml");
+    fn persist_config(&mut self, what: &str) -> bool {
+        let result = match &mut self.config_persistence {
+            ConfigPersistence::UserFile(file) => file.save(&self.config),
+            ConfigPersistence::ReadOnly(_) => {
+                self.restore_persisted_config();
+                return false;
+            }
+            ConfigPersistence::MemoryOnly => Ok(()),
+        };
+        if let Err(error) = result {
+            warn!(error = %error, what, "could not persist to config.toml");
+            self.config_issue = Some(ConfigIssue::Persistence(error.to_string()));
+            self.restore_persisted_config();
             return false;
         }
+        self.persisted_config.clone_from(&self.config);
+        if matches!(&self.config_issue, Some(ConfigIssue::Persistence(_))) {
+            self.config_issue = None;
+        }
+        true
+    }
+
+    fn restore_persisted_config(&mut self) {
+        self.config.clone_from(&self.persisted_config);
+        self.button_bindings = self.bindings_for_current();
+        self.gesture_bindings = self.current_gesture_maps();
+        self.keyboard_bindings = self.config.keyboard.bindings.clone();
+        if let Some(dpi) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .and_then(|key| self.config.dpi(key))
+        {
+            self.dpi = dpi;
+        }
+    }
+
+    /// Current config failure, shown as a fail-closed whole-window notice.
+    #[must_use]
+    pub fn config_issue(&self) -> Option<&str> {
+        self.config_issue.as_ref().map(ConfigIssue::message)
+    }
+
+    /// Record whether the agent adopted the last saved config.
+    pub fn apply_config_reload_result(
+        &mut self,
+        result: Result<(), openlogi_ipc::ConfigReloadError>,
+    ) -> bool {
+        let next = match result {
+            Err(error) => Some(ConfigIssue::Reload(error.message)),
+            Ok(()) if matches!(&self.config_issue, Some(ConfigIssue::Reload(_))) => None,
+            Ok(()) => return false,
+        };
+        if self.config_issue == next {
+            return false;
+        }
+        self.config_issue = next;
         true
     }
     /// A clone of the IPC command sender, so views (the DPI / SmartShift panels)
