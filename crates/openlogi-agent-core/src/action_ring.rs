@@ -289,6 +289,7 @@ impl ActionRingManager {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
     use openlogi_core::binding::ActionRingConfig;
@@ -339,10 +340,7 @@ mod tests {
 
         // Second press: dismissed via an empty invocation on the same poll.
         assert!(manager.dismiss_active());
-        let dismissal = manager
-            .next_invocation()
-            .await
-            .unwrap_or_else(|| panic!("dismissal queued"));
+        let dismissal = manager.next_invocation().await.expect("dismissal queued");
         assert!(dismissal.slots.is_empty());
         assert_ne!(dismissal.session_id, opened.session_id);
 
@@ -376,7 +374,7 @@ mod tests {
         let invocation = manager.begin(spec());
         let activation = manager
             .activate(invocation.session_id, ActionRingSlot::Top)
-            .unwrap_or_else(|error| panic!("{error:?}"));
+            .expect("a live session must activate its top slot");
         assert_eq!(activation.device_key, "mouse-a");
         assert_eq!(activation.action, Action::Cut);
         assert!(matches!(
@@ -417,12 +415,9 @@ mod tests {
             manager.activate(first.session_id, ActionRingSlot::Top),
             Err(ActionRingCommandError::SessionNotFound)
         ));
-        let reactivated = manager.activate(second.session_id, ActionRingSlot::Top);
-        assert!(
-            reactivated.is_ok(),
-            "the replacement session must still be activatable: {:?}",
-            reactivated.as_ref().err()
-        );
+        manager
+            .activate(second.session_id, ActionRingSlot::Top)
+            .expect("the replacement session must still be activatable");
     }
 
     /// The two clocks start at different moments — the session when `begin`
@@ -442,13 +437,10 @@ mod tests {
         let manager = ActionRingManager::default();
         let invocation = manager.begin(spec());
         let mut state = manager.state();
-        let session = state
-            .active
-            .as_mut()
-            .unwrap_or_else(|| panic!("begin creates a session"));
+        let session = state.active.as_mut().expect("begin creates a session");
         session.opened_at = Instant::now()
             .checked_sub(SESSION_LIFETIME + Duration::from_secs(1))
-            .unwrap_or_else(|| panic!("test instant has sufficient history"));
+            .expect("test instant has sufficient history");
         drop(state);
 
         assert!(matches!(

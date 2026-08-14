@@ -312,6 +312,7 @@ const fn default_true() -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 
@@ -345,9 +346,9 @@ mod tests {
             action: RingAction,
         }
 
-        let action = RingAction::new(Action::Copy).unwrap_or_else(|error| panic!("{error}"));
-        let encoded = toml::to_string(&Wrapper { action })
-            .unwrap_or_else(|error| panic!("could not serialize ring action: {error}"));
+        let action = RingAction::new(Action::Copy).expect("copy must be a valid ring action");
+        let encoded =
+            toml::to_string(&Wrapper { action }).expect("could not serialize ring action");
         assert_eq!(encoded, "action = \"Copy\"\n");
     }
 
@@ -359,22 +360,21 @@ mod tests {
             Top = { action = "Copy", label = "Copy Invoice" }
             "#,
         )
-        .unwrap_or_else(|error| panic!("could not deserialize labelled layout: {error}"));
+        .expect("could not deserialize labelled layout");
         assert_eq!(
             layout.slots[&ActionRingSlot::Top].custom_label(),
             Some("Copy Invoice")
         );
 
-        let encoded = toml::to_string(&layout)
-            .unwrap_or_else(|error| panic!("could not serialize labelled layout: {error}"));
+        let encoded = toml::to_string(&layout).expect("could not serialize labelled layout");
         let decoded = toml::from_str::<ActionRingLayout>(&encoded)
-            .unwrap_or_else(|error| panic!("could not deserialize labelled layout: {error}"));
+            .expect("could not deserialize labelled layout");
         assert_eq!(decoded, layout);
 
         // Like icons, a label sticks to its slot when the action is replaced.
         layout.set_action(
             ActionRingSlot::Top,
-            Some(RingAction::new(Action::Paste).unwrap_or_else(|error| panic!("{error}"))),
+            Some(RingAction::new(Action::Paste).expect("paste must be a valid ring action")),
         );
         assert_eq!(
             layout.slots[&ActionRingSlot::Top].custom_label(),
@@ -385,8 +385,7 @@ mod tests {
     #[test]
     fn unlabelled_entries_serialize_without_a_label_key() {
         let layout = ActionRingLayout::default();
-        let encoded = toml::to_string(&layout)
-            .unwrap_or_else(|error| panic!("could not serialize ring layout: {error}"));
+        let encoded = toml::to_string(&layout).expect("could not serialize ring layout");
         assert!(!encoded.contains("label"));
     }
 
@@ -402,10 +401,9 @@ mod tests {
     fn custom_icons_roundtrip_without_changing_slot_actions() {
         let mut layout = ActionRingLayout::default();
         layout.set_icon(ActionRingSlot::Top, Some(ActionRingIcon::Keyboard));
-        let encoded = toml::to_string(&layout)
-            .unwrap_or_else(|error| panic!("could not serialize ring layout: {error}"));
+        let encoded = toml::to_string(&layout).expect("could not serialize ring layout");
         let decoded = toml::from_str::<ActionRingLayout>(&encoded)
-            .unwrap_or_else(|error| panic!("could not deserialize ring layout: {error}"));
+            .expect("could not deserialize ring layout");
         assert_eq!(decoded, layout);
         assert_eq!(decoded.slots[&ActionRingSlot::Top].action(), &Action::Cut);
         assert_eq!(
@@ -423,7 +421,7 @@ Top = { action = "Copy", icon = "Keyboard" }
 Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
 "#,
         )
-        .unwrap_or_else(|error| panic!("documented ring layout failed: {error}"));
+        .expect("documented ring layout failed");
         assert_eq!(layout.slots[&ActionRingSlot::Top].action(), &Action::Copy);
         assert_eq!(
             layout.slots[&ActionRingSlot::Top].custom_icon(),
@@ -459,7 +457,7 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
             slots: BTreeMap::from([(
                 ActionRingSlot::Top,
                 ActionRingEntry::new(
-                    RingAction::new(Action::NewTab).unwrap_or_else(|error| panic!("{error}")),
+                    RingAction::new(Action::NewTab).expect("new tab must be a valid ring action"),
                 ),
             )]),
         };

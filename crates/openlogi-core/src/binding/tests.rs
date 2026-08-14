@@ -91,11 +91,7 @@ fn workflow_label_category_and_catalog_exclusion() {
     let wf = Action::Workflow(vec![
         WorkflowStep::TypeText("bite me".into()),
         WorkflowStep::Delay { millis: 5000 },
-        WorkflowStep::PressKey(
-            "Enter"
-                .parse()
-                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
-        ),
+        WorkflowStep::PressKey("Enter".parse().expect("valid shortcut failed")),
     ]);
     assert_eq!(wf.label(), "Workflow (3 steps)");
     assert_eq!(wf.category(), Category::Editing);
@@ -112,11 +108,7 @@ fn workflow_roundtrips_toml() {
     let wf = Action::Workflow(vec![
         WorkflowStep::TypeText("bite me".into()),
         WorkflowStep::Delay { millis: 5000 },
-        WorkflowStep::PressKey(
-            "Shift+Enter"
-                .parse()
-                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
-        ),
+        WorkflowStep::PressKey("Shift+Enter".parse().expect("valid shortcut failed")),
         WorkflowStep::RunShellCommand("echo done".into()),
     ]);
     let toml = toml::to_string(&wf).expect("serialize");
@@ -151,9 +143,7 @@ fn binding_single_roundtrips_including_payload_variants() {
     bindings.insert(
         ButtonId::Forward,
         Binding::Single(Action::CustomShortcut(
-            "Cmd+P"
-                .parse()
-                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+            "Cmd+P".parse().expect("valid shortcut failed"),
         )),
     );
     let back = binding_roundtrip(bindings);
@@ -258,27 +248,19 @@ fn all_catalog_variants_roundtrip_toml() {
 
 #[test]
 fn custom_shortcut_roundtrips_toml() {
-    let action = Action::CustomShortcut(
-        "Cmd+Shift+P"
-            .parse()
-            .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
-    );
+    let action = Action::CustomShortcut("Cmd+Shift+P".parse().expect("valid shortcut failed"));
     assert_eq!(roundtrip(&action), action);
 }
 
 #[test]
 fn key_combo_rendered_label_is_canonical() {
-    let combo: KeyCombo = "Cmd+Shift+P"
-        .parse()
-        .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
+    let combo: KeyCombo = "Cmd+Shift+P".parse().expect("valid shortcut failed");
     assert_eq!(combo.rendered_label(), "Cmd+Shift+P");
 }
 
 #[test]
 fn key_combo_rendered_label_falls_back_to_modifiers_plus_key() {
-    let combo: KeyCombo = "Cmd+Shift+P"
-        .parse()
-        .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
+    let combo: KeyCombo = "Cmd+Shift+P".parse().expect("valid shortcut failed");
     assert_eq!(combo.rendered_label(), "Cmd+Shift+P");
 }
 

@@ -559,6 +559,7 @@ fn try_mpris_command(command: &str) -> Option<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use evdev::KeyCode;
     use openlogi_core::binding::KeyCombo;
@@ -569,7 +570,7 @@ mod tests {
     fn modifiers_map_to_linux_without_duplicate_control() {
         let combo = "Cmd+Ctrl+Shift+Alt+A"
             .parse::<KeyCombo>()
-            .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
+            .expect("a valid shortcut must parse");
         assert_eq!(
             modifiers_to_keycodes(&combo),
             vec![

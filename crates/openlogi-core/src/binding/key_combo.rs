@@ -332,6 +332,7 @@ fn parse_key(token: &str) -> Result<KeyboardUsage, KeyComboParseError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 
@@ -339,7 +340,7 @@ mod tests {
     fn parses_modifiers_letters_and_navigation_keys() {
         let combo = "Cmd+Shift+P"
             .parse::<KeyCombo>()
-            .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
+            .expect("valid shortcut failed");
         assert!(combo.has_command());
         assert!(combo.has_shift());
         assert_eq!(combo.key().code(), 0x13);
@@ -347,7 +348,7 @@ mod tests {
 
         let combo = "Ctrl+Alt+Left"
             .parse::<KeyCombo>()
-            .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
+            .expect("valid shortcut failed");
         assert!(combo.has_control());
         assert!(combo.has_option());
         assert_eq!(combo.key().code(), 0x50);
@@ -356,9 +357,7 @@ mod tests {
 
     #[test]
     fn a_uses_its_platform_neutral_hid_usage() {
-        let combo = "Cmd+A"
-            .parse::<KeyCombo>()
-            .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
+        let combo = "Cmd+A".parse::<KeyCombo>().expect("valid shortcut failed");
         assert_eq!(combo.key().code(), 0x04);
         assert_eq!(combo.rendered_label(), "Cmd+A");
     }
@@ -411,10 +410,9 @@ mod tests {
 
         let combo = "Cmd+Shift+P"
             .parse::<KeyCombo>()
-            .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
+            .expect("valid shortcut failed");
         let wrapper = Wrapper { shortcut: combo };
-        let encoded = toml::to_string(&wrapper)
-            .unwrap_or_else(|error| panic!("shortcut serialization failed: {error}"));
+        let encoded = toml::to_string(&wrapper).expect("shortcut serialization failed");
         assert_eq!(encoded, "shortcut = \"Cmd+Shift+P\"\n");
         assert_eq!(toml::from_str::<Wrapper>(&encoded), Ok(wrapper));
     }

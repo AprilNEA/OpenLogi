@@ -213,7 +213,7 @@ fn per_key_lighting_builds_only_very_long_frames_then_one_long_commit() {
     let reports = per_key_reports(0x03, 0x27, 0x11, 0x22, 0x33);
     let (commit, frames) = reports
         .split_last()
-        .unwrap_or_else(|| panic!("per-key lighting must emit a commit"));
+        .expect("per-key lighting must emit a commit");
 
     assert_eq!(frames.len(), 17);
     assert!(frames.iter().all(|report| report.len() == 64));
@@ -246,7 +246,7 @@ async fn shared_read_and_lighting_apis_use_the_supplied_channel() -> Result<(), 
     let channel = Arc::new(
         HidppChannel::from_raw_channel(raw)
             .await
-            .unwrap_or_else(|error| panic!("scripted HID++ channel must open: {error:?}")),
+            .expect("scripted HID++ channel must open"),
     );
     let shared = SharedChannel::new(
         channel,

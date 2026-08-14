@@ -1014,6 +1014,7 @@ pub(crate) fn stop(inner: HookInner) {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
@@ -1022,8 +1023,8 @@ mod tests {
     #[test]
     fn tap_callback_suppresses_normally_and_passes_through_panics() {
         let source = CGEventSource::new(CGEventSourceStateID::Private)
-            .unwrap_or_else(|()| panic!("CGEventSourceCreate failed"));
-        let event = CGEvent::new(source).unwrap_or_else(|()| panic!("CGEventCreate failed"));
+            .expect("CGEventSourceCreate must succeed");
+        let event = CGEvent::new(source).expect("CGEventCreate must succeed");
 
         assert!(matches!(
             run_tap_callback(

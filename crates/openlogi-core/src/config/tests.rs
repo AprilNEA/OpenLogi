@@ -433,9 +433,7 @@ fn bindings_roundtrip_per_device() {
         "2b042",
         ButtonId::DpiToggle,
         Binding::Single(Action::CustomShortcut(
-            "Cmd+P"
-                .parse()
-                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+            "Cmd+P".parse().expect("valid shortcut failed"),
         )),
     );
     cfg.set_binding("4082d", ButtonId::Back, Binding::Single(Action::Paste));
@@ -448,9 +446,7 @@ fn bindings_roundtrip_per_device() {
     assert_eq!(
         a.get(&ButtonId::DpiToggle),
         Some(&Binding::Single(Action::CustomShortcut(
-            "Cmd+P"
-                .parse()
-                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"))
+            "Cmd+P".parse().expect("valid shortcut failed")
         )))
     );
 

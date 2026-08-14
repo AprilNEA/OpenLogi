@@ -156,6 +156,12 @@ a `reason`. What that changes day to day:
 - Every `unsafe` block needs a `// SAFETY:` comment saying why it is sound.
 - `assert!(r.is_ok())` / `assert!(r.is_err())` are rejected — unwrap the `Result` (in a
   test module that already allows it) or give the assertion a message.
+- A test module that wants `expect`/`unwrap` says so:
+  `#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]` on the
+  module (or on its `mod tests;` declaration). Never route around the lint with
+  `unwrap_or_else(|e| panic!("…: {e}"))` — that is the same panic with the check switched
+  off. The one honest use of that form is a *dynamic* panic message, where `expect` would
+  need a `format!` that allocates on the happy path (`expect_fun_call`).
 - A test module gated on more than `test` needs stacked attributes (`#[cfg(test)]` then
   `#[cfg(unix)]`), not `#[cfg(all(test, unix))]`, which clippy reads as a test outside a
   test module. Integration tests under `tests/` carry a file-level
