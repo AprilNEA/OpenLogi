@@ -29,15 +29,14 @@ use hidpp::{
     channel::{HidppChannel, HidppMessage},
     receiver::{self, Receiver},
 };
-use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
-// Click / PasskeyMethod / ReceiverSelector are pure IPC wire data with no
-// HID++ I/O, so they live in `openlogi_core::hid::pairing`; re-exported here
-// unchanged so this module's own API surface doesn't churn.
-pub use openlogi_core::hid::pairing::{Click, PasskeyMethod, ReceiverSelector};
+// Click / PasskeyMethod / ReceiverSelector / PairingError are pure data with
+// no HID++/async-hid I/O, so they live in `openlogi_core::hid::pairing`;
+// re-exported here unchanged so this module's own API surface doesn't churn.
+pub use openlogi_core::hid::pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 
 use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
@@ -172,44 +171,27 @@ pub enum PairingCommand {
     Cancel,
 }
 
-/// Errors raised by pairing operations.
-#[derive(Clone, Debug, Error)]
-pub enum PairingError {
-    /// HID transport failure.
-    #[error("HID transport error: {0}")]
-    Hid(String),
-    /// No supported receiver matched the requested selector.
-    #[error("no supported pairing-capable receiver found")]
-    ReceiverNotFound,
-    /// HID++ receiver register read/write failed.
-    #[error("receiver register access failed: {0}")]
-    Register(String),
-    /// Pairing flow exceeded its timeout.
-    #[error("pairing timed out")]
-    Timeout,
-    /// Receiver reported a device-specific pairing error code.
-    #[error("receiver reported pairing error {0:#04x}")]
-    Device(u8),
-    /// Pairing flow was cancelled by the caller.
-    #[error("pairing was cancelled")]
-    Cancelled,
-    /// A receiver notification failed to decode; authentication cannot
-    /// proceed safely, so the flow fails instead of presenting bogus data.
-    #[error("malformed pairing notification ({0})")]
-    MalformedNotification(&'static str),
-}
-
-impl From<async_hid::HidError> for PairingError {
-    fn from(e: async_hid::HidError) -> Self {
-        PairingError::Hid(e.to_string())
-    }
+/// Converts an `async_hid` transport error into [`PairingError`].
+///
+/// A plain function rather than a `From` impl: with `PairingError` defined
+/// in `openlogi-core`, `impl From<async_hid::HidError> for PairingError`
+/// here would implement a foreign trait for a foreign type and violate the
+/// orphan rule.
+fn classify_hid_error(error: &async_hid::HidError) -> PairingError {
+    PairingError::Hid(error.to_string())
 }
 
 /// Lists supported pairing-capable receivers connected to the host.
 pub async fn list_pairing_receivers() -> Result<Vec<PairingReceiver>, PairingError> {
     let mut out = Vec::new();
-    for dev in enumerate_hidpp_devices().await? {
-        let Some((_, channel)) = open_hidpp_channel(dev).await? else {
+    for dev in enumerate_hidpp_devices()
+        .await
+        .map_err(|e| classify_hid_error(&e))?
+    {
+        let Some((_, channel)) = open_hidpp_channel(dev)
+            .await
+            .map_err(|e| classify_hid_error(&e))?
+        else {
             continue;
         };
         let Some(family) = family_for(channel.product_id) else {
@@ -240,8 +222,14 @@ async fn read_bolt_uid(channel: &Arc<HidppChannel>) -> Option<String> {
 async fn open_receiver(
     target: &ReceiverSelector,
 ) -> Result<(Arc<HidppChannel>, ReceiverFamily), PairingError> {
-    for dev in enumerate_hidpp_devices().await? {
-        let Some((_, channel)) = open_hidpp_channel(dev).await? else {
+    for dev in enumerate_hidpp_devices()
+        .await
+        .map_err(|e| classify_hid_error(&e))?
+    {
+        let Some((_, channel)) = open_hidpp_channel(dev)
+            .await
+            .map_err(|e| classify_hid_error(&e))?
+        else {
             continue;
         };
         let Some(family) = family_for(channel.product_id) else {

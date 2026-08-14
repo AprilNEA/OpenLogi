@@ -4,6 +4,7 @@
 //! register writes) lives in `openlogi_hid::pairing`.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Selects which receiver a pairing operation targets.
 ///
@@ -45,4 +46,36 @@ pub enum PasskeyMethod {
         /// MSB-first click sequence derived from the passkey.
         clicks: Vec<Click>,
     },
+}
+
+/// Errors raised by pairing operations.
+///
+/// Pure data — no `hidpp`/`async-hid` types — but not itself a wire type:
+/// the agent maps it to `openlogi_agent_core::ipc::PairingFailure`, which
+/// crosses the IPC boundary. The conversion from `async_hid::HidError` lives
+/// in `openlogi_hid::pairing`, which this crate must never depend on.
+#[derive(Clone, Debug, Error)]
+pub enum PairingError {
+    /// HID transport failure.
+    #[error("HID transport error: {0}")]
+    Hid(String),
+    /// No supported receiver matched the requested selector.
+    #[error("no supported pairing-capable receiver found")]
+    ReceiverNotFound,
+    /// HID++ receiver register read/write failed.
+    #[error("receiver register access failed: {0}")]
+    Register(String),
+    /// Pairing flow exceeded its timeout.
+    #[error("pairing timed out")]
+    Timeout,
+    /// Receiver reported a device-specific pairing error code.
+    #[error("receiver reported pairing error {0:#04x}")]
+    Device(u8),
+    /// Pairing flow was cancelled by the caller.
+    #[error("pairing was cancelled")]
+    Cancelled,
+    /// A receiver notification failed to decode; authentication cannot
+    /// proceed safely, so the flow fails instead of presenting bogus data.
+    #[error("malformed pairing notification ({0})")]
+    MalformedNotification(&'static str),
 }

@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_hid::{
+use openlogi_core::hid::{
     DeviceRoute, DpiInfo, LightCommand, PairingError, PasskeyMethod, ReceiverSelector,
     SmartShiftMode, SmartShiftStatus, WriteError,
 };
