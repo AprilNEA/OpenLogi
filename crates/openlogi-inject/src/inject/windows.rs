@@ -10,23 +10,15 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
 
-use openlogi_core::binding::{Action, KeyCombo, WorkflowStep};
+use openlogi_core::binding::{
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+};
 
 const WHEEL_DELTA: i32 = 120;
 
-const VK_A: u16 = 0x41;
-const VK_C: u16 = 0x43;
 const VK_D: u16 = 0x44;
-const VK_F: u16 = 0x46;
 const VK_L: u16 = 0x4C;
-const VK_R: u16 = 0x52;
 const VK_S: u16 = 0x53;
-const VK_T: u16 = 0x54;
-const VK_V: u16 = 0x56;
-const VK_W: u16 = 0x57;
-const VK_X: u16 = 0x58;
-const VK_Y: u16 = 0x59;
-const VK_Z: u16 = 0x5A;
 const VK_TAB: u16 = 0x09;
 const VK_LEFT: u16 = 0x25;
 const VK_RIGHT: u16 = 0x27;
@@ -43,109 +35,130 @@ const VK_MEDIA_NEXT_TRACK: u16 = 0xB0;
 const VK_MEDIA_PREV_TRACK: u16 = 0xB1;
 const VK_MEDIA_PLAY_PAUSE: u16 = 0xB3;
 
-#[derive(Clone, Copy)]
-enum MouseButton {
-    Left,
-    Right,
-    Middle,
-    /// Extra button 4 ("back").
-    Back,
-    /// Extra button 5 ("forward").
-    Forward,
-}
-
 // XBUTTON1/XBUTTON2 from WinUser.h — windows-sys puts them behind the
 // Win32_UI_WindowsAndMessaging feature; not worth enabling for two
 // integers (same treatment as the VK_* codes above).
 const XBUTTON1: i32 = 1;
 const XBUTTON2: i32 = 2;
 
-/// Windows implementation: synthesise events via `SendInput`. macOS
-/// window-manager actions map to their Windows equivalents; `CustomShortcut`
-/// maps macOS `kVK_*` codes to Windows virtual-key codes (Cmd → Ctrl).
+/// Windows implementation: classify `action` into an [`Effect`] and
+/// synthesise events via `SendInput`. macOS window-manager actions map to
+/// their Windows equivalents; `CustomShortcut` maps macOS `kVK_*` codes to
+/// Windows virtual-key codes (Cmd → Ctrl).
 pub(super) fn execute(action: &Action) {
-    match action {
-        Action::LeftClick => post_click(MouseButton::Left),
-        Action::RightClick => post_click(MouseButton::Right),
-        Action::MiddleClick => post_click(MouseButton::Middle),
-        Action::MouseBack => post_click(MouseButton::Back),
-        Action::MouseForward => post_click(MouseButton::Forward),
-        Action::Copy => post_key(VK_C, &[VK_CONTROL]),
-        Action::Paste => post_key(VK_V, &[VK_CONTROL]),
-        Action::Cut => post_key(VK_X, &[VK_CONTROL]),
-        Action::Undo => post_key(VK_Z, &[VK_CONTROL]),
-        Action::Redo => post_key(VK_Y, &[VK_CONTROL]),
-        Action::SelectAll => post_key(VK_A, &[VK_CONTROL]),
-        Action::Find => post_key(VK_F, &[VK_CONTROL]),
-        Action::Save => post_key(VK_S, &[VK_CONTROL]),
-        Action::BrowserBack => post_key(VK_BROWSER_BACK, &[]),
-        Action::BrowserForward => post_key(VK_BROWSER_FORWARD, &[]),
-        Action::NewTab => post_key(VK_T, &[VK_CONTROL]),
-        Action::CloseTab => post_key(VK_W, &[VK_CONTROL]),
-        Action::ReopenTab => {
-            post_key(VK_T, &[VK_CONTROL, VK_SHIFT]);
-        }
-        Action::NextTab => post_key(VK_TAB, &[VK_CONTROL]),
-        Action::PrevTab => {
-            post_key(VK_TAB, &[VK_CONTROL, VK_SHIFT]);
-        }
-        Action::ReloadPage => post_key(VK_R, &[VK_CONTROL]),
-        Action::MissionControl | Action::AppExpose => {
-            post_key(VK_TAB, &[VK_LWIN]);
-        }
-        Action::PreviousDesktop => {
-            post_key(VK_LEFT, &[VK_LWIN, VK_CONTROL]);
-        }
-        Action::NextDesktop => {
-            post_key(VK_RIGHT, &[VK_LWIN, VK_CONTROL]);
-        }
-        Action::ShowDesktop => post_key(VK_D, &[VK_LWIN]),
-        Action::LaunchpadShow => post_key(VK_LWIN, &[]),
-        Action::LockScreen => post_key(VK_L, &[VK_LWIN]),
-        // Win+Shift+S opens the snip overlay, which serves both full-screen
-        // and region capture on Windows.
-        Action::Screenshot | Action::CaptureRegion => {
-            post_key(VK_S, &[VK_LWIN, VK_SHIFT]);
-        }
-        // Suspending reliably needs `SetSuspendState` (powrprof.dll), which
-        // hibernates instead when hibernation is enabled — no clean win from
-        // a background agent, so the action is skipped on Windows for now.
-        Action::Sleep => {
-            tracing::debug!("Sleep has no Windows synthesis yet — action skipped");
-        }
-        Action::PlayPause => post_key(VK_MEDIA_PLAY_PAUSE, &[]),
-        Action::NextTrack => post_key(VK_MEDIA_NEXT_TRACK, &[]),
-        Action::PrevTrack => post_key(VK_MEDIA_PREV_TRACK, &[]),
-        Action::VolumeUp => post_key(VK_VOLUME_UP, &[]),
-        Action::VolumeDown => post_key(VK_VOLUME_DOWN, &[]),
-        Action::MuteVolume => post_key(VK_VOLUME_MUTE, &[]),
-        Action::CycleDpiPresets
-        | Action::SetDpiPreset(_)
-        | Action::ToggleSmartShift
-        | Action::ShowActionsRing
-        | Action::OpenApplication(_) => {
-            tracing::debug!(
-                action = action.label(),
-                "device action handled by hook/HID layer"
-            );
-        }
-        Action::ScrollUp
-        | Action::ScrollDown
-        | Action::HorizontalScrollLeft
-        | Action::HorizontalScrollRight => post_scroll(action),
-        Action::CustomShortcut(combo) => post_custom_shortcut(combo),
-        Action::TypeText(text) => {
+    match action.effect() {
+        Effect::None => {}
+        Effect::Click(button) => post_click(button),
+        Effect::Shortcut(shortcut) => press_shortcut(shortcut),
+        Effect::Key(combo) => post_custom_shortcut(combo),
+        Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
+        Effect::Media(key) => dispatch_media(key),
+        Effect::Native(native) => dispatch_native(native),
+        Effect::Script(script) => dispatch_script(script),
+        Effect::Text(text) => {
             tracing::warn!(
                 chars = text.chars().count(),
                 "TypeText injection is not implemented on Windows yet"
             );
         }
-        Action::RunAppleScript(_) => {
+        Effect::AgentSide => {
+            tracing::debug!(
+                action = action.label(),
+                "device action handled by hook/HID layer"
+            );
+        }
+    }
+}
+
+/// The Windows chord for a named [`Shortcut`], or the raw virtual key to
+/// post with no modifier when Windows has no chord-shaped representation
+/// for it at all.
+///
+/// `BrowserBack`/`BrowserForward` are Windows' one exception: they fire a
+/// dedicated virtual key (`VK_BROWSER_BACK`/`_FORWARD`) with no modifier,
+/// which isn't a USB HID keyboard usage and so has no [`KeyCombo`]
+/// representation — unlike on macOS/Linux, where the same shortcuts are
+/// ordinary modifier+key chords. [`press_shortcut`] posts the `Err` case
+/// directly instead of routing it through [`post_custom_shortcut`].
+fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
+    let text = match shortcut {
+        Shortcut::BrowserBack => return Err(VK_BROWSER_BACK),
+        Shortcut::BrowserForward => return Err(VK_BROWSER_FORWARD),
+        Shortcut::Copy => "Ctrl+C",
+        Shortcut::Paste => "Ctrl+V",
+        Shortcut::Cut => "Ctrl+X",
+        Shortcut::Undo => "Ctrl+Z",
+        // Ctrl+Y, not Ctrl+Shift+Z: matches the dominant Windows convention
+        // (Office, most Win32/UWP apps) rather than the macOS ⌘⇧Z one.
+        Shortcut::Redo => "Ctrl+Y",
+        Shortcut::SelectAll => "Ctrl+A",
+        Shortcut::Find => "Ctrl+F",
+        Shortcut::Save => "Ctrl+S",
+        Shortcut::NewTab => "Ctrl+T",
+        Shortcut::CloseTab => "Ctrl+W",
+        Shortcut::ReopenTab => "Ctrl+Shift+T",
+        Shortcut::NextTab => "Ctrl+Tab",
+        Shortcut::PrevTab => "Ctrl+Shift+Tab",
+        Shortcut::ReloadPage => "Ctrl+R",
+    };
+    Ok(parse_shortcut(text))
+}
+
+fn parse_shortcut(text: &str) -> KeyCombo {
+    text.parse()
+        .unwrap_or_else(|error| unreachable!("hardcoded shortcut table entry {text:?}: {error}"))
+}
+
+fn press_shortcut(shortcut: Shortcut) {
+    match combo(shortcut) {
+        Ok(combo) => post_custom_shortcut(&combo),
+        Err(vk) => post_key(vk, &[]),
+    }
+}
+
+/// Dispatch a window-manager or power [`NativeAction`]. macOS window-manager
+/// concepts map to their nearest Windows shortcut; `Sleep` has no clean
+/// synthesis (see the comment below) and is skipped.
+fn dispatch_native(native: NativeAction) {
+    match native {
+        NativeAction::MissionControl | NativeAction::AppExpose => post_key(VK_TAB, &[VK_LWIN]),
+        NativeAction::PreviousDesktop => post_key(VK_LEFT, &[VK_LWIN, VK_CONTROL]),
+        NativeAction::NextDesktop => post_key(VK_RIGHT, &[VK_LWIN, VK_CONTROL]),
+        NativeAction::ShowDesktop => post_key(VK_D, &[VK_LWIN]),
+        NativeAction::LaunchpadShow => post_key(VK_LWIN, &[]),
+        NativeAction::LockScreen => post_key(VK_L, &[VK_LWIN]),
+        // Win+Shift+S opens the snip overlay, which serves both full-screen
+        // and region capture on Windows.
+        NativeAction::Screenshot | NativeAction::CaptureRegion => {
+            post_key(VK_S, &[VK_LWIN, VK_SHIFT]);
+        }
+        // Suspending reliably needs `SetSuspendState` (powrprof.dll), which
+        // hibernates instead when hibernation is enabled — no clean win from
+        // a background agent, so the action is skipped on Windows for now.
+        NativeAction::Sleep => {
+            tracing::debug!("Sleep has no Windows synthesis yet — action skipped");
+        }
+    }
+}
+
+fn dispatch_media(key: MediaKey) {
+    match key {
+        MediaKey::PlayPause => post_key(VK_MEDIA_PLAY_PAUSE, &[]),
+        MediaKey::NextTrack => post_key(VK_MEDIA_NEXT_TRACK, &[]),
+        MediaKey::PrevTrack => post_key(VK_MEDIA_PREV_TRACK, &[]),
+        MediaKey::VolumeUp => post_key(VK_VOLUME_UP, &[]),
+        MediaKey::VolumeDown => post_key(VK_VOLUME_DOWN, &[]),
+        MediaKey::Mute => post_key(VK_VOLUME_MUTE, &[]),
+    }
+}
+
+fn dispatch_script(script: Script<'_>) {
+    match script {
+        Script::AppleScript(_) => {
             tracing::warn!("RunAppleScript is only supported on macOS");
         }
-        Action::RunShellCommand(cmd) => run_shell_command_async(cmd.clone()),
-        Action::Workflow(steps) => run_workflow_async(steps.clone()),
-        Action::None => {}
+        Script::ShellCommand(cmd) => run_shell_command_async(cmd.to_string()),
+        Script::Workflow(steps) => run_workflow_async(steps.to_vec()),
     }
 }
 
@@ -207,15 +220,20 @@ fn post_key(vk: u16, modifiers: &[u16]) {
     send_inputs(&inputs);
 }
 
-fn post_scroll(action: &Action) {
-    let (flags, data) = match action {
-        Action::ScrollUp => (MOUSEEVENTF_WHEEL, WHEEL_DELTA),
-        Action::ScrollDown => (MOUSEEVENTF_WHEEL, -WHEEL_DELTA),
-        Action::HorizontalScrollLeft => (MOUSEEVENTF_HWHEEL, -WHEEL_DELTA),
-        Action::HorizontalScrollRight => (MOUSEEVENTF_HWHEEL, WHEEL_DELTA),
-        _ => return,
-    };
-    send_inputs(&[mouse_input(flags, data)]);
+/// Synthesise one scroll tick in direction `(dx, dy)`. Unit direction
+/// (-1/0/1) scaled by `WHEEL_DELTA`, the fixed magnitude the four
+/// `Scroll*`/`HorizontalScroll*` actions have always used.
+fn dispatch_scroll(dx: i8, dy: i8) {
+    let mut inputs = Vec::with_capacity(2);
+    if dy != 0 {
+        inputs.push(mouse_input(MOUSEEVENTF_WHEEL, i32::from(dy) * WHEEL_DELTA));
+    }
+    if dx != 0 {
+        inputs.push(mouse_input(MOUSEEVENTF_HWHEEL, i32::from(dx) * WHEEL_DELTA));
+    }
+    if !inputs.is_empty() {
+        send_inputs(&inputs);
+    }
 }
 
 pub(super) fn post_horizontal_scroll(delta: i32) {
@@ -309,5 +327,69 @@ fn mouse_input(flags: u32, data: i32) -> INPUT {
                 dwExtraInfo: 0,
             },
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_core::binding::Shortcut;
+
+    use super::{VK_BROWSER_BACK, VK_BROWSER_FORWARD, combo};
+
+    /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
+    /// edit to the table can't silently change what Ctrl+C sends.
+    /// `Redo` differs from macOS/Linux by design (see the module doc on
+    /// `combo`), and `BrowserBack`/`BrowserForward` have no `KeyCombo`
+    /// representation on Windows at all — see `combo`'s doc.
+    #[test]
+    fn combo_table_pins_representative_shortcuts() {
+        assert_eq!(
+            combo(Shortcut::Copy)
+                .unwrap_or_else(|vk| panic!("Copy should be a chord, not raw vk {vk:#x}"))
+                .rendered_label(),
+            "Ctrl+C"
+        );
+        assert_eq!(
+            combo(Shortcut::Redo)
+                .unwrap_or_else(|vk| panic!("Redo should be a chord, not raw vk {vk:#x}"))
+                .rendered_label(),
+            "Ctrl+Y"
+        );
+        assert_eq!(
+            combo(Shortcut::NextTab)
+                .unwrap_or_else(|vk| panic!("NextTab should be a chord, not raw vk {vk:#x}"))
+                .rendered_label(),
+            "Ctrl+Tab"
+        );
+        assert_eq!(combo(Shortcut::BrowserBack), Err(VK_BROWSER_BACK));
+        assert_eq!(combo(Shortcut::BrowserForward), Err(VK_BROWSER_FORWARD));
+        // Every chord-shaped row must actually resolve through
+        // hid_usage_to_windows, or a `Shortcut` silently no-ops instead of
+        // pressing anything (see `post_custom_shortcut`'s warn-and-drop path).
+        for shortcut in [
+            Shortcut::Copy,
+            Shortcut::Paste,
+            Shortcut::Cut,
+            Shortcut::Undo,
+            Shortcut::Redo,
+            Shortcut::SelectAll,
+            Shortcut::Find,
+            Shortcut::Save,
+            Shortcut::NewTab,
+            Shortcut::CloseTab,
+            Shortcut::ReopenTab,
+            Shortcut::NextTab,
+            Shortcut::PrevTab,
+            Shortcut::ReloadPage,
+        ] {
+            let key = combo(shortcut)
+                .unwrap_or_else(|vk| panic!("{shortcut:?} should be a chord, not raw vk {vk:#x}"))
+                .key()
+                .code();
+            assert!(
+                super::super::hid_usage_to_windows(key).is_some(),
+                "{shortcut:?} table entry has no Windows virtual-key mapping"
+            );
+        }
     }
 }
