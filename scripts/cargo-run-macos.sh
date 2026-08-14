@@ -23,6 +23,19 @@
 # already-running agent outside this checkout (normally a production install).
 set -euo pipefail
 
+# macOS SIP strips every DYLD_* variable when it launches this script's
+# interpreter, including the DYLD_FALLBACK_LIBRARY_PATH cargo sets so a test
+# binary can locate its dynamically-linked libstd. Most binaries link libstd
+# statically and never notice; a proc-macro crate's test binary links it
+# dynamically and aborts with "Library not loaded: @rpath/libstd-*.dylib —
+# no LC_RPATH's found". Rebuild the path cargo meant to pass. One `rustc`
+# call, and the parameter expansions (first line / last line) keep this
+# working on the bash 3.2 that ships with macOS.
+if [ -z "${DYLD_FALLBACK_LIBRARY_PATH:-}" ]; then
+  rustc_print="$(rustc --print sysroot --print host-tuple)"
+  export DYLD_FALLBACK_LIBRARY_PATH="${rustc_print%%$'\n'*}/lib/rustlib/${rustc_print##*$'\n'}/lib"
+fi
+
 bin="$1"
 shift
 
