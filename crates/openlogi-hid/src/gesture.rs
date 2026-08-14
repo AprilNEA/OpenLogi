@@ -524,6 +524,12 @@ async fn arm_reprog_control(
         .get_cid_reporting(cid)
         .await
         .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
+    if original.diverted {
+        // Left over from a session that never tore down (agent killed, or
+        // another Logitech app). Worth a line: it is the state that used to be
+        // replayed on restore, leaving the button dead.
+        debug!(cid, "control was already diverted before arming");
+    }
     let mut change = reprog_controls::CidReportingChange::temporary_diversion(true, raw_xy);
     change.remap = original.remap;
     if let Err(error) = rc.set_cid_reporting_full(cid, change).await {
@@ -534,23 +540,28 @@ async fn arm_reprog_control(
     Ok(ArmedCid { cid, original })
 }
 
-fn reporting_change(
+/// The mirror image of arming: clear the diversion this session turned on and
+/// hand the control's remap target back untouched.
+///
+/// Deliberately *not* a verbatim replay of the snapshot. A control can already
+/// be diverted when the session arms it — the agent was killed mid-session, or
+/// Logi Options+ left its own diversion behind — and replaying that snapshot
+/// hands the button back diverted with nothing listening for its HID++ events
+/// and no OS event either: dead until the device sleeps or reconnects, since
+/// diversion is volatile. Arming only ever sets `diverted` / `raw_xy` (plus
+/// re-asserting `remap`), so undoing exactly those fields is the whole job;
+/// every other bit stays `None`, i.e. unchanged.
+fn undivert_change(
     reporting: reprog_controls::CidReporting,
 ) -> reprog_controls::CidReportingChange {
-    reprog_controls::CidReportingChange {
-        diverted: Some(reporting.diverted),
-        persistently_diverted: Some(reporting.persistently_diverted),
-        force_raw_xy: Some(reporting.force_raw_xy),
-        raw_xy: Some(reporting.raw_xy),
-        remap: reporting.remap,
-        analytics_key_events: Some(reporting.analytics_key_events),
-        raw_wheel: Some(reporting.raw_wheel),
-    }
+    let mut change = reprog_controls::CidReportingChange::temporary_diversion(false, false);
+    change.remap = reporting.remap;
+    change
 }
 
 async fn restore_reporting(rc: &ReprogControlsV4, armed: ArmedCid, what: &str) {
     let result = rc
-        .set_cid_reporting_full(armed.cid, reporting_change(armed.original))
+        .set_cid_reporting_full(armed.cid, undivert_change(armed.original))
         .await
         .map(|_| ());
     restore(result, what);
