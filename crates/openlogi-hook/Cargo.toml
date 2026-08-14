@@ -52,12 +52,7 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-[lints.rust]
-unsafe_code = "allow"
-
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-unwrap_used = "warn"
-expect_used = "warn"
-missing_errors_doc = "allow"
-doc_markdown = "allow"
+# unsafe_code is denied workspace-wide; the three platform modules are wall-to-wall
+# OS FFI, so each opts out at its own module root instead of the whole crate.
+[lints]
+workspace = true

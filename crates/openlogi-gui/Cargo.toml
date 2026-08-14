@@ -76,18 +76,11 @@ objc2-io-kit = { workspace = true, features = ["std", "hidsystem"] }
 # NSEvent global-monitor handlers are ObjC blocks (overlay click-away dismissal).
 block2 = { workspace = true }
 
-# unsafe_code stays denied; the status-item/tray modules opt in locally with
-# #[expect(unsafe_code)] for the few objc2 calls (init-with-action, set-target,
-# super-init) that remain unsafe.
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-unwrap_used = "warn"
-expect_used = "warn"
-missing_errors_doc = "allow"
-doc_markdown = "allow"
+# unsafe_code stays denied (from [workspace.lints]); the status-item/tray modules
+# opt in locally with #[expect(unsafe_code)] for the few objc2 calls
+# (init-with-action, set-target, super-init) that remain unsafe.
+[lints]
+workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

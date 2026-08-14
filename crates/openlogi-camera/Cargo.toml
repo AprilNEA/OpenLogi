@@ -44,15 +44,7 @@ v4l = "0.14"
 zune-jpeg = "0.5"
 zune-core = "0.5"
 
-# Mirrors [workspace.lints]. unsafe_code stays denied; the AVFoundation modules
-# opt in locally with #[expect(unsafe_code)]. (The `unexpected_cfgs` allow the
-# old objc 0.2 macros needed is gone — objc2 doesn't emit `cfg(cargo-clippy)`.)
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-unwrap_used = "warn"
-expect_used = "warn"
-missing_errors_doc = "allow"
-doc_markdown = "allow"
+# unsafe_code stays denied (from [workspace.lints]); the AVFoundation modules opt
+# in locally with #[expect(unsafe_code)].
+[lints]
+workspace = true

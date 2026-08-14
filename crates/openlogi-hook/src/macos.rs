@@ -1,4 +1,8 @@
 //! macOS `CGEventTap` implementation of the OS-level mouse hook.
+#![allow(
+    unsafe_code,
+    reason = "the event tap is built on Core Graphics / Core Foundation C APIs"
+)]
 
 mod watchdog;
 
