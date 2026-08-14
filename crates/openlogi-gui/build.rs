@@ -19,10 +19,10 @@
 //! the exact version already in the lock as gpui's own build-dependency, which
 //! adds an edge, not a crate.
 
-// A build script fails by panicking, so `expect` (with a message that surfaces
-// in the build log) is the idiomatic error path here — exempt it from the
-// workspace's strict runtime lints.
-#![allow(clippy::expect_used)]
+#![allow(
+    clippy::expect_used,
+    reason = "a build script fails by panicking, so expect — whose message surfaces in the build log — is the idiomatic error path"
+)]
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
