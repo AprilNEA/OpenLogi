@@ -26,6 +26,7 @@
 
 use std::ffi::{CString, c_void};
 use std::ptr;
+use std::ptr::NonNull;
 
 /// Which UVC entity a control request addresses: the Camera Terminal (lens:
 /// zoom/focus/exposure) or the Processing Unit (image: brightness/…).
@@ -300,7 +301,10 @@ pub(crate) fn usb_serials_by_location() -> std::collections::HashMap<u32, String
         {
             return out;
         }
-        let key = cf_string("USB Serial Number");
+        let Some(key) = cf_string("USB Serial Number") else {
+            IOObjectRelease(iter);
+            return out;
+        };
         loop {
             let service = IOIteratorNext(iter);
             if service == 0 {
@@ -311,9 +315,7 @@ pub(crate) fn usb_serials_by_location() -> std::collections::HashMap<u32, String
             }
             IOObjectRelease(service);
         }
-        if !key.is_null() {
-            CFRelease(key);
-        }
+        CFRelease(key.as_ptr());
         IOObjectRelease(iter);
     }
     out
@@ -322,33 +324,35 @@ pub(crate) fn usb_serials_by_location() -> std::collections::HashMap<u32, String
 /// Location id + USB serial from an `IOUSBDevice` service, without opening it.
 unsafe fn registry_location_and_serial(
     service: IoService,
-    serial_key: *const c_void,
+    serial_key: NonNull<c_void>,
 ) -> Option<(u32, String)> {
     // SAFETY: `service` is a live io_service_t the enumeration loop holds for
     // the whole call (it releases it only after this returns), so both registry
-    // reads address a valid IOKit object, and `serial_key` is the caller's
-    // CFString, only borrowed here. `IORegistryEntryCreateCFProperty` follows
-    // the Create rule: each +1 CFTypeRef it returns is handed straight to
-    // `cf_number_u32` / `cf_string_value`, which release it on every path, and
-    // the `locationID` key created for the fallback is released before it
-    // returns.
+    // reads address a valid IOKit object, and `serial_key` is a CFString the
+    // caller created and still owns, only borrowed here. Both property reads
+    // pass a key that exists — IOKit dereferences one without a null check —
+    // which the caller guarantees by construction, `NonNull` being what makes a
+    // failed creation impossible to pass, and the `?` on the `locationID` key
+    // repeating that here. `IORegistryEntryCreateCFProperty` follows the Create
+    // rule: each +1 CFTypeRef it returns is handed straight to `cf_number_u32` /
+    // `cf_string_value`, which release it on every path, and the `locationID`
+    // key created for the fallback is released before it returns.
     unsafe {
         // Prefer the USB device interface for location (matches control open);
         // fall back to the registry number property when the plug-in is busy.
         let location = device_location_id(service).or_else(|| {
-            let key = cf_string("locationID");
+            let key = cf_string("locationID")?;
             let loc = cf_number_u32(IORegistryEntryCreateCFProperty(
                 service,
-                key,
+                key.as_ptr(),
                 ptr::null(),
                 0,
             ));
-            if !key.is_null() {
-                CFRelease(key);
-            }
+            CFRelease(key.as_ptr());
             loc
         })?;
-        let serial_ref = IORegistryEntryCreateCFProperty(service, serial_key, ptr::null(), 0);
+        let serial_ref =
+            IORegistryEntryCreateCFProperty(service, serial_key.as_ptr(), ptr::null(), 0);
         let serial = cf_string_value(serial_ref)?;
         if serial.is_empty() {
             return None;
@@ -406,12 +410,17 @@ unsafe fn device_location_id(service: IoService) -> Option<u32> {
     }
 }
 
-fn cf_string(s: &str) -> *const c_void {
-    let Ok(c) = CString::new(s) else {
-        return ptr::null();
-    };
+/// A freshly created CFString the caller owns, or `None` if `s` holds an
+/// interior NUL or CoreFoundation could not create the string. Returning
+/// `NonNull` makes a failed creation impossible to hand to an IOKit call that
+/// would dereference the key.
+fn cf_string(s: &str) -> Option<NonNull<c_void>> {
+    let c = CString::new(s).ok()?;
     // SAFETY: UTF-8 C string; returned CFString is owned by the caller.
-    unsafe { CFStringCreateWithCString(ptr::null(), c.as_ptr(), K_CF_STRING_ENCODING_UTF8) }
+    let cf =
+        unsafe { CFStringCreateWithCString(ptr::null(), c.as_ptr(), K_CF_STRING_ENCODING_UTF8) }
+            .cast_mut();
+    NonNull::new(cf)
 }
 
 unsafe fn cf_string_value(cf: *const c_void) -> Option<String> {
@@ -419,31 +428,40 @@ unsafe fn cf_string_value(cf: *const c_void) -> Option<String> {
         return None;
     }
     // SAFETY: `cf` is non-null (checked above) and a +1 CFTypeRef its callers
-    // hand over from a Create/Copy call; nothing reads it after the `CFRelease`
-    // that balances it, and the only returns that skip that release are the
-    // capacity checks, which need a string a quarter of the address space long
-    // — no CFString reaches them. The type check gates the CFString calls, so
-    // `CFStringGetLength`/`CFStringGetCString` only ever see a CFStringRef, and
-    // the buffer passed to the conversion is `cap` bytes long with `cap` given
-    // as its size — enough for UTF-8's worst case plus the NUL, and bounded by
-    // CFString either way.
+    // hand over from a Create/Copy call. `decode_cf_string` only borrows it, and
+    // the `CFRelease` below balances that +1 exactly once on every path out —
+    // including the capacity checks, which bail with `?` from the borrow rather
+    // than from here.
+    unsafe {
+        let value = decode_cf_string(cf);
+        CFRelease(cf);
+        value
+    }
+}
+
+/// Decode a **borrowed** `CFStringRef` as UTF-8. Ownership stays with the
+/// caller, which releases `cf` whichever way this returns.
+unsafe fn decode_cf_string(cf: *const c_void) -> Option<String> {
+    // SAFETY: the caller's +1 CFTypeRef is live for the whole call. The type
+    // check gates the CFString calls, so `CFStringGetLength`/`CFStringGetCString`
+    // only ever see a CFStringRef, and the buffer passed to the conversion is
+    // `cap` bytes long with `cap` given as its size — enough for UTF-8's worst
+    // case plus the NUL, and bounded by CFString either way.
     unsafe {
         if CFGetTypeID(cf) != CFStringGetTypeID() {
-            CFRelease(cf);
             return None;
         }
         let len = CFStringGetLength(cf);
         // UTF-8 worst case 4 bytes/char + NUL.
         let cap = usize::try_from(len).ok()?.checked_mul(4)?.checked_add(1)?;
         let mut buf = vec![0u8; cap];
-        let ok = CFStringGetCString(
+        if CFStringGetCString(
             cf,
             buf.as_mut_ptr().cast(),
             isize::try_from(cap).ok()?,
             K_CF_STRING_ENCODING_UTF8,
-        ) != 0;
-        CFRelease(cf);
-        if !ok {
+        ) == 0
+        {
             return None;
         }
         let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
