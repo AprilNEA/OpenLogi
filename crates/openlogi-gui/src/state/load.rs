@@ -46,6 +46,17 @@ pub type DpiStatus = Load<DpiInfo>;
 /// GUI only ever reads and writes the device.
 pub type SmartShiftLoad = Load<SmartShiftStatus>;
 
+/// The lazily-loaded DPI and SmartShift read caches, grouped so callers reach
+/// them as `state.reads.dpi` / `state.reads.smartshift` and use
+/// [`LazyDeviceData`]'s own methods directly — instead of `AppState` growing
+/// a same-shaped forwarding method twice, once per subsystem, for every
+/// operation the generic already provides.
+#[derive(Default)]
+pub(crate) struct DeviceReads {
+    pub(crate) dpi: LazyDeviceData<DpiInfo>,
+    pub(crate) smartshift: LazyDeviceData<SmartShiftStatus>,
+}
+
 /// Per-device lazy-load cache for a background HID++ read, keyed by
 /// [`DeviceKey`]. Holds each device's [`Load`] state plus its transient-retry
 /// counter, and carries the stale-route guard + retry-budget policy once, for

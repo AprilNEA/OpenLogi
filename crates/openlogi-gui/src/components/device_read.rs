@@ -19,9 +19,10 @@ use crate::state::{AppState, DeviceKey};
 /// `make_command` builds the read [`Command`] from the route and reply channel
 /// (e.g. [`Command::ReadDpi`]); `store` applies a delivered result (e.g.
 /// [`AppState::store_dpi_info`]); `clear` resets the loading marker when the
-/// reply is dropped (e.g. [`AppState::clear_dpi_loading`]). The caller marks the
-/// loading state first for an initial load, or skips it for a post-write confirm
-/// re-read so the optimistic value stays on screen until the real one lands.
+/// reply is dropped (e.g. `|state, key| state.reads.dpi.clear_loading(key)`).
+/// The caller marks the loading state first for an initial load, or skips it
+/// for a post-write confirm re-read so the optimistic value stays on screen
+/// until the real one lands.
 pub fn issue_device_read<P, T>(
     cx: &mut Context<P>,
     key: DeviceKey,

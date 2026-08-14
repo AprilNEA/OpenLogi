@@ -81,7 +81,7 @@ impl DpiPanel {
             return;
         };
 
-        cx.update_global::<AppState, _>(|state, _| state.mark_dpi_loading(&key));
+        cx.update_global::<AppState, _>(|state, _| state.reads.dpi.mark_loading(&key));
         // The agent owns device I/O: request the DPI read over IPC and store the
         // typed reply off the render thread. The typed `WriteError` reaches
         // `store_dpi_info` intact, so a permanent `FeatureUnsupported` /
@@ -92,7 +92,7 @@ impl DpiPanel {
             route,
             crate::ipc_client::Command::ReadDpi,
             AppState::store_dpi_info,
-            AppState::clear_dpi_loading,
+            |state, key| state.reads.dpi.clear_loading(key),
         );
     }
 
@@ -216,6 +216,7 @@ impl Render for DpiPanel {
             &snapshot.status,
             self.slider_state.as_ref(),
             snapshot.reachable,
+            snapshot.device_key.clone(),
             pal,
         );
 
@@ -270,11 +271,12 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
     cx.try_global::<AppState>()
         .and_then(|s| {
             let record = s.current_record()?;
+            let device_key = record.device_key();
             Some(DpiPanelSnapshot {
-                device_key: record.device_key(),
+                status: s.reads.dpi.status(&device_key),
+                device_key,
                 dpi: s.dpi,
                 presets: s.dpi_presets(),
-                status: s.current_dpi_status(),
                 reachable: record.route.is_some(),
             })
         })
@@ -312,6 +314,7 @@ fn slider_element(
     status: &DpiStatus,
     slider_state: Option<&Entity<SliderState>>,
     reachable: bool,
+    key: DeviceKey,
     pal: Palette,
 ) -> AnyElement {
     match (status, slider_state) {
@@ -338,8 +341,8 @@ fn slider_element(
             "dpi-retry",
             tr!("Couldn't read DPI — click to retry."),
             pal,
-            |cx| {
-                cx.update_global::<AppState, _>(|state, _| state.retry_active_dpi());
+            move |cx| {
+                cx.update_global::<AppState, _>(|state, _| state.reads.dpi.retry(&key));
                 cx.refresh_windows();
             },
         ),
@@ -431,11 +434,12 @@ fn add_preset_chip() -> AnyElement {
 
 fn dpi_load_target(cx: &mut Context<DpiPanel>) -> Option<(DeviceKey, DeviceRoute)> {
     cx.try_global::<AppState>().and_then(|state| {
-        if !state.current_dpi_unqueried() {
+        let record = state.current_record()?;
+        let key = record.device_key();
+        if !state.reads.dpi.unqueried(&key) {
             return None;
         }
-        let record = state.current_record()?;
-        Some((record.device_key(), record.route.clone()?))
+        Some((key, record.route.clone()?))
     })
 }
 

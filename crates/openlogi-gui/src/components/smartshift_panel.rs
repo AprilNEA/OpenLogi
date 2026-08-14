@@ -13,7 +13,7 @@
 //! [`crate::components::dpi_panel`].
 
 use gpui::{
-    AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, IntoElement,
+    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, IntoElement,
     ParentElement, Render, SharedString, Styled, Subscription, Window, div, px, rgb,
 };
 use gpui_component::{
@@ -157,8 +157,14 @@ impl SmartShiftPanel {
         let Some((key, route, write_id)) = smartshift_load_target(cx) else {
             return;
         };
-        cx.update_global::<AppState, _>(|state, _| state.mark_smartshift_loading(&key));
-        Self::issue_smartshift_read(key, route, write_id, AppState::clear_smartshift_loading, cx);
+        cx.update_global::<AppState, _>(|state, _| state.reads.smartshift.mark_loading(&key));
+        Self::issue_smartshift_read(
+            key,
+            route,
+            write_id,
+            |state, key| state.reads.smartshift.clear_loading(key),
+            cx,
+        );
     }
 
     /// Re-read once after an optimistic write to confirm the device actually
@@ -368,9 +374,13 @@ impl Render for SmartShiftPanel {
         Self::ensure_smartshift_confirm(cx);
         let pal = theme::palette(cx);
 
-        let status = cx
+        let (key, status) = cx
             .try_global::<AppState>()
-            .map_or(SmartShiftLoad::Unknown, AppState::current_smartshift_status);
+            .and_then(|state| {
+                let key = state.current_record()?.device_key();
+                Some((Some(key.clone()), state.reads.smartshift.status(&key)))
+            })
+            .unwrap_or((None, SmartShiftLoad::Unknown));
         let write_status = cx
             .try_global::<AppState>()
             .and_then(AppState::current_smartshift_write_status);
@@ -392,10 +402,7 @@ impl Render for SmartShiftPanel {
                 "smartshift-retry",
                 tr!("Couldn't read SmartShift — click to retry."),
                 pal,
-                |cx| {
-                    cx.update_global::<AppState, _>(|state, _| state.retry_active_smartshift());
-                    cx.refresh_windows();
-                },
+                retry_smartshift_closure(key.clone()),
             ),
             SmartShiftLoad::Unsupported(_) => {
                 status_line(tr!("This device does not support SmartShift."), pal)
@@ -403,14 +410,25 @@ impl Render for SmartShiftPanel {
         };
 
         let feedback = show_write_status
-            .then(|| smartshift_write_feedback(write_status, pal))
+            .then(|| smartshift_write_feedback(write_status, key, pal))
             .flatten();
         v_flex().gap_3().w_full().child(content).children(feedback)
     }
 }
 
+/// A retry action bound to `key`, or a no-op when there is no active device.
+fn retry_smartshift_closure(key: Option<DeviceKey>) -> impl Fn(&mut App) + 'static {
+    move |cx| {
+        if let Some(key) = &key {
+            cx.update_global::<AppState, _>(|state, _| state.retry_smartshift(key));
+        }
+        cx.refresh_windows();
+    }
+}
+
 fn smartshift_write_feedback(
     status: Option<SmartShiftWriteStatus>,
+    key: Option<DeviceKey>,
     pal: Palette,
 ) -> Option<AnyElement> {
     match status {
@@ -422,10 +440,7 @@ fn smartshift_write_feedback(
             "smartshift-confirm-retry",
             tr!("Couldn't read SmartShift — click to retry."),
             pal,
-            |cx| {
-                cx.update_global::<AppState, _>(|state, _| state.retry_active_smartshift());
-                cx.refresh_windows();
-            },
+            retry_smartshift_closure(key),
         )),
         None => None,
     }
@@ -435,15 +450,16 @@ fn smartshift_load_target(
     cx: &mut Context<SmartShiftPanel>,
 ) -> Option<(DeviceKey, DeviceRoute, Option<u64>)> {
     cx.try_global::<AppState>().and_then(|state| {
-        if !state.current_smartshift_unqueried() {
+        let record = state.current_record()?;
+        let key = record.device_key();
+        if !state.reads.smartshift.unqueried(&key) {
             return None;
         }
-        let record = state.current_record()?;
         let write_id = match state.current_smartshift_write_status() {
             Some(SmartShiftWriteStatus::Applying { write_id, .. }) => Some(write_id),
             Some(SmartShiftWriteStatus::Confirmed | SmartShiftWriteStatus::Failed) | None => None,
         };
-        Some((record.device_key(), record.route.clone()?, write_id))
+        Some((key, record.route.clone()?, write_id))
     })
 }
 

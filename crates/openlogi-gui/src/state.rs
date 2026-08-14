@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use gpui::Global;
 use openlogi_core::config::{Config, KeyTrigger};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_hid::{DpiInfo, SmartShiftStatus};
+use openlogi_hid::SmartShiftStatus;
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -43,7 +43,7 @@ pub enum SmartShiftWriteStatus {
 
 use device_ui::DeviceUiState;
 pub(crate) use devices::camera_model_info;
-use load::LazyDeviceData;
+use load::DeviceReads;
 
 use crate::asset::AssetResolver;
 use crate::data::mouse_buttons::{Action, ButtonId, GestureDirection};
@@ -127,7 +127,7 @@ pub struct AppState {
     /// Aggregate host-camera activity reported by the agent. Runtime only.
     camera_active: bool,
     /// Per-device UI state outside the persisted config and the lazily-loaded
-    /// DPI/SmartShift reads ([`Self::dpi_data`] / [`Self::smartshift_data`]) —
+    /// DPI/SmartShift reads ([`Self::reads`]) —
     /// manual camera-light overrides, volatile light settings, in-flight
     /// light commands, inventory-miss counters, and SmartShift write/confirm
     /// bookkeeping. One row per device instead of one map per concern; see
@@ -161,14 +161,12 @@ pub struct AppState {
     /// Sorted (`BTreeMap`) for stable render order in the function-row view.
     pub keyboard_bindings: BTreeMap<KeyTrigger, Action>,
     pub dpi: u32,
-    /// DPI capability load state keyed by [`DeviceKey`]. Loaded lazily
-    /// because HID++ reads must not block device switching or rendering.
-    dpi_data: LazyDeviceData<DpiInfo>,
-    /// SmartShift (`0x2111`) config load state keyed by [`DeviceKey`]. Loaded
-    /// lazily on the same pattern as [`Self::dpi_data`]; the device persists
-    /// the values itself, so this is a read/write cache, not a source of
-    /// truth saved to disk.
-    smartshift_data: LazyDeviceData<SmartShiftStatus>,
+    /// Lazily-loaded DPI and SmartShift read caches, keyed by [`DeviceKey`].
+    /// HID++ reads must not block device switching or rendering, so callers
+    /// reach these directly (`state.reads.dpi.retry(&key)`,
+    /// `state.reads.smartshift.status(&key)`, …) rather than through a
+    /// per-subsystem forwarding method.
+    pub(crate) reads: DeviceReads,
     /// Monotonic identity assigned to the next confirmable SmartShift write.
     next_smartshift_write_id: u64,
     /// All paired devices, in carousel order. Each entry caches the per-
@@ -241,8 +239,7 @@ impl AppState {
             gesture_bindings: BTreeMap::new(),
             keyboard_bindings: BTreeMap::new(),
             dpi: DEFAULT_DPI,
-            dpi_data: LazyDeviceData::default(),
-            smartshift_data: LazyDeviceData::default(),
+            reads: DeviceReads::default(),
             next_smartshift_write_id: 0,
             device_list,
             config,

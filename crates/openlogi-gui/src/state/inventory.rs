@@ -124,8 +124,8 @@ impl AppState {
 
         self.device_list = merged_list;
         for key in &rerouted {
-            self.dpi_data.remove(key);
-            self.smartshift_data.remove(key);
+            self.reads.dpi.remove(key);
+            self.reads.smartshift.remove(key);
             if let Some(entry) = self.device_ui.get_mut(key) {
                 entry.smartshift_pending_confirm = None;
                 entry.smartshift_write_status = None;
@@ -136,8 +136,8 @@ impl AppState {
                 .iter()
                 .any(|r| r.config_key.as_str() == key)
         };
-        self.dpi_data.retain_present(present);
-        self.smartshift_data.retain_present(present);
+        self.reads.dpi.retain_present(present);
+        self.reads.smartshift.retain_present(present);
         self.current_device = new_index;
         // The active device may have changed (selection fell back to index 0
         // when the previous one vanished); re-seed the displayed DPI so it
@@ -304,14 +304,11 @@ impl AppState {
         // A device left in `Failed` (transient read errors exhausted its retry
         // budget) gets one fresh attempt each time it is re-selected.
         if let Some(key) = self.current_record().map(DeviceRecord::device_key) {
-            if matches!(self.dpi_data.get(&key), Some(Load::Failed(_))) {
-                self.dpi_data.retry(&key);
+            if matches!(self.reads.dpi.get(&key), Some(Load::Failed(_))) {
+                self.reads.dpi.retry(&key);
             }
-            if matches!(self.smartshift_data.get(&key), Some(Load::Failed(_))) {
-                self.smartshift_data.retry(&key);
-                if let Some(entry) = self.device_ui.get_mut(&key) {
-                    entry.smartshift_write_status = None;
-                }
+            if matches!(self.reads.smartshift.get(&key), Some(Load::Failed(_))) {
+                self.retry_smartshift(&key);
             }
         }
         // `self.dpi` is the active device's value; adopt the newly-selected
