@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ lib, pkgs, ... }:
 
 let
   # GPUI's build compiles Metal shaders against the real Xcode toolchain.
@@ -23,10 +23,19 @@ in
   apple.sdk = null;
 
   env = {
-    GREET = "devenv";
     RUSTC_WRAPPER = "sccache";
   }
-  // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+  // lib.optionalAttrs pkgs.stdenv.isLinux {
+    # GPUI loads its graphics backends dynamically, so they do not appear in
+    # the development binary's RUNPATH until it is packaged.
+    LD_LIBRARY_PATH = lib.makeLibraryPath [
+      pkgs.libGL
+      pkgs.wayland
+      pkgs.vulkan-loader
+    ];
+    LIBCLANG_PATH = lib.makeLibraryPath [ pkgs.llvmPackages.libclang ];
+  }
+  // lib.optionalAttrs pkgs.stdenv.isDarwin {
     DEVELOPER_DIR = xcodeDeveloperDir;
     SDKROOT = xcodeSdkRoot;
   };
@@ -38,21 +47,22 @@ in
       cmake
       sccache
       prek
-      crowdin-cli
     ]
     # create-dmg is macOS-only (meta.platforms = darwin); an unconditional entry
     # breaks evaluation of the shell on Linux.
     ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ create-dmg ]
-    # The Linux build links a handful of system libraries the shell must
-    # provide rather than rely on whatever the ambient user environment
-    # happens to expose: fontconfig via pkg-config (GPUI text rendering via
-    # yeslogic-fontconfig-sys), libxcb (x11rb in the hook and GPUI's X11
-    # backend), and libxkbcommon (GPUI keyboard handling).
+    # The Linux build and GUI runtime use these libraries directly; declare
+    # them instead of relying on transitive packages or the host environment.
     ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
       pkg-config
       fontconfig
-      xorg.libxcb
+      freetype
+      libGL
+      nfpm
+      libxcb
       libxkbcommon
+      wayland
+      vulkan-loader
     ];
 
   languages.rust = {
@@ -111,8 +121,8 @@ in
       description = "Upload en.yml sources and per-language translations to Crowdin.";
       exec = ''
         set -e
-        crowdin upload sources
-        crowdin upload translations
+        ${pkgs.crowdin-cli}/bin/crowdin upload sources
+        ${pkgs.crowdin-cli}/bin/crowdin upload translations
       '';
     };
     "openlogi:i18n-download" = {
@@ -120,15 +130,15 @@ in
       exec = ''
         set -e
         ${requireXcodeMetal}
-        python3 scripts/i18n/merge_crowdin_download.py --self-test
+        ${pkgs.python3}/bin/python3 scripts/i18n/merge_crowdin_download.py --self-test
         before="$(mktemp -d)"
+        trap 'rm -rf "$before"' EXIT
         cp crates/openlogi-gui/locales/*.yml "$before/"
-        crowdin download --skip-untranslated-strings
-        python3 scripts/i18n/merge_crowdin_download.py \
+        ${pkgs.crowdin-cli}/bin/crowdin download --skip-untranslated-strings
+        ${pkgs.python3}/bin/python3 scripts/i18n/merge_crowdin_download.py \
           --before "$before" \
           --locales crates/openlogi-gui/locales \
           --en crates/openlogi-gui/locales/en.yml
-        rm -rf "$before"
         cargo test -p openlogi-gui i18n
       '';
     };

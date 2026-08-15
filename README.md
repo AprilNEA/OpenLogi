@@ -145,17 +145,40 @@ sudo pacman -U openlogi-*.pkg.tar.zst
 
 Packages are published for both `x86_64`/`amd64` and `arm64`/`aarch64`.
 
-The package installs udev rules that grant your user access to
+NixOS users can instead import the repository's module, which installs the
+package and udev rules and starts the agent with the graphical session:
+
+```nix
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.openlogi = {
+    url = "github:AprilNEA/OpenLogi";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { nixpkgs, openlogi, ... }: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux"; # or aarch64-linux
+      modules = [
+        openlogi.nixosModules.default
+        { programs.openlogi.enable = true; }
+      ];
+    };
+  };
+}
+```
+
+All Linux packages install udev rules that grant your user access to
 `/dev/hidraw*`, `/dev/uinput` and your Logitech mouse's `/dev/input/event*`
-node without `sudo`. After installation,
-enable the background agent for your user:
+node without `sudo`. The NixOS module starts the agent automatically; after a
+`.deb`, `.rpm`, or `.pkg.tar.zst` installation, enable it for your user:
 
 ```sh
 systemctl --user enable --now openlogi-agent.service
 ```
 
-See [docs/INSTALL-linux.md](docs/INSTALL-linux.md) for manual / source installs
-and distros without systemd.
+See [docs/INSTALL-linux.md](docs/INSTALL-linux.md) for complete NixOS options,
+manual / source installs, and distros without systemd.
 
 ### Windows
 

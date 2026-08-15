@@ -37,8 +37,9 @@ and keep working.
 
 ### With devenv (optional)
 
-`devenv.nix` provisions sccache, the stable Rust toolchain, packaging helpers,
-and the macOS env overrides GPUI needs (`DEVELOPER_DIR` / `SDKROOT`). Tasks:
+`devenv.nix` provisions sccache, the stable Rust toolchain, platform libraries,
+nfpm on Linux, and the macOS packaging/env helpers GPUI needs
+(`create-dmg`, `DEVELOPER_DIR`, and `SDKROOT`). Tasks:
 
 ```sh
 devenv tasks run openlogi:gui      # run the desktop app
@@ -58,6 +59,21 @@ Without that, GPUI's `gpui_macos` build script can't find Apple's `metal`
 shader compiler, and link errors about missing `_write` / `_sysconf` /
 `_waitpid` symbols show up because the Nix `apple-sdk-14.4` stub doesn't
 expose `libSystem` the way Apple's real linker wants.
+
+### Nix package
+
+The root Flake exposes native `x86_64-linux` and `aarch64-linux` packages plus
+the NixOS module. It is separate from the devenv shell:
+
+```sh
+nix flake check --all-systems --no-build  # evaluate every output
+nix build .#openlogi                      # build + test this host's package
+nix run .#openlogi -- list                # run the packaged CLI
+```
+
+The package expression and NixOS module live beside the other Linux packaging
+inputs in `packaging/linux/`. `nix fmt` formats all Nix expressions through the
+Flake's pinned formatter.
 
 ### Dev app bundle (macOS)
 
@@ -186,6 +202,10 @@ cargo run -p xtask -- linux package
 
 The package contents (binaries, udev rules, systemd user unit, desktop entry,
 icon) are declared in `packaging/linux/nfpm.yaml`.
+
+The Nix package uses the same shared resources and is declared in
+`packaging/linux/package.nix`; see the Nix package section above for its build
+commands.
 
 ## Release updater publishing
 
