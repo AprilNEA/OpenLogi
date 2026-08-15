@@ -264,6 +264,10 @@ pub(crate) fn event_payload(
 #[derive(Clone, Copy, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "wire bitfield: each bool is an independent flag bit, not related boolean params"
+)]
 pub struct FeatureType {
     /// An obsolete feature is a feature that has been replaced by a newer one,
     /// but is advertised in order for older SWs to still be able to support the
@@ -311,19 +315,19 @@ impl From<FeatureType> for u8 {
         let mut raw = 0;
 
         if value.obsolete {
-            raw |= 1 << 7
+            raw |= 1 << 7;
         }
         if value.hidden {
-            raw |= 1 << 6
+            raw |= 1 << 6;
         }
         if value.engineering {
-            raw |= 1 << 5
+            raw |= 1 << 5;
         }
         if value.manufacturing_deactivatable {
-            raw |= 1 << 4
+            raw |= 1 << 4;
         }
         if value.compliance_deactivatable {
-            raw |= 1 << 3
+            raw |= 1 << 3;
         }
 
         raw
@@ -331,6 +335,11 @@ impl From<FeatureType> for u8 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "expect/unwrap are idiomatic in tests"
+)]
 mod tests {
     use super::event_payload;
     use crate::{
