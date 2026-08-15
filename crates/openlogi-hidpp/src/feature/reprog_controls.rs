@@ -115,7 +115,7 @@ impl From<ControlId> for u16 {
 }
 
 fn u16_from_be_payload(bytes: &[u8]) -> u16 {
-    u16::from_be_bytes(bytes.try_into().unwrap())
+    u16::from_be_bytes([bytes[0], bytes[1]])
 }
 
 /// A HID++ task ID.
@@ -265,6 +265,10 @@ impl CidFlags {
 pub struct GroupMask(pub u8);
 
 /// Current reporting/remapping state returned by `getCidReporting`.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each field is an independent wire flag from getCidReporting, not a state machine"
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct CidReporting {

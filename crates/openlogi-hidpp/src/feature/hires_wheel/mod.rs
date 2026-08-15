@@ -35,7 +35,7 @@ impl DecodeEvent for HiResWheelEvent {
                 Some(HiResWheelEvent::WheelMovement(WheelMovementData {
                     resolution,
                     periods: U4::from_lo(payload[0]),
-                    delta_vertical: i16::from_be_bytes(payload[1..=2].try_into().unwrap()),
+                    delta_vertical: i16::from_be_bytes([payload[1], payload[2]]),
                 }))
             }
             1 => {

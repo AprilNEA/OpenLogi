@@ -41,7 +41,7 @@ impl FeatureSetFeature {
             .extend_payload();
 
         Ok(FeatureInformation {
-            id: (payload[0] as u16) << 8 | payload[1] as u16,
+            id: u16::from(payload[0]) << 8 | u16::from(payload[1]),
             typ: FeatureType::from(payload[2]),
             version: payload[3],
         })

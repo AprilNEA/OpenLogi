@@ -94,6 +94,7 @@ pub fn lookup(feature_id: u16) -> Option<KnownFeature> {
 
 /// Looks up all implementations supporting a specific feature ID and version
 /// combination.
+#[must_use]
 pub fn lookup_version(feature_id: u16, feature_version: u8) -> Option<Vec<FeatureVersion>> {
     lookup(feature_id).map(|feat| {
         feat.versions

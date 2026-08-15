@@ -47,11 +47,9 @@ impl DecodeEvent for BatteryEvent {
 impl UnifiedBatteryFeature {
     /// Retrieves the capabilities of this feature and the battery in general.
     pub async fn get_battery_capabilities(&self) -> Result<BatteryCapabilities, Hidpp20Error> {
-        let payload: [u8; 2] = self.endpoint.call(0, [0; 3]).await?.extend_payload()[..2]
-            .try_into()
-            .unwrap();
+        let payload = self.endpoint.call(0, [0; 3]).await?.extend_payload();
 
-        Ok(BatteryCapabilities::from(payload))
+        Ok(BatteryCapabilities::from([payload[0], payload[1]]))
     }
 
     /// Retrieves the current information about the battery status.

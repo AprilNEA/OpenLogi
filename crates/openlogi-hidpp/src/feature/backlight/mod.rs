@@ -284,6 +284,10 @@ impl BacklightFeature {
     ) -> Result<(), Hidpp20Error> {
         // The request options byte packs the writable option flags (low 3 bits)
         // and the 2-bit mode (bits 3..=4).
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "masked to WOW|CROWN|PWR_SAVE (bits 0-2), so the value always fits in a u8"
+        )]
         let options_byte = (config.options.bits()
             & (BacklightOptions::WOW | BacklightOptions::CROWN | BacklightOptions::PWR_SAVE).bits())
             as u8

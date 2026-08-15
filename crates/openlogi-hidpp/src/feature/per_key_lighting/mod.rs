@@ -323,6 +323,6 @@ fn frame_end_args(
 fn delta_args(first_zone_id: u8, packed: [u8; DELTA_PACKED_LEN]) -> [u8; 16] {
     let mut args = [0; 16];
     args[0] = first_zone_id;
-    args[1..1 + DELTA_PACKED_LEN].copy_from_slice(&packed);
+    args[1..=DELTA_PACKED_LEN].copy_from_slice(&packed);
     args
 }

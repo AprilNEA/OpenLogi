@@ -40,9 +40,10 @@ impl RootFeature {
     /// If the device only supports the root feature version 1, the
     /// [`FeatureInformation::version`] field will be `0` for all features.
     pub async fn get_feature(&self, id: u16) -> Result<Option<FeatureInformation>, Hidpp20Error> {
+        let [id_hi, id_lo] = id.to_be_bytes();
         let payload = self
             .endpoint
-            .call(0, [(id >> 8) as u8, id as u8, 0x00])
+            .call(0, [id_hi, id_lo, 0x00])
             .await?
             .extend_payload();
         if payload[0] == 0 {

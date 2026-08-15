@@ -122,8 +122,8 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<CrownEvent>
     match sub_id {
         0 => Some(CrownEvent::Update(CrownUpdate {
             rotation_state: RotationState::from(payload[0]),
-            relative_slot_rotation: payload[1] as i8,
-            relative_ratchet_rotation: payload[2] as i8,
+            relative_slot_rotation: payload[1].cast_signed(),
+            relative_ratchet_rotation: payload[2].cast_signed(),
             proximity: ActivityState::from(payload[3]),
             touch: ActivityState::from(payload[4]),
             gesture: CrownGesture::from(payload[5]),

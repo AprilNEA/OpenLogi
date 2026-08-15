@@ -51,6 +51,10 @@ impl DeviceTypeAndNameFeature {
 
         let mut len = 0;
         while len < count as usize {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the loop condition `len < count as usize` bounds len below count: u8, so it always fits back in a u8"
+            )]
             let part = self.get_device_name(len as u8).await?;
             string.push_str(str::from_utf8(&part).map_err(|_| Hidpp20Error::UnsupportedResponse)?);
             len = string.len();
