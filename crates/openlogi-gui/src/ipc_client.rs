@@ -572,8 +572,24 @@ async fn handle(
             let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
         }
         Command::ReloadConfig => {
-            let result = client.reload_config(ctx).await.map_err(|_| ())?;
-            let _ = update_tx.send(GuiUpdate::ConfigReloadResult(result));
+            // A transport failure is not the agent rejecting the config, but it
+            // is still a reload that did not happen — and the file on disk has
+            // already changed. Staying silent here would leave the window
+            // showing the new settings while the agent keeps running the old
+            // ones, which is exactly the divergence this fails closed on.
+            match client.reload_config(ctx).await {
+                Ok(result) => {
+                    let _ = update_tx.send(GuiUpdate::ConfigReloadResult(result));
+                }
+                Err(error) => {
+                    let _ = update_tx.send(GuiUpdate::ConfigReloadResult(Err(ConfigReloadError {
+                        message: format!(
+                            "saved, but the agent could not be reached to apply it: {error}"
+                        ),
+                    })));
+                    return Err(());
+                }
+            }
         }
         Command::RequestAccessibilityPrompt => client
             .request_accessibility_prompt(ctx)
@@ -694,17 +710,44 @@ fn reply_disconnected(
             let _ = pairing_tx.send(PairingUpdate::Failed(PairingFailure::AgentRestarted));
         }
         Command::CancelPairing => {}
+        // Unlike the device commands above, a missed reload is not something a
+        // later poll repairs on its own: the config file has already changed,
+        // so the agent stays on the old one until another reload succeeds. Say
+        // so rather than let the window imply the change took effect.
+        Command::ReloadConfig => {
+            let _ = update_tx.send(GuiUpdate::ConfigReloadResult(Err(ConfigReloadError {
+                message: "saved, but the agent is not running, so it has not been applied yet"
+                    .to_string(),
+            })));
+        }
         _ => {}
     }
 }
 
 #[cfg(test)]
-#[cfg(target_os = "macos")]
 mod tests {
+    #[cfg(target_os = "macos")]
     use std::path::Path;
 
-    use super::helper_bundle;
+    use super::*;
 
+    #[test]
+    fn a_reload_that_never_reached_the_agent_is_reported() {
+        // The config file is already written by the time the reload is
+        // dispatched, so dropping this result silently would leave the window
+        // showing settings the agent is not running.
+        let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+        let (pairing_tx, _pairing_rx) = mpsc::unbounded_channel();
+
+        reply_disconnected(&update_tx, &pairing_tx, Command::ReloadConfig);
+
+        let Ok(GuiUpdate::ConfigReloadResult(Err(error))) = update_rx.try_recv() else {
+            panic!("a reload that never reached the agent must be reported as failed");
+        };
+        assert!(!error.message.is_empty(), "the notice needs a reason");
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn helper_bundle_resolves_only_the_packaged_layout() {
         let packaged = Path::new(
