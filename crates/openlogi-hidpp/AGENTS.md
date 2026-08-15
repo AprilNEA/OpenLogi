@@ -47,19 +47,25 @@ protocol-correctness contract:
   mixing them by raw value lives in `.claude/rules/hidpp.md` (the
   `openlogi-hid` side), not duplicated here.
 
-## Open question — not decided by this file
+## Settled: this crate answers to the workspace like any other
 
-`Cargo.toml` currently opts this crate out of the workspace's `[lints]` table and
-pins its own `rust-version = "1.96"` separately from the workspace MSRV, both
-justified in `Cargo.toml`'s comments as "it's third-party code" / "so future
-syncs can see the fork's own lower MSRV." With the hard-fork ruling, that stated
-justification no longer holds — but this file does not resolve it, and this
-commit does not touch `Cargo.toml`.
+`Cargo.toml` used to opt out of the workspace `[lints]` table and to pin its own
+`rust-version`, both justified as "it's third-party code" / "so future syncs can
+see the fork's own lower MSRV." The hard-fork ruling retired both rationales, and
+both opt-outs are gone: the crate now inherits `[lints] workspace = true` and
+`rust-version.workspace = true`.
 
-Adopting `[lints] workspace = true` here means fixing every `clippy::pedantic` /
-`unwrap_used` / `expect_used` violation the workspace table would newly flag
-across this crate — a real, separately-scoped piece of work, not a toggle. Until
-someone does that work and updates `Cargo.toml`'s comments to match, treat the
-opt-out and the separate MSRV pin as unresolved, not as license to keep writing
-non-pedantic code here on the "it's vendored" excuse. This should be filed as a
-tracked issue rather than actioned ad hoc or left as a silent TODO.
+So `clippy::pedantic`, `unwrap_used`, and `expect_used` apply here exactly as
+they do elsewhere. There is no "it's vendored" excuse for a bare `unwrap`, and a
+suppression needs the same `reason = "…"` any other crate would need.
+
+## Known loose end
+
+The optional `serde` dependency and the ~40 files' worth of
+`#[cfg_attr(feature = "serde", derive(serde::Serialize))]` it gates are inherited
+library surface that **nothing in this workspace enables** — no crate depends on
+`hidpp` with `features = ["serde"]`, and types crossing the IPC boundary are
+converted to `openlogi-core`'s own structs first. Dropping it would be a large
+mechanical diff; keeping it costs a feature-combination nobody builds. Decide it
+deliberately (does this crate stay a general-purpose library, or is it strictly
+OpenLogi-internal?) rather than by drive-by.

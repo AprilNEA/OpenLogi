@@ -42,7 +42,7 @@ impl FeatureSetFeature {
 
         Ok(FeatureInformation {
             id: u16::from(payload[0]) << 8 | u16::from(payload[1]),
-            typ: FeatureType::from(payload[2]),
+            typ: FeatureType::from_bits_retain(payload[2]),
             version: payload[3],
         })
     }

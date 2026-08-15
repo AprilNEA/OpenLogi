@@ -22,7 +22,7 @@ impl DeviceInformationFeature {
         Ok(DeviceInformation {
             entity_count: payload[0],
             unit_id: [payload[1], payload[2], payload[3], payload[4]],
-            transport: DeviceTransport::from(payload[6]),
+            transport: DeviceTransport::from_bits_retain(payload[6]),
             model_id: [
                 u16::from_be_bytes([payload[7], payload[8]]),
                 u16::from_be_bytes([payload[9], payload[10]]),
@@ -134,40 +134,28 @@ pub struct DeviceInformation {
     pub capabilities: DeviceInformationCapabilities,
 }
 
-/// Represents the bitfield stating which transport protocols a device supports.
-///
-/// One given device can only support up to three transport protocols at a time.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[non_exhaustive]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "wire bitfield: each transport is an independent support flag, not related boolean params"
-)]
-pub struct DeviceTransport {
-    /// Whether the device supports USB.
-    pub usb: bool,
+bitflags::bitflags! {
+    /// Represents the bitfield stating which transport protocols a device
+    /// supports.
+    ///
+    /// One given device can only support up to three transport protocols at a
+    /// time.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+    pub struct DeviceTransport: u8 {
+        /// The device supports USB.
+        const USB = 1 << 3;
 
-    /// Whether the device supports eQuad, the protocol used by the Unifying
-    /// Receiver.
-    pub e_quad: bool,
+        /// The device supports eQuad, the protocol used by the Unifying
+        /// Receiver.
+        const E_QUAD = 1 << 2;
 
-    /// Whether the device supports Bluetooth Low Energy as used by the Bolt
-    /// Receiver.
-    pub btle: bool,
+        /// The device supports Bluetooth Low Energy as used by the Bolt
+        /// Receiver.
+        const BTLE = 1 << 1;
 
-    /// Whether the device supports Bluetooth.
-    pub bluetooth: bool,
-}
-
-impl From<u8> for DeviceTransport {
-    fn from(value: u8) -> Self {
-        Self {
-            usb: value & (1 << 3) != 0,
-            e_quad: value & (1 << 2) != 0,
-            btle: value & (1 << 1) != 0,
-            bluetooth: value & 1 != 0,
-        }
+        /// The device supports Bluetooth.
+        const BLUETOOTH = 1 << 0;
     }
 }
 

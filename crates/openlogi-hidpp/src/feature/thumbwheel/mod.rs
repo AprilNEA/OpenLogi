@@ -51,7 +51,7 @@ impl ThumbwheelFeature {
             time_unit: u16::from_be_bytes([payload[6], payload[7]]),
             default_direction: ThumbwheelDirection::try_from(payload[4] & 1)
                 .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            capabilities: ThumbwheelCapabilities::from(payload[5]),
+            capabilities: ThumbwheelCapabilities::from_bits_retain(payload[5]),
         })
     }
 
@@ -102,7 +102,7 @@ pub struct ThumbwheelInfo {
     /// diverted (HID++) mode
     pub diverted_resolution: u16,
 
-    /// If [`ThumbwheelCapabilities::time_stamp`] is set, this is set to the
+    /// If [`ThumbwheelCapabilities::TIME_STAMP`] is set, this is set to the
     /// timestamp unit used for [`ThumbwheelStatusUpdate::time_elapsed`] in
     /// microseconds. If the capability is not supported, this will always be
     /// `0`.
@@ -133,46 +133,29 @@ pub enum ThumbwheelDirection {
     PositiveWhenRightOrFront = 1,
 }
 
-/// Represents the capabilities the thumbwheel may support.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[non_exhaustive]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "wire bitfield: each capability is an independent flag bit, not related boolean params"
-)]
-pub struct ThumbwheelCapabilities {
-    /// Whether the thumbwheel supports emitting the elapsed time between two
-    /// events via [`ThumbwheelStatusUpdate::time_elapsed`].
-    pub time_stamp: bool,
+bitflags::bitflags! {
+    /// Represents the capabilities the thumbwheel may support.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+    pub struct ThumbwheelCapabilities: u8 {
+        /// The thumbwheel emits the elapsed time between two events via
+        /// [`ThumbwheelStatusUpdate::time_elapsed`].
+        const TIME_STAMP = 1 << 0;
 
-    /// Whether the thumbwheel is equipped with a touch sensor.
-    ///
-    /// If this capability is supported, [`ThumbwheelStatusUpdate::touch`] will
-    /// be set to whether the user touches the thumbwheel.
-    pub touch: bool,
+        /// The thumbwheel is equipped with a touch sensor, so
+        /// [`ThumbwheelStatusUpdate::touch`] reports whether the user is
+        /// touching it.
+        const TOUCH = 1 << 1;
 
-    /// Whether the thumbwheel is equipped with a proximity sensor.
-    ///
-    /// If this capability is supported, [`ThumbwheelStatusUpdate::proxy`] will
-    /// be set to whether the user is close to the thumbwheel.
-    pub proxy: bool,
+        /// The thumbwheel is equipped with a proximity sensor, so
+        /// [`ThumbwheelStatusUpdate::proxy`] reports whether the user is close
+        /// to it.
+        const PROXY = 1 << 2;
 
-    /// Whether the thumbwheel supports detecting single taps.
-    ///
-    /// If this capability is supported, [`ThumbwheelStatusUpdate::single_tap`]
-    /// will be set to whether the user tapped the thumbwheel.
-    pub single_tap: bool,
-}
-
-impl From<u8> for ThumbwheelCapabilities {
-    fn from(value: u8) -> Self {
-        Self {
-            time_stamp: value & 1 != 0,
-            touch: value & (1 << 1) != 0,
-            proxy: value & (1 << 2) != 0,
-            single_tap: value & (1 << 3) != 0,
-        }
+        /// The thumbwheel detects single taps, so
+        /// [`ThumbwheelStatusUpdate::single_tap`] reports whether the user
+        /// tapped it.
+        const SINGLE_TAP = 1 << 3;
     }
 }
 
@@ -193,13 +176,13 @@ pub struct ThumbwheelStatus {
     /// Whether the user touches the thumbwheel.
     ///
     /// This is only set if the device supports touch detection as reported by
-    /// [`ThumbwheelCapabilities::touch`].
+    /// [`ThumbwheelCapabilities::TOUCH`].
     pub touch: bool,
 
     /// Whether the user is close to the thumbwheel.
     ///
     /// This is only set if the device supports proximity detection as reported
-    /// by [`ThumbwheelCapabilities::proxy`].
+    /// by [`ThumbwheelCapabilities::PROXY`].
     pub proxy: bool,
 }
 
@@ -244,7 +227,7 @@ pub struct ThumbwheelStatusUpdate {
     ///
     /// The unit of this value is reported in [`ThumbwheelInfo::time_unit`].
     ///
-    /// If [`ThumbwheelCapabilities::time_stamp`] is not supported, this value
+    /// If [`ThumbwheelCapabilities::TIME_STAMP`] is not supported, this value
     /// will be `0`.
     pub time_elapsed: u16,
 
@@ -254,19 +237,19 @@ pub struct ThumbwheelStatusUpdate {
     /// Whether the user touches the thumbwheel.
     ///
     /// This is only set if the device supports touch detection as reported by
-    /// [`ThumbwheelCapabilities::touch`].
+    /// [`ThumbwheelCapabilities::TOUCH`].
     pub touch: bool,
 
     /// Whether the user is close to the thumbwheel.
     ///
     /// This is only set if the device supports proximity detection as reported
-    /// by [`ThumbwheelCapabilities::proxy`].
+    /// by [`ThumbwheelCapabilities::PROXY`].
     pub proxy: bool,
 
     /// Whether the user single-tapped the thumbwheel.
     ///
     /// This is only set if the device supports single-tap detection as reported
-    /// by [`ThumbwheelCapabilities::single_tap`].
+    /// by [`ThumbwheelCapabilities::SINGLE_TAP`].
     pub single_tap: bool,
 }
 

@@ -52,7 +52,7 @@ impl RootFeature {
 
         Ok(Some(FeatureInformation {
             index: payload[0],
-            typ: FeatureType::from(payload[1]),
+            typ: FeatureType::from_bits_retain(payload[1]),
             version: payload[2],
         }))
     }
