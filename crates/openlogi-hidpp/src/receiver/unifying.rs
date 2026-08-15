@@ -132,7 +132,7 @@ impl Receiver {
                     kind: DeviceKind::from(payload[1] & 0x0f),
                     encrypted: payload[1] & (1 << 4) != 0,
                     online: payload[1] & (1 << 6) == 0,
-                    wpid: u16::from_le_bytes(payload[2..=3].try_into().unwrap()),
+                    wpid: u16::from_le_bytes([payload[2], payload[3]]),
                 }));
             }
         });
@@ -145,6 +145,7 @@ impl Receiver {
     }
 
     /// Creates a new listener for receiving receiver events.
+    #[must_use]
     pub fn listen(&self) -> async_channel::Receiver<Event> {
         self.emitter.create_receiver()
     }
@@ -251,13 +252,13 @@ impl Receiver {
             .await?;
 
         Ok(DevicePairingInformation {
-            wpid: u16::from_le_bytes(response[2..=3].try_into().unwrap()),
+            wpid: u16::from_le_bytes([response[2], response[3]]),
             // Kind is identity-only: an unrecognised nibble folds to
             // `Unknown` instead of failing the whole pairing-info read.
             kind: DeviceKind::from(response[1] & 0x0f),
             encrypted: response[1] & (1 << 4) != 0,
             online: response[1] & (1 << 6) == 0,
-            unit_id: response[4..=7].try_into().unwrap(),
+            unit_id: [response[4], response[5], response[6], response[7]],
         })
     }
 

@@ -50,6 +50,7 @@ pub enum Receiver {
 
 impl Receiver {
     /// Provides a human-readable name for the receiver.
+    #[must_use]
     pub fn name(&self) -> String {
         match self {
             Self::Bolt(_) => "Logi Bolt Receiver",

@@ -134,7 +134,7 @@ impl Receiver {
                             kind: DeviceKind::from(payload[1] & 0x0f),
                             encrypted: payload[1] & (1 << 5) != 0,
                             online: payload[1] & (1 << 6) == 0,
-                            wpid: u16::from_le_bytes(payload[2..=3].try_into().unwrap()),
+                            wpid: u16::from_le_bytes([payload[2], payload[3]]),
                         }));
                     }
                     // Device discovery
@@ -143,10 +143,10 @@ impl Receiver {
                             // Device data
                             0 => {
                                 emitter.emit(Event::DeviceDiscoveryDeviceDetails {
-                                    counter: payload[0] as u16 + payload[1] as u16 * 256,
+                                    counter: u16::from(payload[0]) + u16::from(payload[1]) * 256,
                                     kind: DeviceKind::from(payload[4] & 0x0f),
-                                    wpid: u16::from_le_bytes(payload[5..=6].try_into().unwrap()),
-                                    address: payload[7..=12].try_into().unwrap(),
+                                    wpid: u16::from_le_bytes([payload[5], payload[6]]),
+                                    address: address6(&payload, 7),
                                     authentication: payload[15],
                                 });
                             }
@@ -181,7 +181,7 @@ impl Receiver {
                         let error = (payload[1] != 0x00).then(|| PairingError::from(payload[1]));
 
                         emitter.emit(Event::PairingStatus {
-                            device_address: payload[2..=7].try_into().unwrap(),
+                            device_address: address6(&payload, 2),
                             pairing_error: error,
                             slot: if payload[8] == 0x00 {
                                 None
@@ -200,14 +200,14 @@ impl Receiver {
                         };
 
                         emitter.emit(Event::PairingPasskeyRequest {
-                            device_address: payload[7..=12].try_into().unwrap(),
+                            device_address: address6(&payload, 7),
                             passkey: passkey.to_string(),
                         });
                     }
                     // Passkey pressed
                     0x4e => {
                         emitter.emit(Event::PairingPasskeyPressed {
-                            device_address: payload[1..=6].try_into().unwrap(),
+                            device_address: address6(&payload, 1),
                             press_type: PairingPasskeyPressType::from(payload[0]),
                         });
                     }
@@ -224,6 +224,7 @@ impl Receiver {
     }
 
     /// Creates a new listener for receiving receiver events.
+    #[must_use]
     pub fn listen(&self) -> async_channel::Receiver<Event> {
         self.emitter.create_receiver()
     }
@@ -254,7 +255,7 @@ impl Receiver {
             .write_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::Notifications.into(),
-                [0, if state.wireless_notifications { 1 } else { 0 }, 0],
+                [0, u8::from(state.wireless_notifications), 0],
             )
             .await?;
 
@@ -371,13 +372,13 @@ impl Receiver {
             .await?;
 
         Ok(DevicePairingInformation {
-            wpid: u16::from_le_bytes(response[2..=3].try_into().unwrap()),
+            wpid: u16::from_le_bytes([response[2], response[3]]),
             // Kind is identity-only: an unrecognised nibble folds to
             // `Unknown` instead of failing the whole pairing-info read.
             kind: DeviceKind::from(response[1] & 0x0f),
             encrypted: response[1] & (1 << 5) != 0,
             online: response[1] & (1 << 6) == 0,
-            unit_id: response[4..=7].try_into().unwrap(),
+            unit_id: [response[4], response[5], response[6], response[7]],
         })
     }
 
@@ -482,6 +483,23 @@ impl Receiver {
     }
 }
 
+/// Extracts 6 contiguous bytes starting at `start` from a receiver-event
+/// payload into a BTLE device-address array.
+///
+/// Every call site below passes a compile-time-fixed `start` (1, 2, or 7)
+/// comfortably within the fixed 17-byte payload, so this never panics in
+/// practice.
+fn address6(payload: &[u8; 17], start: usize) -> [u8; 6] {
+    [
+        payload[start],
+        payload[start + 1],
+        payload[start + 2],
+        payload[start + 3],
+        payload[start + 4],
+        payload[start + 5],
+    ]
+}
+
 /// Parse a device-discovery name notification (sub-id `0x4f`, kind `1`).
 ///
 /// `payload[3]` is the device-reported name length. The byte comes straight
@@ -492,7 +510,7 @@ fn parse_discovery_name(payload: &[u8; 17]) -> Option<(u16, &str)> {
     let len = usize::from(payload[3]);
     let end = 4usize.checked_add(len)?;
     let name = str::from_utf8(payload.get(4..end)?).ok()?;
-    Some((payload[0] as u16 + payload[1] as u16 * 256, name))
+    Some((u16::from(payload[0]) + u16::from(payload[1]) * 256, name))
 }
 
 /// Extract the codename chunk from a `DeviceCodename` register read.
