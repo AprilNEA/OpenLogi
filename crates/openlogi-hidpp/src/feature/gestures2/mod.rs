@@ -135,6 +135,7 @@ impl Gestures2Feature {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 

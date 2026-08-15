@@ -124,6 +124,7 @@ impl SmartShiftEnhancedStatus {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::{Hidpp20Error, SmartShiftEnhancedStatus, WheelMode};
 

@@ -85,6 +85,7 @@ impl DualPlatformFeature {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::DualPlatformSelection;
 
@@ -98,7 +99,7 @@ mod tests {
             DualPlatformSelection::try_from(1).unwrap(),
             DualPlatformSelection::AndroidOrWindows
         );
-        assert!(DualPlatformSelection::try_from(2).is_err());
+        DualPlatformSelection::try_from(2).unwrap_err();
         assert_eq!(u8::from(DualPlatformSelection::AndroidOrWindows), 1);
     }
 }

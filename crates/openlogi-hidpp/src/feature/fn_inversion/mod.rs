@@ -163,6 +163,7 @@ impl FnInversionWithDefaultStateFeature {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::{
         FnInversionInfo, FnInversionState, GlobalFnInversion, set_multi_host_fn_inversion_args,

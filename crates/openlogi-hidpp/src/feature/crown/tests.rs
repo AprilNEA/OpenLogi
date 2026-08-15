@@ -1,4 +1,9 @@
 //! Unit tests for `Crown` mode parsing and event decoding.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "expect/unwrap are idiomatic in tests"
+)]
 
 use std::assert_matches;
 
@@ -97,5 +102,5 @@ fn maps_mode_enum_wire_values() {
     assert_eq!(u8::from(ReportingMode::Diverted), 2);
     assert_eq!(ReportingMode::try_from(1u8).unwrap(), ReportingMode::Hid);
     assert_eq!(u8::from(RatchetMode::Free), 1);
-    assert!(RatchetMode::try_from(3u8).is_err());
+    RatchetMode::try_from(3u8).unwrap_err();
 }

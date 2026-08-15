@@ -1,5 +1,6 @@
 //! Unit tests for `SolarKeyboardDashboard` event decoding, using the spec's
 //! worked examples (battery 96%, light 0 / 319 lux).
+#![allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 
 use super::LedId;
 use super::event::{SolarEvent, SolarStatus, decode_event};
@@ -60,5 +61,5 @@ fn ignores_unknown_event_sub_id() {
 fn maps_led_wire_values() {
     assert_eq!(u8::from(LedId::Off), 0);
     assert_eq!(LedId::try_from(3u8).unwrap(), LedId::Green);
-    assert!(LedId::try_from(4u8).is_err());
+    LedId::try_from(4u8).unwrap_err();
 }
