@@ -16,6 +16,8 @@ pub mod host_switch;
 mod mappings;
 mod node_ledger;
 mod route;
+#[cfg(test)]
+pub(crate) mod scripted_channel;
 mod standalone;
 mod transport;
 // Native Win32 HID report-write fallback, used by the Windows composite channel

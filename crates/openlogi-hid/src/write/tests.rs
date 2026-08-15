@@ -1,16 +1,14 @@
-use std::error::Error;
-use std::io;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use super::*;
-use hidpp::channel::{HidppChannel, RawHidChannel};
+use hidpp::channel::HidppChannel;
 use hidpp::feature::extended_dpi::{DpiRange, Lod};
 use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;
-use tokio::sync::mpsc;
 
 use crate::SmartShiftMode;
 use crate::SmartShiftStatus;
+use crate::scripted_channel::ScriptedRawHidChannel;
 use crate::write::dpi::expand_dpi_ranges;
 use crate::write::lighting::{collect_present_zones, per_key_reports};
 use crate::write::smartshift::{
@@ -170,7 +168,7 @@ fn per_key_lighting_builds_only_very_long_frames_then_one_long_commit() {
 
 #[tokio::test]
 async fn shared_read_and_lighting_apis_use_the_supplied_channel() -> Result<(), WriteError> {
-    let (raw, handle) = ScriptedRawHidChannel::new();
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(scripted_response);
     let channel = Arc::new(
         HidppChannel::from_raw_channel(raw)
             .await
@@ -424,94 +422,6 @@ async fn a_keyboard_with_only_per_key_v2_can_be_coloured() -> Result<(), WriteEr
     Ok(())
 }
 
-#[derive(Clone)]
-struct ScriptedRawHidHandle {
-    written: Arc<Mutex<Vec<Vec<u8>>>>,
-}
-
-impl ScriptedRawHidHandle {
-    fn written_reports(&self) -> Vec<Vec<u8>> {
-        self.written
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-}
-
-/// Answers a HID++ request as a particular scripted device would.
-type Responder = fn(&[u8]) -> Option<Vec<u8>>;
-
-struct ScriptedRawHidChannel {
-    incoming_tx: mpsc::UnboundedSender<Vec<u8>>,
-    incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
-    written: Arc<Mutex<Vec<Vec<u8>>>>,
-    responder: Responder,
-}
-
-impl ScriptedRawHidChannel {
-    fn new() -> (Self, ScriptedRawHidHandle) {
-        Self::with_responder(scripted_response)
-    }
-
-    /// A channel answering as `responder`'s device, for tests that need a
-    /// different feature table than [`scripted_response`]'s.
-    fn with_responder(responder: Responder) -> (Self, ScriptedRawHidHandle) {
-        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let written = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                incoming_tx,
-                incoming_rx: tokio::sync::Mutex::new(incoming_rx),
-                written: Arc::clone(&written),
-                responder,
-            },
-            ScriptedRawHidHandle { written },
-        )
-    }
-}
-
-#[hidpp::async_trait]
-impl RawHidChannel for ScriptedRawHidChannel {
-    fn vendor_id(&self) -> u16 {
-        0x046d
-    }
-
-    fn product_id(&self) -> u16 {
-        0xb35b
-    }
-
-    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
-        self.written
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(src.to_vec());
-        if let Some(response) = (self.responder)(src) {
-            self.incoming_tx.send(response).map_err(|_| mock_error())?;
-        }
-        Ok(src.len())
-    }
-
-    async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
-        let Some(report) = self.incoming_rx.lock().await.recv().await else {
-            return Err(mock_error());
-        };
-        let len = report.len().min(buf.len());
-        buf[..len].copy_from_slice(&report[..len]);
-        Ok(len)
-    }
-
-    fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
-        Some((true, true))
-    }
-
-    async fn get_report_descriptor(
-        &self,
-        _buf: &mut [u8],
-    ) -> Result<usize, Box<dyn Error + Send + Sync>> {
-        unreachable!("scripted channel declares HID++ support")
-    }
-}
-
 fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;
@@ -670,11 +580,4 @@ fn per_key_v2_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     let payload_len = response.len() - 4;
     response[4..].copy_from_slice(&payload[..payload_len]);
     Some(response)
-}
-
-fn mock_error() -> Box<dyn Error + Send + Sync> {
-    Box::new(io::Error::new(
-        io::ErrorKind::BrokenPipe,
-        "scripted HID channel closed",
-    ))
 }

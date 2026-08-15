@@ -11,7 +11,11 @@ use std::{future::Future, sync::Arc, time::Duration};
 use hidpp::{
     channel::HidppChannel,
     device::Device,
-    feature::{CreatableFeature, change_host::ChangeHostFeature},
+    feature::{
+        CreatableFeature,
+        change_host::ChangeHostFeature,
+        hosts_info::{HostIndex, HostSlotStatus, HostsInfoFeature},
+    },
     protocol::v20,
 };
 use thiserror::Error;
@@ -86,6 +90,13 @@ pub enum HostSwitchError {
     /// The keyboard cannot report its host switch controls to software.
     #[error("keyboard exposes no reportable host switch controls")]
     UnsupportedKeyboard,
+    /// The device reports the requested host slot as unpaired, so switching to
+    /// it would strand the device.
+    #[error("host {host} is not paired on this device")]
+    HostSlotEmpty {
+        /// The zero-based host slot that has no pairing.
+        host: u8,
+    },
 }
 
 /// Capture host switch keys on `keyboard` until one is pressed or `shutdown`
@@ -167,6 +178,13 @@ pub async fn switch_linked_hosts(
     let channel = open_channel(channel_pool, keyboard, "opening keyboard channel")
         .await?
         .ok_or(HostSwitchError::KeyboardNotFound)?;
+    // Validate the keyboard's own move before touching anything: preparation is
+    // read-only, but it is the step that rejects an unpaired host slot, and
+    // discovering that *after* the mice have moved would strand them on a host
+    // the keyboard never reaches. Applying it still happens last, because once
+    // the keyboard leaves this host its channel can no longer command a mouse
+    // sharing the same receiver.
+    let keyboard_change = prepare_host_change_on(&channel, keyboard.device_index(), host).await?;
     for target in targets {
         match prepare_host_change(target, host, keyboard, &channel, channel_pool).await {
             Ok(change) => {
@@ -179,7 +197,6 @@ pub async fn switch_linked_hosts(
             }
         }
     }
-    let keyboard_change = prepare_host_change_on(&channel, keyboard.device_index(), host).await?;
     let changed = apply_host_change(keyboard_change).await?;
     if changed {
         debug!(host, route = %keyboard, "keyboard host switched");
@@ -354,6 +371,9 @@ async fn prepare_host_change_on(
     let change_host = device.add_feature::<ChangeHostFeature>(info.index);
     let state = timed_hidpp("reading current host", change_host.get_host_info()).await?;
     let required = host_change_required(state.current_host, state.host_count, host)?;
+    if required && !host_slot_is_paired(&mut device, host).await? {
+        return Err(HostSwitchError::HostSlotEmpty { host });
+    }
     Ok(PreparedHostChange {
         feature: change_host,
         device_index,
@@ -400,6 +420,37 @@ where
         .await
         .map_err(|_| HostSwitchError::TimedOut { operation })?
         .map_err(|error| hidpp_error(operation, error))
+}
+
+/// Whether `host` is a slot this device is actually paired on.
+///
+/// `ChangeHost`'s `host_count` counts the device's RF channels, not the ones
+/// that have a pairing. Switching to an empty slot is not refused by the
+/// device: `setCurrentHost` is fire-and-forget and a successful switch usually
+/// resets the device, so it simply drops off this host and does not come back
+/// until the user pairs that slot or presses the device's own host button. A
+/// keyboard with three host keys paired to two machines is enough to hit this.
+///
+/// `HostsInfo` (`0x1815`) is the only feature that reports per-slot pairing
+/// status. A device that does not expose it, or that fails the read, is
+/// treated as pairable so the switch is still attempted — this guard only ever
+/// blocks on a device that explicitly says the slot is empty.
+async fn host_slot_is_paired(device: &mut Device, host: u8) -> Result<bool, HostSwitchError> {
+    let Some(info) = timed_hidpp(
+        "locating hosts-info feature",
+        device.root().get_feature(HostsInfoFeature::ID),
+    )
+    .await?
+    else {
+        return Ok(true);
+    };
+    let hosts_info = device.add_feature::<HostsInfoFeature>(info.index);
+    let slot = timed_hidpp(
+        "reading host slot status",
+        hosts_info.get_host_info(HostIndex::Slot(host)),
+    )
+    .await?;
+    Ok(slot.status == HostSlotStatus::Paired)
 }
 
 fn host_change_required(
@@ -456,15 +507,135 @@ fn event_host(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
+    use std::sync::Arc;
+
+    use hidpp::channel::HidppChannel;
+
     use super::{
-        ArmedControl, ReportingMode, event_host, host_change_required, host_channel,
-        restoration_change, shares_channel,
+        ArmedControl, HostSwitchError, ReportingMode, event_host, host_change_required,
+        host_channel, prepare_host_change_on, restoration_change, shares_channel,
     };
     use crate::DeviceRoute;
     use crate::reprog_controls::{
         AnalyticsKeyEvent, CidReporting, ControlId, CtrlIdInfo, ReprogControlsEvent,
     };
+    use crate::scripted_channel::ScriptedRawHidChannel;
+
+    /// Feature index the scripted keyboard reports for `0x1814 ChangeHost`.
+    const CHANGE_HOST_INDEX: u8 = 0x04;
+    /// Feature index the scripted keyboard reports for `0x1815 HostsInfo`.
+    const HOSTS_INFO_INDEX: u8 = 0x05;
+
+    /// A three-channel keyboard currently on host 0, paired on hosts 0 and 1
+    /// but **not** on host 2 — a keyboard with three host keys and only two
+    /// machines paired, which is the shape that used to strand devices.
+    fn keyboard_with_an_empty_third_slot(request: &[u8]) -> Option<Vec<u8>> {
+        scripted_keyboard(request, true)
+    }
+
+    /// The same keyboard without `0x1815`, so its slot pairing is unknowable.
+    fn keyboard_without_hosts_info(request: &[u8]) -> Option<Vec<u8>> {
+        scripted_keyboard(request, false)
+    }
+
+    fn scripted_keyboard(request: &[u8], hosts_info: bool) -> Option<Vec<u8>> {
+        if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+            return None;
+        }
+        let mut payload = [0u8; 16];
+        match (request[2], request[3] >> 4) {
+            // Root ping used by Device::new.
+            (0x00, 0x01) => payload[0] = 4,
+            // Root feature lookup.
+            (0x00, 0x00) => {
+                payload[0] = match u16::from_be_bytes([request[4], request[5]]) {
+                    0x1814 => CHANGE_HOST_INDEX,
+                    0x1815 if hosts_info => HOSTS_INFO_INDEX,
+                    _ => 0x00,
+                };
+            }
+            // ChangeHost getHostInfo: three RF channels, currently on host 0.
+            (CHANGE_HOST_INDEX, 0x00) => payload[..2].copy_from_slice(&[3, 0]),
+            // HostsInfo getHostInfo: echo the slot, then its pairing status.
+            (HOSTS_INFO_INDEX, 0x01) => {
+                payload[0] = request[4];
+                payload[1] = u8::from(request[4] < 2);
+            }
+            _ => return None,
+        }
+
+        let mut response = vec![0u8; 7];
+        response[0] = 0x10;
+        response[1..4].copy_from_slice(&request[1..4]);
+        response[4..].copy_from_slice(&payload[..3]);
+        Some(response)
+    }
+
+    async fn scripted_channel(responder: crate::scripted_channel::Responder) -> Arc<HidppChannel> {
+        let (raw, _handle) = ScriptedRawHidChannel::with_responder(responder);
+        Arc::new(
+            HidppChannel::from_raw_channel(raw)
+                .await
+                .expect("scripted HID++ channel must open"),
+        )
+    }
+
+    #[tokio::test]
+    async fn switching_to_an_unpaired_slot_is_refused() {
+        // ChangeHost would allow it: host 2 is within the device's channel
+        // count. But nothing is paired there, and `setCurrentHost` is
+        // fire-and-forget — the device would simply leave and not come back.
+        let channel = scripted_channel(keyboard_with_an_empty_third_slot).await;
+
+        let Err(error) = prepare_host_change_on(&channel, 1, 2).await else {
+            panic!("an unpaired slot must not be switched to");
+        };
+
+        assert!(
+            matches!(error, HostSwitchError::HostSlotEmpty { host: 2 }),
+            "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_to_a_paired_slot_proceeds() {
+        let channel = scripted_channel(keyboard_with_an_empty_third_slot).await;
+
+        let change = prepare_host_change_on(&channel, 1, 1)
+            .await
+            .expect("a paired slot must be switchable");
+
+        assert!(change.required, "host 1 differs from the current host 0");
+    }
+
+    #[tokio::test]
+    async fn a_device_without_hosts_info_is_still_switched() {
+        // 0x1815 is the only source of per-slot pairing status. Without it the
+        // guard must not block, or this change would regress every device that
+        // does not implement it.
+        let channel = scripted_channel(keyboard_without_hosts_info).await;
+
+        let change = prepare_host_change_on(&channel, 1, 2)
+            .await
+            .expect("a device that cannot report slot status must still switch");
+
+        assert!(change.required);
+    }
+
+    #[tokio::test]
+    async fn a_switch_to_the_current_host_never_consults_slot_status() {
+        // Already-there is decided before the pairing check, so a device on an
+        // unpaired-looking slot is not blocked from staying put.
+        let channel = scripted_channel(keyboard_with_an_empty_third_slot).await;
+
+        let change = prepare_host_change_on(&channel, 1, 0)
+            .await
+            .expect("staying on the current host is always fine");
+
+        assert!(!change.required);
+    }
 
     fn reporting(diverted: bool, raw_xy: bool, analytics_key_events: bool) -> CidReporting {
         CidReporting {
