@@ -20,8 +20,9 @@ pub struct DpiArgs {
 }
 
 pub async fn run(args: DpiArgs) -> Result<()> {
-    // 0x2201 = AdjustableDpi — auto-skip devices (keyboards) that lack it.
-    let (route, name) = select_device(args.device.as_deref(), &[0x2201]).await?;
+    // 0x2201 AdjustableDpi / 0x2202 ExtendedAdjustableDpi — auto-skip devices
+    // (keyboards) that expose neither. Newer mice ship only 0x2202.
+    let (route, name) = select_device(args.device.as_deref(), &[0x2201, 0x2202]).await?;
     println!("device: {name} ({route})");
 
     let info = openlogi_hid::get_dpi_info(&route)

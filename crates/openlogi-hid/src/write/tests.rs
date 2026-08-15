@@ -4,11 +4,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use super::*;
 use hidpp::channel::{HidppChannel, RawHidChannel};
+use hidpp::feature::extended_dpi::{DpiRange, Lod};
 use hidpp::feature::smartshift::WheelMode;
 use tokio::sync::mpsc;
 
 use crate::SmartShiftMode;
 use crate::SmartShiftStatus;
+use crate::write::dpi::expand_dpi_ranges;
 use crate::write::lighting::per_key_reports;
 use crate::write::smartshift::{
     is_missing_enhanced, is_transient_smartshift_error, smartshift_to_wheel,
@@ -211,6 +213,128 @@ async fn shared_read_and_lighting_apis_use_the_supplied_channel() -> Result<(), 
     Ok(())
 }
 
+#[test]
+fn stepped_dpi_ranges_expand_onto_their_step_grid() {
+    assert_eq!(
+        expand_dpi_ranges(&[DpiRange::Stepped {
+            from: 400,
+            to: 800,
+            step: 100,
+        }]),
+        [400, 500, 600, 700, 800]
+    );
+}
+
+#[test]
+fn a_stepped_range_always_offers_its_high_endpoint() {
+    // 1000 is not an exact multiple of 300 from 100, but the spec makes the
+    // high endpoint selectable regardless — dropping it would put a device's
+    // maximum DPI out of reach.
+    assert_eq!(
+        expand_dpi_ranges(&[DpiRange::Stepped {
+            from: 100,
+            to: 1000,
+            step: 300,
+        }]),
+        [100, 400, 700, 1000]
+    );
+}
+
+#[test]
+fn fixed_and_stepped_ranges_mix_in_one_description() {
+    assert_eq!(
+        expand_dpi_ranges(&[
+            DpiRange::Fixed(200),
+            DpiRange::Stepped {
+                from: 400,
+                to: 600,
+                step: 100,
+            },
+            DpiRange::Fixed(1600),
+        ]),
+        [200, 400, 500, 600, 1600]
+    );
+}
+
+#[test]
+fn adjacent_ranges_may_share_an_endpoint() {
+    // The device reports one range's high value as the next one's low value;
+    // `DpiCapabilities::new` is what deduplicates, so the raw expansion is
+    // allowed to repeat it.
+    let values = expand_dpi_ranges(&[
+        DpiRange::Stepped {
+            from: 100,
+            to: 300,
+            step: 100,
+        },
+        DpiRange::Stepped {
+            from: 300,
+            to: 500,
+            step: 100,
+        },
+    ]);
+    assert_eq!(values, [100, 200, 300, 300, 400, 500]);
+    assert_eq!(
+        DpiCapabilities::new(values).expect("non-empty").values(),
+        [100, 200, 300, 400, 500]
+    );
+}
+
+#[test]
+fn a_single_value_range_yields_just_that_value() {
+    assert_eq!(
+        expand_dpi_ranges(&[DpiRange::Stepped {
+            from: 800,
+            to: 800,
+            step: 50,
+        }]),
+        [800]
+    );
+}
+
+#[tokio::test]
+async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Result<(), WriteError> {
+    // `Capabilities::from_feature_ids` turns the DPI panel on for 0x2201 *or*
+    // 0x2202, so a mouse that only speaks 0x2202 has to be drivable — it used
+    // to get a panel that failed every read and write.
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(extended_dpi_scripted_response);
+    let channel = Arc::new(
+        HidppChannel::from_raw_channel(raw)
+            .await
+            .expect("scripted HID++ channel must open"),
+    );
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        },
+    );
+
+    let dpi = get_dpi_info_on(&shared).await?;
+    assert_eq!(dpi.current, 800);
+    // The stepped 400..800 range expands onto its step grid and the trailing
+    // fixed value survives.
+    assert_eq!(dpi.capabilities.values(), [400, 500, 600, 700, 800, 1200]);
+
+    set_dpi_on(&shared, 1200).await?;
+
+    // setSensorDpiParameters is a long request on function 6 of feature index
+    // 0x05: [dpiX, dpiY, lod] after the echoed sensor index.
+    let write = handle
+        .written_reports()
+        .into_iter()
+        .find(|report| report.len() == 20 && report[2] == 0x05 && report[3] >> 4 == 0x06)
+        .expect("a DPI write must reach the device");
+    assert_eq!(u16::from_be_bytes([write[5], write[6]]), 1200);
+    // No independent Y axis on this sensor, so the spec has the host send 0.
+    assert_eq!(u16::from_be_bytes([write[7], write[8]]), 0);
+    // Lift-off distance is read back and rewritten unchanged — the packet has
+    // no "leave alone" encoding, so writing a bare 0 would retune the sensor.
+    assert_eq!(write[9], u8::from(Lod::Medium));
+    Ok(())
+}
+
 #[derive(Clone)]
 struct ScriptedRawHidHandle {
     written: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -225,14 +349,24 @@ impl ScriptedRawHidHandle {
     }
 }
 
+/// Answers a HID++ request as a particular scripted device would.
+type Responder = fn(&[u8]) -> Option<Vec<u8>>;
+
 struct ScriptedRawHidChannel {
     incoming_tx: mpsc::UnboundedSender<Vec<u8>>,
     incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
     written: Arc<Mutex<Vec<Vec<u8>>>>,
+    responder: Responder,
 }
 
 impl ScriptedRawHidChannel {
     fn new() -> (Self, ScriptedRawHidHandle) {
+        Self::with_responder(scripted_response)
+    }
+
+    /// A channel answering as `responder`'s device, for tests that need a
+    /// different feature table than [`scripted_response`]'s.
+    fn with_responder(responder: Responder) -> (Self, ScriptedRawHidHandle) {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let written = Arc::new(Mutex::new(Vec::new()));
         (
@@ -240,6 +374,7 @@ impl ScriptedRawHidChannel {
                 incoming_tx,
                 incoming_rx: tokio::sync::Mutex::new(incoming_rx),
                 written: Arc::clone(&written),
+                responder,
             },
             ScriptedRawHidHandle { written },
         )
@@ -261,7 +396,7 @@ impl RawHidChannel for ScriptedRawHidChannel {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(src.to_vec());
-        if let Some(response) = scripted_response(src) {
+        if let Some(response) = (self.responder)(src) {
             self.incoming_tx.send(response).map_err(|_| mock_error())?;
         }
         Ok(src.len())
@@ -331,6 +466,65 @@ fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
             false
         }
         // Raw per-key frame commit expects no reply.
+        _ => return None,
+    };
+
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = if long { 0x11 } else { 0x10 };
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+/// A mouse that exposes `0x2202 ExtendedAdjustableDpi` and **no**
+/// `0x2201 AdjustableDpi` — the shape `Capabilities::from_feature_ids` lights
+/// the DPI panel up for but the write path could not drive.
+fn extended_dpi_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    let long = match (feature_index, function) {
+        // Root ping used by Device::new.
+        (0x00, 0x01) => {
+            payload[0] = 4;
+            false
+        }
+        // Root feature lookup. 0x2201 is deliberately absent.
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(feature_id == 0x2202) * 0x05;
+            false
+        }
+        // getSensorCount.
+        (0x05, 0x00) => {
+            payload[0] = 1;
+            false
+        }
+        // getSensorDpiRanges: echo (sensorIdx, direction, page), then 400 with
+        // a step-100 hyphen up to 800, a fixed 1200, and the end-of-list word.
+        (0x05, 0x02) => {
+            payload[..3].copy_from_slice(&request[4..7]);
+            payload[3..13]
+                .copy_from_slice(&[0x01, 0x90, 0xe0, 0x64, 0x03, 0x20, 0x04, 0xb0, 0x00, 0x00]);
+            true
+        }
+        // getSensorDpiParameters: 800 DPI now and by default, no independent Y
+        // axis (dpiY reads 0), lift-off distance MEDIUM.
+        (0x05, 0x05) => {
+            payload[1..3].copy_from_slice(&800u16.to_be_bytes());
+            payload[3..5].copy_from_slice(&800u16.to_be_bytes());
+            payload[9] = u8::from(Lod::Medium);
+            true
+        }
+        // setSensorDpiParameters: echo the request back.
+        (0x05, 0x06) => {
+            payload[..6].copy_from_slice(&request[4..10]);
+            true
+        }
         _ => return None,
     };
 

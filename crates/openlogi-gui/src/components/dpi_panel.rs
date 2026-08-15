@@ -1,8 +1,9 @@
 //! DPI slider for the right-side config column.
 //!
-//! The slider range comes from the selected device's HID++ AdjustableDpi
-//! capability (`0x2201`). Capability discovery runs in the background and the
-//! UI only exposes exact device-supported values once the list is known.
+//! The slider range comes from the selected device's HID++ DPI capability
+//! (`0x2201` AdjustableDpi or `0x2202` ExtendedAdjustableDpi, whichever it
+//! reports). Capability discovery runs in the background and the UI only
+//! exposes exact device-supported values once the list is known.
 
 use gpui::{
     AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
