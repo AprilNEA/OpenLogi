@@ -371,7 +371,7 @@ async fn prepare_host_change_on(
     let change_host = device.add_feature::<ChangeHostFeature>(info.index);
     let state = timed_hidpp("reading current host", change_host.get_host_info()).await?;
     let required = host_change_required(state.current_host, state.host_count, host)?;
-    if required && !host_slot_is_paired(&mut device, host).await? {
+    if required && host_slot_is_empty(&mut device, host).await {
         return Err(HostSwitchError::HostSlotEmpty { host });
     }
     Ok(PreparedHostChange {
@@ -422,7 +422,7 @@ where
         .map_err(|error| hidpp_error(operation, error))
 }
 
-/// Whether `host` is a slot this device is actually paired on.
+/// Whether the device explicitly reports `host` as an empty slot.
 ///
 /// `ChangeHost`'s `host_count` counts the device's RF channels, not the ones
 /// that have a pairing. Switching to an empty slot is not refused by the
@@ -432,25 +432,38 @@ where
 /// keyboard with three host keys paired to two machines is enough to hit this.
 ///
 /// `HostsInfo` (`0x1815`) is the only feature that reports per-slot pairing
-/// status. A device that does not expose it, or that fails the read, is
-/// treated as pairable so the switch is still attempted — this guard only ever
-/// blocks on a device that explicitly says the slot is empty.
-async fn host_slot_is_paired(device: &mut Device, host: u8) -> Result<bool, HostSwitchError> {
-    let Some(info) = timed_hidpp(
+/// status, and asking is advisory: a device that does not implement it, times
+/// out, returns a feature error, or answers with a status byte outside the
+/// spec has not said the slot is empty, and must still be allowed to switch.
+/// Only an explicit `Empty` refuses, so this returns a plain `bool` — an
+/// unreadable status can never abort the transition it was meant to protect.
+async fn host_slot_is_empty(device: &mut Device, host: u8) -> bool {
+    let feature = timed_hidpp(
         "locating hosts-info feature",
         device.root().get_feature(HostsInfoFeature::ID),
     )
-    .await?
-    else {
-        return Ok(true);
+    .await;
+    let index = match feature {
+        Ok(Some(info)) => info.index,
+        Ok(None) => return false,
+        Err(error) => {
+            debug!(host, %error, "hosts-info lookup failed; treating the slot as usable");
+            return false;
+        }
     };
-    let hosts_info = device.add_feature::<HostsInfoFeature>(info.index);
-    let slot = timed_hidpp(
+    let hosts_info = device.add_feature::<HostsInfoFeature>(index);
+    match timed_hidpp(
         "reading host slot status",
         hosts_info.get_host_info(HostIndex::Slot(host)),
     )
-    .await?;
-    Ok(slot.status == HostSlotStatus::Paired)
+    .await
+    {
+        Ok(slot) => slot.status == HostSlotStatus::Empty,
+        Err(error) => {
+            debug!(host, %error, "host slot status is unreadable; treating the slot as usable");
+            false
+        }
+    }
 }
 
 fn host_change_required(
@@ -528,19 +541,46 @@ mod tests {
     /// Feature index the scripted keyboard reports for `0x1815 HostsInfo`.
     const HOSTS_INFO_INDEX: u8 = 0x05;
 
+    /// `ErrorType::Busy`, the failure a scripted device answers with.
+    const BUSY: u8 = 0x08;
+
+    /// What the scripted keyboard's firmware does when asked about `0x1815`.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum SlotStatus {
+        /// Answers the query: hosts 0 and 1 paired, host 2 empty.
+        Reported,
+        /// Reports the feature as unimplemented, the usual index-0 lookup miss.
+        Unimplemented,
+        /// Errors on the lookup itself, as firmware that refuses unknown
+        /// feature ids rather than reporting index 0 does.
+        LookupErrors,
+        /// Implements the feature but errors on the status read.
+        ReadErrors,
+    }
+
     /// A three-channel keyboard currently on host 0, paired on hosts 0 and 1
     /// but **not** on host 2 — a keyboard with three host keys and only two
     /// machines paired, which is the shape that used to strand devices.
     fn keyboard_with_an_empty_third_slot(request: &[u8]) -> Option<Vec<u8>> {
-        scripted_keyboard(request, true)
+        scripted_keyboard(request, SlotStatus::Reported)
     }
 
     /// The same keyboard without `0x1815`, so its slot pairing is unknowable.
     fn keyboard_without_hosts_info(request: &[u8]) -> Option<Vec<u8>> {
-        scripted_keyboard(request, false)
+        scripted_keyboard(request, SlotStatus::Unimplemented)
     }
 
-    fn scripted_keyboard(request: &[u8], hosts_info: bool) -> Option<Vec<u8>> {
+    /// The same keyboard, whose firmware errors when asked for `0x1815`.
+    fn keyboard_erroring_on_hosts_info_lookup(request: &[u8]) -> Option<Vec<u8>> {
+        scripted_keyboard(request, SlotStatus::LookupErrors)
+    }
+
+    /// The same keyboard, whose `0x1815` reads come back an error.
+    fn keyboard_erroring_on_slot_status(request: &[u8]) -> Option<Vec<u8>> {
+        scripted_keyboard(request, SlotStatus::ReadErrors)
+    }
+
+    fn scripted_keyboard(request: &[u8], slot_status: SlotStatus) -> Option<Vec<u8>> {
         if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
             return None;
         }
@@ -552,7 +592,11 @@ mod tests {
             (0x00, 0x00) => {
                 payload[0] = match u16::from_be_bytes([request[4], request[5]]) {
                     0x1814 => CHANGE_HOST_INDEX,
-                    0x1815 if hosts_info => HOSTS_INFO_INDEX,
+                    0x1815 => match slot_status {
+                        SlotStatus::Unimplemented => 0x00,
+                        SlotStatus::LookupErrors => return Some(feature_error(request, BUSY)),
+                        SlotStatus::Reported | SlotStatus::ReadErrors => HOSTS_INFO_INDEX,
+                    },
                     _ => 0x00,
                 };
             }
@@ -560,6 +604,9 @@ mod tests {
             (CHANGE_HOST_INDEX, 0x00) => payload[..2].copy_from_slice(&[3, 0]),
             // HostsInfo getHostInfo: echo the slot, then its pairing status.
             (HOSTS_INFO_INDEX, 0x01) => {
+                if slot_status == SlotStatus::ReadErrors {
+                    return Some(feature_error(request, BUSY));
+                }
                 payload[0] = request[4];
                 payload[1] = u8::from(request[4] < 2);
             }
@@ -571,6 +618,19 @@ mod tests {
         response[1..4].copy_from_slice(&request[1..4]);
         response[4..].copy_from_slice(&payload[..3]);
         Some(response)
+    }
+
+    /// A HID++ 2.0 error response to `request`: feature index `0xff`, then the
+    /// addressed feature index, the function/software id, and the error code.
+    fn feature_error(request: &[u8], error: u8) -> Vec<u8> {
+        let mut response = vec![0u8; 7];
+        response[0] = 0x10;
+        response[1] = request[1];
+        response[2] = 0xff;
+        response[3] = request[2];
+        response[4] = request[3];
+        response[5] = error;
+        response
     }
 
     async fn scripted_channel(responder: crate::scripted_channel::Responder) -> Arc<HidppChannel> {
@@ -620,6 +680,34 @@ mod tests {
         let change = prepare_host_change_on(&channel, 1, 2)
             .await
             .expect("a device that cannot report slot status must still switch");
+
+        assert!(change.required);
+    }
+
+    #[tokio::test]
+    async fn a_failed_hosts_info_lookup_does_not_block_the_switch() {
+        // Firmware that answers an unknown feature id with an error rather than
+        // index 0 must read the same as not implementing 0x1815 at all: the
+        // pairing status is unknowable, which is not a reason to refuse.
+        let channel = scripted_channel(keyboard_erroring_on_hosts_info_lookup).await;
+
+        let change = prepare_host_change_on(&channel, 1, 2)
+            .await
+            .expect("an errored feature lookup must not abort the switch");
+
+        assert!(change.required);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_slot_status_does_not_block_the_switch() {
+        // The guard is advisory. A device that has 0x1815 but cannot answer for
+        // it right now has not said the slot is empty, so refusing here would
+        // turn a transient read failure into a dead host key.
+        let channel = scripted_channel(keyboard_erroring_on_slot_status).await;
+
+        let change = prepare_host_change_on(&channel, 1, 2)
+            .await
+            .expect("an errored status read must not abort the switch");
 
         assert!(change.required);
     }
