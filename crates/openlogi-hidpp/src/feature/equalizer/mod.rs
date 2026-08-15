@@ -79,8 +79,8 @@ impl EqInfo {
             band_count: payload[0],
             db_range: payload[1],
             capabilities: EqCapabilities::from_bits_retain(payload[2]),
-            db_min: payload[3] as i8,
-            db_max: payload[4] as i8,
+            db_min: payload[3].cast_signed(),
+            db_max: payload[4].cast_signed(),
         }
     }
 
@@ -170,7 +170,7 @@ impl EqualizerFeature {
             if slot >= args.len() {
                 return Err(Hidpp20Error::UnsupportedResponse);
             }
-            args[slot] = gain as u8;
+            args[slot] = gain.cast_unsigned();
         }
         let payload = self.endpoint.call_long(3, args).await?.extend_payload();
         // The response echoes the request, so the gains start after the echoed
@@ -211,6 +211,6 @@ fn parse_gains(payload: &[u8; 16], offset: usize, count: u8) -> Result<Vec<i8>, 
     }
     Ok(payload[offset..offset + count]
         .iter()
-        .map(|&byte| byte as i8)
+        .map(|&byte| byte.cast_signed())
         .collect())
 }
