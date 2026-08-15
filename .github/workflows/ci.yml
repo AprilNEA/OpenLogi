@@ -113,6 +113,10 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc -p openlogi-hidpp --no-deps --document-private-items
+      - name: cargo doc (openlogi-hidpp-derive)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc -p openlogi-hidpp-derive --no-deps --document-private-items
 
   # openlogi-core / openlogi-hid / openlogi-assets / openlogi / openlogi-hook
   # all compile on Linux today (the hook crate has stubs for non-macOS targets).

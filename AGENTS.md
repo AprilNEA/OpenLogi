@@ -57,17 +57,30 @@ direnv exec . git commit …
 
 **Never `git push` until the final tree has passed the full local gate.**
 `cargo check` alone is not enough. Conflict resolution + "it compiles on my
-Mac" is not enough. Run **all three** on the commit you are about to push:
+Mac" is not enough. Run **all four** on the commit you are about to push:
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc -p openlogi-hid -p openlogi-hidpp \
+  -p openlogi-hidpp-derive --no-deps --document-private-items
 # or: devenv tasks run openlogi:check
 ```
 
-Exit non-zero on any of those → fix, re-run the **whole** triple, then push.
+Exit non-zero on any of those → fix, re-run the **whole** set, then push.
 Do not push "to see if CI likes it." CI is confirmation, not the first compile.
+
+The rustdoc step mirrors CI's `rustdoc (hid crates)` job and catches what the
+other three cannot: a broken intra-doc link is neither a compile error nor a
+clippy lint. How it bites is non-obvious — rustdoc resolves a
+`Type::trait_method` link only while that trait is **in scope**, so handing a
+hand-written trait impl over to a derive macro deletes the now-unused `use` and
+silently breaks every such link. Re-adding the import does not fix it either: a
+doc link does not count as a use, so that just trades the broken link for an
+`unused_imports` failure — write the trait method's full path instead. After any
+refactor that moves impls between hand-written and generated, grep for doc links
+naming that trait's methods.
 
 prek hooks (`prek.toml`): `cargo fmt` at commit; full-workspace clippy at push
 (rust-scoped, so non-Rust pushes skip it). Hooks are a backstop, not a substitute

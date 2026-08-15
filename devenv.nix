@@ -94,13 +94,17 @@ in
       '';
     };
     "openlogi:check" = {
-      description = "Run fmt, clippy, and tests.";
+      description = "Run fmt, clippy, tests, and rustdoc.";
       exec = ''
         set -e
         ${requireXcodeMetal}
         cargo fmt --all -- --check
         cargo clippy --workspace --all-targets -- -D warnings
         cargo test --workspace
+        # Mirrors CI's `rustdoc (hid crates)` job: a broken intra-doc link is
+        # neither a compile error nor a clippy lint, so nothing above catches it.
+        RUSTDOCFLAGS="-D warnings" cargo doc -p openlogi-hid -p openlogi-hidpp \
+          -p openlogi-hidpp-derive --no-deps --document-private-items
       '';
     };
     "openlogi:i18n-upload" = {
