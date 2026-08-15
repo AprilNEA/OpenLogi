@@ -42,7 +42,23 @@ impl DeviceFriendlyNameFeature {
             .await?
             .extend_payload();
 
-        Ok(payload[1..].try_into().unwrap())
+        Ok([
+            payload[1],
+            payload[2],
+            payload[3],
+            payload[4],
+            payload[5],
+            payload[6],
+            payload[7],
+            payload[8],
+            payload[9],
+            payload[10],
+            payload[11],
+            payload[12],
+            payload[13],
+            payload[14],
+            payload[15],
+        ])
     }
 
     /// Retrieves the whole friendly name of the device by first calling
@@ -54,7 +70,12 @@ impl DeviceFriendlyNameFeature {
 
         let mut len = 0;
         while len < count as usize {
-            let part = self.get_friendly_name(len as u8).await?;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "len < count as usize and count is a u8, so len always fits in u8"
+            )]
+            let index = len as u8;
+            let part = self.get_friendly_name(index).await?;
             string.push_str(str::from_utf8(&part).map_err(|_| Hidpp20Error::UnsupportedResponse)?);
             len = string.len();
         }
@@ -79,7 +100,23 @@ impl DeviceFriendlyNameFeature {
             .await?
             .extend_payload();
 
-        Ok(payload[1..].try_into().unwrap())
+        Ok([
+            payload[1],
+            payload[2],
+            payload[3],
+            payload[4],
+            payload[5],
+            payload[6],
+            payload[7],
+            payload[8],
+            payload[9],
+            payload[10],
+            payload[11],
+            payload[12],
+            payload[13],
+            payload[14],
+            payload[15],
+        ])
     }
 
     /// Retrieves the whole default friendly name of the device by first calling
@@ -91,7 +128,12 @@ impl DeviceFriendlyNameFeature {
 
         let mut len = 0;
         while len < count as usize {
-            let part = self.get_default_friendly_name(len as u8).await?;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "len < count as usize and count is a u8, so len always fits in u8"
+            )]
+            let index = len as u8;
+            let part = self.get_default_friendly_name(index).await?;
             string.push_str(str::from_utf8(&part).map_err(|_| Hidpp20Error::UnsupportedResponse)?);
             len = string.len();
         }
@@ -137,9 +179,10 @@ impl DeviceFriendlyNameFeature {
 
         let mut index = 0;
         for chunk in chunks {
-            index += self
-                .set_friendly_name(index, chunk.try_into().unwrap())
-                .await?;
+            // `chunks_exact(15)` guarantees every yielded chunk is exactly 15
+            // bytes long.
+            let chunk: [u8; 15] = std::array::from_fn(|i| chunk[i]);
+            index += self.set_friendly_name(index, chunk).await?;
         }
 
         if !remainder.is_empty() {
