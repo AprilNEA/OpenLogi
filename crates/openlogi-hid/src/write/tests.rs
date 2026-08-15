@@ -5,13 +5,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use super::*;
 use hidpp::channel::{HidppChannel, RawHidChannel};
 use hidpp::feature::extended_dpi::{DpiRange, Lod};
+use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;
 use tokio::sync::mpsc;
 
 use crate::SmartShiftMode;
 use crate::SmartShiftStatus;
 use crate::write::dpi::expand_dpi_ranges;
-use crate::write::lighting::per_key_reports;
+use crate::write::lighting::{collect_present_zones, per_key_reports};
 use crate::write::smartshift::{
     is_missing_enhanced, is_transient_smartshift_error, smartshift_to_wheel,
     status_matches_desired, wheel_mode_to_smartshift,
@@ -335,6 +336,94 @@ async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Resul
     Ok(())
 }
 
+#[test]
+fn zone_presence_bits_decode_lsb_first_from_the_page_base() {
+    let mut bitfield = [0u8; 14];
+    bitfield[0] = 0b0000_0110; // zones 1 and 2
+    bitfield[1] = 0b1000_0000; // zone 15
+    let mut zones = Vec::new();
+
+    collect_present_zones(0, &bitfield, &mut zones);
+
+    assert_eq!(zones, [1, 2, 15]);
+}
+
+#[test]
+fn zone_presence_pages_are_offset_by_their_base() {
+    let mut bitfield = [0u8; 14];
+    bitfield[0] = 0b0000_0001;
+    let mut zones = Vec::new();
+
+    collect_present_zones(112, &bitfield, &mut zones);
+
+    assert_eq!(zones, [112]);
+}
+
+#[test]
+fn zone_presence_skips_sentinels_and_padding_past_255() {
+    // The last page covers only 224..=255, so the rest of its 112 bits are
+    // padding — decoding them would wrap back onto low zone ids. Ids 0 and
+    // 0xff are the feature's own end-of-list sentinels.
+    let mut zones = Vec::new();
+    collect_present_zones(0, &[0b0000_0001; 14], &mut zones);
+    assert!(!zones.contains(&0), "zone 0 is an end-of-list sentinel");
+
+    let mut last_page = [0u8; 14];
+    last_page[3] = 0b1000_0000; // id 255 — the other sentinel
+    last_page[5] = 0b0000_0001; // id 264 — past the addressable range
+    let mut zones = Vec::new();
+    collect_present_zones(224, &last_page, &mut zones);
+    assert!(zones.is_empty(), "got {zones:?}");
+}
+
+#[tokio::test]
+async fn a_keyboard_with_only_per_key_v2_can_be_coloured() -> Result<(), WriteError> {
+    // 0x8081 supersedes 0x8080 but nothing had ever driven it, so a keyboard
+    // exposing only 0x8081 could not be coloured at all.
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(per_key_v2_scripted_response);
+    let channel = Arc::new(
+        HidppChannel::from_raw_channel(raw)
+            .await
+            .expect("scripted HID++ channel must open"),
+    );
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc339,
+        },
+    );
+
+    set_keyboard_color_on(&shared, 0x11, 0x22, 0x33).await?;
+
+    let written = handle.written_reports();
+    let long_on = |function: u8| {
+        written
+            .iter()
+            .filter(move |report| {
+                report.len() == 20 && report[2] == 0x07 && report[3] >> 4 == function
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // One setRgbZonesSingleValue carrying the colour and every present zone —
+    // four zones fit in a single request.
+    let paints = long_on(0x06);
+    assert_eq!(paints.len(), 1);
+    assert_eq!(&paints[0][4..7], &[0x11, 0x22, 0x33]);
+    assert_eq!(&paints[0][7..11], &[1, 2, 3, 4]);
+
+    // Then exactly one frameEnd, volatile so the colour does not burn flash on
+    // every pick.
+    let commits = long_on(0x07);
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0][4], u8::from(FramePersistence::Volatile));
+
+    // The raw 0x8080 stream must not have run — this device has no 0x8080.
+    assert!(written.iter().all(|report| report.first() != Some(&0x12)));
+    Ok(())
+}
+
 #[derive(Clone)]
 struct ScriptedRawHidHandle {
     written: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -523,6 +612,53 @@ fn extended_dpi_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
         // setSensorDpiParameters: echo the request back.
         (0x05, 0x06) => {
             payload[..6].copy_from_slice(&request[4..10]);
+            true
+        }
+        _ => return None,
+    };
+
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = if long { 0x11 } else { 0x10 };
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+/// A keyboard that exposes `0x8081 PerKeyLighting2` and neither `0x8070`
+/// ColorLedEffects nor `0x8080` PerKeyLighting — the shape that had no way to
+/// set a colour at all, since nothing ever drove 0x8081.
+fn per_key_v2_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    let long = match (feature_index, function) {
+        // Root ping used by Device::new.
+        (0x00, 0x01) => {
+            payload[0] = 4;
+            false
+        }
+        // Root feature lookup. Only 0x8081 is present.
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(feature_id == 0x8081) * 0x07;
+            false
+        }
+        // getRgbZonePresence: echo (typeOfInfo, page) then the 14-byte
+        // bitfield. Page 0 reports zones 1..=4 present; the others are empty.
+        (0x07, 0x00) => {
+            payload[..2].copy_from_slice(&request[4..6]);
+            if request[5] == 0 {
+                payload[2] = 0b0001_1110;
+            }
+            true
+        }
+        // setRgbZonesSingleValue and frameEnd: echo the request back.
+        (0x07, 0x06 | 0x07) => {
+            payload[..12].copy_from_slice(&request[4..16]);
             true
         }
         _ => return None,

@@ -136,11 +136,12 @@ impl Capabilities {
     pub fn from_feature_ids(ids: &[u16]) -> Self {
         const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
-        // PerKeyLighting (0x8080) and ColorLedEffects (0x8070) — both now driven
-        // by `set_keyboard_color` (it prefers 0x8070's fixed effect to override a
-        // running onboard profile, falling back to 0x8080 per-key). Other families
-        // (backlight 0x198x) stay out so they don't earn a tab the panel can't drive.
-        const LIGHTING: [u16; 2] = [0x8080, 0x8070];
+        // ColorLedEffects (0x8070), PerKeyLighting2 (0x8081) and PerKeyLighting
+        // (0x8080) — all three driven by `set_keyboard_color`, which prefers
+        // 0x8070's fixed effect to override a running onboard profile and falls
+        // back through 0x8081 to 0x8080. Other families (backlight 0x198x) stay
+        // out so they don't earn a tab the panel can't drive.
+        const LIGHTING: [u16; 3] = [0x8080, 0x8070, 0x8081];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
             buttons: has(&BUTTONS),
@@ -560,6 +561,22 @@ mod tests {
             Capabilities::from_feature_ids(&[0x0000, 0x0003]),
             Capabilities::default()
         );
+    }
+
+    #[test]
+    fn every_driveable_lighting_family_earns_the_tab() {
+        // `set_keyboard_color` walks 0x8070 → 0x8081 → 0x8080, so a keyboard
+        // exposing any one of them can be coloured and must get the tab.
+        // 0x8081 was missing here, which left such a keyboard with no lighting
+        // UI at all.
+        for id in [0x8070, 0x8080, 0x8081] {
+            assert!(
+                Capabilities::from_feature_ids(&[0x0001, id]).lighting,
+                "0x{id:04x} must offer the lighting tab"
+            );
+        }
+        // Backlight (0x198x) stays out — the panel cannot drive it.
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).lighting);
     }
 
     #[test]

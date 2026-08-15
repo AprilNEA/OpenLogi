@@ -7,6 +7,10 @@ use hidpp::{
     feature::{
         CreatableFeature,
         color_led_effects::{ColorLedEffectsFeature, Persistence, ZONE_EFFECT_PARAM_COUNT},
+        per_key_lighting::{
+            FramePersistence, MAX_SINGLE_VALUE_ZONES, PerKeyLightingFeature, Rgb,
+            ZONE_PRESENCE_PAGE_LEN, ZonePresencePage,
+        },
     },
 };
 use tracing::debug;
@@ -59,13 +63,17 @@ const FRAME_GAP: Duration = Duration::from_millis(8);
 /// [`Auto`]: LightingMethod::Auto
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LightingMethod {
-    /// Prefer `ColorLedEffects` (`0x8070`), falling back to `PerKeyLighting`
-    /// (`0x8080`) when the device exposes no effect engine.
+    /// Prefer `ColorLedEffects` (`0x8070`), falling back to `PerKeyLighting2`
+    /// (`0x8081`) and then `PerKeyLighting` (`0x8080`) when the device exposes
+    /// no effect engine.
     Auto,
     /// Force `ColorLedEffects` (`0x8070`) — the fixed-effect override.
     Effects,
-    /// Force `PerKeyLighting` (`0x8080`) — the per-key stream.
+    /// Force `PerKeyLighting` (`0x8080`) — the raw per-key stream.
     PerKey,
+    /// Force `PerKeyLighting2` (`0x8081`) — the zone-addressed successor to
+    /// `0x8080`.
+    PerKeyV2,
 }
 
 /// Set a keyboard to a solid `(r, g, b)` colour, choosing the HID++ path
@@ -108,13 +116,26 @@ pub(super) async fn set_keyboard_color_with_on_channel(
 ) -> Result<(), WriteError> {
     match method {
         LightingMethod::PerKey => set_color_per_key(channel, device_index, r, g, b).await,
+        LightingMethod::PerKeyV2 => set_color_per_key_v2(channel, device_index, r, g, b).await,
         LightingMethod::Effects => set_color_effects(channel, device_index, r, g, b).await,
         LightingMethod::Auto => match set_color_effects(channel, device_index, r, g, b).await {
             Err(WriteError::FeatureUnsupported { feature_hex })
                 if feature_hex == COLOR_LED_EFFECTS_FEATURE =>
             {
-                debug!("no 0x8070 effect engine — falling back to 0x8080 per-key");
-                set_color_per_key(channel, device_index, r, g, b).await
+                debug!("no 0x8070 effect engine — trying the per-key paths");
+                // 0x8081 supersedes 0x8080 and is the one newer keyboards ship,
+                // so it is tried first; a device with neither reports the
+                // original 0x8080 as missing, which is the error this fallback
+                // chain has always ended with.
+                match set_color_per_key_v2(channel, device_index, r, g, b).await {
+                    Err(WriteError::FeatureUnsupported { feature_hex })
+                        if feature_hex == PerKeyLightingFeature::ID =>
+                    {
+                        debug!("no 0x8081 per-key zones — falling back to 0x8080 per-key");
+                        set_color_per_key(channel, device_index, r, g, b).await
+                    }
+                    other => other,
+                }
             }
             other => other,
         },
@@ -205,6 +226,126 @@ async fn set_color_effects(
 /// Classify a HID++ error from the `ColorLedEffects` functions.
 fn classify_lighting_error(error: hidpp::protocol::v20::Hidpp20Error) -> WriteError {
     classify_hidpp_error(error, HidppOperation::Lighting, ColorLedEffectsFeature::ID)
+}
+
+/// Set a solid colour via `PerKeyLighting2` (`0x8081`): paint every zone the
+/// device reports as present, then commit the frame. `FeatureUnsupported` when
+/// the device exposes no `0x8081` or reports no zones.
+///
+/// `0x8081` supersedes `0x8080`. It addresses *zones* rather than HID key
+/// usages and answers each request, so unlike the raw `0x8080` stream a write
+/// to a zone the device does not have surfaces as an error instead of being
+/// swallowed. Nothing had ever driven it, which left a keyboard exposing only
+/// `0x8081` with no way to set its colour at all.
+///
+/// Committed volatilely for the same reason as the `0x8070` path: the colour
+/// shows live without a flash write on every colour pick, and the agent
+/// re-applies the saved colour on device arrival.
+async fn set_color_per_key_v2(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> Result<(), WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let feature = open_feature::<PerKeyLightingFeature>(&mut device).await?;
+
+    let zones = present_zones(&feature).await?;
+    if zones.is_empty() {
+        // The device announces 0x8081 but claims no zones, so there is nothing
+        // to paint — and that won't change on retry. Reported as unsupported so
+        // `Auto` falls through to the 0x8080 stream.
+        debug!(index, "0x8081 reported no present zones");
+        return Err(WriteError::FeatureUnsupported {
+            feature_hex: PerKeyLightingFeature::ID,
+        });
+    }
+
+    let color = Rgb {
+        red: r,
+        green: g,
+        blue: b,
+    };
+    // One request carries at most MAX_SINGLE_VALUE_ZONES ids and silently
+    // ignores the rest, so the chunking is the caller's job.
+    for chunk in zones.chunks(MAX_SINGLE_VALUE_ZONES) {
+        feature
+            .set_rgb_zones_single_value(color, chunk)
+            .await
+            .map_err(classify_per_key_v2_error)?;
+    }
+    feature
+        .frame_end(FramePersistence::Volatile, 0, 0)
+        .await
+        .map_err(classify_per_key_v2_error)?;
+
+    debug!(
+        index,
+        zone_count = zones.len(),
+        r,
+        g,
+        b,
+        "set keyboard colour via typed 0x8081"
+    );
+    Ok(())
+}
+
+/// Every zone id `0x8081` reports as present, read across all three presence
+/// pages.
+///
+/// Ids `0` and `0xff` are end-of-list sentinels the feature rejects, so they
+/// are skipped even if a device sets their bits.
+async fn present_zones(feature: &PerKeyLightingFeature) -> Result<Vec<u8>, WriteError> {
+    let mut zones = Vec::new();
+    for (page, base) in [
+        (ZonePresencePage::Zones0To111, 0u16),
+        (ZonePresencePage::Zones112To223, 112),
+        (ZonePresencePage::Zones224To255, 224),
+    ] {
+        let bitfield = feature
+            .get_rgb_zone_presence(page)
+            .await
+            .map_err(classify_per_key_v2_error)?;
+        collect_present_zones(base, &bitfield, &mut zones);
+    }
+    Ok(zones)
+}
+
+/// Appends the zone ids whose presence bit is set in `bitfield`, a 112-bit
+/// field covering ids `base..base + 112` (bit `i` LSB-first within each byte).
+///
+/// The last page covers only 224..=255, so its high bits are padding; ids past
+/// 255 are skipped rather than wrapped. Ids `0` and `0xff` are the feature's
+/// end-of-list sentinels and are skipped even if a device sets their bits.
+pub(super) fn collect_present_zones(
+    base: u16,
+    bitfield: &[u8; ZONE_PRESENCE_PAGE_LEN],
+    zones: &mut Vec<u8>,
+) {
+    for (byte_index, byte) in bitfield.iter().enumerate() {
+        for bit in 0..8u16 {
+            if byte & (1 << bit) == 0 {
+                continue;
+            }
+            let Ok(offset) = u16::try_from(byte_index * 8) else {
+                continue;
+            };
+            let Ok(zone_id) = u8::try_from(base + offset + bit) else {
+                continue;
+            };
+            if !matches!(zone_id, 0 | 0xff) {
+                zones.push(zone_id);
+            }
+        }
+    }
+}
+
+/// Classify a HID++ error from the `PerKeyLighting2` functions.
+fn classify_per_key_v2_error(error: hidpp::protocol::v20::Hidpp20Error) -> WriteError {
+    classify_hidpp_error(error, HidppOperation::Lighting, PerKeyLightingFeature::ID)
 }
 
 /// Set a solid colour via `PerKeyLighting` (`0x8080`): stream every key's colour

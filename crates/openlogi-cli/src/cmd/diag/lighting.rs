@@ -1,5 +1,5 @@
 //! `openlogi diag lighting <RRGGBB>` — set a wired RGB keyboard to a solid
-//! colour via HID++ `PerKeyLighting` (0x8080).
+//! colour via one of the HID++ lighting features (0x8070 / 0x8081 / 0x8080).
 //!
 //! Targets the first online direct-attached (USB) Logitech device — i.e. a
 //! wired G-series keyboard — by VID/PID, so it isn't tied to one model.
@@ -11,12 +11,15 @@ use openlogi_hid::{DeviceRoute, LightingMethod};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Method {
-    /// Prefer 0x8070 ColorLedEffects, fall back to 0x8080 per-key (default).
+    /// Prefer 0x8070 ColorLedEffects, fall back to 0x8081 then 0x8080
+    /// per-key (default).
     Auto,
     /// Force 0x8070 ColorLedEffects (the fixed-effect onboard override).
     Effects,
-    /// Force 0x8080 PerKeyLighting (the per-key stream).
+    /// Force 0x8080 PerKeyLighting (the raw per-key stream).
     Perkey,
+    /// Force 0x8081 PerKeyLighting2 (the zone-addressed successor).
+    Perkeyv2,
 }
 
 impl From<Method> for LightingMethod {
@@ -25,6 +28,7 @@ impl From<Method> for LightingMethod {
             Method::Auto => Self::Auto,
             Method::Effects => Self::Effects,
             Method::Perkey => Self::PerKey,
+            Method::Perkeyv2 => Self::PerKeyV2,
         }
     }
 }

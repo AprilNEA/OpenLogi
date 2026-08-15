@@ -31,7 +31,11 @@ const CONSECUTIVE_ZONES: usize = 5;
 /// Maximum ranges per `setRangeRgbZones` request.
 const MAX_RANGES: usize = 3;
 /// Maximum zones per `setRgbZonesSingleValue` request.
-const MAX_SINGLE_VALUE_ZONES: usize = 13;
+///
+/// Public because [`PerKeyLightingFeature::set_rgb_zones_single_value`] ignores
+/// zones past this limit: a caller with more zones than one request holds has
+/// to chunk them itself, and cannot do that without knowing the chunk size.
+pub const MAX_SINGLE_VALUE_ZONES: usize = 13;
 
 /// An 8-bit-per-channel RGB color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
