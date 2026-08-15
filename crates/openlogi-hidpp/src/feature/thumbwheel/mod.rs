@@ -210,8 +210,9 @@ pub enum ThumbwheelReportingMode {
 
     /// Thumbwheel events are reported only to the diverted HID++ channel.
     ///
-    /// This mode is required for [`ThumbwheelFeature::listen`] to report any
-    /// events.
+    /// This mode is required for
+    /// [`ThumbwheelFeature::listen`](crate::feature::EmittingFeature::listen) to
+    /// report any events.
     Diverted = 1,
 }
 
