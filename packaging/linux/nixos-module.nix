@@ -29,7 +29,7 @@ in
       description = "OpenLogi background agent";
       wantedBy = lib.optionals cfg.launchAtLogin [ "graphical-session.target" ];
       after = [ "graphical-session.target" ];
-      partOf = [ "graphical-session.target" ];
+      partOf = lib.optionals cfg.launchAtLogin [ "graphical-session.target" ];
 
       serviceConfig = {
         ExecStart = lib.getExe' cfg.package "openlogi-agent";

@@ -45,6 +45,7 @@
         assert manual.systemd.user.services.openlogi-agent.wantedBy == [ ];
         assert enabled.systemd.user.services.openlogi-agent.after == [ "graphical-session.target" ];
         assert enabled.systemd.user.services.openlogi-agent.partOf == [ "graphical-session.target" ];
+        assert manual.systemd.user.services.openlogi-agent.partOf == [ ];
         assert
           enabled.systemd.user.services.openlogi-agent.serviceConfig.ExecStart
           == "${package}/bin/openlogi-agent";
