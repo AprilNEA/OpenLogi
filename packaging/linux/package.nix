@@ -107,7 +107,7 @@ rustPlatform.buildRustPackage {
     outputHashes = {
       "gpui-0.2.2" = "sha256-Av+unZNI39dEb+zwSIU+SkEjqagHWrc7W8KehEgQ4H8=";
       "gpui-component-0.5.2" = gpuiComponentHash;
-      "gpui-updater-0.0.6" = "sha256-v8rn8tEkKBi8T2LtBV92uB+XtEeuBwj0qxGcDqEIwIw=";
+      "gpui-updater-0.0.7" = "sha256-hxdATcCif7csqKLNoi41ETe09Ym6zM4rVzYvBDEvVg4=";
       "proptest-1.10.0" = "sha256-p5NTcHhruI8QQvANACg8AMRVNmuvGxs2NLit+/8PaWo=";
       "zed-font-kit-0.14.1-zed" = "sha256-KXygi0olNQi5yM8eaJVykNDtbPMDjT+cWPBF8UrtXR4=";
       "zed-reqwest-0.12.15-zed" = "sha256-p4SiUrOrbTlk/3bBrzN/mq/t+1Gzy2ot4nso6w6S+F8=";
