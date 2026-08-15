@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-15
+
+### Added
+
+- *(gui)* add a reversed Volume preset for the thumb wheel ([#608](https://github.com/AprilNEA/OpenLogi/pull/608))
+
+### Fixed
+
+- *(agent)* request Input Monitoring access at startup on macOS ([#607](https://github.com/AprilNEA/OpenLogi/pull/607))
+- *(infra)* stop ignoring the committed Amp orb lifecycle scripts ([#637](https://github.com/AprilNEA/OpenLogi/pull/637))
+- *(assets)* trust the OS certificate store, not bundled Mozilla roots ([#634](https://github.com/AprilNEA/OpenLogi/pull/634))
+- *(hid)* never switch a device to a host slot it is not paired on ([#631](https://github.com/AprilNEA/OpenLogi/pull/631))
+
 ## [0.7.0] - 2026-08-16
 
 A minor bump rather than a patch: your `config.toml` is now read strictly and
