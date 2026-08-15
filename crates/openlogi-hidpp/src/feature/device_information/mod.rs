@@ -21,12 +21,12 @@ impl DeviceInformationFeature {
 
         Ok(DeviceInformation {
             entity_count: payload[0],
-            unit_id: payload[1..=4].try_into().unwrap(),
+            unit_id: [payload[1], payload[2], payload[3], payload[4]],
             transport: DeviceTransport::from(payload[6]),
             model_id: [
-                u16::from_be_bytes(payload[7..=8].try_into().unwrap()),
-                u16::from_be_bytes(payload[9..=10].try_into().unwrap()),
-                u16::from_be_bytes(payload[11..=12].try_into().unwrap()),
+                u16::from_be_bytes([payload[7], payload[8]]),
+                u16::from_be_bytes([payload[9], payload[10]]),
+                u16::from_be_bytes([payload[11], payload[12]]),
             ],
             extended_model_id: payload[13],
             capabilities: DeviceInformationCapabilities::from(payload[14]),
@@ -52,14 +52,20 @@ impl DeviceInformationFeature {
             firmware_prefix: String::from_utf8(payload[1..=3].to_vec())
                 .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
             firmware_number: bcd::convert_packed_u8(payload[4])
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+                .map_err(|()| Hidpp20Error::UnsupportedResponse)?,
             revision: bcd::convert_packed_u8(payload[5])
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            build: bcd::convert_packed_u16(u16::from_be_bytes(payload[6..=7].try_into().unwrap()))
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+                .map_err(|()| Hidpp20Error::UnsupportedResponse)?,
+            build: bcd::convert_packed_u16(u16::from_be_bytes([payload[6], payload[7]]))
+                .map_err(|()| Hidpp20Error::UnsupportedResponse)?,
             active: payload[8] & 1 != 0,
-            transport_pid: u16::from_be_bytes(payload[9..=10].try_into().unwrap()),
-            extra_version: payload[11..=15].try_into().unwrap(),
+            transport_pid: u16::from_be_bytes([payload[9], payload[10]]),
+            extra_version: [
+                payload[11],
+                payload[12],
+                payload[13],
+                payload[14],
+                payload[15],
+            ],
         })
     }
 
@@ -134,6 +140,10 @@ pub struct DeviceInformation {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "wire bitfield: each transport is an independent support flag, not related boolean params"
+)]
 pub struct DeviceTransport {
     /// Whether the device supports USB.
     pub usb: bool,
