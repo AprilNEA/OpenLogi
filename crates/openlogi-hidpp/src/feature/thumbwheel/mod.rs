@@ -30,8 +30,8 @@ impl DecodeEvent for ThumbwheelEvent {
         let rotation_status = ThumbwheelRotationStatus::try_from(payload[4]).ok()?;
 
         Some(ThumbwheelEvent::StatusUpdate(ThumbwheelStatusUpdate {
-            rotation: i16::from_be_bytes(payload[0..=1].try_into().unwrap()),
-            time_elapsed: u16::from_be_bytes(payload[2..=3].try_into().unwrap()),
+            rotation: i16::from_be_bytes([payload[0], payload[1]]),
+            time_elapsed: u16::from_be_bytes([payload[2], payload[3]]),
             rotation_status,
             touch: payload[5] & (1 << 1) != 0,
             proxy: payload[5] & (1 << 2) != 0,
@@ -46,9 +46,9 @@ impl ThumbwheelFeature {
         let payload = self.endpoint.call(0, [0; 3]).await?.extend_payload();
 
         Ok(ThumbwheelInfo {
-            native_resolution: u16::from_be_bytes(payload[0..=1].try_into().unwrap()),
-            diverted_resolution: u16::from_be_bytes(payload[2..=3].try_into().unwrap()),
-            time_unit: u16::from_be_bytes(payload[6..=7].try_into().unwrap()),
+            native_resolution: u16::from_be_bytes([payload[0], payload[1]]),
+            diverted_resolution: u16::from_be_bytes([payload[2], payload[3]]),
+            time_unit: u16::from_be_bytes([payload[6], payload[7]]),
             default_direction: ThumbwheelDirection::try_from(payload[4] & 1)
                 .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
             capabilities: ThumbwheelCapabilities::from(payload[5]),
@@ -81,7 +81,7 @@ impl ThumbwheelFeature {
         invert_direction: bool,
     ) -> Result<(), Hidpp20Error> {
         self.endpoint
-            .call(2, [mode.into(), if invert_direction { 1 } else { 0 }, 0x00])
+            .call(2, [mode.into(), u8::from(invert_direction), 0x00])
             .await?;
 
         Ok(())
@@ -137,6 +137,10 @@ pub enum ThumbwheelDirection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "wire bitfield: each capability is an independent flag bit, not related boolean params"
+)]
 pub struct ThumbwheelCapabilities {
     /// Whether the thumbwheel supports emitting the elapsed time between two
     /// events via [`ThumbwheelStatusUpdate::time_elapsed`].
