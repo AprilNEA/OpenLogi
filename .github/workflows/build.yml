@@ -386,14 +386,57 @@ jobs:
           : "${AZURE_SIGNING_ACCOUNT:?Configure AZURE_SIGNING_ACCOUNT in the Azure 1Password item}"
           : "${AZURE_CERT_PROFILE:?Configure AZURE_CERT_PROFILE in the Azure 1Password item}"
 
+      # Same R2 1Password item the macOS job reads: the minisign public key the
+      # binary embeds and the base URL its manifest URL derives from. Without
+      # this env the exe ships with no key, and the updater's Strict policy
+      # fails every Windows check with "policy requires a minisign signature,
+      # but no public key is configured" — auto-update never worked on Windows.
+      - name: Load static updater config from 1Password
+        id: update_config
+        if: ${{ inputs.sign }}
+        uses: 1password/load-secrets-action@v4
+        with:
+          export-env: false
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          OPENLOGI_UPDATE_BASE_URL: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_BASE_URL
+          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY
+
+      # Same rationale as the Azure gate above: load-secrets emits empty
+      # outputs on a missing item, and an empty key would rebuild the broken
+      # no-key release instead of failing here with the cause named.
+      - name: Validate updater config
+        if: ${{ inputs.sign }}
+        shell: bash
+        env:
+          OPENLOGI_UPDATE_BASE_URL: ${{ steps.update_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
+          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.update_config.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in the R2 1Password item}"
+          : "${OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY in the R2 1Password item}"
+
       # No separate CLI artifact will ever ship on Windows (cargo install
       # covers that audience), so job and artifact names carry no GUI
       # qualifier. The GUI is a thin IPC client; the headless agent (ported in
       # #167) owns the device I/O, input hook, and IPC server, and the GUI
       # spawns a sibling `openlogi-agent.exe` when the pipe is absent — so the
       # agent MUST ship next to the GUI or the app connects to nothing (#347).
+      # The updater env mirrors the macOS bundle step: openlogi-gui reads the
+      # key and manifest URL via option_env! at compile time. Unsigned builds
+      # get empty values and keep the fail-closed dev behaviour, so the
+      # manifest-URL export is guarded rather than derived from an empty base.
       - name: Build OpenLogi (GUI + agent)
-        run: cargo build --release -p openlogi-gui -p openlogi-agent --target ${{ matrix.target }}
+        shell: bash
+        env:
+          OPENLOGI_UPDATE_BASE_URL: ${{ steps.update_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
+          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.update_config.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "$OPENLOGI_UPDATE_BASE_URL" ]; then
+            export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
+          fi
+          cargo build --release -p openlogi-gui -p openlogi-agent --target ${{ matrix.target }}
 
       # Federated (passwordless) login. Requires an app registration whose federated
       # credential subject is `repo:AprilNEA/OpenLogi:environment:release`, granted the
