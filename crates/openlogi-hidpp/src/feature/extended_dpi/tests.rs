@@ -1,5 +1,11 @@
 //! Unit tests for `ExtendedAdjustableDpi` payload parsing and event decoding.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "expect/unwrap are idiomatic in tests"
+)]
+
 use std::assert_matches;
 
 use super::event::{ExtendedDpiEvent, decode_event};
@@ -174,7 +180,7 @@ fn parses_dpi_list_with_terminator() {
     // Spec example: a profile configured to 400, 800 and 1600 DPI.
     let bytes = [0x01, 0x90, 0x03, 0x20, 0x06, 0x40, 0x00, 0x00];
 
-    assert_eq!(parse_dpi_list(&bytes).unwrap(), [400, 800, 1600]);
+    assert_eq!(parse_dpi_list(&bytes), [400, 800, 1600]);
 }
 
 #[test]
@@ -182,7 +188,7 @@ fn parses_dpi_list_filling_payload() {
     // A full list leaves no room for the terminator.
     let bytes = [0x01, 0x90, 0x03, 0x20];
 
-    assert_eq!(parse_dpi_list(&bytes).unwrap(), [400, 800]);
+    assert_eq!(parse_dpi_list(&bytes), [400, 800]);
 }
 
 #[test]

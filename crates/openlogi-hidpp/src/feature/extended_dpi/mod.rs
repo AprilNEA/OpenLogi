@@ -115,7 +115,7 @@ impl ExtendedDpiFeature {
             .await?
             .extend_payload();
         // Skip the echoed sensor index and direction in bytes 0 and 1.
-        parse_dpi_list(&payload[2..])
+        Ok(parse_dpi_list(&payload[2..]))
     }
 
     /// Retrieves the current profile's lift-off-distance list for
@@ -166,17 +166,11 @@ impl ExtendedDpiFeature {
         sensor_index: u8,
         params: SetDpiParameters,
     ) -> Result<(), Hidpp20Error> {
-        let [dpi_x_hi, dpi_x_lo] = params.dpi_x.to_be_bytes();
-        let [dpi_y_hi, dpi_y_lo] = params.dpi_y.to_be_bytes();
         let mut args = [0; 16];
-        args[..6].copy_from_slice(&[
-            sensor_index,
-            dpi_x_hi,
-            dpi_x_lo,
-            dpi_y_hi,
-            dpi_y_lo,
-            params.lod.into(),
-        ]);
+        args[0] = sensor_index;
+        args[1..3].copy_from_slice(&params.dpi_x.to_be_bytes());
+        args[3..5].copy_from_slice(&params.dpi_y.to_be_bytes());
+        args[5] = params.lod.into();
         self.endpoint.call_long(6, args).await?;
         Ok(())
     }
