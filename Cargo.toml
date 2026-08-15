@@ -54,7 +54,10 @@ async-hid = "0.5.2"
 # Stream/Listener used by serde_transport.
 interprocess = { version = "2", features = ["tokio"] }
 # The agent <-> GUI RPC layer itself, over the `interprocess` transport above.
-tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
+# 0.38 is a hard floor: earlier releases hard-depend on opentelemetry 0.30 (not
+# feature-gated — google/tarpc#564), which drags the vulnerable
+# opentelemetry_sdk 0.30 into the graph (GHSA-w9wp-h8wv-79jx).
+tarpc = { version = "0.38", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
 # Windows FFI for the leaf input/HID paths (WH_MOUSE_LL hook, SendInput action
 # synthesis, native HID writes). Features are selected per crate.
 windows-sys = "0.61"
@@ -135,14 +138,3 @@ undocumented_unsafe_blocks = "warn"
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
-
-# tarpc 0.37 hard-pins opentelemetry 0.30 / tracing-opentelemetry 0.31, which
-# pulls vulnerable opentelemetry_sdk 0.30 (GHSA-w9wp-h8wv-79jx, fixed in
-# 0.32.1). Dependabot cannot bump it alone: the fixed SDK is semver-incompatible
-# with tarpc's pins, and no crates.io tarpc release allows the 0.32 line yet.
-# Patch a 0.37-compatible tree onto otel 0.32 / tracing-opentelemetry 0.33 so
-# opentelemetry_sdk drops out of the runtime graph. Remove when upstream tarpc
-# depends on tracing-opentelemetry >= 0.32.1 (or otherwise sheds the vulnerable
-# SDK). See third_party/tarpc/README.md.
-[patch.crates-io]
-tarpc = { path = "third_party/tarpc" }
