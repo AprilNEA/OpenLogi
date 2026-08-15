@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, VecDeque},
     error::Error,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, MutexGuard, Weak,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
@@ -196,6 +196,7 @@ pub enum HidppMessage {
 
 impl HidppMessage {
     /// Tries to read a HID++ message from raw data.
+    #[must_use]
     pub fn read_raw(data: &[u8]) -> Option<Self> {
         let (&report_id, rest) = data.split_first()?;
 
@@ -245,6 +246,17 @@ impl HidppMessage {
 
 type MessageListener = Arc<dyn Fn(HidppMessage, bool) + Send + Sync + 'static>;
 
+/// Locks `mutex`, treating poisoning as unrecoverable: a panicking holder
+/// leaves the channel's shared queues in an inconsistent state, so
+/// continuing would operate on corrupt data.
+#[expect(
+    clippy::expect_used,
+    reason = "mutex poisoning is unrecoverable here — see doc comment"
+)]
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().expect("mutex poisoned")
+}
+
 /// Removes a HID++ message listener when dropped.
 pub struct MessageListenerGuard {
     message_listeners: Weak<Mutex<HashMap<u32, MessageListener>>>,
@@ -254,7 +266,7 @@ pub struct MessageListenerGuard {
 impl Drop for MessageListenerGuard {
     fn drop(&mut self) {
         if let Some(message_listeners) = self.message_listeners.upgrade() {
-            message_listeners.lock().unwrap().remove(&self.hdl);
+            lock(&message_listeners).remove(&self.hdl);
         }
     }
 }
@@ -322,6 +334,12 @@ impl Drop for HidppChannel {
         }
 
         if let Some(read_thread_hdl) = self.read_thread_hdl.take() {
+            // A panic here means the read thread itself panicked; propagate
+            // it rather than silently ignore a crashed background worker.
+            #[expect(
+                clippy::unwrap_used,
+                reason = "propagate a read-thread panic instead of ignoring a crashed background worker"
+            )]
             read_thread_hdl.join().unwrap();
         }
     }
@@ -394,12 +412,12 @@ impl HidppChannel {
                         let mut matched = false;
                         let pending_count;
                         {
-                            let mut msgs = pending_messages.lock().unwrap();
+                            let mut msgs = lock(&pending_messages);
                             pending_count = msgs.len();
                             if let Some(pos) =
                                 msgs.iter().position(|elem| (elem.response_predicate)(&msg))
+                                && let Some(waiting) = msgs.remove(pos)
                             {
-                                let waiting = msgs.remove(pos).unwrap();
                                 let _ = waiting.sender.send(msg);
                                 matched = true;
                             }
@@ -413,12 +431,8 @@ impl HidppChannel {
                             "raw report received"
                         );
 
-                        let listeners: Vec<_> = message_listeners
-                            .lock()
-                            .unwrap()
-                            .values()
-                            .cloned()
-                            .collect();
+                        let listeners: Vec<_> =
+                            lock(&message_listeners).values().cloned().collect();
                         for listener in listeners {
                             listener(msg, matched);
                         }
@@ -487,17 +501,21 @@ impl HidppChannel {
     /// may rotate (as indicated by [`Self::set_rotating_sw_id`]).
     pub fn get_sw_id(&self) -> U4 {
         if self.rotate_software_id.load(Ordering::SeqCst) {
-            U4::from_lo(
-                self.software_id
+            // The closure always returns `Some`, so `fetch_update` never
+            // reports `Err`; both arms carry the same pre-update value.
+            let previous =
+                match self
+                    .software_id
                     .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
                         Some(if old & 0x0f == 0x0f {
                             0x01
                         } else {
                             old.wrapping_add(1)
                         })
-                    })
-                    .unwrap(),
-            )
+                    }) {
+                    Ok(previous) | Err(previous) => previous,
+                };
+            U4::from_lo(previous)
         } else {
             U4::from_lo(self.software_id.load(Ordering::SeqCst))
         }
@@ -523,7 +541,7 @@ impl HidppChannel {
     fn normalize_outgoing(&self, msg: HidppMessage) -> HidppMessage {
         match msg {
             HidppMessage::Short(payload) if !self.supports_short && self.supports_long => {
-                HidppMessage::Long(short_payload_as_long(&payload))
+                HidppMessage::Long(short_payload_as_long(payload))
             }
             other => other,
         }
@@ -580,7 +598,7 @@ impl HidppChannel {
         let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
 
         {
-            let mut pending = self.pending_messages.lock().unwrap();
+            let mut pending = lock(&self.pending_messages);
             // Drop abandoned requests before queuing this one. Timeouts and
             // write failures remove their entry eagerly below, but a caller
             // cancelled mid-flight (an outer `timeout(..)` dropping the whole
@@ -610,7 +628,7 @@ impl HidppChannel {
 
         let result = select! {
             result = request => result,
-            _ = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
+            () = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
         };
 
         match &result {
@@ -629,7 +647,7 @@ impl HidppChannel {
     }
 
     fn remove_pending_message(&self, id: u64) {
-        let mut pending = self.pending_messages.lock().unwrap();
+        let mut pending = lock(&self.pending_messages);
         if let Some(pos) = pending.iter().position(|msg| msg.id == id) {
             pending.remove(pos);
         }
@@ -678,7 +696,7 @@ impl HidppChannel {
         let mut write = std::pin::pin!(self.raw_channel.write_report(report).fuse());
         select! {
             result = write => result.map_err(ChannelError::Implementation),
-            _ = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
+            () = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
         }
     }
 
@@ -690,7 +708,7 @@ impl HidppChannel {
         &self,
         listener: impl Fn(HidppMessage, bool) + Send + Sync + 'static,
     ) -> u32 {
-        let mut listeners = self.message_listeners.lock().unwrap();
+        let mut listeners = lock(&self.message_listeners);
 
         let mut rng = rand::rng();
         let mut hdl = rng.random::<u32>();
@@ -719,11 +737,7 @@ impl HidppChannel {
     ///
     /// Returns whether a listener was found using the given handle.
     pub fn remove_msg_listener(&self, hdl: u32) -> bool {
-        self.message_listeners
-            .lock()
-            .unwrap()
-            .remove(&hdl)
-            .is_some()
+        lock(&self.message_listeners).remove(&hdl).is_some()
     }
 }
 
@@ -772,13 +786,18 @@ pub enum ChannelError {
 /// both widths, so the only change is zero-padding the trailing payload. Used
 /// to re-frame short messages as long on a long-only channel — see
 /// [`HidppChannel::normalize_outgoing`]. (OpenLogi local addition.)
-fn short_payload_as_long(payload: &[u8; SHORT_REPORT_LENGTH - 1]) -> [u8; LONG_REPORT_LENGTH - 1] {
+fn short_payload_as_long(payload: [u8; SHORT_REPORT_LENGTH - 1]) -> [u8; LONG_REPORT_LENGTH - 1] {
     let mut long = [0u8; LONG_REPORT_LENGTH - 1];
-    long[..payload.len()].copy_from_slice(payload);
+    long[..payload.len()].copy_from_slice(&payload);
     long
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "expect/unwrap are idiomatic in tests"
+)]
 pub(crate) mod tests {
     use super::*;
     use std::{
@@ -799,7 +818,7 @@ pub(crate) mod tests {
     fn short_payload_widens_preserving_header_and_padding() {
         // [device, feature, function|sw, p0, p1, p2]
         let short = [0xff, 0x05, 0x1e, 0xaa, 0xbb, 0xcc];
-        let long = short_payload_as_long(&short);
+        let long = short_payload_as_long(short);
         assert_eq!(&long[..short.len()], &short[..]); // header + payload copied verbatim
         assert!(long[short.len()..].iter().all(|&b| b == 0)); // remainder zero-padded
         assert_eq!(long.len(), LONG_REPORT_LENGTH - 1);
@@ -919,21 +938,21 @@ pub(crate) mod tests {
             assert_eq!(events.lock().unwrap()[0], (late_response, false));
             assert_pending_empty(&channel);
 
-            let later_request = short_msg(0x30);
-            let later_response = short_msg(0x40);
-            handle.queue_response(later_response);
+            let followup_request = short_msg(0x30);
+            let followup_response = short_msg(0x40);
+            handle.queue_response(followup_response);
             let actual = channel
                 .send_with_timeout(
-                    later_request,
-                    move |candidate| *candidate == later_response,
+                    followup_request,
+                    move |candidate| *candidate == followup_response,
                     Duration::from_secs(1),
                 )
                 .await
                 .unwrap();
 
-            assert_eq!(actual, later_response);
+            assert_eq!(actual, followup_response);
             wait_for_event_count(&events, 2).await;
-            assert_eq!(events.lock().unwrap()[1], (later_response, true));
+            assert_eq!(events.lock().unwrap()[1], (followup_response, true));
             assert_pending_empty(&channel);
         });
     }
