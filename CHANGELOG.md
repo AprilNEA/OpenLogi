@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.28] - 2026-08-15
+
+### Changed
+
+- *(gui)* build fallbacks lazily
+
+### Fixed
+
+- *(config)* harden schema and persistence ([#604](https://github.com/AprilNEA/OpenLogi/pull/604))
+- *(hid)* drive 0x2202 DPI and 0x8081 lighting, not just their predecessors ([#629](https://github.com/AprilNEA/OpenLogi/pull/629))
+- *(release)* put openlogi-camera in the workspace version group ([#618](https://github.com/AprilNEA/OpenLogi/pull/618))
+- *(agent)* bound the background lighting write by WRITE_BUDGET
+- *(camera)* pair every COM and Media Foundation initialization
+- *(camera)* scope a UVC entity scan to its own VideoControl block
+- *(camera)* release every activate Media Foundation hands back
+- keep the ring session alive as long as the ring is clickable ([#599](https://github.com/AprilNEA/OpenLogi/pull/599))
+- *(agent)* bound the Actions Ring haptic worker to the session it serves ([#598](https://github.com/AprilNEA/OpenLogi/pull/598))
+- *(hid)* never cache a haptic feature for a retired channel ([#597](https://github.com/AprilNEA/OpenLogi/pull/597))
+- *(hid)* four defects from the Actions Ring review ([#596](https://github.com/AprilNEA/OpenLogi/pull/596))
+- *(xtask)* stamp and verify the macOS bundle identity per channel
+
 ## [0.6.27] - 2026-08-13
 
 ### Added
