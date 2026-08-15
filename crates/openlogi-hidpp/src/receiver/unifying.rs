@@ -109,31 +109,15 @@ impl Receiver {
         let listener = chan.add_msg_listener_guarded({
             let emitter = Arc::clone(&emitter);
             move |raw, matched| {
+                // A report already matched to an outgoing request is a
+                // response, not a notification.
                 if matched {
                     return;
                 }
 
-                let parsed = v10::Message::from(raw);
-                let header = parsed.header();
-                let payload = parsed.extend_payload();
-
-                // Device-connection notifications are directed at a specific slot
-                // (header.device_index = slot) with sub_id 0x41.
-                if header.sub_id != 0x41 {
-                    return;
+                if let Some(event) = decode_notification(&v10::Message::from(raw)) {
+                    emitter.emit(event);
                 }
-
-                // Kind is identity-only; an unrecognised nibble folds to
-                // `Unknown` — dropping the event would hide the device
-                // entirely (arrival notifications are the only device
-                // source on this path).
-                emitter.emit(Event::DeviceConnection(DeviceConnection {
-                    index: header.device_index,
-                    kind: DeviceKind::from(payload[1] & 0x0f),
-                    encrypted: payload[1] & (1 << 4) != 0,
-                    online: payload[1] & (1 << 6) == 0,
-                    wpid: u16::from_le_bytes([payload[2], payload[3]]),
-                }));
             }
         });
 
@@ -268,6 +252,36 @@ impl Receiver {
     }
 }
 
+/// The sub-id of the only notification this receiver emits: a paired device
+/// came online.
+const DEVICE_CONNECTION_SUB_ID: u8 = 0x41;
+
+/// Decodes an unsolicited receiver message into the event it carries, or
+/// `None` for a report this crate does not model.
+///
+/// Kept separate from the message listener in [`Receiver::new`] so the wire
+/// layout is reachable from tests without a HID channel behind it.
+fn decode_notification(msg: &v10::Message) -> Option<Event> {
+    let header = msg.header();
+    if header.sub_id != DEVICE_CONNECTION_SUB_ID {
+        return None;
+    }
+    let payload = msg.extend_payload();
+
+    // A connection notification is addressed to the device's own slot, which
+    // is the only place that index is reported.
+    Some(Event::DeviceConnection(DeviceConnection {
+        index: header.device_index,
+        // Kind is identity-only; an unrecognised nibble folds to `Unknown` —
+        // dropping the event would hide the device entirely, since arrival
+        // notifications are the only device source on this path.
+        kind: DeviceKind::from(payload[1] & 0x0f),
+        encrypted: payload[1] & (1 << 4) != 0,
+        online: payload[1] & (1 << 6) == 0,
+        wpid: u16::from_le_bytes([payload[2], payload[3]]),
+    }))
+}
+
 /// Represents some general information about a Unifying receiver.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -353,4 +367,138 @@ pub enum Event {
     /// Fired whenever a paired device connects or reconnects, and for all
     /// online devices in response to [`Receiver::trigger_device_arrival`].
     DeviceConnection(DeviceConnection),
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "expect/unwrap are idiomatic in tests"
+)]
+mod tests {
+    use super::{DeviceConnection, DeviceKind, Event, decode_notification};
+    use crate::protocol::v10::{Message, MessageHeader};
+
+    /// Builds the long notification the receiver broadcasts, with `payload`
+    /// laid out exactly as the 17 bytes following the header.
+    fn notification(device_index: u8, sub_id: u8, payload: [u8; 17]) -> Message {
+        Message::Long(
+            MessageHeader {
+                device_index,
+                sub_id,
+            },
+            payload,
+        )
+    }
+
+    #[test]
+    fn device_connection_reads_the_slot_from_the_header() {
+        // The header byte is the only place the slot is reported.
+        let mut payload = [0u8; 17];
+        payload[1] = 0x02; // mouse, not encrypted, online
+        payload[2] = 0x74;
+        payload[3] = 0x40;
+
+        assert_eq!(
+            decode_notification(&notification(5, 0x41, payload)).unwrap(),
+            Event::DeviceConnection(DeviceConnection {
+                index: 5,
+                kind: DeviceKind::Mouse,
+                encrypted: false,
+                online: true,
+                wpid: 0x4074,
+            })
+        );
+    }
+
+    #[test]
+    fn encryption_sits_on_bit_4_unlike_bolt() {
+        // Unifying reports link encryption on bit 4; Bolt uses bit 5. Reading
+        // Bolt's bit here would report every encrypted link as plaintext.
+        let connection = |status: u8| {
+            let mut payload = [0u8; 17];
+            payload[1] = status;
+            match decode_notification(&notification(1, 0x41, payload)) {
+                Some(Event::DeviceConnection(connection)) => connection,
+                other => panic!("expected a device connection, got {other:?}"),
+            }
+        };
+
+        assert!(connection(1 << 4).encrypted);
+        assert!(!connection(1 << 5).encrypted);
+    }
+
+    #[test]
+    fn bit_6_is_set_when_the_device_is_offline() {
+        let mut payload = [0u8; 17];
+        payload[1] = 1 << 6;
+
+        let Some(Event::DeviceConnection(connection)) =
+            decode_notification(&notification(1, 0x41, payload))
+        else {
+            panic!("expected a device connection");
+        };
+        assert!(!connection.online);
+    }
+
+    #[test]
+    fn device_kind_uses_the_unifying_table_not_bolts() {
+        // Unifying and Bolt agree up to 4 and diverge from 5 on: `5` is a
+        // remote here but reserved on Bolt, which places its remote at 7.
+        let kind = |nibble: u8| {
+            let mut payload = [0u8; 17];
+            payload[1] = nibble;
+            match decode_notification(&notification(1, 0x41, payload)) {
+                Some(Event::DeviceConnection(connection)) => connection.kind,
+                other => panic!("expected a device connection, got {other:?}"),
+            }
+        };
+
+        assert_eq!(kind(0x05), DeviceKind::Remote);
+        assert_eq!(kind(0x06), DeviceKind::Trackball);
+        assert_eq!(kind(0x07), DeviceKind::Touchpad);
+    }
+
+    #[test]
+    fn unmodelled_device_kind_folds_to_unknown_instead_of_dropping_the_event() {
+        // Losing the event would hide the device from enumeration entirely,
+        // and arrival notifications are the only device source on this path.
+        let mut payload = [0u8; 17];
+        payload[1] = 0x0d;
+
+        let Some(Event::DeviceConnection(connection)) =
+            decode_notification(&notification(1, 0x41, payload))
+        else {
+            panic!("an unknown kind must still produce an event");
+        };
+        assert_eq!(connection.kind, DeviceKind::Unknown);
+    }
+
+    #[test]
+    fn other_sub_ids_are_dropped() {
+        assert_eq!(decode_notification(&notification(1, 0x40, [0u8; 17])), None);
+        assert_eq!(decode_notification(&notification(1, 0x4f, [0u8; 17])), None);
+    }
+
+    #[test]
+    fn short_notifications_decode_from_the_zero_padded_payload() {
+        let short = Message::Short(
+            MessageHeader {
+                device_index: 2,
+                sub_id: 0x41,
+            },
+            [0x00, 0x01, 0x74, 0x40],
+        );
+
+        assert_eq!(
+            decode_notification(&short).unwrap(),
+            Event::DeviceConnection(DeviceConnection {
+                index: 2,
+                kind: DeviceKind::Keyboard,
+                encrypted: false,
+                online: true,
+                wpid: 0x4074,
+            })
+        );
+    }
 }

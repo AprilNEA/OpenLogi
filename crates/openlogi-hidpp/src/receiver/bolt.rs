@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 use futures::{FutureExt, pin_mut, select};
-use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use super::{RECEIVER_DEVICE_INDEX, ReceiverError};
 use crate::{
@@ -22,6 +22,10 @@ use crate::{
     event::EventEmitter,
     protocol::v10::{self, Hidpp10Error},
 };
+
+mod event;
+
+pub use event::{DeviceConnection, DeviceKind, Event, PairingError, PairingPasskeyPressType};
 
 /// All USB vendor & product ID pairs that are known to identify Bolt receivers.
 pub const VPID_PAIRS: &[(u16, u16)] = &[(0x046d, 0xc548)];
@@ -112,106 +116,14 @@ impl Receiver {
             let emitter = Arc::clone(&emitter);
 
             move |raw, matched| {
+                // A report already matched to an outgoing request is a
+                // response, not a notification.
                 if matched {
                     return;
                 }
 
-                let parsed = v10::Message::from(raw);
-                let header = parsed.header();
-                let payload = parsed.extend_payload();
-
-                if header.device_index != RECEIVER_DEVICE_INDEX && header.sub_id != 0x41 {
-                    return;
-                }
-
-                match header.sub_id {
-                    // Device connection
-                    0x41 => {
-                        // Kind is identity-only; an unrecognised nibble folds
-                        // to `Unknown` instead of dropping the event.
-                        emitter.emit(Event::DeviceConnection(DeviceConnection {
-                            index: header.device_index,
-                            kind: DeviceKind::from(payload[1] & 0x0f),
-                            encrypted: payload[1] & (1 << 5) != 0,
-                            online: payload[1] & (1 << 6) == 0,
-                            wpid: u16::from_le_bytes([payload[2], payload[3]]),
-                        }));
-                    }
-                    // Device discovery
-                    0x4f => {
-                        match payload[2] {
-                            // Device data
-                            0 => {
-                                emitter.emit(Event::DeviceDiscoveryDeviceDetails {
-                                    counter: u16::from(payload[0]) + u16::from(payload[1]) * 256,
-                                    kind: DeviceKind::from(payload[4] & 0x0f),
-                                    wpid: u16::from_le_bytes([payload[5], payload[6]]),
-                                    address: address6(&payload, 7),
-                                    authentication: payload[15],
-                                });
-                            }
-                            // Device name
-                            1 => {
-                                let Some((counter, name)) = parse_discovery_name(&payload) else {
-                                    return;
-                                };
-
-                                emitter.emit(Event::DeviceDiscoveryDeviceName {
-                                    counter,
-                                    name: name.to_string(),
-                                });
-                            }
-                            _ => (),
-                        }
-                    }
-                    // Device discovery status
-                    0x53 => {
-                        emitter.emit(Event::DeviceDiscoveryStatus {
-                            discovery_enabled: payload[0] == 0x00,
-                        });
-                    }
-                    // Pairing status
-                    0x54 => {
-                        // payload[0] contains some kind of information about the status. I don't
-                        // know how to map that though.
-
-                        // An unrecognised error code still means "pairing
-                        // failed" — dropping it here would turn the failure
-                        // into a session timeout. Carry the raw code instead.
-                        let error = (payload[1] != 0x00).then(|| PairingError::from(payload[1]));
-
-                        emitter.emit(Event::PairingStatus {
-                            device_address: address6(&payload, 2),
-                            pairing_error: error,
-                            slot: if payload[8] == 0x00 {
-                                None
-                            } else {
-                                Some(payload[8])
-                            },
-                        });
-                    }
-                    // Passkey request
-                    0x4d => {
-                        // 6 bytes, NUL-padded when the passkey is shorter.
-                        let digits = &payload[1..=6];
-                        let len = digits.iter().position(|&b| b == 0).unwrap_or(digits.len());
-                        let Ok(passkey) = str::from_utf8(&digits[..len]) else {
-                            return;
-                        };
-
-                        emitter.emit(Event::PairingPasskeyRequest {
-                            device_address: address6(&payload, 7),
-                            passkey: passkey.to_string(),
-                        });
-                    }
-                    // Passkey pressed
-                    0x4e => {
-                        emitter.emit(Event::PairingPasskeyPressed {
-                            device_address: address6(&payload, 1),
-                            press_type: PairingPasskeyPressType::from(payload[0]),
-                        });
-                    }
-                    _ => (),
+                if let Some(event) = event::decode(&v10::Message::from(raw)) {
+                    emitter.emit(event);
                 }
             }
         });
@@ -483,36 +395,6 @@ impl Receiver {
     }
 }
 
-/// Extracts 6 contiguous bytes starting at `start` from a receiver-event
-/// payload into a BTLE device-address array.
-///
-/// Every call site below passes a compile-time-fixed `start` (1, 2, or 7)
-/// comfortably within the fixed 17-byte payload, so this never panics in
-/// practice.
-fn address6(payload: &[u8; 17], start: usize) -> [u8; 6] {
-    [
-        payload[start],
-        payload[start + 1],
-        payload[start + 2],
-        payload[start + 3],
-        payload[start + 4],
-        payload[start + 5],
-    ]
-}
-
-/// Parse a device-discovery name notification (sub-id `0x4f`, kind `1`).
-///
-/// `payload[3]` is the device-reported name length. The byte comes straight
-/// off the radio, so it must never index past the report: a length that does
-/// not fit the packet (or non-UTF-8 bytes) drops the event instead of
-/// panicking the listener.
-fn parse_discovery_name(payload: &[u8; 17]) -> Option<(u16, &str)> {
-    let len = usize::from(payload[3]);
-    let end = 4usize.checked_add(len)?;
-    let name = str::from_utf8(payload.get(4..end)?).ok()?;
-    Some((u16::from(payload[0]) + u16::from(payload[1]) * 256, name))
-}
-
 /// Extract the codename chunk from a `DeviceCodename` register read.
 ///
 /// `response[2]` is the device-reported name length. A name longer than the
@@ -556,251 +438,9 @@ pub struct DevicePairingInformation {
     pub unit_id: [u8; 4],
 }
 
-/// Represents the kind of a device paired to a Bolt receiver.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, FromPrimitive)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[non_exhaustive]
-#[repr(u8)]
-pub enum DeviceKind {
-    /// Unknown device kind — also the fold target for values this crate
-    /// does not model (kind is identity-only and must never drop an event).
-    #[num_enum(default)]
-    Unknown = 0x00,
-    /// Keyboard device.
-    Keyboard = 0x01,
-    /// Mouse device.
-    Mouse = 0x02,
-    /// Numeric keypad device.
-    Numpad = 0x03,
-    /// Presenter device.
-    Presenter = 0x04,
-    /// Remote-control device.
-    Remote = 0x07,
-    /// Trackball device.
-    Trackball = 0x08,
-    /// Touchpad device.
-    Touchpad = 0x09,
-    /// Tablet device.
-    Tablet = 0x0a,
-    /// Gamepad device.
-    Gamepad = 0x0b,
-    /// Joystick device.
-    Joystick = 0x0c,
-    /// Headset device.
-    Headset = 0x0d,
-}
-
-/// Represents an event emitted by the receiver.
-///
-/// You can listen to these events using [`Receiver::listen`]. Only enabled
-/// notifications as indicated by [`Receiver::get_notification_state`] are
-/// emitted.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[non_exhaustive]
-pub enum Event {
-    /// Is emitted whenever a device connects to or disconnects from the
-    /// receiver, but only if [`NotificationState::wireless_notifications`] is
-    /// enabled.
-    ///
-    /// Can be triggered for all paired devices using
-    /// [`Receiver::trigger_device_arrival`] to allow easy device enumeration.
-    ///
-    /// [`Receiver::collect_paired_devices`] implements a simple mechanism to
-    /// collect all paired devices.
-    DeviceConnection(DeviceConnection),
-
-    /// Is emitted whenever the device discovery status changes.
-    DeviceDiscoveryStatus {
-        /// Whether discovery mode is enabled.
-        discovery_enabled: bool,
-    },
-
-    /// Is emitted many times for every device discovered using
-    /// [`Receiver::discover_devices`].
-    ///
-    /// This event contains device details, including its address required to
-    /// start pairing. The [`Event::DeviceDiscoveryDeviceName`] event will also
-    /// be emitted and contains the device name.
-    DeviceDiscoveryDeviceDetails {
-        /// The incrementing event counter. This can be used to map
-        /// [`Event::DeviceDiscoveryDeviceDetails`] and
-        /// [`Event::DeviceDiscoveryDeviceName`] events.
-        counter: u16,
-
-        /// Device kind reported by discovery.
-        kind: DeviceKind,
-        /// Wireless product ID of the discovered device.
-        wpid: u16,
-
-        /// The address of the device required to pair it using
-        /// [`Receiver::pair_device`].
-        ///
-        /// This can also be used as the unique device identifier when
-        /// collecting discovered devices.
-        address: [u8; 6],
-
-        /// The authentication type(s) the device supports. Unfortunately, there
-        /// is not much information about this value and whether it is a
-        /// single value or a bitfield.
-        authentication: u8,
-    },
-
-    /// Is emitted many times for every device discovered using
-    /// [`Receiver::discover_devices`].
-    ///
-    /// This event only contains the device name. Device details will be
-    /// provided using the [`Event::DeviceDiscoveryDeviceDetails`] event.
-    DeviceDiscoveryDeviceName {
-        /// The incrementing event counter. This can be used to map
-        /// [`Event::DeviceDiscoveryDeviceDetails`] and
-        /// [`Event::DeviceDiscoveryDeviceName`] events.
-        counter: u16,
-
-        /// Discovered device name.
-        name: String,
-    },
-
-    /// Is emitted whenever the status of a pairing process changes.
-    PairingStatus {
-        /// BTLE address of the device being paired.
-        device_address: [u8; 6],
-        /// Optional pairing error reported by the receiver.
-        pairing_error: Option<PairingError>,
-
-        /// The receiver slot the newly paired device was paired to. This can be
-        /// used as the device index for subsequent operations.
-        slot: Option<u8>,
-    },
-
-    /// Is emitted once the receiver requests a passkey to be entered on a
-    /// device that should be paired to it.
-    PairingPasskeyRequest {
-        /// BTLE address of the device being paired.
-        device_address: [u8; 6],
-
-        /// The passkey the user has to enter in order to pair the device.
-        ///
-        /// Depending on the device and authentication type, this value has
-        /// different implications.
-        ///
-        /// For mice, this value will be a valid 6-digit number. After parsing
-        /// this into an integer, the (least significant) bits represent
-        /// the sequence of mouse presses (`0` = left, `1` = right) the
-        /// user has to perform, with an additional press of both mouse
-        /// buttons simultaneously.
-        ///
-        /// The amount of bits significant to this equals to the `entropy`
-        /// passed to [`Receiver::pair_device`].
-        passkey: String,
-    },
-
-    /// Is emitted for every keypress a user performs while entering a pairing
-    /// passkey.
-    PairingPasskeyPressed {
-        /// BTLE address of the device being paired.
-        device_address: [u8; 6],
-
-        /// The type of the keypress the user performed.
-        ///
-        /// Every passkey sequence starts with an event where this value is set
-        /// to [`PairingPasskeyPressType::Initialization`]. Each time the user
-        /// presses a key, an event with a press type of
-        /// [`PairingPasskeyPressType::Keypress`] is emitted. Once the user
-        /// submits their passkey, this value will be
-        /// [`PairingPasskeyPressType::Submit`].
-        press_type: PairingPasskeyPressType,
-    },
-}
-
-/// Represents a device connected to a Bolt receiver.
-///
-/// This information is emitted by the [`Event::DeviceConnection`] event and can
-/// be conveniently collected using [`Receiver::collect_paired_devices`].
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[non_exhaustive]
-pub struct DeviceConnection {
-    /// Slot index (1-based) of the device.
-    pub index: u8,
-    /// Device kind reported by the receiver.
-    pub kind: DeviceKind,
-    /// Whether the link is encrypted.
-    pub encrypted: bool,
-    /// Whether the device is currently online.
-    pub online: bool,
-    /// Wireless product ID of the device.
-    pub wpid: u16,
-}
-
-/// Represents an error during device pairing.
-///
-/// This is reported by the [`Event::PairingStatus`] event.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, FromPrimitive, IntoPrimitive)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[non_exhaustive]
-#[repr(u8)]
-pub enum PairingError {
-    /// Device timed out during pairing.
-    DeviceTimeout = 0x01,
-    /// Pairing failed.
-    Failed = 0x02,
-    /// An error code this crate does not model; carries the raw byte.
-    #[num_enum(catch_all)]
-    Other(u8),
-}
-
-/// Represents the type of a single passkey press.
-///
-/// This is reported by the [`Event::PairingPasskeyPressed`] event, which also
-/// includes some further information about the context of these values.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, FromPrimitive, IntoPrimitive)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[non_exhaustive]
-#[repr(u8)]
-pub enum PairingPasskeyPressType {
-    /// Passkey entry has started.
-    Initialization = 0x00,
-    /// A passkey keypress was entered.
-    Keypress = 0x01,
-    /// Passkey entry was submitted.
-    Submit = 0x04,
-    /// A press type this crate does not model; carries the raw byte.
-    #[num_enum(catch_all)]
-    Other(u8),
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn discovery_name_with_oversized_length_is_dropped() {
-        let mut payload = [0u8; 17];
-        payload[3] = 200;
-
-        assert_eq!(parse_discovery_name(&payload), None);
-    }
-
-    #[test]
-    fn discovery_name_within_bounds_parses() {
-        let mut payload = [0u8; 17];
-        payload[0] = 7;
-        payload[3] = 4;
-        payload[4..8].copy_from_slice(b"Casa");
-
-        assert_eq!(parse_discovery_name(&payload), Some((7, "Casa")));
-    }
-
-    #[test]
-    fn discovery_name_rejects_invalid_utf8() {
-        let mut payload = [0u8; 17];
-        payload[3] = 2;
-        payload[4] = 0xff;
-        payload[5] = 0xfe;
-
-        assert_eq!(parse_discovery_name(&payload), None);
-    }
 
     #[test]
     fn codename_with_oversized_length_clamps_to_available_chunk() {
