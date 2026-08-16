@@ -24,7 +24,9 @@ fn choose_windows_stack_target<T: Copy + Eq>(
     if predecessor == Some(overlay) && overlay_is_topmost == foreground_is_topmost {
         return RelativeStackTarget::Keep;
     }
-    if foreground_is_topmost == predecessor_is_topmost {
+    if overlay_is_topmost == foreground_is_topmost
+        && foreground_is_topmost == predecessor_is_topmost
+    {
         if let Some(predecessor) = predecessor.filter(|candidate| *candidate != foreground) {
             return RelativeStackTarget::After(predecessor);
         }
