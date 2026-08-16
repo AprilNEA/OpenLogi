@@ -1,6 +1,15 @@
-# cargo-deny configuration — advisories, licenses, and source hygiene for the
-# whole dependency graph (including the git-pinned gpui/zed tree).
-# Run locally with: nix run nixpkgs#cargo-deny -- check
+# cargo-deny configuration — advisories, licenses, and source hygiene.
+#
+# Scope: the graph rooted at the CLI, which is exactly what OpenLogi publishes to
+# crates.io. The app crates (gui/agent) are not covered: they pull the git-pinned
+# gpui/zed tree, which currently trips advisories, licenses, and sources alike.
+# The `allow-git` list below is written for that wider graph and is therefore
+# unmatched today — kept so widening the scope is a policy decision, not an
+# archaeology exercise.
+#
+# Run locally with the same scope CI uses:
+#   nix run nixpkgs#cargo-deny -- --all-features \
+#     --manifest-path crates/openlogi/Cargo.toml check
 
 [advisories]
 yanked = "deny"

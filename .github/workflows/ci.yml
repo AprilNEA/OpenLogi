@@ -178,7 +178,13 @@ jobs:
         with:
           tool: cargo-deny
       # Global flags before subcommand (matches cargo-deny-action defaults).
-      - run: cargo deny --all-features check
+      # The graph is rooted at the CLI — i.e. exactly the crates published to
+      # crates.io. cargo-deny picks its roots from the manifest it is given, so
+      # this was implicit while `openlogi` was the workspace root package; with a
+      # virtual root it must be explicit, or the git-pinned gpui/zed tree enters
+      # the graph and the policy in deny.toml no longer holds. Widening the scope
+      # to the app crates is tracked separately — see deny.toml.
+      - run: cargo deny --all-features --manifest-path crates/openlogi/Cargo.toml check
 
   clippy-windows:
     name: clippy (windows)
