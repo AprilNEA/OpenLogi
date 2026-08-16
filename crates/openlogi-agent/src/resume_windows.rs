@@ -38,19 +38,18 @@ pub fn register(pending: Arc<AtomicBool>) {
     // Leaked on purpose: the subscription is never unregistered, so the
     // callback may read the flag until process exit.
     let context = Arc::into_raw(pending);
-    let params = DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
+    // Also leaked: with `DEVICE_NOTIFY_CALLBACK` the recipient *is* this
+    // parameter block, and the subscription may hold the pointer for its
+    // whole lifetime — a stack-local here would dangle once this returns.
+    let params = Box::into_raw(Box::new(DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
         Callback: Some(on_power_event),
         Context: context.cast_mut().cast::<c_void>(),
-    };
-    // SAFETY: with `DEVICE_NOTIFY_CALLBACK` the recipient is a pointer to
-    // `params`, which only needs to outlive the call (the system copies the
-    // registration); the callback matches `PDEVICE_NOTIFY_CALLBACK_ROUTINE`
-    // and its context stays valid forever via the leaked Arc.
+    }));
+    // SAFETY: `params` and the Arc behind its context are both leaked for the
+    // process lifetime, matching the never-unregistered subscription, and the
+    // callback matches `PDEVICE_NOTIFY_CALLBACK_ROUTINE`.
     let handle = unsafe {
-        RegisterSuspendResumeNotification(
-            (&raw const params).cast_mut().cast::<c_void>(),
-            DEVICE_NOTIFY_CALLBACK,
-        )
+        RegisterSuspendResumeNotification(params.cast::<c_void>(), DEVICE_NOTIFY_CALLBACK)
     };
     if handle == 0 {
         warn!("suspend/resume registration failed — only the polling-gap heuristic detects wakes");
