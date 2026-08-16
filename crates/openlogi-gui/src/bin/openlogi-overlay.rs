@@ -41,7 +41,8 @@ use gpui::{
 };
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_ipc::{ActionRingInvocation, AgentClient, PROTOCOL_VERSION};
+use openlogi_ipc::{ActionRingInvocation, AgentClient, Identity, PROTOCOL_VERSION, RUN_ENV};
+use succession::{Allegiance, Compat, Record, Role, Run, Standing, Tenancy, Tenant};
 use tarpc::{client, context};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -241,8 +242,8 @@ fn main() -> Result<()> {
         .init();
 
     rust_i18n::set_locale(locale::resolve(None));
-    let _guard = openlogi_core::single_instance::acquire("overlay.lock")
-        .context("Actions Ring overlay single-instance check")?;
+    // Held for the whole run: dropping it hands the role to the replacement.
+    let _tenancy = claim_the_role()?;
     let Ipc {
         mut invocations,
         commands,
@@ -509,99 +510,79 @@ fn spawn_ipc() -> Ipc {
     }
 }
 
-/// The agent run this overlay serves, latched on the first handshake.
+/// Take the overlay role and publish who is holding it.
 ///
-/// The overlay is a supervised helper: the agent starts one and only one, and
-/// that copy holds `overlay.lock` for as long as it lives. Binding to a single
-/// run is what keeps a copy orphaned by an agent restart from wedging its
-/// replacement out of the lock forever.
-static AGENT_INSTANCE: OnceLock<u64> = OnceLock::new();
-
-/// Why this overlay is no longer the one its agent expects.
-#[derive(Debug, PartialEq, Eq)]
-enum Superseded {
-    /// The agent speaks another wire protocol, so this binary is from a
-    /// superseded install and could not serve the ring even if it stayed.
-    Protocol { agent: u32 },
-    /// The agent is a different run than the one this overlay was started by.
-    Instance { latched: u64, agent: u64 },
+/// The record is what lets the agent recognize this process later — as its own
+/// helper, or as one left behind by a previous run. Publishing is advisory:
+/// failing it costs identification, not the role, so a helper that cannot write
+/// still runs (and is treated as an unidentified tenant).
+fn claim_the_role() -> Result<Tenancy> {
+    let directory = openlogi_core::paths::config_dir().context("resolving the config directory")?;
+    let tenancy = Role::new(directory, "overlay")
+        .claim()
+        .context("Actions Ring overlay single-instance check")?;
+    let serving = spawned_by().unwrap_or_else(Run::mint);
+    if let Err(error) = tenancy.publish(&Record::new(
+        Identity::new(serving, Compat::from(PROTOCOL_VERSION)),
+        Tenant::current(),
+    )) {
+        warn!(%error, "could not publish the overlay claim record");
+    }
+    Ok(tenancy)
 }
 
-/// Outcome of one connection attempt.
-enum Handshake {
-    /// Connected to the agent run this overlay belongs to.
-    Ready(AgentClient),
-    /// Nothing answered on the socket, or the answer was cut short — the agent
-    /// may simply be starting. Retry.
-    Unavailable,
-    /// This overlay has been superseded; it must yield its lock.
-    Superseded(Superseded),
-}
-
-/// Whether an agent reporting run `agent` supersedes the latched one.
+/// The agent run this overlay serves.
 ///
-/// The first sighting must never supersede: an overlay that yields before it
-/// has served anything would be restarted into the same verdict forever.
-fn superseded_by(latched: Option<u64>, agent: u64) -> Option<Superseded> {
-    match latched {
-        Some(latched) if latched != agent => Some(Superseded::Instance { latched, agent }),
-        _ => None,
-    }
+/// Seeded from the run token the supervisor passes in the environment, so even
+/// the first handshake catches an overlay left behind by a previous agent; a
+/// hand-started overlay adopts whichever run answers first.
+fn allegiance() -> &'static Allegiance {
+    static SERVING: OnceLock<Allegiance> = OnceLock::new();
+    SERVING.get_or_init(|| {
+        let ours = Compat::from(PROTOCOL_VERSION);
+        match spawned_by() {
+            Some(run) => Allegiance::to(ours, run),
+            None => Allegiance::new(ours),
+        }
+    })
 }
 
-async fn handshake() -> Handshake {
-    let Ok(stream) = openlogi_ipc::transport::connect().await else {
-        return Handshake::Unavailable;
-    };
-    let transport = openlogi_ipc::transport::wrap(stream);
-    let client = AgentClient::new(client::Config::default(), transport).spawn();
-    // `protocol_version` is method 0 and wire-stable across every version, so
-    // it is the only call worth making before the two versions agree.
-    let Ok(version) = client.protocol_version(context::current()).await else {
-        return Handshake::Unavailable;
-    };
-    if version != PROTOCOL_VERSION {
-        return Handshake::Superseded(Superseded::Protocol { agent: version });
-    }
-    let Ok(status) = client.status(context::current()).await else {
-        return Handshake::Unavailable;
-    };
-    if let Some(reason) = superseded_by(AGENT_INSTANCE.get().copied(), status.instance_id) {
-        return Handshake::Superseded(reason);
-    }
-    let _ = AGENT_INSTANCE.set(status.instance_id);
-    Handshake::Ready(client)
+/// The run token of the agent that started this process, when there is one.
+fn spawned_by() -> Option<Run> {
+    std::env::var(RUN_ENV).ok()?.parse().ok().map(Run::from_raw)
 }
 
 async fn connect() -> Option<AgentClient> {
-    match handshake().await {
-        Handshake::Ready(client) => Some(client),
-        Handshake::Unavailable => None,
-        Handshake::Superseded(reason) => yield_to_replacement(&reason),
+    let stream = openlogi_ipc::transport::connect().await.ok()?;
+    let transport = openlogi_ipc::transport::wrap(stream);
+    let client = AgentClient::new(client::Config::default(), transport).spawn();
+    // `protocol_version` is method 0 and wire-stable across every version, so
+    // it is the only call worth making before the two versions agree. A
+    // mismatch is not transient — this binary is from a superseded install.
+    let version = client.protocol_version(context::current()).await.ok()?;
+    if version != PROTOCOL_VERSION {
+        yield_to_replacement(&format!(
+            "agent speaks protocol {version} and this overlay speaks {PROTOCOL_VERSION}"
+        ));
     }
+    let identity = client.identity(context::current()).await.ok()?;
+    if let Standing::Superseded(because) = allegiance().observe(identity) {
+        yield_to_replacement(&because.to_string());
+    }
+    Some(client)
 }
 
-/// Exit so the replacement overlay can take `overlay.lock`.
+/// Exit so the replacement overlay can take the role.
 ///
 /// Staying alive would be worse than useless: this process cannot serve a ring
-/// it can no longer be asked about, and its lock is exactly what stops the
-/// agent's supervisor from starting the overlay that can.
+/// it can no longer be asked about, and its claim on the role is exactly what
+/// stops the agent's supervisor from starting the overlay that can.
 #[expect(
     clippy::exit,
-    reason = "the IPC tasks run off the GPUI main thread and cannot return a status to `main`, which is parked in the application run loop; releasing the single-instance lock by exiting is the point"
+    reason = "the IPC tasks run off the GPUI main thread and cannot return a status to `main`, which is parked in the application run loop; releasing the role by exiting is the point"
 )]
-fn yield_to_replacement(reason: &Superseded) -> ! {
-    match *reason {
-        Superseded::Protocol { agent } => info!(
-            agent,
-            overlay = PROTOCOL_VERSION,
-            "agent speaks another protocol — exiting so the matching overlay can start"
-        ),
-        Superseded::Instance { latched, agent } => info!(
-            latched,
-            agent, "agent restarted — exiting so its own overlay can start"
-        ),
-    }
+fn yield_to_replacement(because: &str) -> ! {
+    info!("{because} — exiting so the agent's own overlay can start");
     std::process::exit(0)
 }
 
@@ -833,25 +814,6 @@ fn retry_before(deadline: Option<Instant>) -> bool {
 )]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_first_agent_run_seen_is_adopted_not_refused() {
-        // An overlay that yielded on its very first handshake would be
-        // restarted straight back into the same verdict.
-        assert_eq!(superseded_by(None, 7), None);
-    }
-
-    #[test]
-    fn a_restarted_agent_supersedes_the_latched_run() {
-        assert_eq!(superseded_by(Some(7), 7), None);
-        assert_eq!(
-            superseded_by(Some(7), 9),
-            Some(Superseded::Instance {
-                latched: 7,
-                agent: 9
-            })
-        );
-    }
 
     #[test]
     fn overlay_origin_is_clamped_to_the_display() {

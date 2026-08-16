@@ -51,6 +51,7 @@ walkdir = "2.5.0"
 fluent-langneg = "0.14.2"
 backon.workspace = true
 opener = { workspace = true }
+succession = "0.1"
 
 # Windows exe resources (app icon + VERSIONINFO) — see build.rs. The exact
 # version already in Cargo.lock as gpui's own build-dependency, so the resolve
