@@ -96,6 +96,9 @@ pub enum Action {
     ShowDesktop,
     /// Open Launchpad.
     LaunchpadShow,
+    /// Open the GNOME Shell Activities Overview by tapping the bare Super
+    /// key. GNOME/Linux-only; no-op elsewhere (see [`Action::effect`]).
+    GnomeOverview,
 
     // ── System ────────────────────────────────────────────────────────────────
     /// Lock the screen (⌘⌃Q on macOS).
@@ -254,6 +257,7 @@ macro_rules! for_each_unit_action {
             NextDesktop "Next Desktop" Navigation NextDesktop,
             ShowDesktop "Show Desktop" Navigation Monitor,
             LaunchpadShow "Launchpad" Navigation Applications,
+            GnomeOverview "GNOME Overview" Navigation Grid,
             // System
             None "Do Nothing" System Ban,
             LockScreen "Lock Screen" System Lock,

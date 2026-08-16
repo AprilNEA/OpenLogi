@@ -291,6 +291,7 @@ fn persisted_action_variant_names_are_stable() {
         "Cut",
         "CycleDpiPresets",
         "Find",
+        "GnomeOverview",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
         "LaunchpadShow",
