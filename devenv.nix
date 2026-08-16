@@ -130,12 +130,12 @@ in
       exec = ''
         set -e
         ${requireXcodeMetal}
-        ${pkgs.python3}/bin/python3 scripts/i18n/merge_crowdin_download.py --self-test
+        ${pkgs.python3}/bin/python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
         before="$(mktemp -d)"
         trap 'rm -rf "$before"' EXIT
         cp crates/openlogi-gui/locales/*.yml "$before/"
         ${pkgs.crowdin-cli}/bin/crowdin download --skip-untranslated-strings
-        ${pkgs.python3}/bin/python3 scripts/i18n/merge_crowdin_download.py \
+        ${pkgs.python3}/bin/python3 .github/scripts/i18n/merge_crowdin_download.py \
           --before "$before" \
           --locales crates/openlogi-gui/locales \
           --en crates/openlogi-gui/locales/en.yml

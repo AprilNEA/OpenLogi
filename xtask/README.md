@@ -45,9 +45,9 @@ The raw DMG emitted by `cargo-bundle` is deleted during `macos bundle` because i
 is created before xtask embeds and signs the helpers; use `macos package` when
 you need a DMG.
 
-The Cargo runner in `../scripts/cargo-run-macos.sh` stays outside xtask because
+The Cargo runner in `../.cargo/run-macos.sh` stays outside xtask because
 Cargo must execute it while running arbitrary binaries, including this crate.
-The release-notes generator stays in `../scripts/release-notes` because it is a
+The release-notes generator stays in `../.github/scripts/release-notes` because it is a
 dedicated Node tool with Octokit, changelog parsing, and OpenAI dependencies;
 xtask should not add a one-line wrapper around a canonical specialized tool.
 

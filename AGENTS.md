@@ -294,7 +294,7 @@ including what was NOT verified.
   the same PR. `en.yml` is the English source of truth (the English text IS the
   key); other files must not lag — the parity test fails the build.
 - Crowdin improves non-English **values** over time. The sync job **merges**
-  downloads into complete catalogs (`scripts/i18n/merge_crowdin_download.py`):
+  downloads into complete catalogs (`.github/scripts/i18n/merge_crowdin_download.py`):
   only real translations apply; English fill-in and sparse exports never wipe
   keys or open noise PRs.
 - Details: [`.claude/rules/i18n.md`](.claude/rules/i18n.md).
@@ -312,5 +312,5 @@ before editing that area.
 | `crates/openlogi-hidpp/**` (hard fork of `hidpp`) | `crates/openlogi-hidpp/AGENTS.md` |
 | `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |
 | `crates/openlogi-hook/**` (event taps) | `.claude/rules/hook.md` |
-| `xtask/**`, `packaging/**`, `scripts/**` | `.claude/rules/xtask.md` (+ `xtask/README.md`) |
+| `xtask/**`, `packaging/**`, `.github/scripts/**` | `.claude/rules/xtask.md` (+ `xtask/README.md`) |
 | `crates/openlogi-gui/src/platform/**` (ObjC FFI) | `crates/openlogi-gui/src/platform/AGENTS.md` |

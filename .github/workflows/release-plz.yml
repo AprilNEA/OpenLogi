@@ -83,7 +83,7 @@ jobs:
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           # Script/config may not be on the release-plz branch yet — copy from master.
           cp cliff.toml "${RUNNER_TEMP}/cliff.toml"
-          cp scripts/release/write-changelog.sh "${RUNNER_TEMP}/write-changelog.sh"
+          cp .github/scripts/release/write-changelog.sh "${RUNNER_TEMP}/write-changelog.sh"
           chmod +x "${RUNNER_TEMP}/write-changelog.sh"
           git fetch origin "${branch}"
           git checkout --force "origin/${branch}"

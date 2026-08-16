@@ -79,7 +79,7 @@ Flake's pinned formatter.
 
 On macOS the desktop binary is launched from inside a throwaway
 `target/dev/OpenLogi.app` — a Cargo `runner` wired in `.cargo/config.toml`
-(`scripts/cargo-run-macos.sh`). This makes the dev build show as
+(`.cargo/run-macos.sh`). This makes the dev build show as
 **OpenLogi Dev** in the menu bar and Dock, with the real app icon; a bare
 `cargo run` binary has no bundle, so macOS would otherwise fall back to the
 `openlogi-gui` executable name and a generic icon. The binary is hardlinked in
@@ -261,7 +261,7 @@ cargo run -p xtask -- release latest-json \
 [Crowdin](https://crowdin.com/project/openlogi) and opens a `crowdin/i18n` PR
 when a **real** translation value improved — nightly, and on master pushes that
 touch English sources (`en.yml`), `crowdin.yml`, the Crowdin workflow, the merge
-script under `scripts/i18n/`, or the shared GitHub App token action.
+script under `.github/scripts/i18n/`, or the shared GitHub App token action.
 
 **How it helps translation**
 
@@ -278,7 +278,7 @@ does not invent translations; it only stores and syncs them. A raw Crowdin
 download is unsafe: untranslated strings come back as English (#549), and
 `skip_untranslated_strings` overwrites catalogs with sparse files that delete
 keys (#552). The workflow always **snapshots → download → merge** via
-`scripts/i18n/merge_crowdin_download.py` so catalogs stay complete and only real
+`.github/scripts/i18n/merge_crowdin_download.py` so catalogs stay complete and only real
 translations land in git.
 
 Each run:
@@ -320,5 +320,5 @@ Local helpers (with Crowdin credentials configured):
 ```sh
 devenv tasks run openlogi:i18n-upload    # en.yml sources + per-language translations
 devenv tasks run openlogi:i18n-download  # download + merge + i18n tests
-python3 scripts/i18n/merge_crowdin_download.py --self-test
+python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
 ```

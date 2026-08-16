@@ -15,9 +15,9 @@ linker = "/usr/bin/cc"
 # development (both are read from a bundle's Info.plist / Resources, which a
 # bare `cargo run` binary lacks). The runner is a transparent passthrough for
 # the CLI, tests, and every other binary — only `openlogi-gui` is wrapped.
-# A path with a separator is resolved relative to this config file's directory,
-# so it works from any cwd. See scripts/cargo-run-macos.sh.
-runner = "scripts/cargo-run-macos.sh"
+# A path with a separator is resolved relative to the parent of the directory
+# holding this config file — the repo root — so it works from any cwd.
+runner = ".cargo/run-macos.sh"
 
 # Belt-and-suspenders DEVELOPER_DIR for contributors who run cargo outside
 # the devenv shell and have xcode-select pointing at the Command Line Tools

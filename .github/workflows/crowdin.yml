@@ -12,7 +12,7 @@ on:
       - crates/openlogi-gui/locales/en.yml
       - crowdin.yml
       - .github/workflows/crowdin.yml
-      - scripts/i18n/**
+      - .github/scripts/i18n/**
       - .github/actions/github-app-token-from-1password/**
 
 permissions:
@@ -62,7 +62,7 @@ jobs:
           CROWDIN_PERSONAL_TOKEN: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PERSONAL_TOKEN
 
       - name: Self-test locale merge script
-        run: python3 scripts/i18n/merge_crowdin_download.py --self-test
+        run: python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
 
       # Complete catalogs in git are the merge base. Crowdin download overwrites
       # the working tree; without a snapshot we cannot restore keys the export
@@ -98,7 +98,7 @@ jobs:
       - name: Merge Crowdin export into complete catalogs
         run: |
           set -euo pipefail
-          python3 scripts/i18n/merge_crowdin_download.py \
+          python3 .github/scripts/i18n/merge_crowdin_download.py \
             --before /tmp/openlogi-locales-before \
             --locales crates/openlogi-gui/locales \
             --en crates/openlogi-gui/locales/en.yml

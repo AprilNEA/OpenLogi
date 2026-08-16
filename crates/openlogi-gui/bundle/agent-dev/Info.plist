@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyList-1.0.dtd">
 <!--
   Dev Info.plist for the nested login-item helper assembled by
-  scripts/cargo-run-macos.sh into
+  .cargo/run-macos.sh into
   OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app.
 
   The display name and bundle identifier intentionally differ from release so
