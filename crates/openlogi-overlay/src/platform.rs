@@ -14,16 +14,20 @@ fn choose_windows_stack_target<T: Copy + Eq>(
     overlay: T,
     foreground: Option<T>,
     predecessor: Option<T>,
+    overlay_is_topmost: bool,
     foreground_is_topmost: bool,
+    predecessor_is_topmost: bool,
 ) -> RelativeStackTarget<T> {
     let Some(foreground) = foreground.filter(|candidate| *candidate != overlay) else {
         return RelativeStackTarget::Top;
     };
-    if predecessor == Some(overlay) {
+    if predecessor == Some(overlay) && overlay_is_topmost == foreground_is_topmost {
         return RelativeStackTarget::Keep;
     }
-    if let Some(predecessor) = predecessor.filter(|candidate| *candidate != foreground) {
-        return RelativeStackTarget::After(predecessor);
+    if foreground_is_topmost == predecessor_is_topmost {
+        if let Some(predecessor) = predecessor.filter(|candidate| *candidate != foreground) {
+            return RelativeStackTarget::After(predecessor);
+        }
     }
     if foreground_is_topmost {
         RelativeStackTarget::Topmost
@@ -541,13 +545,23 @@ fn show_windows_above_foreground(hwnd: windows_sys::Win32::Foundation::HWND) -> 
     let Ok(topmost_style) = isize::try_from(WS_EX_TOPMOST) else {
         return false;
     };
-    let foreground_is_topmost = foreground.is_some_and(|foreground| {
-        // SAFETY: `foreground` was validated above.
-        let ex_style = unsafe { GetWindowLongPtrW(foreground, GWL_EXSTYLE) };
+    let is_topmost = |candidate| {
+        // SAFETY: candidates are the live overlay HWND or handles returned from
+        // the validated foreground window's z-order chain.
+        let ex_style = unsafe { GetWindowLongPtrW(candidate, GWL_EXSTYLE) };
         ex_style & topmost_style != 0
-    });
-    let stack_target =
-        choose_windows_stack_target(hwnd, foreground, predecessor, foreground_is_topmost);
+    };
+    let overlay_is_topmost = is_topmost(hwnd);
+    let foreground_is_topmost = foreground.is_some_and(is_topmost);
+    let predecessor_is_topmost = predecessor.is_some_and(is_topmost);
+    let stack_target = choose_windows_stack_target(
+        hwnd,
+        foreground,
+        predecessor,
+        overlay_is_topmost,
+        foreground_is_topmost,
+        predecessor_is_topmost,
+    );
     let (insert_after, keep_z_order) = match stack_target {
         RelativeStackTarget::Keep => (std::ptr::null_mut(), true),
         RelativeStackTarget::After(predecessor) => (predecessor, false),
@@ -859,27 +873,43 @@ mod tests {
     #[test]
     fn windows_relative_stack_uses_predecessor() {
         assert_eq!(
-            choose_windows_stack_target(99_u32, Some(10), Some(20), false),
+            choose_windows_stack_target(99_u32, Some(10), Some(20), false, false, false),
             RelativeStackTarget::After(20),
+        );
+    }
+
+    #[test]
+    fn windows_relative_stack_does_not_cross_into_topmost_band() {
+        assert_eq!(
+            choose_windows_stack_target(99_u32, Some(10), Some(20), false, false, true),
+            RelativeStackTarget::Top,
         );
     }
 
     #[test]
     fn windows_relative_stack_keeps_existing_immediate_position() {
         assert_eq!(
-            choose_windows_stack_target(99_u32, Some(10), Some(99), false),
+            choose_windows_stack_target(99_u32, Some(10), Some(99), false, false, false),
             RelativeStackTarget::Keep,
+        );
+    }
+
+    #[test]
+    fn windows_relative_stack_demotes_stale_topmost_overlay() {
+        assert_eq!(
+            choose_windows_stack_target(99_u32, Some(10), Some(99), true, false, true),
+            RelativeStackTarget::Top,
         );
     }
 
     #[test]
     fn windows_relative_stack_falls_back_to_normal_top() {
         assert_eq!(
-            choose_windows_stack_target(99_u32, None, None, false),
+            choose_windows_stack_target(99_u32, None, None, false, false, false),
             RelativeStackTarget::Top,
         );
         assert_eq!(
-            choose_windows_stack_target(99_u32, Some(99), None, false),
+            choose_windows_stack_target(99_u32, Some(99), None, false, false, false),
             RelativeStackTarget::Top,
         );
     }
@@ -887,7 +917,7 @@ mod tests {
     #[test]
     fn windows_relative_stack_preserves_topmost_band_only_when_required() {
         assert_eq!(
-            choose_windows_stack_target(99_u32, Some(10), None, true),
+            choose_windows_stack_target(99_u32, Some(10), None, true, true, false),
             RelativeStackTarget::Topmost,
         );
     }
