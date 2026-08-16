@@ -116,6 +116,11 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::NextDesktop => next_desktop(),
         NativeAction::ShowDesktop => show_desktop(),
         NativeAction::LaunchpadShow => launchpad(),
+        // GNOME-only; macOS has no Activities Overview equivalent (use
+        // Action::MissionControl for the macOS analog instead).
+        NativeAction::GnomeOverview => {
+            tracing::debug!("GnomeOverview has no macOS equivalent — action skipped");
+        }
         // Lock screen = Cmd+Ctrl+Q (kVK_ANSI_Q = 0x0C)
         NativeAction::LockScreen => post_key(0x0C, cmd | ctrl),
         // Screenshot = Cmd+Shift+3 (kVK_ANSI_3 = 0x14)
