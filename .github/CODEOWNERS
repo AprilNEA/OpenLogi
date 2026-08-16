@@ -13,9 +13,26 @@
 *                               @AprilNEA
 
 # ── Windows port ───────────────────────────────────────────────────────────
-# Source only. The installer manifest (packaging/windows) and the signing
-# workflow stay with the maintainer — see the supply-chain block below.
-/crates/**/*windows*.rs         @AprilNEA @davidbudnick
+# Listed file by file rather than by a `*windows*` glob: in this repo the word
+# means two different things, and `openlogi-gui/src/windows.rs` is the app's
+# auxiliary-window registry (Settings, Add Device), not Win32 code.
+#
+# Windows-only branches living in multi-platform files (openlogi-agent's
+# main.rs / launch_agent.rs / self_restart.rs / takeover.rs, hid/transport.rs,
+# hook/lib.rs, …) stay with the maintainer: CODEOWNERS scopes by path, so it
+# cannot hand out ownership of a single `#[cfg(windows)]` branch.
+#
+# The installer manifest (packaging/windows) and the signing workflow also stay
+# with the maintainer — see the supply-chain block below.
+/crates/openlogi-agent/src/resume_windows.rs    @AprilNEA @davidbudnick
+/crates/openlogi-agent/src/tray_windows.rs      @AprilNEA @davidbudnick
+/crates/openlogi-camera/src/capture_windows.rs  @AprilNEA @davidbudnick
+/crates/openlogi-camera/src/com_windows.rs      @AprilNEA @davidbudnick
+/crates/openlogi-camera/src/uvc_windows.rs      @AprilNEA @davidbudnick
+/crates/openlogi-hid/src/transport/windows.rs   @AprilNEA @davidbudnick
+/crates/openlogi-hid/src/windows_hid.rs         @AprilNEA @davidbudnick
+/crates/openlogi-hook/src/windows.rs            @AprilNEA @davidbudnick
+/crates/openlogi-inject/src/inject/windows.rs   @AprilNEA @davidbudnick
 
 # ── Release, packaging, supply chain ───────────────────────────────────────
 # Anything here can reach the release pipeline's signing and notarization
