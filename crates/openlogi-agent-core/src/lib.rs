@@ -18,6 +18,8 @@ pub mod hardware;
 pub mod hook_runtime;
 pub mod orchestrator;
 pub mod receiver_access;
+mod thumbwheel;
 pub mod watchers;
 
 pub use dpi::{DpiCycleState, DpiCycles};
+pub use thumbwheel::{SharedThumbwheelDirs, ThumbwheelDirs};

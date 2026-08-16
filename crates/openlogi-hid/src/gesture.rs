@@ -67,8 +67,25 @@ pub enum CapturedInput {
     ButtonPressed(ButtonId, #[serde(skip)] Option<i32>),
     /// Thumb-wheel rotation to re-synthesise as horizontal scroll, in the
     /// wheel's `diverted_res` increments. Emitted while the wheel is diverted
-    /// (click bound, rotation rebound, or sensitivity changed).
+    /// (click bound, rotation rebound, or sensitivity changed). Positive
+    /// rotation is the physical forward direction: the session normalises the
+    /// firmware's per-model polarity at divert time (`inv_dir` in
+    /// `setThumbwheelReporting`), so consumers never re-interpret the sign per
+    /// device.
     Scroll(i16),
+    /// Not an input: the wheel's un-inverted rotation polarity from `0x2150`
+    /// `getThumbwheelInfo`, reported once when a session arms the thumb wheel —
+    /// whether a positive rotation (and, on the same firmware convention, a
+    /// positive native horizontal-scroll delta) is the physical forward
+    /// direction. Lets the OS hook map native `WM_MOUSEHWHEEL` ticks correctly
+    /// for this device while the wheel is not diverted.
+    ThumbwheelDirection {
+        /// Whether a positive delta is the physical forward direction
+        /// (`default_dir == 1`, [`ThumbwheelInfo::positive_is_forward`]).
+        ///
+        /// [`ThumbwheelInfo::positive_is_forward`]: crate::thumbwheel::ThumbwheelInfo::positive_is_forward
+        positive_is_forward: bool,
+    },
 }
 
 /// Why a capture session could not start (or had to stop).
@@ -183,6 +200,7 @@ pub async fn run_capture_session(
         .ok_or(GestureError::DeviceNotFound)?;
     let device_index = route.device_index();
     let armed = arm_controls(&chan, device_index, &spec).await?;
+    report_thumbwheel_direction(&armed, &sink);
 
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
@@ -369,6 +387,9 @@ struct ArmedControls {
     /// `0x2150` accessor + feature index, present when the thumb wheel is
     /// diverted.
     thumb: Option<(Thumbwheel, u8)>,
+    /// The wheel's `getThumbwheelInfo` snapshot, kept when the read succeeded
+    /// so the session can report the wheel's polarity to its sink.
+    thumb_info: Option<thumbwheel::ThumbwheelInfo>,
 }
 
 #[derive(Clone, Copy)]
@@ -488,21 +509,28 @@ async fn arm_controls_into(
         // Consume the getInfo error here, before the next await: Hidpp20Error
         // isn't Send, so holding it across an await would make this future
         // (spawned on tokio) non-Send.
-        let supports_single_tap = match tw.get_info().await {
-            Ok(twinfo) => twinfo.supports_single_tap,
+        let wheel_info = match tw.get_info().await {
+            Ok(twinfo) => Some(twinfo),
             Err(e) => {
                 warn!(error = ?e, "thumb wheel getInfo failed");
-                false
+                None
             }
         };
         // Divert whenever capture was requested: rotation rebinds and the
         // sensitivity multiplier need the diverted event stream even on wheels
         // that report no single-tap capability (e.g. MX Master 4) — lacking the
         // tap only means a bound click can never fire.
-        if !supports_single_tap {
+        if wheel_info.is_some_and(|twinfo| !twinfo.supports_single_tap) {
             debug!("thumb wheel reports no single tap — click not capturable");
         }
-        if let Err(error) = tw.set_reporting(true, false).await {
+        // Divert with the rotation sign normalised to the workspace convention
+        // (positive = physically forward): a wheel whose un-inverted positive
+        // direction is backward is inverted by the firmware itself, so
+        // [`CapturedInput::Scroll`] means the same thing on every model. When
+        // getInfo failed the polarity is unknowable — keep the un-inverted
+        // stream, which is what every wheel got before the polarity was read.
+        let inv_dir = wheel_info.is_some_and(|twinfo| !twinfo.positive_is_forward());
+        if let Err(error) = tw.set_reporting(true, inv_dir).await {
             let error = GestureError::Hidpp(format!("{error:?}"));
             restore(
                 tw.set_reporting(false, false).await,
@@ -511,8 +539,21 @@ async fn arm_controls_into(
             return Err(error);
         }
         armed.thumb = Some((tw, info.index));
+        armed.thumb_info = wheel_info;
     }
     Ok(())
+}
+
+/// Report the armed wheel's polarity to the session's sink — sent right after
+/// arming so it lands before any rotation event: the OS hook's native fallback
+/// path maps `WM_MOUSEHWHEEL` ticks with it whenever the wheel is not diverted
+/// (see [`CapturedInput::ThumbwheelDirection`]).
+fn report_thumbwheel_direction(armed: &ArmedControls, sink: &mpsc::UnboundedSender<CapturedInput>) {
+    if let Some(twinfo) = armed.thumb_info {
+        let _ = sink.send(CapturedInput::ThumbwheelDirection {
+            positive_is_forward: twinfo.positive_is_forward(),
+        });
+    }
 }
 
 async fn arm_reprog_control(

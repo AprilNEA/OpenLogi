@@ -59,6 +59,19 @@ pub struct ThumbwheelInfo {
     pub supports_single_tap: bool,
 }
 
+impl ThumbwheelInfo {
+    /// Whether the wheel's un-inverted positive rotation is toward the
+    /// right/front of the device — the direction OpenLogi's bindings call
+    /// "forward" (`ThumbwheelScrollUp`). The polarity varies per model
+    /// (MX Master 3-family wheels report the opposite of what the MX-era
+    /// conventions were calibrated on), so every sign interpretation must go
+    /// through this rather than assume one convention.
+    #[must_use]
+    pub fn positive_is_forward(&self) -> bool {
+        self.default_dir == 1
+    }
+}
+
 /// A decoded `thumbwheelEvent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThumbwheelEvent {
@@ -201,6 +214,21 @@ mod tests {
                 proxy: false,
             })
         );
+    }
+
+    #[test]
+    fn positive_is_forward_follows_default_dir() {
+        // `default_dir` semantics from the 0x2150 spec: 0 = positive toward
+        // the left/back, 1 = positive toward the right/front ("forward").
+        let mut info = ThumbwheelInfo {
+            native_res: 18,
+            diverted_res: 120,
+            default_dir: 1,
+            supports_single_tap: true,
+        };
+        assert!(info.positive_is_forward());
+        info.default_dir = 0;
+        assert!(!info.positive_is_forward());
     }
 
     #[test]

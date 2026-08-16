@@ -35,7 +35,7 @@ use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::receiver_access::ReceiverAccess;
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
-use crate::{DpiCycleState, DpiCycles};
+use crate::{DpiCycleState, DpiCycles, SharedThumbwheelDirs};
 
 /// The minimal per-device facts the agent needs: the config key (binding /
 /// preset lookup), the HID++ route (DPI/SmartShift writes + capture target), and
@@ -73,6 +73,9 @@ pub struct SharedRuntime {
     /// per-app-profile in M1 (spec non-goal), so a single shared map.
     pub keyboard_bindings: crate::hook_runtime::SharedKeyboardBindings,
     pub dpi_cycle: Arc<RwLock<DpiCycles>>,
+    /// Per-device native thumb-wheel polarity (learned by capture sessions)
+    /// plus the selection the OS hook resolves native scroll ticks against.
+    pub thumbwheel_dirs: SharedThumbwheelDirs,
     /// One capture plan per online device — what to divert and how to
     /// dispatch, keyed by the device the events arrive on. Carries each
     /// device's effective thumb-wheel sensitivity.
@@ -180,6 +183,7 @@ impl Orchestrator {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
+            thumbwheel_dirs: Arc::new(RwLock::new(crate::ThumbwheelDirs::default())),
             capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: ChannelRegistry::default(),
@@ -301,6 +305,7 @@ impl Orchestrator {
             "capture_plans",
         );
         self.rebuild_dpi_cycles(self.current_key());
+        self.publish_thumbwheel_selection();
         // Keyboard F-key bindings are global (not per-device), so they key off
         // the top-level config map rather than the selected device. Published
         // here so `reload_config` (GUI commit) takes effect live, not only on
@@ -357,6 +362,19 @@ impl Orchestrator {
         }
         guard.selected = selected.map(str::to_owned);
         guard.by_key = by_key;
+    }
+
+    /// Point the OS hook's thumb-wheel polarity lookup at the selected device.
+    /// Unlike the other runtime views this is a read-modify-write: the learned
+    /// polarities (written by the capture watcher as its sessions probe each
+    /// wheel) are not the orchestrator's to rebuild — only the selection is.
+    fn publish_thumbwheel_selection(&self) {
+        match self.shared.thumbwheel_dirs.write() {
+            Ok(mut dirs) => dirs.selected = self.current_key().map(str::to_owned),
+            Err(e) => {
+                warn!(error = %e, "thumbwheel_dirs lock poisoned — keeping stale selection");
+            }
+        }
     }
 
     /// One capture plan per online device, from the current config + app.
