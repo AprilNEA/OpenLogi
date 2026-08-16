@@ -107,19 +107,3 @@ pub fn acquire(lock_name: &str) -> Result<InstanceGuard, InstanceError> {
         Err(TryLockError::Error(source)) => Err(InstanceError::LockFailed { path, source }),
     }
 }
-
-/// Whether some other process currently holds `lock_name`.
-///
-/// For a supervisor deciding whether the role it manages is already filled —
-/// starting a process that would only die on the lock is pure churn. The probe
-/// acquires and immediately releases, so the answer is a snapshot: a caller
-/// acting on `false` must still tolerate losing the race to another starter.
-/// Filesystem trouble reads as "not held" and surfaces on the real attempt,
-/// which reports the error properly.
-#[must_use]
-pub fn is_held(lock_name: &str) -> bool {
-    matches!(
-        acquire(lock_name),
-        Err(InstanceError::AlreadyRunning { .. })
-    )
-}
