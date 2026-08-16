@@ -5395,6 +5395,7 @@ version = "0.7.4"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
+ "core-foundation 0.10.0",
  "core-graphics 0.25.0",
  "embed-resource",
  "gpui",
@@ -5405,12 +5406,15 @@ dependencies = [
  "openlogi-hook",
  "openlogi-ipc",
  "openlogi-ui",
+ "raw-window-handle",
  "rust-i18n",
  "succession",
  "tarpc",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
+ "x11rb",
 ]
 
 [[package]]

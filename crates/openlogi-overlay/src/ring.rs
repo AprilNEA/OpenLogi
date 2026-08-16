@@ -4,6 +4,8 @@
 //! clamped to the display it came up on, so a ring raised near a screen edge
 //! stays whole instead of being cut off.
 
+use std::sync::Arc;
+
 use gpui::{
     Bounds, Context, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Point, Render,
     SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
@@ -14,11 +16,13 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_ipc::ActionRingInvocation;
 use openlogi_ui::color;
 use tokio::sync::mpsc;
+use tracing::warn;
 
 use crate::agent::OverlayCommand;
 use crate::platform;
+use crate::session::ClickAwaySession;
 
-pub(crate) const WINDOW_SIZE: f32 = 360.0;
+pub(crate) const WINDOW_SIZE: f32 = 324.0;
 pub(crate) const SLOT_SIZE: f32 = 54.0;
 pub(crate) const RADIUS: f32 = 122.0;
 
@@ -49,35 +53,86 @@ const SELECTED_FILL_L: f32 = 0.48;
 const SELECTED_BORDER_L: f32 = 0.78;
 
 pub(crate) struct RingView {
-    invocation: ActionRingInvocation,
+    invocation: Option<ActionRingInvocation>,
     commands: mpsc::UnboundedSender<OverlayCommand>,
     hovered: Option<ActionRingSlot>,
+    live_session: Arc<ClickAwaySession>,
+    persistent: bool,
 }
 
 impl RingView {
     /// Open a view on `invocation`, reporting interactions through `commands`.
-    pub(crate) const fn new(
+    pub(crate) fn new(
         invocation: ActionRingInvocation,
         commands: mpsc::UnboundedSender<OverlayCommand>,
+        live_session: Arc<ClickAwaySession>,
     ) -> Self {
         Self {
-            invocation,
+            invocation: Some(invocation),
             commands,
             hovered: None,
+            live_session,
+            persistent: false,
         }
     }
 
-    /// The ring session this view is showing.
-    pub(crate) const fn session_id(&self) -> u64 {
-        self.invocation.session_id
+    /// Construct the hidden view used by the reusable native window.
+    pub(crate) fn idle(
+        commands: mpsc::UnboundedSender<OverlayCommand>,
+        live_session: Arc<ClickAwaySession>,
+    ) -> Self {
+        Self {
+            invocation: None,
+            commands,
+            hovered: None,
+            live_session,
+            persistent: true,
+        }
     }
 
-    /// Report this ring cancelled. The window is closed by the caller, which
-    /// is the only one holding the handle.
+    /// The ring session this view is showing, if any.
+    pub(crate) fn current_session(&self) -> Option<u64> {
+        self.invocation.as_ref().map(|invocation| invocation.session_id)
+    }
+
+    pub(crate) fn install(&mut self, invocation: ActionRingInvocation, cx: &mut Context<Self>) {
+        self.hovered = None;
+        self.invocation = Some(invocation);
+        cx.notify();
+    }
+
+    pub(crate) fn hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.hovered = None;
+        self.invocation = None;
+        self.live_session.clear();
+        cx.notify();
+        if self.persistent {
+            if !platform::hide_window(window) {
+                warn!("could not hide warm Actions Ring window");
+            }
+        } else {
+            window.remove_window();
+        }
+    }
+
+    pub(crate) fn dismiss(
+        &mut self,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !session_targets(session_id, self.current_session()) {
+            return false;
+        }
+        self.hide(window, cx);
+        true
+    }
+
+    /// Report this ring cancelled.
     pub(crate) fn cancel(&self) {
-        let _ = self.commands.send(OverlayCommand::Cancel {
-            session_id: self.invocation.session_id,
-        });
+        if let Some(session_id) = self.current_session() {
+            let _ = self.commands.send(OverlayCommand::Cancel { session_id });
+        }
     }
 
     fn slot_element(
@@ -85,11 +140,12 @@ impl RingView {
         slot: ActionRingSlot,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let presentation = self.invocation.slots.get(&slot)?;
+        let invocation = self.invocation.as_ref()?;
+        let presentation = invocation.slots.get(&slot)?;
         let icon_path = presentation.icon.asset_path();
         let selected = self.hovered == Some(slot);
         let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
-        let session_id = self.invocation.session_id;
+        let session_id = invocation.session_id;
         let activate = self.commands.clone();
         Some(
             div()
@@ -127,23 +183,31 @@ impl RingView {
                         cx.notify();
                     }
                 }))
-                .on_click(move |_, window, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     let _ = activate.send(OverlayCommand::Activate { session_id, slot });
-                    window.remove_window();
-                })
+                    this.dismiss(session_id, window, cx);
+                }))
                 .into_any_element(),
         )
     }
 }
 
+#[must_use]
+const fn session_targets(session_id: u64, open_session: Option<u64>) -> bool {
+    matches!(open_session, Some(open) if open == session_id)
+}
+
 impl Render for RingView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let session_id = self.invocation.session_id;
+        let Some(invocation) = self.invocation.clone() else {
+            return div().id("ring-root-idle").size_full();
+        };
+        let session_id = invocation.session_id;
         let root_commands = self.commands.clone();
         let center_commands = self.commands.clone();
         let hovered_label = self.hovered.and_then(|slot| {
-            let presentation = self.invocation.slots.get(&slot)?;
+            let presentation = invocation.slots.get(&slot)?;
             // User-authored labels render verbatim: passing them through the
             // localization table would translate any label that happens to
             // collide with a known key ("Copy" → "Copier" under fr).
@@ -163,16 +227,8 @@ impl Render for RingView {
             .id("ring-root")
             .relative()
             .size_full()
-            .child(
-                div()
-                    .absolute()
-                    .left(px(18.0))
-                    .top(px(18.0))
-                    .size(px(WINDOW_SIZE - 36.0))
-                    .rounded_full()
-                    .bg(PANEL)
-                    .shadow_lg(),
-            )
+            .rounded_full()
+            .bg(PANEL)
             .children(slots)
             .child(
                 div()
@@ -190,11 +246,11 @@ impl Render for RingView {
                     .text_lg()
                     .cursor_pointer()
                     .child("×")
-                    .on_click(move |_, window, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         let _ = center_commands.send(OverlayCommand::Cancel { session_id });
-                        window.remove_window();
-                    }),
+                        this.dismiss(session_id, window, cx);
+                    })),
             )
             .when_some(hovered_label, |ring, label| {
                 ring.child(
@@ -209,10 +265,10 @@ impl Render for RingView {
                         .child(label),
                 )
             })
-            .on_click(move |_, window, _| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 let _ = root_commands.send(OverlayCommand::Cancel { session_id });
-                window.remove_window();
-            })
+                this.dismiss(session_id, window, cx);
+            }))
     }
 }
 
@@ -220,7 +276,7 @@ impl Render for RingView {
     clippy::cast_possible_truncation,
     reason = "native cursor coordinates are screen-sized and exactly usable as GPUI f32 pixels"
 )]
-pub(crate) fn ring_window_options(cx: &mut gpui::App) -> WindowOptions {
+pub(crate) fn ring_window_options(cx: &mut gpui::App, show: bool) -> WindowOptions {
     let cursor = openlogi_hook::cursor_position();
     let size = Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE));
     // GPUI window bounds are display-relative (`display.bounds()` zeroes every
@@ -272,7 +328,7 @@ pub(crate) fn ring_window_options(cx: &mut gpui::App) -> WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: None,
         focus: false,
-        show: true,
+        show,
         kind: WindowKind::PopUp,
         is_movable: false,
         is_resizable: false,
@@ -299,6 +355,13 @@ pub(crate) fn clamp_window_origin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_target_requires_the_open_session() {
+        assert!(session_targets(12, Some(12)));
+        assert!(!session_targets(11, Some(12)));
+        assert!(!session_targets(12, None));
+    }
 
     #[test]
     fn overlay_origin_is_clamped_to_the_display() {
