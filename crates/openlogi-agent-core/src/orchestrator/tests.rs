@@ -463,6 +463,30 @@ fn plan_reapply_transitions_are_not_queued_for_confirmation() {
 }
 
 #[test]
+fn plan_reapply_wake_targets_get_a_confirm_retry_run() {
+    use std::collections::HashMap;
+    // A system wake re-applies to every online device *and* queues the same
+    // confirm-retry run a first sighting gets: post-wake, a receiver can
+    // enumerate while its mouse link is still re-establishing, so the first
+    // write can time out just like the cold-boot race (#527). Offline devices
+    // stay untargeted and unqueued; they re-apply on their own transition.
+    let prev = [dev("a", 1, true), dev("b", 2, false)];
+    let (targets, followup) = plan_reapply(&prev, &prev, &HashMap::new(), true);
+    assert_eq!(targets, vec![0]);
+    assert_eq!(
+        followup,
+        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES)])
+    );
+    // The run then drains at the usual cadence on steady ticks.
+    let (targets, followup) = plan_reapply(&prev, &prev, &followup, false);
+    assert_eq!(targets, vec![0]);
+    assert_eq!(
+        followup,
+        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES - 1)])
+    );
+}
+
+#[test]
 fn plan_reapply_skips_a_followup_that_went_offline() {
     use std::collections::HashMap;
     let prev = [dev("a", 1, true)];

@@ -18,6 +18,8 @@
 mod launch_agent;
 mod overlay;
 mod pairing;
+#[cfg(target_os = "windows")]
+mod resume_windows;
 mod self_restart;
 mod server;
 #[cfg(target_os = "macos")]
@@ -121,7 +123,16 @@ fn main() {
         // Windows hosts the notification-area icon on its own win32 thread
         // (message pump included); the async core keeps the main thread.
         #[cfg(target_os = "windows")]
-        tray_windows::spawn(config.app_settings.show_in_menu_bar);
+        {
+            tray_windows::spawn(config.app_settings.show_in_menu_bar);
+            // Native resume notifications feed the same seam the macOS
+            // workspace observer does: the core replays volatile settings
+            // when the flag is set.
+            let resume_pending = Arc::new(AtomicBool::new(false));
+            resume_windows::register(Arc::clone(&resume_pending));
+            runtime.block_on(run(config, resume_pending));
+        }
+        #[cfg(not(target_os = "windows"))]
         runtime.block_on(run(config));
     }
 }
@@ -214,7 +225,10 @@ fn prompt_missing_permissions(capture_mouse_events: bool) {
     }
 }
 
-async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<AtomicBool>) {
+async fn run(
+    config: Config,
+    #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: Arc<AtomicBool>,
+) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
     // LaunchAgent, before `config` moves into the orchestrator.
     launch_agent::reconcile(config.app_settings.launch_at_login);
@@ -285,12 +299,13 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
                 Some(watchers::inventory::InventoryEvent::Snapshot { inventories, standalone }) => {
                     let mut orchestrator = orchestrator.lock().await;
                     // The portable watcher catches long sleeps from a polling
-                    // gap. Native macOS notifications also cover short sleeps,
-                    // display wakes, and returning user sessions; consume the
-                    // coalesced signal at the exact point that can replay it.
-                    #[cfg(target_os = "macos")]
+                    // gap. Native notifications (macOS workspace wakes,
+                    // Windows suspend/resume) also cover the sleeps that gap
+                    // misses; consume the coalesced signal at the exact point
+                    // that can replay it.
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
                     if resume_pending.swap(false, Ordering::Relaxed) {
-                        info!("macOS resume notification — replaying volatile settings");
+                        info!("native resume notification — replaying volatile settings");
                         orchestrator.reapply_volatile_on_next_refresh();
                     }
                     orchestrator.refresh_inventory(&inventories, &standalone);
