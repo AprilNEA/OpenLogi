@@ -133,7 +133,7 @@ fn spawn_hidpp_watchers(shared: &SharedRuntime, dispatcher: ActionDispatcher) {
         shared.capture_channel.clone(),
         shared.receiver_access.clone(),
         dispatcher.clone(),
-        shared.thumbwheel_dirs.clone(),
+        shared.hook_maps.clone(),
     );
     watchers::host_switch::spawn(
         shared.host_switch_links.clone(),
@@ -336,7 +336,6 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
                         hook = hook_runtime::start(
                             shared.hook_maps.clone(),
                             shared.keyboard_bindings.clone(),
-                            shared.thumbwheel_dirs.clone(),
                             dispatcher.clone(),
                             Arc::clone(&event_monitor),
                         );

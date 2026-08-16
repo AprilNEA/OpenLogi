@@ -269,7 +269,6 @@ mod tests {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
-            thumbwheel_dirs: Arc::new(RwLock::new(openlogi_agent_core::ThumbwheelDirs::default())),
             capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: openlogi_hid::ChannelRegistry::default(),

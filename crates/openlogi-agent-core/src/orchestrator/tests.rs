@@ -701,3 +701,38 @@ fn app_switch_republishes_capture_plans() {
     orch.set_current_app(Some("com.example.editor".into()));
     assert_eq!(published_back_binding(&orch), Some(Action::Undo));
 }
+
+/// The hook callback reads thumb-wheel polarity and the binding maps through
+/// ONE lock: the selection must be published inside the hook maps (never in a
+/// separately locked cell), and a rebuild must carry the capture-watcher's
+/// learned polarity entries forward — they come from hardware probes, not
+/// config, so rebuilding from config alone would erase them.
+#[test]
+fn hook_maps_carry_selection_and_learned_thumbwheel_polarity_together() {
+    let mut orch = Orchestrator::new(Config::default());
+    let shared = orch.shared();
+    orch.refresh_inventory(&[direct_inventory(Some("ABC123"), [0; 4])], &[]);
+
+    let key = "direct:046d:b023:serial:abc123";
+    let selected = shared
+        .hook_maps
+        .read()
+        .ok()
+        .and_then(|maps| maps.thumbwheel_dirs.selected.clone());
+    assert_eq!(selected.as_deref(), Some(key));
+
+    // A capture session's polarity report lands (the watcher writes it under
+    // the hook-maps lock)...
+    if let Ok(mut maps) = shared.hook_maps.write() {
+        maps.thumbwheel_dirs.by_key.insert(key.to_owned(), true);
+    }
+    // ...and a full rebuild (config reload) must keep both halves: the
+    // republished selection and the learned entry, still resolving together.
+    orch.reload_config(Config::default());
+    let resolved = shared
+        .hook_maps
+        .read()
+        .ok()
+        .and_then(|maps| maps.thumbwheel_dirs.selected_positive_is_forward());
+    assert_eq!(resolved, Some(true));
+}

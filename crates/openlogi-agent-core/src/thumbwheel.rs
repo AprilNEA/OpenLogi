@@ -1,18 +1,21 @@
-//! Per-device thumb-wheel polarity shared with the OS hook's native
+//! Per-device thumb-wheel polarity consumed by the OS hook's native
 //! horizontal-scroll fallback.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 
 /// Native thumb-wheel rotation polarity per device — whether a positive
 /// `WM_MOUSEHWHEEL` delta is the physical forward direction — learned from
 /// HID++ `0x2150` `getThumbwheelInfo` when a capture session arms the wheel,
-/// plus the GUI's current selection.
+/// plus the selection to resolve it against.
 ///
 /// Like [`crate::DpiCycles`], HID++ capture dispatch knows which device an
 /// event arrived on, but the OS hook cannot attribute a native scroll tick to
 /// a device, so it resolves against the selection — the same device whose
-/// binding maps it already dispatches with.
+/// binding maps it already dispatches with. Lives *inside*
+/// [`crate::hook_runtime::HookMaps`] (never behind its own lock), so the hook
+/// callback reads polarity and bindings as one snapshot: the capture watcher
+/// inserts learned entries under the hook-maps lock, and the orchestrator
+/// republishes the selection together with the binding maps.
 ///
 /// Entries are never pruned: one `bool` per device ever probed, and a device
 /// that reconnects simply re-learns its value on the next capture session.
@@ -34,10 +37,6 @@ impl ThumbwheelDirs {
         self.by_key.get(self.selected.as_deref()?).copied()
     }
 }
-
-/// Shared [`ThumbwheelDirs`]: the capture watcher writes learned polarities,
-/// the orchestrator maintains the selection, and the OS hook reads.
-pub type SharedThumbwheelDirs = Arc<RwLock<ThumbwheelDirs>>;
 
 #[cfg(test)]
 mod tests {

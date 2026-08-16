@@ -22,4 +22,4 @@ mod thumbwheel;
 pub mod watchers;
 
 pub use dpi::{DpiCycleState, DpiCycles};
-pub use thumbwheel::{SharedThumbwheelDirs, ThumbwheelDirs};
+pub use thumbwheel::ThumbwheelDirs;
