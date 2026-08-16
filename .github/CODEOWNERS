@@ -40,7 +40,6 @@
 /.github/                       @AprilNEA
 /xtask/                         @AprilNEA
 /packaging/                     @AprilNEA
-/scripts/                       @AprilNEA
 /.cargo/                        @AprilNEA
 /Cargo.toml                     @AprilNEA
 /Cargo.lock                     @AprilNEA
