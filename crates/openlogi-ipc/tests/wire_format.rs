@@ -40,9 +40,10 @@ use openlogi_core::hid::{
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
-    AgentSnapshot, AgentStatus, ConfigReloadError, FoundDevice, InventoryHealth, MonitorEvent,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate,
+    AgentSnapshot, AgentStatus, ConfigReloadError, FoundDevice, Identity, InventoryHealth,
+    MonitorEvent, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate,
 };
+use succession::{Compat, Run};
 
 /// Serialize exactly as the transport does (`tokio_serde::formats::Bincode`
 /// with its default `O = bincode::DefaultOptions`).
@@ -69,7 +70,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 17);
+    assert_eq!(PROTOCOL_VERSION, 18);
 }
 
 #[test]
@@ -143,6 +144,17 @@ fn request_variant_order() {
         "142a01",
     );
     assert_wire(&AgentRequest::ActionRingCancel { session_id: 42 }, "152a");
+    assert_wire(&AgentRequest::Identity {}, "16");
+}
+
+/// The agent identity is frozen: a helper from any build has to be able to
+/// decode it, so both halves stay plain `u64`s and this golden never changes.
+#[test]
+fn agent_identity_is_two_plain_integers() {
+    assert_wire(
+        &Identity::new(Run::from_raw(7), Compat::from_raw(18)),
+        "0712",
+    );
 }
 
 #[test]

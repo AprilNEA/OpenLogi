@@ -26,7 +26,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -44,7 +44,7 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_ipc::{ActionRingInvocation, AgentClient, PROTOCOL_VERSION};
 use tarpc::{client, context};
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const WINDOW_SIZE: f32 = 360.0;
@@ -509,12 +509,100 @@ fn spawn_ipc() -> Ipc {
     }
 }
 
-async fn connect() -> Option<AgentClient> {
-    let stream = openlogi_ipc::transport::connect().await.ok()?;
+/// The agent run this overlay serves, latched on the first handshake.
+///
+/// The overlay is a supervised helper: the agent starts one and only one, and
+/// that copy holds `overlay.lock` for as long as it lives. Binding to a single
+/// run is what keeps a copy orphaned by an agent restart from wedging its
+/// replacement out of the lock forever.
+static AGENT_INSTANCE: OnceLock<u64> = OnceLock::new();
+
+/// Why this overlay is no longer the one its agent expects.
+#[derive(Debug, PartialEq, Eq)]
+enum Superseded {
+    /// The agent speaks another wire protocol, so this binary is from a
+    /// superseded install and could not serve the ring even if it stayed.
+    Protocol { agent: u32 },
+    /// The agent is a different run than the one this overlay was started by.
+    Instance { latched: u64, agent: u64 },
+}
+
+/// Outcome of one connection attempt.
+enum Handshake {
+    /// Connected to the agent run this overlay belongs to.
+    Ready(AgentClient),
+    /// Nothing answered on the socket, or the answer was cut short — the agent
+    /// may simply be starting. Retry.
+    Unavailable,
+    /// This overlay has been superseded; it must yield its lock.
+    Superseded(Superseded),
+}
+
+/// Whether an agent reporting run `agent` supersedes the latched one.
+///
+/// The first sighting must never supersede: an overlay that yields before it
+/// has served anything would be restarted into the same verdict forever.
+fn superseded_by(latched: Option<u64>, agent: u64) -> Option<Superseded> {
+    match latched {
+        Some(latched) if latched != agent => Some(Superseded::Instance { latched, agent }),
+        _ => None,
+    }
+}
+
+async fn handshake() -> Handshake {
+    let Ok(stream) = openlogi_ipc::transport::connect().await else {
+        return Handshake::Unavailable;
+    };
     let transport = openlogi_ipc::transport::wrap(stream);
     let client = AgentClient::new(client::Config::default(), transport).spawn();
-    let version = client.protocol_version(context::current()).await.ok()?;
-    (version == PROTOCOL_VERSION).then_some(client)
+    // `protocol_version` is method 0 and wire-stable across every version, so
+    // it is the only call worth making before the two versions agree.
+    let Ok(version) = client.protocol_version(context::current()).await else {
+        return Handshake::Unavailable;
+    };
+    if version != PROTOCOL_VERSION {
+        return Handshake::Superseded(Superseded::Protocol { agent: version });
+    }
+    let Ok(status) = client.status(context::current()).await else {
+        return Handshake::Unavailable;
+    };
+    if let Some(reason) = superseded_by(AGENT_INSTANCE.get().copied(), status.instance_id) {
+        return Handshake::Superseded(reason);
+    }
+    let _ = AGENT_INSTANCE.set(status.instance_id);
+    Handshake::Ready(client)
+}
+
+async fn connect() -> Option<AgentClient> {
+    match handshake().await {
+        Handshake::Ready(client) => Some(client),
+        Handshake::Unavailable => None,
+        Handshake::Superseded(reason) => yield_to_replacement(&reason),
+    }
+}
+
+/// Exit so the replacement overlay can take `overlay.lock`.
+///
+/// Staying alive would be worse than useless: this process cannot serve a ring
+/// it can no longer be asked about, and its lock is exactly what stops the
+/// agent's supervisor from starting the overlay that can.
+#[expect(
+    clippy::exit,
+    reason = "the IPC tasks run off the GPUI main thread and cannot return a status to `main`, which is parked in the application run loop; releasing the single-instance lock by exiting is the point"
+)]
+fn yield_to_replacement(reason: &Superseded) -> ! {
+    match *reason {
+        Superseded::Protocol { agent } => info!(
+            agent,
+            overlay = PROTOCOL_VERSION,
+            "agent speaks another protocol — exiting so the matching overlay can start"
+        ),
+        Superseded::Instance { latched, agent } => info!(
+            latched,
+            agent, "agent restarted — exiting so its own overlay can start"
+        ),
+    }
+    std::process::exit(0)
 }
 
 async fn poll_invocations(tx: mpsc::UnboundedSender<ActionRingInvocation>) {
@@ -745,6 +833,25 @@ fn retry_before(deadline: Option<Instant>) -> bool {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_agent_run_seen_is_adopted_not_refused() {
+        // An overlay that yielded on its very first handshake would be
+        // restarted straight back into the same verdict.
+        assert_eq!(superseded_by(None, 7), None);
+    }
+
+    #[test]
+    fn a_restarted_agent_supersedes_the_latched_run() {
+        assert_eq!(superseded_by(Some(7), 7), None);
+        assert_eq!(
+            superseded_by(Some(7), 9),
+            Some(Superseded::Instance {
+                latched: 7,
+                agent: 9
+            })
+        );
+    }
 
     #[test]
     fn overlay_origin_is_clamped_to_the_display() {

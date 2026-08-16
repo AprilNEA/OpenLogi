@@ -35,6 +35,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 opener = { workspace = true }
+succession = { version = "0.1", features = ["supervision", "eviction"] }
 
 # Windows exe resources (app icon + VERSIONINFO) — see build.rs. The exact
 # version already in Cargo.lock as gpui's own build-dependency, so the resolve

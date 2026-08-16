@@ -25,8 +25,10 @@ use openlogi_hid::{
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    ConfigReloadError, MonitorEvent, PROTOCOL_VERSION, PairingCommandError, PairingUpdate,
+    ConfigReloadError, Identity, MonitorEvent, PROTOCOL_VERSION, PairingCommandError,
+    PairingUpdate,
 };
+use succession::Compat;
 
 use crate::pairing::PairingManager;
 // Brings `Listener::accept` into scope for the concrete listener `transport::bind`
@@ -79,6 +81,12 @@ impl AgentServer {
 impl Agent for AgentServer {
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
+    }
+
+    /// `Run::mint` is process-global, so the overlay supervisor hands its
+    /// child the very same run this answers with.
+    async fn identity(self, _: Context) -> Identity {
+        Identity::mine(Compat::from(PROTOCOL_VERSION))
     }
 
     async fn status(self, _: Context) -> AgentStatus {
