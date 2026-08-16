@@ -3,8 +3,10 @@
 
 use std::collections::BTreeMap;
 
-use openlogi_hid::{DpiInfo, SmartShiftStatus, WriteError};
+use openlogi_core::hid::{DpiInfo, SmartShiftStatus, WriteError};
 use tracing::debug;
+
+use super::device_key::DeviceKey;
 
 /// How many times to retry a device read (DPI capability discovery or a
 /// SmartShift read) after a transient HID++ error (read timeout, busy device)
@@ -44,15 +46,26 @@ pub type DpiStatus = Load<DpiInfo>;
 /// GUI only ever reads and writes the device.
 pub type SmartShiftLoad = Load<SmartShiftStatus>;
 
+/// The lazily-loaded DPI and SmartShift read caches, grouped so callers reach
+/// them as `state.reads.dpi` / `state.reads.smartshift` and use
+/// [`LazyDeviceData`]'s own methods directly — instead of `AppState` growing
+/// a same-shaped forwarding method twice, once per subsystem, for every
+/// operation the generic already provides.
+#[derive(Default)]
+pub(crate) struct DeviceReads {
+    pub(crate) dpi: LazyDeviceData<DpiInfo>,
+    pub(crate) smartshift: LazyDeviceData<SmartShiftStatus>,
+}
+
 /// Per-device lazy-load cache for a background HID++ read, keyed by
-/// [`DeviceRecord::config_key`](super::DeviceRecord::config_key). Holds each
-/// device's [`Load`] state plus its transient-retry counter, and carries the
-/// stale-route guard + retry-budget policy once, for both DPI and SmartShift.
-pub(super) struct LazyDeviceData<T> {
-    by_device: BTreeMap<String, Load<T>>,
+/// [`DeviceKey`]. Holds each device's [`Load`] state plus its transient-retry
+/// counter, and carries the stale-route guard + retry-budget policy once, for
+/// both DPI and SmartShift.
+pub(crate) struct LazyDeviceData<T> {
+    by_device: BTreeMap<DeviceKey, Load<T>>,
     /// Consecutive transient read failures per device, capped by
     /// [`LOAD_MAX_ATTEMPTS`] before the device settles on [`Load::Failed`].
-    attempts: BTreeMap<String, u8>,
+    attempts: BTreeMap<DeviceKey, u8>,
 }
 
 // Manual `Default` (not derived): a derive would demand `T: Default`, but the
@@ -68,31 +81,31 @@ impl<T> Default for LazyDeviceData<T> {
 
 impl<T: Clone> LazyDeviceData<T> {
     /// The recorded state for `key`, or [`Load::Unknown`] if never queried.
-    pub(super) fn status(&self, key: &str) -> Load<T> {
+    pub(crate) fn status(&self, key: &DeviceKey) -> Load<T> {
         self.by_device.get(key).cloned().unwrap_or(Load::Unknown)
     }
 
     /// The raw recorded entry for `key`, for callers that match on `Ready`
     /// without cloning the payload.
-    pub(super) fn get(&self, key: &str) -> Option<&Load<T>> {
+    pub(crate) fn get(&self, key: &DeviceKey) -> Option<&Load<T>> {
         self.by_device.get(key)
     }
 
     /// Whether `key` still needs a read (nothing recorded yet). Cheaper than
     /// cloning [`status`](Self::status) on the per-frame render path.
-    pub(super) fn unqueried(&self, key: &str) -> bool {
+    pub(crate) fn unqueried(&self, key: &DeviceKey) -> bool {
         !self.by_device.contains_key(key)
     }
 
     /// Mark a read as in flight for `key`.
-    pub(super) fn mark_loading(&mut self, key: &str) {
-        self.by_device.insert(key.to_string(), Load::Loading);
+    pub(crate) fn mark_loading(&mut self, key: &DeviceKey) {
+        self.by_device.insert(key.clone(), Load::Loading);
     }
 
     /// Reset a stuck `Loading` for `key` back to unqueried — the read worker
     /// vanished (e.g. panicked) without delivering a result, so the next render
     /// re-issues instead of wedging the device on "Reading…".
-    pub(super) fn clear_loading(&mut self, key: &str) {
+    pub(crate) fn clear_loading(&mut self, key: &DeviceKey) {
         if matches!(self.by_device.get(key), Some(Load::Loading)) {
             self.by_device.remove(key);
         }
@@ -101,20 +114,20 @@ impl<T: Clone> LazyDeviceData<T> {
     /// Drop `key`'s recorded state and retry budget so the next render re-reads.
     /// Backs the "click to retry" affordance and the re-select-grants-a-retry
     /// rule for a [`Load::Failed`] device.
-    pub(super) fn retry(&mut self, key: &str) {
+    pub(crate) fn retry(&mut self, key: &DeviceKey) {
         self.by_device.remove(key);
         self.attempts.remove(key);
     }
 
     /// Forget `key` entirely — the device disappeared, or reconnected on a new
     /// route, so its cached state (keyed to the dead route) is stale.
-    pub(super) fn remove(&mut self, key: &str) {
+    pub(crate) fn remove(&mut self, key: &DeviceKey) {
         self.by_device.remove(key);
         self.attempts.remove(key);
     }
 
     /// Forget every device the `present` predicate rejects (not in the live set).
-    pub(super) fn retain_present(&mut self, present: impl Fn(&str) -> bool) {
+    pub(crate) fn retain_present(&mut self, present: impl Fn(&str) -> bool) {
         self.by_device.retain(|key, _| present(key.as_str()));
         self.attempts.retain(|key, _| present(key.as_str()));
     }
@@ -122,7 +135,7 @@ impl<T: Clone> LazyDeviceData<T> {
     /// Optimistically record a resolved value with no read involved — e.g. a
     /// just-written SmartShift config, shown until a confirming re-read replaces
     /// it. Leaves the retry budget untouched.
-    pub(super) fn set_ready(&mut self, key: String, value: T) {
+    pub(crate) fn set_ready(&mut self, key: DeviceKey, value: T) {
         self.by_device.insert(key, Load::Ready(value));
     }
 
@@ -132,9 +145,9 @@ impl<T: Clone> LazyDeviceData<T> {
     /// whether `key` exists at all. Returns the resolved value when the result
     /// settled to [`Load::Ready`], so the caller can run a side effect (the DPI
     /// panel seeds the shared current value). `label` tags the debug logs.
-    pub(super) fn store(
+    pub(crate) fn store(
         &mut self,
-        key: String,
+        key: DeviceKey,
         result: Result<T, WriteError>,
         is_permanent: impl Fn(&WriteError) -> bool,
         matches_route: bool,
@@ -142,7 +155,7 @@ impl<T: Clone> LazyDeviceData<T> {
         label: &'static str,
     ) -> Option<T> {
         if !matches_route {
-            debug!(key, label, "stale device read result ignored");
+            debug!(key = %key, label, "stale device read result ignored");
             // The device reconnected on a different route mid-read: drop the
             // orphaned `Loading` marker so the next render re-reads against the
             // live route instead of spinning on "Reading…" forever.
@@ -170,7 +183,7 @@ impl<T: Clone> LazyDeviceData<T> {
                 let attempts = self.attempts.entry(key.clone()).or_insert(0);
                 *attempts = attempts.saturating_add(1);
                 if *attempts < LOAD_MAX_ATTEMPTS {
-                    debug!(key, attempts = *attempts, error = %error, label, "transient device read error — will retry");
+                    debug!(key = %key, attempts = *attempts, error = %error, label, "transient device read error — will retry");
                     self.by_device.remove(&key);
                     return None;
                 }

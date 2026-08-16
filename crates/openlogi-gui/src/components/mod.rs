@@ -4,9 +4,14 @@
 //! widget owns its local state; cross-widget coordination happens through
 //! [`crate::state::AppState`].
 
+pub mod action_ring_panel;
+pub mod camera_controls;
+pub mod camera_preview;
 pub mod carousel;
 pub mod device_read;
 pub mod dpi_panel;
+pub mod light_panel;
+pub mod light_visual;
 pub mod lighting_panel;
 pub mod smartshift_panel;
 pub mod status;

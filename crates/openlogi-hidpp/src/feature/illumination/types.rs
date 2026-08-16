@@ -1,6 +1,6 @@
 //! Domain types for the `Illumination` feature (`0x1990`).
 
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 
 use crate::protocol::v20::{ErrorType, Hidpp20Error};
 
@@ -158,6 +158,10 @@ impl SetLevels {
                 if !(1..=7).contains(&values.len()) || *start_index > 0x0f || *level_count > 0x0f {
                     return Err(Hidpp20Error::Feature(ErrorType::InvalidArgument));
                 }
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "values.len() was just checked to be in 1..=7, so it always fits in a u8"
+                )]
                 let valid_count = (values.len() as u8) & 0x07;
                 args[0] = valid_count << 5; // linear = 0, reset = 0
                 args[1] = (start_index << 4) | (level_count & 0x0f);
@@ -189,7 +193,7 @@ impl From<bool> for IlluminationState {
 }
 
 /// What caused a [`brightness clamp`](super::event::IlluminationEvent::BrightnessClamped).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -200,6 +204,9 @@ pub enum BrightnessClampedSource {
     HidPlusPlus = 1,
     /// A hardware button triggered the clamp.
     Button = 2,
+    /// A source this crate does not model; carries the raw byte.
+    #[num_enum(catch_all)]
+    Other(u8),
 }
 
 /// Decodes the on/off state bit shared by `getIllumination` and its event.

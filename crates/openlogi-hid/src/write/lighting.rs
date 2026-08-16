@@ -1,11 +1,16 @@
+use std::sync::Arc;
 use std::time::Duration;
 
-use async_hid::AsyncHidWrite;
 use hidpp::{
+    channel::{ChannelError, HidppChannel},
     device::Device,
     feature::{
         CreatableFeature,
         color_led_effects::{ColorLedEffectsFeature, Persistence, ZONE_EFFECT_PARAM_COUNT},
+        per_key_lighting::{
+            FramePersistence, MAX_SINGLE_VALUE_ZONES, PerKeyLightingFeature, Rgb,
+            ZONE_PRESENCE_PAGE_LEN, ZonePresencePage,
+        },
     },
 };
 use tracing::debug;
@@ -58,13 +63,17 @@ const FRAME_GAP: Duration = Duration::from_millis(8);
 /// [`Auto`]: LightingMethod::Auto
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LightingMethod {
-    /// Prefer `ColorLedEffects` (`0x8070`), falling back to `PerKeyLighting`
-    /// (`0x8080`) when the device exposes no effect engine.
+    /// Prefer `ColorLedEffects` (`0x8070`), falling back to `PerKeyLighting2`
+    /// (`0x8081`) and then `PerKeyLighting` (`0x8080`) when the device exposes
+    /// no effect engine.
     Auto,
     /// Force `ColorLedEffects` (`0x8070`) — the fixed-effect override.
     Effects,
-    /// Force `PerKeyLighting` (`0x8080`) — the per-key stream.
+    /// Force `PerKeyLighting` (`0x8080`) — the raw per-key stream.
     PerKey,
+    /// Force `PerKeyLighting2` (`0x8081`) — the zone-addressed successor to
+    /// `0x8080`.
+    PerKeyV2,
 }
 
 /// Set a keyboard to a solid `(r, g, b)` colour, choosing the HID++ path
@@ -90,15 +99,43 @@ pub async fn set_keyboard_color_with(
     g: u8,
     b: u8,
 ) -> Result<(), WriteError> {
+    let device_index = route.device_index();
+    with_route(route, move |channel| async move {
+        set_keyboard_color_with_on_channel(&channel, device_index, method, r, g, b).await
+    })
+    .await
+}
+
+pub(super) async fn set_keyboard_color_with_on_channel(
+    channel: &Arc<HidppChannel>,
+    device_index: u8,
+    method: LightingMethod,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> Result<(), WriteError> {
     match method {
-        LightingMethod::PerKey => set_color_per_key(route, r, g, b).await,
-        LightingMethod::Effects => set_color_effects(route, r, g, b).await,
-        LightingMethod::Auto => match set_color_effects(route, r, g, b).await {
+        LightingMethod::PerKey => set_color_per_key(channel, device_index, r, g, b).await,
+        LightingMethod::PerKeyV2 => set_color_per_key_v2(channel, device_index, r, g, b).await,
+        LightingMethod::Effects => set_color_effects(channel, device_index, r, g, b).await,
+        LightingMethod::Auto => match set_color_effects(channel, device_index, r, g, b).await {
             Err(WriteError::FeatureUnsupported { feature_hex })
                 if feature_hex == COLOR_LED_EFFECTS_FEATURE =>
             {
-                debug!("no 0x8070 effect engine — falling back to 0x8080 per-key");
-                set_color_per_key(route, r, g, b).await
+                debug!("no 0x8070 effect engine — trying the per-key paths");
+                // 0x8081 supersedes 0x8080 and is the one newer keyboards ship,
+                // so it is tried first; a device with neither reports the
+                // original 0x8080 as missing, which is the error this fallback
+                // chain has always ended with.
+                match set_color_per_key_v2(channel, device_index, r, g, b).await {
+                    Err(WriteError::FeatureUnsupported { feature_hex })
+                        if feature_hex == PerKeyLightingFeature::ID =>
+                    {
+                        debug!("no 0x8081 per-key zones — falling back to 0x8080 per-key");
+                        set_color_per_key(channel, device_index, r, g, b).await
+                    }
+                    other => other,
+                }
             }
             other => other,
         },
@@ -109,24 +146,21 @@ pub async fn set_keyboard_color_with(
 /// when the device doesn't expose it; the index differs per device, so callers
 /// can't hard-code it.
 async fn resolve_feature_index(
-    route: &DeviceRoute,
+    channel: &Arc<HidppChannel>,
+    device_index: u8,
     feature_id: u16,
 ) -> Result<Option<u8>, WriteError> {
-    let device_index = route.device_index();
-    with_route(route, move |channel| async move {
-        let device = Device::new(std::sync::Arc::clone(&channel), device_index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable {
-                index: device_index,
-            })?;
-        let info = device
-            .root()
-            .get_feature(feature_id)
-            .await
-            .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, feature_id))?;
-        Ok(info.map(|i| i.index))
-    })
-    .await
+    let device = Device::new(Arc::clone(channel), device_index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable {
+            index: device_index,
+        })?;
+    let info = device
+        .root()
+        .get_feature(feature_id)
+        .await
+        .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, feature_id))?;
+    Ok(info.map(|i| i.index))
 }
 
 /// Set a solid colour via `ColorLedEffects` (`0x8070`): a fixed effect per zone,
@@ -137,54 +171,56 @@ async fn resolve_feature_index(
 /// first so only existing zones are driven (a typed `set_zone_effect` awaits the
 /// device's reply, so unlike the former raw fire-and-forget path a write to a
 /// non-existent zone would surface as an error rather than a silent no-op).
-async fn set_color_effects(route: &DeviceRoute, r: u8, g: u8, b: u8) -> Result<(), WriteError> {
-    let index = route.device_index();
-    with_route(route, move |channel| async move {
-        let mut device = Device::new(std::sync::Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        let feature = open_feature::<ColorLedEffectsFeature>(&mut device).await?;
-        let zone_count = feature
-            .get_info()
-            .await
-            .map_err(classify_lighting_error)?
-            .zone_count;
+async fn set_color_effects(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> Result<(), WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let feature = open_feature::<ColorLedEffectsFeature>(&mut device).await?;
+    let zone_count = feature
+        .get_info()
+        .await
+        .map_err(classify_lighting_error)?
+        .zone_count;
 
-        let mut params = [0u8; ZONE_EFFECT_PARAM_COUNT];
-        params[0] = r;
-        params[1] = g;
-        params[2] = b;
-        let zones_to_write = if zone_count == 0 {
-            debug!(
-                index,
-                "0x8070 reported zero zones; applying legacy 4-zone fallback"
-            );
-            MAX_COLOR_LED_EFFECT_ZONES
-        } else {
-            zone_count.min(MAX_COLOR_LED_EFFECT_ZONES)
-        };
-        if zone_count > MAX_COLOR_LED_EFFECT_ZONES {
-            debug!(
-                index,
-                zone_count,
-                capped_zone_count = MAX_COLOR_LED_EFFECT_ZONES,
-                "0x8070 zone count capped to legacy write limit"
-            );
-        }
-        for zone in 0..zones_to_write {
-            feature
-                .set_zone_effect(zone, EFFECT_FIXED, params, Persistence::Volatile)
-                .await
-                .map_err(classify_lighting_error)?;
-            tokio::time::sleep(FRAME_GAP).await;
-        }
+    let mut params = [0u8; ZONE_EFFECT_PARAM_COUNT];
+    params[0] = r;
+    params[1] = g;
+    params[2] = b;
+    let zones_to_write = if zone_count == 0 {
         debug!(
             index,
-            zone_count, zones_to_write, r, g, b, "set keyboard colour via typed 0x8070"
+            "0x8070 reported zero zones; applying legacy 4-zone fallback"
         );
-        Ok(())
-    })
-    .await
+        MAX_COLOR_LED_EFFECT_ZONES
+    } else {
+        zone_count.min(MAX_COLOR_LED_EFFECT_ZONES)
+    };
+    if zone_count > MAX_COLOR_LED_EFFECT_ZONES {
+        debug!(
+            index,
+            zone_count,
+            capped_zone_count = MAX_COLOR_LED_EFFECT_ZONES,
+            "0x8070 zone count capped to legacy write limit"
+        );
+    }
+    for zone in 0..zones_to_write {
+        feature
+            .set_zone_effect(zone, EFFECT_FIXED, params, Persistence::Volatile)
+            .await
+            .map_err(classify_lighting_error)?;
+        tokio::time::sleep(FRAME_GAP).await;
+    }
+    debug!(
+        index,
+        zone_count, zones_to_write, r, g, b, "set keyboard colour via typed 0x8070"
+    );
+    Ok(())
 }
 
 /// Classify a HID++ error from the `ColorLedEffects` functions.
@@ -192,20 +228,169 @@ fn classify_lighting_error(error: hidpp::protocol::v20::Hidpp20Error) -> WriteEr
     classify_hidpp_error(error, HidppOperation::Lighting, ColorLedEffectsFeature::ID)
 }
 
+/// Set a solid colour via `PerKeyLighting2` (`0x8081`): paint every zone the
+/// device reports as present, then commit the frame. `FeatureUnsupported` when
+/// the device exposes no `0x8081` or reports no zones.
+///
+/// `0x8081` supersedes `0x8080`. It addresses *zones* rather than HID key
+/// usages and answers each request, so unlike the raw `0x8080` stream a write
+/// to a zone the device does not have surfaces as an error instead of being
+/// swallowed. Nothing had ever driven it, which left a keyboard exposing only
+/// `0x8081` with no way to set its colour at all.
+///
+/// Committed volatilely for the same reason as the `0x8070` path: the colour
+/// shows live without a flash write on every colour pick, and the agent
+/// re-applies the saved colour on device arrival.
+async fn set_color_per_key_v2(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> Result<(), WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let feature = open_feature::<PerKeyLightingFeature>(&mut device).await?;
+
+    let zones = present_zones(&feature).await?;
+    if zones.is_empty() {
+        // The device announces 0x8081 but claims no zones, so there is nothing
+        // to paint — and that won't change on retry. Reported as unsupported so
+        // `Auto` falls through to the 0x8080 stream.
+        debug!(index, "0x8081 reported no present zones");
+        return Err(WriteError::FeatureUnsupported {
+            feature_hex: PerKeyLightingFeature::ID,
+        });
+    }
+
+    let color = Rgb {
+        red: r,
+        green: g,
+        blue: b,
+    };
+    // One request carries at most MAX_SINGLE_VALUE_ZONES ids and silently
+    // ignores the rest, so the chunking is the caller's job.
+    for chunk in zones.chunks(MAX_SINGLE_VALUE_ZONES) {
+        feature
+            .set_rgb_zones_single_value(color, chunk)
+            .await
+            .map_err(classify_per_key_v2_error)?;
+    }
+    feature
+        .frame_end(FramePersistence::Volatile, 0, 0)
+        .await
+        .map_err(classify_per_key_v2_error)?;
+
+    debug!(
+        index,
+        zone_count = zones.len(),
+        r,
+        g,
+        b,
+        "set keyboard colour via typed 0x8081"
+    );
+    Ok(())
+}
+
+/// Every zone id `0x8081` reports as present, read across all three presence
+/// pages.
+///
+/// Ids `0` and `0xff` are end-of-list sentinels the feature rejects, so they
+/// are skipped even if a device sets their bits.
+async fn present_zones(feature: &PerKeyLightingFeature) -> Result<Vec<u8>, WriteError> {
+    let mut zones = Vec::new();
+    for (page, base) in [
+        (ZonePresencePage::Zones0To111, 0u16),
+        (ZonePresencePage::Zones112To223, 112),
+        (ZonePresencePage::Zones224To255, 224),
+    ] {
+        let bitfield = feature
+            .get_rgb_zone_presence(page)
+            .await
+            .map_err(classify_per_key_v2_error)?;
+        collect_present_zones(base, &bitfield, &mut zones);
+    }
+    Ok(zones)
+}
+
+/// Appends the zone ids whose presence bit is set in `bitfield`, a 112-bit
+/// field covering ids `base..base + 112` (bit `i` LSB-first within each byte).
+///
+/// The last page covers only 224..=255, so its high bits are padding; ids past
+/// 255 are skipped rather than wrapped. Ids `0` and `0xff` are the feature's
+/// end-of-list sentinels and are skipped even if a device sets their bits.
+pub(super) fn collect_present_zones(
+    base: u16,
+    bitfield: &[u8; ZONE_PRESENCE_PAGE_LEN],
+    zones: &mut Vec<u8>,
+) {
+    for (byte_index, byte) in bitfield.iter().enumerate() {
+        for bit in 0..8u16 {
+            if byte & (1 << bit) == 0 {
+                continue;
+            }
+            let Ok(offset) = u16::try_from(byte_index * 8) else {
+                continue;
+            };
+            let Ok(zone_id) = u8::try_from(base + offset + bit) else {
+                continue;
+            };
+            if !matches!(zone_id, 0 | 0xff) {
+                zones.push(zone_id);
+            }
+        }
+    }
+}
+
+/// Classify a HID++ error from the `PerKeyLighting2` functions.
+fn classify_per_key_v2_error(error: hidpp::protocol::v20::Hidpp20Error) -> WriteError {
+    classify_hidpp_error(error, HidppOperation::Lighting, PerKeyLightingFeature::ID)
+}
+
 /// Set a solid colour via `PerKeyLighting` (`0x8080`): stream every key's colour
 /// in 64-byte `0x12` frames, then commit. `FeatureUnsupported` when the device
 /// exposes no `0x8080`.
-async fn set_color_per_key(route: &DeviceRoute, r: u8, g: u8, b: u8) -> Result<(), WriteError> {
-    let device_index = route.device_index();
-    let feature_index = resolve_feature_index(route, PER_KEY_LIGHTING_FEATURE)
+async fn set_color_per_key(
+    channel: &Arc<HidppChannel>,
+    device_index: u8,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> Result<(), WriteError> {
+    let feature_index = resolve_feature_index(channel, device_index, PER_KEY_LIGHTING_FEATURE)
         .await?
         .ok_or(WriteError::FeatureUnsupported {
             feature_hex: PER_KEY_LIGHTING_FEATURE,
         })?;
 
-    let Some(mut writer) = crate::transport::open_route_writer(route).await? else {
-        return Err(WriteError::DeviceNotFound);
-    };
+    for report in per_key_reports(device_index, feature_index, r, g, b) {
+        let written = channel
+            .write_raw_report(&report)
+            .await
+            .map_err(classify_raw_lighting_error)?;
+        if written != report.len() {
+            return Err(WriteError::Hidpp(format!(
+                "raw lighting report wrote {written} of {} bytes",
+                report.len()
+            )));
+        }
+    }
+    debug!(
+        device_index,
+        feature_index, r, g, b, "set keyboard colour via 0x8080"
+    );
+    Ok(())
+}
+
+pub(super) fn per_key_reports(
+    device_index: u8,
+    feature_index: u8,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> Vec<Vec<u8>> {
+    let mut reports = Vec::new();
     // Each 64-byte `0x12` "set group keys" packet carries up to 14
     // `(keyID, R, G, B)` entries; keyIDs are HID usage codes. Cover the whole
     // keyboard usage range (incl. modifiers at `0xe0..`) so every key lights,
@@ -226,23 +411,22 @@ async fn set_color_per_key(route: &DeviceRoute, r: u8, g: u8, b: u8) -> Result<(
             rep[off + 2] = g;
             rep[off + 3] = b;
         }
-        writer
-            .write_output_report(&rep)
-            .await
-            .map_err(WriteError::from)?;
+        reports.push(rep);
     }
     let mut commit = vec![0u8; 20];
     commit[0] = REPORT_LONG;
     commit[1] = device_index;
     commit[2] = feature_index;
     commit[3] = (FN_FRAME_END << 4) | SW_ID;
-    writer
-        .write_output_report(&commit)
-        .await
-        .map_err(WriteError::from)?;
-    debug!(
-        device_index,
-        feature_index, r, g, b, "set keyboard colour via 0x8080"
-    );
-    Ok(())
+    reports.push(commit);
+    reports
+}
+
+fn classify_raw_lighting_error(error: ChannelError) -> WriteError {
+    match error {
+        ChannelError::Timeout => WriteError::RequestTimedOut {
+            operation: HidppOperation::Lighting,
+        },
+        other => WriteError::Hidpp(format!("{other:?}")),
+    }
 }

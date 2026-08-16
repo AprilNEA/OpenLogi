@@ -15,8 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use openlogi_hook::MouseEvent;
-
-use crate::ipc::MonitorEvent;
+use openlogi_ipc::MonitorEvent;
 
 /// A shared [`EventMonitor`], threaded between the hook callback (writer) and
 /// the IPC server (reader/poller).
@@ -55,7 +54,7 @@ impl EventMonitor {
             return;
         }
         let mapped = match event {
-            MouseEvent::Button { id, pressed } => MonitorEvent::Button {
+            MouseEvent::Button { id, pressed, .. } => MonitorEvent::Button {
                 button: id.to_string(),
                 pressed: *pressed,
             },
@@ -68,7 +67,9 @@ impl EventMonitor {
             MouseEvent::CaptureInterrupted => MonitorEvent::CaptureInterrupted,
             MouseEvent::Moved { .. } => return,
         };
-        if let Ok(mut buf) = self.buf.lock() {
+        // `try_lock` only — the freeze-sensitive hook callback must never block
+        // on the monitor buffer (a contended `lock` stalls every pointer event).
+        if let Ok(mut buf) = self.buf.try_lock() {
             if buf.len() == CAPACITY {
                 buf.pop_front();
             }
@@ -137,6 +138,7 @@ mod tests {
         m.record(&MouseEvent::Button {
             id: ButtonId::Back,
             pressed: true,
+            device: None,
         });
         assert!(!m.enabled());
 
@@ -152,6 +154,7 @@ mod tests {
         m.record(&MouseEvent::Button {
             id: ButtonId::Forward,
             pressed: false,
+            device: None,
         });
         assert_eq!(
             m.poll(),

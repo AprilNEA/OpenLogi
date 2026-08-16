@@ -18,11 +18,11 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use openlogi_agent_core::ipc::{FoundDevice, PairingCommandError, PairingUpdate};
 use openlogi_agent_core::orchestrator::SharedRuntime;
-use openlogi_agent_core::receiver_access::PairingReceiverLease;
+use openlogi_agent_core::receiver_access::{ExclusiveAccessReason, ExclusiveReceiverLease};
 use openlogi_agent_core::watchers::pairing::{self, Control};
 use openlogi_hid::{DiscoveredDevice, PairingEvent, ReceiverSelector};
+use openlogi_ipc::{FoundDevice, PairingCommandError, PairingUpdate};
 use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
 
@@ -36,7 +36,7 @@ const RECEIVER_LEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Address-keyed cache of the full discovered devices, so the GUI can pair by
 /// address without round-tripping the non-serializable `DiscoveredDevice`.
 type DeviceCache = Arc<StdMutex<HashMap<[u8; 6], DiscoveredDevice>>>;
-type ReceiverLeaseSlot = Arc<StdMutex<Option<PairingReceiverLease>>>;
+type ReceiverLeaseSlot = Arc<StdMutex<Option<ExclusiveReceiverLease>>>;
 
 /// Owns the pairing watcher and translates its event stream for the IPC layer.
 pub struct PairingManager {
@@ -96,7 +96,9 @@ impl PairingManager {
         }
         let Ok(receiver_lease) = tokio::time::timeout(
             RECEIVER_LEASE_TIMEOUT,
-            self.shared.receiver_access.acquire_for_pairing(),
+            self.shared
+                .receiver_access
+                .acquire_exclusive(ExclusiveAccessReason::Pairing),
         )
         .await
         else {
@@ -159,7 +161,7 @@ impl PairingManager {
 
 fn with_receiver_lease_slot<T>(
     receiver_lease: &ReceiverLeaseSlot,
-    f: impl FnOnce(&mut Option<PairingReceiverLease>) -> T,
+    f: impl FnOnce(&mut Option<ExclusiveReceiverLease>) -> T,
 ) -> T {
     match receiver_lease.lock() {
         Ok(mut slot) => f(&mut slot),
@@ -256,21 +258,26 @@ async fn translate(
 mod tests {
     use super::*;
 
-    use std::collections::BTreeMap;
     use std::sync::RwLock;
 
-    use openlogi_agent_core::DpiCycleState;
+    use openlogi_agent_core::DpiCycles;
     use openlogi_agent_core::hook_runtime::HookMaps;
     use openlogi_agent_core::receiver_access::ReceiverAccess;
 
     fn shared_runtime() -> SharedRuntime {
         SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
-            gesture_bindings: Arc::new(RwLock::new(BTreeMap::new())),
-            dpi_cycle: Arc::new(RwLock::new(DpiCycleState::default())),
-            thumbwheel_sensitivity: Arc::new(0.into()),
+            keyboard_bindings: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
+            dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
+            capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),
+            channel_registry: openlogi_hid::ChannelRegistry::default(),
+            channel_pool: openlogi_hid::ChannelPool::default(),
+            keyboard_spec: Arc::new(RwLock::new(None)),
+            keyboard_channel: Arc::new(RwLock::new(None)),
+            capture_rearm_generation: Arc::new(0.into()),
             receiver_access: ReceiverAccess::default(),
+            host_switch_links: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -296,12 +303,12 @@ mod tests {
 
         assert_eq!(result, Err(PairingCommandError::WatcherUnavailable));
         assert_eq!(manager.sessions.load(Ordering::Acquire), 0);
-        assert!(!manager.shared.receiver_access.pairing_requested());
+        assert!(!manager.shared.receiver_access.exclusive_requested());
         assert!(
             manager
                 .shared
                 .receiver_access
-                .try_acquire_for_capture()
+                .try_acquire_for_session()
                 .is_some()
         );
     }
@@ -314,18 +321,31 @@ mod tests {
         let result = manager.cancel();
 
         assert_eq!(result, Ok(()));
-        assert!(ctrl_rx.try_recv().is_err());
+        let sent = ctrl_rx.try_recv();
+        assert!(
+            sent.is_err(),
+            "cancel without an active session must not reach the watcher, got {sent:?}"
+        );
     }
 
     #[tokio::test]
     async fn release_receiver_lease_recovers_poisoned_slot() {
         let (ctrl_tx, _ctrl_rx) = mpsc::unbounded_channel();
         let manager = manager_with_ctrl(ctrl_tx);
-        let receiver_lease = manager.shared.receiver_access.acquire_for_pairing().await;
+        let receiver_lease = manager
+            .shared
+            .receiver_access
+            .acquire_exclusive(ExclusiveAccessReason::Pairing)
+            .await;
         with_receiver_lease_slot(&manager.receiver_lease, |slot| {
             *slot = Some(receiver_lease);
         });
-        assert!(manager.shared.receiver_access.pairing_requested());
+        assert!(
+            manager
+                .shared
+                .receiver_access
+                .requested(ExclusiveAccessReason::Pairing)
+        );
 
         let slot = Arc::clone(&manager.receiver_lease);
         let _ = std::panic::catch_unwind(move || {
@@ -337,12 +357,12 @@ mod tests {
 
         manager.release_receiver_lease();
 
-        assert!(!manager.shared.receiver_access.pairing_requested());
+        assert!(!manager.shared.receiver_access.exclusive_requested());
         assert!(
             manager
                 .shared
                 .receiver_access
-                .try_acquire_for_capture()
+                .try_acquire_for_session()
                 .is_some()
         );
     }
@@ -375,6 +395,10 @@ mod tests {
             panic!("test device cache lock should not be poisoned");
         };
         assert_eq!(devices.len(), 1);
-        assert!(ctrl_rx.try_recv().is_err());
+        let sent = ctrl_rx.try_recv();
+        assert!(
+            sent.is_err(),
+            "an overlapping start must not reach the watcher, got {sent:?}"
+        );
     }
 }

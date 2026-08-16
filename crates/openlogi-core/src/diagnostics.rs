@@ -411,7 +411,9 @@ fn kind_label(kind: DeviceKind) -> &'static str {
         DeviceKind::Gamepad => "gamepad",
         DeviceKind::Joystick => "joystick",
         DeviceKind::Headset => "headset",
+        DeviceKind::Camera => "camera",
         DeviceKind::Unknown => "unknown",
+        DeviceKind::Light => "light",
     }
 }
 
@@ -594,6 +596,9 @@ mod tests {
                         lighting: false,
                         scroll_inversion: false,
                         hires_wheel: true,
+                        thumbwheel: false,
+                        haptic_feedback: false,
+                        haptic_panel: false,
                     }),
                     dpi: Some("1600 dpi (range 200–8000, 5 steps)".to_string()),
                     config_key: "4082d".to_string(),

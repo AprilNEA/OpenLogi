@@ -429,7 +429,8 @@ fn resolved_colors(cfg: &Rc<ThemeConfig>) -> ThemeColor {
     temp.colors
 }
 
-/// One theme card: a mini preview, the name, and a light/dark badge.
+/// One theme card: a mini preview, the name, and a light/dark badge. Its low
+/// resting shadow strengthens on hover and settles on press.
 /// The three resolved colours a theme card previews. Small + `Copy` so it can
 /// be collected and passed by value.
 #[derive(Clone, Copy)]
@@ -458,10 +459,17 @@ fn theme_card(
         .border_1()
         .border_color(if selected { swatch.primary } else { pal.border })
         .bg(pal.surface)
+        .shadow_xs()
         .cursor_pointer()
-        .when(!selected, |this| {
-            this.hover(|h| h.border_color(pal.text_muted))
+        .hover(move |style| {
+            let style = style.shadow_sm();
+            if selected {
+                style
+            } else {
+                style.border_color(pal.text_muted)
+            }
         })
+        .active(gpui::Styled::shadow_2xs)
         .child(
             v_flex()
                 .h(px(54.))

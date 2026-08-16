@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
-use hidpp::{device::Device, feature::CreatableFeature, feature::feature_set::FeatureSetFeature};
+use hidpp::{
+    device::Device, feature::CreatableFeature, feature::battery_status::BatteryStatusFeature,
+    feature::feature_set::FeatureSetFeature, feature::unified_battery::UnifiedBatteryFeature,
+};
 
 use crate::reprog_controls::{self, CidFlags, CidInfo, ReprogControlsV4};
 use crate::route::DeviceRoute;
-use crate::write::{HidppOperation, WriteError, classify_hidpp_error, with_route};
+use crate::write::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 
 /// Snapshot of one HID++ feature exposed by a device: protocol ID +
 /// version. Returned by [`dump_features`] for diagnostics.
@@ -41,8 +44,9 @@ impl From<CidInfo> for ReprogControlEntry {
 
 /// Enumerate every HID++ feature the device on `route` reports — used by
 /// `openlogi diag features` to confirm which DPI / SmartShift / etc.
-/// feature IDs a given peripheral actually exposes (e.g. some mice use
-/// `0x2202 ExtendedAdjustableDpi` instead of `0x2201 AdjustableDpi`).
+/// feature IDs a given peripheral actually exposes (e.g. whether a mouse
+/// speaks `0x2201 AdjustableDpi`, `0x2202 ExtendedAdjustableDpi`, or both —
+/// `write::dpi` drives either).
 pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, WriteError> {
     let index = route.device_index();
     with_route(route, move |channel| async move {
@@ -116,6 +120,57 @@ pub async fn dump_reprog_controls(
             entries.push(control.into());
         }
         Ok(entries)
+    })
+    .await
+}
+
+/// Diagnostic read of the device's raw battery report — the unified `0x1004`
+/// fields, or the legacy `0x1000` `discharge_level`/`next_level`/`status`. For
+/// `openlogi diag battery`: surfaces exactly what the firmware reports so a
+/// claim like "MX2S shows 0% while charging" can be confirmed against the wire
+/// instead of guessed (the GUI only ever shows the mapped value).
+pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError> {
+    let index = route.device_index();
+    with_route(route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+
+        match open_feature::<UnifiedBatteryFeature>(&mut device).await {
+            Ok(feature) => {
+                let info = feature
+                    .get_battery_info()
+                    .await
+                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+                return Ok(format!(
+                    "0x1004 UnifiedBattery: percentage={} level={:?} status={:?}",
+                    info.charging_percentage, info.level, info.status
+                ));
+            }
+            Err(WriteError::FeatureUnsupported { .. }) => {}
+            Err(e) => return Err(e),
+        }
+
+        match open_feature::<BatteryStatusFeature>(&mut device).await {
+            Ok(feature) => {
+                let info = feature
+                    .get_battery_level_status()
+                    .await
+                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+                return Ok(format!(
+                    "0x1000 BatteryStatus: discharge_level={} next_level={} status={:?}",
+                    info.discharge_level, info.next_level, info.status
+                ));
+            }
+            Err(WriteError::FeatureUnsupported { .. }) => {}
+            Err(e) => return Err(e),
+        }
+
+        // Reached only when neither 0x1004 nor 0x1000 is present; report the
+        // preferred feature rather than implying 0x1000 was specifically absent.
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x1004,
+        })
     })
     .await
 }

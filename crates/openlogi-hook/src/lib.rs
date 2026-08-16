@@ -4,7 +4,7 @@
 //! |----------|---------------|
 //! | macOS    | `CGEventTap` (same primitive used by Logi Options+) |
 //! | Linux    | `evdev` grab + `uinput` re-injection |
-//! | Windows  | `WH_MOUSE_LL` low-level mouse hook |
+//! | Windows  | `WH_MOUSE_LL` low-level mouse hook (motion is edge-clamped) |
 //!
 //! # Usage
 //!
@@ -29,6 +29,18 @@ use std::cfg_select;
 
 pub use openlogi_core::binding::ButtonId;
 
+/// Logitech's USB/Bluetooth vendor id (`0x046D`).
+pub const LOGITECH_VENDOR_ID: u32 = 0x046d;
+
+/// Cursor position in the operating system's global screen coordinate space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CursorPosition {
+    /// Horizontal screen coordinate.
+    pub x: f64,
+    /// Vertical screen coordinate.
+    pub y: f64,
+}
+
 /// Best-effort identity for the physical device that produced an OS event.
 ///
 /// Platform hooks fill the stable fields they can read cheaply from the native
@@ -44,6 +56,82 @@ pub struct EventDevice {
     pub product_name: Option<String>,
 }
 
+impl EventDevice {
+    /// Whether this looks like a trackpad/touchpad (must never be remapped).
+    #[must_use]
+    pub fn is_trackpad_like(&self) -> bool {
+        self.product_name.as_deref().is_some_and(|n| {
+            let n = n.to_ascii_lowercase();
+            n.contains("trackpad") || n.contains("touchpad") || n.contains("touch pad")
+        })
+    }
+
+    /// Whether this is a Logitech product OpenLogi may remap buttons for.
+    #[must_use]
+    pub fn is_logitech(&self) -> bool {
+        if self.vendor_id == Some(LOGITECH_VENDOR_ID) {
+            return true;
+        }
+        self.product_name.as_deref().is_some_and(|n| {
+            let n = n.to_ascii_lowercase();
+            n.contains("logitech") || n.starts_with("logi ")
+        })
+    }
+}
+
+/// Whether the OS hook may suppress/remap a button event from this source.
+///
+/// Fail-closed on macOS-style attribution: only a known Logitech non-trackpad
+/// source is remappable. Unknown / non-Logitech / trackpad sources always pass
+/// through so a wedged remap policy can never brick the system pointer.
+#[must_use]
+pub fn source_is_remappable(device: Option<&EventDevice>) -> bool {
+    match device {
+        Some(d) if d.is_trackpad_like() => false,
+        Some(d) => d.is_logitech(),
+        None => false,
+    }
+}
+
+/// Which modifier keys were held when a key event fired. Mirrors the
+/// detectable macOS modifier flags. Note `Fn` is deliberately absent — it is
+/// firmware-internal and never reported on non-function-row keys (see the
+/// function-key-remapper spec, Appendix A).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent modifier flags from OS event bits"
+)]
+pub struct KeyModifiers {
+    pub shift: bool,
+    pub control: bool,
+    pub option: bool,
+    pub command: bool,
+}
+
+/// A keyboard event observed by the hook.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyEvent {
+    /// Platform virtual keycode (macOS: `kVK_*`, e.g. 122 = F1, 53 = Escape).
+    pub keycode: u16,
+    /// `true` = key down; `false` = key up.
+    pub pressed: bool,
+    /// Which modifiers were held.
+    pub modifiers: KeyModifiers,
+}
+
+/// Anything the OS hook can observe. `Mouse` preserves the existing callback
+/// payload; `Key` is the keyboard path added by the function-key remapper.
+/// Wrapping both in a union means `Hook::start`'s callback widens once and
+/// stays stable as further event classes arrive.
+#[derive(Clone, Debug)]
+pub enum HookEvent {
+    /// Mouse button / scroll / move event.
+    Mouse(MouseEvent),
+    /// Keyboard event (function-key remapper path).
+    Key(KeyEvent),
+}
+
 /// An event captured at the OS layer.
 #[derive(Clone, Debug)]
 pub enum MouseEvent {
@@ -53,6 +141,9 @@ pub enum MouseEvent {
         id: ButtonId,
         /// `true` = button down; `false` = button up.
         pressed: bool,
+        /// Best-effort physical source. `None` when the platform cannot
+        /// attribute the event (Windows today) or it was synthetic.
+        device: Option<EventDevice>,
     },
     /// A scroll-wheel tick (or continuous momentum scroll).
     Scroll {
@@ -250,18 +341,20 @@ impl Drop for Hook {
 }
 
 impl Hook {
-    /// Install the mouse hook and start delivering events to `cb`.
+    /// Install the input hook and start delivering events to `cb`.
     ///
-    /// The callback runs on a private background thread for every mouse button
-    /// or scroll event. It must return [`EventDisposition`] quickly — blocking
-    /// it stalls input delivery system-wide.
+    /// The callback runs on a private background thread for every mouse
+    /// button, scroll, or (macOS / Windows) keyboard event. It must return
+    /// [`EventDisposition`] quickly — blocking it stalls input delivery
+    /// system-wide.
     ///
     /// On macOS, returns [`HookError::AccessibilityDenied`] when Accessibility
     /// permission has not been granted. On Linux, returns
-    /// [`HookError::NoDeviceFound`] when no mouse device is accessible. On
-    /// Windows, installs a `WH_MOUSE_LL` low-level mouse hook.
+    /// [`HookError::NoDeviceFound`] when no mouse device is accessible (key
+    /// events are not yet captured there). On Windows, installs `WH_MOUSE_LL`
+    /// and `WH_KEYBOARD_LL` low-level hooks.
     pub fn start(
-        cb: impl Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static,
+        cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
     ) -> Result<Self, HookError> {
         cfg_select! {
             target_os = "macos" => {
@@ -383,6 +476,20 @@ pub fn frontmost_bundle_id() -> Option<String> {
         target_os = "macos" => { macos::frontmost_bundle_id() }
         target_os = "linux" => { linux::frontmost_bundle_id() }
         target_os = "windows" => { windows::frontmost_process_path() }
+        _ => { None }
+    }
+}
+
+/// Return the current global cursor position without installing an input hook.
+///
+/// Returns `None` on unsupported platforms and on native Wayland, where the
+/// compositor deliberately does not expose global pointer coordinates.
+#[must_use]
+pub fn cursor_position() -> Option<CursorPosition> {
+    cfg_select! {
+        target_os = "macos" => { macos::cursor_position() }
+        target_os = "linux" => { linux::cursor_position() }
+        target_os = "windows" => { windows::cursor_position() }
         _ => { None }
     }
 }

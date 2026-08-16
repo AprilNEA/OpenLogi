@@ -26,6 +26,7 @@ fn mouse_event_clone_and_debug() {
         MouseEvent::Button {
             id: ButtonId::Back,
             pressed: true,
+            device: None,
         },
         MouseEvent::Scroll {
             delta_x: 1.0,
@@ -51,6 +52,40 @@ fn event_disposition_equality() {
     assert_eq!(EventDisposition::PassThrough, EventDisposition::PassThrough);
     assert_eq!(EventDisposition::Suppress, EventDisposition::Suppress);
     assert_ne!(EventDisposition::PassThrough, EventDisposition::Suppress);
+}
+
+/// Remap policy is fail-closed: only known Logitech non-trackpad sources.
+#[test]
+fn source_is_remappable_policy() {
+    assert!(!source_is_remappable(None));
+
+    let trackpad = EventDevice {
+        vendor_id: Some(0),
+        product_id: None,
+        product_name: Some("Apple Internal Keyboard / Trackpad".into()),
+    };
+    assert!(!source_is_remappable(Some(&trackpad)));
+
+    let apple_mouse = EventDevice {
+        vendor_id: Some(0x05ac),
+        product_id: Some(0x030d),
+        product_name: Some("Magic Mouse".into()),
+    };
+    assert!(!source_is_remappable(Some(&apple_mouse)));
+
+    let logi = EventDevice {
+        vendor_id: Some(LOGITECH_VENDOR_ID),
+        product_id: Some(0xb034),
+        product_name: Some("MX Master 3S".into()),
+    };
+    assert!(source_is_remappable(Some(&logi)));
+
+    let logi_by_name = EventDevice {
+        vendor_id: None,
+        product_id: None,
+        product_name: Some("Logitech USB Receiver".into()),
+    };
+    assert!(source_is_remappable(Some(&logi_by_name)));
 }
 
 /// On unsupported targets (not macOS, Linux, or Windows), `Hook::start`

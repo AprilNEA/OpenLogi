@@ -14,11 +14,19 @@ publish = false
 name = "openlogi-agent"
 path = "src/main.rs"
 
+# Hardware-free mock agent for GUI development: serves a scripted inventory over
+# the real IPC socket. Dev-only — xtask bundles `openlogi-agent` by exact path,
+# so this binary never ships.
+[[bin]]
+name = "openlogi-agent-mock"
+path = "src/bin/mock_agent.rs"
+
 [dependencies]
 openlogi-agent-core = { path = "../openlogi-agent-core" }
 openlogi-core = { path = "../openlogi-core" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
+openlogi-ipc = { path = "../openlogi-ipc" }
 tarpc = { workspace = true }
 interprocess = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
@@ -39,9 +47,9 @@ embed-resource = "3.0.9"
 # the GUI's so the resolve doesn't move the gpui Cargo.lock pin.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication"] }
-objc2-foundation = { workspace = true, features = ["NSString", "NSData", "NSArray"] }
-plist = "1.9.0"
+objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication", "NSWorkspace"] }
+objc2-foundation = { workspace = true, features = ["NSString", "NSData", "NSArray", "NSNotification"] }
+plist = "1.10.0"
 
 # Autostart via the HKCU Run key (launch_agent.rs); winreg also answers the
 # taskbar light/dark theme read for the tray glyph (tray_windows.rs). The

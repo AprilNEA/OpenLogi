@@ -3,10 +3,13 @@ set -eu
 
 # Reload udev rules and wait for the new uaccess tags to be applied.
 # udevadm trigger is asynchronous — settle ensures the tags are in place
-# before the script exits so the agent can open /dev/hidraw* immediately.
+# before the script exits so the agent can open /dev/hidraw* and the mouse's
+# /dev/input/event* node immediately, even for a device connected before the
+# install.
 if command -v udevadm > /dev/null 2>&1; then
     udevadm control --reload-rules
     udevadm trigger --subsystem-match=hidraw
+    udevadm trigger --subsystem-match=input
     udevadm trigger --subsystem-match=misc --attr-match=name=uinput 2>/dev/null || true
     udevadm settle 2>/dev/null || true
 fi

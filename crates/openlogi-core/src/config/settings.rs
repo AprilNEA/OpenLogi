@@ -1,7 +1,8 @@
 //! App-wide and per-device *value* settings: [`AppSettings`], [`Appearance`],
 //! [`Lighting`], [`ScrollResolution`], [`WheelMode`] / [`SmartShift`], and
-//! [`GestureOwner`], plus
-//! their serde `default_*` / `deserialize_*` helpers.
+//! the legacy [`GestureOwner`], plus their serde helpers.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +50,7 @@ pub enum AssetSourcePreference {
 /// All fields are `#[serde(default)]` so adding a new one is backward
 /// compatible — old config files just keep the default for the new field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "independent on/off user preferences, not a state machine"
@@ -89,6 +91,21 @@ pub struct AppSettings {
     /// while a window is open). Ignored on Linux.
     #[serde(default = "default_true")]
     pub show_in_menu_bar: bool,
+    /// Whether the agent installs the OS-level mouse hook (CGEventTap /
+    /// exclusive `evdev` grab / `WH_MOUSE_LL`) that intercepts mouse events
+    /// for button remapping. `true` (default) keeps remapping active;
+    /// `false` is an escape hatch that leaves every input device untouched
+    /// (on Linux: no exclusive grabs at all; on macOS the agent also skips
+    /// the startup Accessibility prompt). HID++-side features — DPI,
+    /// SmartShift, the gesture button, the thumb wheel — are unaffected.
+    /// Takes effect on agent restart.
+    #[serde(default = "default_true")]
+    pub capture_mouse_events: bool,
+    /// Whether the GUI automatically downloads device images from
+    /// `assets.openlogi.org` when a device appears. `true` (default) keeps
+    /// the current behavior; `false` makes no asset network requests at all
+    /// (the app falls back to bundled art and the synthetic silhouette). A
+    /// manual "Refresh assets" in Settings still fetches on demand regardless.
     /// Whether the GUI automatically downloads device images from the selected
     /// source when a device appears. `true` (default) keeps the current behavior;
     /// `false` makes no asset network requests at all (the app falls back to
@@ -114,7 +131,10 @@ pub struct AppSettings {
     /// custom wheel action needs to fire. [`DEFAULT_THUMBWHEEL_SENSITIVITY`]
     /// (the out-of-the-box value) means 1× scroll speed; the wheel is only
     /// diverted from native scrolling once this leaves the default.
-    #[serde(default = "default_thumbwheel_sensitivity")]
+    #[serde(
+        default = "default_thumbwheel_sensitivity",
+        deserialize_with = "deserialize_thumbwheel_sensitivity"
+    )]
     pub thumbwheel_sensitivity: i32,
     /// Light/dark appearance preference. Defaults to following the OS.
     #[serde(default)]
@@ -143,6 +163,12 @@ pub const MIN_THUMBWHEEL_SENSITIVITY: i32 = 1;
 /// Highest selectable [`AppSettings::thumbwheel_sensitivity`].
 pub const MAX_THUMBWHEEL_SENSITIVITY: i32 = 100;
 
+/// Clamp a UI-provided thumb-wheel sensitivity to the persisted range.
+#[must_use]
+pub fn clamp_thumbwheel_sensitivity(value: i32) -> i32 {
+    value.clamp(MIN_THUMBWHEEL_SENSITIVITY, MAX_THUMBWHEEL_SENSITIVITY)
+}
+
 impl AppSettings {
     /// `skip_serializing_if` helper: true when nothing diverges from the
     /// default, so empty settings don't clutter `config.toml`.
@@ -160,6 +186,7 @@ impl Default for AppSettings {
             auto_install_updates: false,
             update_prompt_seen: false,
             show_in_menu_bar: true,
+            capture_mouse_events: true,
             auto_download_assets: true,
             asset_source: AssetSourcePreference::Automatic,
             language: None,
@@ -172,8 +199,10 @@ impl Default for AppSettings {
     }
 }
 
-/// serde default for [`AppSettings::show_in_menu_bar`]: `true`, so the menu-bar
-/// icon is on out of the box and configs predating the field keep that behavior.
+/// serde default for the on-by-default [`AppSettings`] toggles
+/// ([`AppSettings::show_in_menu_bar`], [`AppSettings::capture_mouse_events`],
+/// [`AppSettings::auto_download_assets`]), so configs predating a field keep the
+/// out-of-the-box behavior.
 fn default_true() -> bool {
     true
 }
@@ -184,33 +213,134 @@ const fn default_thumbwheel_sensitivity() -> i32 {
     DEFAULT_THUMBWHEEL_SENSITIVITY
 }
 
+pub(super) fn deserialize_thumbwheel_sensitivity<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = i32::deserialize(deserializer)?;
+    if (MIN_THUMBWHEEL_SENSITIVITY..=MAX_THUMBWHEEL_SENSITIVITY).contains(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format_args!(
+            "thumbwheel sensitivity must be between {MIN_THUMBWHEEL_SENSITIVITY} and {MAX_THUMBWHEEL_SENSITIVITY}, got {value}"
+        )))
+    }
+}
+
+pub(super) fn deserialize_optional_thumbwheel_sensitivity<'de, D>(
+    deserializer: D,
+) -> Result<Option<i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<i32>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            if (MIN_THUMBWHEEL_SENSITIVITY..=MAX_THUMBWHEEL_SENSITIVITY).contains(&value) {
+                Ok(value)
+            } else {
+                Err(serde::de::Error::custom(format_args!(
+                    "thumbwheel sensitivity must be between {MIN_THUMBWHEEL_SENSITIVITY} and {MAX_THUMBWHEEL_SENSITIVITY}, got {value}"
+                )))
+            }
+        })
+        .transpose()
+}
+
 /// Per-device RGB lighting: a single static color, brightness, and on/off.
 /// Deliberately basic — per-key effects are a later addition.
 ///
 /// Crosses the agent↔GUI IPC (`set_lighting`), so field order is wire format —
 /// changes require a `PROTOCOL_VERSION` bump (guarded by
-/// `openlogi-agent-core/tests/wire_format.rs`).
+/// `openlogi-ipc/tests/wire_format.rs`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Lighting {
     /// Master on/off for the device's lighting. The color and brightness
     /// persist while disabled, so re-enabling restores the previous look.
     #[serde(default = "default_lighting_enabled")]
     pub enabled: bool,
     /// Static color as 6 hex digits `"RRGGBB"` (no leading `#`). A value
-    /// that does not parse falls back to white on load — the same per-field
-    /// tolerance as `brightness`, because failing the whole load would
-    /// discard the user's entire config (see the `load_or_default` callers).
+    /// that does not parse is rejected with its TOML location.
     #[serde(
         default = "default_lighting_color",
         deserialize_with = "deserialize_lighting_color"
     )]
     pub color: Rgb,
-    /// Brightness percent, clamped to 0–100 on load.
+    /// Brightness percent (`0`–`100`).
     #[serde(
         default = "default_lighting_brightness",
         deserialize_with = "deserialize_brightness"
     )]
     pub brightness: u8,
+}
+
+/// Persisted settings for a standalone light such as Logitech Litra.
+///
+/// Brightness is stored as a normalized percentage so the same config shape
+/// works for lumen-based, percentage-based, and stepped light protocols. The
+/// selected driver maps it to its native range when applying the setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LightSettings {
+    /// Whether the light should be on.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Link power to aggregate host-camera activity. This is a policy setting:
+    /// brightness, colour temperature, and the persisted manual power choice
+    /// remain independent from the transient effective power state.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_camera: bool,
+    /// Brightness across the device's advertised range.
+    #[serde(
+        default = "default_light_brightness",
+        deserialize_with = "deserialize_brightness"
+    )]
+    pub brightness_percent: u8,
+    /// Desired colour temperature, when the device supports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature_kelvin: Option<u16>,
+    /// Optional colour for a driver that exposes RGB controls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Rgb>,
+}
+
+const fn default_light_brightness() -> u8 {
+    100
+}
+
+impl Default for LightSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_camera: false,
+            brightness_percent: default_light_brightness(),
+            temperature_kelvin: None,
+            color: None,
+        }
+    }
+}
+
+impl LightSettings {
+    /// Create settings with a normalized brightness percentage.
+    #[must_use]
+    pub fn new(enabled: bool, brightness_percent: u8, temperature_kelvin: Option<u16>) -> Self {
+        Self {
+            enabled,
+            auto_camera: false,
+            brightness_percent: brightness_percent.min(100),
+            temperature_kelvin,
+            color: None,
+        }
+    }
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Default for Lighting {
@@ -235,30 +365,45 @@ fn default_lighting_brightness() -> u8 {
     100
 }
 
-/// Clamp a deserialized brightness into the UI's `0..=100` range, so a
-/// hand-edited `config.toml` can't feed out-of-range values into the scaling
-/// math (which assumes `brightness <= 100`).
+/// Reject brightness outside the UI and hardware contract.
 fn deserialize_brightness<'de, D>(deserializer: D) -> Result<u8, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(u8::deserialize(deserializer)?.min(100))
+    let value = u8::deserialize(deserializer)?;
+    if value <= 100 {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format_args!(
+            "brightness must be between 0 and 100, got {value}"
+        )))
+    }
 }
 
-/// Accept the optional `#` prefix supported by older releases, then fall back
-/// to white when the configured color does not parse, mirroring the `brightness`
-/// clamp above instead of failing the whole config load.
+/// Accept the optional `#` prefix supported by older releases, then parse the
+/// validated RGB value.
 fn deserialize_lighting_color<'de, D>(deserializer: D) -> Result<Rgb, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let color = String::deserialize(deserializer)?;
-    Ok(color
+    color
         .strip_prefix('#')
         .unwrap_or(color.as_str())
         .parse()
-        .unwrap_or(Rgb::WHITE))
+        .map_err(serde::de::Error::custom)
 }
+
+/// Per-webcam UVC controls, keyed by control name (`brightness`, `focus`,
+/// `focus_auto`, …). Each value is the raw device unit (its scale comes from
+/// the camera's own min/max); auto toggles store 0/1. Persisted so values
+/// survive an unplug or reboot — the GUI re-applies them over USB when the
+/// camera is next viewed, since the hardware only retains them until it loses
+/// power. Serializes to the same TOML table the earlier fixed-field struct
+/// wrote, so existing saved controls load unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CameraControls(pub BTreeMap<String, i32>);
 
 /// Vertical wheel reporting resolution for HID++ `0x2121 HiResWheel`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,38 +428,29 @@ pub enum WheelMode {
 }
 
 /// SmartShift auto-disengage out-of-box default (`16` ≈ 4 turn/s, per the
-/// x2110 / x2111 spec). The sensitivity slider's default and the heal target
-/// for a corrupt persisted threshold.
+/// x2110 / x2111 spec). The sensitivity slider's default.
 pub const SMARTSHIFT_AUTO_DISENGAGE_DEFAULT: u8 = 16;
 
 /// Smallest auto-disengage threshold OpenLogi will store or apply (`8` ≈
 /// 2 turn/s). Below this the ratchet releases into free-spin at everyday scroll
 /// speeds, leaving the wheel "stuck" spinning (#317); `0` is also the firmware
 /// "do not change" sentinel that must never be stored as a real value. A
-/// persisted threshold below this floor is a corrupt artifact and is healed to
-/// [`SMARTSHIFT_AUTO_DISENGAGE_DEFAULT`] on load.
+/// persisted threshold below this floor is rejected on load.
 pub const SMARTSHIFT_MIN_AUTO_DISENGAGE: u8 = 8;
 
-/// Heal a persisted auto-disengage threshold on load: anything below
-/// [`SMARTSHIFT_MIN_AUTO_DISENGAGE`] (including the `0` sentinel) becomes the
-/// default. `0xFF` (permanent ratchet) and every real threshold at or above the
-/// floor pass through unchanged.
+/// Reject a persisted auto-disengage threshold below the supported floor.
 fn deserialize_auto_disengage<'de, D>(deserializer: D) -> Result<u8, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let value = u8::deserialize(deserializer)?;
-    Ok(if value < SMARTSHIFT_MIN_AUTO_DISENGAGE {
-        tracing::warn!(
-            value,
-            min = SMARTSHIFT_MIN_AUTO_DISENGAGE,
-            default = SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
-            "healed persisted SmartShift auto-disengage threshold below supported floor"
-        );
-        SMARTSHIFT_AUTO_DISENGAGE_DEFAULT
+    if value >= SMARTSHIFT_MIN_AUTO_DISENGAGE {
+        Ok(value)
     } else {
-        value
-    })
+        Err(serde::de::Error::custom(format_args!(
+            "SmartShift auto_disengage must be between {SMARTSHIFT_MIN_AUTO_DISENGAGE} and 255, got {value}"
+        )))
+    }
 }
 
 /// Per-device SmartShift wheel configuration, persisted so the agent can
@@ -326,53 +462,37 @@ where
 /// `config.toml` on reload), so it is free to evolve without a
 /// `PROTOCOL_VERSION` bump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SmartShift {
     /// The persisted wheel mode, re-applied to device RAM on reconnect.
     pub mode: WheelMode,
     /// SmartShift auto-disengage threshold (`0x08`–`0xFE`, in 0.25 turn/s
     /// steps), or `0xFF` for a permanently engaged ratchet. A persisted value
-    /// below [`SMARTSHIFT_MIN_AUTO_DISENGAGE`] is healed to the default on load.
+    /// below [`SMARTSHIFT_MIN_AUTO_DISENGAGE`] is rejected on load.
     #[serde(deserialize_with = "deserialize_auto_disengage")]
     pub auto_disengage: u8,
-    /// Tunable-torque force percentage (`1`–`100`), `0` when the device
-    /// doesn't support tunable torque.
+    /// Firmware tunable-torque level (`1`–`255`), `0` when the device does not
+    /// expose tunable torque. HID++ defines the full non-zero byte range.
     pub tunable_torque: u8,
 }
 
-/// Which control owns a device's single gesture role.
-///
-/// Stored explicitly — rather than inferred from which button happens to carry a
-/// [`Binding::Gesture`](crate::binding::Binding::Gesture) — so switching the
-/// gesture button never has to collapse a button's gesture map to encode the
-/// choice: every gesture-capable button keeps its full direction map, and only
-/// the owner is dispatched. Serialized as a bare string (`"Off"` or a
-/// [`ButtonId`] name) so it stays a TOML scalar.
+/// The v3-and-older owner-lock choice: which control owned a device's single
+/// gesture role. Deserialize-only since v4 — the load migration
+/// (`Config::migrate_owner_locked_gestures`) consumes it and rewrites the
+/// binding shapes, which are the whole truth from then on. Read as a bare TOML
+/// scalar (`"Off"` or a [`ButtonId`] name).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GestureOwner {
-    /// Gestures are explicitly turned off for this device.
+pub(super) enum GestureOwner {
+    /// Gestures were explicitly turned off for this device.
     Off,
-    /// The named button owns the gesture role.
+    /// The named button owned the gesture role.
     Button(ButtonId),
 }
 
-impl Serialize for GestureOwner {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            // "Off" can't collide with a ButtonId variant name (all CamelCase
-            // control names), so the string space is unambiguous.
-            GestureOwner::Off => serializer.serialize_str("Off"),
-            GestureOwner::Button(id) => id.serialize(serializer),
-        }
-    }
-}
-
-/// Lenient field deserializer for `RawDeviceConfig::gesture_owner`
-/// (`crate::config::device`). An unrecognized or miscased value (`"back"`, a
-/// typo, a future-version button name) is treated as absent — i.e. "infer the
-/// owner" — rather than failing the whole-document parse and reverting *every*
-/// device's settings to defaults. Mirrors [`deserialize_brightness`], which
-/// clamps a bad value instead of erroring; a hand-editable config should
-/// degrade one field, not the document.
+/// Lenient legacy deserializer for v3-and-older `gesture_owner`. Those releases
+/// already treated an unknown value as absent and inferred the owner; preserving
+/// that behavior keeps migration compatible. Current schemas reject the field
+/// before device deserialization.
 pub(super) fn deserialize_gesture_owner<'de, D>(
     deserializer: D,
 ) -> Result<Option<GestureOwner>, D::Error>
@@ -398,28 +518,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn low_auto_disengage_heals_to_default_on_load() {
-        // A pre-#317 config could persist a runaway-low threshold (or the `0`
-        // sentinel); loading it must heal to the default so reapply doesn't
-        // re-program free-spin-on-any-scroll into the device — while a real
-        // threshold and the `0xFF` permanent-ratchet value pass through.
-        let heal = |v: u8| {
-            let body = format!("mode = \"ratchet\"\nauto_disengage = {v}\ntunable_torque = 50\n");
+    fn smartshift_rejects_values_outside_the_persisted_contract() {
+        let parse = |auto_disengage: u8, tunable_torque: u8| {
+            let body = format!(
+                "mode = \"ratchet\"\nauto_disengage = {auto_disengage}\ntunable_torque = {tunable_torque}\n"
+            );
             toml::from_str::<SmartShift>(&body)
-                .expect("parse")
-                .auto_disengage
         };
-        assert_eq!(heal(0), SMARTSHIFT_AUTO_DISENGAGE_DEFAULT);
-        assert_eq!(heal(1), SMARTSHIFT_AUTO_DISENGAGE_DEFAULT);
-        assert_eq!(
-            heal(SMARTSHIFT_MIN_AUTO_DISENGAGE - 1),
-            SMARTSHIFT_AUTO_DISENGAGE_DEFAULT
-        );
-        assert_eq!(
-            heal(SMARTSHIFT_MIN_AUTO_DISENGAGE),
-            SMARTSHIFT_MIN_AUTO_DISENGAGE
-        );
-        assert_eq!(heal(16), 16);
-        assert_eq!(heal(0xff), 0xff);
+        parse(SMARTSHIFT_MIN_AUTO_DISENGAGE - 1, 50)
+            .expect_err("auto_disengage below the persisted minimum must be rejected");
+        parse(SMARTSHIFT_MIN_AUTO_DISENGAGE, 50).expect("the minimum itself is in contract");
+        parse(0xff, 0xff).expect("the top of both ranges is in contract");
     }
 }

@@ -1,10 +1,18 @@
 //! macOS `CGEventTap` implementation of the OS-level mouse hook.
+#![allow(
+    unsafe_code,
+    reason = "the event tap is built on Core Graphics / Core Foundation C APIs"
+)]
+
+mod watchdog;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use core_foundation::base::{CFTypeRef, TCFType as _};
 use core_foundation::number::CFNumber;
@@ -13,42 +21,41 @@ use core_foundation::runloop::{
 };
 use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::event::{
-    CGEvent, CGEventField, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
-    CGEventTapProxy, CGEventType, CallbackResult, EventField,
+    CGEvent, CGEventField, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions,
+    CGEventTapPlacement, CGEventTapProxy, CGEventType, CallbackResult, EventField,
 };
+use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use foreign_types_shared::ForeignType as _;
+use objc2_application_services::{AXIsProcessTrusted, AXIsProcessTrustedWithOptions};
 use tracing::{debug, error, warn};
 
 use crate::{
-    ButtonId, EventDevice, EventDisposition, EventTapInfo, HookError, MouseEvent, TapLocation,
+    ButtonId, CursorPosition, EventDevice, EventDisposition, EventTapInfo, HookError, HookEvent,
+    KeyEvent, KeyModifiers, MouseEvent, TapLocation,
+};
+use watchdog::{
+    LifecycleDecision, LifecycleExitReason, LifecycleObservation, LifecycleWatchdog, TapPhase,
+    WatchdogSignals, stuck_callback,
 };
 
 /// Everything `Hook` needs to control the background thread.
 pub(crate) struct HookInner {
     thread: thread::JoinHandle<()>,
+    lifecycle_watchdog: thread::JoinHandle<()>,
     run_loop: CFRunLoop,
-    /// Termination flag, re-checked at the top of every run-loop slice.
+    /// Lifecycle signals re-checked at the top of every run-loop slice.
     /// `run_loop.stop()` only interrupts the loop while it is *inside* a
     /// `run_in_mode` slice; a stop landing in the gap between slices is
-    /// dropped, so this flag — not the CF stop alone — is the reliable
-    /// shutdown signal that guarantees the thread can never hang forever.
-    stop: Arc<AtomicBool>,
+    /// dropped, so the stop latch — not the CF stop alone — is the reliable
+    /// shutdown signal. The independent lifecycle watchdog keeps observing
+    /// that latch until the tap thread proves the tap is gone.
+    signals: Arc<WatchdogSignals>,
 }
 
 // SAFETY: CFRunLoop is a Core Foundation ref-counted object. The CF
 // documentation states that CFRunLoop objects can be passed between
 // threads; only CFRunLoopRun must be called on the owning thread.
 unsafe impl Send for HookInner {}
-
-// Raw FFI for `AXIsProcessTrustedWithOptions` from the Accessibility
-// framework. Passing `NULL` queries trust state without prompting; passing
-// a dictionary with `kAXTrustedCheckOptionPrompt = true` raises the system
-// permission dialog and registers the process in the Accessibility list.
-#[link(name = "ApplicationServices", kind = "framework")]
-unsafe extern "C" {
-    fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
-    static kAXTrustedCheckOptionPrompt: core_foundation::string::CFStringRef;
-}
 
 /// Opaque `IOHIDEventRef` — the HID event backing a `CGEvent`.
 type IOHIDEventRef = *mut std::ffi::c_void;
@@ -169,14 +176,16 @@ fn sender_device_info(sender_id: u64) -> SenderDeviceInfo {
                         .map(|p| unsafe { CFString::wrap_under_create_rule(p.cast()) }.to_string())
                 };
                 let num_prop = |k| {
-                    // SAFETY: a numeric property is a +1 CFNumber; wrap takes ownership.
                     service_property(service, k)
                         .and_then(|p| {
+                            // SAFETY: `service_property` only yields a non-null, +1 CF
+                            // value, and every key passed below is published by IOKit as
+                            // a CFNumber, so the cast keeps the type; the create rule
+                            // hands that retain to the wrapper, which releases it on drop.
                             unsafe { CFNumber::wrap_under_create_rule(p.cast()) }.to_i64()
                         })
                         .and_then(|n| u32::try_from(n).ok())
                 };
-                // SAFETY: a String property is a +1 CFString; wrap takes ownership.
                 let product_name = string_prop("Product");
                 let info = SenderDeviceInfo {
                     is_trackpad: product_name
@@ -198,29 +207,30 @@ fn sender_device_info(sender_id: u64) -> SenderDeviceInfo {
 
 /// Check whether this process has been granted Accessibility access.
 pub(crate) fn has_accessibility() -> bool {
-    // SAFETY: NULL is documented as a valid argument; it queries the current
-    // trust state without raising a permission dialog.
-    unsafe { AXIsProcessTrustedWithOptions(std::ptr::null()) }
+    // SAFETY: takes no arguments and only reads the current trust state — the
+    // non-prompting counterpart of `AXIsProcessTrustedWithOptions`.
+    unsafe { AXIsProcessTrusted() }
 }
 
 /// Raise the Accessibility prompt + register the process. See
 /// [`super::Hook::prompt_accessibility`].
+///
+/// The `kAXTrustedCheckOptionPrompt = true` option is what makes macOS surface
+/// the dialog and list the process in System Settings; without it this is just
+/// [`has_accessibility`].
 pub(crate) fn prompt_accessibility() {
-    use core_foundation::base::TCFType as _;
-    use core_foundation::boolean::CFBoolean;
-    use core_foundation::dictionary::CFDictionary;
-    use core_foundation::string::CFString;
+    use objc2_application_services::kAXTrustedCheckOptionPrompt;
+    use objc2_core_foundation::{CFDictionary, kCFBooleanTrue};
 
-    // SAFETY: `kAXTrustedCheckOptionPrompt` is a framework-provided
-    // `CFStringRef` constant; wrapping under the get rule borrows it
-    // without taking ownership.
-    let key = unsafe { CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt) };
-    let options =
-        CFDictionary::from_CFType_pairs(&[(key.as_CFType(), CFBoolean::true_value().as_CFType())]);
-    // SAFETY: `options` is a valid `CFDictionaryRef` for the lifetime of
-    // the call; the function reads it and (if untrusted) shows the dialog.
-    // The returned trust state is observed separately via the watcher.
-    let _trusted = unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef().cast()) };
+    // SAFETY: both are framework-provided constants, live for the process
+    // lifetime; reading them copies a `&'static` reference.
+    let (key, value) = unsafe { (kAXTrustedCheckOptionPrompt, kCFBooleanTrue) };
+    let Some(value) = value else { return };
+    let options = CFDictionary::from_slices(&[key], &[value]);
+    // SAFETY: the dictionary holds exactly the documented key/value types
+    // (`kAXTrustedCheckOptionPrompt` → `CFBoolean`). The returned trust state is
+    // observed separately via the watcher, so it is deliberately dropped here.
+    let _trusted = unsafe { AXIsProcessTrustedWithOptions(Some(options.as_opaque())) };
 }
 
 /// Read the frontmost application's bundle identifier via `NSWorkspace`.
@@ -232,6 +242,15 @@ pub(crate) fn prompt_accessibility() {
 /// UTF-8 view from the pool — so an explicit `autoreleasepool` is required off
 /// the main thread, where no run loop drains one. (Without it the old raw path
 /// leaked the workspace/app/bundle-id objects: hundreds of MB across a workday.)
+pub(crate) fn cursor_position() -> Option<CursorPosition> {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok()?;
+    let point = CGEvent::new(source).ok()?.location();
+    Some(CursorPosition {
+        x: point.x,
+        y: point.y,
+    })
+}
+
 pub(crate) fn frontmost_bundle_id() -> Option<String> {
     use objc2::rc::autoreleasepool;
     use objc2_app_kit::NSWorkspace;
@@ -261,6 +280,43 @@ fn button_number_to_id(n: i64) -> Option<ButtonId> {
     }
 }
 
+/// Best-effort device identity for a button event's HID sender.
+fn button_source(event: &CGEvent) -> Option<crate::EventDevice> {
+    event_sender_id(event).map(|id| sender_device_info(id).event_device)
+}
+
+/// Map the macOS modifier flags on a `CGEvent` to our [`KeyModifiers`].
+/// `SecondaryFn` is deliberately ignored: it is firmware-internal and
+/// unreliable as a trigger (function-key-remapper spec, Appendix A).
+fn modifiers_from_flags(flags: CGEventFlags) -> KeyModifiers {
+    KeyModifiers {
+        shift: flags.contains(CGEventFlags::CGEventFlagShift),
+        control: flags.contains(CGEventFlags::CGEventFlagControl),
+        option: flags.contains(CGEventFlags::CGEventFlagAlternate),
+        command: flags.contains(CGEventFlags::CGEventFlagCommand),
+    }
+}
+
+/// Translate a keyboard `CGEvent` into a [`KeyEvent`]. Returns `None` for
+/// non-key event types (the mouse path handles those) and for `FlagsChanged`
+/// (modifier state rides on the next key event via its flags; a standalone
+/// flags change carries no key of interest to the remapper).
+fn translate_key(etype: CGEventType, event: &CGEvent) -> Option<KeyEvent> {
+    let pressed = match etype {
+        CGEventType::KeyDown => true,
+        CGEventType::KeyUp => false,
+        // FlagsChanged: no key to remap here.
+        _ => return None,
+    };
+    let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+    let keycode = u16::try_from(keycode).ok()?;
+    Some(KeyEvent {
+        keycode,
+        pressed,
+        modifiers: modifiers_from_flags(event.get_flags()),
+    })
+}
+
 /// Convert a `CGEvent` to our [`MouseEvent`] vocabulary. Returns `None`
 /// for event types we don't translate (e.g. move events, unknown buttons).
 fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
@@ -288,26 +344,38 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
         CGEventType::LeftMouseDown => Some(MouseEvent::Button {
             id: ButtonId::LeftClick,
             pressed: true,
+            device: button_source(event),
         }),
         CGEventType::LeftMouseUp => Some(MouseEvent::Button {
             id: ButtonId::LeftClick,
             pressed: false,
+            device: button_source(event),
         }),
         CGEventType::RightMouseDown => Some(MouseEvent::Button {
             id: ButtonId::RightClick,
             pressed: true,
+            device: button_source(event),
         }),
         CGEventType::RightMouseUp => Some(MouseEvent::Button {
             id: ButtonId::RightClick,
             pressed: false,
+            device: button_source(event),
         }),
         CGEventType::OtherMouseDown => {
             let n = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
-            button_number_to_id(n).map(|id| MouseEvent::Button { id, pressed: true })
+            button_number_to_id(n).map(|id| MouseEvent::Button {
+                id,
+                pressed: true,
+                device: button_source(event),
+            })
         }
         CGEventType::OtherMouseUp => {
             let n = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
-            button_number_to_id(n).map(|id| MouseEvent::Button { id, pressed: false })
+            button_number_to_id(n).map(|id| MouseEvent::Button {
+                id,
+                pressed: false,
+                device: button_source(event),
+            })
         }
         CGEventType::ScrollWheel => {
             // axis 1 = vertical scroll; axis 2 = horizontal scroll. Read the
@@ -419,7 +487,7 @@ fn usable_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
 
 /// Create the event tap and run loop on a dedicated thread.
 pub(crate) fn start(
-    cb: impl Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static,
+    cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
 ) -> Result<HookInner, HookError> {
     if !has_accessibility() {
         return Err(HookError::AccessibilityDenied);
@@ -427,34 +495,233 @@ pub(crate) fn start(
 
     // Wrap in Arc so the closure handed to CGEventTap::new captures it by
     // clone rather than by move — avoids a second Box allocation.
-    let cb: Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
+    let cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
 
-    let stop = Arc::new(AtomicBool::new(false));
+    let signals = Arc::new(WatchdogSignals::default());
+    let lifecycle_watchdog = spawn_lifecycle_watchdog(Arc::clone(&signals))?;
     let (rl_tx, rl_rx) = mpsc::channel::<CFRunLoop>();
 
     let thread = {
-        let stop = Arc::clone(&stop);
-        thread::Builder::new()
+        let thread_signals = Arc::clone(&signals);
+        match thread::Builder::new()
             .name("openlogi-hook".into())
-            .spawn(move || thread_main(cb, rl_tx, stop))
-            .map_err(|e| HookError::MacOsTap(e.to_string()))?
+            .spawn(move || thread_main(cb, rl_tx, thread_signals))
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                signals.set_phase(TapPhase::ThreadExited);
+                lifecycle_watchdog.thread().unpark();
+                let _ = lifecycle_watchdog.join();
+                return Err(HookError::MacOsTap(error.to_string()));
+            }
+        }
     };
 
     // Block until the background thread confirms the run loop is live, or
     // reports failure by dropping its sender.
-    let run_loop = rl_rx.recv().map_err(|_| {
-        HookError::MacOsTap(
+    let Ok(run_loop) = rl_rx.recv() else {
+        let error = HookError::MacOsTap(
             "background thread exited before the run loop started; \
              CGEventTapCreate likely returned null"
                 .into(),
-        )
-    })?;
+        );
+        if let Err(panic) = thread.join() {
+            error!(?panic, "hook thread panicked during startup");
+        }
+        lifecycle_watchdog.thread().unpark();
+        if let Err(panic) = lifecycle_watchdog.join() {
+            error!(?panic, "hook lifecycle watchdog panicked during startup");
+        }
+        return Err(error);
+    };
 
     Ok(HookInner {
         thread,
+        lifecycle_watchdog,
         run_loop,
-        stop,
+        signals,
     })
+}
+
+const CALLBACK_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const LIFECYCLE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const FREEZE_HAZARD_EXIT_CODE: i32 = 78;
+
+/// Event types the HID tap observes. Pointer *Dragged variants are required
+/// because a held button makes the OS emit those instead of `MouseMoved`.
+fn hooked_event_types() -> Vec<CGEventType> {
+    vec![
+        CGEventType::LeftMouseDown,
+        CGEventType::LeftMouseUp,
+        CGEventType::RightMouseDown,
+        CGEventType::RightMouseUp,
+        CGEventType::OtherMouseDown,
+        CGEventType::OtherMouseUp,
+        CGEventType::ScrollWheel,
+        CGEventType::MouseMoved,
+        CGEventType::LeftMouseDragged,
+        CGEventType::RightMouseDragged,
+        CGEventType::OtherMouseDragged,
+        // Function-key remapper: F1–F12/Esc arrive as KeyDown/KeyUp.
+        CGEventType::KeyDown,
+        CGEventType::KeyUp,
+        CGEventType::FlagsChanged,
+    ]
+}
+
+/// Invoke the user callback under `catch_unwind`, always failing open.
+fn run_tap_callback(
+    cb: &dyn Fn(HookEvent) -> EventDisposition,
+    etype: CGEventType,
+    event: &CGEvent,
+) -> CallbackResult {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        // Mouse first, then keyboard; a given event type is one or the other.
+        let hook_event = if let Some(mouse_event) = translate(etype, event) {
+            HookEvent::Mouse(mouse_event)
+        } else if let Some(key_event) = translate_key(etype, event) {
+            HookEvent::Key(key_event)
+        } else {
+            return CallbackResult::Keep;
+        };
+        match cb(hook_event) {
+            EventDisposition::PassThrough => CallbackResult::Keep,
+            EventDisposition::Suppress => CallbackResult::Drop,
+        }
+    }));
+    if let Ok(disposition) = result {
+        disposition
+    } else {
+        error!(
+            "OS mouse-hook callback panicked — passing event through to \
+             avoid wedging system input"
+        );
+        CallbackResult::Keep
+    }
+}
+
+/// Sibling watchdog: if the callback is still entered past the budget, abort
+/// the agent so macOS tears the tap down and system input recovers.
+fn spawn_callback_watchdog(
+    signals: Arc<WatchdogSignals>,
+    in_callback: Arc<AtomicBool>,
+    entered_at_ms: Arc<AtomicU64>,
+) -> std::io::Result<()> {
+    thread::Builder::new()
+        .name("openlogi-hook-watchdog".into())
+        .spawn(move || {
+            loop {
+                let phase = signals.phase();
+                if matches!(phase, TapPhase::TapStopped | TapPhase::ThreadExited) {
+                    return;
+                }
+                thread::sleep(CALLBACK_WATCHDOG_POLL_INTERVAL);
+                if !in_callback.load(Ordering::Acquire) {
+                    continue;
+                }
+                let entered = entered_at_ms.load(Ordering::Acquire);
+                if entered == 0 {
+                    continue;
+                }
+                let Some(elapsed) = stuck_callback(signals.now_millis(), entered) else {
+                    continue;
+                };
+                // Re-sample: a fresh high-frequency event may have rewritten
+                // the stamp between the first loads and the budget check.
+                if !in_callback.load(Ordering::Acquire)
+                    || entered_at_ms.load(Ordering::Acquire) != entered
+                {
+                    continue;
+                }
+                if signals.phase() != TapPhase::Armed {
+                    continue;
+                }
+                error!(
+                    stuck_ms = duration_millis(elapsed),
+                    "OS mouse-hook callback stuck past budget — exiting agent to \
+                     restore system input (HID CGEventTap freeze hazard)"
+                );
+                // Hard exit: disable_tap alone cannot unblock an in-flight
+                // callback, and a live active HID tap freezes all pointer I/O.
+                #[expect(
+                    clippy::exit,
+                    reason = "this watchdog thread has no caller to return to and the stuck callback owns the active HID tap, which serialises every pointer event machine-wide; only process death makes macOS tear the tap down"
+                )]
+                std::process::exit(FREEZE_HAZARD_EXIT_CODE);
+            }
+        })
+        .map(|_| ())
+}
+
+/// Independent lifecycle watchdog for paths that never enter the Rust tap
+/// callback (for example, TCC revocation wedging `CFRunLoopRunInMode` or the
+/// Accessibility query itself).
+///
+/// This thread is started before the tap thread, uses only atomics and a
+/// monotonic clock, and remains armed after a stop request. It deliberately
+/// does not call `has_accessibility()`: that query can itself stop returning
+/// after TCC revocation. It disarms only after the tap thread reports that the
+/// tap was synchronously disabled and destroyed, or (for explicit shutdown)
+/// after that thread has exited.
+fn spawn_lifecycle_watchdog(
+    signals: Arc<WatchdogSignals>,
+) -> Result<thread::JoinHandle<()>, HookError> {
+    thread::Builder::new()
+        .name("openlogi-hook-lifecycle-watchdog".into())
+        .spawn(move || {
+            let mut watchdog = LifecycleWatchdog::default();
+            loop {
+                let observation = LifecycleObservation {
+                    phase: signals.phase(),
+                    stop_requested: signals.stop_requested(),
+                    tap_progress_at: signals.tap_progress_at(),
+                };
+                match watchdog.evaluate(signals.now(), observation) {
+                    LifecycleDecision::Continue => {
+                        thread::park_timeout(LIFECYCLE_WATCHDOG_POLL_INTERVAL);
+                    }
+                    LifecycleDecision::Complete => return,
+                    LifecycleDecision::Exit { reason, elapsed } => {
+                        // The tap thread may have completed immediately after
+                        // the decision. Only a still-hazardous phase may exit.
+                        let phase = signals.phase();
+                        let still_hazardous = match reason {
+                            LifecycleExitReason::TapThreadStalled => {
+                                matches!(phase, TapPhase::Arming | TapPhase::Armed)
+                            }
+                            LifecycleExitReason::StopTimedOut => phase != TapPhase::ThreadExited,
+                        };
+                        if !still_hazardous {
+                            continue;
+                        }
+                        let reason = match reason {
+                            LifecycleExitReason::TapThreadStalled if phase == TapPhase::Arming => {
+                                "HID tap creation or activation stopped making progress"
+                            }
+                            LifecycleExitReason::TapThreadStalled => {
+                                "HID tap thread stopped making progress while tap remained active"
+                            }
+                            LifecycleExitReason::StopTimedOut => {
+                                "hook stop requested but tap thread did not exit"
+                            }
+                        };
+                        error!(
+                            reason,
+                            elapsed_ms = duration_millis(elapsed),
+                            ?phase,
+                            "HID CGEventTap lifecycle did not make progress before deadline — \
+                             exiting agent to restore system input"
+                        );
+                        #[expect(
+                            clippy::exit,
+                            reason = "the tap thread is wedged (TCC revocation can stall it inside CoreGraphics), so no unwinding path can reach it from this watchdog thread; a live HID tap left behind freezes all input until the process dies"
+                        )]
+                        std::process::exit(FREEZE_HAZARD_EXIT_CODE);
+                    }
+                }
+            }
+        })
+        .map_err(|error| HookError::MacOsTap(format!("could not spawn tap watchdog: {error}")))
 }
 
 /// Body of the background hook thread.
@@ -463,43 +730,41 @@ pub(crate) fn start(
     reason = "rl_tx must be owned: dropping it signals the parent's recv() to return Err on failure paths"
 )]
 fn thread_main(
-    cb: Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync>,
+    cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync>,
     rl_tx: mpsc::Sender<CFRunLoop>,
-    stop: Arc<AtomicBool>,
+    signals: Arc<WatchdogSignals>,
 ) {
-    let event_types = vec![
-        CGEventType::LeftMouseDown,
-        CGEventType::LeftMouseUp,
-        CGEventType::RightMouseDown,
-        CGEventType::RightMouseUp,
-        CGEventType::OtherMouseDown,
-        CGEventType::OtherMouseUp,
-        CGEventType::ScrollWheel,
-        // Pointer movement, for gesture-button hold+swipe. A held button makes
-        // the OS emit *Dragged rather than MouseMoved, so all four are needed.
-        // The callback stays lock-light (see `hook_runtime`) so this high-rate
-        // stream can't stall the tap.
-        CGEventType::MouseMoved,
-        CGEventType::LeftMouseDragged,
-        CGEventType::RightMouseDragged,
-        CGEventType::OtherMouseDragged,
-    ];
+    // Declared first so it drops last, after the tap, callback, source, and run
+    // loop locals have unwound. The lifecycle watchdog treats this notification
+    // as proof that an explicit stop has completed, not merely been requested.
+    let _thread_exit = signals.thread_exit_guard();
 
-    let tap_result = CGEventTap::new(
-        CGEventTapLocation::HID,
-        CGEventTapPlacement::HeadInsertEventTap,
-        CGEventTapOptions::Default,
-        event_types,
-        move |_proxy: CGEventTapProxy, etype: CGEventType, event: &CGEvent| {
-            let Some(mouse_event) = translate(etype, event) else {
-                return CallbackResult::Keep;
-            };
-            match cb(mouse_event) {
-                EventDisposition::PassThrough => CallbackResult::Keep,
-                EventDisposition::Suppress => CallbackResult::Drop,
-            }
-        },
-    );
+    // A successful CGEventTapCreate may install the HID tap before returning,
+    // so lifecycle monitoring must be armed before entering CoreGraphics.
+    signals.mark_tap_progress();
+    signals.set_phase(TapPhase::Arming);
+
+    let in_callback = Arc::new(AtomicBool::new(false));
+    let entered_at_ms = Arc::new(AtomicU64::new(0));
+
+    let tap_result = {
+        let callback_signals = Arc::clone(&signals);
+        let in_callback = Arc::clone(&in_callback);
+        let entered_at_ms = Arc::clone(&entered_at_ms);
+        CGEventTap::new(
+            CGEventTapLocation::HID,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::Default,
+            hooked_event_types(),
+            move |_proxy: CGEventTapProxy, etype: CGEventType, event: &CGEvent| {
+                entered_at_ms.store(callback_signals.now_millis(), Ordering::Relaxed);
+                in_callback.store(true, Ordering::Release);
+                let disposition = run_tap_callback(cb.as_ref(), etype, event);
+                in_callback.store(false, Ordering::Release);
+                disposition
+            },
+        )
+    };
 
     let Ok(tap) = tap_result else {
         error!("CGEventTapCreate returned null — Accessibility may have been revoked");
@@ -507,11 +772,13 @@ fn thread_main(
         // which we surface as MacOsTap.
         return;
     };
+    signals.mark_tap_progress();
 
     let Ok(loop_source) = tap.mach_port().create_runloop_source(0) else {
         error!("CFRunLoopSourceCreate failed for event tap");
         return;
     };
+    signals.mark_tap_progress();
 
     let run_loop = CFRunLoop::get_current();
 
@@ -520,10 +787,28 @@ fn thread_main(
     unsafe {
         run_loop.add_source(&loop_source, kCFRunLoopCommonModes);
     }
+    signals.mark_tap_progress();
+    if let Err(error) = spawn_callback_watchdog(
+        Arc::clone(&signals),
+        Arc::clone(&in_callback),
+        Arc::clone(&entered_at_ms),
+    ) {
+        error!(%error, "could not spawn callback watchdog — refusing to arm HID tap");
+        return;
+    }
+    signals.mark_tap_progress();
     tap.enable();
+    signals.mark_tap_progress();
+    signals.set_phase(TapPhase::Armed);
 
-    if rl_tx.send(run_loop).is_err() {
+    if rl_tx.send(run_loop.clone()).is_err() {
         debug!("hook parent dropped before run loop was ready; stopping");
+        disable_tap(&tap);
+        // SAFETY: framework-provided static CFStringRef, 'static.
+        run_loop.remove_source(&loop_source, unsafe { kCFRunLoopCommonModes });
+        drop(loop_source);
+        drop(tap);
+        signals.set_phase(TapPhase::TapStopped);
         return;
     }
 
@@ -535,26 +820,28 @@ fn thread_main(
     // down right here, on the tap's own thread, so input is restored even
     // when the UI thread is already stuck.
     //
-    // `stop()` requests shutdown two ways: it sets `stop` and calls
+    // `stop()` requests shutdown two ways: it sets the stop latch and calls
     // `run_loop.stop()`. The CF stop returns `Stopped` and breaks promptly
     // while a slice is running, but is a no-op if it lands in the gap
-    // between slices (CFRunLoopStop only acts on a running loop). The `stop`
-    // flag, checked at the top of every slice, is the reliable signal: in
+    // between slices (CFRunLoopStop only acts on a running loop). The latch,
+    // checked at the top of every slice, is the reliable signal: in
     // that race the thread notices one 500 ms slice later instead of joining
     // forever.
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if signals.stop_requested() {
             break;
         }
+        signals.mark_tap_progress();
         match CFRunLoop::run_in_mode(
             // SAFETY: framework-provided static CFStringRef, 'static.
             unsafe { kCFRunLoopDefaultMode },
-            std::time::Duration::from_millis(500),
+            Duration::from_millis(500),
             false,
         ) {
             CFRunLoopRunResult::Stopped | CFRunLoopRunResult::Finished => break,
             CFRunLoopRunResult::TimedOut | CFRunLoopRunResult::HandledSource => {}
         }
+        signals.mark_tap_progress();
         if !has_accessibility() {
             warn!(
                 "Accessibility revoked while the event tap was live — \
@@ -573,6 +860,15 @@ fn thread_main(
     // so input recovers immediately rather than whenever CF happens to
     // release the port.
     disable_tap(&tap);
+    // SAFETY: framework-provided static CFStringRef, 'static.
+    run_loop.remove_source(&loop_source, unsafe { kCFRunLoopCommonModes });
+    drop(loop_source);
+    drop(tap);
+    signals.set_phase(TapPhase::TapStopped);
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Disable an active event tap now. core-graphics only exposes the enable
@@ -649,6 +945,10 @@ pub(crate) fn list_event_taps() -> Vec<EventTapInfo> {
     // pattern is a valid instance (`enabled = false`, all numeric fields 0).
     // `CGGetEventTapList` overwrites each slot it fills.
     let mut taps: Vec<CGEventTapInformation> = vec![unsafe { std::mem::zeroed() }; count as usize];
+    // SAFETY: `taps` holds exactly `count` initialised, correctly aligned slots
+    // and stays alive for the call, and that same `count` is the maximum passed
+    // in, so the C side cannot write past the allocation; the out-parameter
+    // points at a live local it may only overwrite.
     let err = unsafe { CGGetEventTapList(count, taps.as_mut_ptr(), &raw mut count) };
     if err != 0 {
         return Vec::new();
@@ -698,13 +998,49 @@ fn process_name(pid: i32) -> Option<String> {
 
 /// Signal the run loop to stop and join the background thread.
 pub(crate) fn stop(inner: HookInner) {
-    // Set the flag *before* waking the loop: if `run_loop.stop()` lands in
-    // the gap between slices and is dropped, the thread still observes the
-    // flag at the next slice top. Relaxed suffices — the flag carries no
-    // other data, and `thread.join()` below is the final synchronisation.
-    inner.stop.store(true, Ordering::Relaxed);
+    // Latch stop before waking either thread. The lifecycle watchdog stays
+    // armed across the blocking join and accepts only `ThreadExited` as proof
+    // that explicit shutdown completed.
+    inner.signals.request_stop();
+    inner.lifecycle_watchdog.thread().unpark();
     inner.run_loop.stop();
     if let Err(e) = inner.thread.join() {
         error!("hook thread panicked on shutdown: {e:?}");
+    }
+    inner.lifecycle_watchdog.thread().unpark();
+    if let Err(e) = inner.lifecycle_watchdog.join() {
+        error!("hook lifecycle watchdog panicked on shutdown: {e:?}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
+mod tests {
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    use super::*;
+
+    #[test]
+    fn tap_callback_suppresses_normally_and_passes_through_panics() {
+        let source = CGEventSource::new(CGEventSourceStateID::Private)
+            .expect("CGEventSourceCreate must succeed");
+        let event = CGEvent::new(source).expect("CGEventCreate must succeed");
+
+        assert!(matches!(
+            run_tap_callback(
+                &|_| EventDisposition::Suppress,
+                CGEventType::MouseMoved,
+                &event
+            ),
+            CallbackResult::Drop
+        ));
+        assert!(matches!(
+            run_tap_callback(
+                &|_| panic!("test callback panic"),
+                CGEventType::MouseMoved,
+                &event
+            ),
+            CallbackResult::Keep
+        ));
     }
 }

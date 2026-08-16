@@ -1,17 +1,30 @@
+use std::process::ExitCode;
+
 use anyhow::{Context, Result};
 use clap::Args;
+use openlogi_camera::Camera;
 use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceModelInfo, PairedDevice};
 
 #[derive(Debug, Args)]
 pub struct ListArgs {}
 
-pub async fn run(_args: ListArgs) -> Result<()> {
+/// Exit status for "the scan succeeded, but nothing is connected" — distinct
+/// from the failure status a real enumeration error produces.
+const NOTHING_FOUND: u8 = 2;
+
+/// Print every connected receiver, paired device and Logitech webcam.
+///
+/// Returns the `NOTHING_FOUND` status when neither a HID++ device nor a webcam
+/// is present, so scripts can tell "no hardware" apart from a failed
+/// enumeration.
+pub async fn run(_args: ListArgs) -> Result<ExitCode> {
     let inventories = openlogi_hid::enumerate()
         .await
         .context("failed to enumerate HID++ devices")?;
+    let cameras = openlogi_camera::enumerate_cameras();
 
-    if inventories.is_empty() {
-        println!("No Logitech HID++ devices found.");
+    if inventories.is_empty() && cameras.is_empty() {
+        println!("No Logitech HID++ devices or webcams found.");
         println!();
         println!("Notes:");
         println!("  - On macOS, quit Logi Options+ first — both apps fight over HID++ access.");
@@ -23,7 +36,7 @@ pub async fn run(_args: ListArgs) -> Result<()> {
             "  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548); other \
              receivers (Unifying) aren't surfaced yet."
         );
-        std::process::exit(2);
+        return Ok(ExitCode::from(NOTHING_FOUND));
     }
 
     for (i, inv) in inventories.iter().enumerate() {
@@ -33,7 +46,31 @@ pub async fn run(_args: ListArgs) -> Result<()> {
         print_inventory(inv);
     }
 
-    Ok(())
+    if !cameras.is_empty() {
+        if !inventories.is_empty() {
+            println!();
+        }
+        print_cameras(&cameras);
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+fn print_cameras(cameras: &[Camera]) {
+    println!("Cameras ({} Logitech UVC)", cameras.len());
+    let last = cameras.len() - 1;
+    for (i, cam) in cameras.iter().enumerate() {
+        let prefix = if i == last { "  └─" } else { "  ├─" };
+        let caps = match (cam.max_resolution, cam.max_fps) {
+            (Some((w, h)), Some(fps)) => format!(", up to {w}x{h}@{fps}"),
+            (Some((w, h)), None) => format!(", up to {w}x{h}"),
+            _ => String::new(),
+        };
+        println!(
+            "{prefix} ● {} (camera, vid={:04x} pid={:04x}{caps}, id={})",
+            cam.name, cam.vendor_id, cam.product_id, cam.unique_id
+        );
+    }
 }
 
 fn print_inventory(inv: &DeviceInventory) {

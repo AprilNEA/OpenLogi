@@ -4,6 +4,7 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 use xshell::{Shell, cmd};
 
+use super::bundle::identity::{self, Channel};
 use crate::support::fs::{absolutize, ensure_command, ensure_dir, repo_root};
 
 #[derive(Parser)]
@@ -33,6 +34,14 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     let app = absolutize(&root, &args.app);
     let output = absolutize(&root, &args.output);
     ensure_dir(&app)?;
+    // Signing makes this DMG a distribution artifact, so the bundle inside it
+    // must wear the shipped identity no matter which command built it. A dev
+    // bundle that reached users would void their permission grants and move
+    // them to a different config directory.
+    if args.sign_identity.is_some() {
+        identity::verify(&app, Channel::Production)
+            .context("a signed DMG must contain a production-identity app bundle")?;
+    }
     ensure_command("create-dmg")?;
 
     println!("==> dmg background");

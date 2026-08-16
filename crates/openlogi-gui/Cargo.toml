@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "GPUI-based desktop UI for OpenLogi."
+default-run = "openlogi-gui"
 # Not publishable to crates.io: depends on git-only gpui / gpui_platform
 # (gpui_platform is not on the registry). Distributed as a bundled .app.
 publish = false
@@ -15,14 +16,17 @@ publish = false
 name = "openlogi-gui"
 path = "src/main.rs"
 
+[[bin]]
+name = "openlogi-overlay"
+path = "src/bin/openlogi-overlay.rs"
+
 [dependencies]
 openlogi-core = { path = "../openlogi-core" }
-openlogi-hid = { path = "../openlogi-hid" }
+openlogi-camera = { path = "../openlogi-camera" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-assets = { path = "../openlogi-assets" }
-openlogi-agent-core = { path = "../openlogi-agent-core" }
+openlogi-ipc = { path = "../openlogi-ipc" }
 tarpc = { workspace = true }
-interprocess = { workspace = true }
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
 gpui-component = { workspace = true }
@@ -38,7 +42,7 @@ serde_json = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rust-i18n = "4"
 sys-locale = "0.3.2"
-gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.5", features = ["gpui"] }
+gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.7", features = ["gpui"] }
 # Spawn the agent under its own macOS TCC identity (see ipc_client::spawn_agent).
 # Cross-platform: a no-op pass-through to std::process::Command off macOS.
 disclaim = "0.1"
@@ -57,24 +61,27 @@ embed-resource = "3.0.9"
 # Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. objc2 gives typed,
 # `Retained<T>`-owned AppKit bindings so the status-item code can't leak (#99).
 [target.'cfg(target_os = "macos")'.dependencies]
+# CGGetActiveDisplayList/CGDisplayBounds for the overlay: locating the cursor's
+# display needs global display bounds, which GPUI's display API doesn't expose
+# (its bounds are display-relative). C FFI, so core-graphics per platform/AGENTS.md.
+core-graphics = { workspace = true }
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance"] }
+objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance", "NSWindow", "NSEvent", "block2"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSProcessInfo"] }
+# Input-Monitoring status (`IOHIDCheckAccess`) with typed request/access enums —
+# see platform/permissions.rs.
+objc2-io-kit = { workspace = true, features = ["std", "hidsystem"] }
+# NSEvent global-monitor handlers are ObjC blocks (overlay click-away dismissal).
+block2 = { workspace = true }
 
-# unsafe_code stays denied; the status-item/tray modules opt in locally with
-# #[expect(unsafe_code)] for the few objc2 calls (init-with-action, set-target,
-# super-init) that remain unsafe.
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-unwrap_used = "warn"
-expect_used = "warn"
-missing_errors_doc = "allow"
-doc_markdown = "allow"
+# unsafe_code stays denied (from [workspace.lints]); the status-item/tray modules
+# opt in locally with #[expect(unsafe_code)] for the few objc2 calls
+# (init-with-action, set-target, super-init) that remain unsafe.
+[lints]
+workspace = true
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 tempfile = "3.27.0"
 
 [package.metadata.bundle]
@@ -95,8 +102,3 @@ osx_minimum_system_version = "13.0"
 osx_url_schemes = ["openlogi"]
 icon = ["icon/AppIcon.icns"]
 resources = ["assets/**/*"]
-
-[package.metadata.i18n]
-available-locales = ["en", "ja", "ru", "zh-CN", "zh-HK", "zh-TW", "it"]
-default-locale = "en"
-load-path = "locales"

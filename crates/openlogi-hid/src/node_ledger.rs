@@ -211,6 +211,27 @@ mod tests {
         assert!(!recovered.evict_channel);
     }
 
+    /// A receiver probe that burns its whole budget arrives here as one
+    /// unhealthy tick. It must not evict on its own: the budget leaves barely a
+    /// second over its documented worst case, so one lost reply during a
+    /// legitimate deep walk lands here too — and evicting unpublishes every
+    /// device behind that receiver. The devices stay visible via the replay
+    /// while a channel that really is dead trips the threshold next tick.
+    #[test]
+    fn one_failed_probe_never_evicts_but_keeps_the_devices_visible() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("bolt")));
+
+        let first = ledger.settle(&1, false, None);
+
+        assert!(!first.evict_channel);
+        assert_eq!(receiver_name(first.inventory.as_ref()), Some("bolt"));
+        assert!(
+            ledger.settle(&1, false, None).evict_channel,
+            "a node that keeps failing is still replaced on the next tick"
+        );
+    }
+
     #[test]
     fn a_healthy_empty_result_clears_the_replay_state() {
         let mut ledger = NodeLedger::default();

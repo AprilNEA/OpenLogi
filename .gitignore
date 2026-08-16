@@ -15,7 +15,13 @@ devenv.local.yaml
 /local-reference/
 
 # Claude Code skill plumbing — local per-developer, not part of the project.
-/.agents/
+# `/*` instead of the bare directory so the committed Amp orb lifecycle
+# scripts can be re-included below: git cannot un-ignore a file whose parent
+# directory is excluded, and a tracked-but-ignored file makes release-plz
+# treat every checkout as dirty (`git ls-files -ci --exclude-standard`).
+/.agents/*
+!/.agents/resume
+!/.agents/setup
 /skills-lock.json
 
 # Local planning docs — kept on disk, never committed.
@@ -26,6 +32,9 @@ devenv.local.yaml
 # The path-scoped agent rules in .claude/rules/ are project config and stay tracked.
 /.claude/*
 !/.claude/rules/
+
+# Node dependencies for the JS helper scripts under scripts/.
+node_modules/
 
 # macOS finder metadata
 .DS_Store

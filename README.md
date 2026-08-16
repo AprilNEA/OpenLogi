@@ -59,10 +59,9 @@ Things OpenLogi does that Options+ won't:
 - **Run on Linux.** Options+ ships for macOS and Windows only. OpenLogi treats
   Linux as a first-class platform: evdev/uinput hook, udev rules, a systemd
   user unit, and `.deb` / `.rpm` / `.pkg.tar.zst` packages.
-- **Move the Gesture Button.** Pick which physical button owns the gesture
-  role — the dedicated Gesture Button, middle, back, or forward — with per-direction swipe
-  bindings, or turn gestures off entirely. Options+ pins the gesture role to
-  the dedicated Gesture Button.
+- **Put gestures on any button.** The dedicated Gesture Button, middle, back,
+  and forward buttons can each have their own per-direction swipe bindings.
+  Options+ pins gestures to the dedicated Gesture Button.
 - **Keep config in plain text.** Everything is one TOML file you can read,
   diff, version-control, and copy between machines.
 - **Script it.** A real CLI: device inventory, asset prefetch, and on-device
@@ -94,6 +93,8 @@ Things OpenLogi does that Options+ won't:
 | Gesture-button per-direction bindings + live capture | ✅ (device capability dependent) |
 | Middle / mode-shift / thumbwheel button capture | ✅ middle on all platforms; mode-shift / thumbwheel device dependent |
 | Windows (agent, GUI, event hook, installer) | ✅ Windows 11 hardware validated; newer port with ongoing compatibility polish |
+
+Help improve the interface translations on [Crowdin](https://crowdin.com/project/openlogi).
 
 ¹ Media key actions use D-Bus MPRIS on Linux; a handful of macOS-specific actions have no universal Linux equivalent and are no-ops. Windows maps platform actions to native equivalents where available.
 
@@ -145,7 +146,8 @@ sudo pacman -U openlogi-*.pkg.tar.zst
 Packages are published for both `x86_64`/`amd64` and `arm64`/`aarch64`.
 
 The package installs udev rules that grant your user access to
-`/dev/hidraw*` and `/dev/uinput` without `sudo`. After installation,
+`/dev/hidraw*`, `/dev/uinput` and your Logitech mouse's `/dev/input/event*`
+node without `sudo`. After installation,
 enable the background agent for your user:
 
 ```sh
@@ -190,9 +192,10 @@ See [DEVELOPMENT.md](docs/DEVELOPMENT.md)
 
 ## Acknowledgments
 
-- [`hidpp`](https://crates.io/crates/hidpp) by [@lus](https://github.com/lus)
-- [Solaar](https://github.com/pwr-Solaar/Solaar)
-- [Mouser](https://github.com/TomBadash/Mouser) by Tom Badash
+- **Windows, cameras, and i18n** by [@davidbudnick](https://github.com/davidbudnick) — the Windows input hook and MSI updates, Logitech webcam support, keyboard RGB, and the Crowdin translation pipeline
+- **Linux port** by [@cserby](https://github.com/cserby) — the evdev/uinput hook, D-Bus actions, .deb/.rpm packaging
+- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) — the most complete open-source HID++ implementation, and our protocol reference
+- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) — prior art for a local, account-free Options+ replacement
 
 ## License
 
@@ -202,6 +205,11 @@ Dual-licensed under either of
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
+
+### Third-party code
+
+`crates/openlogi-hidpp` is a vendored fork of [`hidpp`](https://crates.io/crates/hidpp)
+by [@lus](https://github.com/lus), licensed 0BSD.
 
 ### Logo & brand assets
 

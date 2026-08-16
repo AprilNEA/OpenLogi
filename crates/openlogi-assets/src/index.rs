@@ -71,11 +71,18 @@ pub struct FileEntry {
 
 /// Filename schemas Logi ships, most-preferred first. Newer depots use the
 /// `*_core` names; older ones — most keyboards, the MX Vertical, older mice —
-/// ship the bare names. A depot commits to one schema, never a mix, so
-/// resolving each slot to the first name the registry actually lists picks
-/// the right one. The manifest then maps `device_image` /
-/// `device_buttons_image` to the concrete render for colour variants.
-pub const METADATA_FILES: [&str; 2] = ["core_metadata.json", "metadata.json"];
+/// ship the bare names. Render schemas never mix within a depot, so resolving
+/// each slot to the first name the registry actually lists picks the right
+/// one. The manifest then maps `device_image` / `device_buttons_image` to the
+/// concrete render for colour variants.
+///
+/// Metadata is the one slot where legacy keyboard depots *do* ship two files:
+/// the G513 family's `metadata.json` is authored against the G512 banner
+/// renders, while `metadata_full.json` matches the `front.png` the primary
+/// model actually fetches (the manifest's `image_metadata` for `g513` names
+/// it). Preferring `metadata_full.json` keeps the key markers on the render
+/// we display.
+pub const METADATA_FILES: [&str; 3] = ["core_metadata.json", "metadata_full.json", "metadata.json"];
 pub const FRONT_RENDER_FILES: [&str; 2] = ["front_core.png", "front.png"];
 pub const BUTTONS_RENDER_FILES: [&str; 2] = ["side_core.png", "side.png"];
 
@@ -239,6 +246,33 @@ mod tests {
         assert_eq!(
             index.find_by_model_id("2b043").map(|(d, _)| d),
             Some("mx_master_3s")
+        );
+    }
+
+    #[test]
+    fn illumination_light_entries_use_the_same_bundle_baseline() {
+        let mut e = entry("8c900", "Litra Glow");
+        e.kind = "ILLUMINATION_LIGHT".into();
+        e.files = vec![
+            FileEntry {
+                name: "front.png".into(),
+                sha256: "front".into(),
+                bytes: 1,
+            },
+            FileEntry {
+                name: "manifest.json".into(),
+                sha256: "manifest".into(),
+                bytes: 1,
+            },
+            FileEntry {
+                name: "metadata.json".into(),
+                sha256: "metadata".into(),
+                bytes: 1,
+            },
+        ];
+        assert_eq!(
+            e.baseline_files(),
+            vec!["metadata.json", "manifest.json", "front.png"]
         );
     }
 

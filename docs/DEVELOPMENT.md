@@ -15,42 +15,30 @@ build instructions, see the [README](../README.md).
 
 ## Building from source
 
-CLI:
+Nix/devenv is optional. A normal Rust toolchain is enough.
+
+### Without Nix
 
 ```sh
+# rustup installs the stable toolchain pinned in rust-toolchain.toml
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# macOS: full Xcode 16+ with the Metal Toolchain (not only Command Line Tools)
+# Linux: see system libraries under Toolchain above
+# optional helpers: brew install cmake create-dmg sccache
 git clone https://github.com/AprilNEA/OpenLogi
 cd OpenLogi
 cargo run -p openlogi --release -- list
-```
-
-Desktop app:
-
-```sh
 cargo run -p openlogi-gui --release
 ```
 
-On macOS the desktop binary is launched from inside a throwaway
-`target/dev/OpenLogi.app` — a Cargo `runner` wired in `.cargo/config.toml`
-(`scripts/cargo-run-macos.sh`). This makes the dev build show the real
-**OpenLogi** name in the menu bar and the app icon in the Dock; a bare
-`cargo run` binary has no bundle, so macOS would otherwise fall back to the
-`openlogi-gui` executable name and a generic icon. The binary is hardlinked in
-(no copy) and the icon is generated on demand by
-`cargo run -p xtask -- macos icns`. The runner is a transparent passthrough for
-everything else (the CLI, tests); set
-`OPENLOGI_DEV_BUNDLE=0` to launch the raw `openlogi-gui` binary instead.
+If you use [direnv](https://direnv.net) without devenv installed, `.envrc`
+prints a notice and leaves your shell alone. Install rustup/cargo yourself
+and keep working.
 
-To install the CLI binary on `PATH`:
+### With devenv (optional)
 
-```sh
-cargo install --path .
-```
-
-## Using devenv (macOS)
-
-The repo's `devenv.nix` provisions a Nix-based dev shell with sccache, the
-stable Rust toolchain, and the env overrides GPUI needs. It exposes tasks that
-mirror CI and packaging:
+`devenv.nix` provisions sccache, the stable Rust toolchain, packaging helpers,
+and the macOS env overrides GPUI needs (`DEVELOPER_DIR` / `SDKROOT`). Tasks:
 
 ```sh
 devenv tasks run openlogi:gui      # run the desktop app
@@ -60,9 +48,7 @@ devenv tasks run openlogi:i18n-upload    # upload English source strings to Crow
 devenv tasks run openlogi:i18n-download  # download translations and run i18n tests
 ```
 
-The first time you `cd` into the repo after pulling a change to `devenv.nix`,
-**reload direnv** so the new env vars (`DEVELOPER_DIR`, `SDKROOT`, the PATH
-filter that strips Nix's `xcbuild` xcrun stub) take effect:
+After a `devenv.nix` change, reload direnv so the new env takes effect:
 
 ```sh
 direnv reload    # or: exit your shell and `cd` back in
@@ -72,6 +58,72 @@ Without that, GPUI's `gpui_macos` build script can't find Apple's `metal`
 shader compiler, and link errors about missing `_write` / `_sysconf` /
 `_waitpid` symbols show up because the Nix `apple-sdk-14.4` stub doesn't
 expose `libSystem` the way Apple's real linker wants.
+
+### Dev app bundle (macOS)
+
+On macOS the desktop binary is launched from inside a throwaway
+`target/dev/OpenLogi.app` — a Cargo `runner` wired in `.cargo/config.toml`
+(`scripts/cargo-run-macos.sh`). This makes the dev build show as
+**OpenLogi Dev** in the menu bar and Dock, with the real app icon; a bare
+`cargo run` binary has no bundle, so macOS would otherwise fall back to the
+`openlogi-gui` executable name and a generic icon. The binary is hardlinked in
+(no copy) and the icon is generated on demand by
+`cargo run -p xtask -- macos icns`. The runner is a transparent passthrough for
+everything else (the CLI, tests); set
+`OPENLOGI_DEV_BUNDLE=0` to launch the raw `openlogi-gui` binary instead.
+
+Packaged local dev bundles (`cargo run` and
+`cargo run -p xtask -- macos bundle`) use `.dev` bundle identifiers and the
+`openlogi-dev` XDG profile (`~/.config/openlogi-dev`,
+`~/.local/share/openlogi-dev`, and its own `agent.sock`). That keeps the dev
+GUI and agent from sharing the installed production app's Accessibility grant,
+single-instance lock, config, or IPC socket.
+
+Those identifiers are a channel, not a guess from the build type:
+`macos bundle` takes `--channel dev|production` (dev by default) and verifies
+what it stamped, and `macos dmg` refuses a non-production bundle once it is
+given a signing identity. Reproduce the shipped layout locally with
+`--channel production`, but don't sign and run it — it would take over the
+installed app's grants and config, which is exactly what releases
+0.6.24–0.6.26 did in reverse.
+
+To install the CLI binary on `PATH`:
+
+```sh
+cargo install --path .
+```
+
+## Developing the GUI without hardware
+
+`openlogi-agent-mock` serves the real agent IPC contract from a scripted
+in-memory inventory, so the desktop app can be developed with no Logitech
+device (or receiver) attached:
+
+```sh
+cargo run -p openlogi-agent --bin openlogi-agent-mock   # then, in another terminal:
+OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-gui
+```
+
+The mock defaults itself to the `openlogi-dev` profile (as if `OPENLOGI_PROFILE=dev`
+were set), which is the profile the dev app bundle already uses — so it meets the
+dev GUI on the dev socket, and an installed *release* build, which is on the
+production profile, keeps running untouched. (A locally built bundle installed
+into `/Applications` carries `.dev` identifiers and therefore shares the dev
+profile: it and the mock contend for the same lock, and whichever starts second
+exits.) `OPENLOGI_DEV_AGENT=0` keeps the runner from building and embedding
+the real agent for the GUI to auto-spawn; add `OPENLOGI_ALLOW_EXTERNAL_AGENT=1`
+if your installed production agent is running, since the runner's guard against
+it predates the profile split and cannot know the dev GUI is on a separate
+socket. Pass `OPENLOGI_PROFILE=prod` to serve the production socket instead; the
+mock then contends for the production agent's single-instance lock and refuses
+to start while it is running.
+
+The script covers an online mouse (DPI and SmartShift writes persist and read
+back, battery drains so poll-driven repaints are visible), an offline mouse, a
+lighting-capable keyboard, a directly-attached device, and a full Bolt pairing
+flow (discovery → passkey → paired). Its agent version carries a `-mock` suffix,
+so a mock session is identifiable in the UI. It is a dev tool only and is never
+bundled.
 
 ## Project layout
 
@@ -181,4 +233,72 @@ cargo run -p xtask -- release latest-json \
   --tag v0.2.0 \
   --base-url https://updates.openlogi.org \
   --output dist/latest.json
+```
+
+## Crowdin translation sync
+
+`.github/workflows/crowdin.yml` syncs GUI locales with
+[Crowdin](https://crowdin.com/project/openlogi) and opens a `crowdin/i18n` PR
+when a **real** translation value improved — nightly, and on master pushes that
+touch English sources (`en.yml`), `crowdin.yml`, the Crowdin workflow, the merge
+script under `scripts/i18n/`, or the shared GitHub App token action.
+
+**How it helps translation**
+
+| | Role |
+|--|--|
+| `en.yml` (git) | English source of truth — English text is the key |
+| All `locales/*.yml` in git | Same keys as `en.yml` (parity test); seed Crowdin per language |
+| Crowdin project | Where people improve non-English **values** |
+| Merge script | Applies only values ≠ English; restores keys sparse exports omit |
+| Bot PR (`crowdin/i18n`) | Only when a non-English value actually changed |
+
+Feature PRs add new keys to **every** locale file in the same change. Crowdin
+does not invent translations; it only stores and syncs them. A raw Crowdin
+download is unsafe: untranslated strings come back as English (#549), and
+`skip_untranslated_strings` overwrites catalogs with sparse files that delete
+keys (#552). The workflow always **snapshots → download → merge** via
+`scripts/i18n/merge_crowdin_download.py` so catalogs stay complete and only real
+translations land in git.
+
+Each run:
+
+1. Snapshots every `locales/*.yml`.
+2. Uploads `en.yml` **sources**.
+3. Uploads **per-language translations** already in git (`import_eq_suggestions`
+   off so `value == English` is not stored as a finished translation).
+4. Downloads Crowdin’s export (`skip_untranslated_strings`; sparse is fine).
+5. Merges the export into the snapshot (English fill-in ignored; omitted keys
+   kept; headers / `_version` preserved).
+6. Opens/updates `crowdin/i18n` only when the working tree still differs.
+
+Like the release workflow, the job reads its credentials from one 1Password
+item referenced by the GitHub secret `OP_CROWDIN_SECRET_ITEM`. The item must
+contain:
+
+- `CROWDIN_PROJECT_ID` — the numeric Crowdin project id.
+- `CROWDIN_PERSONAL_TOKEN` — a Crowdin API token with access to the project.
+
+Grant the token only these scopes and restrict its granular access to the
+OpenLogi project:
+
+- Projects (List, Get, Create, Edit) — Read.
+- Translation Status — Read Only.
+- Source files & strings — Read and Write.
+- Translations — Read and Write.
+
+Missing or invalid credentials fail the workflow. Translation PRs run the
+normal CI checks, including the locale key parity test (every catalog must match
+`en.yml` key-for-key). The workflow uses the existing `OP_GITHUB_APP_ITEM` to
+mint a short-lived token for pushing its translation branch and opening the PR;
+the default `GITHUB_TOKEN` remains read-only. Checkout runs with
+`persist-credentials: false` and the origin remote is rewritten to the app token
+so git push does not inherit the read-only Actions credential.
+
+Local helpers (with Crowdin credentials configured):
+
+```sh
+devenv tasks run openlogi:i18n-upload    # en.yml sources + per-language translations
+devenv tasks run openlogi:i18n-download  # download + merge + i18n tests
+python3 scripts/i18n/merge_crowdin_download.py --self-test
 ```

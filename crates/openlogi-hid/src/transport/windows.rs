@@ -5,12 +5,11 @@ use std::{error::Error, io};
 use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceInfo, DeviceReader, DeviceWriter};
 #[cfg(target_os = "windows")]
 use futures_lite::StreamExt as _;
+use hidpp::channel::{LONG_REPORT_ID, SHORT_REPORT_ID};
 #[cfg(target_os = "windows")]
 use hidpp::{
     async_trait,
-    channel::{
-        LONG_REPORT_ID, LONG_REPORT_LENGTH, RawHidChannel, SHORT_REPORT_ID, SHORT_REPORT_LENGTH,
-    },
+    channel::{LONG_REPORT_LENGTH, RawHidChannel, SHORT_REPORT_LENGTH},
 };
 #[cfg(target_os = "windows")]
 use tokio::sync::Mutex;
@@ -22,6 +21,22 @@ use crate::windows_hid::NativeHidWriter;
 
 #[cfg(target_os = "windows")]
 use super::HID_BACKEND;
+
+const VERY_LONG_REPORT_ID: u8 = 0x12;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReportEndpoint {
+    Short,
+    Long,
+}
+
+fn endpoint_for_report_id(report_id: u8) -> Option<ReportEndpoint> {
+    match report_id {
+        SHORT_REPORT_ID => Some(ReportEndpoint::Short),
+        LONG_REPORT_ID | VERY_LONG_REPORT_ID => Some(ReportEndpoint::Long),
+        _ => None,
+    }
+}
 
 #[cfg(target_os = "windows")]
 struct HidEndpoint {
@@ -189,9 +204,9 @@ impl RawHidChannel for WindowsHidppChannel {
     }
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
-        let endpoint = match src.first().copied() {
-            Some(SHORT_REPORT_ID) => self.short.as_ref(),
-            Some(LONG_REPORT_ID) => self.long.as_ref(),
+        let endpoint = match src.first().copied().and_then(endpoint_for_report_id) {
+            Some(ReportEndpoint::Short) => self.short.as_ref(),
+            Some(ReportEndpoint::Long) => self.long.as_ref(),
             _ => None,
         }
         .ok_or_else(|| {
@@ -266,4 +281,26 @@ fn copy_report(
     }
     dst[..len].copy_from_slice(&src[..len]);
     Ok(len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_ids_select_their_windows_endpoint() {
+        assert_eq!(
+            endpoint_for_report_id(SHORT_REPORT_ID),
+            Some(ReportEndpoint::Short)
+        );
+        assert_eq!(
+            endpoint_for_report_id(LONG_REPORT_ID),
+            Some(ReportEndpoint::Long)
+        );
+        assert_eq!(
+            endpoint_for_report_id(VERY_LONG_REPORT_ID),
+            Some(ReportEndpoint::Long)
+        );
+        assert_eq!(endpoint_for_report_id(0x13), None);
+    }
 }

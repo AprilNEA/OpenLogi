@@ -45,7 +45,8 @@ async fn malformed_passkey_after_pair_cancels_bolt_pairing() {
                 kind: BoltDeviceKind::Keyboard,
                 name: "Test Keyboard".into(),
             }))
-            .is_ok()
+            .is_ok(),
+        "the pair command must reach the session's command receiver"
     );
 
     let exchange = async {
@@ -60,7 +61,10 @@ async fn malformed_passkey_after_pair_cancels_bolt_pairing() {
         data[0] = RECEIVER_INDEX;
         data[1] = notification::id::PASSKEY_REQUEST;
         data[3..9].copy_from_slice(b"12x456");
-        assert!(notification_tx.send(HidppMessage::Long(data)).is_ok());
+        assert!(
+            notification_tx.send(HidppMessage::Long(data)).is_ok(),
+            "the malformed passkey notification must reach the running session"
+        );
 
         let Some(cancel) = written_reports.recv().await else {
             panic!("mock channel closed before cancel command");

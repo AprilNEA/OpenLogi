@@ -1,9 +1,11 @@
 //! The event emitted by the `Crown` feature (`0x4600`).
 
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+use num_enum::{FromPrimitive, IntoPrimitive};
+
+use crate::feature::DecodeEvent;
 
 /// Rotation phase reported in a [`CrownUpdate`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -16,10 +18,13 @@ pub enum RotationState {
     Active = 2,
     /// Rotation stopped.
     Stop = 3,
+    /// A state this crate does not model; carries the raw byte.
+    #[num_enum(catch_all)]
+    Other(u8),
 }
 
 /// Proximity or touch activity phase reported in a [`CrownUpdate`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -32,10 +37,13 @@ pub enum ActivityState {
     Active = 2,
     /// Stopped.
     Stop = 3,
+    /// A state this crate does not model; carries the raw byte.
+    #[num_enum(catch_all)]
+    Other(u8),
 }
 
 /// Touch gesture reported in a [`CrownUpdate`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -46,10 +54,13 @@ pub enum CrownGesture {
     Tap = 1,
     /// Double tap.
     DoubleTap = 2,
+    /// A gesture this crate does not model; carries the raw byte.
+    #[num_enum(catch_all)]
+    Other(u8),
 }
 
 /// Crown button state reported in a [`CrownUpdate`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -66,6 +77,9 @@ pub enum ButtonState {
     LongPressActive = 4,
     /// Released.
     Release = 5,
+    /// A state this crate does not model; carries the raw byte.
+    #[num_enum(catch_all)]
+    Other(u8),
 }
 
 /// An event emitted by [`CrownFeature`](super::CrownFeature).
@@ -107,15 +121,21 @@ pub struct CrownUpdate {
 pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<CrownEvent> {
     match sub_id {
         0 => Some(CrownEvent::Update(CrownUpdate {
-            rotation_state: RotationState::try_from(payload[0]).ok()?,
-            relative_slot_rotation: payload[1] as i8,
-            relative_ratchet_rotation: payload[2] as i8,
-            proximity: ActivityState::try_from(payload[3]).ok()?,
-            touch: ActivityState::try_from(payload[4]).ok()?,
-            gesture: CrownGesture::try_from(payload[5]).ok()?,
-            button: ButtonState::try_from(payload[6]).ok()?,
+            rotation_state: RotationState::from(payload[0]),
+            relative_slot_rotation: payload[1].cast_signed(),
+            relative_ratchet_rotation: payload[2].cast_signed(),
+            proximity: ActivityState::from(payload[3]),
+            touch: ActivityState::from(payload[4]),
+            gesture: CrownGesture::from(payload[5]),
+            button: ButtonState::from(payload[6]),
             speed: i16::from_be_bytes([payload[14], payload[15]]),
         })),
         _ => None,
+    }
+}
+
+impl DecodeEvent for CrownEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        decode_event(sub_id, payload)
     }
 }

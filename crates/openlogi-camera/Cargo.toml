@@ -1,0 +1,71 @@
+[package]
+name = "openlogi-camera"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Generic Logitech UVC webcam discovery for OpenLogi (AVFoundation on macOS, DirectShow on Windows, V4L2 on Linux)."
+keywords = ["logitech", "uvc", "webcam", "camera", "v4l2"]
+categories = ["hardware-support"]
+
+[dependencies]
+serde = { workspace = true }
+tracing = { workspace = true }
+
+# AVFoundation (AVCaptureDevice enumeration + AVCaptureSession capture) on the
+# same objc2 toolchain as the rest of the workspace's ObjC FFI (GUI menu bar /
+# permissions, the hook's NSWorkspace read): leak-proof `Retained<T>` ownership,
+# `define_class!` for the frame delegate (matching the agent tray target), and
+# `block2` for the `requestAccess…` completion block.
+#
+# The UVC control path is IOKit rather than AVFoundation, and gets the same
+# treatment from the objc2 bindings: `CFRetained` for CoreFoundation values,
+# `IOServiceGetMatchingServices` taking the matching dictionary *by value*
+# (it consumes a reference), and the real `IOUSBDeviceInterface182` vtable —
+# so nothing here declares its own `extern "C"` block.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+block2 = "0.6"
+objc2-core-foundation = { workspace = true, features = [
+    "std",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+    "CFUUID",
+] }
+objc2-io-kit = { workspace = true, features = [
+    "std",
+    "libc",
+    "usb",
+    "AppleUSBDefinitions",
+    "IOUSBLib",
+    "USB",
+] }
+
+# DirectShow enumeration + IAMVideoProcAmp / IAMCameraControl UVC controls.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Media_DirectShow",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_System_Ole",
+] }
+
+# V4L2 enumeration, UVC controls and mmap capture. `v4l` wraps every ioctl in a
+# safe API, so the Linux backend needs no `unsafe` of its own. MJPEG frames are
+# decoded by `zune-jpeg`, which already ships in the tree (via `image`) and can
+# emit BGRA directly — gpui's texture order, so the preview needs no swap.
+[target.'cfg(target_os = "linux")'.dependencies]
+v4l = "0.14"
+zune-jpeg = "0.5"
+zune-core = "0.5"
+
+# unsafe_code stays denied (from [workspace.lints]); the AVFoundation modules opt
+# in locally with #[expect(unsafe_code)].
+[lints]
+workspace = true

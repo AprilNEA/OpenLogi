@@ -40,6 +40,7 @@ Options:
 The script installs:
   PREFIX/bin/openlogi
   PREFIX/bin/openlogi-gui
+  PREFIX/bin/openlogi-overlay
   PREFIX/bin/openlogi-agent
   /etc/udev/rules.d/70-openlogi.rules
   /usr/lib/systemd/user/openlogi-agent.service  (if systemd is present)
@@ -58,7 +59,7 @@ BINDIR="${PREFIX}/bin"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="${REPO_ROOT}/target/release"
 
-for bin in openlogi openlogi-gui openlogi-agent; do
+for bin in openlogi openlogi-gui openlogi-overlay openlogi-agent; do
     if [ ! -x "${BUILD_DIR}/${bin}" ]; then
         echo "Error: ${BUILD_DIR}/${bin} not found." >&2
         echo "Build first: cargo build --release" >&2
@@ -70,8 +71,9 @@ done
 
 echo "Installing binaries to ${BINDIR} …"
 sudo install -Dm755 "${BUILD_DIR}/openlogi"       "${BINDIR}/openlogi"
-sudo install -Dm755 "${BUILD_DIR}/openlogi-gui"   "${BINDIR}/openlogi-gui"
-sudo install -Dm755 "${BUILD_DIR}/openlogi-agent" "${BINDIR}/openlogi-agent"
+sudo install -Dm755 "${BUILD_DIR}/openlogi-gui"     "${BINDIR}/openlogi-gui"
+sudo install -Dm755 "${BUILD_DIR}/openlogi-overlay" "${BINDIR}/openlogi-overlay"
+sudo install -Dm755 "${BUILD_DIR}/openlogi-agent"   "${BINDIR}/openlogi-agent"
 
 # ── udev rules ────────────────────────────────────────────────────────────────
 
@@ -83,6 +85,7 @@ if command -v udevadm > /dev/null 2>&1; then
     echo "Reloading udev rules …"
     sudo udevadm control --reload-rules
     sudo udevadm trigger --subsystem-match=hidraw
+    sudo udevadm trigger --subsystem-match=input
     sudo udevadm trigger --subsystem-match=misc --attr-match=name=uinput 2>/dev/null || true
 fi
 

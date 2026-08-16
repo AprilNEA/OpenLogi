@@ -12,103 +12,205 @@ use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::blocking::Connection as DbusConn;
 
-use openlogi_core::binding::Action;
+use openlogi_core::binding::{
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+};
 
-/// Linux implementation: inject events via a shared `uinput` virtual device.
+/// Linux implementation: classify `action` into an [`Effect`] and inject the
+/// resulting events via a shared `uinput` virtual device.
 pub(super) fn execute(action: &Action) {
-    let ctrl = KeyCode::KEY_LEFTCTRL;
-    let shift = KeyCode::KEY_LEFTSHIFT;
-    let alt = KeyCode::KEY_LEFTALT;
-    match action {
-        // ── Mouse clicks ──────────────────────────────────────────────────
-        Action::LeftClick => click(KeyCode::BTN_LEFT),
-        Action::RightClick => click(KeyCode::BTN_RIGHT),
-        Action::MiddleClick => click(KeyCode::BTN_MIDDLE),
+    match action.effect() {
+        Effect::None => {}
         // Extra mouse buttons: BTN_SIDE/BTN_EXTRA are the evdev side
         // buttons ("back"/"forward") browsers handle natively.
-        Action::MouseBack => click(KeyCode::BTN_SIDE),
-        Action::MouseForward => click(KeyCode::BTN_EXTRA),
-        // ── Editing ───────────────────────────────────────────────────────
-        Action::Copy => press_key(&[ctrl], KeyCode::KEY_C),
-        Action::Paste => press_key(&[ctrl], KeyCode::KEY_V),
-        Action::Cut => press_key(&[ctrl], KeyCode::KEY_X),
-        Action::Undo => press_key(&[ctrl], KeyCode::KEY_Z),
-        // Redo is Ctrl+Shift+Z on Linux (matches macOS ⌘⇧Z convention).
-        Action::Redo => press_key(&[ctrl, shift], KeyCode::KEY_Z),
-        Action::SelectAll => press_key(&[ctrl], KeyCode::KEY_A),
-        Action::Find => press_key(&[ctrl], KeyCode::KEY_F),
-        Action::Save => press_key(&[ctrl], KeyCode::KEY_S),
-        // ── Browser / Navigation ──────────────────────────────────────────
-        Action::BrowserBack => press_key(&[alt], KeyCode::KEY_LEFT),
-        Action::BrowserForward => press_key(&[alt], KeyCode::KEY_RIGHT),
-        Action::NewTab => press_key(&[ctrl], KeyCode::KEY_T),
-        Action::CloseTab => press_key(&[ctrl], KeyCode::KEY_W),
-        Action::ReopenTab => press_key(&[ctrl, shift], KeyCode::KEY_T),
-        Action::NextTab => press_key(&[ctrl], KeyCode::KEY_TAB),
-        Action::PrevTab => press_key(&[ctrl, shift], KeyCode::KEY_TAB),
-        Action::ReloadPage => press_key(&[ctrl], KeyCode::KEY_R),
-        // ── Navigation — macOS-specific ───────────────────────────────────
+        Effect::Click(button) => click(mouse_button_code(button)),
+        Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
+        Effect::Key(combo) => press_combo(combo),
+        Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
+        Effect::Media(key) => dispatch_media(key),
+        Effect::Native(native) => dispatch_native(action, native),
+        Effect::Script(script) => dispatch_script(script),
+        Effect::Text(text) => {
+            tracing::warn!(
+                chars = text.chars().count(),
+                "TypeText injection is not implemented on Linux yet"
+            );
+        }
+        Effect::AgentSide => {
+            tracing::debug!(
+                action = action.label(),
+                "device action handled by hook/HID layer"
+            );
+        }
+    }
+}
+
+fn mouse_button_code(button: MouseButton) -> KeyCode {
+    match button {
+        MouseButton::Left => KeyCode::BTN_LEFT,
+        MouseButton::Right => KeyCode::BTN_RIGHT,
+        MouseButton::Middle => KeyCode::BTN_MIDDLE,
+        MouseButton::Back => KeyCode::BTN_SIDE,
+        MouseButton::Forward => KeyCode::BTN_EXTRA,
+    }
+}
+
+/// The Linux chord for each named [`Shortcut`].
+///
+/// Parsed through [`KeyCombo`]'s existing, tested `FromStr` rather than
+/// hand-built keycode lists — the table stays a flat, auditable list of
+/// chord strings instead of a second modifier-encoding call site.
+fn combo(shortcut: Shortcut) -> KeyCombo {
+    let text = match shortcut {
+        Shortcut::Copy => "Ctrl+C",
+        Shortcut::Paste => "Ctrl+V",
+        Shortcut::Cut => "Ctrl+X",
+        Shortcut::Undo => "Ctrl+Z",
+        // Ctrl+Shift+Z matches the macOS ⌘⇧Z convention (see `Shortcut::Redo`
+        // doc on `Action`); Ctrl+Y is the GTK/LibreOffice convention and is
+        // left to a `CustomShortcut` binding.
+        Shortcut::Redo => "Ctrl+Shift+Z",
+        Shortcut::SelectAll => "Ctrl+A",
+        Shortcut::Find => "Ctrl+F",
+        Shortcut::Save => "Ctrl+S",
+        Shortcut::BrowserBack => "Alt+Left",
+        Shortcut::BrowserForward => "Alt+Right",
+        Shortcut::NewTab => "Ctrl+T",
+        Shortcut::CloseTab => "Ctrl+W",
+        Shortcut::ReopenTab => "Ctrl+Shift+T",
+        Shortcut::NextTab => "Ctrl+Tab",
+        Shortcut::PrevTab => "Ctrl+Shift+Tab",
+        Shortcut::ReloadPage => "Ctrl+R",
+    };
+    parse_shortcut(text)
+}
+
+fn parse_shortcut(text: &str) -> KeyCombo {
+    text.parse()
+        .unwrap_or_else(|error| unreachable!("hardcoded shortcut table entry {text:?}: {error}"))
+}
+
+/// Press an already-resolved chord: a table lookup from [`combo`] or a
+/// user-recorded [`Action::CustomShortcut`]/`WorkflowStep::PressKey`.
+fn press_combo(combo: &KeyCombo) {
+    let Some(key) = hid_usage_to_linux(combo.key().code()) else {
+        tracing::warn!(
+            usage = combo.key().code(),
+            "shortcut usage has no Linux mapping — press ignored"
+        );
+        return;
+    };
+    press_key(&modifiers_to_keycodes(combo), key);
+}
+
+/// MPRIS targets the running media player; XF86 volume keys go to the
+/// system mixer (PulseAudio/PipeWire) which is what users expect.
+fn dispatch_media(key: MediaKey) {
+    match key {
+        MediaKey::PlayPause => mpris_command("PlayPause"),
+        MediaKey::NextTrack => mpris_command("Next"),
+        MediaKey::PrevTrack => mpris_command("Previous"),
+        MediaKey::VolumeUp => press_key(&[], KeyCode::KEY_VOLUMEUP),
+        MediaKey::VolumeDown => press_key(&[], KeyCode::KEY_VOLUMEDOWN),
+        MediaKey::Mute => press_key(&[], KeyCode::KEY_MUTE),
+    }
+}
+
+/// Dispatch a window-manager or power [`NativeAction`]. `action` is only
+/// used for its label in the "no Linux equivalent" debug log.
+fn dispatch_native(action: &Action, native: NativeAction) {
+    let ctrl = KeyCode::KEY_LEFTCTRL;
+    let alt = KeyCode::KEY_LEFTALT;
+    match native {
         // No universal Linux equivalent; the compositor shortcut varies.
-        Action::MissionControl
-        | Action::AppExpose
-        | Action::ShowDesktop
-        | Action::LaunchpadShow => {
+        NativeAction::MissionControl
+        | NativeAction::AppExpose
+        | NativeAction::ShowDesktop
+        | NativeAction::LaunchpadShow => {
             tracing::debug!(
                 action = action.label(),
                 "no Linux equivalent — action skipped"
             );
         }
         // Ctrl+Alt+←/→ is the default in GNOME and KDE.
-        Action::PreviousDesktop => press_key(&[ctrl, alt], KeyCode::KEY_LEFT),
-        Action::NextDesktop => press_key(&[ctrl, alt], KeyCode::KEY_RIGHT),
-        // ── System ────────────────────────────────────────────────────────
-        // logind LockSessions() via the system bus; falls back to Super+L.
-        Action::LockScreen => lock_screen(),
+        NativeAction::PreviousDesktop => press_key(&[ctrl, alt], KeyCode::KEY_LEFT),
+        NativeAction::NextDesktop => press_key(&[ctrl, alt], KeyCode::KEY_RIGHT),
+        // logind LockSession() via the system bus; falls back to Super+L.
+        NativeAction::LockScreen => lock_screen(),
         // Region vs full-screen capture depends on the desktop environment's
         // screenshot handler for Print Screen, so both map to the same key.
-        Action::Screenshot | Action::CaptureRegion => press_key(&[], KeyCode::KEY_SYSRQ),
-        // ── Media ─────────────────────────────────────────────────────────
-        // MPRIS targets the running media player; XF86 volume keys go to the
-        // system mixer (PulseAudio/PipeWire) which is what users expect.
-        Action::PlayPause => mpris_command("PlayPause"),
-        Action::NextTrack => mpris_command("Next"),
-        Action::PrevTrack => mpris_command("Previous"),
-        Action::VolumeUp => press_key(&[], KeyCode::KEY_VOLUMEUP),
-        Action::VolumeDown => press_key(&[], KeyCode::KEY_VOLUMEDOWN),
-        Action::MuteVolume => press_key(&[], KeyCode::KEY_MUTE),
-        // ── DPI / SmartShift: handled at hook/HID layer ───────────────────
-        Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::ToggleSmartShift => {
-            tracing::debug!(
-                action = action.label(),
-                "device action handled by hook/HID layer"
-            );
+        NativeAction::Screenshot | NativeAction::CaptureRegion => {
+            press_key(&[], KeyCode::KEY_SYSRQ);
         }
-        // ── Scroll ────────────────────────────────────────────────────────
-        Action::ScrollUp => scroll(RelativeAxisCode::REL_WHEEL, 3),
-        Action::ScrollDown => scroll(RelativeAxisCode::REL_WHEEL, -3),
-        Action::HorizontalScrollLeft => scroll(RelativeAxisCode::REL_HWHEEL, -3),
-        Action::HorizontalScrollRight => scroll(RelativeAxisCode::REL_HWHEEL, 3),
-        // ── No-op ─────────────────────────────────────────────────────────
-        Action::None => {}
-        // ── Custom shortcut ───────────────────────────────────────────────
-        Action::CustomShortcut(combo) => {
-            if combo.key_code == 0 {
+        // logind Suspend() via the system bus.
+        NativeAction::Sleep => sleep_system(),
+    }
+}
+
+fn dispatch_script(script: Script<'_>) {
+    match script {
+        Script::AppleScript(_) => {
+            tracing::warn!("RunAppleScript is only supported on macOS");
+        }
+        Script::ShellCommand(cmd) => run_shell_command_async(cmd.to_string()),
+        Script::Workflow(steps) => run_workflow_async(steps.to_vec()),
+    }
+}
+
+/// Synthesise one scroll tick in direction `(dx, dy)`. Unit direction
+/// (-1/0/1) scaled by the fixed relative-axis magnitude the four
+/// `Scroll*`/`HorizontalScroll*` actions have always used.
+fn dispatch_scroll(dx: i8, dy: i8) {
+    if dy != 0 {
+        scroll(RelativeAxisCode::REL_WHEEL, i32::from(dy) * 3);
+    }
+    if dx != 0 {
+        scroll(RelativeAxisCode::REL_HWHEEL, i32::from(dx) * 3);
+    }
+}
+
+fn run_shell_command_async(cmd: String) {
+    std::thread::spawn(move || run_shell_command(&cmd));
+}
+
+fn run_workflow_async(steps: Vec<WorkflowStep>) {
+    std::thread::spawn(move || run_workflow(&steps));
+}
+
+fn run_workflow(steps: &[WorkflowStep]) {
+    for step in steps {
+        match step {
+            WorkflowStep::TypeText(text) => {
                 tracing::warn!(
-                    chord = %combo.rendered_label(),
-                    "CustomShortcut with no key code — press ignored"
+                    chars = text.chars().count(),
+                    "workflow TypeText injection is not implemented on Linux yet"
                 );
-                return;
             }
-            let Some(key) = macos_vk_to_linux(combo.key_code) else {
-                tracing::warn!(
-                    key_code = combo.key_code,
-                    "CustomShortcut key code has no Linux mapping — press ignored"
-                );
-                return;
-            };
-            press_key(&modifiers_to_keycodes(combo.modifiers), key);
+            WorkflowStep::PressKey(combo) => {
+                let Some(key) = hid_usage_to_linux(combo.key().code()) else {
+                    tracing::warn!(
+                        usage = combo.key().code(),
+                        "workflow PressKey usage has no Linux mapping; step ignored"
+                    );
+                    continue;
+                };
+                press_key(&modifiers_to_keycodes(combo), key);
+            }
+            WorkflowStep::Delay { millis } => {
+                std::thread::sleep(std::time::Duration::from_millis(*millis));
+            }
+            WorkflowStep::RunAppleScript(_) => {
+                tracing::warn!("workflow RunAppleScript is only supported on macOS");
+            }
+            WorkflowStep::RunShellCommand(cmd) => run_shell_command(cmd),
         }
     }
+}
+
+fn run_shell_command(cmd: &str) {
+    let _ = std::process::Command::new("/bin/sh")
+        .args(["-c", cmd])
+        .output();
 }
 
 const DEVICE_NAME: &str = "OpenLogi action injector";
@@ -273,103 +375,116 @@ pub(super) fn device_node() -> Option<std::path::PathBuf> {
 /// macOS Cmd (`MOD_CMD`) and Ctrl (`MOD_CTRL`) both map to `KEY_LEFTCTRL`;
 /// the bitwise-OR check deduplicates them so at most one Ctrl is pushed.
 /// Order is canonical: Ctrl → Shift → Alt.
-fn modifiers_to_keycodes(modifiers: u8) -> Vec<KeyCode> {
-    use openlogi_core::binding::KeyCombo;
-    let mut mods = Vec::new();
-    if modifiers & (KeyCombo::MOD_CMD | KeyCombo::MOD_CTRL) != 0 {
-        mods.push(KeyCode::KEY_LEFTCTRL);
+fn modifiers_to_keycodes(combo: &openlogi_core::binding::KeyCombo) -> Vec<KeyCode> {
+    let mut modifiers = Vec::new();
+    if combo.has_command() || combo.has_control() {
+        modifiers.push(KeyCode::KEY_LEFTCTRL);
     }
-    if modifiers & KeyCombo::MOD_SHIFT != 0 {
-        mods.push(KeyCode::KEY_LEFTSHIFT);
+    if combo.has_shift() {
+        modifiers.push(KeyCode::KEY_LEFTSHIFT);
     }
-    if modifiers & KeyCombo::MOD_OPTION != 0 {
-        mods.push(KeyCode::KEY_LEFTALT);
+    if combo.has_option() {
+        modifiers.push(KeyCode::KEY_LEFTALT);
     }
-    mods
+    modifiers
 }
 
-/// Map a macOS `kVK_*` virtual key code to the corresponding Linux `KeyCode`.
-///
-/// Source: `HIToolbox/Events.h` (macOS side) and
-/// `linux/input-event-codes.h` (Linux side). Only the codes the recorder UI
-/// is likely to produce are mapped; unknown codes return `None`.
-fn macos_vk_to_linux(vk: u16) -> Option<KeyCode> {
-    Some(match vk {
-        0x00 => KeyCode::KEY_A,          // kVK_ANSI_A
-        0x01 => KeyCode::KEY_S,          // kVK_ANSI_S
-        0x02 => KeyCode::KEY_D,          // kVK_ANSI_D
-        0x03 => KeyCode::KEY_F,          // kVK_ANSI_F
-        0x04 => KeyCode::KEY_H,          // kVK_ANSI_H
-        0x05 => KeyCode::KEY_G,          // kVK_ANSI_G
-        0x06 => KeyCode::KEY_Z,          // kVK_ANSI_Z
-        0x07 => KeyCode::KEY_X,          // kVK_ANSI_X
-        0x08 => KeyCode::KEY_C,          // kVK_ANSI_C
-        0x09 => KeyCode::KEY_V,          // kVK_ANSI_V
-        0x0B => KeyCode::KEY_B,          // kVK_ANSI_B
-        0x0C => KeyCode::KEY_Q,          // kVK_ANSI_Q
-        0x0D => KeyCode::KEY_W,          // kVK_ANSI_W
-        0x0E => KeyCode::KEY_E,          // kVK_ANSI_E
-        0x0F => KeyCode::KEY_R,          // kVK_ANSI_R
-        0x10 => KeyCode::KEY_Y,          // kVK_ANSI_Y
-        0x11 => KeyCode::KEY_T,          // kVK_ANSI_T
-        0x12 => KeyCode::KEY_1,          // kVK_ANSI_1
-        0x13 => KeyCode::KEY_2,          // kVK_ANSI_2
-        0x14 => KeyCode::KEY_3,          // kVK_ANSI_3
-        0x15 => KeyCode::KEY_4,          // kVK_ANSI_4
-        0x16 => KeyCode::KEY_6,          // kVK_ANSI_6
-        0x17 => KeyCode::KEY_5,          // kVK_ANSI_5
-        0x18 => KeyCode::KEY_EQUAL,      // kVK_ANSI_Equal
-        0x19 => KeyCode::KEY_9,          // kVK_ANSI_9
-        0x1A => KeyCode::KEY_7,          // kVK_ANSI_7
-        0x1B => KeyCode::KEY_MINUS,      // kVK_ANSI_Minus
-        0x1C => KeyCode::KEY_8,          // kVK_ANSI_8
-        0x1D => KeyCode::KEY_0,          // kVK_ANSI_0
-        0x1E => KeyCode::KEY_RIGHTBRACE, // kVK_ANSI_RightBracket
-        0x1F => KeyCode::KEY_O,          // kVK_ANSI_O
-        0x20 => KeyCode::KEY_U,          // kVK_ANSI_U
-        0x21 => KeyCode::KEY_LEFTBRACE,  // kVK_ANSI_LeftBracket
-        0x22 => KeyCode::KEY_I,          // kVK_ANSI_I
-        0x23 => KeyCode::KEY_P,          // kVK_ANSI_P
-        0x24 => KeyCode::KEY_ENTER,      // kVK_Return
-        0x25 => KeyCode::KEY_L,          // kVK_ANSI_L
-        0x26 => KeyCode::KEY_J,          // kVK_ANSI_J
-        0x27 => KeyCode::KEY_APOSTROPHE, // kVK_ANSI_Quote
-        0x28 => KeyCode::KEY_K,          // kVK_ANSI_K
-        0x29 => KeyCode::KEY_SEMICOLON,  // kVK_ANSI_Semicolon
-        0x2A => KeyCode::KEY_BACKSLASH,  // kVK_ANSI_Backslash
-        0x2B => KeyCode::KEY_COMMA,      // kVK_ANSI_Comma
-        0x2C => KeyCode::KEY_SLASH,      // kVK_ANSI_Slash
-        0x2D => KeyCode::KEY_N,          // kVK_ANSI_N
-        0x2E => KeyCode::KEY_M,          // kVK_ANSI_M
-        0x2F => KeyCode::KEY_DOT,        // kVK_ANSI_Period
-        0x30 => KeyCode::KEY_TAB,        // kVK_Tab
-        0x31 => KeyCode::KEY_SPACE,      // kVK_Space
-        0x32 => KeyCode::KEY_GRAVE,      // kVK_ANSI_Grave
-        0x33 => KeyCode::KEY_BACKSPACE,  // kVK_Delete (= Backspace on macOS)
-        0x35 => KeyCode::KEY_ESC,        // kVK_Escape
-        0x60 => KeyCode::KEY_F5,         // kVK_F5
-        0x61 => KeyCode::KEY_F6,         // kVK_F6
-        0x62 => KeyCode::KEY_F7,         // kVK_F7
-        0x63 => KeyCode::KEY_F3,         // kVK_F3
-        0x64 => KeyCode::KEY_F8,         // kVK_F8
-        0x65 => KeyCode::KEY_F9,         // kVK_F9
-        0x67 => KeyCode::KEY_F11,        // kVK_F11
-        0x6D => KeyCode::KEY_F10,        // kVK_F10
-        0x6F => KeyCode::KEY_F12,        // kVK_F12
-        0x76 => KeyCode::KEY_F4,         // kVK_F4
-        0x78 => KeyCode::KEY_F2,         // kVK_F2
-        0x7A => KeyCode::KEY_F1,         // kVK_F1
-        0x73 => KeyCode::KEY_HOME,       // kVK_Home
-        0x77 => KeyCode::KEY_END,        // kVK_End
-        0x74 => KeyCode::KEY_PAGEUP,     // kVK_PageUp
-        0x79 => KeyCode::KEY_PAGEDOWN,   // kVK_PageDown
-        0x75 => KeyCode::KEY_DELETE,     // kVK_ForwardDelete
-        0x7B => KeyCode::KEY_LEFT,       // kVK_LeftArrow
-        0x7C => KeyCode::KEY_RIGHT,      // kVK_RightArrow
-        0x7D => KeyCode::KEY_DOWN,       // kVK_DownArrow
-        0x7E => KeyCode::KEY_UP,         // kVK_UpArrow
-        _ => return None,
-    })
+/// Map a platform-neutral USB HID keyboard usage to evdev.
+fn hid_usage_to_linux(usage: u8) -> Option<KeyCode> {
+    const LETTERS: [KeyCode; 26] = [
+        KeyCode::KEY_A,
+        KeyCode::KEY_B,
+        KeyCode::KEY_C,
+        KeyCode::KEY_D,
+        KeyCode::KEY_E,
+        KeyCode::KEY_F,
+        KeyCode::KEY_G,
+        KeyCode::KEY_H,
+        KeyCode::KEY_I,
+        KeyCode::KEY_J,
+        KeyCode::KEY_K,
+        KeyCode::KEY_L,
+        KeyCode::KEY_M,
+        KeyCode::KEY_N,
+        KeyCode::KEY_O,
+        KeyCode::KEY_P,
+        KeyCode::KEY_Q,
+        KeyCode::KEY_R,
+        KeyCode::KEY_S,
+        KeyCode::KEY_T,
+        KeyCode::KEY_U,
+        KeyCode::KEY_V,
+        KeyCode::KEY_W,
+        KeyCode::KEY_X,
+        KeyCode::KEY_Y,
+        KeyCode::KEY_Z,
+    ];
+    const DIGITS: [KeyCode; 10] = [
+        KeyCode::KEY_1,
+        KeyCode::KEY_2,
+        KeyCode::KEY_3,
+        KeyCode::KEY_4,
+        KeyCode::KEY_5,
+        KeyCode::KEY_6,
+        KeyCode::KEY_7,
+        KeyCode::KEY_8,
+        KeyCode::KEY_9,
+        KeyCode::KEY_0,
+    ];
+    const FUNCTIONS: [KeyCode; 20] = [
+        KeyCode::KEY_F1,
+        KeyCode::KEY_F2,
+        KeyCode::KEY_F3,
+        KeyCode::KEY_F4,
+        KeyCode::KEY_F5,
+        KeyCode::KEY_F6,
+        KeyCode::KEY_F7,
+        KeyCode::KEY_F8,
+        KeyCode::KEY_F9,
+        KeyCode::KEY_F10,
+        KeyCode::KEY_F11,
+        KeyCode::KEY_F12,
+        KeyCode::KEY_F13,
+        KeyCode::KEY_F14,
+        KeyCode::KEY_F15,
+        KeyCode::KEY_F16,
+        KeyCode::KEY_F17,
+        KeyCode::KEY_F18,
+        KeyCode::KEY_F19,
+        KeyCode::KEY_F20,
+    ];
+    match usage {
+        0x04..=0x1d => LETTERS.get(usize::from(usage - 0x04)).copied(),
+        0x1e..=0x27 => DIGITS.get(usize::from(usage - 0x1e)).copied(),
+        0x3a..=0x45 => FUNCTIONS.get(usize::from(usage - 0x3a)).copied(),
+        0x68..=0x6f => FUNCTIONS.get(usize::from(usage - 0x68 + 12)).copied(),
+        0x28 => Some(KeyCode::KEY_ENTER),
+        0x29 => Some(KeyCode::KEY_ESC),
+        0x2a => Some(KeyCode::KEY_BACKSPACE),
+        0x2b => Some(KeyCode::KEY_TAB),
+        0x2c => Some(KeyCode::KEY_SPACE),
+        0x2d => Some(KeyCode::KEY_MINUS),
+        0x2e => Some(KeyCode::KEY_EQUAL),
+        0x2f => Some(KeyCode::KEY_LEFTBRACE),
+        0x30 => Some(KeyCode::KEY_RIGHTBRACE),
+        0x31 => Some(KeyCode::KEY_BACKSLASH),
+        0x33 => Some(KeyCode::KEY_SEMICOLON),
+        0x34 => Some(KeyCode::KEY_APOSTROPHE),
+        0x35 => Some(KeyCode::KEY_GRAVE),
+        0x36 => Some(KeyCode::KEY_COMMA),
+        0x37 => Some(KeyCode::KEY_DOT),
+        0x38 => Some(KeyCode::KEY_SLASH),
+        0x4a => Some(KeyCode::KEY_HOME),
+        0x4b => Some(KeyCode::KEY_PAGEUP),
+        0x4c => Some(KeyCode::KEY_DELETE),
+        0x4d => Some(KeyCode::KEY_END),
+        0x4e => Some(KeyCode::KEY_PAGEDOWN),
+        0x4f => Some(KeyCode::KEY_RIGHT),
+        0x50 => Some(KeyCode::KEY_LEFT),
+        0x51 => Some(KeyCode::KEY_DOWN),
+        0x52 => Some(KeyCode::KEY_UP),
+        _ => None,
+    }
 }
 
 // ── D-Bus helpers ────────────────────────────────────────────────────────
@@ -412,6 +527,27 @@ fn lock_screen() {
     // Super+L is the standard lock shortcut on GNOME and KDE.
     tracing::debug!("LockScreen via Super+L key combo");
     press_key(&[KeyCode::KEY_LEFTMETA], KeyCode::KEY_L);
+}
+
+/// Suspend the system via logind's `Suspend()` on the system bus. The
+/// `false` argument declines the "interactive" polkit prompt — if the
+/// session isn't allowed to suspend, the call fails and is logged rather
+/// than popping an authentication dialog from a background agent.
+fn sleep_system() {
+    let Some(conn) = SYSTEM_BUS.as_ref() else {
+        tracing::warn!("no system bus — Sleep skipped");
+        return;
+    };
+    match conn.call_method(
+        Some("org.freedesktop.login1"),
+        "/org/freedesktop/login1",
+        Some("org.freedesktop.login1.Manager"),
+        "Suspend",
+        &(false,),
+    ) {
+        Ok(_) => tracing::debug!("Sleep via logind Suspend"),
+        Err(e) => tracing::warn!("logind Suspend failed: {e}"),
+    }
 }
 
 /// Send `command` to the first MPRIS-capable media player on the session bus,
@@ -471,121 +607,59 @@ fn try_mpris_command(command: &str) -> Option<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
-    // ── modifiers_to_keycodes ─────────────────────────────────────────────
+    use evdev::KeyCode;
+    use openlogi_core::binding::{KeyCombo, Shortcut};
 
-    mod modifier_mapping {
-        use evdev::KeyCode;
+    use super::{combo, hid_usage_to_linux, modifiers_to_keycodes};
 
-        use super::super::modifiers_to_keycodes;
-        use openlogi_core::binding::KeyCombo;
-
-        #[test]
-        fn mod_cmd_alone_maps_to_ctrl() {
-            assert_eq!(
-                modifiers_to_keycodes(KeyCombo::MOD_CMD),
-                vec![KeyCode::KEY_LEFTCTRL]
-            );
-        }
-
-        #[test]
-        fn mod_ctrl_alone_maps_to_ctrl() {
-            assert_eq!(
-                modifiers_to_keycodes(KeyCombo::MOD_CTRL),
-                vec![KeyCode::KEY_LEFTCTRL]
-            );
-        }
-
-        #[test]
-        fn mod_cmd_and_ctrl_together_produce_single_ctrl() {
-            // Both bits set must not push KEY_LEFTCTRL twice.
-            assert_eq!(
-                modifiers_to_keycodes(KeyCombo::MOD_CMD | KeyCombo::MOD_CTRL),
-                vec![KeyCode::KEY_LEFTCTRL]
-            );
-        }
-
-        #[test]
-        fn all_modifiers_produce_canonical_order() {
-            let mods = modifiers_to_keycodes(
-                KeyCombo::MOD_CMD | KeyCombo::MOD_SHIFT | KeyCombo::MOD_OPTION,
-            );
-            assert_eq!(
-                mods,
-                vec![
-                    KeyCode::KEY_LEFTCTRL,
-                    KeyCode::KEY_LEFTSHIFT,
-                    KeyCode::KEY_LEFTALT
-                ]
-            );
-        }
-
-        #[test]
-        fn no_modifiers_produces_empty_vec() {
-            assert!(modifiers_to_keycodes(0).is_empty());
-        }
+    #[test]
+    fn modifiers_map_to_linux_without_duplicate_control() {
+        let combo = "Cmd+Ctrl+Shift+Alt+A"
+            .parse::<KeyCombo>()
+            .expect("a valid shortcut must parse");
+        assert_eq!(
+            modifiers_to_keycodes(&combo),
+            vec![
+                KeyCode::KEY_LEFTCTRL,
+                KeyCode::KEY_LEFTSHIFT,
+                KeyCode::KEY_LEFTALT
+            ]
+        );
     }
 
-    // ── macos_vk_to_linux ─────────────────────────────────────────────────
+    #[test]
+    fn hid_usages_map_letters_navigation_and_function_keys() {
+        assert_eq!(hid_usage_to_linux(0x04), Some(KeyCode::KEY_A));
+        assert_eq!(hid_usage_to_linux(0x50), Some(KeyCode::KEY_LEFT));
+        assert_eq!(hid_usage_to_linux(0x3a), Some(KeyCode::KEY_F1));
+        assert_eq!(hid_usage_to_linux(0x6f), Some(KeyCode::KEY_F20));
+        assert_eq!(hid_usage_to_linux(0xff), None);
+    }
 
-    mod vk_mapping {
-        use evdev::KeyCode;
-
-        use super::super::macos_vk_to_linux;
-
-        #[test]
-        fn common_letters_map_correctly() {
-            assert_eq!(macos_vk_to_linux(0x08), Some(KeyCode::KEY_C)); // kVK_ANSI_C
-            assert_eq!(macos_vk_to_linux(0x09), Some(KeyCode::KEY_V)); // kVK_ANSI_V
-            assert_eq!(macos_vk_to_linux(0x07), Some(KeyCode::KEY_X)); // kVK_ANSI_X
-            assert_eq!(macos_vk_to_linux(0x00), Some(KeyCode::KEY_A)); // kVK_ANSI_A
-            assert_eq!(macos_vk_to_linux(0x06), Some(KeyCode::KEY_Z)); // kVK_ANSI_Z
-            assert_eq!(macos_vk_to_linux(0x0D), Some(KeyCode::KEY_W)); // kVK_ANSI_W
-        }
-
-        #[test]
-        fn digits_map_correctly() {
-            assert_eq!(macos_vk_to_linux(0x12), Some(KeyCode::KEY_1)); // kVK_ANSI_1
-            assert_eq!(macos_vk_to_linux(0x1D), Some(KeyCode::KEY_0)); // kVK_ANSI_0
-        }
-
-        #[test]
-        fn arrow_keys_map_correctly() {
-            assert_eq!(macos_vk_to_linux(0x7B), Some(KeyCode::KEY_LEFT));
-            assert_eq!(macos_vk_to_linux(0x7C), Some(KeyCode::KEY_RIGHT));
-            assert_eq!(macos_vk_to_linux(0x7D), Some(KeyCode::KEY_DOWN));
-            assert_eq!(macos_vk_to_linux(0x7E), Some(KeyCode::KEY_UP));
-        }
-
-        #[test]
-        fn function_keys_map_correctly() {
-            assert_eq!(macos_vk_to_linux(0x7A), Some(KeyCode::KEY_F1)); // kVK_F1
-            assert_eq!(macos_vk_to_linux(0x78), Some(KeyCode::KEY_F2)); // kVK_F2
-            assert_eq!(macos_vk_to_linux(0x76), Some(KeyCode::KEY_F4)); // kVK_F4
-            assert_eq!(macos_vk_to_linux(0x60), Some(KeyCode::KEY_F5)); // kVK_F5
-            assert_eq!(macos_vk_to_linux(0x6F), Some(KeyCode::KEY_F12)); // kVK_F12
-        }
-
-        #[test]
-        fn nav_keys_map_correctly() {
-            assert_eq!(macos_vk_to_linux(0x73), Some(KeyCode::KEY_HOME));
-            assert_eq!(macos_vk_to_linux(0x77), Some(KeyCode::KEY_END));
-            assert_eq!(macos_vk_to_linux(0x74), Some(KeyCode::KEY_PAGEUP));
-            assert_eq!(macos_vk_to_linux(0x79), Some(KeyCode::KEY_PAGEDOWN));
-            assert_eq!(macos_vk_to_linux(0x75), Some(KeyCode::KEY_DELETE));
-        }
-
-        #[test]
-        fn brackets_follow_ansi_layout() {
-            // kVK_ANSI_LeftBracket=0x21 → KEY_LEFTBRACE, RightBracket=0x1E → KEY_RIGHTBRACE
-            assert_eq!(macos_vk_to_linux(0x21), Some(KeyCode::KEY_LEFTBRACE));
-            assert_eq!(macos_vk_to_linux(0x1E), Some(KeyCode::KEY_RIGHTBRACE));
-        }
-
-        #[test]
-        fn unmapped_code_returns_none() {
-            assert_eq!(macos_vk_to_linux(0xFF), None);
-            assert_eq!(macos_vk_to_linux(0x34), None); // gap in the kVK table
+    /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
+    /// edit to the table can't silently change what Ctrl+C sends.
+    /// `BrowserBack` and `Redo` differ from macOS/Windows by design (see
+    /// the module doc on `combo`), so each backend pins its own rows.
+    #[test]
+    fn combo_table_pins_representative_shortcuts() {
+        assert_eq!(combo(Shortcut::Copy).rendered_label(), "Ctrl+C");
+        assert_eq!(combo(Shortcut::Redo).rendered_label(), "Ctrl+Shift+Z");
+        assert_eq!(combo(Shortcut::BrowserBack).rendered_label(), "Alt+Left");
+        assert_eq!(combo(Shortcut::NextTab).rendered_label(), "Ctrl+Tab");
+        // hid_usage_to_linux must actually resolve every table entry, or a
+        // `Shortcut` silently no-ops instead of pressing anything (see
+        // `press_combo`'s warn-and-drop path). Iterates `Shortcut::ALL`
+        // rather than a hand-copied list, so a newly added `Shortcut`
+        // variant is checked here automatically instead of depending on
+        // someone remembering to extend a second, independent list.
+        for &shortcut in Shortcut::ALL {
+            let key = combo(shortcut).key().code();
+            assert!(
+                hid_usage_to_linux(key).is_some(),
+                "{shortcut:?} table entry has no Linux keycode mapping"
+            );
         }
     }
 }

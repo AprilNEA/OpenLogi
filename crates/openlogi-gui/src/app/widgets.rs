@@ -12,11 +12,21 @@ use gpui_component::{
     h_flex, v_flex,
 };
 use openlogi_core::device::{BatteryInfo, BatteryStatus, DeviceKind};
-use openlogi_hid::DeviceRoute;
+use openlogi_core::hid::DeviceRoute;
 
 use super::AppView;
 use crate::state::AppState;
 use crate::theme::{self, Palette, Typography as _};
+
+/// True when the device is charging but still reports 0% — the MX2S `0x1000`
+/// firmware can't gauge charge under load, and on a cold start there's no
+/// pre-charge % cached to carry forward. Show "Charging" without the bogus 0%.
+pub(crate) fn battery_charging_no_reading(b: &BatteryInfo) -> bool {
+    matches!(
+        b.status,
+        BatteryStatus::Charging | BatteryStatus::ChargingSlow
+    ) && b.percentage == 0
+}
 
 /// "← Back" affordance on the detail screen; returns to the gallery without
 /// changing the active-device selection.
@@ -62,7 +72,7 @@ pub(super) fn main_window_title(show_device: bool, cx: &Context<AppView>) -> Sha
 
 pub(super) fn panel_card(
     title: SharedString,
-    icon: IconName,
+    icon: Icon,
     pal: Palette,
     content: AnyElement,
 ) -> impl IntoElement {
@@ -71,7 +81,7 @@ pub(super) fn panel_card(
 
 pub(super) fn panel_card_fill(
     title: SharedString,
-    icon: IconName,
+    icon: Icon,
     pal: Palette,
     content: AnyElement,
 ) -> impl IntoElement {
@@ -80,7 +90,7 @@ pub(super) fn panel_card_fill(
 
 fn panel_card_inner(
     title: SharedString,
-    icon: IconName,
+    icon: Icon,
     pal: Palette,
     content: AnyElement,
     fill_height: bool,
@@ -104,7 +114,7 @@ fn panel_card_inner(
                             .items_center()
                             .gap_2()
                             .text_color(pal.text_primary)
-                            .child(Icon::new(icon).size_4().text_color(pal.text_muted))
+                            .child(icon.size_4().text_color(pal.text_muted))
                             .child(div().text_subheading().child(title)),
                     )
                 })
@@ -147,22 +157,32 @@ pub(super) fn battery_summary(battery: &BatteryInfo, pal: Palette) -> impl IntoE
                 .text_caption()
                 .text_color(pal.text_muted)
                 .child(status)
-                .child(format!("{}%", battery.percentage)),
+                .child(if battery_charging_no_reading(battery) {
+                    String::new()
+                } else {
+                    format!("{}%", battery.percentage)
+                }),
         )
-        .child(
-            div()
+        .child({
+            let track = div()
                 .h(px(6.))
                 .w_full()
                 .rounded_full()
-                .bg(pal.surface_hover)
-                .child(
+                .bg(pal.surface_hover);
+            // Charging with no reliable %: leave the track empty rather than
+            // drawing the 1%-wide red critical sliver that percentage==0 yields.
+            if battery_charging_no_reading(battery) {
+                track
+            } else {
+                track.child(
                     div()
                         .h_full()
                         .w(relative(f32::from(battery.percentage.clamp(1, 100)) / 100.))
                         .rounded_full()
                         .bg(rgb(battery_color(battery.percentage))),
-                ),
-        )
+                )
+            }
+        })
 }
 
 fn battery_color(percentage: u8) -> u32 {
@@ -192,7 +212,9 @@ pub(super) fn route_label(route: Option<&DeviceRoute>) -> String {
     match route {
         Some(DeviceRoute::Bolt { .. }) => tr!("Bolt receiver").to_string(),
         Some(DeviceRoute::Unifying { .. }) => tr!("Unifying receiver").to_string(),
-        Some(DeviceRoute::Direct { .. }) => tr!("Direct connection").to_string(),
+        Some(DeviceRoute::Direct { .. } | DeviceRoute::RawHid { .. }) => {
+            tr!("Direct connection").to_string()
+        }
         None => tr!("Unavailable").to_string(),
     }
 }
@@ -210,6 +232,8 @@ pub(super) fn kind_label(kind: DeviceKind) -> String {
         DeviceKind::Gamepad => tr!("Gamepad").to_string(),
         DeviceKind::Joystick => tr!("Joystick").to_string(),
         DeviceKind::Headset => tr!("Headset").to_string(),
+        DeviceKind::Camera => tr!("Camera").to_string(),
         DeviceKind::Unknown => tr!("Device").to_string(),
+        DeviceKind::Light => tr!("Lighting").to_string(),
     }
 }

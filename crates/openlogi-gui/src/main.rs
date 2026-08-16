@@ -29,6 +29,9 @@ macro_rules! tr {
     };
 }
 
+mod action_icons;
+mod action_ring_geometry;
+mod action_ring_icons;
 mod app;
 mod app_assets;
 mod app_menu;
@@ -38,6 +41,7 @@ mod data;
 mod diagnostics;
 mod i18n;
 mod ipc_client;
+mod keyboard_model;
 mod mouse_model;
 mod platform;
 mod state;
@@ -58,9 +62,9 @@ use gpui::{
     AppContext, BorrowAppContext as _, Bounds, Size, Styled, WindowBounds, WindowOptions, px,
 };
 use gpui_component::{ActiveTheme, Root};
-use openlogi_core::brand::DeeplinkCommand;
-use openlogi_core::config::Config;
-use openlogi_core::device::DeviceInventory;
+use openlogi_core::brand::{APP_ID, DeeplinkCommand};
+use openlogi_core::config::{Config, ConfigFile};
+use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -68,7 +72,7 @@ use crate::app::AppView;
 use crate::asset::sync::{
     AssetCommand, AssetControl, SyncOutcome, model_key, run_asset_sync, sync_retry_delay,
 };
-use crate::state::AppState;
+use crate::state::{AppState, ConfigPersistence};
 
 fn dispatch_gui_command(command: DeeplinkCommand, cx: &mut gpui::App) {
     use DeeplinkCommand as Cmd;
@@ -139,11 +143,18 @@ fn main() -> Result<()> {
     // bindings, and the hook live; asset sync is kicked off in the background
     // when the first devices appear (see the `inventory_rx` arm).
     let inventories: Vec<DeviceInventory> = Vec::new();
+    let standalone = Vec::new();
 
-    let initial_config = Config::load_or_default().unwrap_or_else(|e| {
-        warn!(error = %e, "could not load config.toml; using defaults");
-        Config::default()
-    });
+    let (initial_config, config_persistence) = match ConfigFile::load_or_default() {
+        Ok((config, file)) => (config, ConfigPersistence::UserFile(file)),
+        Err(error) => {
+            warn!(error = %error, "could not load config.toml; disabling config writes");
+            (
+                Config::ephemeral(),
+                ConfigPersistence::ReadOnly(error.to_string()),
+            )
+        }
+    };
 
     // Resolve the UI locale before any menu or window is built so the first
     // frame already renders in the right language.
@@ -221,6 +232,14 @@ fn main() -> Result<()> {
         .detach();
 
         cx.spawn(async move |cx| {
+            // Enumerate webcams off the UI thread: AVFoundation discovery can
+            // stall for hundreds of ms on first touch, which must never block
+            // the first paint (or, below, a snapshot merge mid-render).
+            let mut latest_cams = cx
+                .background_executor()
+                .spawn(async { openlogi_camera::enumerate_cameras() })
+                .await;
+
             // Install the hook-shared AppState up front, then open the window at
             // launch; closing it leaves the app live in the menu bar.
             cx.update(|cx| {
@@ -229,7 +248,10 @@ fn main() -> Result<()> {
                     cx.set_global(AppState::with_runtime(
                         initial_config,
                         &inventories,
+                        &standalone,
                         &cache,
+                        &latest_cams,
+                        config_persistence,
                         ipc_commands,
                     ));
                 }
@@ -278,11 +300,15 @@ fn main() -> Result<()> {
             // Clear (the AssetControl arm below) can sync the current devices
             // without waiting for the next snapshot.
             let mut latest_inv: Vec<DeviceInventory> = Vec::new();
+            let mut latest_standalone: Vec<StandaloneDevice> = Vec::new();
             // A manual Refresh / Clear that arrived while a sync was in
             // flight: stashed here and run by the sync-outcome arm the moment
             // that sync finishes, so a Clear's cache wipe never races the
             // in-flight fetch's writes and the manual fetch is never dropped.
             let mut deferred_manual: Option<AssetCommand> = None;
+            // Consecutive empty camera scans while cameras were showing — see
+            // the grace logic in the snapshot arm.
+            let mut camera_misses: u8 = 0;
             // Cleared when the IPC update channel closes (the client thread
             // died), so the select stops polling a closed receiver.
             let mut ipc_open = true;
@@ -290,13 +316,32 @@ fn main() -> Result<()> {
                 tokio::select! {
                     update = ipc_updates.recv(), if ipc_open => match update {
                         Some(ipc_client::GuiUpdate::Snapshot(update)) => {
+                        // Refresh the camera set off the UI thread (AVFoundation
+                        // discovery is far too slow for the render path) so the
+                        // merge below sees hot-plugs without ever stalling paint.
+                        // An empty scan gets a two-snapshot grace before it
+                        // evicts anything: a USB control seize (e.g. another
+                        // process's CLI) blinks the camera out of discovery for
+                        // a moment, and one blink must not tear down the card —
+                        // or the detail page — the user is looking at.
+                        let scanned = cx
+                            .background_executor()
+                            .spawn(async { openlogi_camera::enumerate_cameras() })
+                            .await;
+                        if scanned.is_empty() && !latest_cams.is_empty() && camera_misses < 2 {
+                            camera_misses += 1;
+                        } else {
+                            camera_misses = 0;
+                            latest_cams = scanned;
+                        }
                         // Keep the latest completed enumeration for the manual
                         // Refresh / Clear arm — a not-yet-ready agent's empty
                         // pre-enumeration list must not shrink it.
-                        let inventory_ready = update.status.inventory
-                            == openlogi_agent_core::ipc::InventoryHealth::Ready;
+                        let inventory_ready =
+                            update.status.inventory == openlogi_ipc::InventoryHealth::Ready;
                         if inventory_ready {
                             latest_inv.clone_from(&update.inventory);
+                            latest_standalone.clone_from(&update.standalone);
                         }
                         // A completed sync may have put real photos where
                         // silhouettes were resolved: the resolver was rebuilt
@@ -312,37 +357,42 @@ fn main() -> Result<()> {
                         // Scanning window overlaps the first sync's completion).
                         let force_refresh = inventory_ready && std::mem::take(&mut assets_dirty);
                         let (auto_download, asset_source, models) = cx.update(|cx| {
-                            let (changed, auto_download, asset_source, models) = cx.update_global::<AppState, _>(|state, _| {
-                                // Merge only *completed* enumerations. A not-yet-ready
-                                // agent can only serve an empty pre-enumeration list, and
-                                // counting those as misses would wipe the device list (and
-                                // pop an open detail page) on every agent restart: at the
-                                // 250 ms reconnect cadence the miss grace burns in ~750 ms
-                                // while a fresh enumeration takes 1.5–5 s. The diagnostics
-                                // snapshot shares the gate so a report copied during that
-                                // window keeps the receivers the UI is still showing; the
-                                // manual-sync arm reuses `inventory_ready` above.
+                            let (changed, merged, auto_download, asset_source, models) = cx.update_global::<AppState, _>(|state, _| {
+                                // Merge only completed enumerations. A scanning agent serves
+                                // an empty pre-enumeration list, which must not burn the GUI's
+                                // miss grace or replace the last known device set.
                                 let merged = inventory_ready
-                                    && state.refresh_inventories(&update.inventory, &cache, force_refresh);
+                                    && state.refresh_inventories(
+                                        &update.inventory,
+                                        &update.standalone,
+                                        &cache,
+                                        force_refresh,
+                                        &latest_cams,
+                                    );
                                 if inventory_ready {
                                     state.store_inventory_snapshot(&update.inventory);
                                 }
                                 // Bitwise `|`: the link must be set even when the
                                 // merge already reported a change.
                                 let changed = merged
-                                    | state.set_agent_link(state::AgentLink::Ready(update.status));
+                                    | state.set_agent_link(state::AgentLink::Ready(update.status))
+                                    | state.set_camera_active(update.camera_active);
                                 let settings = state.app_settings();
                                 (
                                     changed,
+                                    merged,
                                     settings.auto_download_assets,
                                     settings.asset_source,
                                     state.asset_models(),
                                 )
                             });
                             // The steady poll mostly repeats an identical snapshot;
-                            // skip the full-window invalidation for those.
+                            // skip the full-window invalidation and menu rebuild for those.
                             if changed {
                                 cx.refresh_windows();
+                            }
+                            if merged {
+                                app_menu::rebuild(cx);
                             }
                             (auto_download, asset_source, models)
                         });
@@ -356,6 +406,17 @@ fn main() -> Result<()> {
                         // works via the AssetControl arm below.
                         let backoff_passed = last_sync_at
                             .is_none_or(|t| t.elapsed() >= sync_retry_delay(sync_attempts));
+                        // Cameras are enumerated on the UI side (UVC, not HID++),
+                        // so `asset_models` — built from the HID++ device list —
+                        // can't see them. Fold their synthesized models in so a
+                        // webcam's product art downloads like any other device's.
+                        let mut models = models;
+                        models.extend(latest_cams.iter().map(|c| {
+                            crate::asset::sync::AssetTarget::Hidpp {
+                                model: state::camera_model_info(c),
+                                codename: Some(c.name.clone()),
+                            }
+                        }));
                         let pending: Vec<_> = models
                             .into_iter()
                             .filter(|m| !synced_keys.contains(&model_key(m)))
@@ -382,6 +443,27 @@ fn main() -> Result<()> {
                         }
                         Some(ipc_client::GuiUpdate::OutdatedGui) => {
                             cx.update(|cx| set_agent_link(state::AgentLink::OutdatedGui, cx));
+                        }
+                        Some(ipc_client::GuiUpdate::LightCommandResult {
+                            key,
+                            request_id,
+                            command,
+                            result,
+                        }) => {
+                            let changed = cx.update_global::<AppState, _>(|state, _| {
+                                state.apply_light_command_result(key, request_id, command, result)
+                            });
+                            if changed {
+                                cx.update(gpui::App::refresh_windows);
+                            }
+                        }
+                        Some(ipc_client::GuiUpdate::ConfigReloadResult(result)) => {
+                            let changed = cx.update_global::<AppState, _>(|state, _| {
+                                state.apply_config_reload_result(result)
+                            });
+                            if changed {
+                                cx.update(gpui::App::refresh_windows);
+                            }
                         }
                         // The IPC client thread is gone (runtime / thread spawn
                         // failure) — without this the window would show its
@@ -429,7 +511,13 @@ fn main() -> Result<()> {
                                 cache = asset::AssetResolver::new();
                                 cx.update(|cx| {
                                     let changed = cx.update_global::<AppState, _>(|state, _| {
-                                        state.refresh_inventories(&latest_inv, &cache, true)
+                                        state.refresh_inventories(
+                                            &latest_inv,
+                                            &latest_standalone,
+                                            &cache,
+                                            true,
+                                            &latest_cams,
+                                        )
                                     });
                                     if changed {
                                         cx.refresh_windows();
@@ -443,6 +531,15 @@ fn main() -> Result<()> {
                                 let state = cx.global::<AppState>();
                                 (state.asset_models(), state.app_settings().asset_source)
                             });
+                            // Include the UI-side webcam models (see the snapshot
+                            // arm) so a manual Refresh fetches camera art too.
+                            let mut models = models;
+                            models.extend(latest_cams.iter().map(|c| {
+                                crate::asset::sync::AssetTarget::Hidpp {
+                                    model: state::camera_model_info(c),
+                                    codename: Some(c.name.clone()),
+                                }
+                            }));
                             let tx = sync_tx.clone();
                             std::thread::spawn(move || {
                                 let keys = models.iter().map(model_key).collect();
@@ -499,11 +596,17 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
     let bounds = Bounds::centered(None, Size::new(px(1100.), px(750.)), cx);
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
+        // Advertise a Wayland xdg-toplevel app_id (and X11 WM_CLASS). Without it
+        // the window ships no app_id, so GNOME's `get_wm_class()` returns empty
+        // and our own `gnome_shell` frontmost backend reports OpenLogi as `None`
+        // (and the dash can't group the window under its launcher icon). The id
+        // is the shared `brand::APP_ID`, matching the desktop file's
+        // `StartupWMClass` and the macOS bundle-id family.
+        app_id: Some(APP_ID.into()),
         // Min height keeps the buttons tab's mouse model above its scale floor
         // (`MODEL_MIN_H` + the chrome/padding reserve) so its side labels never
         // overlap; below this the model can't shrink further without crowding.
         window_min_size: Some(Size::new(px(720.), px(680.))),
-        app_id: Some("openlogi".to_string()),
         // Linux: transparent chrome so `AppView::render` can draw a client-side
         // `TitleBar` (the compositor declines server-side decorations and gpui's
         // fallback is unpainted). macOS/Windows keep their native titlebar.

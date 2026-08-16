@@ -47,6 +47,9 @@ pub enum Permission {
     /// macOS: CoreBluetooth authorization.
     #[cfg(target_os = "macos")]
     Bluetooth,
+    /// macOS: Camera (AVFoundation) authorization for the webcam preview.
+    #[cfg(target_os = "macos")]
+    Camera,
 }
 
 /// Current Input Monitoring ("listen event") status.
@@ -61,6 +64,19 @@ pub fn input_monitoring() -> PermissionStatus {
 #[must_use]
 pub fn bluetooth() -> PermissionStatus {
     macos::bluetooth()
+}
+
+/// Current Camera (AVFoundation) authorization status. Delegates to
+/// `openlogi-camera`, which owns all the camera FFI, so the GUI doesn't
+/// duplicate the AVFoundation calls.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn camera() -> PermissionStatus {
+    match openlogi_camera::camera_authorization() {
+        openlogi_camera::CameraAuthorization::Granted => PermissionStatus::Granted,
+        openlogi_camera::CameraAuthorization::Denied => PermissionStatus::Denied,
+        openlogi_camera::CameraAuthorization::Undetermined => PermissionStatus::Unknown,
+    }
 }
 
 /// Probe Linux input-device access: `/dev/uinput` (write) and at least one
@@ -110,6 +126,7 @@ pub fn open_pane(permission: Permission) {
         Permission::Accessibility => "Privacy_Accessibility",
         Permission::InputMonitoring => "Privacy_ListenEvent",
         Permission::Bluetooth => "Privacy_Bluetooth",
+        Permission::Camera => "Privacy_Camera",
     };
     let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
     if let Err(e) = opener::open(&url) {
@@ -120,27 +137,52 @@ pub fn open_pane(permission: Permission) {
 #[cfg(not(target_os = "macos"))]
 pub fn open_pane(_permission: Permission) {}
 
+/// Fire the Camera consent prompt, then repaint every window once it resolves (the dialog is answered outside the app, so nothing else triggers a render).
+#[cfg(target_os = "macos")]
+pub fn request_camera_access(cx: &mut gpui::App) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    static POLL_ACTIVE: AtomicBool = AtomicBool::new(false);
+    const TICK: Duration = Duration::from_millis(250);
+    const TICKS_MAX: u32 = 2400; // 10 minutes
+
+    openlogi_camera::request_camera_access();
+    if POLL_ACTIVE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        for _ in 0..TICKS_MAX {
+            cx.background_executor().timer(TICK).await;
+            if openlogi_camera::camera_authorization()
+                != openlogi_camera::CameraAuthorization::Undetermined
+            {
+                break;
+            }
+        }
+        POLL_ACTIVE.store(false, Ordering::SeqCst);
+        cx.update(gpui::App::refresh_windows);
+    })
+    .detach();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_camera_access(_cx: &mut gpui::App) {}
+
 // ── macOS FFI ──────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
 mod macos {
     #![expect(
         unsafe_code,
-        reason = "IOKit (IOHIDCheckAccess) + CoreBluetooth privacy-permission FFI"
+        reason = "CoreBluetooth force-link + `+[CBManager authorization]` class-method send"
     )]
 
     use objc2::msg_send;
     use objc2::runtime::AnyClass;
+    use objc2_io_kit::{IOHIDAccessType, IOHIDCheckAccess, IOHIDRequestType};
 
     use super::PermissionStatus;
-
-    // Query the current HID access without prompting. `IOHIDRequestType`:
-    // PostEvent = 0, ListenEvent = 1. Returned `IOHIDAccessType`: Granted = 0,
-    // Denied = 1, Unknown = 2.
-    #[link(name = "IOKit", kind = "framework")]
-    unsafe extern "C" {
-        fn IOHIDCheckAccess(request_type: u32) -> u32;
-    }
 
     // Force-link CoreBluetooth so the `CBCentralManager` class is normally
     // registered for the `Class::get` lookup in `bluetooth()` (which degrades
@@ -148,14 +190,13 @@ mod macos {
     #[link(name = "CoreBluetooth", kind = "framework")]
     unsafe extern "C" {}
 
-    const REQUEST_TYPE_LISTEN_EVENT: u32 = 1;
-
     pub(super) fn input_monitoring() -> PermissionStatus {
-        // SAFETY: `IOHIDCheckAccess` is a side-effect-free query taking a valid
-        // `IOHIDRequestType` discriminant.
-        match unsafe { IOHIDCheckAccess(REQUEST_TYPE_LISTEN_EVENT) } {
-            0 => PermissionStatus::Granted,
-            1 => PermissionStatus::Denied,
+        // `IOHIDCheckAccess` queries the current HID access without prompting;
+        // `IOHIDRequestAccess` is the prompting variant we deliberately don't
+        // call here (the agent owns HID I/O, so it must raise the prompt).
+        match IOHIDCheckAccess(IOHIDRequestType::ListenEvent) {
+            IOHIDAccessType::Granted => PermissionStatus::Granted,
+            IOHIDAccessType::Denied => PermissionStatus::Denied,
             _ => PermissionStatus::Unknown,
         }
     }
@@ -267,7 +308,8 @@ pub(crate) mod linux {
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests {
     use super::*;
 

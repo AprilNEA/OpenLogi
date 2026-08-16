@@ -1,0 +1,22 @@
+[package]
+name = "openlogi-hidpp-derive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Derive macro generating openlogi-hidpp's CreatableFeature/Feature boilerplate."
+keywords = ["hid++", "logitech", "derive", "proc-macro"]
+categories = ["development-tools::procedural-macro-helpers"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+syn = { version = "3.0.3", features = ["full", "extra-traits"] }
+
+[lints]
+workspace = true

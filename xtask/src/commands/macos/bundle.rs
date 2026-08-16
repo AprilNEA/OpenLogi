@@ -1,17 +1,18 @@
+pub(crate) mod identity;
+
 use std::env;
-use std::io::BufWriter;
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use icns::{IconFamily, IconType, Image as IcnsImage, PixelFormat};
-use image::imageops::FilterType;
 use plist::Value;
 use xshell::{Shell, cmd};
 
 use crate::support::fs::{command_exists, ensure_dir, ensure_file, repo_root};
+use identity::{Channel, Component};
 
 pub(crate) fn generate_icns() -> Result<()> {
     let root = repo_root()?;
+    let sh = Shell::new()?;
     let master = root.join("design/icon/openlogi.png");
     let output_dir = root.join("crates/openlogi-gui/icon");
     let output = output_dir.join("AppIcon.icns");
@@ -23,40 +24,58 @@ pub(crate) fn generate_icns() -> Result<()> {
             output_dir.display()
         )
     })?;
-    write_icns(&master, &output)?;
+
+    let work = tempfile::Builder::new()
+        .prefix("openlogi-icns-")
+        .tempdir()
+        .context("could not create temporary iconset directory")?;
+    let iconset = work.path().join("AppIcon.iconset");
+    fs_err::create_dir_all(&iconset)
+        .with_context(|| format!("could not create iconset directory {}", iconset.display()))?;
+
+    render_iconset(&iconset, |size, output| {
+        let size = size.to_string();
+        cmd!(sh, "sips -z {size} {size} {master} --out {output}")
+            .ignore_stdout()
+            .run()?;
+        Ok(())
+    })?;
+
+    // Let Apple's encoder choose the ICNS chunk layout. The Rust `icns` crate
+    // emits `icp4`/`icp5` PNG chunks that current macOS releases decode as
+    // corrupted pixels in small-icon surfaces such as Login Items.
+    cmd!(sh, "iconutil -c icns {iconset} -o {output}").run()?;
     println!("wrote {}", output.display());
     Ok(())
 }
 
-fn write_icns(master: &Path, output: &Path) -> Result<()> {
-    let master = image::open(master)
-        .with_context(|| format!("could not read app icon master {}", master.display()))?;
-    let mut family = IconFamily::new();
-    for (size, icon_type) in [
-        (16, IconType::RGBA32_16x16),
-        (32, IconType::RGBA32_16x16_2x),
-        (32, IconType::RGBA32_32x32),
-        (64, IconType::RGBA32_32x32_2x),
-        (128, IconType::RGBA32_128x128),
-        (256, IconType::RGBA32_128x128_2x),
-        (256, IconType::RGBA32_256x256),
-        (512, IconType::RGBA32_256x256_2x),
-        (512, IconType::RGBA32_512x512),
-        (1024, IconType::RGBA32_512x512_2x),
-    ] {
-        let rgba = master
-            .resize_exact(size, size, FilterType::Lanczos3)
-            .to_rgba8();
-        let icon = IcnsImage::from_data(PixelFormat::RGBA, size, size, rgba.into_raw())?;
-        family.add_icon_with_type(&icon, icon_type)?;
+fn render_iconset<F>(iconset: &Path, mut render: F) -> Result<()>
+where
+    F: FnMut(u16, &Path) -> Result<()>,
+{
+    for size in [16, 32, 128, 256, 512] {
+        render(size, &iconset.join(format!("icon_{size}x{size}.png")))?;
+        render(
+            size * 2,
+            &iconset.join(format!("icon_{size}x{size}@2x.png")),
+        )?;
     }
-    let file = fs_err::File::create(output)
-        .with_context(|| format!("could not create app icon {}", output.display()))?;
-    family.write(BufWriter::new(file))?;
     Ok(())
 }
 
-pub(crate) fn run() -> Result<()> {
+/// Build `OpenLogi.app` wearing `channel`'s identity, signing it with whatever
+/// local identity is available (dev) or leaving it unsigned (production).
+pub(crate) fn run(channel: Channel) -> Result<()> {
+    run_with_channel(channel, None)
+}
+
+/// Build the bundle that ships: always the production identity, signed with the
+/// Developer ID identity when one is given.
+pub(crate) fn run_for_distribution(sign_identity: Option<&str>) -> Result<()> {
+    run_with_channel(Channel::Production, sign_identity)
+}
+
+fn run_with_channel(channel: Channel, sign_identity: Option<&str>) -> Result<()> {
     let root = repo_root()?;
     let sh = Shell::new()?;
     let _repo = sh.push_dir(&root);
@@ -95,60 +114,139 @@ pub(crate) fn run() -> Result<()> {
             .envs(xcode_env.iter().map(|(key, value)| (key, value)))
             .run()?;
     }
+    remove_cargo_bundle_dmg(&root)?;
 
     let app = root.join("target/release/bundle/osx/OpenLogi.app");
     ensure_dir(&app)?;
-    embed_agent_helper(&root, &app, &xcode_env)?;
+    embed_helpers(&root, &app, &xcode_env)?;
     embed_cli(&root, &app, &xcode_env)?;
     verify_bundle_binaries(&app)?;
+    stamp_privacy_usage_descriptions(&app)?;
+    // Identity first, then the checks, then signing — a signature seals the
+    // `Info.plist` files, so nothing may rewrite them afterwards.
+    identity::stamp(&app, channel)?;
+    identity::verify(&app, channel)?;
+    identity::verify_icons(&app)?;
+    match (channel, sign_identity) {
+        (Channel::Production, Some(identity)) => {
+            sign_app_with_timestamp(identity, TimestampMode::Secure)?;
+        }
+        (Channel::Production, None) => {
+            println!("==> codesign: skipped (unsigned — set OPENLOGI_SIGN_IDENTITY to sign)");
+        }
+        (Channel::Dev, _) => local_sign_app_if_available()?,
+    }
     println!();
     println!("Bundle ready: {}", app.display());
     Ok(())
 }
 
-/// Build the headless agent and embed it as a nested login-item helper at
-/// `OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app`. The agent is
-/// the always-on process (hook + device I/O + menu bar); shipping it inside the
-/// GUI bundle keeps one notarized artifact, lets `open -b` foreground the GUI
-/// from the agent's menu, and gives the agent a stable signed identity so its
-/// Accessibility (TCC) grant survives app updates.
-fn embed_agent_helper(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<()> {
+fn remove_cargo_bundle_dmg(root: &Path) -> Result<()> {
+    let dmg = root.join("target/release/bundle/dmg/OpenLogi.dmg");
+    if dmg.exists() {
+        fs_err::remove_file(&dmg)
+            .with_context(|| format!("could not remove stale {}", dmg.display()))?;
+        println!(
+            "    removed cargo-bundle DMG before helper embedding; use `macos package` for a DMG"
+        );
+    }
+    Ok(())
+}
+
+/// A nested login-item helper embedded under `Contents/Library/LoginItems`.
+struct Helper {
+    /// Identity component, which also locates the helper inside the app bundle.
+    component: Component,
+    /// Cargo package and binary that build it.
+    package: &'static str,
+    /// Binary name, both in `target/release` and inside the helper bundle.
+    binary: &'static str,
+    /// Checked-in release `Info.plist`, relative to the repo root.
+    info_plist: &'static str,
+    /// What the build log calls it.
+    label: &'static str,
+}
+
+/// Every helper the app bundle ships.
+const HELPERS: [Helper; 2] = [
+    Helper {
+        component: Component::Agent,
+        package: "openlogi-agent",
+        binary: "openlogi-agent",
+        info_plist: "crates/openlogi-gui/bundle/agent-release/Info.plist",
+        label: "agent helper",
+    },
+    Helper {
+        component: Component::Overlay,
+        package: "openlogi-gui",
+        binary: "openlogi-overlay",
+        info_plist: "crates/openlogi-gui/bundle/overlay-release/Info.plist",
+        label: "Actions Ring overlay helper",
+    },
+];
+
+/// Build each helper and embed it as a nested login-item bundle.
+///
+/// The agent is the always-on process (hook + device I/O + menu bar); shipping
+/// it inside the GUI bundle keeps one notarized artifact, lets `open -b`
+/// foreground the GUI from the agent's menu, and gives the agent a stable
+/// signed identity so its Accessibility (TCC) grant survives app updates.
+///
+/// Every helper gets the GUI's icon, so each shows the OpenLogi mark rather than
+/// a generic blank wherever macOS lists it — System Settings' Accessibility
+/// pane, Login Items. Icon generation already ran, so the icns is on disk.
+fn embed_helpers(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<()> {
+    let icon = root.join("crates/openlogi-gui/icon/AppIcon.icns");
+    ensure_file(&icon)?;
+    for helper in &HELPERS {
+        embed_helper(root, app, xcode_env, helper, &icon)?;
+    }
+    Ok(())
+}
+
+fn embed_helper(
+    root: &Path,
+    app: &Path,
+    xcode_env: &[(String, String)],
+    helper: &Helper,
+    icon: &Path,
+) -> Result<()> {
     let sh = Shell::new()?;
     let _repo = sh.push_dir(root);
-    println!("==> agent helper (build)");
-    cmd!(sh, "cargo build -p openlogi-agent --release")
+    let Helper {
+        package,
+        binary,
+        label,
+        ..
+    } = *helper;
+    println!("==> {label} (build)");
+    cmd!(sh, "cargo build -p {package} --bin {binary} --release")
         .envs(xcode_env.iter().map(|(key, value)| (key, value)))
         .run()?;
-    let agent_bin = root.join("target/release/openlogi-agent");
-    ensure_file(&agent_bin)?;
+    let built = root.join("target/release").join(binary);
+    ensure_file(&built)?;
 
-    let helper = app.join("Contents/Library/LoginItems/OpenLogiAgent.app");
-    let helper_macos = helper.join("Contents/MacOS");
-    fs_err::create_dir_all(&helper_macos)
-        .with_context(|| format!("could not create {}", helper_macos.display()))?;
-    fs_err::copy(&agent_bin, helper_macos.join("openlogi-agent"))
-        .with_context(|| "could not copy the agent binary into the helper bundle".to_string())?;
-    let info_src = root.join("crates/openlogi-gui/bundle/agent-release/Info.plist");
+    let bundle = helper.component.root(app);
+    let bundle_macos = bundle.join("Contents/MacOS");
+    fs_err::create_dir_all(&bundle_macos)
+        .with_context(|| format!("could not create {}", bundle_macos.display()))?;
+    fs_err::copy(&built, bundle_macos.join(binary))
+        .with_context(|| format!("could not copy {binary} into the helper bundle"))?;
+
+    let info_src = root.join(helper.info_plist);
     ensure_file(&info_src)?;
-    let info_dst = helper.join("Contents/Info.plist");
+    let info_dst = helper.component.info_plist(app);
     fs_err::copy(&info_src, &info_dst)
-        .with_context(|| "could not write the helper Info.plist".to_string())?;
-    // Share the GUI's app icon so the agent shows the OpenLogi mark (not a
-    // generic blank) in System Settings → Accessibility, where the grant now
-    // lives under "OpenLogi Agent". The bundle command runs icon generation
-    // first, so the icns is already on disk. Matches the Info.plist
-    // CFBundleIconFile = "AppIcon".
-    let icon_src = root.join("crates/openlogi-gui/icon/AppIcon.icns");
-    ensure_file(&icon_src)?;
-    let resources = helper.join("Contents/Resources");
-    fs_err::create_dir_all(&resources)
-        .with_context(|| format!("could not create {}", resources.display()))?;
-    fs_err::copy(&icon_src, resources.join("AppIcon.icns"))
-        .with_context(|| "could not copy the app icon into the helper bundle".to_string())?;
-
+        .with_context(|| format!("could not write the {label} Info.plist"))?;
     stamp_bundle_version(&info_dst, env!("CARGO_PKG_VERSION"))?;
 
-    println!("    embedded {}", helper.display());
+    let resources = bundle.join("Contents/Resources");
+    fs_err::create_dir_all(&resources)
+        .with_context(|| format!("could not create {}", resources.display()))?;
+    fs_err::copy(icon, helper.component.icon(app))
+        .with_context(|| format!("could not copy the app icon into the {label} bundle"))?;
+
+    println!("    embedded {}", bundle.display());
     Ok(())
 }
 
@@ -171,10 +269,11 @@ fn embed_cli(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<
 }
 
 /// Every Mach-O the finished bundle must ship, relative to the `.app` root.
-const REQUIRED_BUNDLE_BINARIES: [&str; 3] = [
+const REQUIRED_BUNDLE_BINARIES: [&str; 4] = [
     "Contents/MacOS/openlogi",
     "Contents/MacOS/openlogi-gui",
     "Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
+    "Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/MacOS/openlogi-overlay",
 ];
 
 fn verify_bundle_binaries(app: &Path) -> Result<()> {
@@ -184,6 +283,18 @@ fn verify_bundle_binaries(app: &Path) -> Result<()> {
             .with_context(|| format!("missing required bundle binary {}", path.display()))?;
     }
     Ok(())
+}
+
+/// Stamp `NSCameraUsageDescription` (cargo-bundle can't; matches the dev plist) so camera requests prompt instead of killing the app.
+fn stamp_privacy_usage_descriptions(app: &Path) -> Result<()> {
+    println!("==> privacy usage descriptions");
+    stamp_plist_strings(
+        &app.join("Contents/Info.plist"),
+        &[(
+            "NSCameraUsageDescription",
+            "OpenLogi previews your Logitech webcam locally. Video never leaves your Mac.",
+        )],
+    )
 }
 
 fn stamp_bundle_version(info_plist: &Path, version: &str) -> Result<()> {
@@ -213,10 +324,70 @@ fn xcode_env() -> Result<Vec<(String, String)>> {
     ])
 }
 
-pub(crate) fn sign_app(identity: &str) -> Result<()> {
+/// Read one string value from an `Info.plist`; `None` when the key is absent.
+fn read_plist_string(info_plist: &Path, key: &str) -> Result<Option<String>> {
+    let plist = Value::from_file(info_plist)
+        .with_context(|| format!("could not read {}", info_plist.display()))?;
+    let dict = plist
+        .as_dictionary()
+        .with_context(|| format!("{} is not a plist dictionary", info_plist.display()))?;
+    Ok(dict.get(key).and_then(Value::as_string).map(str::to_owned))
+}
+
+fn stamp_plist_strings(info_plist: &Path, entries: &[(&str, &str)]) -> Result<()> {
+    let mut plist = Value::from_file(info_plist)
+        .with_context(|| format!("could not read {}", info_plist.display()))?;
+    let dict = plist
+        .as_dictionary_mut()
+        .with_context(|| format!("{} is not a plist dictionary", info_plist.display()))?;
+    for (key, value) in entries {
+        dict.insert((*key).into(), Value::String((*value).to_string()));
+    }
+    plist
+        .to_file_xml(info_plist)
+        .with_context(|| format!("could not write {}", info_plist.display()))
+}
+
+fn local_sign_app_if_available() -> Result<()> {
+    if env::var("OPENLOGI_LOCAL_CODESIGN").as_deref() == Ok("0") {
+        println!("==> local codesign: skipped (OPENLOGI_LOCAL_CODESIGN=0)");
+        return Ok(());
+    }
+
+    if let Some(identity) = env_nonempty("OPENLOGI_SIGN_IDENTITY") {
+        sign_app_with_timestamp(&identity, TimestampMode::Secure)?;
+        return Ok(());
+    }
+
+    if let Some(identity) = env_nonempty("OPENLOGI_LOCAL_CODESIGN_IDENTITY") {
+        sign_app_with_timestamp(&identity, TimestampMode::None)?;
+        return Ok(());
+    }
+
+    if let Some(identity) = first_apple_development_identity()? {
+        sign_app_with_timestamp(&identity, TimestampMode::None)?;
+        return Ok(());
+    }
+
+    println!(
+        "==> local codesign: skipped (no Apple Development identity found;          set OPENLOGI_LOCAL_CODESIGN_IDENTITY or OPENLOGI_SIGN_IDENTITY to sign)"
+    );
+    println!(
+        "    warning: an unsigned bundle is re-signed ad-hoc on every build, so its own Accessibility grant goes stale each time"
+    );
+    Ok(())
+}
+
+fn sign_app_with_timestamp(identity: &str, timestamp: TimestampMode) -> Result<()> {
     let sh = Shell::new()?;
-    let app = repo_root()?.join("target/release/bundle/osx/OpenLogi.app");
+    let root = repo_root()?;
+    let app = root.join("target/release/bundle/osx/OpenLogi.app");
     let helper = app.join("Contents/Library/LoginItems/OpenLogiAgent.app");
+    let overlay = app.join("Contents/Library/LoginItems/OpenLogiOverlay.app");
+    // GUI + embedded CLI open the camera (preview / snapshot). The agent and
+    // overlay helpers do not — leave them without camera entitlements.
+    let camera_ents = camera_entitlements_path(&root);
+    ensure_file(&camera_ents)?;
     println!("==> codesign ({identity})");
     // Inside-out signing: seal the nested helper with its own signature first,
     // then the outer app (which seals the already-signed helper). `--deep` is
@@ -224,19 +395,25 @@ pub(crate) fn sign_app(identity: &str) -> Result<()> {
     // stable, separately-signed helper identity is exactly what lets the agent's
     // Accessibility (TCC) grant persist across updates. So sign each explicitly.
     if helper.exists() {
-        codesign_runtime(identity, &helper)?;
+        codesign_runtime(identity, &helper, timestamp, None)?;
+    }
+    if overlay.exists() {
+        codesign_runtime(identity, &overlay, timestamp, None)?;
     }
     // The embedded CLI is a second Mach-O under Contents/MacOS; sign it with the
     // hardened runtime before the outer app so it carries a Developer ID
     // signature (its as-built ad-hoc signature would fail notarization).
     let cli = app.join("Contents/MacOS/openlogi");
     if cli.exists() {
-        codesign_runtime(identity, &cli)?;
+        codesign_runtime(identity, &cli, timestamp, Some(&camera_ents))?;
     }
-    codesign_runtime(identity, &app)?;
+    codesign_runtime(identity, &app, timestamp, Some(&camera_ents))?;
     cmd!(sh, "codesign --verify --strict {app}").run()?;
     if helper.exists() {
         cmd!(sh, "codesign --verify --strict {helper}").run()?;
+    }
+    if overlay.exists() {
+        cmd!(sh, "codesign --verify --strict {overlay}").run()?;
     }
     if cli.exists() {
         cmd!(sh, "codesign --verify --strict {cli}").run()?;
@@ -244,21 +421,99 @@ pub(crate) fn sign_app(identity: &str) -> Result<()> {
     Ok(())
 }
 
-/// Sign one bundle with the hardened runtime + a secure timestamp.
-fn codesign_runtime(identity: &str, target: &Path) -> Result<()> {
+/// Path to the GUI/CLI entitlements (camera hardened-runtime exception).
+fn camera_entitlements_path(root: &Path) -> std::path::PathBuf {
+    root.join("crates/openlogi-gui/bundle/OpenLogi.entitlements")
+}
+
+/// Sign one target with the hardened runtime and the requested timestamp mode.
+fn codesign_runtime(
+    identity: &str,
+    target: &Path,
+    timestamp: TimestampMode,
+    entitlements: Option<&Path>,
+) -> Result<()> {
     let sh = Shell::new()?;
-    cmd!(
-        sh,
-        "codesign --force --options runtime --timestamp --sign {identity} {target}"
-    )
-    .run()?;
+    match (timestamp, entitlements) {
+        (TimestampMode::Secure, Some(ents)) => {
+            cmd!(
+                sh,
+                "codesign --force --options runtime --timestamp --entitlements {ents} --sign {identity} {target}"
+            )
+            .run()?;
+        }
+        (TimestampMode::Secure, None) => {
+            cmd!(
+                sh,
+                "codesign --force --options runtime --timestamp --sign {identity} {target}"
+            )
+            .run()?;
+        }
+        (TimestampMode::None, Some(ents)) => {
+            cmd!(
+                sh,
+                "codesign --force --options runtime --timestamp=none --entitlements {ents} --sign {identity} {target}"
+            )
+            .run()?;
+        }
+        (TimestampMode::None, None) => {
+            cmd!(
+                sh,
+                "codesign --force --options runtime --timestamp=none --sign {identity} {target}"
+            )
+            .run()?;
+        }
+    }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum TimestampMode {
+    Secure,
+    None,
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+fn first_apple_development_identity() -> Result<Option<String>> {
+    let sh = Shell::new()?;
+    let Ok(output) = cmd!(sh, "security find-identity -v -p codesigning").read() else {
+        return Ok(None);
+    };
+    Ok(output
+        .lines()
+        .filter_map(quoted_identity)
+        .find(|identity| identity.starts_with("Apple Development:")))
+}
+
+fn quoted_identity(line: &str) -> Option<String> {
+    let start = line.find('"')? + 1;
+    let end = line[start..].find('"')?;
+    Some(line[start..start + end].to_string())
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
+    use strum::VariantArray as _;
+
     use super::*;
+
+    /// Identity work iterates every `Component`, so a component added without a
+    /// `Helper` to embed it would only surface as a stamping failure during a
+    /// real build.
+    #[test]
+    fn every_nested_component_is_embedded_by_a_helper() {
+        for &component in Component::VARIANTS {
+            assert!(
+                component == Component::App
+                    || HELPERS.iter().any(|helper| helper.component == component),
+                "{component} has no Helper entry to embed it"
+            );
+        }
+    }
 
     fn app_with_binaries(binaries: &[&str]) -> tempfile::TempDir {
         let app = tempfile::tempdir().unwrap();
@@ -275,6 +530,79 @@ mod tests {
         let app = app_with_binaries(&REQUIRED_BUNDLE_BINARIES);
 
         verify_bundle_binaries(app.path()).unwrap();
+    }
+
+    #[test]
+    fn camera_entitlements_declare_device_camera() {
+        let path = camera_entitlements_path(&repo_root().unwrap());
+        let plist = Value::from_file(&path).unwrap();
+        let dict = plist.as_dictionary().unwrap();
+        assert_eq!(
+            dict.get("com.apple.security.device.camera")
+                .and_then(Value::as_boolean),
+            Some(true),
+            "hardened-runtime camera capture needs this entitlement"
+        );
+    }
+
+    /// The checked-in helper plists are what a fresh bundle starts from, so a
+    /// rename there that never reached the identity table would ship one name in
+    /// the bundle and another in every verification.
+    #[test]
+    fn shipped_helper_plists_declare_their_production_identity() {
+        let root = repo_root().unwrap();
+
+        for helper in &HELPERS {
+            let plist = root.join(helper.info_plist);
+            let expected = Channel::Production.identity(helper.component);
+
+            for (key, want) in [
+                ("CFBundleIdentifier", &expected.bundle_id),
+                ("CFBundleName", &expected.name),
+                ("CFBundleDisplayName", &expected.name),
+            ] {
+                assert_eq!(
+                    read_plist_string(&plist, key).unwrap().as_ref(),
+                    Some(want),
+                    "{} declares the wrong {key}",
+                    helper.info_plist
+                );
+            }
+        }
+    }
+
+    /// Every helper must declare the shared icon, or it shows up blank in the
+    /// System Settings panes where users grant it permissions.
+    #[test]
+    fn shipped_helper_plists_declare_the_shared_icon() {
+        let root = repo_root().unwrap();
+
+        for helper in &HELPERS {
+            let icon =
+                read_plist_string(&root.join(helper.info_plist), "CFBundleIconFile").unwrap();
+
+            assert_eq!(
+                icon.as_deref().map(|file| file.trim_end_matches(".icns")),
+                Some("AppIcon"),
+                "{} must declare the shared app icon",
+                helper.info_plist
+            );
+        }
+    }
+
+    /// `verify_bundle_binaries` is the list a missing helper build trips over;
+    /// a helper absent from it would embed silently broken.
+    #[test]
+    fn every_helper_binary_is_a_required_bundle_binary() {
+        for helper in &HELPERS {
+            let nested = helper.component.nested_bundle().unwrap();
+            let path = format!("{nested}/Contents/MacOS/{}", helper.binary);
+
+            assert!(
+                REQUIRED_BUNDLE_BINARIES.contains(&path.as_str()),
+                "{path} is embedded but never verified"
+            );
+        }
     }
 
     #[test]

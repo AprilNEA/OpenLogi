@@ -19,14 +19,15 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use openlogi_agent_core::ipc::{
-    AgentClient, AgentStatus, InventoryHealth, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingUpdate,
-};
 use openlogi_core::config::Lighting;
-use openlogi_core::device::DeviceInventory;
-use openlogi_hid::{
-    DeviceRoute, DpiInfo, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
+use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::hid::{
+    DeviceRoute, DpiInfo, LightCommand, ReceiverSelector, SmartShiftMode, SmartShiftStatus,
+    WriteError,
+};
+use openlogi_ipc::{
+    AgentClient, AgentStatus, ConfigReloadError, InventoryHealth, PROTOCOL_VERSION,
+    PairingCommandError, PairingFailure, PairingUpdate,
 };
 use tarpc::client;
 use tarpc::context;
@@ -65,20 +66,38 @@ pub enum GuiUpdate {
     /// updated on disk while this GUI kept running, and only a relaunch
     /// helps. Sent once per episode.
     OutdatedGui,
+    /// Result of an agent-owned standalone-light command. The typed failure
+    /// reaches the GPUI state model instead of being reduced to a log line.
+    LightCommandResult {
+        /// Runtime/config key of the light that issued the command.
+        key: String,
+        /// Monotonic request id used to ignore stale results.
+        request_id: u64,
+        /// The control whose write produced this result.
+        command: LightCommand,
+        /// Agent acceptance or typed device failure.
+        result: Result<(), WriteError>,
+    },
+    /// Whether the agent adopted the config currently on disk.
+    ConfigReloadResult(Result<(), ConfigReloadError>),
 }
 
 /// A poll snapshot pushed to the GPUI loop on every successful poll round.
 pub struct PollUpdate {
     pub inventory: Vec<DeviceInventory>,
+    pub standalone: Vec<StandaloneDevice>,
     pub status: AgentStatus,
+    pub camera_active: bool,
 }
 
 /// A device command sent from the GPUI thread to the client thread. Reads carry
-/// a `oneshot` for the reply; "apply now" writes are fire-and-forget (the GUI
-/// updates its display optimistically and the client logs any device failure).
+/// a `oneshot` for the reply; standalone-light writes return a result event so
+/// the GUI can surface device failures after an optimistic update.
 pub enum Command {
     SetDpi(DeviceRoute, u32),
     SetLighting(DeviceRoute, Lighting),
+    SetLight(DeviceRoute, LightCommand, String, u64),
+    SetLightManualPower(DeviceRoute, bool, String, u64),
     SetSmartShift(DeviceRoute, SmartShiftMode, u8, u8),
     ReadDpi(DeviceRoute, oneshot::Sender<Result<DpiInfo, WriteError>>),
     ReadSmartShift(
@@ -100,7 +119,7 @@ pub enum Command {
     /// monitor. The first poll enables monitoring agent-side; the agent
     /// auto-disables it once polls stop.
     #[cfg(all(target_os = "macos", debug_assertions))]
-    PollEventMonitor(oneshot::Sender<Vec<openlogi_agent_core::ipc::MonitorEvent>>),
+    PollEventMonitor(oneshot::Sender<Vec<openlogi_ipc::MonitorEvent>>),
 }
 
 /// Handle the GUI holds to talk to the agent: a stream of poll updates, a
@@ -224,7 +243,7 @@ async fn poll_loop(
             }
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break }; // GUI dropped the sender → shut down
-                if handle(&mut client, pairing_tx, cmd).await.is_err() {
+                if handle(&mut client, update_tx, pairing_tx, cmd).await.is_err() {
                     // Same as a poll-detected drop: back to the fast cadence
                     // so the reconnect (agent self-exec, crash) re-converges
                     // just as quickly as at startup.
@@ -377,39 +396,6 @@ fn helper_bundle(path: &std::path::Path) -> Option<&std::path::Path> {
     (bundle.extension()? == "app").then_some(bundle)
 }
 
-#[cfg(all(test, target_os = "macos"))]
-mod tests {
-    use std::path::Path;
-
-    use super::helper_bundle;
-
-    #[test]
-    fn helper_bundle_resolves_only_the_packaged_layout() {
-        let packaged = Path::new(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
-        );
-        assert_eq!(
-            helper_bundle(packaged),
-            Some(Path::new(
-                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app"
-            ))
-        );
-        let dev = Path::new(
-            "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
-        );
-        assert_eq!(
-            helper_bundle(dev),
-            Some(Path::new(
-                "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app"
-            ))
-        );
-        assert_eq!(
-            helper_bundle(Path::new("target/debug/openlogi-agent")),
-            None
-        );
-    }
-}
-
 /// Resolve the agent executable relative to the running GUI: a sibling in the
 /// cargo target dir (dev, and the flat Windows install layout), else the
 /// embedded `OpenLogiAgent.app` login-item helper (packaged macOS build).
@@ -460,10 +446,10 @@ enum ConnectFailure {
 /// Ensure a live client, connecting on demand.
 async fn ensure(client: &mut Option<AgentClient>) -> Result<&AgentClient, ConnectFailure> {
     if client.is_none() {
-        let stream = openlogi_agent_core::transport::connect()
+        let stream = openlogi_ipc::transport::connect()
             .await
             .map_err(|_| ConnectFailure::Unreachable)?;
-        let transport = openlogi_agent_core::transport::wrap(stream);
+        let transport = openlogi_ipc::transport::wrap(stream);
         let fresh = AgentClient::new(client::Config::default(), transport).spawn();
         // Protocol handshake before any real RPC: mismatched bincode layouts
         // would otherwise surface only as opaque RpcErrors and a silently
@@ -527,8 +513,15 @@ async fn poll(
     let snapshot = client.snapshot(context::current()).await.map_err(|_| ())?;
     let status = snapshot.status;
     let inventory = snapshot.inventory;
+    let standalone = snapshot.standalone;
+    let camera_active = snapshot.camera_active;
     let ready = status.inventory == InventoryHealth::Ready;
-    let _ = update_tx.send(GuiUpdate::Snapshot(PollUpdate { inventory, status }));
+    let _ = update_tx.send(GuiUpdate::Snapshot(PollUpdate {
+        inventory,
+        standalone,
+        status,
+        camera_active,
+    }));
     Ok(PollOutcome::Delivered { ready })
 }
 
@@ -536,12 +529,13 @@ async fn poll(
 /// reconnects; the command's own failure is reported back over its oneshot.
 async fn handle(
     client: &mut Option<AgentClient>,
+    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     pairing_tx: &mpsc::UnboundedSender<PairingUpdate>,
     cmd: Command,
 ) -> Result<(), ()> {
     // keep `client` None on connect failure; that's not a dropped live connection
     let Ok(client) = ensure(client).await else {
-        reply_disconnected(pairing_tx, cmd);
+        reply_disconnected(update_tx, pairing_tx, cmd);
         return Ok(());
     };
     let ctx = context::current();
@@ -549,6 +543,24 @@ async fn handle(
         Command::SetDpi(route, dpi) => log_apply(client.set_dpi(ctx, route, dpi).await)?,
         Command::SetLighting(route, lighting) => {
             log_apply(client.set_lighting(ctx, route, lighting).await)?;
+        }
+        Command::SetLight(route, command, key, request_id) => {
+            send_light_result(
+                update_tx,
+                key,
+                request_id,
+                command,
+                client.set_light(ctx, route, command).await,
+            )?;
+        }
+        Command::SetLightManualPower(route, enabled, key, request_id) => {
+            send_light_result(
+                update_tx,
+                key,
+                request_id,
+                LightCommand::Power(enabled),
+                client.set_light_manual_power(ctx, route, enabled).await,
+            )?;
         }
         Command::SetSmartShift(route, mode, auto, torque) => {
             log_apply(client.set_smartshift(ctx, route, mode, auto, torque).await)?;
@@ -559,7 +571,26 @@ async fn handle(
         Command::ReadSmartShift(route, reply) => {
             let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
         }
-        Command::ReloadConfig => client.reload_config(ctx).await.map_err(|_| ())?,
+        Command::ReloadConfig => {
+            // A transport failure is not the agent rejecting the config, but it
+            // is still a reload that did not happen — and the file on disk has
+            // already changed. Staying silent here would leave the window
+            // showing the new settings while the agent keeps running the old
+            // ones, which is exactly the divergence this fails closed on.
+            match client.reload_config(ctx).await {
+                Ok(result) => {
+                    let _ = update_tx.send(GuiUpdate::ConfigReloadResult(result));
+                }
+                Err(error) => {
+                    let _ = update_tx.send(GuiUpdate::ConfigReloadResult(Err(ConfigReloadError {
+                        message: format!(
+                            "saved, but the agent could not be reached to apply it: {error}"
+                        ),
+                    })));
+                    return Err(());
+                }
+            }
+        }
         Command::RequestAccessibilityPrompt => client
             .request_accessibility_prompt(ctx)
             .await
@@ -607,6 +638,32 @@ fn log_apply(r: Result<Result<(), WriteError>, tarpc::client::RpcError>) -> Resu
     }
 }
 
+fn send_light_result(
+    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
+    key: String,
+    request_id: u64,
+    command: LightCommand,
+    result: Result<Result<(), WriteError>, tarpc::client::RpcError>,
+) -> Result<(), ()> {
+    if let Ok(result) = result {
+        let _ = update_tx.send(GuiUpdate::LightCommandResult {
+            key,
+            request_id,
+            command,
+            result,
+        });
+        Ok(())
+    } else {
+        let _ = update_tx.send(GuiUpdate::LightCommandResult {
+            key,
+            request_id,
+            command,
+            result: Err(WriteError::AgentUnavailable),
+        });
+        Err(())
+    }
+}
+
 /// Unwrap a tarpc transport result: `Err(())` (connection dropped) propagates so
 /// the caller reconnects; the inner application `Result` is returned for the reply.
 fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
@@ -619,7 +676,11 @@ fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
     clippy::match_same_arms,
     reason = "the two read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
 )]
-fn reply_disconnected(pairing_tx: &mpsc::UnboundedSender<PairingUpdate>, cmd: Command) {
+fn reply_disconnected(
+    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
+    pairing_tx: &mpsc::UnboundedSender<PairingUpdate>,
+    cmd: Command,
+) {
     // Transient, not a permanent feature error: the agent is just restarting,
     // so the panel should keep retrying, not latch "unsupported".
     match cmd {
@@ -629,10 +690,87 @@ fn reply_disconnected(pairing_tx: &mpsc::UnboundedSender<PairingUpdate>, cmd: Co
         Command::ReadSmartShift(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
+        Command::SetLight(_, command, key, request_id) => {
+            let _ = update_tx.send(GuiUpdate::LightCommandResult {
+                key,
+                request_id,
+                command,
+                result: Err(WriteError::AgentUnavailable),
+            });
+        }
+        Command::SetLightManualPower(_, enabled, key, request_id) => {
+            let _ = update_tx.send(GuiUpdate::LightCommandResult {
+                key,
+                request_id,
+                command: LightCommand::Power(enabled),
+                result: Err(WriteError::AgentUnavailable),
+            });
+        }
         Command::StartPairing(_) | Command::PairDevice(_) => {
             let _ = pairing_tx.send(PairingUpdate::Failed(PairingFailure::AgentRestarted));
         }
         Command::CancelPairing => {}
+        // Unlike the device commands above, a missed reload is not something a
+        // later poll repairs on its own: the config file has already changed,
+        // so the agent stays on the old one until another reload succeeds. Say
+        // so rather than let the window imply the change took effect.
+        Command::ReloadConfig => {
+            let _ = update_tx.send(GuiUpdate::ConfigReloadResult(Err(ConfigReloadError {
+                message: "saved, but the agent is not running, so it has not been applied yet"
+                    .to_string(),
+            })));
+        }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "macos")]
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn a_reload_that_never_reached_the_agent_is_reported() {
+        // The config file is already written by the time the reload is
+        // dispatched, so dropping this result silently would leave the window
+        // showing settings the agent is not running.
+        let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+        let (pairing_tx, _pairing_rx) = mpsc::unbounded_channel();
+
+        reply_disconnected(&update_tx, &pairing_tx, Command::ReloadConfig);
+
+        let Ok(GuiUpdate::ConfigReloadResult(Err(error))) = update_rx.try_recv() else {
+            panic!("a reload that never reached the agent must be reported as failed");
+        };
+        assert!(!error.message.is_empty(), "the notice needs a reason");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn helper_bundle_resolves_only_the_packaged_layout() {
+        let packaged = Path::new(
+            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
+        );
+        assert_eq!(
+            helper_bundle(packaged),
+            Some(Path::new(
+                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app"
+            ))
+        );
+        let dev = Path::new(
+            "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
+        );
+        assert_eq!(
+            helper_bundle(dev),
+            Some(Path::new(
+                "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app"
+            ))
+        );
+        assert_eq!(
+            helper_bundle(Path::new("target/debug/openlogi-agent")),
+            None
+        );
     }
 }

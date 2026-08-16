@@ -2,7 +2,8 @@
 //!
 //! A palette of color swatches, an on/off toggle, and a brightness slider,
 //! persisted per device via [`AppState::commit_lighting`] and pushed to the
-//! keyboard through [`openlogi_agent_core::hardware::set_lighting_in_background`].
+//! keyboard through `openlogi_agent_core::hardware::set_lighting_in_background`
+//! (the agent, over IPC — the GUI has no device I/O of its own).
 
 use gpui::{
     AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
@@ -18,7 +19,7 @@ use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
+use crate::theme::{self, Palette, SelectableStyle, Typography as _};
 
 const SWATCH: f32 = 28.;
 
@@ -137,7 +138,7 @@ impl Render for LightingPanel {
                     .child(
                         div()
                             .text_caption()
-                            .text_color(rgb(ACCENT_BLUE))
+                            .text_color(pal.text_primary)
                             .child(format!("{}%", lighting.brightness)),
                     ),
             )

@@ -17,14 +17,14 @@
 use gpui::{
     App, Context, FocusHandle, FontWeight, Global, InteractiveElement, IntoElement,
     ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
+    Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     v_flex,
 };
-use openlogi_agent_core::ipc::{FoundDevice, PairingFailure, PairingUpdate};
-use openlogi_hid::{Click, PasskeyMethod, ReceiverSelector};
+use openlogi_core::hid::{Click, PasskeyMethod, ReceiverSelector};
+use openlogi_ipc::{FoundDevice, PairingFailure, PairingUpdate};
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::ipc_client::Command;
@@ -48,8 +48,8 @@ pub enum PairingUi {
     Passkey(PasskeyMethod),
     /// A device paired into `slot`.
     Paired { slot: u8 },
-    /// The session ended without pairing; carries localized display copy.
-    Failed(String),
+    /// The session ended without pairing.
+    Failed(PairingFailure),
 }
 
 impl Global for PairingUi {}
@@ -93,21 +93,22 @@ pub fn apply_update(cx: &mut App, update: PairingUpdate) {
         }
         PairingUpdate::Passkey(method) => PairingUi::Passkey(method),
         PairingUpdate::Paired { slot } => PairingUi::Paired { slot },
-        PairingUpdate::Failed(failure) => PairingUi::Failed(pairing_failure_text(failure)),
+        PairingUpdate::Failed(failure) => PairingUi::Failed(failure),
     };
     cx.set_global(next);
 }
 
-fn pairing_failure_text(failure: PairingFailure) -> String {
+fn pairing_failure_text(failure: &PairingFailure) -> String {
     match failure {
         PairingFailure::Hid { message } => {
-            tr!("HID transport error: %{message}", message => message).to_string()
+            tr!("HID transport error: %{message}", message => message.clone()).to_string()
         }
         PairingFailure::ReceiverNotFound => {
             tr!("No supported pairing-capable receiver was found.").to_string()
         }
         PairingFailure::Register { message } => {
-            tr!("Receiver register access failed: %{message}", message => message).to_string()
+            tr!("Receiver register access failed: %{message}", message => message.clone())
+                .to_string()
         }
         PairingFailure::Timeout => tr!("Pairing timed out.").to_string(),
         PairingFailure::Device { code } => tr!(
@@ -258,7 +259,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
             col = col
                 .child(
                     div()
-                        .text_color(rgb(theme::STATUS_CONNECTED))
+                        .text_color(pal.text_primary)
                         .font_weight(FontWeight::MEDIUM)
                         .child(tr!("Device paired")),
                 )
@@ -271,15 +272,28 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                         .on_click(|_, _, cx| cx.set_global(PairingUi::Idle)),
                 );
         }
-        PairingUi::Failed(detail) => {
+        PairingUi::Failed(failure) => {
             col = col
                 .child(
                     div()
-                        .text_color(rgb(theme::STATUS_CONNECTING))
+                        .text_color(pal.text_primary)
                         .font_weight(FontWeight::MEDIUM)
                         .child(tr!("Pairing failed")),
                 )
-                .child(hint(SharedString::from(detail.clone()), pal))
+                .child(hint(pairing_failure_text(failure), pal))
+                .when(
+                    matches!(failure, PairingFailure::ReceiverNotFound),
+                    |this| {
+                        this.child(hint(
+                            tr!(
+                                "Plug in or pair a supported Logitech device — it'll show up here \
+                                 automatically. For direct Bluetooth connections, pair in your \
+                                 computer's bluetooth settings."
+                            ),
+                            pal,
+                        ))
+                    },
+                )
                 .child(
                     action_button("ad-retry", tr!("Try again"), true)
                         .on_click(|_, _, cx| start_search(cx)),

@@ -4,17 +4,12 @@
 //! label layout separate from the GPUI element tree in `view`.
 
 use crate::asset::ResolvedAsset;
-use crate::data::mouse_buttons::{ButtonId, Hotspot, MOUSE_MODEL_SIZE};
+use crate::data::mouse_buttons::{ButtonId, Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use crate::mouse_model::leader_lines::{Label, Side};
 
 /// Approx pixel width of each hotspot hit-target. Logitech only gives us a
 /// marker point per button, not a rectangle, so we size by hand.
 const ASSET_HOTSPOT: f32 = 56.;
-
-/// Vertical offset of each synthetic thumb-wheel rotation hotspot from the
-/// wheel's click marker, so "up" and "down" sit above and below it as two
-/// separately-clickable dots.
-const THUMBWHEEL_ROTATION_OFFSET: f32 = 18.;
 
 /// Scale the device image to *fit inside* a `max_w` × `target_h` box while
 /// preserving the **actual PNG's** aspect ratio. A tall device (a mouse) is
@@ -110,33 +105,6 @@ pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32)
         })
         .collect();
 
-    with_thumbwheel_rotation(hotspots)
-}
-
-/// Replace the thumb-wheel *click* hotspot with two rotation hotspots
-/// (`ThumbwheelScrollUp` / `ThumbwheelScrollDown`) stacked above and below the
-/// wheel's marker — the click stays bound to its default and still dispatches
-/// when the wheel is diverted, it just isn't surfaced in the model.
-///
-/// No-op when the device has no thumb wheel.
-fn with_thumbwheel_rotation(mut hotspots: Vec<Hotspot>) -> Vec<Hotspot> {
-    let Some(wheel) = hotspots.iter().find(|h| h.id == ButtonId::Thumbwheel) else {
-        return hotspots;
-    };
-    let rotation = [
-        Hotspot {
-            id: ButtonId::ThumbwheelScrollUp,
-            y: wheel.y - THUMBWHEEL_ROTATION_OFFSET,
-            ..*wheel
-        },
-        Hotspot {
-            id: ButtonId::ThumbwheelScrollDown,
-            y: wheel.y + THUMBWHEEL_ROTATION_OFFSET,
-            ..*wheel
-        },
-    ];
-    hotspots.retain(|h| h.id != ButtonId::Thumbwheel);
-    hotspots.extend(rotation);
     hotspots
 }
 
@@ -174,49 +142,52 @@ pub fn labels_from_hotspots(hotspots: &[Hotspot], mouse_h: f32) -> Vec<Label> {
 }
 
 /// Label positions for the synthetic fallback silhouette.
-pub fn default_labels() -> Vec<Label> {
-    vec![
-        Label {
-            id: ButtonId::MiddleClick,
+pub fn default_labels(thumbwheel: bool) -> Vec<Label> {
+    let layout: &[(MouseControlId, f32)] = if thumbwheel {
+        &[
+            (MouseControlId::Button(ButtonId::MiddleClick), 80.),
+            (MouseControlId::ThumbwheelRotation, 165.),
+            (MouseControlId::Button(ButtonId::Back), 250.),
+            (MouseControlId::Button(ButtonId::Forward), 335.),
+            (MouseControlId::Button(ButtonId::DpiToggle), 420.),
+            (MouseControlId::Button(ButtonId::GestureButton), 505.),
+        ]
+    } else {
+        &[
+            (MouseControlId::Button(ButtonId::MiddleClick), 120.),
+            (MouseControlId::Button(ButtonId::Back), 240.),
+            (MouseControlId::Button(ButtonId::Forward), 340.),
+            (MouseControlId::Button(ButtonId::DpiToggle), 430.),
+            (MouseControlId::Button(ButtonId::GestureButton), 510.),
+        ]
+    };
+    layout
+        .iter()
+        .map(|(id, y)| Label {
+            id: *id,
             side: Side::Left,
-            y: 120.,
-        },
-        Label {
-            id: ButtonId::Back,
-            side: Side::Left,
-            y: 240.,
-        },
-        Label {
-            id: ButtonId::Forward,
-            side: Side::Left,
-            y: 340.,
-        },
-        Label {
-            id: ButtonId::DpiToggle,
-            side: Side::Left,
-            y: 430.,
-        },
-        Label {
-            id: ButtonId::GestureButton,
-            side: Side::Left,
-            y: 510.,
-        },
-    ]
+            y: *y,
+        })
+        .collect()
 }
 
-/// Logitech's stable slot vocabulary → OpenLogi's `ButtonId`. Intentionally
-/// conservative; unknown names fall through so widening `ButtonId` later
+/// Logitech's stable slot vocabulary → OpenLogi's visual control IDs. Intentionally
+/// conservative; unknown names fall through so widening `MouseControlId` later
 /// doesn't break old depots.
-fn map_slot_name(name: &str) -> Option<ButtonId> {
+fn map_slot_name(name: &str) -> Option<MouseControlId> {
     match name {
-        "SLOT_NAME_LEFT_BUTTON" => Some(ButtonId::LeftClick),
-        "SLOT_NAME_RIGHT_BUTTON" => Some(ButtonId::RightClick),
-        "SLOT_NAME_MIDDLE_BUTTON" => Some(ButtonId::MiddleClick),
-        "SLOT_NAME_BACK_BUTTON" => Some(ButtonId::Back),
-        "SLOT_NAME_FORWARD_BUTTON" => Some(ButtonId::Forward),
-        "SLOT_NAME_MODESHIFT_BUTTON" => Some(ButtonId::DpiToggle),
-        "SLOT_NAME_THUMBWHEEL" => Some(ButtonId::Thumbwheel),
-        "SLOT_NAME_GESTURE_BUTTON" => Some(ButtonId::GestureButton),
+        "SLOT_NAME_LEFT_BUTTON" => Some(MouseControlId::Button(ButtonId::LeftClick)),
+        "SLOT_NAME_RIGHT_BUTTON" => Some(MouseControlId::Button(ButtonId::RightClick)),
+        "SLOT_NAME_MIDDLE_BUTTON" => Some(MouseControlId::Button(ButtonId::MiddleClick)),
+        "SLOT_NAME_BACK_BUTTON" => Some(MouseControlId::Button(ButtonId::Back)),
+        "SLOT_NAME_FORWARD_BUTTON" => Some(MouseControlId::Button(ButtonId::Forward)),
+        "SLOT_NAME_MODESHIFT_BUTTON" => Some(MouseControlId::Button(ButtonId::DpiToggle)),
+        "SLOT_NAME_THUMBWHEEL" => Some(MouseControlId::ThumbwheelRotation),
+        "SLOT_NAME_GESTURE_BUTTON" => Some(MouseControlId::Button(ButtonId::GestureButton)),
+        // The MX Master 4 Haptic Sense Panel. Logi names the slot after its
+        // Options+ default assignment (the radial Actions Ring menu), but the
+        // marker is the panel itself.
+        "ASSIGNMENT_NAME_SHOW_RADIAL_MENU" => Some(MouseControlId::Button(ButtonId::HapticPanel)),
         _ => None,
     }
 }
@@ -227,62 +198,32 @@ mod tests {
     use crate::data::mouse_buttons::default_hotspots;
 
     #[test]
-    fn default_labels_include_the_gesture_button() {
-        let labels = default_labels();
+    fn default_labels_include_capability_gated_thumbwheel() {
         assert!(
-            labels
+            !default_labels(false)
                 .iter()
-                .any(|l| matches!(l.id, ButtonId::GestureButton)),
-            "the gesture button needs a fallback label"
+                .any(|label| label.id == MouseControlId::ThumbwheelRotation)
+        );
+        assert_eq!(
+            default_labels(true)
+                .iter()
+                .filter(|label| label.id == MouseControlId::ThumbwheelRotation)
+                .count(),
+            1
         );
     }
 
     #[test]
-    fn thumbwheel_click_becomes_two_rotation_hotspots() {
-        let wheel = Hotspot {
-            id: ButtonId::Thumbwheel,
-            x: 100.,
-            y: 200.,
-            w: ASSET_HOTSPOT,
-            h: ASSET_HOTSPOT,
-        };
-        let out = with_thumbwheel_rotation(vec![wheel]);
-        assert!(
-            !out.iter().any(|h| h.id == ButtonId::Thumbwheel),
-            "the click hotspot is not surfaced in the model"
+    fn thumbwheel_metadata_maps_to_one_rotation_control() {
+        assert_eq!(
+            map_slot_name("SLOT_NAME_THUMBWHEEL"),
+            Some(MouseControlId::ThumbwheelRotation)
         );
-        assert_eq!(out.len(), 2, "click is replaced by the two rotations");
-        let up_y = out
-            .iter()
-            .find(|h| h.id == ButtonId::ThumbwheelScrollUp)
-            .map(|h| h.y);
-        let down_y = out
-            .iter()
-            .find(|h| h.id == ButtonId::ThumbwheelScrollDown)
-            .map(|h| h.y);
-        assert!(
-            matches!((up_y, down_y), (Some(up), Some(down)) if up < down),
-            "up sits above down"
-        );
-    }
-
-    #[test]
-    fn no_thumbwheel_leaves_hotspots_untouched() {
-        let middle = Hotspot {
-            id: ButtonId::MiddleClick,
-            x: 0.,
-            y: 0.,
-            w: ASSET_HOTSPOT,
-            h: ASSET_HOTSPOT,
-        };
-        let out = with_thumbwheel_rotation(vec![middle]);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].id, ButtonId::MiddleClick);
     }
 
     #[test]
     fn labels_track_hotspots_and_avoid_crossing() {
-        let hotspots = default_hotspots();
+        let hotspots = default_hotspots(true);
         let labels = labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1);
         assert_eq!(labels.len(), hotspots.len());
 

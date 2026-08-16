@@ -41,7 +41,11 @@ OpenLogi needs:
 - **Write access to `/dev/uinput`** — to create the virtual input device for
   button remapping.
 - **Read/write access to `/dev/hidraw*`** — to send HID++ commands to the Bolt
-  receiver.
+  receiver, or to the device itself when it is paired over Bluetooth.
+- **Read access to the mouse's `/dev/input/event*` node** — the hook grabs the
+  pointer there to capture button presses. Bluetooth mice need the bundled rule
+  for this: their event node hangs off `/devices/virtual/misc/uhid`, which has
+  no seat, so `logind` never grants the ACL on its own.
 
 Install the bundled udev rules to grant access to the active-seat user without
 requiring `sudo` or group membership (requires `systemd-logind`):
@@ -61,6 +65,11 @@ openlogi-agent --check-uinput 2>/dev/null || \
 
 # Check a hidraw node
 ls -la /dev/hidraw*
+
+# Check the mouse's event node — look for a "+" (ACL) in the mode, or your
+# user in the ACL itself. Without it the agent logs
+# "could not install OS mouse hook".
+getfacl /dev/input/event*
 ```
 
 The GUI Settings → Permissions page shows a live `Granted` / `Not granted`

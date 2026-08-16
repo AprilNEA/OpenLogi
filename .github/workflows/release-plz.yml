@@ -8,6 +8,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # Match CI so shared-key linux-stable-debug restore hits the env hash.
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   # Opens/updates a release PR that bumps the shared workspace version and writes
@@ -29,6 +31,11 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: linux-stable-debug
+          # CI master is the canonical writer; release-plz only restores.
+          save-if: false
       - name: Install Linux build deps
         run: |
           sudo apt-get update
@@ -51,6 +58,48 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ steps.app-token.outputs.cargo-registry-token }}
+      # Whole-repo CHANGELOG via git-cliff (cliff.toml). release-plz is
+      # package-path-scoped and skips release=false app crates; git-cliff is the
+      # GoReleaser-style "every conventional commit since last tag" path.
+      - name: Write root changelog with git-cliff
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          branch="$(
+            gh pr list \
+              --repo "${{ github.repository }}" \
+              --state open \
+              --json headRefName \
+              --jq '.[] | select(.headRefName | startswith("release-plz/")) | .headRefName' \
+              | head -n1
+          )"
+          if [[ -z "${branch}" ]]; then
+            echo "No open release-plz PR — nothing to write."
+            exit 0
+          fi
+          git config user.name "aprilnea[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          # Script/config may not be on the release-plz branch yet — copy from master.
+          cp cliff.toml "${RUNNER_TEMP}/cliff.toml"
+          cp scripts/release/write-changelog.sh "${RUNNER_TEMP}/write-changelog.sh"
+          chmod +x "${RUNNER_TEMP}/write-changelog.sh"
+          git fetch origin "${branch}"
+          git checkout --force "origin/${branch}"
+          cp "${RUNNER_TEMP}/cliff.toml" cliff.toml
+          # git-cliff: same binary release-plz uses under the hood for formatting.
+          curl -sL "https://github.com/orhun/git-cliff/releases/download/v2.13.1/git-cliff-2.13.1-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "${RUNNER_TEMP}"
+          export PATH="${RUNNER_TEMP}/git-cliff-2.13.1:${PATH}"
+          "${RUNNER_TEMP}/write-changelog.sh"
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "CHANGELOG already complete."
+            exit 0
+          fi
+          git add CHANGELOG.md cliff.toml 2>/dev/null || git add CHANGELOG.md
+          git commit -m "chore(release): write whole-repo changelog"
+          git push origin "HEAD:refs/heads/${branch}"
       # `release-plz/action` swallows a release-pr HTTP 422 as a warning and
       # reports no PR, which silently stalls releases (it looks identical to a
       # quiet week of commits). Fail loudly when release-plz opened/updated no
@@ -124,11 +173,16 @@ jobs:
             }
             core.info(`No release PR and no release-worthy commits since ${lastTag || "repo start"}; nothing to release.`);
 
-  # On every push to master, publishes any crate whose manifest version is not yet
-  # on crates.io — i.e. a no-op until the release PR is merged, at which point it
-  # publishes the whole workspace and cuts one `v{version}` tag + GitHub Release.
+  # Publishes crates + cuts `v{version}` only from the release PR merge commit
+  # (`chore: release v*`). release_always=false in release-plz.toml is the primary
+  # gate; this job-level filter is defense in depth so a later feature push cannot
+  # tag HEAD after a failed-then-retried crates.io publish. On publish failure,
+  # re-run this workflow on the release commit SHA — never on a later master tip.
   release:
     name: release-plz release
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.event.head_commit.message, 'chore: release')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -138,20 +192,85 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # Pin to the version-bump commit even if workflow_dispatch is fired from a
+      # later master tip (or a re-run that somehow resolves to the wrong SHA).
+      - name: Check out the version-bump commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(
+            python3 - <<'PY'
+          import pathlib, re, sys
+          text = pathlib.Path("Cargo.toml").read_text()
+          m = re.search(
+              r'(?ms)^\[workspace\.package\].*?^version\s*=\s*"([^"]+)"',
+              text,
+          )
+          if not m:
+              sys.exit("workspace.package version not found in Cargo.toml")
+          print(m.group(1))
+          PY
+          )"
+          tag="v${version}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists — nothing to release."
+            echo "skip=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          # Prefer the conventional release-PR squash subject; fall back to the
+          # first commit that set this workspace version in Cargo.toml.
+          bump_sha="$(git log -1 --format=%H --grep="^chore: release v${version}" || true)"
+          if [[ -z "${bump_sha}" ]]; then
+            bump_sha="$(
+              git log -G '^version = "' --format=%H -- Cargo.toml \
+                | while read -r sha; do
+                    if git show "${sha}:Cargo.toml" \
+                      | python3 -c "import pathlib,re,sys; t=sys.stdin.read(); m=re.search(r'(?ms)^\[workspace\.package\].*?^version\s*=\s*\"([^\"]+)\"', t); sys.exit(0 if m and m.group(1)==sys.argv[1] else 1)" \
+                      "${version}"
+                    then
+                      echo "${sha}"
+                      break
+                    fi
+                  done
+            )"
+          fi
+          if [[ -z "${bump_sha}" ]]; then
+            echo "::error::Could not locate the version-bump commit for ${tag}"
+            exit 1
+          fi
+          echo "Checking out version-bump commit ${bump_sha} for ${tag}"
+          # Stay on a real branch with @{upstream} set. A bare SHA checkout
+          # detaches HEAD and release-plz aborts with "cannot determine current
+          # branch". Pin master to the bump commit only for this job's workspace
+          # (does not push, does not bump versions).
+          git switch --force -C master "${bump_sha}"
+          git branch --set-upstream-to=origin/master master
+          echo "skip=false" >> "$GITHUB_ENV"
+          echo "release_sha=${bump_sha}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
+        if: env.skip != 'true'
       - uses: Swatinem/rust-cache@v2
+        if: env.skip != 'true'
+        with:
+          prefix-key: v1-rust
+          shared-key: linux-stable-debug
+          # CI master is the canonical writer; release-plz only restores.
+          save-if: false
       - name: Install Linux build deps
+        if: env.skip != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libudev-dev pkg-config gcc g++ clang libssl-dev libzstd-dev
       - name: Mint GitHub App token
+        if: env.skip != 'true'
         id: app-token
         uses: ./.github/actions/github-app-token-from-1password
         with:
           op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
       - name: Run release-plz (release)
+        if: env.skip != 'true'
         uses: release-plz/action@v0.5
         with:
           command: release

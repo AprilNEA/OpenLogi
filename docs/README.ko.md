@@ -156,9 +156,10 @@ Windows 지원은 정상 작동하며 유선 키보드와 Unifying 수신기 마
 
 ## 감사의 말
 
-- [`hidpp`](https://crates.io/crates/hidpp) — [@lus](https://github.com/lus)
-- [Solaar](https://github.com/pwr-Solaar/Solaar)
-- [Mouser](https://github.com/TomBadash/Mouser) — Tom Badash
+- **Windows·카메라·i18n** — [@davidbudnick](https://github.com/davidbudnick): Windows 입력 훅과 MSI 업데이트, Logitech 웹캠 지원, 키보드 RGB, Crowdin 번역 파이프라인
+- **Linux 포팅** — [@cserby](https://github.com/cserby): evdev/uinput 훅, D-Bus 액션, .deb/.rpm 패키징
+- [Solaar](https://github.com/pwr-Solaar/Solaar) — [@pwr](https://github.com/pwr)가 만든, 가장 완성도 높은 오픈소스 HID++ 구현이자 이 프로젝트의 프로토콜 참고 자료
+- [Mouser](https://github.com/TomBadash/Mouser) — [@TomBadash](https://github.com/TomBadash)가 만든, 같은 목표의 선행 프로젝트: 로컬에서 동작하는 계정 없는 Options+ 대체제
 
 ## 라이선스
 
@@ -166,6 +167,10 @@ Windows 지원은 정상 작동하며 유선 키보드와 Unifying 수신기 마
 
 - Apache License 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
 - MIT 라이선스 ([LICENSE-MIT](../LICENSE-MIT))
+
+### 서드파티 코드
+
+`crates/openlogi-hidpp`는 [`hidpp`](https://crates.io/crates/hidpp)([@lus](https://github.com/lus) 제작)의 vendored fork이며, 0BSD 라이선스를 따릅니다.
 
 ### 로고 및 브랜드 자산
 

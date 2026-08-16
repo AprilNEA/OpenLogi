@@ -1,6 +1,7 @@
 //! Events emitted by the `Illumination` feature (`0x1990`).
 
 use super::types::{BrightnessClampedSource, IlluminationState, be16, illumination_state};
+use crate::feature::DecodeEvent;
 
 /// An event emitted by [`IlluminationFeature`](super::IlluminationFeature).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -39,9 +40,15 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<Illuminatio
             payload, 0,
         ))),
         4 => Some(IlluminationEvent::BrightnessClamped {
-            source: BrightnessClampedSource::try_from(payload[0]).ok()?,
+            source: BrightnessClampedSource::from(payload[0]),
             brightness: be16(payload, 1),
         }),
         _ => None,
+    }
+}
+
+impl DecodeEvent for IlluminationEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        decode_event(sub_id, payload)
     }
 }

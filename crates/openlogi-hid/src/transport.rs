@@ -10,6 +10,9 @@
 
 #[cfg(not(target_os = "windows"))]
 use std::error::Error;
+#[cfg(not(target_os = "windows"))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, LazyLock};
 
 #[cfg(not(target_os = "windows"))]
@@ -17,11 +20,24 @@ use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader};
 use async_hid::{DeviceInfo, DeviceWriter, HidBackend};
 use futures_lite::StreamExt as _;
 use hidpp::channel::HidppChannel;
+use hidpp::nibble::U4;
 #[cfg(not(target_os = "windows"))]
 use hidpp::{async_trait, channel::RawHidChannel};
 #[cfg(not(target_os = "windows"))]
 use tokio::sync::Mutex;
 use tracing::debug;
+
+use crate::write::{WriteError, classify_hid_error, matches_litra};
+
+/// Bitmask of leased HID++ software ids (`1..=15`; bit `N` means id `N` is taken).
+///
+/// HID++ correlates request/response by `(device, feature, function, software_id)`.
+/// Concurrent opens of the same physical HID node each get a private pending
+/// queue but share the OS input report stream, so a shared software id lets a
+/// response satisfy the wrong open. Each channel leases one **fixed** id for its
+/// lifetime (no rotation — offset rotating sequences still collide across
+/// channels) and frees it on drop via [`HidppChannel::set_sw_id_lease`].
+static SW_ID_LEASES: AtomicU16 = AtomicU16::new(0);
 
 #[cfg(any(target_os = "windows", test))]
 mod windows;
@@ -98,11 +114,11 @@ fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
 /// backend is the usage async-hid intends, and keeps the device set warm between
 /// polls. `HidBackend` is `Arc`-backed, so this is shared, not copied.
 ///
-/// `enumerate` is also reached from `open_route_writer`, so the inventory
-/// watcher and a (rare) lighting write can enumerate through this one backend
-/// concurrently. That is sound: async-hid declares the backend `Send + Sync`,
-/// `enumerate` only reads a snapshot (`IOHIDManagerCopyDevices`), and sharing a
-/// single long-lived `IOHIDManager` across threads is the model hidapi uses too.
+/// Inventory and route-addressed standalone operations may enumerate through
+/// this one backend concurrently. That is sound: async-hid declares the backend
+/// `Send + Sync`, `enumerate` only reads a snapshot
+/// (`IOHIDManagerCopyDevices`), and sharing a single long-lived `IOHIDManager`
+/// across threads is the model hidapi uses too.
 static HID_BACKEND: LazyLock<HidBackend> = LazyLock::new(HidBackend::default);
 
 /// The process-wide HID backend shared by enumeration and hotplug watching.
@@ -110,8 +126,7 @@ pub(crate) fn hid_backend() -> &'static HidBackend {
     &HID_BACKEND
 }
 
-pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError>
-{
+pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError> {
     let all: Vec<async_hid::Device> = HID_BACKEND.enumerate().await?.collect().await;
 
     // One-time visibility into what the OS actually reports for Logitech nodes,
@@ -128,14 +143,62 @@ pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, 
         );
     }
 
-    Ok(all
+    Ok(all)
+}
+
+/// Stable opaque identity used by raw-device routes. Prefer the HID serial;
+/// otherwise retain the backend's platform identifier as a runtime identity.
+/// The latter is deliberately not treated as a cross-machine portable key,
+/// but it is stronger than enumeration order and lets duplicate nodes be
+/// rejected deterministically.
+pub(crate) fn device_identity(info: &DeviceInfo) -> String {
+    info.serial_number
+        .as_deref()
+        .filter(|serial| !serial.is_empty())
+        .map_or_else(
+            // `DeviceInfo::id` is an OS-node identity (hidraw path, registry
+            // entry, or Windows device path). It is useful to re-find a node
+            // during this process lifetime, but it is intentionally marked as
+            // transient and must never become a persisted physical key.
+            || format!("id:{:?}", info.id),
+            |serial| format!("serial:{}", serial.to_ascii_lowercase()),
+        )
+}
+
+pub(crate) async fn enumerate_hidpp_devices() -> Result<Vec<async_hid::Device>, async_hid::HidError>
+{
+    Ok(enumerate_devices()
+        .await?
         .into_iter()
         .filter(|d| {
-            d.vendor_id == LOGITECH_VID
-                && is_hidpp_long_collection(d.usage_page, d.usage_id)
-                && !is_receiver_child_node(&d.id)
+            is_hidpp_candidate(
+                d.vendor_id,
+                d.product_id,
+                d.usage_page,
+                d.usage_id,
+                is_receiver_child_node(&d.id),
+            )
         })
         .collect())
+}
+
+/// Whether an enumerated node belongs to the HID++ channel path.
+///
+/// Standalone drivers have precedence over the generic collection matcher. A
+/// Litra Glow intentionally uses the same BLE usage collection as Logitech
+/// HID++ peripherals, so the full product/usage tuple must be excluded here;
+/// the collection itself remains a valid HID++ candidate for other products.
+fn is_hidpp_candidate(
+    vendor_id: u16,
+    product_id: u16,
+    usage_page: u16,
+    usage_id: u16,
+    receiver_child: bool,
+) -> bool {
+    vendor_id == LOGITECH_VID
+        && is_hidpp_long_collection(usage_page, usage_id)
+        && !matches_litra(vendor_id, product_id, usage_page, usage_id)
+        && !receiver_child
 }
 
 /// Returns `true` when a HID++ node is a virtual per-device interface created by
@@ -178,6 +241,7 @@ fn is_receiver_child_sysfs_path(path: &str) -> bool {
     crate::BOLT_PIDS
         .iter()
         .chain(crate::UNIFYING_PIDS.iter())
+        .chain(crate::LIGHTSPEED_PIDS.iter())
         .any(|&pid| {
             let marker = format!(":{LOGITECH_VID:04X}:{pid:04X}.");
             // A parent component contains the marker followed by at least one
@@ -198,22 +262,95 @@ fn is_receiver_child_node(_id: &async_hid::DeviceId) -> bool {
 /// matching node is connected.
 pub(crate) async fn open_route_writer(
     route: &crate::route::DeviceRoute,
-) -> Result<Option<DeviceWriter>, async_hid::HidError> {
-    let crate::route::DeviceRoute::Direct {
-        vendor_id,
-        product_id,
-    } = route
-    else {
-        return Ok(None);
+) -> Result<Option<DeviceWriter>, WriteError> {
+    let candidates = match route {
+        crate::route::DeviceRoute::Direct { .. } => enumerate_hidpp_devices()
+            .await
+            .map_err(|e| classify_hid_error(&e))?,
+        crate::route::DeviceRoute::RawHid { .. } => enumerate_devices()
+            .await
+            .map_err(|e| classify_hid_error(&e))?,
+        _ => return Ok(None),
     };
-    let candidates = enumerate_hidpp_devices().await?;
+    let mut matched = None;
     for dev in candidates {
-        if dev.vendor_id == *vendor_id && dev.product_id == *product_id {
-            let (_reader, writer) = dev.open().await?;
-            return Ok(Some(writer));
+        let is_match = match route {
+            crate::route::DeviceRoute::Direct {
+                vendor_id,
+                product_id,
+            } => dev.vendor_id == *vendor_id && dev.product_id == *product_id,
+            crate::route::DeviceRoute::RawHid {
+                vendor_id,
+                product_id,
+                usage_page,
+                usage_id,
+                identity,
+            } => {
+                dev.vendor_id == *vendor_id
+                    && dev.product_id == *product_id
+                    && dev.usage_page == *usage_page
+                    && dev.usage_id == *usage_id
+                    && device_identity(&dev) == *identity
+            }
+            _ => false,
+        };
+        if is_match {
+            if matches!(route, crate::route::DeviceRoute::Direct { .. }) {
+                let (_reader, writer) = dev.open().await.map_err(|e| classify_hid_error(&e))?;
+                return Ok(Some(writer));
+            }
+            if matched.is_some() {
+                tracing::warn!("multiple raw HID nodes matched one route");
+                return Err(WriteError::AmbiguousRawDevice);
+            }
+            matched = Some(dev);
         }
     }
-    Ok(None)
+    match matched {
+        Some(dev) => {
+            let (_reader, writer) = dev.open().await.map_err(|e| classify_hid_error(&e))?;
+            Ok(Some(writer))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Lease one free software id in `1..=15`, or `None` if all 15 are held.
+fn try_lease_sw_id() -> Option<u8> {
+    loop {
+        let bits = SW_ID_LEASES.load(Ordering::Acquire);
+        let free = (1u8..=15).find(|&id| bits & (1u16 << id) == 0)?;
+        let next = bits | (1u16 << free);
+        if SW_ID_LEASES
+            .compare_exchange(bits, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Some(free);
+        }
+    }
+}
+
+fn free_sw_id(id: u8) {
+    if (1..=15).contains(&id) {
+        SW_ID_LEASES.fetch_and(!(1u16 << id), Ordering::Release);
+    }
+}
+
+/// Give `channel` a process-unique fixed software id for its lifetime.
+///
+/// Software id `0` is reserved for device notifications and is never leased.
+/// Rotation stays off: concurrent channels that share a rotating `1..=15`
+/// sequence eventually reuse the same id and cross-match again.
+fn configure_channel_sw_ids(channel: &mut HidppChannel) {
+    let Some(id) = try_lease_sw_id() else {
+        // More than 15 simultaneous opens is unexpected; keep the default id
+        // rather than colliding with a live lease deliberately.
+        debug!("all HID++ software ids are leased; channel keeps default id 1");
+        return;
+    };
+    channel.set_sw_id(U4::from_lo(id));
+    channel.set_rotating_sw_id(false);
+    channel.set_sw_id_lease(id, free_sw_id);
 }
 
 pub(crate) async fn open_hidpp_channel(
@@ -230,7 +367,10 @@ pub(crate) async fn open_hidpp_channel(
     {
         let raw = WindowsHidppChannel::open(dev, info.clone()).await?;
         let channel = match HidppChannel::from_raw_channel(raw).await {
-            Ok(c) => Arc::new(c),
+            Ok(mut c) => {
+                configure_channel_sw_ids(&mut c);
+                Arc::new(c)
+            }
             Err(e) => {
                 debug!(name = %info.name, error = ?e, "not a HID++ channel");
                 return Ok(None);
@@ -247,7 +387,10 @@ pub(crate) async fn open_hidpp_channel(
         let long_only = is_long_only_collection(info.usage_page, info.usage_id);
         let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only);
         let channel = match HidppChannel::from_raw_channel(raw).await {
-            Ok(c) => Arc::new(c),
+            Ok(mut c) => {
+                configure_channel_sw_ids(&mut c);
+                Arc::new(c)
+            }
             Err(e) => {
                 debug!(name = %info.name, error = ?e, "not a HID++ channel");
                 return Ok(None);
@@ -261,11 +404,39 @@ pub(crate) async fn open_hidpp_channel(
     }
 }
 
+#[cfg(test)]
+mod sw_id_lease_tests {
+    use super::{free_sw_id, try_lease_sw_id};
+
+    #[test]
+    fn leases_are_unique_until_freed() {
+        // Leave any ids held by concurrent tests alone: lease two free slots,
+        // check they differ, free them, and confirm the first id is reusable.
+        let Some(a) = try_lease_sw_id() else {
+            return;
+        };
+        let Some(b) = try_lease_sw_id() else {
+            free_sw_id(a);
+            return;
+        };
+        assert_ne!(a, b);
+        free_sw_id(a);
+        let Some(c) = try_lease_sw_id() else {
+            free_sw_id(b);
+            return;
+        };
+        assert_eq!(c, a);
+        free_sw_id(b);
+        free_sw_id(c);
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 pub(crate) struct AsyncHidChannel {
     reader: Mutex<DeviceReader>,
     writer: Mutex<DeviceWriter>,
     info: DeviceInfo,
+    connected: AtomicBool,
     /// Whether the device exposes only the long HID++ report (a BLE-direct
     /// peripheral on macOS). Reported via `supports_short_long_hidpp` so the
     /// `hidpp` channel up-converts outgoing short messages to long.
@@ -284,7 +455,14 @@ impl AsyncHidChannel {
             reader: Mutex::new(reader),
             writer: Mutex::new(writer),
             info,
+            connected: AtomicBool::new(true),
             long_only,
+        }
+    }
+
+    fn mark_disconnected(&self) {
+        if self.connected.swap(false, Ordering::AcqRel) {
+            debug!(name = %self.info.name, "HID channel disconnected");
         }
     }
 }
@@ -302,8 +480,15 @@ impl RawHidChannel for AsyncHidChannel {
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         let mut w = self.writer.lock().await;
-        w.write_output_report(src).await?;
-        Ok(src.len())
+        match w.write_output_report(src).await {
+            Ok(()) => Ok(src.len()),
+            Err(e) => {
+                if matches!(e, async_hid::HidError::Disconnected) {
+                    self.mark_disconnected();
+                }
+                Err(e.into())
+            }
+        }
     }
 
     async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
@@ -320,9 +505,16 @@ impl RawHidChannel for AsyncHidChannel {
             // until the inventory watcher evicts the channel), so park instead.
             // The contract guarantees every caller races this future against
             // the channel's close signal, which tears the read down on drop.
-            Err(async_hid::HidError::Disconnected) => std::future::pending().await,
+            Err(async_hid::HidError::Disconnected) => {
+                self.mark_disconnected();
+                std::future::pending().await
+            }
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
     }
 
     fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {

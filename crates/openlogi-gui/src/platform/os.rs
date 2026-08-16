@@ -47,9 +47,15 @@ pub fn set_app_appearance(appearance: Appearance) {
     };
     let named = match appearance {
         Appearance::System => None,
-        // SAFETY: the `NSAppearanceName` constants are static framework globals,
-        // valid for the whole process; `appearanceNamed` copies what it needs.
+        // SAFETY: `NSAppearanceNameAqua` is an AppKit `extern static` typed
+        // `&'static NSAppearanceName`; its non-lazy binding is resolved when the
+        // framework loads, before `main`, and AppKit never reassigns it — so
+        // this is a shared read of a live `&'static` of the declared type.
         Appearance::Light => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }),
+        // SAFETY: `NSAppearanceNameDarkAqua` is an AppKit `extern static` typed
+        // `&'static NSAppearanceName`; its non-lazy binding is resolved when the
+        // framework loads, before `main`, and AppKit never reassigns it — so
+        // this is a shared read of a live `&'static` of the declared type.
         Appearance::Dark => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }),
     };
     NSApplication::sharedApplication(mtm).setAppearance(named.as_deref());

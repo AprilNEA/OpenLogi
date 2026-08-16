@@ -2,8 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>OpenLogi</string>
-  <key>CFBundleDisplayName</key><string>OpenLogi</string>
+  <key>CFBundleName</key><string>OpenLogi Dev</string>
+  <key>CFBundleDisplayName</key><string>OpenLogi Dev</string>
   <key>CFBundleExecutable</key><string>openlogi-gui</string>
   <key>CFBundleIdentifier</key><string>org.openlogi.openlogi.dev</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -14,6 +14,7 @@
   <key>CFBundleVersion</key><string>0.0.0</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSCameraUsageDescription</key><string>OpenLogi previews your Logitech webcam locally. Video never leaves your Mac.</string>
   <!-- openlogi:// deep-link scheme. Mirror of [package.metadata.bundle]
        osx_url_schemes in Cargo.toml (which cargo-bundle uses for the release
        app) — keep the two in sync. CFBundleURLName matches the name

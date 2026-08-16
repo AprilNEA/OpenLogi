@@ -1,9 +1,16 @@
 //! Linux `evdev` + `uinput` implementation of the OS-level mouse hook.
 //!
-//! Each physical mouse found under `/dev/input/` is grabbed exclusively;
-//! a paired `uinput` virtual device re-injects events the callback marks
+//! Each physical mouse — a relative pointer with buttons — found under
+//! `/dev/input/` is grabbed exclusively; a paired `uinput` virtual device
+//! re-injects events the callback marks
 //! [`crate::EventDisposition::PassThrough`]. Events marked
 //! [`crate::EventDisposition::Suppress`] are consumed and never reach the desktop.
+//!
+//! Touch-driven devices (touchpads, touchscreens) and pointing sticks are
+//! never grabbed, even though they advertise mouse buttons: the virtual
+//! device mirrors only keys and relative axes, so a grab would swallow their
+//! multitouch `EV_ABS` stream (and the input properties libinput keys
+//! behavior on) with no way to re-inject it — killing the built-in pointer.
 //!
 //! # Permissions
 //!
@@ -11,6 +18,10 @@
 //! group) and write access to `/dev/uinput` (the `input` or `uinput` group, or
 //! a `udev` rule granting access). Without those, `start()` returns
 //! [`crate::HookError::Linux`].
+#![allow(
+    unsafe_code,
+    reason = "the wake pipe and the Wayland toplevel listener call libc directly"
+)]
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -21,17 +32,28 @@ use std::sync::{
 use std::thread;
 
 use evdev::uinput::VirtualDevice;
-use evdev::{Device, EventSummary, KeyCode, RelativeAxisCode};
+use evdev::{
+    AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, KeyCode, PropType, RelativeAxisCode,
+};
 use tracing::{debug, error, warn};
 use x11rb::connection::Connection as _;
 use x11rb::properties::WmClass;
 use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, Window};
 use x11rb::rust_connection::RustConnection;
 
-use crate::{ButtonId, EventDisposition, HookError, MouseEvent};
+use crate::{
+    ButtonId, CursorPosition, EventDisposition, HookError, HookEvent, LOGITECH_VENDOR_ID,
+    MouseEvent,
+};
 
-/// Name stamped on every uinput pass-through device; used to skip those
-/// devices during enumeration so we don't hook our own virtual mice.
+/// Prefix carried by every uinput device OpenLogi creates — the hook's
+/// pass-through mice ([`VIRTUAL_DEVICE_NAME`]) and openlogi-inject's
+/// "OpenLogi action injector" (which also advertises mouse buttons).
+/// Enumeration refuses anything with this prefix so the hook can never grab
+/// one of our own virtual devices.
+const OPENLOGI_DEVICE_PREFIX: &str = "OpenLogi ";
+
+/// Name stamped on every uinput pass-through device.
 const VIRTUAL_DEVICE_NAME: &str = "OpenLogi virtual mouse";
 
 /// Hi-res scroll resolution: 120 units per standard wheel tick, matching the
@@ -46,7 +68,7 @@ pub(crate) struct HookInner {
 }
 
 pub(crate) fn start(
-    cb: impl Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static,
+    cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
 ) -> Result<HookInner, HookError> {
     let devices = find_mouse_devices();
     if devices.is_empty() {
@@ -54,7 +76,7 @@ pub(crate) fn start(
     }
 
     let stop = Arc::new(AtomicBool::new(false));
-    let cb: Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
+    let cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
     let mut threads: Vec<thread::JoinHandle<()>> = Vec::with_capacity(devices.len());
     let mut stop_pipes: Vec<OwnedFd> = Vec::with_capacity(devices.len());
 
@@ -135,12 +157,99 @@ fn create_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
 
 fn find_mouse_devices() -> Vec<(std::path::PathBuf, Device)> {
     evdev::enumerate()
-        .filter(|(_, d)| d.name().unwrap_or("") != VIRTUAL_DEVICE_NAME)
-        .filter(|(_, d)| {
-            d.supported_keys()
-                .is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT))
+        // Only Logitech mice: the hook exists to remap devices OpenLogi
+        // manages, and grabbing an unrelated vendor's mouse would route its
+        // events through the virtual device and apply foreign remaps to it.
+        // `input_id().vendor()` is u16; crate::LOGITECH_VENDOR_ID is u32.
+        .filter(|(path, d)| {
+            let ours = u32::from(d.input_id().vendor()) == LOGITECH_VENDOR_ID;
+            if !ours
+                && d.supported_keys()
+                    .is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT))
+            {
+                debug!(
+                    "not hooking {} ({}): not a Logitech device",
+                    path.display(),
+                    d.name().unwrap_or("unnamed"),
+                );
+            }
+            ours
+        })
+        .filter(|(path, d)| {
+            let vendor = u32::from(d.input_id().vendor());
+            let hookable = is_hookable_mouse(
+                d.name(),
+                d.supported_keys(),
+                d.supported_relative_axes(),
+                d.supported_absolute_axes(),
+                d.properties(),
+                vendor,
+            );
+            if !hookable
+                && d.supported_keys()
+                    .is_some_and(|keys| keys.contains(KeyCode::BTN_LEFT))
+            {
+                debug!(
+                    "not hooking {} ({}): has mouse buttons but is not a managed Logitech relative-pointer mouse",
+                    path.display(),
+                    d.name().unwrap_or("unnamed"),
+                );
+            }
+            hookable
         })
         .collect()
+}
+
+/// Decide whether an input device is a physical mouse the hook may grab.
+///
+/// Grabbing is only correct for devices whose full event stream the paired
+/// virtual device can re-inject, i.e. relative pointers. Touch-driven
+/// devices (touchpads, touchscreens) speak multitouch `EV_ABS`, which
+/// [`build_virtual_device`] does not mirror — grabbing one swallows its
+/// events and kills the pointer. Pointing sticks are relative pointers but
+/// are excluded too: libinput derives their on-button scrolling from the
+/// `POINTING_STICK` input property, which a re-injected uinput stream loses,
+/// and built-in sticks are never OpenLogi's target hardware.
+///
+/// Only Logitech devices are grabbed: OpenLogi remaps Logitech mice, and an
+/// exclusive grab on any other vendor's pointer (or a misclassified built-in
+/// trackpad) would leave that device dead for the life of the agent (#484).
+fn is_hookable_mouse(
+    name: Option<&str>,
+    keys: Option<&AttributeSetRef<KeyCode>>,
+    rel_axes: Option<&AttributeSetRef<RelativeAxisCode>>,
+    abs_axes: Option<&AttributeSetRef<AbsoluteAxisCode>>,
+    props: &AttributeSetRef<PropType>,
+    vendor_id: u32,
+) -> bool {
+    // Never hook one of our own uinput devices (an unnamed device is fine —
+    // ours are always named).
+    if name.is_some_and(|n| n.starts_with(OPENLOGI_DEVICE_PREFIX)) {
+        return false;
+    }
+    // OpenLogi only remaps Logitech hardware — never grab foreign vendors.
+    if vendor_id != LOGITECH_VENDOR_ID {
+        return false;
+    }
+    // A mouse clicks and moves relatively; nothing else qualifies. This alone
+    // rejects pure-ABS touchpads, keyboards with stray button bits, and
+    // wheel-only devices like the action injector.
+    let clicks = keys.is_some_and(|k| k.contains(KeyCode::BTN_LEFT));
+    let moves = rel_axes.is_some_and(|r| {
+        r.contains(RelativeAxisCode::REL_X) && r.contains(RelativeAxisCode::REL_Y)
+    });
+    if !clicks || !moves {
+        return false;
+    }
+    // Combo devices that qualify as relative pointers but also expose a touch
+    // surface must stay un-grabbed: their touch stream cannot be re-injected.
+    let touches = keys
+        .is_some_and(|k| k.contains(KeyCode::BTN_TOUCH) || k.contains(KeyCode::BTN_TOOL_FINGER))
+        || abs_axes.is_some_and(|a| a.contains(AbsoluteAxisCode::ABS_MT_POSITION_X))
+        || props.contains(PropType::BUTTONPAD)
+        || props.contains(PropType::SEMI_MT)
+        || props.contains(PropType::DIRECT);
+    !touches && !props.contains(PropType::POINTING_STICK)
 }
 
 fn build_virtual_device(device: &Device) -> io::Result<evdev::uinput::VirtualDevice> {
@@ -225,9 +334,12 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
     match event.destructure() {
         EventSummary::Key(_, key, value) => {
             let id = key_to_button(key)?;
+            // Device is already Logitech-only (see `is_hookable_mouse`); the
+            // agent runtime treats `device: None` as remappable on Linux.
             Some(MouseEvent::Button {
                 id,
                 pressed: value != 0,
+                device: None,
             })
         }
         EventSummary::RelativeAxis(_, axis, value) => match axis {
@@ -296,7 +408,7 @@ fn device_thread(
     path: std::path::PathBuf,
     mut device: Device,
     mut virtual_device: VirtualDevice,
-    cb: Arc<dyn Fn(MouseEvent) -> EventDisposition + Send + Sync>,
+    cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync>,
     stop: Arc<AtomicBool>,
     stop_rx: OwnedFd,
 ) {
@@ -360,7 +472,7 @@ fn device_thread(
                 }
             } else {
                 let disposition = match translate(&event, hires_scroll) {
-                    Some(me) => cb(me),
+                    Some(me) => cb(HookEvent::Mouse(me)),
                     // Low-res companions (REL_WHEEL/REL_HWHEEL) must be suppressed when hi-res
                     // is active — passing them through would double the scroll distance.
                     None if hires_scroll
@@ -391,70 +503,228 @@ fn device_thread(
 
 // ── frontmost_bundle_id ──────────────────────────────────────────────────────
 
-struct X11State {
+// The frontmost-app reader is backend-driven so that Wayland support can be
+// added without touching callers. Exactly one backend is selected at startup
+// from the session environment (see `detect_frontmost_source`) and cached in
+// `FRONTMOST_SOURCE` for the process lifetime. The X11, wlr-foreign-toplevel,
+// and gnome-shell backends are all available; see `wayland_candidates`.
+
+mod gnome_shell;
+mod wlr_foreign_toplevel;
+
+/// A backend that reports which application is currently frontmost.
+///
+/// Implementations are display-server / desktop specific. The string returned
+/// by `frontmost_bundle_id` is compared against per-app profile keys by exact
+/// match (`openlogi_core::Config::effective_bindings`), so its exact form
+/// matters and is backend-specific. The X11 and gnome-shell backends both
+/// return the `WM_CLASS` class component (e.g. "Firefox"); the wlr backend
+/// returns the xdg-shell `app_id` (e.g. "org.mozilla.firefox"). These two
+/// namespaces do not map onto each other by any simple string rule, so a
+/// per-app profile created under wlroots will not match under GNOME/X11 and
+/// vice versa. This is a known limitation: reconciling it needs a canonical-id
+/// scheme or per-profile aliases rather than naive normalization, and is
+/// deliberately out of scope for the backends themselves.
+trait FrontmostSource: Send + Sync {
+    /// Opaque identifier of the frontmost application, or `None` when there is
+    /// no frontmost window or it cannot be read.
+    fn frontmost_bundle_id(&self) -> Option<String>;
+
+    /// Short backend identifier, for diagnostics / logging only.
+    fn name(&self) -> &'static str;
+}
+
+/// Frontmost backend backed by X11 `_NET_ACTIVE_WINDOW` + `WM_CLASS`.
+///
+/// Works on an X11 session, and on a Wayland session for XWayland windows;
+/// native Wayland windows are invisible through this path and yield `None`.
+struct X11Source {
     conn: RustConnection,
     root: Window,
     net_active_window: Atom,
 }
 
-static X11_STATE: LazyLock<Option<X11State>> = LazyLock::new(|| {
-    let (conn, screen_num) = RustConnection::connect(None)
-        .map_err(|e| debug!("X11 not available, frontmost_bundle_id will return None: {e}"))
-        .ok()?;
-    let root = conn.setup().roots[screen_num].root;
-    let net_active_window = conn
-        .intern_atom(false, b"_NET_ACTIVE_WINDOW")
-        .ok()?
-        .reply()
-        .ok()?
-        .atom;
-    Some(X11State {
-        conn,
-        root,
-        net_active_window,
-    })
-});
+impl X11Source {
+    /// Connect to the X server and resolve the `_NET_ACTIVE_WINDOW` atom.
+    /// Returns `None` when no X display is reachable (a Wayland session without
+    /// XWayland, or `$DISPLAY` unset).
+    fn connect() -> Option<Self> {
+        let (conn, screen_num) = RustConnection::connect(None)
+            .map_err(|e| debug!("X11 not available, frontmost will return None: {e}"))
+            .ok()?;
+        let root = conn.setup().roots[screen_num].root;
+        let net_active_window = conn
+            .intern_atom(false, b"_NET_ACTIVE_WINDOW")
+            .ok()?
+            .reply()
+            .ok()?
+            .atom;
+        Some(Self {
+            conn,
+            root,
+            net_active_window,
+        })
+    }
+}
 
-/// Return the X11 `WM_CLASS` class component of the currently active window,
-/// e.g. `"Firefox"` or `"Code"`.
-///
-/// Returns `None` when there is no active window, when the X11 display is
-/// unavailable (Wayland-only session without XWayland), or on read error.
-/// Native Wayland windows are not visible through this path.
-pub(crate) fn frontmost_bundle_id() -> Option<String> {
-    let state = X11_STATE.as_ref()?;
+impl FrontmostSource for X11Source {
+    fn frontmost_bundle_id(&self) -> Option<String> {
+        // _NET_ACTIVE_WINDOW on the root window holds the focused window's XID.
+        let window: Window = self
+            .conn
+            .get_property(
+                false,
+                self.root,
+                self.net_active_window,
+                AtomEnum::WINDOW,
+                0,
+                1,
+            )
+            .ok()?
+            .reply()
+            .ok()?
+            .value32()?
+            .next()?;
+        if window == 0 {
+            return None;
+        }
 
-    // _NET_ACTIVE_WINDOW on the root window holds the focused window's XID.
-    let window: Window = state
-        .conn
-        .get_property(
-            false,
-            state.root,
-            state.net_active_window,
-            AtomEnum::WINDOW,
-            0,
-            1,
-        )
-        .ok()?
-        .reply()
-        .ok()?
-        .value32()?
-        .next()?;
-    if window == 0 {
-        return None;
+        // WM_CLASS is instance_name\0class_name\0; the class component is more
+        // stable across window instances and is what profiles should key on
+        // (e.g. "Firefox", not "Navigator").
+        let wm = WmClass::get(&self.conn, window)
+            .ok()?
+            .reply_unchecked()
+            .ok()??;
+        std::str::from_utf8(wm.class())
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
     }
 
-    // WM_CLASS is instance_name\0class_name\0; the class component is more
-    // stable across window instances and is what profiles should key on
-    // (e.g. "Firefox", not "Navigator").
-    let wm = WmClass::get(&state.conn, window)
-        .ok()?
-        .reply_unchecked()
-        .ok()??;
-    std::str::from_utf8(wm.class())
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
+    fn name(&self) -> &'static str {
+        "x11"
+    }
+}
+
+/// Fallback used when no backend is available (e.g. a pure Wayland session
+/// before any Wayland backend lands). Always reports `None`, so per-app
+/// profile switching simply no-ops rather than erroring.
+struct NullSource;
+
+impl FrontmostSource for NullSource {
+    fn frontmost_bundle_id(&self) -> Option<String> {
+        None
+    }
+
+    fn name(&self) -> &'static str {
+        "null"
+    }
+}
+
+/// Coarse classification of the graphical session, used to order the frontmost
+/// backend candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionKind {
+    X11,
+    Wayland,
+    Unknown,
+}
+
+/// Classify the session from the environment. `XDG_SESSION_TYPE` is
+/// authoritative when set to `x11` or `wayland`; otherwise fall back to the
+/// presence of `WAYLAND_DISPLAY` / `DISPLAY`.
+fn detect_session_kind() -> SessionKind {
+    if let Ok(kind) = std::env::var("XDG_SESSION_TYPE") {
+        match kind.as_str() {
+            "wayland" => return SessionKind::Wayland,
+            "x11" => return SessionKind::X11,
+            _ => {}
+        }
+    }
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        SessionKind::Wayland
+    } else if std::env::var_os("DISPLAY").is_some() {
+        SessionKind::X11
+    } else {
+        SessionKind::Unknown
+    }
+}
+
+/// A backend constructor: returns the backend if it can initialize on this
+/// system, or `None` to fall through to the next candidate.
+type Candidate = fn() -> Option<Box<dyn FrontmostSource>>;
+
+fn x11_candidate() -> Option<Box<dyn FrontmostSource>> {
+    X11Source::connect().map(|s| Box::new(s) as Box<dyn FrontmostSource>)
+}
+
+/// Wayland-native frontmost backends, in priority order: the wlroots
+/// foreign-toplevel protocol (sway, Hyprland, river, …) and the GNOME Shell
+/// D-Bus extension (Mutter). AT-SPI remains a future fallback. Compositors that
+/// support none of these fall through to the X11/XWayland path (which resolves
+/// XWayland windows, `None` for native Wayland apps).
+fn wayland_candidates() -> Vec<Candidate> {
+    vec![wlr_foreign_toplevel::candidate, gnome_shell::candidate]
+}
+
+/// Pick the frontmost backend for this session, trying each candidate in order
+/// and keeping the first that initializes. Called once, lazily, per process.
+fn detect_frontmost_source() -> Box<dyn FrontmostSource> {
+    let session = detect_session_kind();
+    debug!("frontmost: session kind = {session:?}");
+
+    let mut candidates: Vec<Candidate> = match session {
+        SessionKind::Wayland => wayland_candidates(),
+        SessionKind::X11 | SessionKind::Unknown => Vec::new(),
+    };
+    // X11 / XWayland: the primary path on an X11 session and the universal
+    // fallback everywhere else.
+    candidates.push(x11_candidate);
+
+    for candidate in candidates {
+        if let Some(source) = candidate() {
+            debug!("frontmost: using '{}' backend", source.name());
+            // On Wayland, landing on the X11 backend means no native Wayland
+            // frontmost source was available, so native Wayland windows will
+            // report None (only XWayland windows resolve). Hint at the fix.
+            if session == SessionKind::Wayland && source.name() == "x11" {
+                debug!(
+                    "frontmost: on Wayland but using the X11/XWayland backend; \
+                     native Wayland windows will report None. Install the OpenLogi \
+                     GNOME Shell extension (GNOME) or use a wlroots compositor."
+                );
+            }
+            return source;
+        }
+    }
+
+    debug!("frontmost: no usable backend; frontmost_bundle_id will return None");
+    Box::new(NullSource)
+}
+
+static FRONTMOST_SOURCE: LazyLock<Box<dyn FrontmostSource>> =
+    LazyLock::new(detect_frontmost_source);
+
+/// Return an opaque identifier of the currently frontmost application, or
+/// `None` when unavailable. Dispatches to the backend chosen at startup.
+///
+/// On an X11 session this is the `WM_CLASS` class component (e.g. "Firefox").
+/// On a Wayland session the wlr-foreign-toplevel or gnome-shell backend is used
+/// when available; XWayland windows fall back to the X11 backend.
+pub(crate) fn frontmost_bundle_id() -> Option<String> {
+    FRONTMOST_SOURCE.frontmost_bundle_id()
+}
+
+/// Read the global cursor position through X11 when an X server is available.
+/// Native Wayland intentionally has no equivalent global-coordinate API.
+pub(crate) fn cursor_position() -> Option<CursorPosition> {
+    let source = X11Source::connect()?;
+    let reply = source.conn.query_pointer(source.root).ok()?.reply().ok()?;
+    Some(CursorPosition {
+        x: f64::from(reply.root_x),
+        y: f64::from(reply.root_y),
+    })
 }
 
 #[cfg(test)]
@@ -503,7 +773,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::LeftClick,
-                pressed: true
+                pressed: true,
+                device: None,
             })
         );
     }
@@ -515,7 +786,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::LeftClick,
-                pressed: false
+                pressed: false,
+                device: None,
             })
         );
     }
@@ -527,7 +799,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::Back,
-                pressed: true
+                pressed: true,
+                device: None,
             })
         );
     }
@@ -539,7 +812,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::Back,
-                pressed: true
+                pressed: true,
+                device: None,
             })
         );
     }
@@ -551,7 +825,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Button {
                 id: ButtonId::Forward,
-                pressed: true
+                pressed: true,
+                device: None,
             })
         );
     }
@@ -661,5 +936,207 @@ mod tests {
     fn translate_sync_event_returns_none() {
         let event = InputEvent::new(EventType::SYNCHRONIZATION.0, 0, 0);
         assert!(translate(&event, false).is_none());
+    }
+
+    // ── is_hookable_mouse ────────────────────────────────────────────────────
+
+    use evdev::{AbsoluteAxisCode, AttributeSet, PropType};
+
+    /// Capability profile fed to [`is_hookable_mouse`]. [`Caps::mouse`] models a
+    /// plain relative mouse; tests mutate it toward the device they model.
+    struct Caps {
+        name: Option<&'static str>,
+        keys: Option<AttributeSet<KeyCode>>,
+        rel: Option<AttributeSet<RelativeAxisCode>>,
+        abs: Option<AttributeSet<AbsoluteAxisCode>>,
+        props: AttributeSet<PropType>,
+        vendor_id: u32,
+    }
+
+    impl Caps {
+        fn mouse() -> Self {
+            Self {
+                name: Some("Logitech MX Master 3S"),
+                keys: Some(
+                    [KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE]
+                        .into_iter()
+                        .collect(),
+                ),
+                rel: Some(
+                    [
+                        RelativeAxisCode::REL_X,
+                        RelativeAxisCode::REL_Y,
+                        RelativeAxisCode::REL_WHEEL,
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                abs: None,
+                props: AttributeSet::new(),
+                vendor_id: LOGITECH_VENDOR_ID,
+            }
+        }
+
+        fn is_hookable(&self) -> bool {
+            is_hookable_mouse(
+                self.name,
+                self.keys.as_deref(),
+                self.rel.as_deref(),
+                self.abs.as_deref(),
+                &self.props,
+                self.vendor_id,
+            )
+        }
+    }
+
+    #[test]
+    fn plain_mouse_is_hookable() {
+        assert!(Caps::mouse().is_hookable());
+    }
+
+    #[test]
+    fn unnamed_mouse_is_hookable() {
+        let mut caps = Caps::mouse();
+        caps.name = None;
+        assert!(
+            caps.is_hookable(),
+            "a missing name must not exclude a device"
+        );
+    }
+
+    #[test]
+    fn non_logitech_mouse_is_not_hookable() {
+        let mut caps = Caps::mouse();
+        caps.name = Some("Apple SPI Trackpad");
+        caps.vendor_id = 0x05ac;
+        assert!(
+            !caps.is_hookable(),
+            "foreign vendors must never be exclusively grabbed"
+        );
+        caps.name = Some("Generic USB Mouse");
+        caps.vendor_id = 0x1234;
+        assert!(!caps.is_hookable());
+    }
+
+    #[test]
+    fn touchpad_is_not_hookable() {
+        // A libinput touchpad: clicks via BTN_LEFT but moves via multitouch
+        // EV_ABS, no relative axes — the device class the old BTN_LEFT-only
+        // filter wrongly grabbed, killing the built-in touchpad.
+        let mut caps = Caps::mouse();
+        caps.name = Some("ELAN0670:00 04F3:3150 Touchpad");
+        caps.keys = Some(
+            [
+                KeyCode::BTN_LEFT,
+                KeyCode::BTN_TOUCH,
+                KeyCode::BTN_TOOL_FINGER,
+            ]
+            .into_iter()
+            .collect(),
+        );
+        caps.rel = None;
+        caps.abs = Some([AbsoluteAxisCode::ABS_MT_POSITION_X].into_iter().collect());
+        caps.props = [PropType::POINTER, PropType::BUTTONPAD]
+            .into_iter()
+            .collect();
+        assert!(!caps.is_hookable());
+    }
+
+    #[test]
+    fn touch_keys_exclude_a_relative_pointer() {
+        for touch_key in [KeyCode::BTN_TOUCH, KeyCode::BTN_TOOL_FINGER] {
+            let mut caps = Caps::mouse();
+            caps.keys = Some(
+                [KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, touch_key]
+                    .into_iter()
+                    .collect(),
+            );
+            assert!(
+                !caps.is_hookable(),
+                "{touch_key:?} should mark the device as touch-driven"
+            );
+        }
+    }
+
+    #[test]
+    fn multitouch_abs_axis_excludes_a_relative_pointer() {
+        let mut caps = Caps::mouse();
+        caps.abs = Some([AbsoluteAxisCode::ABS_MT_POSITION_X].into_iter().collect());
+        assert!(!caps.is_hookable());
+    }
+
+    #[test]
+    fn touch_props_exclude_a_relative_pointer() {
+        for prop in [PropType::BUTTONPAD, PropType::SEMI_MT, PropType::DIRECT] {
+            let mut caps = Caps::mouse();
+            caps.props = [prop].into_iter().collect();
+            assert!(
+                !caps.is_hookable(),
+                "{prop:?} should mark the device as touch-driven"
+            );
+        }
+    }
+
+    #[test]
+    fn pointing_stick_is_not_hookable() {
+        let mut caps = Caps::mouse();
+        caps.name = Some("TPPS/2 Elan TrackPoint");
+        caps.props = [PropType::POINTER, PropType::POINTING_STICK]
+            .into_iter()
+            .collect();
+        assert!(!caps.is_hookable());
+    }
+
+    #[test]
+    fn device_without_relative_motion_is_not_hookable() {
+        // Buttons but no REL_X/REL_Y: keyboards with stray button bits and
+        // wheel-only virtual devices (the action injector's shape).
+        let mut caps = Caps::mouse();
+        caps.rel = None;
+        assert!(!caps.is_hookable());
+
+        let mut caps = Caps::mouse();
+        caps.rel = Some([RelativeAxisCode::REL_WHEEL].into_iter().collect());
+        assert!(!caps.is_hookable());
+    }
+
+    #[test]
+    fn device_without_buttons_is_not_hookable() {
+        let mut caps = Caps::mouse();
+        caps.keys = Some(
+            [KeyCode::KEY_A, KeyCode::KEY_LEFTSHIFT]
+                .into_iter()
+                .collect(),
+        );
+        assert!(!caps.is_hookable());
+    }
+
+    #[test]
+    fn own_virtual_devices_are_not_hookable() {
+        // Both uinput devices OpenLogi creates carry the prefix; even with
+        // fully mouse-like capabilities they must never be grabbed.
+        for name in ["OpenLogi virtual mouse", "OpenLogi action injector"] {
+            let mut caps = Caps::mouse();
+            caps.name = Some(name);
+            assert!(!caps.is_hookable(), "{name:?} must be excluded by prefix");
+        }
+    }
+
+    #[test]
+    fn virtual_device_name_carries_exclusion_prefix() {
+        assert!(
+            VIRTUAL_DEVICE_NAME.starts_with(OPENLOGI_DEVICE_PREFIX),
+            "renaming the virtual device away from the prefix would let the \
+             hook grab its own pass-through mice"
+        );
+    }
+
+    #[test]
+    fn stray_abs_axis_does_not_exclude_a_mouse() {
+        // Some mice expose odd ABS codes (e.g. ABS_MISC for tilt); only the
+        // multitouch position axis marks a touch surface.
+        let mut caps = Caps::mouse();
+        caps.abs = Some([AbsoluteAxisCode::ABS_MISC].into_iter().collect());
+        assert!(caps.is_hookable());
     }
 }

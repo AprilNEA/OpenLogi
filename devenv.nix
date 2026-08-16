@@ -25,19 +25,35 @@ in
   env = {
     GREET = "devenv";
     RUSTC_WRAPPER = "sccache";
-  } // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+  }
+  // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
     DEVELOPER_DIR = xcodeDeveloperDir;
     SDKROOT = xcodeSdkRoot;
   };
 
-  packages = with pkgs; [
-    git
-    cmake
-    sccache
-    prek
-    create-dmg
-    crowdin-cli
-  ];
+  packages =
+    with pkgs;
+    [
+      git
+      cmake
+      sccache
+      prek
+      crowdin-cli
+    ]
+    # create-dmg is macOS-only (meta.platforms = darwin); an unconditional entry
+    # breaks evaluation of the shell on Linux.
+    ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ create-dmg ]
+    # The Linux build links a handful of system libraries the shell must
+    # provide rather than rely on whatever the ambient user environment
+    # happens to expose: fontconfig via pkg-config (GPUI text rendering via
+    # yeslogic-fontconfig-sys), libxcb (x11rb in the hook and GPUI's X11
+    # backend), and libxkbcommon (GPUI keyboard handling).
+    ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+      pkg-config
+      fontconfig
+      xorg.libxcb
+      libxkbcommon
+    ];
 
   languages.rust = {
     enable = true;
@@ -78,25 +94,41 @@ in
       '';
     };
     "openlogi:check" = {
-      description = "Run fmt, clippy, and tests.";
+      description = "Run fmt, clippy, tests, and rustdoc.";
       exec = ''
         set -e
         ${requireXcodeMetal}
         cargo fmt --all -- --check
         cargo clippy --workspace --all-targets -- -D warnings
         cargo test --workspace
+        # Mirrors CI's `rustdoc (hid crates)` job: a broken intra-doc link is
+        # neither a compile error nor a clippy lint, so nothing above catches it.
+        RUSTDOCFLAGS="-D warnings" cargo doc -p openlogi-hid -p openlogi-hidpp \
+          -p openlogi-hidpp-derive --no-deps --document-private-items
       '';
     };
     "openlogi:i18n-upload" = {
-      description = "Upload English source strings to Crowdin.";
-      exec = "crowdin upload sources";
+      description = "Upload en.yml sources and per-language translations to Crowdin.";
+      exec = ''
+        set -e
+        crowdin upload sources
+        crowdin upload translations
+      '';
     };
     "openlogi:i18n-download" = {
-      description = "Download translated locale files from Crowdin.";
+      description = "Download Crowdin translations, merge into complete catalogs, run i18n tests.";
       exec = ''
         set -e
         ${requireXcodeMetal}
-        crowdin download
+        python3 scripts/i18n/merge_crowdin_download.py --self-test
+        before="$(mktemp -d)"
+        cp crates/openlogi-gui/locales/*.yml "$before/"
+        crowdin download --skip-untranslated-strings
+        python3 scripts/i18n/merge_crowdin_download.py \
+          --before "$before" \
+          --locales crates/openlogi-gui/locales \
+          --en crates/openlogi-gui/locales/en.yml
+        rm -rf "$before"
         cargo test -p openlogi-gui i18n
       '';
     };

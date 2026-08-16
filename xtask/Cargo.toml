@@ -13,13 +13,12 @@ publish = false
 anyhow = { workspace = true }
 clap = { workspace = true }
 fs-err = "3.3.0"
-icns = { version = "0.4.0", default-features = false, features = ["pngio"] }
-image = { version = "0.25.10", default-features = false, features = ["png"] }
 path-absolutize = "3.1.1"
-plist = "1.9.0"
+plist = "1.10.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2_hasher = { version = "0.3.2", features = ["sync"] }
+strum = { version = "0.27", features = ["derive"] }
 tempfile = "3.27.0"
 time = { version = "0.3", features = ["formatting"] }
 which = "8.0.4"

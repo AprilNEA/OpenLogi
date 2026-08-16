@@ -1,18 +1,76 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
+use openlogi_core::device::{
+    Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice,
+    ReceiverInfo,
+};
 
-use super::cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_TICKS, is_stale};
-use super::probe::{NodeProbe, assemble_bolt_probe, parse_codename_unifying};
-use super::{Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop};
-use crate::inventory::features::ProbedFeatures;
+use super::cache::{
+    CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_TICKS, backfill_identity, is_stale,
+    keep_known_capabilities,
+};
+use super::persist;
+use super::probe::{
+    NodeProbe, assemble_bolt_probe, parse_codename_unifying, preferred_direct_codename,
+};
+use super::{
+    ChannelCache, Enumerator, ONESHOT_ATTEMPTS, one_shot_should_stop, retained_nodes,
+    routes_for_inventories, settle_unhealthy_node,
+};
+use crate::inventory::features::{BatteryProbe, ProbedFeatures};
+use crate::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
 fn cache_entry(probed_tick: u64) -> Cached {
     Cached {
         probe: ProbedFeatures::default(),
-        battery_index: None,
+        battery: None,
         probed_tick,
     }
+}
+
+#[test]
+fn direct_codename_prefers_hidpp_marketing_name_over_generic_os_name() {
+    assert_eq!(
+        preferred_direct_codename(Some("Wireless Mouse MX Master 2S"), "Mouse"),
+        "Wireless Mouse MX Master 2S"
+    );
+    assert_eq!(preferred_direct_codename(None, "Mouse"), "Mouse");
+}
+
+#[test]
+fn cache_dirty_tracks_only_persistable_keys() {
+    // A system whose devices never persist (direct-only, or Unifying) must not
+    // rewrite probe-cache.json on every refresh pass: the file's content
+    // wouldn't change.
+    let mut e = Enumerator::default();
+    let unifying = CacheKey::UnifyingSlot {
+        receiver_uid: "DA2699E1".into(),
+        slot: 1,
+    };
+    e.apply_outcomes(vec![CacheOutcome::Fresh(unifying.clone(), cache_entry(0))]);
+    assert!(
+        !e.cache_dirty,
+        "non-persistable fresh probe dirtied the cache"
+    );
+
+    // Its eviction is equally invisible to the persisted file.
+    let nobody = HashSet::new();
+    for _ in 0..=CACHE_MISS_GRACE {
+        e.evict_unseen(&nobody);
+    }
+    assert!(!e.cache.contains_key(&unifying), "entry should be evicted");
+    assert!(!e.cache_dirty, "non-persistable eviction dirtied the cache");
+
+    // A Bolt probe is what the file stores — that one dirties it.
+    let bolt = CacheKey::Bolt {
+        unit_id: [1, 2, 3, 4],
+    };
+    e.apply_outcomes(vec![CacheOutcome::Fresh(bolt, cache_entry(0))]);
+    assert!(
+        e.cache_dirty,
+        "persistable fresh probe must dirty the cache"
+    );
 }
 
 #[test]
@@ -61,7 +119,7 @@ fn being_seen_resets_the_miss_counter() {
 fn cached_probe_is_reused_until_refresh_ticks() {
     let cached = Cached {
         probe: ProbedFeatures::default(),
-        battery_index: None,
+        battery: None,
         probed_tick: 10,
     };
     assert!(!is_stale(&cached, 10), "same tick is fresh");
@@ -98,6 +156,140 @@ fn inventory(slots: &[u8]) -> Vec<DeviceInventory> {
             })
             .collect(),
     }]
+}
+
+#[test]
+fn settled_inventories_publish_exact_receiver_routes() {
+    assert_eq!(
+        routes_for_inventories(&inventory(&[1, 4])),
+        vec![
+            DeviceRoute::Unifying {
+                receiver_uid: "receiver-1".into(),
+                slot: 1,
+            },
+            DeviceRoute::Unifying {
+                receiver_uid: "receiver-1".into(),
+                slot: 4,
+            },
+        ]
+    );
+
+    assert_eq!(
+        routes_for_inventories(&inventory(&[4])),
+        vec![DeviceRoute::Unifying {
+            receiver_uid: "receiver-1".into(),
+            slot: 4,
+        }],
+        "a vanished slot must not survive the next atomic node replacement"
+    );
+}
+
+#[test]
+fn settled_direct_inventory_publishes_one_direct_route() {
+    let direct = vec![DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "MX Keys".into(),
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+            unique_id: None,
+        },
+        paired: vec![PairedDevice {
+            slot: DIRECT_DEVICE_INDEX,
+            codename: Some("MX Keys".into()),
+            wpid: Some(0xb35b),
+            kind: DeviceKind::Keyboard,
+            online: true,
+            battery: None,
+            model_info: None,
+            capabilities: None,
+        }],
+    }];
+
+    assert_eq!(
+        routes_for_inventories(&direct),
+        vec![DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        }]
+    );
+}
+
+#[test]
+fn channel_cache_retires_and_defers_reopen_until_a_later_tick() {
+    let mut cache = ChannelCache::<u8, Arc<()>>::default();
+    let channel = Arc::new(());
+    cache.insert(1, Arc::clone(&channel));
+
+    assert!(cache.retire_node(&1).is_some());
+    assert!(cache.get(&1).is_none());
+    assert!(!cache.prepare_open(&1, |channel| Arc::strong_count(channel) == 1));
+
+    drop(channel);
+    assert!(cache.is_retiring(&1));
+    assert!(
+        !cache.prepare_open(&1, |channel| Arc::strong_count(channel) == 1),
+        "the tick that drops retirement still skips opening"
+    );
+    assert!(!cache.is_retiring(&1));
+    assert!(
+        cache.prepare_open(&1, |channel| Arc::strong_count(channel) == 1),
+        "only a later tick may reopen"
+    );
+}
+
+#[test]
+fn absent_channels_retire_and_quiescent_absent_retirement_is_reaped() {
+    let mut cache = ChannelCache::<u8, Arc<()>>::default();
+    cache.insert(1, Arc::new(()));
+    cache.insert(2, Arc::new(()));
+
+    let mut retired = 0;
+    cache.retire_absent(&HashSet::from([2]), |_| retired += 1);
+    assert_eq!(retired, 1, "the retire hook fires once per retired channel");
+    assert!(cache.is_retiring(&1));
+    assert!(cache.get(&2).is_some());
+
+    cache.reap_absent(&HashSet::from([2]), |channel| {
+        Arc::strong_count(channel) == 1
+    });
+    assert!(!cache.is_retiring(&1));
+}
+
+#[test]
+fn retiring_node_replays_ledger_and_marks_tick_unhealthy() {
+    let mut ledger = crate::node_ledger::NodeLedger::<u8>::default();
+    let expected = inventory(&[1]);
+    let settled = ledger.settle(&1, true, Some(expected[0].clone()));
+    assert_eq!(settled.inventory, Some(expected[0].clone()));
+
+    let mut complete = true;
+    let mut healthy = true;
+    let replay = settle_unhealthy_node(&mut ledger, &1, &mut complete, &mut healthy);
+
+    assert_eq!(replay, Some(expected[0].clone()));
+    assert!(!complete);
+    assert!(!healthy);
+}
+
+#[test]
+fn retiring_node_inventory_expires_after_the_existing_ledger_grace() {
+    let mut ledger = crate::node_ledger::NodeLedger::<u8>::default();
+    let expected = inventory(&[1]);
+    ledger.settle(&1, true, Some(expected[0].clone()));
+
+    let mut complete = true;
+    let mut healthy = true;
+    for _ in 0..3 {
+        assert_eq!(
+            settle_unhealthy_node(&mut ledger, &1, &mut complete, &mut healthy),
+            Some(expected[0].clone())
+        );
+    }
+    assert_eq!(
+        settle_unhealthy_node(&mut ledger, &1, &mut complete, &mut healthy),
+        None,
+        "retirement must not extend stale inventory beyond ledger policy"
+    );
 }
 
 #[test]
@@ -257,6 +449,137 @@ fn bolt_probe_is_incomplete_when_the_count_register_is_unanswered() {
     assert!(!probe.healthy);
 }
 
+fn model(unit_id: [u8; 4], serial: Option<&str>) -> DeviceModelInfo {
+    DeviceModelInfo {
+        entity_count: 1,
+        serial_number: serial.map(str::to_string),
+        unit_id,
+        transports: DeviceTransports::default(),
+        model_ids: [0xc09d, 0, 0],
+        extended_model_id: 1,
+    }
+}
+
+fn probed(model_info: Option<DeviceModelInfo>, identity_incomplete: bool) -> ProbedFeatures {
+    ProbedFeatures {
+        model_info,
+        identity_incomplete,
+        kind: Some(DeviceKind::Mouse),
+        ..ProbedFeatures::default()
+    }
+}
+
+/// A control-table read that fails half way reads exactly like "no haptic
+/// panel", and the answer is memoized for `REFRESH_TICKS` — so the Actions Ring
+/// binding would vanish from the GUI for half a minute on a device that has it.
+#[test]
+fn an_incomplete_capability_walk_keeps_the_last_complete_answer() {
+    let mut fresh = probed(None, false);
+    fresh.capabilities_incomplete = true;
+    fresh.capabilities = Some(Capabilities::default());
+    let mut cached = probed(None, false);
+    cached.capabilities = Some(Capabilities {
+        haptic_panel: true,
+        ..Capabilities::default()
+    });
+
+    keep_known_capabilities(&mut fresh, &cached);
+
+    assert_eq!(
+        fresh.capabilities.map(|caps| caps.haptic_panel),
+        Some(true),
+        "the panel the last complete walk saw must survive a lost reply"
+    );
+}
+
+/// A device that genuinely lost a capability must still be able to say so.
+#[test]
+fn a_complete_capability_walk_is_left_alone() {
+    let mut fresh = probed(None, false);
+    fresh.capabilities = Some(Capabilities::default());
+    let mut cached = probed(None, false);
+    cached.capabilities = Some(Capabilities {
+        haptic_panel: true,
+        ..Capabilities::default()
+    });
+
+    keep_known_capabilities(&mut fresh, &cached);
+
+    assert_eq!(
+        fresh.capabilities.map(|caps| caps.haptic_panel),
+        Some(false)
+    );
+}
+
+#[test]
+fn failed_device_info_read_backfills_from_cache() {
+    let mut fresh = probed(None, true);
+    let cached = probed(Some(model([0x46, 0, 0x2e, 0], None)), false);
+
+    backfill_identity(&mut fresh, &cached);
+
+    assert_eq!(fresh.model_info, cached.model_info);
+    assert!(
+        !fresh.identity_incomplete,
+        "a backfilled identity is complete and may be cached"
+    );
+}
+
+#[test]
+fn failed_serial_read_backfills_only_the_serial() {
+    let mut fresh = probed(Some(model([1, 2, 3, 4], None)), true);
+    let cached = probed(Some(model([9, 9, 9, 9], Some("abc123"))), false);
+
+    backfill_identity(&mut fresh, &cached);
+
+    let Some(info) = fresh.model_info else {
+        panic!("model info kept");
+    };
+    assert_eq!(info.serial_number.as_deref(), Some("abc123"));
+    assert_eq!(info.unit_id, [1, 2, 3, 4], "fresh unit id wins");
+    assert!(!fresh.identity_incomplete);
+}
+
+#[test]
+fn complete_probe_is_never_overwritten_by_cache() {
+    let mut fresh = probed(Some(model([1, 2, 3, 4], None)), false);
+    let cached = probed(Some(model([9, 9, 9, 9], Some("stale"))), false);
+
+    backfill_identity(&mut fresh, &cached);
+
+    let Some(info) = fresh.model_info else {
+        panic!("model info kept");
+    };
+    assert_eq!(info.unit_id, [1, 2, 3, 4]);
+    assert!(
+        info.serial_number.is_none(),
+        "no serial was read, none faked"
+    );
+}
+
+#[test]
+fn incomplete_probe_without_cached_identity_stays_incomplete() {
+    let mut fresh = probed(None, true);
+    let cached = probed(None, false);
+
+    backfill_identity(&mut fresh, &cached);
+
+    assert!(
+        fresh.identity_incomplete,
+        "nothing to backfill from — the caller must not memoize this probe"
+    );
+}
+
+#[test]
+fn failed_kind_read_is_carried_forward() {
+    let mut fresh = ProbedFeatures::default();
+    let cached = probed(None, false);
+
+    backfill_identity(&mut fresh, &cached);
+
+    assert_eq!(fresh.kind, Some(DeviceKind::Mouse));
+}
+
 #[test]
 fn codename_reads_len_prefixed_name() {
     // wire-verified MX Master 2S reply: `40 0c "MX Master 2S"` then padding.
@@ -279,4 +602,114 @@ fn codename_clamps_overlong_len() {
 #[test]
 fn codename_rejects_short_response() {
     assert_eq!(parse_codename_unifying(&[0x40]), None);
+}
+
+#[test]
+fn live_cached_channel_survives_a_transient_enumeration_gap() {
+    let enumerated = std::collections::HashSet::from([1_u8]);
+    let cached_channels = [(1_u8, true), (2_u8, true), (3_u8, false)];
+    let retained = retained_nodes(&enumerated, cached_channels);
+    assert!(retained.contains(&1));
+    assert!(retained.contains(&2));
+    assert!(!retained.contains(&3));
+    assert_eq!(retained, std::collections::HashSet::from([1, 2]));
+}
+
+#[test]
+fn probe_cache_roundtrips_through_disk() {
+    // A device fully probed once must keep its identity across restarts: the
+    // persisted cache is what spares a fresh process the expensive (and on
+    // degraded transports, failing) re-interview.
+    use openlogi_core::device::{
+        BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports,
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("probe-cache.json");
+
+    let model = DeviceModelInfo {
+        entity_count: 1,
+        serial_number: Some("TESTSERIAL01".into()),
+        unit_id: [0xaa, 0xbb, 0xcc, 0xdd],
+        transports: DeviceTransports::default(),
+        model_ids: [0xb042, 0, 0],
+        extended_model_id: 0,
+    };
+    let probe = ProbedFeatures {
+        model_info: Some(model.clone()),
+        // A live reading at save time: volatile, so it must NOT survive the
+        // round trip (the feature index in `battery` below does).
+        battery: Some(BatteryInfo {
+            percentage: 55,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        }),
+        ..Default::default()
+    };
+    let mut cache = std::collections::HashMap::new();
+    cache.insert(
+        CacheKey::Bolt {
+            unit_id: [0xaa, 0xbb, 0xcc, 0xdd],
+        },
+        Cached {
+            probe,
+            battery: Some(BatteryProbe::Unified(9)),
+            probed_tick: 7,
+        },
+    );
+    cache.insert(
+        CacheKey::UnifyingSlot {
+            receiver_uid: "DA2699E1".into(),
+            slot: 2,
+        },
+        Cached {
+            probe: ProbedFeatures::default(),
+            battery: None,
+            probed_tick: 3,
+        },
+    );
+
+    persist::save(&path, &cache).expect("save");
+    let loaded = persist::load(&path);
+
+    let bolt = loaded
+        .get(&CacheKey::Bolt {
+            unit_id: [0xaa, 0xbb, 0xcc, 0xdd],
+        })
+        .expect("bolt entry survives a save/load cycle");
+    assert_eq!(bolt.probe.model_info.as_ref(), Some(&model));
+    assert_eq!(bolt.battery, Some(BatteryProbe::Unified(9)));
+    assert!(
+        bolt.probe.battery.is_none(),
+        "the volatile battery reading must not be resurrected across restarts"
+    );
+    assert_eq!(
+        bolt.probed_tick, 0,
+        "loaded entries restart the refresh clock"
+    );
+    assert!(
+        !loaded.contains_key(&CacheKey::UnifyingSlot {
+            receiver_uid: "DA2699E1".into(),
+            slot: 2,
+        }),
+        "unifying entries are slot-keyed, so a re-pair while the agent is \
+         down could hand them to a different device — never persisted"
+    );
+}
+
+#[test]
+fn probe_cache_load_tolerates_missing_or_garbage_files() {
+    // The persisted cache is a warm-start optimization: a missing file, torn
+    // write, or foreign schema must yield an empty cache, never an error.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("nope.json");
+    assert!(persist::load(&missing).is_empty());
+
+    let garbage = dir.path().join("garbage.json");
+    std::fs::write(&garbage, b"not json at all").expect("write");
+    assert!(persist::load(&garbage).is_empty());
+
+    let wrong_version = dir.path().join("future.json");
+    std::fs::write(&wrong_version, br#"{"version":999,"entries":[]}"#).expect("write");
+    assert!(persist::load(&wrong_version).is_empty());
 }

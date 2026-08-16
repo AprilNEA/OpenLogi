@@ -1,8 +1,8 @@
 # OpenLogi udev rules
 #
-# Grants the active-seat user read/write access to Logitech HID devices and the
-# uinput kernel module — no group membership required on systems running
-# systemd-logind (uaccess tag).
+# Grants the active-seat user read/write access to Logitech HID devices, their
+# input event nodes, and the uinput kernel module — no group membership required
+# on systems running systemd-logind (uaccess tag).
 #
 # Install:
 #   sudo cp 70-openlogi.rules /etc/udev/rules.d/
@@ -25,3 +25,16 @@ SUBSYSTEM=="hidraw", KERNELS=="*:046D:*", TAG+="uaccess"
 # OPTIONS+="static_node=uinput" creates the node at boot even before any device
 # is plugged in, so the agent can open it without a trigger.
 KERNEL=="uinput", TAG+="uaccess", OPTIONS+="static_node=uinput"
+
+# Logitech pointer event nodes (evdev interface) — the read side of the hook.
+# hidraw alone is not enough: the hook enumerates /dev/input/event* to grab the
+# pointer. USB devices already get uaccess from logind's seat rules, but a
+# Bluetooth mouse hangs off /devices/virtual/misc/uhid, which belongs to no
+# seat, so those rules never tag it and its event node stays root:input 0660.
+#
+# Scoped to event nodes the kernel classifies as a mouse (ID_INPUT_MOUSE, set by
+# the input_id builtin in 60-input-id.rules, which runs before this file): a
+# Logitech keyboard's keystrokes must never become readable session-wide. The
+# two matchers cover the same two transports as the hidraw block above.
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", ATTRS{idVendor}=="046d", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", KERNELS=="*:046D:*", TAG+="uaccess"

@@ -1,9 +1,10 @@
-//! Background HID++ control-capture watcher for the active device.
+//! Background HID++ control-capture watcher, one session per online device.
 //!
-//! Runs [`openlogi_hid::run_capture_session`] on a dedicated thread for whichever
-//! device the DPI / SmartShift path currently targets
-//! ([`DpiCycleState::target`]), restarts it when the carousel selection — or the
-//! thumb-wheel arming — changes, and dispatches each captured input:
+//! Runs [`openlogi_hid::run_capture_session`] concurrently for every device in
+//! the shared capture-plan list (not just the GUI's selection), restarts a
+//! session when its device's plan — route, diverted controls, thumb-wheel
+//! arming — changes, and dispatches each captured input against the binding
+//! maps of the device it arrived on:
 //!
 //! - a gesture swipe through the gesture binding map,
 //! - a DPI/ModeShift or thumb-wheel-tap press through the button binding map,
@@ -18,32 +19,22 @@
 //! the events arrive over HID++, and the bound action is synthesised the same
 //! way regardless.
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{Action, ButtonId, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
-use openlogi_hid::{
-    CaptureChannel, CapturedInput, DeviceRoute, reprog_controls, run_capture_session,
-};
+use openlogi_hid::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
+use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use crate::DpiCycleState;
-use crate::hook_runtime::{self, RepeatCmd, SharedHookMaps, spawn_repeater};
-use crate::receiver_access::ReceiverAccess;
-
-/// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
-/// direction). The watcher reads it to map a captured swipe to a bound action.
-pub type GestureBindings = Arc<RwLock<BTreeMap<GestureDirection, Action>>>;
-
-/// Shared thumb-wheel sensitivity, mirrored from `AppState`. Read on every wheel
-/// event; written only by `AppState::set_thumbwheel_sensitivity`.
-pub type ThumbwheelSensitivity = Arc<AtomicI32>;
+use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
+use crate::hook_runtime::{ActionDispatcher, RepeatCmd, spawn_repeater};
+use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
 
 /// How often to re-read the active device target + thumb-wheel arming so a
 /// carousel switch or a binding/sensitivity edit re-points / re-arms capture.
@@ -78,12 +69,10 @@ fn action_threshold(sensitivity: i32) -> i32 {
 /// keeps one capture session pointed at the active device and dispatches each
 /// captured input.
 pub fn spawn(
-    hook_maps: SharedHookMaps,
-    gesture_bindings: GestureBindings,
-    dpi_cycle: Arc<RwLock<DpiCycleState>>,
+    capture_plans: SharedCapturePlans,
     capture_channel: CaptureChannel,
-    thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
+    dispatcher: ActionDispatcher,
 ) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -97,274 +86,320 @@ pub fn spawn(
             }
         };
         runtime.block_on(manage(
-            hook_maps,
-            gesture_bindings,
-            dpi_cycle,
+            capture_plans,
             capture_channel,
-            thumbwheel_sensitivity,
             receiver_access,
+            dispatcher,
         ));
     });
 }
 
-/// Whether the thumb wheel must be diverted over HID++ (which suppresses native
-/// scroll) so we can re-synthesise its scroll or capture its tap.
-///
-/// We divert when the sensitivity leaves its default (so we can scale scroll
-/// ourselves) or when the click or either rotation direction is rebound away
-/// from its default; otherwise the OS scrolls the wheel natively.
-fn thumbwheel_armed(hook_maps: &SharedHookMaps, sensitivity: i32) -> bool {
-    if sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY {
-        return true;
-    }
-    hook_maps.read().ok().is_some_and(|maps| {
-        [
-            ButtonId::Thumbwheel,
-            ButtonId::ThumbwheelScrollUp,
-            ButtonId::ThumbwheelScrollDown,
-        ]
-        .iter()
-        .any(|&button| {
-            maps.bindings
-                .get(&button)
-                .is_some_and(|action| *action != default_binding(button))
-        })
-    })
+/// Whether one device's thumb wheel must be diverted over HID++ (which
+/// suppresses native scroll) so we can re-synthesise its scroll or capture its
+/// tap: its sensitivity leaves the default (so we scale scroll ourselves) or a
+/// thumbwheel binding does.
+fn thumbwheel_armed(plan: &DeviceCapturePlan) -> bool {
+    plan.thumbwheel_sensitivity != DEFAULT_THUMBWHEEL_SENSITIVITY
+        || plan.thumbwheel_bindings_nondefault
 }
 
-/// Whether a finished capture session should make the manager re-arm.
+/// The [`CaptureSpec`] one device's session should run with right now.
+fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
+    CaptureSpec {
+        capture_thumbwheel: thumbwheel_armed(plan),
+        // Derived from the dispatch maps, so the armed diverts and the maps
+        // resolving their events can never drift apart.
+        divert_gesture_sources: GESTURE_SOURCE_BUTTONS
+            .into_iter()
+            .filter(|(_, button)| plan.gesture_bindings.contains_key(button))
+            .map(|(cid, _)| cid)
+            .collect(),
+        divert_buttons: plan.divert_buttons.clone(),
+    }
+}
+
+/// One capture session tracked by the manager.
+struct RunningSession {
+    route: DeviceRoute,
+    spec: CaptureSpec,
+    rearm_generation: u64,
+    /// Present while the session runs; taken to request a stop. `None` means
+    /// the session is draining — deliberately stopped, but its task (and the
+    /// control-restore writes in its teardown) may still be in flight.
+    stop: Option<oneshot::Sender<()>>,
+    epoch: u64,
+}
+
+/// What the manager should do with one session-completion report.
+#[derive(Debug, PartialEq)]
+enum DoneAction {
+    /// A stale report from a session the manager no longer tracks — ignore it.
+    Ignore,
+    /// The tracked session's task has fully exited: drop its entry so the next
+    /// tick may arm a successor. `unexpected` is true when the exit wasn't a
+    /// deliberate stop and the drop deserves a warning.
+    Remove { unexpected: bool },
+}
+
+/// Decide the [`DoneAction`] for a completion report carrying `done_epoch`,
+/// given the session the manager currently tracks for that device (if any).
 ///
-/// `done_epoch` identifies the session that signalled completion; `live_epoch`
-/// is the session the manager currently believes is running; `has_target` is
-/// whether a device is currently targeted. A session ending only warrants a
-/// respawn when it is the *current* one (not a stale session already superseded
-/// by a deliberate restart, whose epoch no longer matches) and a target is still
-/// set (not a deliberate stop-to-idle, e.g. while pairing owns the receiver).
-fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -> bool {
+/// Only the *current* session's report settles anything; a stale epoch belongs
+/// to a session already superseded. A tracked session whose stop sender is
+/// gone was stopped deliberately and is merely draining — its report frees the
+/// key quietly. One still holding its stop sender exited on its own and
+/// warrants a warning alongside the re-arm.
+/// Whether a finished session should be re-armed after completion.
+pub(crate) fn should_rearm(done_epoch: u64, live_epoch: u64, has_target: bool) -> bool {
     done_epoch == live_epoch && has_target
 }
 
-/// Whether a captured button reports both edges, so a hold started on its press
-/// is guaranteed a release to end it.
-///
-/// Only the thumb-side buttons this path diverts for hold tracking do. The
-/// DPI/ModeShift and thumb-wheel captures are rising-edge only, so starting a
-/// repeat on their press would leave it firing with no release to stop it.
-fn reports_hold_edges(button: ButtonId) -> bool {
-    reprog_controls::hold_cid_for_button(button).is_some()
-}
-
-/// Buttons that need diverting so the capture session can see their release
-/// edge: the ones bound to a repeatable action.
-///
-/// Deliberately narrow. Diverting a thumb button trades its crash-safety — the
-/// OS hook's remap dies with the process, a divert outlives it and leaves the
-/// button dead until the mouse is power-cycled — so it is only worth doing for
-/// a binding that actually needs the hold duration. Buttons with no hold CID are
-/// dropped here too: they cannot be hold-tracked, so listing them would only
-/// churn the session key.
-///
-/// Sorted and deduplicated so the result is stable tick to tick and can be
-/// compared as part of the session key.
-fn hold_buttons(hook_maps: &SharedHookMaps) -> Vec<ButtonId> {
-    let Ok(maps) = hook_maps.read() else {
-        return Vec::new();
-    };
-    let mut out: Vec<ButtonId> = maps
-        .bindings
-        .iter()
-        .filter(|(button, action)| action.is_repeatable() && reports_hold_edges(**button))
-        .map(|(button, _)| *button)
-        .collect();
-    out.sort();
-    out.dedup();
-    out
-}
-
-/// Cut a dead session's input loose and end any repeat it started.
-///
-/// A stop tells the repeater that nothing still held will ever see its release —
-/// that session was the only source of release edges. But the stop alone is not
-/// enough: the manager's receiver outlives individual sessions, so a press
-/// captured just before teardown can still be sitting in it and get dispatched
-/// *after* the stop, starting a cycle nothing can end. Handing the manager a
-/// fresh channel drops those queued events with the old receiver, so the fix
-/// does not depend on the order the loop happens to poll its branches in.
-fn discard_session_input(
-    tx: &mut mpsc::UnboundedSender<CapturedInput>,
-    rx: &mut mpsc::UnboundedReceiver<CapturedInput>,
-    repeat: &Sender<RepeatCmd>,
-) {
-    let (new_tx, new_rx) = mpsc::unbounded_channel();
-    *tx = new_tx;
-    *rx = new_rx;
-    let _ = repeat.send(RepeatCmd::StopAll);
-}
-
-/// Tear the live capture session down, if there is one.
-///
-/// Signalling the oneshot lets the session restore the controls it diverted;
-/// [`discard_session_input`] handles everything it leaves behind.
-fn stop_session(
-    stop: &mut Option<oneshot::Sender<()>>,
-    tx: &mut mpsc::UnboundedSender<CapturedInput>,
-    rx: &mut mpsc::UnboundedReceiver<CapturedInput>,
-    repeat: &Sender<RepeatCmd>,
-) {
-    if let Some(stop) = stop.take() {
-        let _ = stop.send(());
-        discard_session_input(tx, rx, repeat);
+fn on_done(done_epoch: u64, live: Option<&RunningSession>) -> DoneAction {
+    match live {
+        Some(session) if session.epoch == done_epoch => DoneAction::Remove {
+            unexpected: session.stop.is_some(),
+        },
+        _ => DoneAction::Ignore,
     }
 }
 
-/// Keep one capture session alive for the active device, restarting it when the
-/// device or the thumb-wheel arming changes, and dispatch incoming inputs. Runs
-/// for the lifetime of the process.
+/// Whether an input tagged with `input_epoch` comes from the session the
+/// manager currently tracks *and still runs* for its device — the only inputs
+/// that may dispatch.
+///
+/// A dead or draining session's queued input must never dispatch: a press
+/// captured just before a teardown has no release edge coming (that session
+/// was the only source of release edges), so acting on it could start a
+/// repeat cycle nothing can end. A stale epoch is a superseded session's
+/// leftover; a taken stop sender means the session was deliberately stopped
+/// and is merely draining. Either way the input is dropped, so the guarantee
+/// does not rest on the order the select loop happens to poll its branches in.
+fn session_input_live(session: Option<&RunningSession>, input_epoch: u64) -> bool {
+    session.is_some_and(|session| session.epoch == input_epoch && session.stop.is_some())
+}
+
+/// Whether a captured button reports both edges on `plan`'s session, so a hold
+/// started on its press is guaranteed a release to end it.
+///
+/// Only the plain-diverted buttons in the plan's divert set do — their `0x1b04`
+/// divertedButtonsEvent carries the complete held set, so leaving it is an
+/// explicit release. The DPI/ModeShift and thumb-wheel captures are
+/// rising-edge only, so starting a repeat on their press would leave it firing
+/// with no release to stop it.
+fn reports_hold_edges(plan: &DeviceCapturePlan, button: ButtonId) -> bool {
+    plan.divert_buttons
+        .iter()
+        .any(|&(_, diverted)| diverted == button)
+}
+
+/// Keep one capture session alive per online device, restarting a session when
+/// its device's plan changes, and dispatch incoming inputs against the plan of
+/// the device they arrived on. Runs for the lifetime of the process.
 async fn manage(
-    hook_maps: SharedHookMaps,
-    gesture_bindings: GestureBindings,
-    dpi_cycle: Arc<RwLock<DpiCycleState>>,
+    capture_plans: SharedCapturePlans,
     capture_channel: CaptureChannel,
-    thumbwheel_sensitivity: ThumbwheelSensitivity,
     receiver_access: ReceiverAccess,
+    dispatcher: ActionDispatcher,
 ) {
-    // Replaced on every teardown (see `discard_session_input`), so one session's
-    // queued input can never reach the next. The manager keeps its own sender so
-    // the receiver stays open while no session is running.
-    let (mut tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
-    // Hold-to-repeat for the buttons this path diverts. Lives for the whole
-    // manage loop so a session restart mid-hold cannot orphan a running cycle.
-    let repeat = spawn_repeater(Arc::clone(&dpi_cycle), Arc::clone(&capture_channel));
-    // (route, capture_thumbwheel, divert_gesture_button, hold_buttons)
-    let mut current: Option<(DeviceRoute, bool, bool, Vec<ButtonId>)> = None;
-    let mut stop: Option<oneshot::Sender<()>> = None;
+    // Inputs are tagged with the epoch of the session that captured them, so a
+    // dead session's queued events can be told apart from the live session's
+    // (see `session_input_live`).
+    let (tx, mut rx) = mpsc::unbounded_channel::<(String, u64, CapturedInput)>();
+    let mut sessions: HashMap<String, RunningSession> = HashMap::new();
     let mut ticker = tokio::time::interval(TARGET_POLL);
-    let mut accumulators = WheelAccumulators::default();
+    let mut accumulators: HashMap<String, WheelAccumulators> = HashMap::new();
+    // Hold-to-repeat for the buttons the sessions divert. Lives for the whole
+    // manage loop so a session restart mid-hold cannot orphan a running cycle.
+    let repeat = spawn_repeater(dispatcher.clone());
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
     // HID++ read error, a sleep-wake glitch, brief radio loss) would otherwise go
-    // unnoticed: the tick below only restarts on a *changed* target, so a session
-    // that dies with the target unchanged leaves the gesture button and thumb
-    // wheel dead until the next carousel switch, config reload, or agent restart.
-    // Each session reports its completion here, tagged with the epoch it started
-    // under, so a dead *current* session can be re-armed while stale completions
-    // (from an already-superseded session) are ignored.
-    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<u64>();
+    // unnoticed. Each session reports its completion here, tagged with its device
+    // key and the epoch it started under: a dead *current* session re-arms on the
+    // next tick, a deliberately stopped one merely frees its key for the
+    // replacement once its teardown has drained, and stale completions are
+    // ignored (see `on_done`).
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<(String, u64)>();
     let mut epoch: u64 = 0;
+    // The capture-vs-pairing arbiter hands out one exclusive lease. All session
+    // tasks share it through an `Arc`; the manager keeps only a `Weak` so the
+    // lease frees itself when the last session exits (letting pairing proceed).
+    let mut lease: std::sync::Weak<SessionReceiverLease> = std::sync::Weak::new();
 
     loop {
         tokio::select! {
-            Some(input) = rx.recv() => {
-                dispatch(
-                    input,
-                    &mut accumulators,
-                    &DispatchCtx {
-                        hook_maps: &hook_maps,
-                        gesture_bindings: &gesture_bindings,
-                        dpi_cycle: &dpi_cycle,
-                        capture: &capture_channel,
-                        thumbwheel_sensitivity: &thumbwheel_sensitivity,
-                        repeat: &repeat,
-                    },
-                );
+            Some((key, input_epoch, input)) = rx.recv() => {
+                // Only the tracked, still-running session's inputs dispatch — a
+                // dead session's queued press could start a repeat cycle whose
+                // release will never arrive (see `session_input_live`).
+                if session_input_live(sessions.get(&key), input_epoch) {
+                    dispatch(
+                        &key,
+                        input,
+                        &mut accumulators,
+                        &capture_plans,
+                        &dispatcher,
+                        &repeat,
+                    );
+                }
             }
             _ = ticker.tick() => {
-                // While pairing is waiting or active, release the capture
+                // While pairing is waiting or active, release every capture
                 // session so run_pairing can own the receiver's HID node (one
                 // process can't read it through two channels).
-                let want = if receiver_access.pairing_requested() {
-                    None
-                } else {
-                    let target = dpi_cycle.read().ok().and_then(|guard| guard.target.clone());
-                    let sensitivity = thumbwheel_sensitivity.load(Ordering::Relaxed);
-                    // Divert the dedicated HID++ gesture button only while it owns the gesture role. The
-                    // shared gesture map is non-empty exactly then (gesture_bindings_for
-                    // gates on the owner), so it doubles as that signal — no need to
-                    // thread the full config in. Re-evaluated each tick, so a
-                    // ReloadConfig owner change restarts the session accordingly.
-                    let divert_gesture = gesture_bindings.read().is_ok_and(|g| !g.is_empty());
-                    target.map(|t| {
-                        (
-                            t,
-                            thumbwheel_armed(&hook_maps, sensitivity),
-                            divert_gesture,
-                            hold_buttons(&hook_maps),
-                        )
-                    })
-                };
-                if want == current {
-                    continue;
-                }
-                // Target or thumb-wheel arming changed (or first tick): stop the
-                // old session and start one for the new state.
-                stop_session(&mut stop, &mut tx, &mut rx, &repeat);
-                if current.is_some() {
-                    current = None;
-                    continue;
-                }
-                if let Some((route, capture_thumbwheel, divert_gesture_button, hold)) = want {
-                    let Some(receiver_lease) = receiver_access.try_acquire_for_capture() else {
-                        current = None;
-                        continue;
+                let want: HashMap<String, (DeviceRoute, CaptureSpec, u64)> =
+                    if receiver_access.exclusive_requested() {
+                        HashMap::new()
+                    } else {
+                        capture_plans
+                            .read()
+                            .map(|plans| {
+                                plans
+                                    .iter()
+                                    .map(|plan| {
+                                        (
+                                            plan.config_key.clone(),
+                                            (
+                                                plan.route.clone(),
+                                                spec_for(plan),
+                                                plan.rearm_generation,
+                                            ),
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default()
                     };
-                    current = Some((
-                        route.clone(),
-                        capture_thumbwheel,
-                        divert_gesture_button,
-                        hold.clone(),
-                    ));
-                    let (stop_tx, stop_rx) = oneshot::channel();
-                    let sink = tx.clone();
-                    let slot = Arc::clone(&capture_channel);
-                    epoch = epoch.wrapping_add(1);
-                    let session_epoch = epoch;
-                    let done = done_tx.clone();
-                    tokio::spawn(async move {
-                        let _receiver_lease = receiver_lease;
-                        if let Err(e) = run_capture_session(
-                            route,
-                            capture_thumbwheel,
-                            divert_gesture_button,
-                            &hold,
-                            sink,
-                            stop_rx,
-                            slot,
-                        )
-                        .await
-                        {
-                            debug!(error = %e, "capture session ended");
-                        }
-                        // Report completion so the manager can re-arm if this exit
-                        // was unexpected rather than a deliberate stop.
-                        let _ = done.send(session_epoch);
+                // Stop sessions whose device disappeared or whose plan changed.
+                // Sending on the oneshot lets the session restore its controls.
+                // A stopped session stays tracked — stop sender taken — until
+                // its task reports completion below, and a tracked key is never
+                // re-armed: arming the replacement while the old task may still
+                // be mid-restore could interleave its divert writes with the
+                // restore writes on the same device, leaving a control
+                // un-diverted while the new session believes it owns it,
+                // however many ticks the restore takes.
+                for (key, session) in &mut sessions {
+                    let keep = want.get(key).is_some_and(|(route, spec, rearm)| {
+                        *route == session.route
+                            && *spec == session.spec
+                            && *rearm == session.rearm_generation
                     });
-                    stop = Some(stop_tx);
-                } else {
-                    current = None;
+                    if !keep && let Some(stop) = session.stop.take() {
+                        let _ = stop.send(());
+                        // That session was the only source of release edges for
+                        // its device, so no release is coming for anything still
+                        // held: end every cycle it started. Its queued input is
+                        // just as stale — the taken stop sender is what makes
+                        // `session_input_live` drop it.
+                        let _ = repeat.send(RepeatCmd::StopDevice(key.clone()));
+                    }
+                }
+                accumulators.retain(|key, _| want.contains_key(key));
+                for (key, (route, spec, rearm_generation)) in want {
+                    if sessions.contains_key(&key) {
+                        continue;
+                    }
+                    // All sessions share one exclusive lease; acquire it with the
+                    // first session and ride the existing one afterwards.
+                    let session_lease = if let Some(existing) = lease.upgrade() {
+                        existing
+                    } else {
+                        let Some(fresh) = receiver_access.try_acquire_for_session() else {
+                            continue;
+                        };
+                        let fresh = Arc::new(fresh);
+                        lease = Arc::downgrade(&fresh);
+                        fresh
+                    };
+                    epoch = epoch.wrapping_add(1);
+                    let session = spawn_session(
+                        key.clone(),
+                        route,
+                        spec,
+                        rearm_generation,
+                        epoch,
+                        session_lease,
+                        &tx,
+                        &done_tx,
+                        &capture_channel,
+                    );
+                    sessions.insert(key, session);
                 }
             }
-            Some(done_epoch) = done_rx.recv() => {
-                // A capture session ended on its own. Re-arm only when it is the
-                // session we currently believe is live for an active target;
-                // clearing `current` lets the next tick start a fresh session.
-                // The tick fires at most once per `TARGET_POLL`, which paces the
-                // respawn so a permanently failing device can't hot-loop. A stale
-                // epoch or a deliberate stop-to-idle is a no-op (see `should_rearm`).
-                if should_rearm(done_epoch, epoch, current.is_some()) {
-                    warn!("capture session for the active device ended unexpectedly, re-arming");
+            Some((key, done_epoch)) = done_rx.recv() => {
+                // A capture session's task has fully exited — its restore writes
+                // included — so dropping its entry lets the next tick start a
+                // fresh session for that device; the tick fires at most once per
+                // `TARGET_POLL`, which paces the respawn so a permanently failing
+                // device can't hot-loop. A stale epoch (an already-superseded
+                // session) is a no-op.
+                if let DoneAction::Remove { unexpected } = on_done(done_epoch, sessions.get(&key)) {
+                    if unexpected {
+                        warn!(key, "capture session ended unexpectedly, re-arming");
+                    }
                     // A session that died mid-hold (device disconnect, HID++
-                    // error) takes the release edge with it, and whatever it had
-                    // already queued is just as stale — same reasoning as the
-                    // deliberate stop above.
-                    discard_session_input(&mut tx, &mut rx, &repeat);
-                    current = None;
-                    // Keep the `stop`/`current` invariant: the session already
-                    // exited, so its stop receiver is gone and dropping the sender
-                    // here is a no-op, but it stops the next tick from signalling a
-                    // session that no longer exists.
-                    stop = None;
+                    // error) takes the release edge with it — end whatever it
+                    // left repeating. A deliberately stopped session already got
+                    // its StopDevice; a second one is a no-op.
+                    let _ = repeat.send(RepeatCmd::StopDevice(key.clone()));
+                    sessions.remove(&key);
                 }
             }
         }
+    }
+}
+
+/// Start one device's capture session plus its input-forwarding task, and
+/// return the manager's tracking entry for it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "plumbing between the manager loop's channels; grouping them into \
+              a struct would only relabel the same eight values"
+)]
+fn spawn_session(
+    key: String,
+    route: DeviceRoute,
+    spec: CaptureSpec,
+    rearm_generation: u64,
+    epoch: u64,
+    lease: Arc<SessionReceiverLease>,
+    inputs: &mpsc::UnboundedSender<(String, u64, CapturedInput)>,
+    done: &mpsc::UnboundedSender<(String, u64)>,
+    capture_channel: &CaptureChannel,
+) -> RunningSession {
+    let (stop_tx, stop_rx) = oneshot::channel();
+    // Tag this session's inputs with its device key so dispatch resolves them
+    // against the right plan, and with its epoch so the manager can drop
+    // whatever a dead session had queued (see `session_input_live`).
+    let (session_tx, mut session_rx) = mpsc::unbounded_channel::<CapturedInput>();
+    let forward = inputs.clone();
+    let forward_key = key.clone();
+    tokio::spawn(async move {
+        while let Some(input) = session_rx.recv().await {
+            let _ = forward.send((forward_key.clone(), epoch, input));
+        }
+    });
+    let done = done.clone();
+    let session_route = route.clone();
+    let session_spec = spec.clone();
+    let slot = Arc::clone(capture_channel);
+    tokio::spawn(async move {
+        let _lease = lease;
+        if let Err(e) =
+            run_capture_session(session_route, session_spec, session_tx, stop_rx, slot).await
+        {
+            debug!(error = %e, "capture session ended");
+        }
+        // Report completion so the manager can re-arm if this exit was
+        // unexpected rather than a deliberate stop.
+        let _ = done.send((key, epoch));
+    });
+    RunningSession {
+        route,
+        spec,
+        rearm_generation,
+        stop: Some(stop_tx),
+        epoch,
     }
 }
 
@@ -401,70 +436,64 @@ enum WheelOutput {
     FireAction,
 }
 
-/// Route one captured input to its bound action (or re-synthesised scroll).
-/// The long-lived state [`dispatch`] reads, bundled so the signature stays
-/// reviewable as inputs grow. Every field is borrowed for the call — nothing here
-/// is owned by the dispatch itself.
-#[derive(Clone, Copy)]
-struct DispatchCtx<'a> {
-    hook_maps: &'a SharedHookMaps,
-    gesture_bindings: &'a GestureBindings,
-    dpi_cycle: &'a Arc<RwLock<DpiCycleState>>,
-    capture: &'a CaptureChannel,
-    thumbwheel_sensitivity: &'a ThumbwheelSensitivity,
-    /// Drives hold-to-repeat for the buttons this path diverts.
-    repeat: &'a Sender<RepeatCmd>,
-}
-
-fn dispatch(input: CapturedInput, accumulators: &mut WheelAccumulators, ctx: &DispatchCtx<'_>) {
-    let &DispatchCtx {
-        hook_maps,
-        gesture_bindings,
-        dpi_cycle,
-        capture,
-        thumbwheel_sensitivity,
-        repeat,
-    } = ctx;
+/// Route one captured input from device `key` to its bound action (or
+/// re-synthesised scroll), using that device's own plan maps.
+fn dispatch(
+    key: &str,
+    input: CapturedInput,
+    accumulators: &mut HashMap<String, WheelAccumulators>,
+    capture_plans: &SharedCapturePlans,
+    dispatcher: &ActionDispatcher,
+    repeat: &Sender<RepeatCmd>,
+) {
+    let Ok(plans) = capture_plans.read() else {
+        return;
+    };
+    let Some(plan) = plans.iter().find(|plan| plan.config_key == key) else {
+        debug!(key, "input from a device with no capture plan — ignored");
+        return;
+    };
     match input {
-        CapturedInput::Gesture(direction) => {
-            let action = gesture_bindings
-                .read()
-                .ok()
-                .and_then(|guard| guard.get(&direction).cloned());
-            if let Some(action) = action {
-                debug!(?direction, action = %action.label(), "gesture → action");
-                hook_runtime::dispatch_action(&action, dpi_cycle, capture);
+        CapturedInput::Gesture(button, direction) => {
+            if let Some(action) = plan
+                .gesture_bindings
+                .get(&button)
+                .and_then(|map| map.get(&direction))
+            {
+                debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
+                dispatcher.dispatch(action, Some(key));
             } else {
-                debug!(?direction, "gesture with no binding — ignored");
+                debug!(key, %button, ?direction, "gesture with no binding — ignored");
             }
         }
-        CapturedInput::ButtonPressed(button) => {
-            let action = hook_maps
-                .read()
-                .ok()
-                .and_then(|maps| maps.bindings.get(&button).cloned());
-            if let Some(action) = action {
-                debug!(?button, action = %action.label(), "HID++ button → action");
-                hook_runtime::dispatch_action(&action, dpi_cycle, capture);
-                // Increment-style actions keep firing until the release arrives.
-                // Only the HID++ path can do this: the OS hook sees these
-                // buttons as a press/release pulse regardless of hold length.
-                // Gated on the release edge existing — a rising-edge-only
-                // capture would start a cycle nothing could stop.
-                if action.is_repeatable() && reports_hold_edges(button) {
-                    let _ = repeat.send(RepeatCmd::Start(button, action));
+        CapturedInput::ButtonPressed(button, _) => {
+            if let Some(action) = plan.bindings.get(&button) {
+                debug!(key, ?button, action = %action.label(), "HID++ button → action");
+                dispatcher.dispatch(action, Some(key));
+                // Increment-style actions keep firing until the release
+                // arrives. Only this path can do that: the OS hook sees the
+                // thumb buttons as a press/release pulse regardless of hold
+                // length, while the `0x1b04` divert reports the true release.
+                // Gated on the release edge existing — the DPI/ModeShift and
+                // thumb-wheel captures are rising-edge only, and starting a
+                // cycle off them would leave it firing with nothing to stop it.
+                if action.is_repeatable() && reports_hold_edges(plan, button) {
+                    let _ = repeat.send(RepeatCmd::Start(
+                        (Some(key.to_owned()), button),
+                        action.clone(),
+                    ));
                 }
             } else {
-                debug!(?button, "HID++ button with no binding — ignored");
+                debug!(key, ?button, "HID++ button with no binding — ignored");
             }
         }
         CapturedInput::ButtonReleased(button) => {
-            // Unconditional, but keyed to this button: a stop for a button that
-            // is not repeating is a no-op, so a binding that changed mid-hold
-            // still ends the cycle its own press started — while another thumb
-            // button held at the same time keeps repeating.
-            debug!(?button, "HID++ button released");
-            let _ = repeat.send(RepeatCmd::Stop(button));
+            // Unconditional, but keyed to this device's hold: a stop for a
+            // button that is not repeating is a no-op, so a binding that
+            // changed mid-hold still ends the cycle its own press started —
+            // while the same button held on another device keeps repeating.
+            debug!(key, ?button, "HID++ button released");
+            let _ = repeat.send(RepeatCmd::Stop((Some(key.to_owned()), button)));
         }
         CapturedInput::Scroll(rotation) => {
             // Positive rotation is "up"; each direction has its own binding.
@@ -474,17 +503,14 @@ fn dispatch(input: CapturedInput, accumulators: &mut WheelAccumulators, ctx: &Di
             } else {
                 ButtonId::ThumbwheelScrollDown
             };
-            let action = hook_maps
-                .read()
-                .ok()
-                .and_then(|maps| maps.bindings.get(&button).cloned())
+            let action = plan
+                .bindings
+                .get(&button)
+                .cloned()
                 .unwrap_or_else(|| default_binding(button));
-            let sensitivity = thumbwheel_sensitivity.load(Ordering::Relaxed);
-            let dir = if up {
-                &mut accumulators.up
-            } else {
-                &mut accumulators.down
-            };
+            let sensitivity = plan.thumbwheel_sensitivity;
+            let wheels = accumulators.entry(key.to_owned()).or_default();
+            let dir = if up { &mut wheels.up } else { &mut wheels.down };
             let magnitude = i32::from(rotation).abs();
             match advance(dir, &action, magnitude, sensitivity, Instant::now()) {
                 WheelOutput::Idle => {}
@@ -492,8 +518,8 @@ fn dispatch(input: CapturedInput, accumulators: &mut WheelAccumulators, ctx: &Di
                     openlogi_inject::post_horizontal_scroll(lines);
                 }
                 WheelOutput::FireAction => {
-                    debug!(?button, action = %action.label(), "thumb wheel → action");
-                    hook_runtime::dispatch_action(&action, dpi_cycle, capture);
+                    debug!(key, ?button, action = %action.label(), "thumb wheel → action");
+                    dispatcher.dispatch(&action, Some(key));
                 }
             }
         }
@@ -569,47 +595,73 @@ fn advance(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
+    fn session(epoch: u64, stop: Option<oneshot::Sender<()>>) -> RunningSession {
+        RunningSession {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "cafe".into(),
+                slot: 2,
+            },
+            spec: CaptureSpec::default(),
+            rearm_generation: 0,
+            stop,
+            epoch,
+        }
+    }
+
     #[test]
-    fn input_queued_before_a_teardown_never_reaches_the_next_session() {
-        // The press that arrives a moment before the session is stopped: its
+    fn input_queued_before_a_teardown_never_dispatches() {
+        // The press that arrives a moment before its session is stopped: its
         // release can never follow, so dispatching it would start a repeat
-        // nothing could end.
-        let (mut tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
-        let session_sink = tx.clone();
-        let (repeat_tx, repeat_rx) = std::sync::mpsc::channel();
+        // nothing could end. A deliberate stop takes the stop sender, and that
+        // alone must make the session's remaining input dead.
+        let (stop_tx, _stop_rx) = oneshot::channel();
         assert!(
-            session_sink
-                .send(CapturedInput::ButtonPressed(ButtonId::Back))
-                .is_ok()
-        );
-
-        discard_session_input(&mut tx, &mut rx, &repeat_tx);
-
-        assert!(
-            rx.try_recv().is_err(),
-            "the dead session's queued press must be unreachable, not merely late"
+            session_input_live(Some(&session(7, Some(stop_tx))), 7),
+            "the tracked, still-running session's input dispatches"
         );
         assert!(
-            matches!(repeat_rx.try_recv(), Ok(RepeatCmd::StopAll)),
-            "and anything already repeating must be stopped"
-        );
-        assert!(
-            session_sink
-                .send(CapturedInput::ButtonPressed(ButtonId::Forward))
-                .is_err(),
-            "a session still running after teardown has nowhere left to send"
+            !session_input_live(Some(&session(7, None)), 7),
+            "a draining session's queued input must be unreachable, not merely late"
         );
     }
 
-    /// Only the thumb-side buttons are diverted for hold tracking, so they are
-    /// the only ones whose press is guaranteed a matching release. Starting a
-    /// repeat off any other capture would leave it firing forever.
     #[test]
-    fn only_the_hold_tracked_buttons_report_both_edges() {
-        assert!(reports_hold_edges(ButtonId::Back));
-        assert!(reports_hold_edges(ButtonId::Forward));
+    fn a_superseded_sessions_input_never_dispatches() {
+        let (stop_tx, _stop_rx) = oneshot::channel();
+        assert!(
+            !session_input_live(Some(&session(8, Some(stop_tx))), 7),
+            "a stale epoch belongs to a session already superseded"
+        );
+        assert!(
+            !session_input_live(None, 7),
+            "input from a device with no tracked session is dropped"
+        );
+    }
+
+    /// Only the plain-diverted buttons report both edges, so they are the only
+    /// ones whose press is guaranteed a matching release. Starting a repeat off
+    /// any other capture would leave it firing forever.
+    #[test]
+    fn only_the_plans_diverted_buttons_report_both_edges() {
+        let plan = DeviceCapturePlan {
+            config_key: "lift".into(),
+            route: DeviceRoute::Bolt {
+                receiver_uid: "cafe".into(),
+                slot: 1,
+            },
+            bindings: BTreeMap::new(),
+            gesture_bindings: BTreeMap::new(),
+            divert_buttons: vec![(0x0053, ButtonId::Back), (0x0056, ButtonId::Forward)],
+            thumbwheel_bindings_nondefault: false,
+            thumbwheel_sensitivity: DEFAULT_THUMBWHEEL_SENSITIVITY,
+            rearm_generation: 0,
+        };
+        assert!(reports_hold_edges(&plan, ButtonId::Back));
+        assert!(reports_hold_edges(&plan, ButtonId::Forward));
         for button in [
             ButtonId::DpiToggle,
             ButtonId::Thumbwheel,
@@ -618,34 +670,10 @@ mod tests {
             ButtonId::GestureButton,
         ] {
             assert!(
-                !reports_hold_edges(button),
+                !reports_hold_edges(&plan, button),
                 "{button:?} is rising-edge only — it must not start a repeat"
             );
         }
-    }
-
-    #[test]
-    fn hold_buttons_lists_only_repeatable_bindings_that_can_be_tracked() {
-        let maps = Arc::new(RwLock::new(hook_runtime::HookMaps {
-            bindings: BTreeMap::from([
-                // Repeatable and divertable for hold tracking → wanted.
-                (ButtonId::Back, Action::VolumeDown),
-                (ButtonId::Forward, Action::VolumeUp),
-                // Repeatable but rising-edge only: diverting it would gain
-                // nothing and starting a repeat off it could never be stopped.
-                (ButtonId::DpiToggle, Action::VolumeUp),
-                // Repeatable by binding, but rotation is not a held button.
-                (ButtonId::ThumbwheelScrollUp, Action::HorizontalScrollRight),
-                // Hold-trackable button, but a one-shot action.
-                (ButtonId::MiddleClick, Action::PlayPause),
-            ]),
-            gestures: BTreeMap::new(),
-        }));
-        assert_eq!(
-            hold_buttons(&maps),
-            vec![ButtonId::Back, ButtonId::Forward],
-            "diverting anything else trades crash-safety for nothing"
-        );
     }
 
     #[test]
@@ -780,23 +808,64 @@ mod tests {
         );
     }
 
+    /// A session whose stop sender is already gone (taken by a deliberate stop).
+    fn stopped_session_with_epoch(epoch: u64) -> RunningSession {
+        RunningSession {
+            route: DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xc548,
+            },
+            spec: CaptureSpec::default(),
+            rearm_generation: 0,
+            stop: None,
+            epoch,
+        }
+    }
+
+    /// A session still holding its stop sender (never asked to stop).
+    fn live_session_with_epoch(epoch: u64) -> RunningSession {
+        let (stop, _rx) = oneshot::channel();
+        RunningSession {
+            stop: Some(stop),
+            ..stopped_session_with_epoch(epoch)
+        }
+    }
+
     #[test]
-    fn rearms_when_the_current_session_dies_with_a_target() {
-        // The live session ended on its own while a device is still targeted.
-        assert!(should_rearm(7, 7, true));
+    fn rearms_when_the_current_session_dies() {
+        // The live session for this device ended on its own.
+        assert_eq!(
+            on_done(7, Some(&live_session_with_epoch(7))),
+            DoneAction::Remove { unexpected: true }
+        );
     }
 
     #[test]
     fn ignores_a_stale_session_superseded_by_a_restart() {
         // An older session reports completion after a deliberate restart already
         // bumped the epoch; re-arming would needlessly cycle the live session.
-        assert!(!should_rearm(6, 7, true));
+        assert_eq!(
+            on_done(6, Some(&live_session_with_epoch(7))),
+            DoneAction::Ignore
+        );
     }
 
     #[test]
-    fn ignores_a_deliberate_stop_to_idle() {
-        // The session was stopped on purpose (pairing took the receiver, or no
-        // device is targeted): no target means there is nothing to re-arm.
-        assert!(!should_rearm(7, 7, false));
+    fn ignores_a_completion_for_an_untracked_device() {
+        // The session's entry is already gone (a deliberate stop to idle, or a
+        // device that went away): there is nothing to settle or re-arm.
+        assert_eq!(on_done(7, None), DoneAction::Ignore);
+    }
+
+    #[test]
+    fn settles_a_draining_session_quietly() {
+        // A deliberately stopped session stays tracked until its task — the
+        // control-restore writes included — actually exits, so its key cannot
+        // re-arm mid-restore. Its completion report frees the key without the
+        // unexpected-exit warning.
+        assert_eq!(
+            on_done(7, Some(&stopped_session_with_epoch(7))),
+            DoneAction::Remove { unexpected: false }
+        );
     }
 }

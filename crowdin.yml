@@ -4,15 +4,50 @@ base_path: "."
 
 preserve_hierarchy: true
 
+export_languages:
+  - da
+  - de
+  - es-ES
+  - fr
+  - it
+  - nl
+  - "no"
+  - pl
+  - pt-PT
+  - pt-BR
+  - fi
+  - sv-SE
+  - el
+  - ru
+  - ja
+  - zh-CN
+  - zh-HK
+  - zh-TW
+  - ko
+
 files:
   - source: "/crates/openlogi-gui/locales/en.yml"
     translation: "/crates/openlogi-gui/locales/%locale%.yml"
     type: "yaml"
+    update_option: "update_as_unapproved"
     languages_mapping:
       locale:
+        da: "da"
+        de: "de"
+        es-ES: "es"
+        fr: "fr"
+        it: "it"
+        nl: "nl"
+        "no": "nb"
+        pl: "pl"
+        pt-PT: "pt-PT"
+        pt-BR: "pt-BR"
+        fi: "fi"
+        sv-SE: "sv"
+        el: "el"
         ja: "ja"
         ru: "ru"
         zh-CN: "zh-CN"
         zh-HK: "zh-HK"
         zh-TW: "zh-TW"
-        it: "it"
+        ko: "ko"

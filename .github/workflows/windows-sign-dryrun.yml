@@ -84,7 +84,7 @@ jobs:
           tenant-id: ${{ steps.azure_config.outputs.AZURE_TENANT_ID }}
           subscription-id: ${{ steps.azure_config.outputs.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Sign openlogi-gui.exe and openlogi-agent.exe with Artifact Signing
+      - name: Sign OpenLogi Windows executables with Artifact Signing
         uses: azure/artifact-signing-action@v2
         with:
           endpoint: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
@@ -93,6 +93,7 @@ jobs:
           # `files` is a newline-separated list; one call signs both PE files.
           files: |
             ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-gui.exe
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-overlay.exe
             ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-agent.exe
           # Must stay http — SignTool rejects an https /tr ("Invalid Timestamp
           # URL", v0.6.5). The RFC3161 response is itself signed.
@@ -105,7 +106,7 @@ jobs:
           # NotSigned and HashMismatch are trust-store independent and always
           # ship-blockers; NotTrusted/UnknownError depend on the runner's
           # trust store, so they stay log-only.
-          foreach ($exe in 'openlogi-gui.exe', 'openlogi-agent.exe') {
+          foreach ($exe in 'openlogi-gui.exe', 'openlogi-overlay.exe', 'openlogi-agent.exe') {
             $sig = Get-AuthenticodeSignature "target\${{ matrix.target }}\release\$exe"
             $sig | Format-List
             if ($null -eq $sig.SignerCertificate -or

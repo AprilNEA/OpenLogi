@@ -30,6 +30,7 @@ pub use hidpp_reprog::{
     ControlId, GroupMask, RawWheelResolution, ReprogControlsCapabilities, ReprogControlsEvent,
     TaskId, decode_event as decode_full_event,
 };
+pub use hidpp_reprog::{control_ids, task_ids};
 
 /// `ReprogControlsV4` HID++ feature ID.
 pub const FEATURE_ID: u16 = 0x1b04;
@@ -37,11 +38,22 @@ pub const FEATURE_ID: u16 = 0x1b04;
 /// Control ID of the MX-line dedicated gesture button (`Mouse_Gesture_Button`,
 /// Logitech "App_Switch_Gesture").
 ///
-/// MX Master 4 also has a separate Haptic Sense Panel in the thumb area. That
-/// panel is not this CID; it must be discovered from the device's `0x1b04`
-/// control table and supported explicitly before OpenLogi treats it as a
-/// bindable/capturable input.
+/// MX Master 4 also has a separate Haptic Sense Panel in the thumb area; that
+/// panel is [`HAPTIC_PANEL_CID`], not this CID.
 pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
+
+/// Control ID of the MX Master 4 Haptic Sense Panel — the touch-sensitive
+/// thumb rest that replaces the dedicated gesture button on that model.
+///
+/// Reverse-engineered on real hardware (MX Master 4, Bolt receiver); not in
+/// the published `0x1b04` control-ID lists. Press/release arrive as
+/// `divertedButtonsEvent` with this CID, and while touched the panel streams
+/// relative raw-XY at ~125 Hz exactly like the dedicated gesture button —
+/// except that the first raw-XY sample after contact is a large position jump
+/// that must be discarded before feeding a swipe accumulator.
+///
+/// The typed source of truth is [`control_ids::HAPTIC_PANEL`].
+pub const HAPTIC_PANEL_CID: u16 = control_ids::HAPTIC_PANEL.0;
 
 /// Control IDs of the "DPI / ModeShift" button family. Whichever a device
 /// exposes (and can divert) is captured and mapped to
@@ -51,45 +63,27 @@ pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 /// cross-checked against Solaar `special_keys.py`.
 pub const DPI_MODE_SHIFT_CIDS: [u16; 3] = [0x00c4, 0x00ed, 0x00fd];
 
-/// Control IDs for the thumb-side buttons the OS hook normally remaps —
-/// [`ButtonId::Back`](openlogi_core::binding::ButtonId::Back) and
+/// Control IDs of the Back button family. MX Vertical and similar devices
+/// report Back via HID++ `0x1b04` rather than a standard OS mouse button,
+/// so macOS never translates them into `OtherMouseDown` events. Whichever a
+/// device exposes (and can divert) is captured and mapped to
+/// [`ButtonId::Back`](openlogi_core::binding::ButtonId::Back).
+///
+/// Known CIDs (from the `0x1b04` control-ID list / Solaar `special_keys.py`):
+/// - `0x0053` — Back (classic mouse CID, used by MX Vertical)
+/// - `0x00BD` — MultiPlatform Back
+/// - `0x00CE` — Multiplatform Back (alternate)
+/// - `0x00DB` — Back (generic)
+pub const BACK_CIDS: [u16; 4] = [0x0053, 0x00BD, 0x00CE, 0x00DB];
+
+/// Control IDs of the Forward button family. Counterpart to [`BACK_CIDS`]:
+/// captured and mapped to
 /// [`ButtonId::Forward`](openlogi_core::binding::ButtonId::Forward).
 ///
-/// These are **not** diverted by default. The OS hook handles them natively,
-/// which keeps them working even if the agent dies mid-session — a diverted
-/// control stays diverted in the device until something restores it, so an
-/// abnormal exit would leave the buttons dead until the mouse is power-cycled.
-///
-/// They are diverted only when a bound action needs the release edge, which the
-/// OS hook cannot supply: the device reports these buttons to the OS as a short
-/// press/release pulse (measured 7–22 ms on a Lift) no matter how long the
-/// button is physically held, so hold-to-repeat is impossible from that path.
-/// See `gesture::arm_controls`.
-///
-/// **Reverse-engineered, not read off a spec.** Both values were identified on a
-/// single Logitech Lift (BLE, PID `b031`) by correlating `0x1b04`
-/// divertedButtonsEvent reports against OS-level `WM_XBUTTONDOWN` timestamps:
-/// `0x0056` fired with button 5 / `Forward`, `0x0053` with button 4 / `Back`,
-/// and `getCtrlIdInfo` reports both as divertable. Not yet confirmed against the
-/// official control-ID list or a second model — `arm_controls` therefore checks
-/// `is_divertable()` before using them instead of assuming they exist.
-pub const BACK_CID: u16 = 0x0053;
-/// See [`BACK_CID`].
-pub const FORWARD_CID: u16 = 0x0056;
-
-/// The `0x1b04` control ID for `button`, when OpenLogi knows how to divert it
-/// for hold tracking. `None` for buttons that have no divertable control (the
-/// primary/secondary clicks) or that are already handled by their own capture
-/// path (the gesture button, DPI/ModeShift, thumb wheel).
-#[must_use]
-pub fn hold_cid_for_button(button: openlogi_core::binding::ButtonId) -> Option<u16> {
-    use openlogi_core::binding::ButtonId;
-    match button {
-        ButtonId::Back => Some(BACK_CID),
-        ButtonId::Forward => Some(FORWARD_CID),
-        _ => None,
-    }
-}
+/// Known CIDs:
+/// - `0x0056` — Forward (classic mouse CID, used by MX Vertical)
+/// - `0x00CF` — Multiplatform Forward
+pub const FORWARD_CIDS: [u16; 2] = [0x0056, 0x00CF];
 
 /// Identity and capabilities of one reprogrammable control, as returned by
 /// `getCtrlIdInfo`.

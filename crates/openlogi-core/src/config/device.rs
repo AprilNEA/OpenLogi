@@ -7,10 +7,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::settings::{
-    GestureOwner, Lighting, ScrollResolution, SmartShift, deserialize_gesture_owner,
+    CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
+    deserialize_gesture_owner, deserialize_optional_thumbwheel_sensitivity,
 };
-use crate::binding::{Action, Binding, ButtonId, GestureDirection};
-use crate::device::{Capabilities, DeviceKind, DeviceModelInfo};
+use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
+use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -25,6 +26,7 @@ use crate::device::{Capabilities, DeviceKind, DeviceModelInfo};
 /// vanishing from the device list (and losing its Pointer/Buttons panels)
 /// until a cold probe happens to win its race — see issue #159.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceIdentity {
     /// The name shown in the carousel, as resolved from the asset registry the
     /// last time the device was online.
@@ -43,6 +45,30 @@ pub struct DeviceIdentity {
     /// Configuration capabilities measured from the device's HID++ feature
     /// table. This is the field that keeps a sleeping mouse's panels visible.
     pub capabilities: Capabilities,
+    /// Standalone-light controls measured by its protocol driver, if this is
+    /// a non-HID++ light. Old configs omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_capabilities: Option<LightCapabilities>,
+    /// Standalone driver family that produced this identity, when applicable.
+    /// Old configs and HID++ devices omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_id: Option<String>,
+    /// Optional model-level identity in the OpenLogi asset registry. This is
+    /// not a physical-device key and never contains a serial or OS node id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_model_id: Option<String>,
+}
+
+impl DeviceIdentity {
+    /// Remove per-unit identifiers before this model snapshot is persisted.
+    #[must_use]
+    pub fn without_unit_identifiers(mut self) -> Self {
+        if let Some(model) = &mut self.model_info {
+            model.serial_number = None;
+            model.unit_id = [0; 4];
+        }
+        self
+    }
 }
 
 /// Settings scoped to a single physical device.
@@ -50,29 +76,43 @@ pub struct DeviceIdentity {
 /// Deserialization goes through `RawDeviceConfig` (`#[serde(from)]`) so
 /// pre-v2 files — which split bindings across `button_bindings` +
 /// `gesture_bindings` — fold into the unified [`Self::bindings`] map. Only
-/// `bindings` is ever serialized, so a migrated file self-heals to the v2 shape
-/// on its next save.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// `bindings` is ever serialized, so a migrated file is rewritten to the v2
+/// shape on its next save.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "RawDeviceConfig")]
 pub struct DeviceConfig {
-    /// Which button owns the device's single gesture role, once the user has
-    /// chosen explicitly. Absent means "infer" (the dedicated HID++ gesture
-    /// button owns gestures if present) — see
-    /// [`Config::gesture_owner`](crate::config::Config::gesture_owner). Listed
-    /// first so it serializes as a scalar ahead of the `bindings` sub-table.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gesture_owner: Option<GestureOwner>,
+    /// Whether OpenLogi manages this device at all. `false` leaves the device
+    /// fully native: no capture session (no HID++ diversion of any control)
+    /// and no volatile-settings re-apply on reconnect. Defaults to `true` and
+    /// is only serialized when disabled.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    /// Legacy owner-lock carrier, deserialize-only: the v3-and-older
+    /// `gesture_owner` field, held here just long enough for the version-gated
+    /// load migration (`Config::migrate_owner_locked_gestures`) to consume it.
+    /// Never serialized — since v4 the binding shape is the whole truth
+    /// (gesture mode is per-button; see
+    /// [`Config::set_gesture_mode`](crate::config::Config::set_gesture_mode)).
+    #[serde(skip_serializing)]
+    pub(super) gesture_owner: Option<GestureOwner>,
     /// Last-known identity (name / kind / capabilities), captured while the
     /// device was online. Lets the UI render this device — with the right
     /// config panels — on a cold start before any probe, or while it sleeps.
     /// `None` for configs written before this field existed or by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<DeviceIdentity>,
-    /// Every rebindable button's binding: a single [`Action`], or — for the
-    /// gesture button (and, later, any raw-XY-capable button) — a
-    /// [`Binding::Gesture`] per-direction map.
+    /// Every rebindable button's binding: a single [`Action`], or — for a
+    /// button in gesture mode — a [`Binding::Gesture`] per-direction map.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bindings: BTreeMap<ButtonId, Binding>,
+    /// Direction maps of buttons whose gesture mode is currently OFF, keyed by
+    /// button — pure UX memory so re-enabling restores the user's customized
+    /// arms exactly
+    /// (see [`Config::set_gesture_mode`](crate::config::Config::set_gesture_mode)).
+    /// Never dispatched: the runtime reads only `bindings`, where a demoted
+    /// button is a [`Binding::Single`] of its former `Click`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Per-application binding overlays (P1.4). Keyed by bundle identifier
     /// (e.g. `"com.microsoft.VSCode"` on macOS). When the foreground app's
     /// id matches a key here, those bindings take precedence; anything not
@@ -81,26 +121,61 @@ pub struct DeviceConfig {
     /// action, never a per-direction gesture overlay.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
+    /// Host-rendered Actions Ring settings and complete per-application layouts.
+    #[serde(default, skip_serializing_if = "ActionRingConfig::is_default")]
+    pub action_ring: ActionRingConfig,
     /// Ordered list of DPI presets cycled through by
     /// [`Action::CycleDpiPresets`] and indexed by
     /// [`Action::SetDpiPreset`]. Empty means "no presets configured" —
     /// the cycle action becomes a no-op until the user adds at least one.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_dpi_presets",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub dpi_presets: Vec<u32>,
     /// The sensor DPI the user committed for this device. Persisted because
     /// the value lives in device RAM and resets on a power cycle (#189); the
     /// agent re-applies it when the device reconnects. `None` until the user
     /// first changes DPI.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_dpi",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub dpi: Option<u32>,
     /// Per-device RGB lighting (static color + brightness + on/off). `None`
     /// until the user changes it, so it stays out of `config.toml` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lighting: Option<Lighting>,
+    /// Per-device standalone-light settings. Separate from [`Self::lighting`],
+    /// which is the existing HID++ keyboard RGB configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<LightSettings>,
     /// Per-device SmartShift wheel configuration, re-applied on reconnect for
     /// the same reason as [`Self::dpi`]. `None` until the user changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smartshift: Option<SmartShift>,
+    /// Per-webcam UVC image controls (brightness/contrast/…). `None` until the
+    /// user adjusts one, so it stays out of `config.toml` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_controls: Option<CameraControls>,
+    /// User-saved camera profiles (name → control snapshot). Built-in profiles
+    /// (Default / Streaming / Video call) live in the GUI, not here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub camera_profiles: BTreeMap<String, CameraControls>,
+    /// The camera profile last applied from the GUI, highlighted on reopen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_profile: Option<String>,
+    /// Per-device thumb-wheel sensitivity override. `None` falls back to the
+    /// app-wide
+    /// [`AppSettings::thumbwheel_sensitivity`](crate::config::AppSettings::thumbwheel_sensitivity).
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_thumbwheel_sensitivity",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub thumbwheel_sensitivity: Option<i32>,
     /// Invert this device's scroll-wheel direction relative to the OS setting
     /// (issue #126): on, a wheel tick scrolls the opposite way, so a user who
     /// keeps macOS "natural scrolling" for the trackpad can have a traditional
@@ -113,6 +188,61 @@ pub struct DeviceConfig {
     /// current resolution unmanaged and omits the field from `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll_resolution: Option<ScrollResolution>,
+    /// Physical config keys of pointing devices that follow this keyboard's
+    /// host switch channel. The relationship is keyboard-initiated: pressing
+    /// one of this device's host keys switches every listed target first, then
+    /// lets the keyboard leave the current host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_switch_targets: Vec<String>,
+    /// Keyboard Fn-lock state (HID++ fn inversion, `0x40a2`/`0x40a3`): `true`
+    /// means the F-row sends F1–F12 without holding Fn. The state lives in
+    /// device RAM per host, so the agent re-applies it on reconnect like
+    /// [`Self::dpi`]. `None` means "never set — leave the keyboard alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fn_lock: Option<bool>,
+}
+
+impl Default for DeviceConfig {
+    fn default() -> Self {
+        Self {
+            // A fresh entry (e.g. created by a first DPI write) must stay
+            // managed — `enabled: false` is an explicit user choice only.
+            enabled: true,
+            gesture_owner: None,
+            identity: None,
+            bindings: BTreeMap::new(),
+            disabled_gestures: BTreeMap::new(),
+            per_app_bindings: BTreeMap::new(),
+            action_ring: ActionRingConfig::default(),
+            dpi_presets: Vec::new(),
+            dpi: None,
+            lighting: None,
+            light: None,
+            smartshift: None,
+            camera_controls: None,
+            camera_profiles: BTreeMap::new(),
+            camera_profile: None,
+            thumbwheel_sensitivity: None,
+            invert_scroll: false,
+            scroll_resolution: None,
+            host_switch_targets: Vec::new(),
+            fn_lock: None,
+        }
+    }
+}
+
+/// `serde(default)` helper for `bool` fields that default to `true`.
+fn default_true() -> bool {
+    true
+}
+
+/// `skip_serializing_if` helper for `bool` fields whose default is `true`.
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 /// `skip_serializing_if` helper for plain `bool` fields whose default is
@@ -125,17 +255,45 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+fn deserialize_dpi_presets<'de, D>(deserializer: D) -> Result<Vec<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<u32>::deserialize(deserializer)?;
+    if let Some(value) = values.iter().find(|value| u16::try_from(**value).is_err()) {
+        return Err(serde::de::Error::custom(format_args!(
+            "DPI must fit the HID++ 16-bit range, got {value}"
+        )));
+    }
+    Ok(values)
+}
+
+fn deserialize_optional_dpi<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<u32>::deserialize(deserializer)?;
+    if let Some(value) = value
+        && u16::try_from(value).is_err()
+    {
+        return Err(serde::de::Error::custom(format_args!(
+            "DPI must fit the HID++ 16-bit range, got {value}"
+        )));
+    }
+    Ok(value)
+}
+
 /// Deserialize-only shim that folds the pre-v2 `button_bindings` +
 /// `gesture_bindings` fields into [`DeviceConfig::bindings`]. Never serialized
 /// (only [`DeviceConfig`] is), so reading a legacy file and saving rewrites it
 /// in the v2 shape.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawDeviceConfig {
     /// Explicit gesture owner (v2.1+). Absent on older configs → `None` → the
-    /// owner is inferred in
-    /// [`Config::gesture_owner`](crate::config::Config::gesture_owner). A
-    /// present-but-invalid value is tolerated as `None` (infer), not a parse
-    /// error — see [`deserialize_gesture_owner`].
+    /// owner is inferred during the version-gated migration. A
+    /// present-but-invalid legacy value is tolerated as `None` for compatibility
+    /// with v3-and-older behavior; current schemas reject the field first.
     #[serde(default, deserialize_with = "deserialize_gesture_owner")]
     gesture_owner: Option<GestureOwner>,
     #[serde(default)]
@@ -143,6 +301,9 @@ struct RawDeviceConfig {
     /// v2 shape — present on already-migrated files; wins on any key collision.
     #[serde(default)]
     bindings: BTreeMap<ButtonId, Binding>,
+    /// v4 stash of turned-off gesture maps (see [`DeviceConfig::disabled_gestures`]).
+    #[serde(default)]
+    disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Legacy v1 per-button single bindings.
     #[serde(default)]
     button_bindings: BTreeMap<ButtonId, Action>,
@@ -152,17 +313,38 @@ struct RawDeviceConfig {
     #[serde(default)]
     per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
     #[serde(default)]
+    action_ring: ActionRingConfig,
+    #[serde(default, deserialize_with = "deserialize_dpi_presets")]
     dpi_presets: Vec<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_dpi")]
     dpi: Option<u32>,
     #[serde(default)]
     lighting: Option<Lighting>,
     #[serde(default)]
+    light: Option<LightSettings>,
+    #[serde(default)]
     smartshift: Option<SmartShift>,
+    #[serde(default)]
+    camera_controls: Option<CameraControls>,
+    #[serde(default)]
+    camera_profiles: BTreeMap<String, CameraControls>,
+    #[serde(default)]
+    camera_profile: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_thumbwheel_sensitivity"
+    )]
+    thumbwheel_sensitivity: Option<i32>,
     #[serde(default)]
     invert_scroll: bool,
     #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
+    #[serde(default)]
+    host_switch_targets: Vec<String>,
+    #[serde(default)]
+    fn_lock: Option<bool>,
+    #[serde(default = "default_true")]
+    enabled: bool,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -197,16 +379,49 @@ impl From<RawDeviceConfig> for DeviceConfig {
         }
 
         DeviceConfig {
+            enabled: raw.enabled,
             gesture_owner: raw.gesture_owner,
-            identity: raw.identity,
+            identity: raw.identity.map(DeviceIdentity::without_unit_identifiers),
             bindings,
+            disabled_gestures: raw.disabled_gestures,
             per_app_bindings: raw.per_app_bindings,
+            action_ring: raw.action_ring,
             dpi_presets: raw.dpi_presets,
             dpi: raw.dpi,
             lighting: raw.lighting,
+            light: raw.light,
             smartshift: raw.smartshift,
+            camera_controls: raw.camera_controls,
+            camera_profiles: raw.camera_profiles,
+            camera_profile: raw.camera_profile,
+            thumbwheel_sensitivity: raw.thumbwheel_sensitivity,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
+            host_switch_targets: raw.host_switch_targets,
+            fn_lock: raw.fn_lock,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeviceConfig;
+
+    #[test]
+    fn host_switch_targets_round_trip_as_physical_keys() -> Result<(), Box<dyn std::error::Error>> {
+        let config: DeviceConfig = toml::from_str(
+            r#"host_switch_targets = [
+  "receiver:keyboard:slot:1",
+  "receiver:mouse:slot:2",
+]"#,
+        )?;
+
+        assert_eq!(
+            config.host_switch_targets,
+            ["receiver:keyboard:slot:1", "receiver:mouse:slot:2"]
+        );
+        let serialized = toml::to_string(&config)?;
+        assert!(serialized.contains("host_switch_targets"));
+        Ok(())
     }
 }

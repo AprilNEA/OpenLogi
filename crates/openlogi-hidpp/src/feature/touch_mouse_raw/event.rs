@@ -1,5 +1,7 @@
 //! Events emitted by `TouchMouseRaw` (`0x6110`).
 
+use crate::feature::DecodeEvent;
+
 /// Number of touch points carried by a raw-data report.
 pub const TOUCH_POINT_COUNT: usize = 4;
 /// Byte value in a coordinate's high byte that marks a lifted (absent) finger.
@@ -81,5 +83,11 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<TouchMouseR
             TouchMouseStatus::from_bits_retain(payload[0]),
         )),
         _ => None,
+    }
+}
+
+impl DecodeEvent for TouchMouseRawEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        decode_event(sub_id, payload)
     }
 }

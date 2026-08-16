@@ -1,5 +1,7 @@
 //! Broadcast events emitted by `SolarKeyboardDashboard` (`0x4301`).
 
+use crate::feature::DecodeEvent;
+
 /// Battery and light readings shared by every solar-dashboard event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -46,5 +48,11 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<SolarEvent>
         1 => Some(SolarEvent::LightMeasure(status)),
         2 => Some(SolarEvent::CheckLightButton(status)),
         _ => None,
+    }
+}
+
+impl DecodeEvent for SolarEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        decode_event(sub_id, payload)
     }
 }

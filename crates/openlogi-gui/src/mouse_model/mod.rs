@@ -3,7 +3,8 @@
 //!
 //! Per UI.md phases 6 (this view), 7 (leader lines), and 8 (ambient motion).
 
-mod geometry;
+pub mod geometry;
 pub mod leader_lines;
 pub mod picker;
+pub(crate) mod thumbwheel;
 pub mod view;

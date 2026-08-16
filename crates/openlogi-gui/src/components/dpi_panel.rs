@@ -1,26 +1,28 @@
 //! DPI slider for the right-side config column.
 //!
-//! The slider range comes from the selected device's HID++ AdjustableDpi
-//! capability (`0x2201`). Capability discovery runs in the background and the
-//! UI only exposes exact device-supported values once the list is known.
+//! The slider range comes from the selected device's HID++ DPI capability
+//! (`0x2201` AdjustableDpi or `0x2202` ExtendedAdjustableDpi, whichever it
+//! reports). Capability discovery runs in the background and the UI only
+//! exposes exact device-supported values once the list is known.
 
 use gpui::{
     AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, div, px, rgb,
+    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window, div, px,
 };
 use gpui_component::{
-    Icon, IconName, h_flex,
+    IconName, Selectable as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
-use openlogi_hid::{DeviceRoute, DpiCapabilities};
+use openlogi_core::hid::{DeviceRoute, DpiCapabilities};
 use tracing::debug;
 
 use crate::components::device_read::issue_device_read;
 use crate::components::status::{retry_line, status_line};
-use crate::state::{AppState, DpiStatus};
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
+use crate::state::{AppState, DeviceKey, DpiStatus};
+use crate::theme::{self, Palette, SelectableStyle, Typography as _};
 
 pub struct DpiPanel {
     slider_state: Option<Entity<SliderState>>,
@@ -38,7 +40,7 @@ struct SliderShape {
 }
 
 struct DpiPanelSnapshot {
-    device_key: String,
+    device_key: DeviceKey,
     dpi: u32,
     presets: Vec<u32>,
     status: DpiStatus,
@@ -80,7 +82,7 @@ impl DpiPanel {
             return;
         };
 
-        cx.update_global::<AppState, _>(|state, _| state.mark_dpi_loading(&key));
+        cx.update_global::<AppState, _>(|state, _| state.reads.dpi.mark_loading(&key));
         // The agent owns device I/O: request the DPI read over IPC and store the
         // typed reply off the render thread. The typed `WriteError` reaches
         // `store_dpi_info` intact, so a permanent `FeatureUnsupported` /
@@ -91,7 +93,7 @@ impl DpiPanel {
             route,
             crate::ipc_client::Command::ReadDpi,
             AppState::store_dpi_info,
-            AppState::clear_dpi_loading,
+            |state, key| state.reads.dpi.clear_loading(key),
         );
     }
 
@@ -180,7 +182,7 @@ impl Render for DpiPanel {
 
         if let DpiStatus::Ready(info) = &snapshot.status {
             self.ensure_slider(
-                &snapshot.device_key,
+                snapshot.device_key.as_str(),
                 &info.capabilities,
                 snapshot.dpi,
                 window,
@@ -215,6 +217,7 @@ impl Render for DpiPanel {
             &snapshot.status,
             self.slider_state.as_ref(),
             snapshot.reachable,
+            snapshot.device_key.clone(),
             pal,
         );
 
@@ -234,7 +237,7 @@ impl Render for DpiPanel {
                     .child(
                         div()
                             .text_body()
-                            .text_color(rgb(ACCENT_BLUE))
+                            .text_color(pal.text_primary)
                             .child(format!("{}", snapshot.dpi)),
                     ),
             )
@@ -259,7 +262,7 @@ impl Render for DpiPanel {
                             .gap_2()
                             .flex_wrap()
                             .children(preset_chips)
-                            .child(add_preset_chip(pal)),
+                            .child(add_preset_chip()),
                     ),
             )
     }
@@ -269,16 +272,17 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
     cx.try_global::<AppState>()
         .and_then(|s| {
             let record = s.current_record()?;
+            let device_key = record.device_key();
             Some(DpiPanelSnapshot {
-                device_key: record.config_key.clone(),
+                status: s.reads.dpi.status(&device_key),
+                device_key,
                 dpi: s.dpi,
                 presets: s.dpi_presets(),
-                status: s.current_dpi_status(),
                 reachable: record.route.is_some(),
             })
         })
         .unwrap_or_else(|| DpiPanelSnapshot {
-            device_key: String::new(),
+            device_key: DeviceKey::default(),
             dpi: crate::state::DEFAULT_DPI,
             presets: Vec::new(),
             status: DpiStatus::Unsupported(tr!("No active device").to_string()),
@@ -311,6 +315,7 @@ fn slider_element(
     status: &DpiStatus,
     slider_state: Option<&Entity<SliderState>>,
     reachable: bool,
+    key: DeviceKey,
     pal: Palette,
 ) -> AnyElement {
     match (status, slider_state) {
@@ -337,8 +342,8 @@ fn slider_element(
             "dpi-retry",
             tr!("Couldn't read DPI — click to retry."),
             pal,
-            |cx| {
-                cx.update_global::<AppState, _>(|state, _| state.retry_active_dpi());
+            move |cx| {
+                cx.update_global::<AppState, _>(|state, _| state.reads.dpi.retry(&key));
                 cx.refresh_windows();
             },
         ),
@@ -367,11 +372,14 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
         .selected_fill(active)
         .hover(|s| s.bg(pal.surface_hover))
         .child(
-            div()
-                .id(("dpi-preset-apply", idx))
-                .text_body()
-                .text_color(pal.text_primary)
-                .child(format!("{value}"))
+            Button::new(("dpi-preset-apply", idx))
+                .compact()
+                .ghost()
+                .h_full()
+                .flex()
+                .items_center()
+                .label(format!("{value}"))
+                .selected(active)
                 .on_click(move |_event, _window, cx| {
                     // Only apply once the supported DPI list is known, so the
                     // click writes a snapped, device-valid value — and can't be
@@ -387,11 +395,10 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
                 }),
         )
         .child(
-            div()
-                .id(("dpi-preset-remove", idx))
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(Icon::new(IconName::Close).size_3())
+            Button::new(("dpi-preset-remove", idx))
+                .xsmall()
+                .ghost()
+                .icon(IconName::Close)
                 .on_click(move |_event, _window, cx| {
                     let mut next = presets_for_remove.clone();
                     if idx < next.len() {
@@ -405,26 +412,13 @@ fn preset_chip(idx: usize, value: u32, active: bool, presets: &[u32], pal: Palet
 }
 
 /// "+" chip that snapshots `AppState.dpi` as a new preset.
-fn add_preset_chip(pal: Palette) -> AnyElement {
-    h_flex()
-        .id("dpi-preset-add")
+fn add_preset_chip() -> AnyElement {
+    Button::new("dpi-preset-add")
+        .compact()
+        .outline()
         .h(px(CHIP_H))
-        .px_3()
-        .items_center()
-        .rounded(pal.control_radius)
-        .border_1()
-        .border_color(pal.border)
-        .bg(pal.surface)
-        .hover(|s| s.bg(pal.surface_hover))
-        .child(
-            h_flex()
-                .gap_1()
-                .items_center()
-                .text_body()
-                .text_color(pal.text_muted)
-                .child(Icon::new(IconName::Plus).size_3())
-                .child(tr!("Add")),
-        )
+        .icon(IconName::Plus)
+        .label(tr!("Add"))
         .on_click(|_event, _window, cx| {
             // Append the current DPI to the active device's preset list.
             // Duplicates are allowed — the user might want the same value
@@ -439,13 +433,14 @@ fn add_preset_chip(pal: Palette) -> AnyElement {
         .into_any_element()
 }
 
-fn dpi_load_target(cx: &mut Context<DpiPanel>) -> Option<(String, DeviceRoute)> {
+fn dpi_load_target(cx: &mut Context<DpiPanel>) -> Option<(DeviceKey, DeviceRoute)> {
     cx.try_global::<AppState>().and_then(|state| {
-        if !state.current_dpi_unqueried() {
+        let record = state.current_record()?;
+        let key = record.device_key();
+        if !state.reads.dpi.unqueried(&key) {
             return None;
         }
-        let record = state.current_record()?;
-        Some((record.config_key.clone(), record.route.clone()?))
+        Some((key, record.route.clone()?))
     })
 }
 

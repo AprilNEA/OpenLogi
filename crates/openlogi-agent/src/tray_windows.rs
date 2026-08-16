@@ -149,6 +149,10 @@ unsafe extern "system" fn wnd_proc(
         WM_TRAY => {
             match lparam as u32 {
                 WM_LBUTTONUP => open_or_focus_gui(),
+                // SAFETY: win32 dispatches this callback on the tray thread —
+                // the one that created `hwnd` and pumps its messages — so the
+                // handle is live for the whole call, and `TrackPopupMenu` gets
+                // the owning thread it requires.
                 WM_RBUTTONUP | WM_CONTEXTMENU => unsafe { show_menu(hwnd) },
                 _ => {}
             }
@@ -156,9 +160,16 @@ unsafe extern "system" fn wnd_proc(
         }
         m if m != 0 && m == TASKBAR_CREATED.load(Ordering::Relaxed) => {
             // Explorer restarted; every tray icon was dropped. Re-add ours.
+            // SAFETY: `hwnd` is our own window, still live while its window
+            // procedure runs, and this is the thread that created it — the
+            // same conditions under which `run_tray_loop` first added the icon.
             unsafe { add_tray_icon(hwnd) };
             0
         }
+        // SAFETY: handing the system back the message it just delivered,
+        // unchanged: `hwnd` is live for the duration of the callback and
+        // `wparam`/`lparam` are the payload win32 paired with `msg`, which is
+        // exactly what the default handler expects.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
@@ -301,13 +312,20 @@ fn gui_pids() -> Vec<u32> {
         .processes()
         .values()
         .filter(|p| {
-            let name = p.name().to_string_lossy();
-            (name.eq_ignore_ascii_case("OpenLogi.exe")
-                || name.eq_ignore_ascii_case("openlogi-gui.exe"))
+            is_gui_process_name(&p.name().to_string_lossy())
                 && (own_user.is_none() || p.user_id() == own_user)
         })
         .map(|p| p.pid().as_u32())
         .collect()
+}
+
+/// Whether a process image name is one of the GUI binaries.
+///
+/// `OpenLogi.exe` is matched case-*sensitively*: the CLI is `openlogi.exe`,
+/// which `eq_ignore_ascii_case` would accept, and the dev target dir holds
+/// both. Windows reports image names with their on-disk case, so this holds.
+fn is_gui_process_name(name: &str) -> bool {
+    name == "OpenLogi.exe" || name.eq_ignore_ascii_case("openlogi-gui.exe")
 }
 
 /// Bring the first visible top-level window owned by one of `pids` to the
@@ -354,9 +372,13 @@ fn spawn_gui() {
         return;
     };
     let Some(dir) = exe.parent() else { return };
-    // Installed/portable layout first (the product name), then the cargo
-    // target-dir name (dev) — the reverse of the GUI's agent sibling lookup.
-    let gui = ["OpenLogi.exe", "openlogi-gui.exe"]
+    // Dev target dir first: it holds both `openlogi.exe` (CLI) and
+    // `openlogi-gui.exe`, and the CLI shares `OpenLogi.exe`'s name on the
+    // case-insensitive filesystem — so `dir.join("OpenLogi.exe").exists()`
+    // there resolves to the CLI and would launch it. Probing the unambiguous
+    // `openlogi-gui.exe` first avoids that; the installed layout has only
+    // `OpenLogi.exe` and falls through to it.
+    let gui = ["openlogi-gui.exe", "OpenLogi.exe"]
         .iter()
         .map(|name| dir.join(name))
         .find(|p| p.exists());
@@ -396,10 +418,26 @@ fn quit(hwnd: HWND) {
         Shell_NotifyIconW(NIM_DELETE, &raw const nid);
     }
     info!("tray Quit — exiting agent");
+    #[expect(
+        clippy::exit,
+        reason = "reached from the window procedure on the tray thread: the status cannot travel back through an `extern \"system\"` callback, and ending the message pump would only end this thread while `main` keeps running the agent core"
+    )]
     std::process::exit(0);
 }
 
 /// NUL-terminated UTF-16 for win32 W-APIs.
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_gui_process_name;
+
+    #[test]
+    fn the_cli_binary_is_not_the_gui() {
+        assert!(is_gui_process_name("OpenLogi.exe"));
+        assert!(is_gui_process_name("openlogi-gui.exe"));
+        assert!(!is_gui_process_name("openlogi.exe")); // the CLI
+    }
 }

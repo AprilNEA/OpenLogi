@@ -3,13 +3,13 @@
 use std::path::Path;
 
 use gpui::App;
-use openlogi_agent_core::ipc::{InventoryHealth, PROTOCOL_VERSION};
 use openlogi_core::device::{DeviceInventory, PairedDevice};
 use openlogi_core::diagnostics::{
     AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport, InventoryState,
     ReceiverDiag, RenderState,
 };
-use openlogi_hid::DeviceRoute;
+use openlogi_core::hid::DeviceRoute;
+use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION};
 
 use crate::asset::AssetResolver;
 use crate::state::{AppState, DpiStatus};
@@ -124,8 +124,10 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
                 online: record.online,
                 battery: record.battery.clone(),
                 capabilities: record.capabilities,
-                dpi: dpi_summary(state.dpi_status_for(&record.config_key)),
-                config_key: record.config_key.clone(),
+                dpi: dpi_summary(state.reads.dpi.get(&record.device_key()).cloned()),
+                // Diagnostics are model-level by contract. The runtime config
+                // key may contain a receiver UID or raw-device serial.
+                config_key: record.model_key.clone(),
                 wpid: paired.and_then(|p| p.wpid),
                 model_ids: model.map(|m| m.model_ids),
                 extended_model_id: model.map(|m| m.extended_model_id),
@@ -164,6 +166,7 @@ fn connection_for(
             Some(t) if t.usb => ConnectionKind::Wired,
             _ => ConnectionKind::Unknown,
         },
+        Some(DeviceRoute::RawHid { .. }) => ConnectionKind::Wired,
         None => ConnectionKind::Unknown,
     }
 }

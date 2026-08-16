@@ -3,6 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use futures_concurrency::future::Join as _;
 use hidpp::{
     channel::HidppChannel,
+    device::Device,
     receiver::{
         self, Receiver,
         bolt::{
@@ -253,7 +254,7 @@ async fn probe_unifying_receiver(
     NodeProbe {
         inventory: Some(DeviceInventory {
             receiver: ReceiverInfo {
-                name: "Unifying Receiver".to_string(),
+                name: crate::route::receiver_display_name(info.product_id).to_string(),
                 vendor_id: info.vendor_id,
                 product_id: info.product_id,
                 unique_id,
@@ -397,6 +398,16 @@ async fn walk_bolt_slot(
     (device, outcome)
 }
 
+/// Prefer the device's own HID++ marketing name over the host HID collection
+/// label. Windows Bluetooth frequently exposes only a generic `"Mouse"`, while
+/// feature `0x0005` carries the real model name (for example MX Master 2S).
+pub(super) fn preferred_direct_codename(marketing_name: Option<&str>, os_name: &str) -> String {
+    marketing_name
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(os_name)
+        .to_string()
+}
+
 /// Probe a HID++ channel that doesn't host a Bolt receiver — for
 /// Bluetooth-direct, USB-C, or otherwise wired devices that present
 /// themselves as a HID++ device rather than a receiver (P2.4).
@@ -437,6 +448,24 @@ async fn probe_direct(
     let walk_succeeded = capabilities.is_some();
     let caps = capabilities.unwrap_or_default();
     let is_peripheral = probe.battery.is_some() || caps.buttons || caps.pointer || caps.lighting;
+    // A walk that never completed says nothing about what this node is: the
+    // discriminator below would read "no battery, no config feature" off an
+    // empty probe and reject a real mouse as a receiver's secondary interface.
+    // Settle it as a transient failure and keep the node's cache entry, so the
+    // last-good inventory is replayed while the link recovers.
+    if !walk_succeeded {
+        debug!(
+            vid = format_args!("{:04x}", info.vendor_id),
+            pid = format_args!("{:04x}", info.product_id),
+            "feature walk did not complete — transient probe failure, keeping last-known identity"
+        );
+        return NodeProbe {
+            inventory: None,
+            healthy: false,
+            complete: false,
+            outcomes: vec![seen(Some(CacheKey::Direct(info.id.clone())))],
+        };
+    }
     if !is_peripheral {
         debug!(
             vid = format_args!("{:04x}", info.vendor_id),
@@ -455,10 +484,11 @@ async fn probe_direct(
         };
     }
 
-    // Without a Bolt receiver we don't have a wpid, codename, or pairing
-    // info — those live on the receiver registers. Use the HID name as
-    // the display fallback and leave wpid empty.
-    debug!(name = %info.name, "BT-direct / wired device recognised");
+    // Direct devices have no receiver codename register. Prefer the device's
+    // own 0x0005 marketing name; the Windows Bluetooth HID collection often
+    // calls every pointing device simply `"Mouse"`.
+    let codename = preferred_direct_codename(probe.marketing_name.as_deref(), &info.name);
+    debug!(os_name = %info.name, name = %codename, "BT-direct / wired device recognised");
     let inventory = DeviceInventory {
         receiver: ReceiverInfo {
             name: info.name.clone(),
@@ -468,7 +498,7 @@ async fn probe_direct(
         },
         paired: vec![PairedDevice {
             slot: DIRECT_DEVICE_INDEX,
-            codename: Some(info.name.clone()),
+            codename: Some(codename),
             wpid: None,
             // No receiver pairing register here, so `0x0005` is the only kind
             // hint — but kind is just identity now; the UI gates on the
@@ -575,39 +605,69 @@ async fn probe_unifying_slot(
     // online or not, and the crate's `event.online` reads the wrong notification
     // byte (payload[1] bit6, always set here — wire-verified `04 62 69 40`), so
     // neither tells us if the device is actually reachable on this receiver.
-    // We therefore always attempt the probe (passing `true`) and treat the
-    // feature walk succeeding as the real liveness signal below — a device that
-    // moved to Bluetooth answers `DeviceNotFound` and surfaces as offline.
+    // A cache hit must therefore still do one live round-trip: otherwise cached
+    // capabilities keep an absent device "online" forever and its reconnect is
+    // invisible to the agent's volatile-state re-apply/capture re-arm path.
     let probe_result = timeout(
         UNIFYING_SLOT_PROBE,
-        probe_or_reuse(channel, slot, Some(id.clone()), cached, true, tick),
+        probe_unifying_features(channel, slot, &id, cached, tick),
     )
     .await;
-    let (probe, outcome) = if let Ok(r) = probe_result {
+    let (probe, outcome, online) = if let Ok(r) = probe_result {
         r
     } else {
         debug!(slot, budget = ?UNIFYING_SLOT_PROBE,
             "Unifying slot probe timed out; using cached data if available");
         let probe = cached.map_or_else(ProbedFeatures::default, |c| c.probe.clone());
-        (probe, CacheOutcome::Seen(id))
+        (probe, CacheOutcome::Seen(id), false)
     };
 
-    let device = PairedDevice {
+    let device = assemble_unifying_device(slot, codename, event.wpid, register_kind, probe, online);
+    Some((device, outcome))
+}
+
+/// Return cached immutable features together with a fresh reachability result.
+///
+/// A successful full probe ([`CacheOutcome::Fresh`]) confirms liveness on a
+/// cache miss/stale entry. A fresh cached entry normally refreshes its battery,
+/// whose successful response ([`CacheOutcome::Update`]) is the liveness check.
+/// A failed battery refresh, or a device without that feature, gets a root ping
+/// before being treated as offline.
+pub(super) async fn probe_unifying_features(
+    channel: &Arc<HidppChannel>,
+    slot: u8,
+    id: &CacheKey,
+    cached: Option<&Cached>,
+    tick: u64,
+) -> (ProbedFeatures, CacheOutcome, bool) {
+    let (probe, outcome) =
+        probe_or_reuse(channel, slot, Some(id.clone()), cached, true, tick).await;
+    let online = if matches!(outcome, CacheOutcome::Fresh(..) | CacheOutcome::Update(..)) {
+        true
+    } else {
+        Device::new(Arc::clone(channel), slot).await.is_ok()
+    };
+    (probe, outcome, online)
+}
+
+pub(super) fn assemble_unifying_device(
+    slot: u8,
+    codename: Option<String>,
+    wpid: u16,
+    register_kind: DeviceKind,
+    probe: ProbedFeatures,
+    online: bool,
+) -> PairedDevice {
+    PairedDevice {
         slot,
         codename,
-        wpid: Some(event.wpid),
+        wpid: Some(wpid),
         kind: resolve_device_kind(probe.kind, register_kind),
-        // Reachable on this receiver iff the feature walk got through this tick.
-        // Caveat: a GUI cache hit can serve stale capabilities for up to
-        // REFRESH_TICKS after the device leaves for Bluetooth, briefly showing it
-        // online; self-heals on the next forced re-probe. Add a per-tick liveness
-        // ping if that window ever matters.
-        online: probe.capabilities.is_some(),
+        online,
         battery: probe.battery,
         model_info: probe.model_info,
         capabilities: probe.capabilities,
-    };
-    Some((device, outcome))
+    }
 }
 
 /// Reads a Unifying paired device's name. Unifying stores names at

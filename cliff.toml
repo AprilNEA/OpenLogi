@@ -1,0 +1,51 @@
+# Whole-repo changelog (git-cliff). release-plz only bumps versions; it is
+# package-path-scoped and cannot see `release = false` app crates, so the root
+# CHANGELOG is owned here — same model as GoReleaser's `changelog.use: git`.
+# https://git-cliff.org/docs/configuration
+
+[changelog]
+header = """# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+"""
+# Keep-a-Changelog layout matching historical OpenLogi sections.
+body = """
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+
+{% for group, commits in commits | group_by(attribute="group") -%}
+### {{ group | upper_first }}
+
+{% for commit in commits -%}
+- {% if commit.scope %}*({{ commit.scope }})* {% endif %}{% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message }}
+{% endfor %}
+{% endfor -%}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+require_conventional = true
+split_commits = false
+commit_preprocessors = [
+  { pattern = "\\(#([0-9]+)\\)", replace = "([#${1}](https://github.com/AprilNEA/OpenLogi/pull/${1}))" },
+]
+commit_parsers = [
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^perf", group = "Changed" },
+  { message = "^security", group = "Security" },
+  { message = "^.*", skip = true },
+]
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "v[0-9].*"
+sort_commits = "newest"
+# No include_path / exclude_path — every conventional commit since the last tag
+# counts, including gui/agent work that never touches a crates.io package.

@@ -3,7 +3,10 @@
 //! consumer (the agent's orchestrator, or the GUI).
 
 pub mod accessibility;
+pub mod camera;
 pub mod foreground_app;
 pub mod gesture;
+pub mod host_switch;
 pub mod inventory;
+pub mod keyboard;
 pub mod pairing;

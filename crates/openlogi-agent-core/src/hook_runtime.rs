@@ -6,21 +6,79 @@
 //! and gesture events.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Arc, RwLock};
+use std::collections::{BTreeMap, HashSet};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{
     Action, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
-use openlogi_hid::CaptureChannel;
-use openlogi_hook::{EventDisposition, Hook, MouseEvent};
+use openlogi_core::config::{KeyModifiers, KeyTrigger};
+use openlogi_hid::{CaptureChannel, ChannelRegistry};
+use openlogi_hook::{
+    EventDevice, EventDisposition, Hook, HookEvent, MouseEvent, source_is_remappable,
+};
 use tracing::{info, warn};
 
-use crate::DpiCycleState;
 use crate::event_monitor::SharedEventMonitor;
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
+use crate::receiver_access::ReceiverAccess;
+use crate::{DpiCycleState, DpiCycles};
+
+/// Runtime dependencies shared by every action source: the OS hook, HID++
+/// controls, keyboard capture, and Actions Ring slot activation.
+#[derive(Clone)]
+pub struct ActionDispatcher {
+    dpi_cycle: Arc<RwLock<DpiCycles>>,
+    capture: CaptureChannel,
+    registry: ChannelRegistry,
+    receiver_access: ReceiverAccess,
+    action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+}
+
+impl ActionDispatcher {
+    /// Build a dispatcher around the agent's shared device state and ring queue.
+    #[must_use]
+    pub fn new(
+        dpi_cycle: Arc<RwLock<DpiCycles>>,
+        capture: CaptureChannel,
+        registry: ChannelRegistry,
+        receiver_access: ReceiverAccess,
+        action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    ) -> Self {
+        Self {
+            dpi_cycle,
+            capture,
+            registry,
+            receiver_access,
+            action_ring,
+        }
+    }
+
+    /// Route one action without blocking the input callback.
+    pub fn dispatch(&self, action: &Action, device_key: Option<&str>) {
+        if matches!(action, Action::ShowActionsRing) {
+            if self
+                .action_ring
+                .send(device_key.map(str::to_owned))
+                .is_err()
+            {
+                warn!("Actions Ring runtime unavailable — trigger ignored");
+            }
+            return;
+        }
+        dispatch_action(
+            action,
+            &self.dpi_cycle,
+            device_key,
+            &self.capture,
+            Some(&self.registry),
+            &self.receiver_access,
+        );
+    }
+}
 
 /// The two button maps the OS-hook callback reads, kept behind ONE lock so a
 /// config rebuild publishes both atomically — a press during an owner switch can
@@ -41,29 +99,72 @@ pub struct HookMaps {
 /// (orchestrator), the OS-hook callback, and the gesture watcher.
 pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
 
+/// Shared keyboard trigger→action map for the function-key remapper. Unlike
+/// mouse bindings these are not per-app-profile (M1 scope — per the spec's
+/// non-goals), so a single map suffices. Keyed by the config `KeyTrigger`
+/// (keycode + modifiers).
+pub type SharedKeyboardBindings = Arc<RwLock<BTreeMap<KeyTrigger, Action>>>;
+
+/// Convert the hook-layer modifier state into the config-layer type (the two
+/// live in different crates — core is leaf-level and duplicates the four
+/// bools). Drop-in identity once the field names align.
+fn convert_modifiers(m: openlogi_hook::KeyModifiers) -> KeyModifiers {
+    KeyModifiers {
+        shift: m.shift,
+        control: m.control,
+        option: m.option,
+        command: m.command,
+    }
+}
+
 /// Tracks which OS-hook button (Middle/Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
 /// *mid-motion* like the HID++ gesture-button path in `openlogi-hid`. This wrapper
 /// adds only the button identity the accumulator doesn't track; a press that
 /// never commits a direction is a plain click, fired on release.
+/// A gesture hold this old is presumed stale — real hold+swipe interactions
+/// finish in well under a second, and only a lost button-up (with no OS
+/// interrupt to trigger [`HoldState::cancel`]) leaves one lingering.
+const STALE_HOLD: Duration = Duration::from_secs(10);
+
 #[derive(Default)]
 struct HoldState {
-    button: Option<ButtonId>,
+    /// The held button and when its hold began. The timestamp exists solely
+    /// for stale-hold recovery in [`Self::begin`].
+    button: Option<(ButtonId, Instant)>,
     swipe: SwipeAccumulator,
 }
 
 impl HoldState {
-    /// Begin a hold for `button`.
-    fn begin(&mut self, button: ButtonId) {
-        self.button = Some(button);
+    /// Begin a hold for `button`, unless another button's live hold is in
+    /// progress — with several gesture buttons the first hold wins, so a second
+    /// press can't hijack the accumulated motion mid-swipe. Returns whether the
+    /// hold started (the caller lets a refused press fall through to the
+    /// single-action path, where it means its plain click).
+    ///
+    /// Two presses recover a hold whose button-up was lost (nothing else ever
+    /// clears it when the OS drops a release without an interrupt): a re-press
+    /// of the held button itself — a button cannot be pressed while down, so
+    /// this is proof the release was lost — and any press once the hold has
+    /// aged past [`STALE_HOLD`], without which every other gesture button
+    /// would stay refused indefinitely.
+    fn begin(&mut self, button: ButtonId) -> bool {
+        if let Some((held, since)) = self.button
+            && held != button
+            && since.elapsed() < STALE_HOLD
+        {
+            return false;
+        }
+        self.button = Some((button, Instant::now()));
         self.swipe.begin();
+        true
     }
 
     /// Feed a pointer-move delta into the active hold, tagging a committed swipe
     /// with the held button. Returns `Some((button, direction))` exactly once per
     /// hold, or `None` while still too short, already fired, or not holding.
     fn accumulate(&mut self, dx: i32, dy: i32) -> Option<(ButtonId, GestureDirection)> {
-        let button = self.button?;
+        let (button, _) = self.button?;
         self.swipe.accumulate(dx, dy).map(|dir| (button, dir))
     }
 
@@ -72,7 +173,7 @@ impl HoldState {
     /// `Some(false)` when a swipe already fired, and `None` for a stray release
     /// of a button we weren't holding.
     fn end(&mut self, button: ButtonId) -> Option<bool> {
-        if self.button == Some(button) {
+        if self.button.is_some_and(|(held, _)| held == button) {
             self.button = None;
             Some(self.swipe.end())
         } else {
@@ -87,6 +188,17 @@ impl HoldState {
         self.button = None;
         self.swipe.end();
     }
+
+    /// Age the current hold past the staleness horizon, so tests can exercise
+    /// the lost-button-up recovery without sleeping.
+    #[cfg(test)]
+    fn backdate_for_test(&mut self) {
+        if let Some((_, since)) = &mut self.button
+            && let Some(aged) = Instant::now().checked_sub(STALE_HOLD)
+        {
+            *since = aged;
+        }
+    }
 }
 
 thread_local! {
@@ -96,6 +208,10 @@ thread_local! {
     /// Thread-local rather than a shared `Mutex` keeps the hot path lock-free and
     /// free of cross-thread contention on the freeze-sensitive callback.
     static HOLD: RefCell<HoldState> = RefCell::new(HoldState::default());
+    /// Buttons whose physical press was delivered because the action queue
+    /// rejected the remap. Their matching release must also pass through so
+    /// apps never see a stuck auxiliary button (down without up).
+    static FAIL_OPEN_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
 }
 
 /// How long a repeatable action's button must stay down before the action
@@ -131,52 +247,63 @@ fn ramp(current: Duration) -> Duration {
     next.max(REPEAT_MIN_INTERVAL)
 }
 
+/// Identity of one repeating hold: the capture-session device key it arrived on
+/// (`None` for the OS hook, which is not per-device) plus the button. Keying on
+/// both scopes every stop to exactly the hold that produced it — the same
+/// button held on two devices repeats as two independent cycles, and either
+/// release ends only its own.
+pub type RepeatKey = (Option<String>, ButtonId);
+
 /// What a capture path tells the repeat worker.
 ///
 /// Both input paths use this: the OS hook (for buttons it remaps directly) and
-/// the HID++ capture session (for buttons diverted to get the release edge).
+/// the HID++ capture watcher (for buttons diverted over `0x1b04`, whose
+/// divertedButtonsEvent supplies the release edge the OS hook cannot).
 ///
-/// Every variant names the button it concerns. Two thumb buttons can be held at
-/// once, so an unkeyed stop would let releasing one end the other's cycle while
-/// it is still physically down.
+/// Every variant names the hold(s) it concerns. Two thumb buttons can be held
+/// at once, so an unkeyed stop would let releasing one end the other's cycle
+/// while it is still physically down.
 pub enum RepeatCmd {
     /// A repeatable action's button went down — begin the delay-then-repeat
-    /// cycle for that button, superseding its own previous cycle only.
-    Start(ButtonId, Action),
-    /// The button came up — stop re-firing that button.
-    Stop(ButtonId),
-    /// Capture was interrupted, so no release edge is coming for anything still
-    /// held: end every cycle rather than leave an action firing with nothing left
-    /// to stop it.
+    /// cycle for that hold, superseding its own previous cycle only.
+    Start(RepeatKey, Action),
+    /// The button came up — stop re-firing that hold.
+    Stop(RepeatKey),
+    /// One device's capture session went away, so no release edge is coming
+    /// for anything it still held: end every cycle that session started,
+    /// leaving other devices' holds running.
+    StopDevice(String),
+    /// Capture was interrupted wholesale (the OS disabled the tap): end every
+    /// cycle rather than leave an action firing with nothing left to stop it.
     StopAll,
 }
 
-/// One button's in-flight repeat cycle.
+/// One hold's in-flight repeat cycle.
 struct RepeatCycle {
     /// The action to re-fire, resolved when the press arrived.
     action: Action,
-    /// When this button's next re-fire is due.
+    /// When this hold's next re-fire is due.
     due: Instant,
     /// The gap to apply *after* the fire that is currently pending.
     interval: Duration,
 }
 
-/// Every hold currently repeating, keyed by button.
+/// Every hold currently repeating, keyed by [`RepeatKey`].
 ///
 /// Split out from the worker thread so the scheduling is testable without
 /// dispatching real actions: the worker only sleeps and dispatches, this decides
 /// what is due and when to wake.
 #[derive(Default)]
 struct RepeatCycles {
-    cycles: BTreeMap<ButtonId, RepeatCycle>,
+    cycles: BTreeMap<RepeatKey, RepeatCycle>,
 }
 
 impl RepeatCycles {
-    /// Begin (or restart) one button's cycle. A restart resets the delay *and*
+    /// Begin (or restart) one hold's cycle. A restart resets the delay *and*
     /// the ramp, so every hold starts slow again.
-    fn start(&mut self, button: ButtonId, action: Action, now: Instant) {
+    fn start(&mut self, key: RepeatKey, action: Action, now: Instant) {
         self.cycles.insert(
-            button,
+            key,
             RepeatCycle {
                 action,
                 due: now + REPEAT_INITIAL_DELAY,
@@ -185,11 +312,18 @@ impl RepeatCycles {
         );
     }
 
-    /// End one button's cycle, leaving any other held button running. A stop for
-    /// a button that is not repeating is a no-op, which is what lets the callers
+    /// End one hold's cycle, leaving any other held button running. A stop for
+    /// a hold that is not repeating is a no-op, which is what lets the callers
     /// send it unconditionally on release.
-    fn stop(&mut self, button: ButtonId) {
-        self.cycles.remove(&button);
+    fn stop(&mut self, key: &RepeatKey) {
+        self.cycles.remove(key);
+    }
+
+    /// End every cycle one device's capture session started — see
+    /// [`RepeatCmd::StopDevice`].
+    fn stop_device(&mut self, device: &str) {
+        self.cycles
+            .retain(|(key_device, _), _| key_device.as_deref() != Some(device));
     }
 
     /// End every cycle — see [`RepeatCmd::StopAll`].
@@ -207,12 +341,13 @@ impl RepeatCycles {
             .map(|due| due.saturating_duration_since(now))
     }
 
-    /// Take every action whose gap has elapsed, advancing each ramp. Buttons ramp
-    /// independently: one held longer is already firing faster.
-    fn take_due(&mut self, now: Instant) -> Vec<Action> {
+    /// Take every action whose gap has elapsed (with the device key it should
+    /// dispatch against), advancing each ramp. Holds ramp independently: one
+    /// held longer is already firing faster.
+    fn take_due(&mut self, now: Instant) -> Vec<(Option<String>, Action)> {
         let mut due = Vec::new();
-        for cycle in self.cycles.values_mut().filter(|cycle| cycle.due <= now) {
-            due.push(cycle.action.clone());
+        for (key, cycle) in self.cycles.iter_mut().filter(|(_, cycle)| cycle.due <= now) {
+            due.push((key.0.clone(), cycle.action.clone()));
             cycle.due = now + cycle.interval;
             cycle.interval = ramp(cycle.interval);
         }
@@ -221,63 +356,231 @@ impl RepeatCycles {
 }
 
 /// Spawns the worker that re-fires a held button's action, and returns the
-/// sender the hook callback signals it with.
+/// sender the capture paths signal it with.
 ///
-/// The delay and the interval are slept here, never in the callback: the
+/// The delay and the interval are slept here, never in a callback: the hook
 /// callback must not block (see the freeze-hazard note in `macos.rs`). The
 /// worker also keeps the repeat state off the thread-local [`HOLD`], so a
 /// synthesized event re-entering the tap cannot double-borrow it.
 ///
-/// [`Sender`] is `Sync` as of Rust 1.72, so the callback can hold it directly
-/// without a mutex.
-pub fn spawn_repeater(
-    dpi_cycle: Arc<RwLock<DpiCycleState>>,
-    capture: CaptureChannel,
-) -> Sender<RepeatCmd> {
+/// [`mpsc::Sender`] is `Sync` as of Rust 1.72, so the hook callback can hold it
+/// directly without a mutex.
+#[must_use]
+pub fn spawn_repeater(dispatcher: ActionDispatcher) -> mpsc::Sender<RepeatCmd> {
     let (tx, rx) = mpsc::channel::<RepeatCmd>();
-    std::thread::spawn(move || {
-        let mut cycles = RepeatCycles::default();
-        loop {
-            // Park until a press arrives when nothing is held; otherwise wake on
-            // whichever comes first, the next command or the soonest re-fire.
-            let cmd = match cycles.next_wait(Instant::now()) {
-                Some(wait) => match rx.recv_timeout(wait) {
-                    Ok(cmd) => Some(cmd),
-                    Err(RecvTimeoutError::Timeout) => None,
-                    // The agent is shutting down.
-                    Err(RecvTimeoutError::Disconnected) => return,
-                },
-                None => match rx.recv() {
-                    Ok(cmd) => Some(cmd),
-                    Err(_) => return,
-                },
-            };
-            match cmd {
-                Some(RepeatCmd::Start(button, action)) => {
-                    cycles.start(button, action, Instant::now());
-                }
-                Some(RepeatCmd::Stop(button)) => cycles.stop(button),
-                Some(RepeatCmd::StopAll) => cycles.stop_all(),
-                // A gap elapsed: fire everything now due. The first press was
-                // already dispatched by the caller, so this is strictly the 2nd
-                // fire onward.
-                None => {
-                    for action in cycles.take_due(Instant::now()) {
-                        dispatch_action(&action, &dpi_cycle, &capture);
+    let _ = thread::Builder::new()
+        .name("openlogi-repeat".into())
+        .spawn(move || {
+            let mut cycles = RepeatCycles::default();
+            loop {
+                // Park until a press arrives when nothing is held; otherwise wake
+                // on whichever comes first, the next command or the soonest re-fire.
+                let cmd = match cycles.next_wait(Instant::now()) {
+                    Some(wait) => match rx.recv_timeout(wait) {
+                        Ok(cmd) => Some(cmd),
+                        Err(mpsc::RecvTimeoutError::Timeout) => None,
+                        // The agent is shutting down.
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    },
+                    None => match rx.recv() {
+                        Ok(cmd) => Some(cmd),
+                        Err(_) => return,
+                    },
+                };
+                match cmd {
+                    Some(RepeatCmd::Start(key, action)) => {
+                        cycles.start(key, action, Instant::now());
+                    }
+                    Some(RepeatCmd::Stop(key)) => cycles.stop(&key),
+                    Some(RepeatCmd::StopDevice(device)) => cycles.stop_device(&device),
+                    Some(RepeatCmd::StopAll) => cycles.stop_all(),
+                    // A gap elapsed: fire everything now due. The first press was
+                    // already dispatched by the caller, so this is strictly the
+                    // 2nd fire onward.
+                    None => {
+                        for (device, action) in cycles.take_due(Instant::now()) {
+                            dispatcher.dispatch(&action, device.as_deref());
+                        }
                     }
                 }
             }
-        }
-    });
+        });
     tx
+}
+
+/// Whether a button event's physical source may be remapped/suppressed.
+///
+/// macOS attributes every CGEvent to an IOKit sender and fails closed: only
+/// known Logitech non-trackpad devices are remappable, so the built-in
+/// trackpad can never be swallowed. Linux/Windows often lack attribution
+/// (`device: None`); those platforms already restrict which devices the hook
+/// attaches to, so unknown sources stay remappable.
+fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
+    match device {
+        Some(d) => source_is_remappable(Some(d)),
+        None => {
+            // Attribution missing: safe on Linux/Windows (device selection is
+            // upstream of the callback). On macOS fail closed — an unattributed
+            // event is more likely a trackpad/system source than a Logi mouse.
+            !cfg!(target_os = "macos")
+        }
+    }
+}
+
+/// Off-thread worker for bound actions so the tap callback never injects input.
+fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<Action> {
+    let (tx, rx) = mpsc::sync_channel::<Action>(64);
+    let _ = thread::Builder::new()
+        .name("openlogi-action".into())
+        .spawn(move || {
+            while let Ok(action) = rx.recv() {
+                dispatcher.dispatch(&action, None);
+            }
+        });
+    tx
+}
+
+/// Queue a bound action without blocking the tap callback. Returns `false` if
+/// the queue is full (caller should fail open and pass the physical event).
+fn try_queue_action(tx: &mpsc::SyncSender<Action>, action: Action) -> bool {
+    if tx.try_send(action).is_err() {
+        warn!("action queue full — dropping bound action to keep the input hook live");
+        false
+    } else {
+        true
+    }
+}
+
+/// Remap path for Middle/Back/Forward. Must stay lock-light and non-blocking.
+fn handle_button(
+    id: ButtonId,
+    pressed: bool,
+    device: Option<&EventDevice>,
+    hooks: &SharedHookMaps,
+    action_tx: &mpsc::SyncSender<Action>,
+    repeat: &mpsc::Sender<RepeatCmd>,
+) -> EventDisposition {
+    // Primary L/R always pass through (suppressing them would brick the mouse).
+    if !id.is_os_hook_button() || !button_source_may_remap(device) {
+        return EventDisposition::PassThrough;
+    }
+
+    // `try_read` only: a blocking read on the tap thread freezes every pointer
+    // event while a config rebuild holds the write lock. Fail open if unavailable.
+    if pressed {
+        let is_gesture = hooks.try_read().is_ok_and(|m| m.gestures.contains_key(&id));
+        // A refused begin — a second gesture button pressed mid-hold — falls
+        // through to the single-action path: the first hold wins and this press
+        // still means its plain click.
+        if is_gesture && HOLD.with_borrow_mut(|h| h.begin(id)) {
+            return EventDisposition::Suppress;
+        }
+    } else {
+        // Drop the HOLD borrow before any queueing (re-entrancy freeze hazard).
+        let ended = HOLD.with_borrow_mut(|h| h.end(id));
+        if let Some(was_click) = ended {
+            if was_click {
+                let action = hooks
+                    .try_read()
+                    .ok()
+                    .map(|m| resolve_gesture_click(&m.gestures, id));
+                if let Some(action) = action {
+                    info!(button = %id, action = %action.label(), "gesture click → executing bound action");
+                    let _ = try_queue_action(action_tx, action);
+                }
+            }
+            return EventDisposition::Suppress;
+        }
+    }
+
+    let action = hooks
+        .try_read()
+        .ok()
+        .and_then(|m| m.bindings.get(&id).cloned());
+    let Some(action) = action else {
+        return EventDisposition::PassThrough;
+    };
+    if is_native_click(id, &action) {
+        return EventDisposition::PassThrough;
+    }
+    if pressed {
+        info!(button = %id, action = %action.label(), "button → executing bound action");
+        let repeat_action = action.is_repeatable().then(|| action.clone());
+        let queued = try_queue_action(action_tx, action);
+        // Increment-style actions keep firing while the button is held; the
+        // worker owns the timing. Started only when the press itself queued —
+        // a fail-open press delivered the physical event instead. A send
+        // failure just means the worker is gone, which costs only the repeat.
+        if queued && let Some(repeat_action) = repeat_action {
+            let _ = repeat.send(RepeatCmd::Start((None, id), repeat_action));
+        }
+        return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s));
+    }
+    // Unconditional, but keyed to this button: a stop for a button that is not
+    // repeating is a no-op, so a binding that changed mid-hold still ends the
+    // cycle its own press started — without touching another button's hold.
+    let _ = repeat.send(RepeatCmd::Stop((None, id)));
+    FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_release_disposition(id, s))
+}
+
+/// Press of a remapped single-action button: suppress when the action was
+/// queued, otherwise pass through and mark `id` so the release pairs.
+fn remapped_press_disposition(
+    id: ButtonId,
+    queued: bool,
+    fail_open: &mut HashSet<ButtonId>,
+) -> EventDisposition {
+    if queued {
+        fail_open.remove(&id);
+        EventDisposition::Suppress
+    } else {
+        fail_open.insert(id);
+        EventDisposition::PassThrough
+    }
+}
+
+/// Release of a remapped single-action button: pass through only when the
+/// matching press was fail-opened (queue rejection), else suppress.
+fn remapped_release_disposition(
+    id: ButtonId,
+    fail_open: &mut HashSet<ButtonId>,
+) -> EventDisposition {
+    if fail_open.remove(&id) {
+        EventDisposition::PassThrough
+    } else {
+        EventDisposition::Suppress
+    }
+}
+
+/// Feed an in-progress gesture hold; always pass motion through so the cursor moves.
+fn handle_moved(
+    delta_x: i32,
+    delta_y: i32,
+    hooks: &SharedHookMaps,
+    action_tx: &mpsc::SyncSender<Action>,
+) -> EventDisposition {
+    let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
+    if let Some((button, dir)) = commit {
+        let action = hooks.try_read().ok().map(|m| {
+            m.gestures
+                .get(&button)
+                .and_then(|dirs| dirs.get(&dir).cloned())
+                .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
+        });
+        if let Some(action) = action {
+            info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
+            let _ = try_queue_action(action_tx, action);
+        }
+    }
+    EventDisposition::PassThrough
 }
 
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not
 /// granted or on an unsupported platform — the app continues without crashing.
 pub fn start(
     hooks: SharedHookMaps,
-    dpi_cycle: Arc<RwLock<DpiCycleState>>,
-    capture: CaptureChannel,
+    keyboard_bindings: SharedKeyboardBindings,
+    dispatcher: ActionDispatcher,
     monitor: SharedEventMonitor,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
@@ -289,142 +592,119 @@ pub fn start(
     }
 
     // Hold-to-repeat runs on its own thread so the callback never sleeps.
-    let repeat = spawn_repeater(Arc::clone(&dpi_cycle), Arc::clone(&capture));
+    let repeat = spawn_repeater(dispatcher.clone());
+
+    // Actions never run on the tap callback thread (HID CGEventTap freeze hazard).
+    let action_tx = spawn_action_worker(dispatcher);
 
     // The per-hold pointer accumulator lives in the thread-local `HOLD`; the
     // callback must never block — see the freeze-hazard note in `macos.rs`.
-    let result = Hook::start(move |event| {
-        // Mirror the raw event to the GUI's live monitor first (a single relaxed
-        // atomic load while monitoring is off — see `event_monitor`), before any
-        // remapping decides its disposition.
-        monitor.record(&event);
-        match event {
-            MouseEvent::Button { id, pressed } => {
-                // The CGEventTap only sees standard buttons 0-4. We remap
-                // Middle/Back/Forward; the primary L/R clicks always pass through
-                // (suppressing them would brick the mouse), and the DPI / thumb /
-                // dedicated gesture button aren't visible to the tap at all — the
-                // dedicated gesture button is captured separately over HID++.
-                if !id.is_os_hook_button() {
-                    return EventDisposition::PassThrough;
+    let result = Hook::start(move |event| match event {
+        HookEvent::Mouse(event) => {
+            monitor.record(&event);
+            match event {
+                MouseEvent::Button {
+                    id,
+                    pressed,
+                    device,
+                } => handle_button(id, pressed, device.as_ref(), &hooks, &action_tx, &repeat),
+                MouseEvent::Moved { delta_x, delta_y } => {
+                    handle_moved(delta_x, delta_y, &hooks, &action_tx)
                 }
-
-                // Gesture button: suppress the native click and begin a hold. The
-                // swipe commits mid-motion in the `Moved` arm; here, on release, we
-                // only fire the plain `Click` when no swipe committed. The cursor is
-                // free to drift via the pass-through `Moved` events during the hold.
-                if pressed {
-                    let is_gesture = hooks.read().is_ok_and(|m| m.gestures.contains_key(&id));
-                    if is_gesture {
-                        HOLD.with_borrow_mut(|h| h.begin(id));
-                        return EventDisposition::Suppress;
-                    }
-                } else {
-                    // Release: end the hold and release the `HOLD` borrow *before* any
-                    // dispatch — the callback must stay lock-light, since a
-                    // synthesized event could otherwise re-enter the tap and re-borrow
-                    // `HOLD` (a RefCell double-borrow panic, freeze hazard).
-                    let ended = HOLD.with_borrow_mut(|h| h.end(id));
-                    if let Some(was_click) = ended {
-                        if was_click {
-                            // No swipe committed → fire the plain click. Resolve to an
-                            // owned action (so no lock is held across dispatch), then
-                            // dispatch with the guard already dropped.
-                            let action = hooks
-                                .read()
-                                .ok()
-                                .map(|m| resolve_gesture_click(&m.gestures, id));
-                            if let Some(action) = action {
-                                info!(button = %id, action = %action.label(), "gesture click → executing bound action");
-                                dispatch_action(&action, &dpi_cycle, &capture);
-                            }
+                MouseEvent::CaptureInterrupted => {
+                    // The OS dropped events (tap disabled); cancel any hold so a
+                    // lost button-up can't later commit a phantom swipe off
+                    // ordinary motion.
+                    HOLD.with_borrow_mut(HoldState::cancel);
+                    // Same reasoning for the repeat cycles: without this, a
+                    // swallowed button-up would leave the action firing forever.
+                    let _ = repeat.send(RepeatCmd::StopAll);
+                    EventDisposition::PassThrough
+                }
+                MouseEvent::Scroll {
+                    delta_x, delta_y, ..
+                } => {
+                    #[cfg(not(target_os = "windows"))]
+                    let _ = (delta_x, delta_y);
+                    #[cfg(target_os = "windows")]
+                    if delta_y == 0.0
+                        && let Some((button, action)) = hooks
+                            .try_read()
+                            .ok()
+                            .and_then(|maps| rebound_thumbwheel_action(&maps, delta_x))
+                    {
+                        info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
+                        if try_queue_action(&action_tx, action) {
+                            return EventDisposition::Suppress;
                         }
-                        return EventDisposition::Suppress;
+                    }
+                    EventDisposition::PassThrough
+                }
+            }
+        }
+        // Function-key remapper: on key-down, look up a [keyboard.bindings]
+        // entry for this keycode + modifier mask. A match queues its action
+        // (suppressing the original key so it doesn't also type / trigger its
+        // native function); an unmatched key passes through untouched. Key-up
+        // is ignored to avoid double-firing the action.
+        HookEvent::Key(openlogi_hook::KeyEvent {
+            keycode,
+            pressed,
+            modifiers,
+        }) => {
+            if !pressed {
+                return EventDisposition::PassThrough;
+            }
+            let trigger = KeyTrigger {
+                keycode,
+                modifiers: convert_modifiers(modifiers),
+            };
+            match keyboard_bindings
+                .try_read()
+                .ok()
+                .and_then(|m| m.get(&trigger).cloned())
+            {
+                Some(action) => {
+                    info!(keycode, action = %action.label(), "key → executing bound action");
+                    if try_queue_action(&action_tx, action) {
+                        EventDisposition::Suppress
+                    } else {
+                        EventDisposition::PassThrough
                     }
                 }
-
-                // Single-action button.
-                let action = hooks.read().ok().and_then(|m| m.bindings.get(&id).cloned());
-                let Some(action) = action else {
-                    // Unbound → leave the physical button to the OS.
-                    return EventDisposition::PassThrough;
-                };
-
-                // A button left on its own native click (e.g. Middle → MiddleClick)
-                // should just do that click; suppressing and re-synthesising it
-                // would be pointless churn.
-                if is_native_click(id, &action) {
-                    return EventDisposition::PassThrough;
-                }
-
-                if pressed {
-                    info!(button = %id, action = %action.label(), "button → executing bound action");
-                    dispatch_action(&action, &dpi_cycle, &capture);
-                    // Increment-style actions keep firing while the button is
-                    // held; the worker owns the timing. A send failure just
-                    // means the worker is gone, which costs only the repeat.
-                    if action.is_repeatable() {
-                        let _ = repeat.send(RepeatCmd::Start(id, action));
-                    }
-                } else {
-                    // Unconditional, but keyed to this button: a stop for a
-                    // button that is not repeating is a no-op, so a binding that
-                    // changed mid-hold still ends the cycle its own press
-                    // started — without touching another button's hold.
-                    let _ = repeat.send(RepeatCmd::Stop(id));
-                }
-                EventDisposition::Suppress
+                None => EventDisposition::PassThrough,
             }
-            MouseEvent::Moved { delta_x, delta_y } => {
-                // Feed an in-progress hold; a committed swipe fires here, mid-motion.
-                // Always pass through so the cursor keeps moving — the swipe is read,
-                // not consumed (the B2 cursor-drift tradeoff vs. a HID++ raw-XY divert
-                // that would freeze the pointer).
-                let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
-                if let Some((button, dir)) = commit {
-                    // Resolve to an owned action and drop the read guard before
-                    // dispatch (same lock-light rule as the release arm). The button
-                    // can leave the gesture set mid-hold (a per-app rebuild); the
-                    // commit has already armed `fired`, so the release won't fire a
-                    // click. Fall back to the same click action the release path uses
-                    // so the suppressed press is never swallowed into nothing —
-                    // symmetric with `resolve_gesture_click`.
-                    let action = hooks.read().ok().map(|m| {
-                        m.gestures
-                            .get(&button)
-                            .and_then(|dirs| dirs.get(&dir).cloned())
-                            .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
-                    });
-                    if let Some(action) = action {
-                        info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
-                        dispatch_action(&action, &dpi_cycle, &capture);
-                    }
-                }
-                EventDisposition::PassThrough
-            }
-            MouseEvent::CaptureInterrupted => {
-                // The OS dropped events (tap disabled); cancel any hold so a lost
-                // button-up can't later commit a phantom swipe off ordinary motion.
-                HOLD.with_borrow_mut(HoldState::cancel);
-                // Same reasoning for the repeat cycles: without this, a swallowed
-                // button-up would leave the action firing forever.
-                let _ = repeat.send(RepeatCmd::StopAll);
-                EventDisposition::PassThrough
-            }
-            MouseEvent::Scroll { .. } => EventDisposition::PassThrough,
         }
     });
 
     match result {
         Ok(hook) => {
-            info!("OS mouse hook installed");
+            info!("OS input hook installed");
             Some(hook)
         }
         Err(e) => {
-            warn!(error = %e, "could not install OS mouse hook — events will not be captured");
+            warn!(error = %e, "could not install OS input hook — events will not be captured");
             None
         }
     }
+}
+
+/// Resolve a native horizontal-wheel tick to a rebound thumb-wheel action.
+/// The built-in horizontal-scroll defaults intentionally return `None` so the
+/// physical wheel stays native unless the user changed that direction. On
+/// Windows/MX Master 2S, positive `WM_MOUSEHWHEEL` delta is the physical
+/// backward/down direction, so it maps to `ThumbwheelScrollDown`.
+#[cfg(any(target_os = "windows", test))]
+fn rebound_thumbwheel_action(maps: &HookMaps, delta_x: f32) -> Option<(ButtonId, Action)> {
+    let button = if delta_x > 0.0 {
+        ButtonId::ThumbwheelScrollDown
+    } else if delta_x < 0.0 {
+        ButtonId::ThumbwheelScrollUp
+    } else {
+        return None;
+    };
+    let action = maps.bindings.get(&button)?.clone();
+    (action != default_binding(button)).then_some((button, action))
 }
 
 /// The action a gesture button's plain (no-swipe) click should fire: its
@@ -459,38 +739,99 @@ fn is_native_click(id: ButtonId, action: &Action) -> bool {
     )
 }
 
+/// Minimum time between two BrowserBack (or two BrowserForward) keyboard
+/// dispatches, shared across the CGEventTap hook and the HID++ gesture
+/// watcher — both call [`dispatch_action`] independently, and on devices
+/// where one physical press is visible through both paths, a naive dispatch
+/// would fire the keyboard shortcut twice for one click. Same window as the
+/// HID++ path's own intra-press debounce (`BACK_FORWARD_DEBOUNCE` in
+/// `openlogi-hid`), for consistency.
+const BROWSER_NAV_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// Per-direction last-dispatch timestamps backing [`browser_nav_debounce_ok`].
+/// `(last_back, last_forward)`.
+static BROWSER_NAV_LAST: Mutex<(Option<Instant>, Option<Instant>)> = Mutex::new((None, None));
+
+/// Whether a BrowserBack/BrowserForward keyboard dispatch for `action` should
+/// proceed, or be suppressed as a duplicate of one already sent (from either
+/// dispatch path) within [`BROWSER_NAV_DEBOUNCE`]. Records the dispatch time
+/// on every `true` return so the *next* call — from either path — sees it.
+fn browser_nav_debounce_ok(action: &Action) -> bool {
+    let mut last = BROWSER_NAV_LAST
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let slot = if matches!(action, Action::BrowserForward) {
+        &mut last.1
+    } else {
+        &mut last.0
+    };
+    let now = Instant::now();
+    let fire = slot.is_none_or(|t| now.duration_since(t) >= BROWSER_NAV_DEBOUNCE);
+    if fire {
+        *slot = Some(now);
+    }
+    fire
+}
+
 /// Route a bound action either to OS-level event synthesis
 /// ([`Action::execute`]) or to one of OpenLogi's hardware-side handlers.
 ///
 /// `dpi_cycle` is held across a write lock long enough to advance the index
 /// and snapshot the new DPI + target; the actual HID write spawns its own
 /// thread via [`write_dpi_in_background`] to keep event callbacks non-blocking.
-/// `capture` lets those writes reuse the capture session's open channel.
+/// `registry` confirms that `capture` is still current or supplies the current
+/// inventory channel. Hardware actions are skipped when standalone callers do
+/// not provide a registry.
 pub fn dispatch_action(
     action: &Action,
-    dpi_cycle: &Arc<RwLock<DpiCycleState>>,
+    dpi_cycle: &Arc<RwLock<DpiCycles>>,
+    device_key: Option<&str>,
     capture: &CaptureChannel,
+    registry: Option<&ChannelRegistry>,
+    receiver_access: &ReceiverAccess,
 ) {
     let next = match action {
         Action::CycleDpiPresets => match dpi_cycle.write() {
-            Ok(mut guard) => guard.cycle(),
+            Ok(mut guard) => guard.state_for(device_key).and_then(DpiCycleState::cycle),
             Err(e) => {
                 warn!(error = %e, "dpi_cycle lock poisoned — cycle skipped");
                 None
             }
         },
         Action::SetDpiPreset(i) => match dpi_cycle.write() {
-            Ok(mut guard) => guard.set(usize::from(*i)),
+            Ok(mut guard) => guard
+                .state_for(device_key)
+                .and_then(|state| state.set(usize::from(*i))),
             Err(e) => {
                 warn!(error = %e, "dpi_cycle lock poisoned — set skipped");
                 None
             }
         },
         Action::ToggleSmartShift => {
-            let target = dpi_cycle.read().ok().and_then(|g| g.target.clone());
+            let target = dpi_cycle.read().ok().and_then(|g| g.target_for(device_key));
             info!("SmartShift toggle → flipping wheel mode");
-            toggle_smartshift_in_background(Some(capture), target);
+            if let Some(registry) = registry {
+                toggle_smartshift_in_background(capture, registry, receiver_access, target);
+            } else {
+                warn!("no inventory registry — SmartShift toggle skipped");
+            }
             return;
+        }
+        // BrowserBack/BrowserForward fall through to the keyboard shortcut
+        // (Cmd+[ / Cmd+]) here — for Chrome and other apps that respond to
+        // it, and as the HID++ gesture watcher's own fallback when its
+        // AXPress attempt (Safari) fails. On devices where one physical press
+        // is visible through both the CGEventTap hook and the HID++ diverted
+        // path (e.g. MX Vertical), both independently reach this arm for the
+        // *same* press, so it's cross-path debounced — otherwise a
+        // keyboard-driven browser like Chrome would navigate twice per click.
+        Action::BrowserBack | Action::BrowserForward => {
+            if browser_nav_debounce_ok(action) {
+                openlogi_inject::execute(action);
+            } else {
+                info!(action = %action.label(), "browser nav debounced — duplicate dispatch path suppressed");
+            }
+            None
         }
         other => {
             openlogi_inject::execute(other);
@@ -499,7 +840,11 @@ pub fn dispatch_action(
     };
     if let Some((dpi, target)) = next {
         info!(dpi, "DPI action → writing to device");
-        write_dpi_in_background(Some(capture), target, dpi);
+        if let Some(registry) = registry {
+            write_dpi_in_background(capture, registry, receiver_access, target, dpi);
+        } else {
+            warn!("no inventory registry — DPI action skipped");
+        }
     } else if matches!(action, Action::CycleDpiPresets | Action::SetDpiPreset(_)) {
         info!(
             action = %action.label(),
@@ -513,6 +858,22 @@ mod tests {
     use super::*;
     use openlogi_core::binding::GESTURE_SWIPE_THRESHOLD;
 
+    /// A hold arriving through the OS hook, which has no device key.
+    fn hook(button: ButtonId) -> RepeatKey {
+        (None, button)
+    }
+
+    /// A hold arriving through one device's capture session.
+    fn dev(key: &str, button: ButtonId) -> RepeatKey {
+        (Some(key.to_owned()), button)
+    }
+
+    /// Just the actions of a [`RepeatCycles::take_due`] batch, for assertions
+    /// that don't care which device each fire dispatches against.
+    fn actions(due: Vec<(Option<String>, Action)>) -> Vec<Action> {
+        due.into_iter().map(|(_, action)| action).collect()
+    }
+
     /// The gap between fires is long enough that a test can step time by hand:
     /// jump past the initial delay, then past one interval, without sleeping.
     fn past(now: Instant, gap: Duration) -> Instant {
@@ -525,11 +886,11 @@ mod tests {
         // letting go of one killed the other's repeat while it was still down.
         let start = Instant::now();
         let mut cycles = RepeatCycles::default();
-        cycles.start(ButtonId::Back, Action::VolumeDown, start);
-        cycles.start(ButtonId::Forward, Action::VolumeUp, start);
-        cycles.stop(ButtonId::Back);
+        cycles.start(hook(ButtonId::Back), Action::VolumeDown, start);
+        cycles.start(hook(ButtonId::Forward), Action::VolumeUp, start);
+        cycles.stop(&hook(ButtonId::Back));
 
-        let due = cycles.take_due(past(start, REPEAT_INITIAL_DELAY));
+        let due = actions(cycles.take_due(past(start, REPEAT_INITIAL_DELAY)));
         assert_eq!(
             due,
             vec![Action::VolumeUp],
@@ -543,23 +904,59 @@ mod tests {
         // click on some other button must not disturb a hold in progress.
         let start = Instant::now();
         let mut cycles = RepeatCycles::default();
-        cycles.start(ButtonId::Back, Action::VolumeDown, start);
-        cycles.stop(ButtonId::MiddleClick);
+        cycles.start(hook(ButtonId::Back), Action::VolumeDown, start);
+        cycles.stop(&hook(ButtonId::MiddleClick));
 
         assert_eq!(
-            cycles.take_due(past(start, REPEAT_INITIAL_DELAY)),
+            actions(cycles.take_due(past(start, REPEAT_INITIAL_DELAY))),
             vec![Action::VolumeDown]
         );
     }
 
     #[test]
+    fn the_same_button_on_two_devices_repeats_as_two_independent_holds() {
+        // The capture watcher runs one session per online device, so the same
+        // ButtonId can be held on two mice at once — and releasing it on one
+        // must not end the other's cycle.
+        let start = Instant::now();
+        let mut cycles = RepeatCycles::default();
+        cycles.start(dev("lift", ButtonId::Back), Action::VolumeDown, start);
+        cycles.start(dev("mx3", ButtonId::Back), Action::VolumeUp, start);
+        cycles.stop(&dev("lift", ButtonId::Back));
+
+        assert_eq!(
+            cycles.take_due(past(start, REPEAT_INITIAL_DELAY)),
+            vec![(Some("mx3".to_owned()), Action::VolumeUp)],
+            "each device's hold lives and dies on its own release edge"
+        );
+    }
+
+    #[test]
+    fn stop_device_ends_only_that_devices_cycles() {
+        // One session's teardown must not touch another device's live hold, nor
+        // a hold the OS hook (device-less) is driving.
+        let start = Instant::now();
+        let mut cycles = RepeatCycles::default();
+        cycles.start(dev("lift", ButtonId::Back), Action::VolumeDown, start);
+        cycles.start(dev("mx3", ButtonId::Forward), Action::VolumeUp, start);
+        cycles.start(hook(ButtonId::MiddleClick), Action::ScrollDown, start);
+        cycles.stop_device("lift");
+
+        assert_eq!(
+            actions(cycles.take_due(past(start, REPEAT_INITIAL_DELAY))),
+            vec![Action::ScrollDown, Action::VolumeUp],
+            "only the dead session's cycles end (BTreeMap order: hook key first)"
+        );
+    }
+
+    #[test]
     fn stop_all_ends_every_hold() {
-        // What a capture session sends as it goes away: no release edge is
+        // What the hook sends when the OS disables the tap: no release edge is
         // coming for anything still held, so nothing may stay armed.
         let start = Instant::now();
         let mut cycles = RepeatCycles::default();
-        cycles.start(ButtonId::Back, Action::VolumeDown, start);
-        cycles.start(ButtonId::Forward, Action::VolumeUp, start);
+        cycles.start(hook(ButtonId::Back), Action::VolumeDown, start);
+        cycles.start(hook(ButtonId::Forward), Action::VolumeUp, start);
         cycles.stop_all();
 
         assert!(
@@ -579,7 +976,7 @@ mod tests {
     fn nothing_fires_before_the_initial_delay_elapses() {
         let start = Instant::now();
         let mut cycles = RepeatCycles::default();
-        cycles.start(ButtonId::Back, Action::VolumeDown, start);
+        cycles.start(hook(ButtonId::Back), Action::VolumeDown, start);
 
         // 90% of the way into the delay — a firmly ordinary click.
         let just_short = REPEAT_INITIAL_DELAY.mul_f32(0.9);
@@ -600,19 +997,19 @@ mod tests {
         // one button's fire must not reschedule the other's.
         let start = Instant::now();
         let mut cycles = RepeatCycles::default();
-        cycles.start(ButtonId::Back, Action::VolumeDown, start);
+        cycles.start(hook(ButtonId::Back), Action::VolumeDown, start);
 
         // Back has been repeating for a while before Forward is even pressed.
         let mut now = past(start, REPEAT_INITIAL_DELAY);
         for _ in 0..6 {
-            assert_eq!(cycles.take_due(now), vec![Action::VolumeDown]);
+            assert_eq!(actions(cycles.take_due(now)), vec![Action::VolumeDown]);
             now = past(now, REPEAT_START_INTERVAL);
         }
-        cycles.start(ButtonId::Forward, Action::VolumeUp, now);
+        cycles.start(hook(ButtonId::Forward), Action::VolumeUp, now);
 
         // Forward serves out its own full initial delay, during which Back keeps
         // firing alone.
-        assert_eq!(cycles.take_due(now), vec![Action::VolumeDown]);
+        assert_eq!(actions(cycles.take_due(now)), vec![Action::VolumeDown]);
         assert_eq!(
             cycles.take_due(past(now, REPEAT_INITIAL_DELAY)).len(),
             2,
@@ -624,19 +1021,19 @@ mod tests {
     fn a_re_press_restarts_that_buttons_delay_and_ramp() {
         let start = Instant::now();
         let mut cycles = RepeatCycles::default();
-        cycles.start(ButtonId::Back, Action::VolumeDown, start);
+        cycles.start(hook(ButtonId::Back), Action::VolumeDown, start);
         let mut now = past(start, REPEAT_INITIAL_DELAY);
-        assert_eq!(cycles.take_due(now), vec![Action::VolumeDown]);
+        assert_eq!(actions(cycles.take_due(now)), vec![Action::VolumeDown]);
 
         // A fresh press (binding swap, or a re-press that outran the release).
         now += Duration::from_millis(10);
-        cycles.start(ButtonId::Back, Action::VolumeUp, now);
+        cycles.start(hook(ButtonId::Back), Action::VolumeUp, now);
         assert!(
             cycles.take_due(now + REPEAT_START_INTERVAL).is_empty(),
             "the delay starts over, so the hold ramps up slowly again"
         );
         assert_eq!(
-            cycles.take_due(past(now, REPEAT_INITIAL_DELAY)),
+            actions(cycles.take_due(past(now, REPEAT_INITIAL_DELAY))),
             vec![Action::VolumeUp],
             "and it fires the newly bound action"
         );
@@ -707,6 +1104,68 @@ mod tests {
     }
 
     #[test]
+    fn a_same_button_re_press_restarts_the_stale_hold() {
+        // A press for the very button we think is held can only mean its
+        // release was lost (a button cannot be pressed while down): the hold
+        // restarts instead of wedging on the stale state.
+        let mut hold = HoldState::default();
+        assert!(hold.begin(ButtonId::Back));
+        assert!(
+            hold.begin(ButtonId::Back),
+            "a same-button re-press is proof of a lost release"
+        );
+        hold.swipe.backdate_hold_for_test();
+        assert_eq!(
+            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some((ButtonId::Back, GestureDirection::Right))
+        );
+    }
+
+    #[test]
+    fn an_aged_hold_yields_to_a_new_buttons_press() {
+        // No release ever clears a hold whose button-up was lost (and no OS
+        // interrupt fired), so a different gesture button's press takes over
+        // once the hold is old enough to be presumed stale — otherwise every
+        // gesture button stays wedged until the stale one is pressed again.
+        let mut hold = HoldState::default();
+        assert!(hold.begin(ButtonId::Back));
+        hold.backdate_for_test();
+        assert!(
+            hold.begin(ButtonId::Forward),
+            "an aged hold must yield to a new press"
+        );
+        hold.swipe.backdate_hold_for_test();
+        assert_eq!(
+            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some((ButtonId::Forward, GestureDirection::Right))
+        );
+    }
+
+    #[test]
+    fn begin_is_first_wins_while_a_hold_is_active() {
+        // Two gesture buttons pressed together: the first hold keeps the
+        // accumulator; the second press is refused (its caller falls through to
+        // the single-action path) and its release is a stray, not a click.
+        let mut hold = HoldState::default();
+        assert!(hold.begin(ButtonId::Back));
+        hold.swipe.backdate_hold_for_test();
+        assert!(
+            !hold.begin(ButtonId::Forward),
+            "a second press must not hijack the active hold"
+        );
+
+        // The accumulated motion still belongs to the first button...
+        assert_eq!(
+            hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some((ButtonId::Back, GestureDirection::Right))
+        );
+        // ...the refused button's release is a stray...
+        assert_eq!(hold.end(ButtonId::Forward), None);
+        // ...and the first hold ends normally (swipe fired, so not a click).
+        assert_eq!(hold.end(ButtonId::Back), Some(false));
+    }
+
+    #[test]
     fn end_matches_the_held_button() {
         let mut hold = HoldState::default();
         hold.begin(ButtonId::Back);
@@ -735,6 +1194,73 @@ mod tests {
             BTreeMap::from([(GestureDirection::Click, Action::None)]),
         )]);
         assert_eq!(resolve_gesture_click(&off, ButtonId::Back), Action::None);
+    }
+
+    #[test]
+    fn fail_open_press_pairs_release() {
+        let mut fail_open = HashSet::new();
+        // Queue accepted → suppress press and release.
+        assert_eq!(
+            remapped_press_disposition(ButtonId::Back, true, &mut fail_open),
+            EventDisposition::Suppress
+        );
+        assert_eq!(
+            remapped_release_disposition(ButtonId::Back, &mut fail_open),
+            EventDisposition::Suppress
+        );
+        // Queue rejected → pass through press *and* matching release.
+        assert_eq!(
+            remapped_press_disposition(ButtonId::Forward, false, &mut fail_open),
+            EventDisposition::PassThrough
+        );
+        assert_eq!(
+            remapped_release_disposition(ButtonId::Forward, &mut fail_open),
+            EventDisposition::PassThrough
+        );
+        // A later unpaired release of that button suppresses again.
+        assert_eq!(
+            remapped_release_disposition(ButtonId::Forward, &mut fail_open),
+            EventDisposition::Suppress
+        );
+    }
+
+    #[test]
+    fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
+        let maps = HookMaps {
+            bindings: BTreeMap::from([
+                (ButtonId::ThumbwheelScrollUp, Action::NextTab),
+                (ButtonId::ThumbwheelScrollDown, Action::PrevTab),
+            ]),
+            gestures: BTreeMap::new(),
+        };
+        assert_eq!(
+            rebound_thumbwheel_action(&maps, 1.0),
+            Some((ButtonId::ThumbwheelScrollDown, Action::PrevTab))
+        );
+        assert_eq!(
+            rebound_thumbwheel_action(&maps, -1.0),
+            Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
+        );
+        assert_eq!(rebound_thumbwheel_action(&maps, 0.0), None);
+    }
+
+    #[test]
+    fn native_thumbwheel_scroll_stays_os_native() {
+        let maps = HookMaps {
+            bindings: BTreeMap::from([
+                (
+                    ButtonId::ThumbwheelScrollUp,
+                    default_binding(ButtonId::ThumbwheelScrollUp),
+                ),
+                (
+                    ButtonId::ThumbwheelScrollDown,
+                    default_binding(ButtonId::ThumbwheelScrollDown),
+                ),
+            ]),
+            gestures: BTreeMap::new(),
+        };
+        assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
+        assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
     }
 
     #[test]

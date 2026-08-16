@@ -124,6 +124,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          # Release profile (fat LTO) — never share with CI debug keys.
+          shared-key: macos-stable-release
+          # Packaging never runs on master push; allow same-repo PRs/dispatch/release
+          # to refresh the shared release cache (few keys, not per-job thrash).
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.arch }}"
@@ -147,10 +154,19 @@ jobs:
           OPENLOGI_UPDATE_BASE_URL: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_BASE_URL
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY
 
+      - name: Cache Homebrew downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            ~/Library/Caches/Homebrew/downloads
+          key: brew-macos-${{ runner.arch }}-librsvg-create-dmg-v1
+          restore-keys: |
+            brew-macos-${{ runner.arch }}-
+
       - name: Install packaging tools
         run: |
-          brew install librsvg
-          brew install create-dmg
+          brew install librsvg create-dmg
 
       - name: Validate release secrets
         if: ${{ inputs.sign }}
@@ -185,61 +201,54 @@ jobs:
           p12-file-base64: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE }}
           p12-password: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE_PASSWORD }}
 
-      - name: Build OpenLogi.app with cargo-bundle
+      - name: Build and package OpenLogi
         env:
+          APPLE_SIGNING_IDENTITY: ${{ steps.load_secrets.outputs.APPLE_SIGNING_IDENTITY }}
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_BASE_URL }}
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
         run: |
           set -euo pipefail
           export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
-          cargo run -p xtask -- macos bundle
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            cargo run -p xtask -- macos package --sign-identity "$APPLE_SIGNING_IDENTITY"
+          else
+            cargo run -p xtask -- macos package
+          fi
 
-      - name: Sign app bundle
+      # xtask stamps and verifies this itself; re-checking the artifact here is
+      # deliberate redundancy, because a bundle that ships with the `.dev`
+      # identity voids every user's permission grants and moves them to a
+      # different config directory (releases 0.6.24–0.6.26).
+      - name: Verify production bundle identities
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/osx/OpenLogi.app"
+          plist() { /usr/libexec/PlistBuddy -c "Print :$2" "$1/Contents/Info.plist"; }
+          check() { # bundle expected-id expected-name
+            [ "$(plist "$1" CFBundleIdentifier)" = "$2" ]
+            [ "$(plist "$1" CFBundleName)" = "$3" ]
+            [ "$(plist "$1" CFBundleDisplayName)" = "$3" ]
+            [ -f "$1/Contents/Resources/AppIcon.icns" ]
+          }
+          check "$app" "org.openlogi.openlogi" "OpenLogi"
+          check "$app/Contents/Library/LoginItems/OpenLogiAgent.app" "org.openlogi.agent" "OpenLogi Agent"
+          check "$app/Contents/Library/LoginItems/OpenLogiOverlay.app" "org.openlogi.overlay" "OpenLogi Overlay"
+
+      - name: Verify signed app bundle
         if: ${{ inputs.sign }}
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ steps.load_secrets.outputs.APPLE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
           app="target/release/bundle/osx/OpenLogi.app"
           helper="$app/Contents/Library/LoginItems/OpenLogiAgent.app"
+          overlay="$app/Contents/Library/LoginItems/OpenLogiOverlay.app"
           cli="$app/Contents/MacOS/openlogi"
-          # Inside-out signing: seal the nested agent helper with its own
-          # signature first, then the outer app (which seals the signed helper).
-          # --deep is deprecated and can't give the helper an independent
-          # signature, which a stable per-helper TCC identity — so the agent's
-          # Accessibility grant survives app updates — requires.
-          if [ -d "$helper" ]; then
-            codesign --force --options runtime --timestamp \
-              --sign "$APPLE_SIGNING_IDENTITY" "$helper"
-          fi
-          # The embedded CLI is a second Mach-O under Contents/MacOS; sign it
-          # with the hardened runtime before the outer app or notarization
-          # rejects its as-built ad-hoc signature.
-          if [ -f "$cli" ]; then
-            codesign --force --options runtime --timestamp \
-              --sign "$APPLE_SIGNING_IDENTITY" "$cli"
-          fi
-          codesign --force --options runtime --timestamp \
-            --sign "$APPLE_SIGNING_IDENTITY" "$app"
           codesign --verify --strict --verbose=2 "$app"
           [ -d "$helper" ] && codesign --verify --strict --verbose=2 "$helper"
+          [ -d "$overlay" ] && codesign --verify --strict --verbose=2 "$overlay"
           [ -f "$cli" ] && codesign --verify --strict --verbose=2 "$cli"
-
-      - name: Create and sign DMG
-        if: ${{ inputs.sign }}
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ steps.load_secrets.outputs.APPLE_SIGNING_IDENTITY }}
-        run: |
-          set -euo pipefail
-          cargo run -p xtask -- macos dmg --sign-identity "$APPLE_SIGNING_IDENTITY"
-
-      # Unsigned PR/dispatch build: `--sign-identity` is optional, so the DMG is
-      # produced without it (Gatekeeper will warn on open — fine for testing).
-      - name: Create unsigned DMG
-        if: ${{ !inputs.sign }}
-        run: |
-          set -euo pipefail
-          cargo run -p xtask -- macos dmg
+          # Fail the release if camera access would still be blocked at runtime.
+          codesign -d --entitlements - "$app" 2>/dev/null \
+            | grep -q 'com.apple.security.device.camera'
 
       - name: Notarize DMG
         if: ${{ inputs.sign }}
@@ -325,9 +334,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # No rust-cache here: this workflow runs only on tag refs, whose saved
-      # caches no future tag can restore (and no default-branch job produces a
-      # matching key), so the save was pure overhead churning the cache quota.
+      # Release builds need their own cache (crt-static RUSTFLAGS + --release).
+      # Shared per matrix.arch so labeled PR packaging and dispatch runs warm
+      # each other; tag-only saves were pure quota churn under the old per-ref
+      # keys, but a shared-key entry is restorable across PR/dispatch/release.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: windows-stable-release-${{ matrix.arch }}
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       # Azure signing config lives in 1Password, matching the macOS job's secret flow.
       # load-secrets-action is a node action, so it runs on Windows runners too. The
@@ -371,14 +386,60 @@ jobs:
           : "${AZURE_SIGNING_ACCOUNT:?Configure AZURE_SIGNING_ACCOUNT in the Azure 1Password item}"
           : "${AZURE_CERT_PROFILE:?Configure AZURE_CERT_PROFILE in the Azure 1Password item}"
 
+      # Same R2 1Password item the macOS job reads: the minisign public key the
+      # binary embeds and the base URL its manifest URL derives from. Without
+      # this env the exe ships with no key, and the updater's Strict policy
+      # fails every Windows check with "policy requires a minisign signature,
+      # but no public key is configured" — auto-update never worked on Windows.
+      - name: Load static updater config from 1Password
+        id: update_config
+        if: ${{ inputs.sign }}
+        # Pinned to an immutable commit (matching crowdin.yml): this step runs
+        # with the 1Password service-account token during signed release
+        # builds, so a repointed mutable tag must not be able to swap the code.
+        uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
+        with:
+          export-env: false
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          OPENLOGI_UPDATE_BASE_URL: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_BASE_URL
+          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY
+
+      # Same rationale as the Azure gate above: load-secrets emits empty
+      # outputs on a missing item, and an empty key would rebuild the broken
+      # no-key release instead of failing here with the cause named.
+      - name: Validate updater config
+        if: ${{ inputs.sign }}
+        shell: bash
+        env:
+          OPENLOGI_UPDATE_BASE_URL: ${{ steps.update_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
+          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.update_config.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in the R2 1Password item}"
+          : "${OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY in the R2 1Password item}"
+
       # No separate CLI artifact will ever ship on Windows (cargo install
       # covers that audience), so job and artifact names carry no GUI
       # qualifier. The GUI is a thin IPC client; the headless agent (ported in
       # #167) owns the device I/O, input hook, and IPC server, and the GUI
       # spawns a sibling `openlogi-agent.exe` when the pipe is absent — so the
       # agent MUST ship next to the GUI or the app connects to nothing (#347).
+      # The updater env mirrors the macOS bundle step: openlogi-gui reads the
+      # key and manifest URL via option_env! at compile time. Unsigned builds
+      # get empty values and keep the fail-closed dev behaviour, so the
+      # manifest-URL export is guarded rather than derived from an empty base.
       - name: Build OpenLogi (GUI + agent)
-        run: cargo build --release -p openlogi-gui -p openlogi-agent --target ${{ matrix.target }}
+        shell: bash
+        env:
+          OPENLOGI_UPDATE_BASE_URL: ${{ steps.update_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
+          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.update_config.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "$OPENLOGI_UPDATE_BASE_URL" ]; then
+            export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
+          fi
+          cargo build --release -p openlogi-gui -p openlogi-agent --target ${{ matrix.target }}
 
       # Federated (passwordless) login. Requires an app registration whose federated
       # credential subject is `repo:AprilNEA/OpenLogi:environment:release`, granted the
@@ -407,7 +468,7 @@ jobs:
       # Authenticode-signs via Artifact Signing (ex-Trusted Signing). The action only
       # runs on Windows runners. azure/login leaves an az CLI session that the action's
       # default AzureCliCredential picks up, so no azure-* secret inputs are needed.
-      - name: Sign openlogi-gui.exe and openlogi-agent.exe with Artifact Signing
+      - name: Sign OpenLogi Windows executables with Artifact Signing
         if: ${{ inputs.sign }}
         uses: azure/artifact-signing-action@v2
         with:
@@ -417,6 +478,7 @@ jobs:
           # `files` is a newline-separated list; one call signs both PE files.
           files: |
             ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-gui.exe
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-overlay.exe
             ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-agent.exe
           # Timestamping is mandatory: without it the signature expires after
           # 3 days. The URL must stay http — SignTool rejects an https /tr up
@@ -438,7 +500,7 @@ jobs:
           # HashMismatch (bytes no longer match the signature) are trust-store
           # independent and always ship-blockers; NotTrusted/UnknownError depend
           # on the runner's trust store, so they stay log-only.
-          foreach ($exe in 'openlogi-gui.exe', 'openlogi-agent.exe') {
+          foreach ($exe in 'openlogi-gui.exe', 'openlogi-overlay.exe', 'openlogi-agent.exe') {
             $sig = Get-AuthenticodeSignature "target\${{ matrix.target }}\release\$exe"
             $sig | Format-List
             if ($null -eq $sig.SignerCertificate -or
@@ -457,6 +519,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist, stage | Out-Null
           Copy-Item target\${{ matrix.target }}\release\openlogi-gui.exe stage\OpenLogi.exe
+          Copy-Item target\${{ matrix.target }}\release\openlogi-overlay.exe stage\openlogi-overlay.exe
           Copy-Item target\${{ matrix.target }}\release\openlogi-agent.exe stage\openlogi-agent.exe
           # Zipping after signing is safe: Authenticode lives in the PE files.
           $ref = $env:GITHUB_REF_NAME -replace '/', '-'
@@ -579,9 +642,10 @@ jobs:
           # unreachable; the guards turn a confusing "$null.FullName -> empty
           # -d" wix error into a named cause if those invariants ever shift.
           $gui = Get-Item signed-exe\OpenLogi.exe -ErrorAction SilentlyContinue
+          $overlay = Get-Item signed-exe\openlogi-overlay.exe -ErrorAction SilentlyContinue
           $agent = Get-Item signed-exe\openlogi-agent.exe -ErrorAction SilentlyContinue
-          if ($null -eq $gui -or $null -eq $agent) {
-            Write-Error "signed-exe\ must contain OpenLogi.exe and openlogi-agent.exe — nothing to package"
+          if ($null -eq $gui -or $null -eq $overlay -or $null -eq $agent) {
+            Write-Error "signed-exe\ must contain OpenLogi.exe, openlogi-overlay.exe, and openlogi-agent.exe — nothing to package"
             exit 1
           }
           New-Item -ItemType Directory -Force -Path out | Out-Null
@@ -591,6 +655,7 @@ jobs:
             -d Version=$version `
             -d ExeFile="$($gui.FullName)" `
             -d AgentExeFile="$($agent.FullName)" `
+            -d OverlayExeFile="$($overlay.FullName)" `
             -o out\OpenLogi.msi
 
       - name: Azure login (OIDC)
@@ -676,6 +741,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: linux-stable-release
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       # The nfpm `arch` and the runner's native arch must agree — the packages
       # are built natively, not cross-compiled, so a mismatched runner would

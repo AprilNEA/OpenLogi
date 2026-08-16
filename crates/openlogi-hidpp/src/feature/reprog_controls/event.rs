@@ -1,11 +1,11 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{nibble::U4, protocol::v20};
+use crate::{feature::DecodeEvent, nibble::U4, protocol::v20};
 
 use super::ControlId;
 
 fn i16_from_be_payload(bytes: &[u8]) -> i16 {
-    i16::from_be_bytes(bytes.try_into().unwrap())
+    i16::from_be_bytes([bytes[0], bytes[1]])
 }
 
 /// One analytics key event entry.
@@ -117,5 +117,11 @@ pub(super) fn decode_event_payload(
             delta_vertical: i16_from_be_payload(&payload[1..=2]),
         }),
         _ => None,
+    }
+}
+
+impl DecodeEvent for ReprogControlsEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        decode_event_payload(sub_id, payload)
     }
 }

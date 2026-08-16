@@ -1,11 +1,14 @@
 //! UI localization plumbing.
 //!
 //! Translations live in `crates/openlogi-gui/locales/*.yml` and are loaded at
-//! compile time by the `rust_i18n::i18n!` macro in `main.rs`. Crowdin manages one
-//! file per locale: `en.yml` is the source file, and every other locale in
-//! [`SUPPORTED`] is downloaded as a translated YAML file. Call sites use the
-//! [`tr!`](crate::tr) helper (or `rust_i18n::t!`) with the **English string as
-//! the key**.
+//! compile time by the `rust_i18n::i18n!` macro in `main.rs` (fallback `"en"`).
+//! **`en.yml` is the English source of truth** (the English text IS the key).
+//! New or changed copy must land in **every** `locales/*.yml` in the same
+//! change — the parity test enforces key-for-key match. Crowdin improves
+//! non-English values over time and the workflow downloads only real
+//! translations (`skip_untranslated_strings`). Call sites use
+//! [`tr!`](crate::tr) / `rust_i18n::t!` with the **English string as the key**.
+//! Missing keys fall back to English at runtime, but catalogs must not lag.
 //!
 //! The current locale is a process-global atomic inside `rust_i18n`. Setting it
 //! re-localizes both our own call sites *and* gpui-component's built-in widget
@@ -217,6 +220,22 @@ mod tests {
         assert_eq!(rust_i18n::t!("No devices connected"), "未连接设备"); // menu-bar device line
         assert_eq!(rust_i18n::t!("Lighting"), "灯光"); // keyboard lighting tab
         assert_eq!(rust_i18n::t!("BRIGHTNESS"), "亮度"); // lighting panel label
+        assert_eq!(
+            rust_i18n::t!("Automatically start OpenLogi when you log in to macOS."),
+            "登录 macOS 时自动启动 OpenLogi。"
+        );
+        assert_eq!(
+            rust_i18n::t!("No supported pairing-capable receiver was found."),
+            "未找到支持配对的接收器。"
+        );
+        assert_eq!(
+            rust_i18n::t!("Device offline — DPI unavailable."),
+            "设备离线 —— DPI 不可用。"
+        );
+        assert_eq!(
+            rust_i18n::t!("This device does not report native HID++ scroll inversion support."),
+            "此设备未报告原生 HID++ 滚动反转支持。"
+        );
         assert_ne!(
             rust_i18n::t!(BLURB),
             BLURB,
@@ -254,6 +273,14 @@ mod tests {
         assert_eq!(rust_i18n::t!("Settings"), "設定");
         assert_eq!(rust_i18n::t!("Left Click"), "左鍵按一下");
         assert_eq!(rust_i18n::t!("Bind %{name}", name => "X"), "設定 X");
+        assert_eq!(
+            rust_i18n::t!("No supported pairing-capable receiver was found."),
+            "找不到支援配對的接收器。"
+        );
+        assert_eq!(
+            rust_i18n::t!("Device offline — DPI unavailable."),
+            "裝置離線 —— DPI 無法使用。"
+        );
         assert_ne!(
             rust_i18n::t!(BLURB),
             BLURB,
@@ -271,9 +298,21 @@ mod tests {
         assert_eq!(rust_i18n::t!(BLURB), BLURB);
     }
 
+    /// Every shipped locale must carry the same keys as `en.yml`. New UI copy
+    /// is added to all catalogs in the same change; Crowdin later improves the
+    /// non-English values (never English fill-in).
     #[test]
     fn locale_files_have_the_same_keys() {
-        let source = locale_keys(include_str!("../locales/en.yml"));
+        use std::collections::BTreeSet;
+
+        let source: BTreeSet<&str> = locale_keys(include_str!("../locales/en.yml"))
+            .into_iter()
+            .collect();
+        assert!(
+            !source.is_empty(),
+            "en.yml is the string source of truth and must define keys"
+        );
+
         for (locale, file) in [
             ("ja", include_str!("../locales/ja.yml")),
             ("ru", include_str!("../locales/ru.yml")),
@@ -295,8 +334,13 @@ mod tests {
             ("pt-PT", include_str!("../locales/pt-PT.yml")),
             ("sv", include_str!("../locales/sv.yml")),
         ] {
-            let keys = locale_keys(file);
-            assert_eq!(keys, source, "{locale}.yml keys drifted from en.yml");
+            let keys: BTreeSet<&str> = locale_keys(file).into_iter().collect();
+            let missing: Vec<&str> = source.difference(&keys).copied().collect();
+            let extras: Vec<&str> = keys.difference(&source).copied().collect();
+            assert!(
+                missing.is_empty() && extras.is_empty(),
+                "{locale}.yml key mismatch vs en.yml — missing: {missing:?}, extras: {extras:?}"
+            );
         }
     }
 

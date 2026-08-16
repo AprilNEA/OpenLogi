@@ -7,7 +7,7 @@
 # the desktop binary it's a transparent passthrough (`exec "$@"`).
 #
 # For `openlogi-gui` it launches the build from inside a throwaway
-# `OpenLogi.app` so macOS shows the real app name (the bold menu-bar title)
+# `OpenLogi.app` so macOS shows the dev app name (the bold menu-bar title)
 # and the Dock icon during development. Both are read from the bundle's
 # `Info.plist` / `Resources` — a bare `target/debug/openlogi-gui` has neither,
 # so macOS falls back to the executable name and a generic icon.
@@ -23,6 +23,19 @@
 # already-running agent outside this checkout (normally a production install).
 set -euo pipefail
 
+# macOS SIP strips every DYLD_* variable when it launches this script's
+# interpreter, including the DYLD_FALLBACK_LIBRARY_PATH cargo sets so a test
+# binary can locate its dynamically-linked libstd. Most binaries link libstd
+# statically and never notice; a proc-macro crate's test binary links it
+# dynamically and aborts with "Library not loaded: @rpath/libstd-*.dylib —
+# no LC_RPATH's found". Rebuild the path cargo meant to pass. One `rustc`
+# call, and the parameter expansions (first line / last line) keep this
+# working on the bash 3.2 that ships with macOS.
+if [ -z "${DYLD_FALLBACK_LIBRARY_PATH:-}" ]; then
+  rustc_print="$(rustc --print sysroot --print host-tuple)"
+  export DYLD_FALLBACK_LIBRARY_PATH="${rustc_print%%$'\n'*}/lib/rustlib/${rustc_print##*$'\n'}/lib"
+fi
+
 bin="$1"
 shift
 
@@ -37,6 +50,7 @@ RES="$APP/Contents/Resources"
 ICON_SRC="$ROOT/crates/openlogi-gui/icon/AppIcon.icns"
 PLIST_SRC="$ROOT/crates/openlogi-gui/bundle/gui-dev/Info.plist"
 AGENT_PLIST_SRC="$ROOT/crates/openlogi-gui/bundle/agent-dev/Info.plist"
+OVERLAY_PLIST_SRC="$ROOT/crates/openlogi-gui/bundle/overlay-dev/Info.plist"
 CODESIGN_ENABLED="${OPENLOGI_DEV_CODESIGN:-1}"
 
 check_external_agent() {
@@ -94,8 +108,9 @@ if [ "$ICON_SRC" -nt "$RES/AppIcon.icns" ]; then
   cp -f "$ICON_SRC" "$RES/AppIcon.icns"
 fi
 
-# Info.plist — minimal, dev-only. A distinct `.dev` identifier keeps this
-# target artifact from registering as the production app in LaunchServices.
+# Info.plist — minimal, dev-only. A distinct `.dev` identifier and display name
+# keep this target artifact from registering as the production app in
+# LaunchServices or macOS Privacy & Security.
 PLIST="$APP/Contents/Info.plist"
 if [ "$PLIST_SRC" -nt "$PLIST" ]; then
   cp -f "$PLIST_SRC" "$PLIST"
@@ -149,8 +164,10 @@ if [ "${OPENLOGI_DEV_AGENT:-1}" != "0" ]; then
   agent_dir="$(dirname "$bin")" # target/debug or target/release
   if [ "${agent_dir##*/}" = "release" ]; then
     cargo build -p openlogi-agent --release --manifest-path "$ROOT/Cargo.toml"
+    cargo build -p openlogi-gui --bin openlogi-overlay --release --manifest-path "$ROOT/Cargo.toml"
   else
     cargo build -p openlogi-agent --manifest-path "$ROOT/Cargo.toml"
+    cargo build -p openlogi-gui --bin openlogi-overlay --manifest-path "$ROOT/Cargo.toml"
   fi
   helper="$APP/Contents/Library/LoginItems/OpenLogi Agent.app"
   rm -rf \
@@ -168,6 +185,17 @@ if [ "${OPENLOGI_DEV_AGENT:-1}" != "0" ]; then
   # agent isn't a blank entry in the Accessibility list. ICON_SRC was generated
   # / verified above.
   cp -f "$ICON_SRC" "$helper/Contents/Resources/AppIcon.icns"
+
+  overlay_helper="$APP/Contents/Library/LoginItems/OpenLogiOverlay.app"
+  rm -rf "$overlay_helper"
+  mkdir -p "$overlay_helper/Contents/MacOS"
+  if [ "$CODESIGN_ENABLED" != "0" ]; then
+    cp -f "$agent_dir/openlogi-overlay" "$overlay_helper/Contents/MacOS/openlogi-overlay"
+  else
+    ln -f "$agent_dir/openlogi-overlay" "$overlay_helper/Contents/MacOS/openlogi-overlay" 2>/dev/null \
+      || cp -f "$agent_dir/openlogi-overlay" "$overlay_helper/Contents/MacOS/openlogi-overlay"
+  fi
+  cp -f "$OVERLAY_PLIST_SRC" "$overlay_helper/Contents/Info.plist"
 fi
 
 # Sign after all resources and nested helpers are in place; otherwise macOS can
@@ -183,6 +211,10 @@ if [ "$CODESIGN_ENABLED" != "0" ]; then
   if [ -d "$APP/Contents/Library/LoginItems/OpenLogi Agent.app" ]; then
     codesign --force --sign "$identity" --timestamp=none \
       "$APP/Contents/Library/LoginItems/OpenLogi Agent.app"
+  fi
+  if [ -d "$APP/Contents/Library/LoginItems/OpenLogiOverlay.app" ]; then
+    codesign --force --sign "$identity" --timestamp=none \
+      "$APP/Contents/Library/LoginItems/OpenLogiOverlay.app"
   fi
   codesign --force --sign "$identity" --timestamp=none "$APP"
 fi

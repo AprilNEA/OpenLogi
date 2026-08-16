@@ -11,7 +11,9 @@ keywords = ["logitech", "input", "uinput", "sendinput", "mouse"]
 categories = ["hardware-support", "os"]
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", version = "0.6.22" }
+shellexpand.workspace = true
+opener.workspace = true
+openlogi-core = { path = "../openlogi-core", version = "0.7.1" }
 tracing = { workspace = true }
 
 [dev-dependencies]
@@ -33,6 +35,8 @@ objc2-app-kit = { workspace = true, features = [
   "NSEvent",
   "NSGraphicsContext",
   "objc2-core-graphics",
+  "NSWorkspace",
+  "NSRunningApplication",
 ] }
 objc2-core-graphics = { version = "0.3.2", features = ["CGEvent"] }
 objc2-foundation = { workspace = true }

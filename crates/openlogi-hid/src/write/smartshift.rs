@@ -1,5 +1,6 @@
 use std::num::NonZeroU8;
 use std::sync::Arc;
+use std::time::Duration;
 
 use hidpp::{
     channel::HidppChannel,
@@ -15,7 +16,14 @@ use tracing::debug;
 use crate::route::DeviceRoute;
 use crate::smartshift::{SmartShiftMode, SmartShiftStatus};
 
-use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
+use super::{
+    HidppFeatureErrorKind, HidppOperation, WriteError, classify_hidpp_error, open_feature,
+    with_route,
+};
+
+/// Brief pause before re-trying a SmartShift transaction that lost a race with
+/// concurrent HID++ traffic on another open of the same node (#485).
+const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 /// Whether a failure to open the `0x2111` Enhanced SmartShift feature should
 /// trigger the `0x2110` legacy fallback. Only a missing-`0x2111` feature
@@ -26,6 +34,31 @@ pub(super) fn is_missing_enhanced(err: &WriteError) -> bool {
         err,
         WriteError::FeatureUnsupported { feature_hex } if *feature_hex == 0x2111
     )
+}
+
+/// Errors that, on SmartShift, have been observed to clear on a second attempt
+/// with byte-identical parameters after concurrent multi-open traffic settles
+/// (#485). Permanent failures (unsupported feature, bad permanent payload) are
+/// not included.
+pub(super) fn is_transient_smartshift_error(err: &WriteError) -> bool {
+    matches!(
+        err,
+        WriteError::HidppFeature {
+            kind: HidppFeatureErrorKind::InvalidArgument
+                | HidppFeatureErrorKind::Busy
+                | HidppFeatureErrorKind::HwError,
+            ..
+        } | WriteError::UnsupportedResponse { .. }
+    )
+}
+
+/// Whether `current` already satisfies a desired SmartShift write. A zero
+/// `auto_disengage` / `tunable_torque` is the firmware "do not change" sentinel
+/// on the write path, so those fields are only compared when non-zero.
+pub(super) fn status_matches_desired(current: SmartShiftStatus, desired: SmartShiftStatus) -> bool {
+    current.mode == desired.mode
+        && (desired.auto_disengage == 0 || current.auto_disengage == desired.auto_disengage)
+        && (desired.tunable_torque == 0 || current.tunable_torque == desired.tunable_torque)
 }
 
 /// Map the fork's `0x2110` [`WheelMode`] onto OpenLogi's [`SmartShiftMode`].
@@ -62,14 +95,23 @@ enum SmartShift {
 
 impl SmartShift {
     /// Open whichever SmartShift feature the device exposes. Tries `0x2111`
-    /// first; on a missing-`0x2111` error (and only that), retries with
-    /// `0x2110`. Any other error from the first attempt propagates unchanged.
+    /// first; on a missing-`0x2111` error (and only that), re-checks once before
+    /// falling back to `0x2110`. A concurrent multi-open of the same HID node
+    /// can mis-deliver a `root.get_feature` response and make a present `0x2111`
+    /// look absent (#485) — the second probe catches that before we write the
+    /// wrong feature. Any other error from either attempt propagates unchanged.
     async fn open(device: &mut Device) -> Result<Self, WriteError> {
         match open_feature::<SmartShiftEnhancedFeature>(device).await {
             Ok(feature) => Ok(Self::Enhanced(feature)),
             Err(err) if is_missing_enhanced(&err) => {
-                let feature = open_feature::<SmartShiftFeature>(device).await?;
-                Ok(Self::Legacy(feature))
+                match open_feature::<SmartShiftEnhancedFeature>(device).await {
+                    Ok(feature) => Ok(Self::Enhanced(feature)),
+                    Err(err) if is_missing_enhanced(&err) => {
+                        let feature = open_feature::<SmartShiftFeature>(device).await?;
+                        Ok(Self::Legacy(feature))
+                    }
+                    Err(err) => Err(err),
+                }
             }
             Err(err) => Err(err),
         }
@@ -199,13 +241,20 @@ impl SmartShift {
 pub async fn get_smartshift_status(route: &DeviceRoute) -> Result<SmartShiftStatus, WriteError> {
     let index = route.device_index();
     with_route(route, move |channel| async move {
-        let mut device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        let smartshift = SmartShift::open(&mut device).await?;
-        smartshift.status().await
+        get_smartshift_status_on_channel(&channel, index).await
     })
     .await
+}
+
+pub(super) async fn get_smartshift_status_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<SmartShiftStatus, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let smartshift = SmartShift::open(&mut device).await?;
+    smartshift.status().await
 }
 
 /// Set the SmartShift auto-disengage sensitivity on `route`, preserving the
@@ -252,6 +301,9 @@ pub async fn toggle_smartshift(route: &DeviceRoute) -> Result<SmartShiftMode, Wr
 
 /// The SmartShift toggle itself, on an already-open channel at HID++ `index`.
 /// Shared by [`toggle_smartshift`] and [`toggle_smartshift_on`](super::toggle_smartshift_on).
+///
+/// Retries once on the same transient errors as [`set_smartshift_on_channel`] —
+/// a ModeShift binding can race concurrent HID++ traffic the same way (#485).
 pub(super) async fn toggle_smartshift_on_channel(
     channel: &Arc<HidppChannel>,
     index: u8,
@@ -259,7 +311,23 @@ pub(super) async fn toggle_smartshift_on_channel(
     let mut device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    let smartshift = SmartShift::open(&mut device).await?;
+    match toggle_once(&mut device, index).await {
+        Ok(mode) => Ok(mode),
+        Err(err) if is_transient_smartshift_error(&err) => {
+            debug!(
+                index,
+                error = ?err,
+                "SmartShift toggle hit a transient error; retrying once"
+            );
+            tokio::time::sleep(TRANSIENT_RETRY_DELAY).await;
+            toggle_once(&mut device, index).await
+        }
+        Err(err) => Err(err),
+    }
+}
+
+async fn toggle_once(device: &mut Device, index: u8) -> Result<SmartShiftMode, WriteError> {
+    let smartshift = SmartShift::open(device).await?;
     let status = smartshift.status().await?;
     let next = status.mode.flipped();
     smartshift
@@ -298,6 +366,11 @@ pub async fn set_smartshift(
 
 /// The SmartShift write itself, on an already-open channel at HID++ `index`.
 /// Shared by [`set_smartshift`] and [`set_smartshift_on`](super::set_smartshift_on).
+///
+/// Skips the HID++ write when the device already holds the desired config, and
+/// retries once after a short delay on transient device errors — the first
+/// post-start reapply races concurrent opens of the same Bolt/Unifying node and
+/// can return `InvalidArgument` for byte-identical parameters (#485).
 pub(super) async fn set_smartshift_on_channel(
     channel: &Arc<HidppChannel>,
     index: u8,
@@ -305,23 +378,58 @@ pub(super) async fn set_smartshift_on_channel(
     auto_disengage: u8,
     tunable_torque: u8,
 ) -> Result<(), WriteError> {
+    let desired = SmartShiftStatus {
+        mode,
+        auto_disengage,
+        tunable_torque,
+    };
     let mut device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let smartshift = SmartShift::open(&mut device).await?;
-    smartshift
-        .set_status(SmartShiftStatus {
-            mode,
+    if let Ok(current) = smartshift.status().await
+        && status_matches_desired(current, desired)
+    {
+        debug!(
+            index,
+            ?mode,
             auto_disengage,
             tunable_torque,
-        })
-        .await?;
-    debug!(
-        index,
-        ?mode,
-        auto_disengage,
-        tunable_torque,
-        "wrote SmartShift config"
-    );
-    Ok(())
+            "SmartShift already matches config; skipping write"
+        );
+        return Ok(());
+    }
+    match smartshift.set_status(desired).await {
+        Ok(()) => {
+            debug!(
+                index,
+                ?mode,
+                auto_disengage,
+                tunable_torque,
+                "wrote SmartShift config"
+            );
+            Ok(())
+        }
+        Err(err) if is_transient_smartshift_error(&err) => {
+            debug!(
+                index,
+                error = ?err,
+                "SmartShift write hit a transient error; retrying once"
+            );
+            tokio::time::sleep(TRANSIENT_RETRY_DELAY).await;
+            // Re-open: the first attempt may have bound the wrong feature index
+            // after a mis-delivered root.get_feature response.
+            let smartshift = SmartShift::open(&mut device).await?;
+            smartshift.set_status(desired).await?;
+            debug!(
+                index,
+                ?mode,
+                auto_disengage,
+                tunable_torque,
+                "wrote SmartShift config"
+            );
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
 }

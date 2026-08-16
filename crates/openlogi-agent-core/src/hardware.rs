@@ -1,26 +1,38 @@
 //! Hardware-side actions invoked from both the GPUI thread (slider release)
 //! and the OS-event hook thread (bound button press).
 //!
-//! Each call spawns a one-shot tokio runtime on a dedicated OS thread —
-//! cheap at the cadence these fire at (≤ once per slider release / button
-//! press) and avoids holding a long-lived async runtime alongside GPUI's
-//! executor.
+//! [`DeviceOp`] is the seam every device write and read goes through: it binds
+//! a [`DeviceRoute`] to this runtime's capture/inventory channels (built via
+//! [`crate::orchestrator::SharedRuntime::device`] or
+//! [`crate::orchestrator::SharedRuntime::keyboard_device`]), then either
+//! awaits [`DeviceOp::run`] (the IPC server's reads/writes, which must report
+//! their result to the GUI) or fires [`DeviceOp::detach`] (the OS-hook and
+//! reconnect paths, which must never block their caller). Both resolve the
+//! channel the same way every caller always did — a registry-confirmed
+//! capture channel or the exact current inventory channel; a registry miss is
+//! unavailable, never a fallback to re-enumerating and opening a competing
+//! connection.
 //!
-//! When the HID++ capture session already has the target device open, these
-//! reuse that channel ([`openlogi_hid::CaptureChannel`]) instead of
-//! re-enumerating and opening a fresh one — the dominant cost of a write. The
-//! transient open is kept as a fallback for callers (e.g. the CGEventTap hook)
-//! firing while no session is connected.
+//! `detach` spawns a one-shot tokio runtime on a dedicated OS thread — cheap
+//! at the cadence these fire at (≤ once per slider release / button press)
+//! and avoids holding a long-lived async runtime alongside GPUI's executor.
 
 use std::future::Future;
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, DeviceRoute, DpiInfo, HidppFeatureErrorKind, HidppOperation, ScrollResolution,
-    SharedChannel, SmartShiftMode, SmartShiftStatus, WriteError,
+    CaptureChannel, ChannelRegistry, DeviceRoute, HidppFeatureErrorKind, HidppOperation,
+    ScrollResolution, SharedChannel, SmartShiftMode, WriteError,
 };
+use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
+
+use crate::receiver_access::ReceiverAccess;
+
+mod light;
+
+pub use light::{apply_light, cancel_light_reapply, set_light_in_background};
 
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
 /// own, so without this an asleep / unresponsive device would hang (and leak)
@@ -28,186 +40,386 @@ use tracing::{debug, warn};
 /// under a second.
 const WRITE_BUDGET: Duration = Duration::from_secs(5);
 
-/// Read the current DPI and supported DPI values on a background worker.
-///
-/// This helper is intentionally blocking so GPUI callers can run it via
-/// `cx.background_spawn` without making the UI thread own a Tokio runtime.
-pub fn read_dpi_info_blocking(target: &DeviceRoute) -> Result<DpiInfo, WriteError> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| WriteError::RuntimeInit {
-            message: e.to_string(),
-        })?;
-
-    rt.block_on(async {
-        tokio::time::timeout(WRITE_BUDGET, openlogi_hid::get_dpi_info(target))
-            .await
-            .map_err(|_| WriteError::RequestTimedOut {
-                operation: HidppOperation::ReadDpiCapabilities,
-            })?
+/// Select the only Agent-authoritative channel for `route`.
+fn authoritative_channel(
+    capture: Option<&CaptureChannel>,
+    registry: &ChannelRegistry,
+    route: &DeviceRoute,
+) -> Result<SharedChannel, WriteError> {
+    let capture = capture
+        .and_then(|capture| capture.read().ok())
+        .and_then(|slot| (*slot).clone())
+        .filter(|channel| channel.matches(route));
+    choose_authoritative(
+        capture,
+        |channel| registry.is_current(channel),
+        || registry.lookup(route),
+    )
+    .ok_or_else(|| {
+        // Route resolution failing means every known channel for this route is
+        // gone — a cached haptic feature handle pinning one of them would
+        // deadlock the enumerator's reopen (it waits for the old channel's
+        // last Arc to drop) while itself never being invalidated, because no
+        // haptic I/O reaches the cache without a resolvable route.
+        openlogi_hid::clear_haptic_feature_cache();
+        WriteError::DeviceNotFound
     })
 }
 
-/// Clone out the capture session's channel when it reaches `route`. `None` when
-/// no capture session is connected or the open channel points at a different
-/// device.
-fn reusable_channel(
-    capture: Option<&CaptureChannel>,
-    route: &DeviceRoute,
-) -> Option<SharedChannel> {
-    capture?
-        .read()
-        .ok()
-        .and_then(|slot| (*slot).clone())
-        .filter(|chan| chan.matches(route))
+fn choose_authoritative<T>(
+    capture: Option<T>,
+    capture_is_current: impl FnOnce(&T) -> bool,
+    registry_lookup: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    match capture {
+        Some(capture) if capture_is_current(&capture) => Some(capture),
+        _ => registry_lookup(),
+    }
+}
+
+/// One device's HID++ write or read, bound to this runtime's capture and
+/// inventory channels for `route`. Built via
+/// [`crate::orchestrator::SharedRuntime::device`] or
+/// [`crate::orchestrator::SharedRuntime::keyboard_device`] — the receiver-side
+/// counterpart of `openlogi_hid::write::with_route`'s "boilerplate-eater"
+/// pattern, applied to an already-open channel instead of a fresh one.
+pub struct DeviceOp<'a> {
+    capture: &'a CaptureChannel,
+    registry: &'a ChannelRegistry,
+    receiver_access: &'a ReceiverAccess,
+    route: DeviceRoute,
+}
+
+impl<'a> DeviceOp<'a> {
+    pub(crate) fn new(
+        capture: &'a CaptureChannel,
+        registry: &'a ChannelRegistry,
+        receiver_access: &'a ReceiverAccess,
+        route: &DeviceRoute,
+    ) -> Self {
+        Self {
+            capture,
+            registry,
+            receiver_access,
+            route: route.clone(),
+        }
+    }
+
+    /// Resolve the authoritative channel without acquiring the receiver
+    /// lease. Callers that manage their own lease/thread lifecycle across
+    /// more than one write (the volatile-settings reapply sequence) resolve
+    /// once up front through this instead of [`Self::run`]/[`Self::detach`].
+    fn resolve(&self) -> Result<SharedChannel, WriteError> {
+        authoritative_channel(Some(self.capture), self.registry, &self.route)
+    }
+
+    /// Lease the receiver, resolve the authoritative channel, then run `f`
+    /// against it under `WRITE_BUDGET`, mapping a timeout to
+    /// [`WriteError::RequestTimedOut`].
+    ///
+    /// Lease-then-resolve, not the other way around: the lease wait is
+    /// unbounded, and a channel resolved before it would risk being retired
+    /// by the inventory enumerator while still queued — the write itself
+    /// would likely still succeed on the stale handle, but anything that
+    /// caches a feature off it (see the haptic feature cache's
+    /// `EpochGuarded` note) would then pin a channel the enumerator can never
+    /// reopen. Used by every awaited device call: the IPC server's
+    /// DPI/SmartShift/lighting reads and writes, and the Actions Ring haptic
+    /// path.
+    pub async fn run<F, Fut, T>(self, op: HidppOperation, f: F) -> Result<T, WriteError>
+    where
+        F: FnOnce(SharedChannel) -> Fut,
+        Fut: Future<Output = Result<T, WriteError>>,
+    {
+        let _lease = self.receiver_access.acquire_for_io().await;
+        let shared = self.resolve()?;
+        timed(op, f(shared)).await
+    }
+
+    /// Fire-and-forget `f` on its own OS thread and one-shot runtime, with the
+    /// standard three-arm outcome logging: a completed write and a failed
+    /// write both log at their own level, keyed by `label`; a device that
+    /// never answers within `WRITE_BUDGET` warns instead of hanging the
+    /// thread forever.
+    ///
+    /// Resolves the channel on the calling thread before spawning — every
+    /// `*_in_background` write did this, so a resolution failure (no target,
+    /// registry miss) never pays for a thread spawn, and the lease (acquired
+    /// only once the thread is running) is never awaited for a write that was
+    /// already going nowhere.
+    pub fn detach<F, Fut, T>(self, label: &'static str, f: F)
+    where
+        F: FnOnce(SharedChannel) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, WriteError>>,
+    {
+        let index = self.route.device_index();
+        self.spawn_write(label, f, move |result| match result {
+            Ok(Ok(_)) => debug!(index, label, "background write completed"),
+            Ok(Err(e)) => warn!(error = ?e, label, "background write failed"),
+            Err(_) => warn!(
+                index,
+                label, "background write timed out (device asleep/unresponsive)"
+            ),
+        });
+    }
+
+    /// Core of [`Self::detach`], with the outcome handed to `log` instead of
+    /// an assumed logging shape. Used directly (bypassing `detach`) by any
+    /// write whose input carries a value worth logging — a written DPI, a
+    /// SmartShift config, an `on`/`off` flag, an RGB triple — so that value
+    /// stays in the log line instead of collapsing to the generic
+    /// `label`-only outcome message; native wheel-mode writes use the same
+    /// seam to log a `FeatureUnsupported` result at `debug` (unsupported
+    /// HiRes wheel/inversion is expected on plenty of mice), unlike every
+    /// other background write's `warn`.
+    fn spawn_write<F, Fut, T>(
+        self,
+        label: &'static str,
+        f: F,
+        log: impl FnOnce(Result<Result<T, WriteError>, Elapsed>) + Send + 'static,
+    ) where
+        F: FnOnce(SharedChannel) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, WriteError>>,
+    {
+        let Ok(shared) = self.resolve() else {
+            debug!(route = %self.route, label, "no inventory channel — write skipped");
+            return;
+        };
+        let receiver_access = self.receiver_access.clone();
+        std::thread::spawn(move || {
+            let Some(rt) = one_shot_runtime(label) else {
+                return;
+            };
+            let result = rt.block_on(async {
+                let _lease = receiver_access.acquire_for_io().await;
+                tokio::time::timeout(WRITE_BUDGET, f(shared)).await
+            });
+            log(result);
+        });
+    }
+}
+
+/// Build the one-shot current-thread runtime every background write spawns
+/// its OS thread onto. Logs and returns `None` on the rare case that
+/// initialization itself fails (e.g. OS resource exhaustion).
+fn one_shot_runtime(label: &str) -> Option<tokio::runtime::Runtime> {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => Some(rt),
+        Err(e) => {
+            warn!(error = %e, label, "tokio runtime init failed; write skipped");
+            None
+        }
+    }
 }
 
 /// Spawn an OS thread that toggles SmartShift (free ↔ ratchet) on the
-/// device at `target` via `openlogi_hid::toggle_smartshift`. Returns
+/// device at `target` via its current shared channel. Returns
 /// immediately; failures (incl. devices that expose neither `0x2111` nor
 /// the older `0x2110` SmartShift feature) are logged.
 pub fn toggle_smartshift_in_background(
-    capture: Option<&CaptureChannel>,
+    capture: &CaptureChannel,
+    registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
     target: Option<DeviceRoute>,
 ) {
     let Some(target) = target else {
         debug!("no target device — SmartShift toggle skipped");
         return;
     };
-    let shared = reusable_channel(capture, &target);
-    let reused = shared.is_some();
-    std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                warn!(error = %e, "tokio runtime init failed; SmartShift toggle skipped");
-                return;
-            }
-        };
-        let result = rt.block_on(async {
-            tokio::time::timeout(WRITE_BUDGET, async {
-                match &shared {
-                    Some(shared) => openlogi_hid::toggle_smartshift_on(shared).await,
-                    None => openlogi_hid::toggle_smartshift(&target).await,
-                }
-            })
-            .await
-        });
-        let index = target.device_index();
-        match result {
-            Ok(Ok(mode)) => debug!(index, ?mode, reused, "SmartShift toggled"),
+    let index = target.device_index();
+    DeviceOp::new(capture, registry, receiver_access, &target).spawn_write(
+        "SmartShift toggle",
+        |c| async move { openlogi_hid::toggle_smartshift_on(&c).await },
+        move |result| match result {
+            Ok(Ok(mode)) => debug!(index, ?mode, "SmartShift toggled"),
             Ok(Err(e)) => warn!(error = ?e, "SmartShift toggle failed"),
             Err(_) => warn!(
                 index,
                 "SmartShift toggle timed out (device asleep/unresponsive)"
             ),
-        }
-    });
+        },
+    );
 }
 
-/// Read the device's current SmartShift configuration (wheel mode +
-/// auto-disengage threshold + tunable torque) on a background worker.
-///
-/// Blocking, like [`read_dpi_info_blocking`], so the SmartShift panel can run
-/// it off a dedicated OS thread without the UI thread owning a Tokio runtime.
-pub fn read_smartshift_status_blocking(
-    target: &DeviceRoute,
-) -> Result<SmartShiftStatus, WriteError> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| WriteError::RuntimeInit {
-            message: e.to_string(),
-        })?;
-
-    rt.block_on(async {
-        tokio::time::timeout(WRITE_BUDGET, openlogi_hid::get_smartshift_status(target))
-            .await
-            .map_err(|_| WriteError::RequestTimedOut {
-                operation: HidppOperation::ReadSmartShift,
-            })?
-    })
-}
-
-/// Spawn an OS thread that writes a full SmartShift configuration to the device
-/// at `target` via [`openlogi_hid::set_smartshift`]. Returns immediately;
-/// failures (incl. devices that expose neither `0x2111` nor the older `0x2110`
-/// SmartShift feature) are logged.
-///
-/// `target == None` is a no-op (dev environment without a real device).
-pub fn write_smartshift_in_background(
-    capture: Option<&CaptureChannel>,
-    target: Option<DeviceRoute>,
-    mode: SmartShiftMode,
-    auto_disengage: u8,
-    tunable_torque: u8,
-) {
-    let Some(target) = target else {
-        debug!("no target device — SmartShift write skipped");
-        return;
-    };
-    let shared = reusable_channel(capture, &target);
-    let reused = shared.is_some();
-    std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                warn!(error = %e, "tokio runtime init failed; SmartShift write skipped");
-                return;
-            }
-        };
-        let result = rt.block_on(async {
-            tokio::time::timeout(WRITE_BUDGET, async {
-                match &shared {
-                    Some(shared) => {
-                        openlogi_hid::set_smartshift_on(
-                            shared,
-                            mode,
-                            auto_disengage,
-                            tunable_torque,
-                        )
-                        .await
-                    }
-                    None => {
-                        openlogi_hid::set_smartshift(&target, mode, auto_disengage, tunable_torque)
-                            .await
-                    }
-                }
-            })
-            .await
-        });
-        let index = target.device_index();
-        match result {
-            Ok(Ok(())) => debug!(
-                index,
-                ?mode,
-                auto_disengage,
-                tunable_torque,
-                reused,
-                "SmartShift config written"
-            ),
-            Ok(Err(e)) => warn!(error = ?e, "SmartShift write failed"),
+/// Spawn an OS thread that writes the keyboard Fn-lock state to `op`'s device
+/// via [`openlogi_hid::set_fn_lock_on`]. Returns immediately; failures (incl.
+/// keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion) are
+/// logged.
+pub fn write_fn_lock_in_background(op: DeviceOp<'_>, on: bool) {
+    let index = op.route.device_index();
+    op.spawn_write(
+        "Fn-lock write",
+        move |c| async move { openlogi_hid::set_fn_lock_on(&c, on).await },
+        move |result| match result {
+            Ok(Ok(())) => debug!(index, on, "Fn-lock written"),
+            Ok(Err(e)) => warn!(error = ?e, "Fn-lock write failed"),
             Err(_) => warn!(
                 index,
-                "SmartShift write timed out (device asleep/unresponsive)"
+                "Fn-lock write timed out (device asleep/unresponsive)"
             ),
-        }
+        },
+    );
+}
+
+/// Desired SmartShift values for a reconnect re-apply.
+#[derive(Debug, Clone, Copy)]
+pub struct SmartShiftApply {
+    /// Wheel mode to write.
+    pub mode: SmartShiftMode,
+    /// Auto-disengage threshold (`0` = preserve).
+    pub auto_disengage: u8,
+    /// Tunable torque (`0` = preserve).
+    pub tunable_torque: u8,
+}
+
+/// Re-apply every volatile mouse setting for `op`'s device on a **single**
+/// background thread, sequentially, on the current inventory-owned channel.
+///
+/// Agent-start reapply used to fire DPI / SmartShift / wheel-mode each on its
+/// own thread, and each opened a fresh HID++ channel when capture was not yet
+/// ready. Concurrent opens of the same Bolt/Unifying node share the OS input
+/// stream while correlating responses only by software id — they cross-talk and
+/// produce the intermittent SmartShift `InvalidArgument` seen in #485. One
+/// sequential writer removes that self-race, so this deliberately does NOT
+/// decompose into three [`DeviceOp::detach`] calls: the channel is resolved
+/// once, the lease is held for the whole sequence, and every write below runs
+/// on the one OS thread spawned here. Takes `op` by reference (unlike every
+/// other function here) because it only ever reads its fields — it never
+/// hands the operation itself to [`DeviceOp::run`] or [`DeviceOp::detach`].
+pub fn reapply_mouse_volatile_in_background(
+    op: &DeviceOp<'_>,
+    resolution: Option<ScrollResolution>,
+    inverted: Option<bool>,
+    dpi: Option<u32>,
+    smartshift: Option<SmartShiftApply>,
+) {
+    let Ok(shared) = op.resolve() else {
+        debug!(route = %op.route, "no inventory channel — volatile reapply skipped");
+        return;
+    };
+    let receiver_access = op.receiver_access.clone();
+    let index = op.route.device_index();
+    std::thread::spawn(move || {
+        let Some(rt) = one_shot_runtime("volatile reapply") else {
+            return;
+        };
+        rt.block_on(async {
+            let _lease = receiver_access.acquire_for_io().await;
+            if resolution.is_some() || inverted.is_some() {
+                let result = tokio::time::timeout(WRITE_BUDGET, async {
+                    apply_wheel_mode(&shared, resolution, inverted).await
+                })
+                .await;
+                log_wheel_result(index, resolution, inverted, result);
+            }
+            if let Some(dpi) = dpi {
+                match u16::try_from(dpi) {
+                    Ok(dpi_u16) => {
+                        let result = tokio::time::timeout(WRITE_BUDGET, async {
+                            openlogi_hid::set_dpi_on(&shared, dpi_u16).await
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(())) => {
+                                debug!(index, dpi = dpi_u16, "DPI written to device");
+                            }
+                            Ok(Err(e)) => warn!(error = ?e, "DPI write failed"),
+                            Err(_) => warn!(
+                                dpi = dpi_u16,
+                                "DPI write timed out (device asleep/unresponsive)"
+                            ),
+                        }
+                    }
+                    Err(_) => {
+                        warn!(dpi, "DPI exceeds the HID++ u16 wire field; write skipped");
+                    }
+                }
+            }
+            if let Some(ss) = smartshift {
+                let result = tokio::time::timeout(WRITE_BUDGET, async {
+                    openlogi_hid::set_smartshift_on(
+                        &shared,
+                        ss.mode,
+                        ss.auto_disengage,
+                        ss.tunable_torque,
+                    )
+                    .await
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => debug!(
+                        index,
+                        mode = ?ss.mode,
+                        auto_disengage = ss.auto_disengage,
+                        tunable_torque = ss.tunable_torque,
+                        "SmartShift config written"
+                    ),
+                    Ok(Err(e)) => warn!(error = ?e, "SmartShift write failed"),
+                    Err(_) => warn!(
+                        index,
+                        "SmartShift write timed out (device asleep/unresponsive)"
+                    ),
+                }
+            }
+        });
     });
 }
 
-/// Spawn an OS thread that writes `dpi` to the device at `target` via
-/// `openlogi_hid::set_dpi`. Returns immediately; failures are logged.
+async fn apply_wheel_mode(
+    shared: &SharedChannel,
+    resolution: Option<ScrollResolution>,
+    inverted: Option<bool>,
+) -> Result<(), WriteError> {
+    match (resolution, inverted) {
+        (Some(resolution), Some(inverted)) => {
+            openlogi_hid::set_scroll_wheel_mode_on(shared, resolution, inverted)
+                .await
+                .map(|_| ())
+        }
+        (Some(resolution), None) => openlogi_hid::set_scroll_resolution_on(shared, resolution)
+            .await
+            .map(|_| ()),
+        (None, Some(inverted)) => openlogi_hid::set_scroll_inversion_on(shared, inverted).await,
+        (None, None) => Ok(()),
+    }
+}
+
+fn log_wheel_result(
+    index: u8,
+    resolution: Option<ScrollResolution>,
+    inverted: Option<bool>,
+    result: Result<Result<(), WriteError>, Elapsed>,
+) {
+    match result {
+        Ok(Ok(())) => debug!(index, ?resolution, ?inverted, "native wheel mode written"),
+        Ok(Err(WriteError::FeatureUnsupported { feature_hex })) => debug!(
+            index,
+            ?resolution,
+            ?inverted,
+            feature = format_args!("{feature_hex:#06x}"),
+            "native wheel mode unsupported"
+        ),
+        Ok(Err(e)) => warn!(error = ?e, "wheel mode write failed"),
+        Err(_) => warn!(
+            index,
+            ?resolution,
+            ?inverted,
+            "wheel mode write timed out (device asleep/unresponsive)"
+        ),
+    }
+}
+
+/// Spawn an OS thread that writes `dpi` to the device at `target` via its
+/// current shared channel. Returns immediately; failures are logged.
 ///
 /// `target == None` is a no-op (dev environment without a real device).
 pub fn write_dpi_in_background(
-    capture: Option<&CaptureChannel>,
+    capture: &CaptureChannel,
+    registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
     target: Option<DeviceRoute>,
     dpi: u32,
 ) {
@@ -215,48 +427,25 @@ pub fn write_dpi_in_background(
         debug!(dpi, "no target device — DPI write skipped");
         return;
     };
-    let shared = reusable_channel(capture, &target);
-    let reused = shared.is_some();
-    std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                warn!(error = %e, "tokio runtime init failed; DPI write skipped");
-                return;
-            }
-        };
-        // All device-supported DPI values fit in HID++'s u16 wire field; a
-        // larger value is a caller bug and must not be clamped onto the device.
-        let Ok(dpi_u16) = u16::try_from(dpi) else {
-            warn!(dpi, "DPI exceeds the HID++ u16 wire field; write skipped");
-            return;
-        };
-        let result = rt.block_on(async {
-            tokio::time::timeout(WRITE_BUDGET, async {
-                match &shared {
-                    Some(shared) => openlogi_hid::set_dpi_on(shared, dpi_u16).await,
-                    None => openlogi_hid::set_dpi(&target, dpi_u16).await,
-                }
-            })
-            .await
-        });
-        match result {
-            Ok(Ok(())) => debug!(
-                index = target.device_index(),
-                dpi = dpi_u16,
-                reused,
-                "DPI written to device"
-            ),
+    // All device-supported DPI values fit in HID++'s u16 wire field; a
+    // larger value is a caller bug and must not be clamped onto the device.
+    let Ok(dpi_u16) = u16::try_from(dpi) else {
+        warn!(dpi, "DPI exceeds the HID++ u16 wire field; write skipped");
+        return;
+    };
+    let index = target.device_index();
+    DeviceOp::new(capture, registry, receiver_access, &target).spawn_write(
+        "DPI write",
+        move |c| async move { openlogi_hid::set_dpi_on(&c, dpi_u16).await },
+        move |result| match result {
+            Ok(Ok(())) => debug!(index, dpi = dpi_u16, "DPI written to device"),
             Ok(Err(e)) => warn!(error = ?e, "DPI write failed"),
             Err(_) => warn!(
                 dpi = dpi_u16,
                 "DPI write timed out (device asleep/unresponsive)"
             ),
-        }
-    });
+        },
+    );
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -269,26 +458,18 @@ enum ScrollWheelModeChange {
     },
 }
 
-/// Spawn an OS thread that reconciles the configured native HiResWheel mode.
+/// Spawn an OS thread that reconciles the configured native HiResWheel mode
+/// for `op`'s device.
 ///
 /// `resolution == None` preserves the current device resolution;
 /// `inverted == None` preserves the current inversion bit. At least one field
 /// must be set by the caller. Unsupported devices are expected and only logged
 /// at debug level.
 pub fn write_scroll_wheel_mode_in_background(
-    capture: Option<&CaptureChannel>,
-    target: Option<DeviceRoute>,
+    op: DeviceOp<'_>,
     resolution: Option<ScrollResolution>,
     inverted: Option<bool>,
 ) {
-    let Some(target) = target else {
-        debug!(
-            ?resolution,
-            ?inverted,
-            "no target device — wheel mode write skipped"
-        );
-        return;
-    };
     let change = match (resolution, inverted) {
         (Some(resolution), Some(inverted)) => ScrollWheelModeChange::ResolutionAndInversion {
             resolution,
@@ -301,120 +482,57 @@ pub fn write_scroll_wheel_mode_in_background(
             return;
         }
     };
-    let shared = reusable_channel(capture, &target);
-    let reused = shared.is_some();
-    std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                warn!(error = %e, "tokio runtime init failed; wheel mode write skipped");
-                return;
-            }
-        };
-        let result = rt.block_on(async {
-            tokio::time::timeout(WRITE_BUDGET, async {
-                match (change, &shared) {
-                    (
-                        ScrollWheelModeChange::ResolutionAndInversion {
-                            resolution,
-                            inverted,
-                        },
-                        Some(shared),
-                    ) => openlogi_hid::set_scroll_wheel_mode_on(shared, resolution, inverted)
+    let index = op.route.device_index();
+    op.spawn_write(
+        "wheel mode write",
+        move |shared| async move {
+            match change {
+                ScrollWheelModeChange::ResolutionAndInversion {
+                    resolution,
+                    inverted,
+                } => openlogi_hid::set_scroll_wheel_mode_on(&shared, resolution, inverted)
+                    .await
+                    .map(|_| ()),
+                ScrollWheelModeChange::Resolution(resolution) => {
+                    openlogi_hid::set_scroll_resolution_on(&shared, resolution)
                         .await
-                        .map(|_| ()),
-                    (
-                        ScrollWheelModeChange::ResolutionAndInversion {
-                            resolution,
-                            inverted,
-                        },
-                        None,
-                    ) => openlogi_hid::set_scroll_wheel_mode(&target, resolution, inverted)
-                        .await
-                        .map(|_| ()),
-                    (ScrollWheelModeChange::Resolution(resolution), Some(shared)) => {
-                        openlogi_hid::set_scroll_resolution_on(shared, resolution)
-                            .await
-                            .map(|_| ())
-                    }
-                    (ScrollWheelModeChange::Resolution(resolution), None) => {
-                        openlogi_hid::set_scroll_resolution(&target, resolution)
-                            .await
-                            .map(|_| ())
-                    }
-                    (ScrollWheelModeChange::Inversion(inverted), Some(shared)) => {
-                        openlogi_hid::set_scroll_inversion_on(shared, inverted).await
-                    }
-                    (ScrollWheelModeChange::Inversion(inverted), None) => {
-                        openlogi_hid::set_scroll_inversion(&target, inverted).await
-                    }
+                        .map(|_| ())
                 }
-            })
-            .await
-        });
-        let index = target.device_index();
-        match result {
-            Ok(Ok(())) => debug!(
-                index,
-                ?resolution,
-                ?inverted,
-                reused,
-                "native wheel mode written"
-            ),
-            Ok(Err(WriteError::FeatureUnsupported { feature_hex })) => debug!(
-                index,
-                ?resolution,
-                ?inverted,
-                feature = format_args!("{feature_hex:#06x}"),
-                "native wheel mode unsupported"
-            ),
-            Ok(Err(e)) => warn!(error = ?e, "wheel mode write failed"),
-            Err(_) => warn!(
-                index,
-                ?resolution,
-                ?inverted,
-                "wheel mode write timed out (device asleep/unresponsive)"
-            ),
-        }
-    });
+                ScrollWheelModeChange::Inversion(inverted) => {
+                    openlogi_hid::set_scroll_inversion_on(&shared, inverted).await
+                }
+            }
+        },
+        move |result| log_wheel_result(index, resolution, inverted, result),
+    );
 }
 
-/// Apply `lighting` to the keyboard at `target` on a background thread.
+/// Apply `lighting` to the keyboard at `op`'s device on a background thread.
 ///
 /// Resolves the configured colour (scaled by brightness, or black when the
 /// lighting is off) and writes every key over HID++ via
-/// [`openlogi_hid::set_keyboard_color`]. A `None` target is a no-op (dev runs
-/// without a device); failures are logged, not surfaced.
-pub fn set_lighting_in_background(target: Option<DeviceRoute>, lighting: &Lighting) {
-    let Some(target) = target else {
-        debug!("no target device — lighting write skipped");
-        return;
-    };
+/// [`openlogi_hid::set_keyboard_color_on`]. A registry miss and write
+/// failures are logged, not surfaced.
+pub fn set_lighting_in_background(op: DeviceOp<'_>, lighting: &Lighting) {
     let (r, g, b) = lighting_rgb(lighting);
-    std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                warn!(error = %e, "tokio runtime init failed; lighting write skipped");
-                return;
-            }
-        };
-        match rt.block_on(openlogi_hid::set_keyboard_color(&target, r, g, b)) {
-            Ok(()) => debug!(r, g, b, "lighting written to keyboard"),
-            Err(e) => warn!(error = ?e, "lighting write failed"),
-        }
-    });
+    op.spawn_write(
+        "lighting write",
+        move |c| async move { openlogi_hid::set_keyboard_color_on(&c, r, g, b).await },
+        move |result| match result {
+            Ok(Ok(())) => debug!(r, g, b, "lighting written to keyboard"),
+            Ok(Err(e)) => warn!(error = ?e, "lighting write failed"),
+            Err(_) => warn!(
+                r,
+                g, b, "lighting write timed out (device asleep/unresponsive)"
+            ),
+        },
+    );
 }
 
 /// Resolve a [`Lighting`] config to an `(r, g, b)` triple: the configured
 /// colour scaled by brightness, or black when lighting is off.
-fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
+#[must_use]
+pub fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
     if !lighting.enabled {
         return (0, 0, 0);
     }
@@ -424,81 +542,14 @@ fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
     (scale(r), scale(g), scale(b))
 }
 
-// Async, awaitable variants used by the IPC server (the GUI routes "apply now"
-// / "read" device commands through the agent, which awaits and reports the
-// result). Writes reuse the capture session's open channel when it targets the
-// same device, exactly like the fire-and-forget `*_in_background` helpers, so
-// the daemon never opens a second channel to a device it already holds.
-
-/// Apply `dpi` to `route`, reusing the capture session's channel when possible.
-pub async fn apply_dpi(
-    capture: &CaptureChannel,
-    route: &DeviceRoute,
-    dpi: u32,
-) -> Result<(), WriteError> {
-    // Reject a DPI beyond the HID++ u16 wire field the same way the device
-    // itself would reject an out-of-range argument.
-    let dpi = u16::try_from(dpi).map_err(|_| WriteError::HidppFeature {
+/// Reject a DPI beyond the HID++ `u16` wire field the same way the device
+/// itself would reject an out-of-range argument, rather than clamping it.
+pub fn dpi_wire_value(dpi: u32) -> Result<u16, WriteError> {
+    u16::try_from(dpi).map_err(|_| WriteError::HidppFeature {
         operation: HidppOperation::WriteDpi,
         feature_hex: 0x2201,
         kind: HidppFeatureErrorKind::OutOfRange,
-    })?;
-    let shared = reusable_channel(Some(capture), route);
-    timed(HidppOperation::WriteDpi, async {
-        match &shared {
-            Some(shared) => openlogi_hid::set_dpi_on(shared, dpi).await,
-            None => openlogi_hid::set_dpi(route, dpi).await,
-        }
     })
-    .await
-}
-
-/// Apply a full SmartShift config to `route` (capture-channel-aware).
-pub async fn apply_smartshift(
-    capture: &CaptureChannel,
-    route: &DeviceRoute,
-    mode: SmartShiftMode,
-    auto_disengage: u8,
-    tunable_torque: u8,
-) -> Result<(), WriteError> {
-    let shared = reusable_channel(Some(capture), route);
-    timed(HidppOperation::WriteSmartShift, async {
-        match &shared {
-            Some(shared) => {
-                openlogi_hid::set_smartshift_on(shared, mode, auto_disengage, tunable_torque).await
-            }
-            None => openlogi_hid::set_smartshift(route, mode, auto_disengage, tunable_torque).await,
-        }
-    })
-    .await
-}
-
-/// Apply a lighting config to the keyboard at `route`.
-pub async fn apply_lighting(route: &DeviceRoute, lighting: &Lighting) -> Result<(), WriteError> {
-    let (r, g, b) = lighting_rgb(lighting);
-    timed(
-        HidppOperation::Lighting,
-        openlogi_hid::set_keyboard_color(route, r, g, b),
-    )
-    .await
-}
-
-/// Read the current DPI + supported values from `route`.
-pub async fn read_dpi(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
-    timed(
-        HidppOperation::ReadDpiCapabilities,
-        openlogi_hid::get_dpi_info(route),
-    )
-    .await
-}
-
-/// Read the current SmartShift config from `route`.
-pub async fn read_smartshift(route: &DeviceRoute) -> Result<SmartShiftStatus, WriteError> {
-    timed(
-        HidppOperation::ReadSmartShift,
-        openlogi_hid::get_smartshift_status(route),
-    )
-    .await
 }
 
 /// Bound any single HID++ call by [`WRITE_BUDGET`] so an asleep / unresponsive
@@ -510,4 +561,132 @@ async fn timed<T>(
     tokio::time::timeout(WRITE_BUDGET, fut)
         .await
         .map_err(|_| WriteError::RequestTimedOut { operation })?
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::sync::RwLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    #[test]
+    fn current_capture_wins_without_consulting_the_registry_again() {
+        let looked_up = Cell::new(false);
+        let selected = choose_authoritative(
+            Some("capture"),
+            |_| true,
+            || {
+                looked_up.set(true);
+                Some("registry")
+            },
+        );
+
+        assert_eq!(selected, Some("capture"));
+        assert!(!looked_up.get());
+    }
+
+    #[test]
+    fn stale_capture_falls_through_to_the_registry_winner() {
+        let selected = choose_authoritative(Some("stale"), |_| false, || Some("registry-current"));
+
+        assert_eq!(selected, Some("registry-current"));
+    }
+
+    #[test]
+    fn registry_miss_has_no_route_open_fallback() {
+        let selected = choose_authoritative(Some("stale"), |_| false, || None);
+
+        assert_eq!(selected, None);
+    }
+
+    fn unresolvable_route() -> DeviceRoute {
+        // A route no capture/registry in this test ever publishes — every
+        // resolve attempt against it takes the registry-miss path.
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc52b,
+        }
+    }
+
+    /// `DeviceOp::run` must fail fast on a registry miss ([`DeviceNotFound`],
+    /// the same path `authoritative_channel` uses to clear the haptic feature
+    /// cache) and must never invoke `f` — a route that can't be resolved has no
+    /// channel to hand it, so running the caller's write would be a bug, not a
+    /// no-op.
+    #[tokio::test]
+    async fn run_on_a_registry_miss_returns_device_not_found_without_calling_f() {
+        let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
+        let registry = ChannelRegistry::default();
+        let receiver_access = ReceiverAccess::default();
+        let route = unresolvable_route();
+        let called = std::sync::Arc::new(AtomicBool::new(false));
+        let called_for_closure = std::sync::Arc::clone(&called);
+
+        let result = DeviceOp::new(&capture, &registry, &receiver_access, &route)
+            .run(HidppOperation::WriteDpi, move |_shared| {
+                called_for_closure.store(true, Ordering::SeqCst);
+                async move { Ok::<(), WriteError>(()) }
+            })
+            .await;
+
+        assert!(matches!(result, Err(WriteError::DeviceNotFound)));
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "f must not run when the route can't be resolved"
+        );
+    }
+
+    /// `DeviceOp::detach` resolves before spawning, so a registry miss must
+    /// return synchronously (no thread, no lease wait) and never call `f`.
+    #[tokio::test]
+    async fn detach_on_a_registry_miss_never_calls_f() {
+        let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
+        let registry = ChannelRegistry::default();
+        let receiver_access = ReceiverAccess::default();
+        let route = unresolvable_route();
+        let called = std::sync::Arc::new(AtomicBool::new(false));
+        let called_for_closure = std::sync::Arc::clone(&called);
+
+        DeviceOp::new(&capture, &registry, &receiver_access, &route).detach(
+            "test write",
+            move |_shared| {
+                called_for_closure.store(true, Ordering::SeqCst);
+                async move { Ok::<(), WriteError>(()) }
+            },
+        );
+
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "f must not run when the route can't be resolved"
+        );
+    }
+
+    /// The timeout every [`DeviceOp::run`] call relies on: a write that never
+    /// resolves within `WRITE_BUDGET` must map to
+    /// [`WriteError::RequestTimedOut`] carrying the operation, not hang
+    /// forever. Uses a paused clock so the test doesn't spend `WRITE_BUDGET`
+    /// (5s) of real wall-clock time.
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used, reason = "expect is idiomatic in tests")]
+    async fn timed_maps_an_elapsed_deadline_to_request_timed_out() {
+        let handle = tokio::spawn(timed(
+            HidppOperation::WriteDpi,
+            std::future::pending::<Result<(), WriteError>>(),
+        ));
+        // Let the spawned task run up to its first await point so the
+        // underlying sleep is armed before we fast-forward the clock past it.
+        tokio::task::yield_now().await;
+        tokio::time::advance(WRITE_BUDGET + Duration::from_millis(1)).await;
+
+        let result = handle.await.expect("timed task must not panic");
+
+        assert!(matches!(
+            result,
+            Err(WriteError::RequestTimedOut {
+                operation: HidppOperation::WriteDpi
+            })
+        ));
+    }
 }

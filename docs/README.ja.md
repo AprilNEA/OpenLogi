@@ -156,9 +156,10 @@ Windows サポートは動作しており、有線キーボードと Unifying �
 
 ## 謝辞
 
-- [`hidpp`](https://crates.io/crates/hidpp) by [@lus](https://github.com/lus)
-- [Solaar](https://github.com/pwr-Solaar/Solaar)
-- [Mouser](https://github.com/TomBadash/Mouser) by Tom Badash
+- **Windows・カメラ・i18n**: [@davidbudnick](https://github.com/davidbudnick) —— Windows の入力フックと MSI アップデート、Logitech ウェブカメラ対応、キーボード RGB、Crowdin 翻訳パイプライン
+- **Linux 移植**: [@cserby](https://github.com/cserby) —— evdev/uinput フック、D-Bus アクション、.deb/.rpm パッケージング
+- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) —— 最も網羅的なオープンソースの HID++ 実装であり、本プロジェクトのプロトコル参照元
+- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) —— 同じ目標の先行プロジェクト：ローカル完結・アカウント不要の Options+ 代替
 
 ## ライセンス
 
@@ -166,6 +167,10 @@ Windows サポートは動作しており、有線キーボードと Unifying �
 
 - Apache License 2.0（[LICENSE-APACHE](../LICENSE-APACHE)）
 - MIT ライセンス（[LICENSE-MIT](../LICENSE-MIT)）
+
+### サードパーティコード
+
+`crates/openlogi-hidpp` は [`hidpp`](https://crates.io/crates/hidpp)（作者 [@lus](https://github.com/lus)）の vendored fork で、0BSD ライセンスです。
 
 ### ロゴとブランドアセット
 

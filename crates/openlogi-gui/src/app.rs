@@ -1,7 +1,8 @@
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, FocusHandle,
-    InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
+    InteractiveElement, IntoElement, MouseButton, NavigationDirection, ParentElement, Render,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     Icon, IconName, TitleBar,
@@ -9,15 +10,19 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
+use openlogi_ipc::InventoryHealth;
 use tracing::info;
-
-use openlogi_agent_core::ipc::InventoryHealth;
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::asset::AssetResolver;
+use crate::components::action_ring_panel::ActionRingPanel;
+use crate::components::camera_controls::CameraControlsPanel;
+use crate::components::camera_preview::CameraPreview;
 use crate::components::dpi_panel::DpiPanel;
+use crate::components::light_panel::LightPanel;
 use crate::components::lighting_panel::LightingPanel;
 use crate::components::smartshift_panel::SmartShiftPanel;
+use crate::keyboard_model::function_row::FunctionRowView;
 use crate::mouse_model::view::MouseModelView;
 use crate::state::{AgentLink, AppState, DeviceRecord};
 use crate::theme::{self, Palette, Typography as _};
@@ -31,6 +36,8 @@ mod widgets;
 // gallery card, so it reaches these through the crate-stable `crate::app::…`
 // path rather than the internal `app::home` submodule.
 pub(crate) use home::{glow_canvas, keyboard_glow};
+// Tray menu and other crate-level callers need the cold-start charging quirk.
+pub(crate) use widgets::battery_charging_no_reading;
 
 /// Which screen the root view is showing.
 ///
@@ -63,10 +70,18 @@ enum Route {
 enum DetailTab {
     /// The mouse model with clickable button hotspots.
     Buttons,
+    /// Cursor-centred eight-slot action launcher.
+    ActionsRing,
+    /// The keyboard function-row remapper with clickable F-key bubbles.
+    Keys,
     /// Pointer tuning — DPI and presets.
     Pointer,
     /// RGB lighting — color, brightness, on/off.
     Lighting,
+    /// Live webcam preview (UVC cameras only).
+    Camera,
+    /// Standalone light controls driven by a raw-HID device driver.
+    Light,
     /// Device info and configuration.
     Device,
 }
@@ -82,27 +97,40 @@ impl DetailTab {
     /// measured capabilities; we presume a set from their kind so a sleeping
     /// mouse still shows its (host-side) button bindings.
     ///
-    /// The Buttons panel renders a *mouse-model* silhouette with hotspots. It is
-    /// only useful for pointer-type devices (Mouse / Trackball) or when the device
-    /// has a resolved asset that provides its own correct layout. A keyboard that
-    /// exposes ReprogControls via HID++ but has no asset would get the generic
-    /// mouse fallback hotspots — confusing and wrong. Suppress the Buttons tab for
-    /// such devices until a proper keyboard-layout UI is available.
+    /// The Buttons panel renders a mouse-model silhouette with hotspots. It is
+    /// only useful for pointer-type devices; keyboards get the Keys panel
+    /// instead, even when they expose ReprogControls over HID++.
     fn tabs_for(record: &DeviceRecord) -> Vec<Self> {
         let caps = record
             .capabilities
             .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
-        let can_show_mouse_model = record.asset.is_some()
-            || matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
+        // Buttons panel is a mouse-model silhouette — only for pointer devices.
+        // Keyboards get the Keys panel instead, even when they expose ReprogControls.
+        let can_show_mouse_model = matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
         let mut tabs = Vec::new();
+        // A webcam is a UVC device with no HID++ capabilities; its detail screen
+        // leads with the live preview, then the generic info tab.
+        if matches!(record.kind, DeviceKind::Camera) {
+            tabs.push(Self::Camera);
+        }
         if caps.buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
+        }
+        if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
+            tabs.push(Self::ActionsRing);
+        }
+        // Function-row remapper when the keyboard reports remappable buttons.
+        if matches!(record.kind, DeviceKind::Keyboard) && caps.buttons {
+            tabs.push(Self::Keys);
         }
         if caps.pointer {
             tabs.push(Self::Pointer);
         }
         if caps.lighting {
             tabs.push(Self::Lighting);
+        }
+        if record.light_capabilities.is_some() {
+            tabs.push(Self::Light);
         }
         tabs.push(Self::Device);
         tabs
@@ -119,8 +147,11 @@ impl DetailTab {
     fn label(self) -> gpui::SharedString {
         match self {
             Self::Buttons => tr!("Buttons"),
+            Self::ActionsRing => tr!("Actions Ring"),
+            Self::Keys => tr!("Keys"),
             Self::Pointer => tr!("Pointer"),
-            Self::Lighting => tr!("Lighting"),
+            Self::Lighting | Self::Light => tr!("Lighting"),
+            Self::Camera => tr!("Camera"),
             Self::Device => tr!("Device"),
         }
     }
@@ -131,9 +162,14 @@ pub struct AppView {
     focus_handle: FocusHandle,
     route: Route,
     mouse_model: Entity<MouseModelView>,
+    action_ring_panel: Entity<ActionRingPanel>,
+    keyboard_model: Entity<FunctionRowView>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
+    camera_preview: Entity<CameraPreview>,
+    camera_controls: Entity<CameraControlsPanel>,
+    light_panel: Entity<LightPanel>,
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
     /// Re-renders the root when the device list changes so the empty state
@@ -175,17 +211,27 @@ impl AppView {
         }
 
         let mouse_model = cx.new(MouseModelView::new);
+        let action_ring_panel = cx.new(ActionRingPanel::new);
+        let keyboard_model = cx.new(FunctionRowView::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
+        let camera_preview = cx.new(CameraPreview::new);
+        let camera_controls = cx.new(CameraControlsPanel::new);
+        let light_panel = cx.new(LightPanel::new);
         let state_obs = cx.observe_global::<AppState>(|_, cx| cx.notify());
         Self {
             focus_handle,
             route: Route::Home,
             mouse_model,
+            action_ring_panel,
+            keyboard_model,
             dpi_panel,
             smartshift_panel,
             lighting_panel,
+            camera_preview,
+            camera_controls,
+            light_panel,
             appearance_obs: None,
             state_obs,
             accessibility_dismissed: false,
@@ -227,6 +273,31 @@ impl AppView {
     fn go_home(&mut self, cx: &mut Context<Self>) {
         self.route = Route::Home;
         cx.notify();
+    }
+
+    /// Attach the window-level back-navigation listeners to `root`: a mouse
+    /// configurator should honor the hardware it configures. Two routes reach
+    /// us — the native navigate button (its default binding never diverts, so
+    /// the OS still sees it), and Alt+Left, which is both what a rebound
+    /// button's BrowserBack action injects on Linux and what keyboard users
+    /// expect.
+    fn with_back_navigation(root: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        root.on_mouse_down(
+            MouseButton::Navigate(NavigationDirection::Back),
+            cx.listener(|this, _, _, cx| {
+                if !matches!(this.route, Route::Home) {
+                    this.go_home(cx);
+                }
+            }),
+        )
+        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+            if event.keystroke.modifiers.alt
+                && event.keystroke.key == "left"
+                && !matches!(this.route, Route::Home)
+            {
+                this.go_home(cx);
+            }
+        }))
     }
 
     fn accessibility_gate(pal: Palette, cx: &mut Context<Self>) -> AnyElement {
@@ -331,6 +402,10 @@ fn app_title_bar(pal: Palette) -> impl IntoElement {
 }
 
 impl Render for AppView {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "root view assembles every screen branch inline"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
 
@@ -352,6 +427,18 @@ impl Render for AppView {
             .when(cfg!(target_os = "linux"), |this| {
                 this.child(app_title_bar(pal))
             });
+        let root = Self::with_back_navigation(root, cx);
+
+        if let Some(issue) = cx
+            .try_global::<AppState>()
+            .and_then(AppState::config_issue)
+            .map(gpui::SharedString::from)
+        {
+            window.set_window_title("OpenLogi");
+            return root
+                .child(status::config_issue_body(issue, pal))
+                .into_any_element();
+        }
 
         // The agent is the source of truth for both the permission state and
         // the device list; `AgentLink` is everything the GUI knows about it.
@@ -431,13 +518,34 @@ impl Render for AppView {
             } else {
                 tabs.first().copied().unwrap_or(DetailTab::Device)
             };
+            // Run the camera only while its live-preview tab is the one on screen;
+            // any other tab, device, or Home tears the session down (LED off).
+            // Use capture_id (OS open id), not config_key — the latter prefers
+            // the port-stable USB serial and is not a valid AVFoundation id.
+            let camera_target = if active == DetailTab::Camera {
+                record
+                    .as_ref()
+                    .filter(|r| matches!(r.kind, DeviceKind::Camera))
+                    .and_then(|r| r.capture_id.clone())
+            } else {
+                None
+            };
+            self.camera_preview
+                .update(cx, |preview, cx| preview.set_target(camera_target, cx));
             (
                 detail::detail_header(record.as_ref(), &tabs, active, pal, cx).into_any_element(),
                 detail::detail_content(
-                    &self.mouse_model,
-                    &self.dpi_panel,
-                    &self.smartshift_panel,
-                    &self.lighting_panel,
+                    &detail::DetailPanels {
+                        mouse_model: &self.mouse_model,
+                        action_ring: &self.action_ring_panel,
+                        keyboard_model: &self.keyboard_model,
+                        dpi_panel: &self.dpi_panel,
+                        smartshift_panel: &self.smartshift_panel,
+                        lighting_panel: &self.lighting_panel,
+                        camera_preview: &self.camera_preview,
+                        camera_controls: &self.camera_controls,
+                        light_panel: &self.light_panel,
+                    },
                     active,
                     pal,
                     cx,
@@ -445,6 +553,8 @@ impl Render for AppView {
                 .into_any_element(),
             )
         } else {
+            self.camera_preview
+                .update(cx, |preview, cx| preview.set_target(None, cx));
             (
                 home::home_header(pal).into_any_element(),
                 if has_device {
@@ -468,10 +578,43 @@ impl Render for AppView {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::expect_used,
+        reason = "capability fixture construction is intentionally asserted in tests"
+    )]
+
     use super::home::connection_icon_path;
-    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
-    use openlogi_core::device::DeviceTransports;
-    use openlogi_hid::DeviceRoute;
+    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord, battery_charging_no_reading};
+    use openlogi_core::device::{
+        BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities,
+        LightValueRange, LightValueUnit,
+    };
+    use openlogi_core::hid::DeviceRoute;
+
+    /// "Charging" replaces the bogus percentage only when charging *and* the
+    /// reading is still 0% (cold start, no cached pre-charge value). A non-zero
+    /// charge or a real 0% while discharging keeps the number.
+    #[test]
+    fn charging_without_reading_suppresses_percentage() {
+        let b = |percentage, status| BatteryInfo {
+            percentage,
+            level: BatteryLevel::Good,
+            status,
+        };
+        assert!(battery_charging_no_reading(&b(0, BatteryStatus::Charging)));
+        assert!(battery_charging_no_reading(&b(
+            0,
+            BatteryStatus::ChargingSlow
+        )));
+        assert!(!battery_charging_no_reading(&b(
+            40,
+            BatteryStatus::Charging
+        )));
+        assert!(!battery_charging_no_reading(&b(
+            0,
+            BatteryStatus::Discharging
+        )));
+    }
 
     #[test]
     fn connection_icon_matches_route() {
@@ -554,6 +697,7 @@ mod tests {
     fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord {
         DeviceRecord {
             config_key: "test".to_string(),
+            persistent: true,
             model_key: "test".to_string(),
             display_name: "Test".to_string(),
             asset: None,
@@ -561,9 +705,13 @@ mod tests {
             codename: None,
             serial_number: None,
             unit_id: [0; 4],
+            driver_id: None,
+            registry_model_id: None,
             route: None,
+            capture_id: None,
             kind,
             capabilities,
+            light_capabilities: None,
             slot: 1,
             online: true,
             battery: None,
@@ -581,6 +729,9 @@ mod tests {
             lighting: false,
             scroll_inversion: false,
             hires_wheel: false,
+            thumbwheel: false,
+            haptic_feedback: false,
+            haptic_panel: false,
         });
         // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -600,6 +751,9 @@ mod tests {
             lighting: true,
             scroll_inversion: false,
             hires_wheel: false,
+            thumbwheel: false,
+            haptic_feedback: false,
+            haptic_panel: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(
@@ -607,6 +761,23 @@ mod tests {
             "mouse model shown for keyboard"
         );
         assert!(tabs.contains(&DetailTab::Lighting));
+    }
+
+    #[test]
+    fn keyboard_with_buttons_shows_keys_tab() {
+        let caps = Some(Capabilities {
+            buttons: true,
+            pointer: false,
+            lighting: true,
+            scroll_inversion: false,
+            hires_wheel: false,
+            thumbwheel: false,
+            haptic_feedback: false,
+            haptic_panel: false,
+        });
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+        assert!(tabs.contains(&DetailTab::Keys));
+        assert!(!tabs.contains(&DetailTab::Buttons));
     }
 
     /// Each panel is independent: a lighting-only device (e.g. a keyboard with
@@ -619,6 +790,23 @@ mod tests {
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert_eq!(tabs, vec![DetailTab::Lighting, DetailTab::Device]);
+    }
+
+    #[test]
+    fn light_tab_follows_light_capabilities() {
+        let mut device = record(DeviceKind::Light, None);
+        device.light_capabilities = Some(LightCapabilities {
+            power: true,
+            brightness: Some(
+                LightValueRange::new(20, 250, 1, LightValueUnit::Lumens)
+                    .expect("demo light range is valid"),
+            ),
+            ..LightCapabilities::default()
+        });
+        assert_eq!(
+            DetailTab::tabs_for(&device),
+            vec![DetailTab::Light, DetailTab::Device]
+        );
     }
 
     /// An unprobed (offline) device has no measured capabilities and falls back
