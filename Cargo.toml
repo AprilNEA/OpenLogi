@@ -1,27 +1,7 @@
-[package]
-name = "openlogi"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-authors.workspace = true
-description = "OpenLogi command-line interface — a local-first companion for Logitech HID++ peripherals."
-keywords = ["logitech", "hidpp", "hid", "mouse", "cli"]
-categories = ["command-line-utilities", "hardware-support"]
-readme = "README.md"
-
-[dependencies]
-openlogi-cli = { path = "crates/openlogi-cli", version = "0.7.1" }
-anyhow = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
-
-[lints]
-workspace = true
-
 [workspace]
 resolver = "3"
 members = [
+    "crates/openlogi",
     "crates/openlogi-core",
     "crates/openlogi-inject",
     "crates/openlogi-hidpp",
@@ -37,6 +17,10 @@ members = [
     "crates/openlogi-hook",
     "xtask",
 ]
+# The CLI used to be the root package, so a bare `cargo build` / `cargo run`
+# built it alone. Keep that: without this, a virtual workspace defaults to every
+# member, dragging GPUI's Metal shader toolchain into the simplest build there is.
+default-members = ["crates/openlogi"]
 
 [workspace.package]
 version = "0.7.1"

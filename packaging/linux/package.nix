@@ -56,7 +56,6 @@ let
       (src + "/packaging/linux/desktop")
       (src + "/packaging/linux/systemd")
       (src + "/packaging/linux/udev")
-      (src + "/src")
       (src + "/xtask")
     ];
   };

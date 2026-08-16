@@ -106,7 +106,7 @@ installed app's grants and config, which is exactly what releases
 To install the CLI binary on `PATH`:
 
 ```sh
-cargo install --path .
+cargo install --path crates/openlogi
 ```
 
 ## Developing the GUI without hardware
@@ -144,8 +144,8 @@ bundled.
 ## Project layout
 
 ```
-src/                the `openlogi` binary (workspace root package) — a thin wrapper over openlogi-cli
 crates/
+  openlogi/         the `openlogi` binary — a thin wrapper over openlogi-cli
   openlogi-core/    types, config (TOML), paths, button + action catalog — no HID, no async
   openlogi-inject/  OS input synthesis: CGEvent, uinput/MPRIS, and SendInput
   openlogi-hidpp/   vendored HID++ protocol crate (lib name `hidpp`)

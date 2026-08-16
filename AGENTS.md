@@ -18,7 +18,7 @@ sits beneath both.
 
 | Crate | Role |
 |---|---|
-| `openlogi` (root package, `src/`) | The CLI binary — thin wrapper over `openlogi-cli` |
+| `crates/openlogi` | The CLI binary — thin wrapper over `openlogi-cli` |
 | `crates/openlogi-core` | Pure types: TOML config, device model, action catalog. No I/O, no async |
 | `crates/openlogi-hidpp` | Vendored fork of the `hidpp` protocol crate (**lib name `hidpp`**, 0BSD) |
 | `crates/openlogi-hid` | Device discovery + HID++ writes over `async-hid` |
