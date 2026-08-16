@@ -132,6 +132,16 @@ fn dispatch_native(action: &Action, native: NativeAction) {
                 "no Linux equivalent — action skipped"
             );
         }
+        // Tap the bare Super key: GNOME Shell's default overlay-key setting
+        // toggles the Activities Overview on Super pressed and released
+        // alone. No portable D-Bus call exists for this
+        // (`org.gnome.Shell.Eval` is disabled by default on stock GNOME); a
+        // user who rebinds/disables the overlay-key will see this silently
+        // no-op, same tradeoff as the LockScreen Super+L fallback below.
+        NativeAction::GnomeOverview => {
+            tracing::debug!("GnomeOverview via bare Super tap");
+            press_key(&[], KeyCode::KEY_LEFTMETA);
+        }
         // Ctrl+Alt+←/→ is the default in GNOME and KDE.
         NativeAction::PreviousDesktop => press_key(&[ctrl, alt], KeyCode::KEY_LEFT),
         NativeAction::NextDesktop => press_key(&[ctrl, alt], KeyCode::KEY_RIGHT),

@@ -179,6 +179,8 @@ pub enum NativeAction {
     ShowDesktop,
     /// Open the application launcher.
     LaunchpadShow,
+    /// Open the GNOME Shell Activities Overview.
+    GnomeOverview,
     /// Lock the screen.
     LockScreen,
     /// Capture a full-screen screenshot.
@@ -243,6 +245,7 @@ impl Action {
             Action::NextDesktop => Effect::Native(NativeAction::NextDesktop),
             Action::ShowDesktop => Effect::Native(NativeAction::ShowDesktop),
             Action::LaunchpadShow => Effect::Native(NativeAction::LaunchpadShow),
+            Action::GnomeOverview => Effect::Native(NativeAction::GnomeOverview),
 
             Action::LockScreen => Effect::Native(NativeAction::LockScreen),
             Action::Screenshot => Effect::Native(NativeAction::Screenshot),

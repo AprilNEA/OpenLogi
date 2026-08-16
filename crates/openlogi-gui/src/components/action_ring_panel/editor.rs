@@ -294,6 +294,9 @@ fn ring_catalog() -> Vec<(Category, Vec<Action>)> {
         if RingAction::new(action.clone()).is_err() {
             continue;
         }
+        if !crate::action_visibility::is_offered_here(&action) {
+            continue;
+        }
         let category = action.category();
         if let Some((_, actions)) = sections
             .iter_mut()

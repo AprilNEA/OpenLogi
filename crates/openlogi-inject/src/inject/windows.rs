@@ -126,6 +126,10 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::NextDesktop => post_key(VK_RIGHT, &[VK_LWIN, VK_CONTROL]),
         NativeAction::ShowDesktop => post_key(VK_D, &[VK_LWIN]),
         NativeAction::LaunchpadShow => post_key(VK_LWIN, &[]),
+        // GNOME-only; Windows has no Activities Overview equivalent.
+        NativeAction::GnomeOverview => {
+            tracing::debug!("GnomeOverview has no Windows equivalent — action skipped");
+        }
         NativeAction::LockScreen => post_key(VK_L, &[VK_LWIN]),
         // Win+Shift+S opens the snip overlay, which serves both full-screen
         // and region capture on Windows.
