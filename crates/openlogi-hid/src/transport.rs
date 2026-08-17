@@ -80,6 +80,27 @@ const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 3] = [
     (0xff43, 0x0602, false),
 ];
 
+/// `async-hid 0.5.2` renders the macOS report-writer callback status as an
+/// unstructured message, so this adapter must match the one IOKit status whose
+/// semantics it can narrow. `0xE00002D6` is `kIOReturnTimeout`: the callback
+/// stopped waiting, but report delivery remains unknown.
+#[cfg(target_os = "macos")]
+const MACOS_WRITE_CALLBACK_TIMEOUT: &str = "report writer callback error: 0xE00002D6";
+
+#[cfg(not(target_os = "windows"))]
+fn classify_output_write_error(error: async_hid::HidError) -> RawHidWriteError {
+    #[cfg(target_os = "macos")]
+    if matches!(
+        &error,
+        async_hid::HidError::Message(message)
+            if message.as_ref() == MACOS_WRITE_CALLBACK_TIMEOUT
+    ) {
+        return RawHidWriteError::completion_unknown(error);
+    }
+
+    RawHidWriteError::failed(error)
+}
+
 /// Whether `(usage_page, usage_id)` is one of the HID++ long-report collections.
 fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
     HIDPP_LONG_COLLECTIONS
@@ -488,7 +509,7 @@ impl RawHidChannel for AsyncHidChannel {
                 if matches!(e, async_hid::HidError::Disconnected) {
                     self.mark_disconnected();
                 }
-                Err(RawHidWriteError::failed(e))
+                Err(classify_output_write_error(e))
             }
         }
     }
