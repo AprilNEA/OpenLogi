@@ -22,6 +22,34 @@ const SHORT_REPORT_USAGE: u16 = 0x0001;
 /// The HID usage ID identifying long HID++ message reports.
 const LONG_REPORT_USAGE: u16 = 0x0002;
 
+/// Failure reported while writing one raw HID output report.
+///
+/// A transport may know that a write failed, or it may only know that its
+/// completion callback stopped waiting. The latter is not success, but a
+/// response-bearing protocol can still confirm delivery from a matching reply.
+#[derive(Debug, thiserror::Error)]
+pub enum RawHidWriteError {
+    /// The transport established that the report write failed.
+    #[error("the HID report write failed")]
+    Failed(#[source] Box<dyn Error + Send + Sync>),
+
+    /// The transport could not establish whether the report was delivered.
+    #[error("the HID report write completion is unknown")]
+    CompletionUnknown(#[source] Box<dyn Error + Send + Sync>),
+}
+
+impl RawHidWriteError {
+    /// Wrap a transport error that establishes a failed write.
+    pub fn failed(error: impl Into<Box<dyn Error + Send + Sync>>) -> Self {
+        Self::Failed(error.into())
+    }
+
+    /// Wrap a transport error that leaves report delivery unknown.
+    pub fn completion_unknown(error: impl Into<Box<dyn Error + Send + Sync>>) -> Self {
+        Self::CompletionUnknown(error.into())
+    }
+}
+
 /// Represents an arbitrary HID communication channel that is both readable and
 /// writable. It has to support async I/O.
 ///
@@ -40,7 +68,7 @@ pub trait RawHidChannel: Sync + Send + 'static {
     /// Writes a raw report to the channel.
     ///
     /// Returns the exact amount of written bytes on success.
-    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Sync + Send>>;
+    async fn write_report(&self, src: &[u8]) -> Result<usize, RawHidWriteError>;
 
     /// Reads a raw report from the channel.
     ///

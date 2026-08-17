@@ -3,7 +3,7 @@ use super::*;
 use std::{error::Error, io, time::Duration};
 
 use hidpp::{
-    channel::{LONG_REPORT_ID, LONG_REPORT_LENGTH, RawHidChannel},
+    channel::{LONG_REPORT_ID, LONG_REPORT_LENGTH, RawHidChannel, RawHidWriteError},
     protocol::v10::MessageType,
 };
 
@@ -149,10 +149,10 @@ impl RawHidChannel for EchoRawHidChannel {
         0xc548
     }
 
-    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Sync + Send>> {
+    async fn write_report(&self, src: &[u8]) -> Result<usize, RawHidWriteError> {
         let report = src.to_vec();
         if self.written_tx.send(report.clone()).is_err() || self.incoming_tx.send(report).is_err() {
-            return Err(mock_error());
+            return Err(RawHidWriteError::failed(mock_error()));
         }
         Ok(src.len())
     }

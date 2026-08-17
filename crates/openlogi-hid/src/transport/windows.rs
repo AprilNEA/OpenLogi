@@ -9,7 +9,7 @@ use hidpp::channel::{LONG_REPORT_ID, SHORT_REPORT_ID};
 #[cfg(target_os = "windows")]
 use hidpp::{
     async_trait,
-    channel::{LONG_REPORT_LENGTH, RawHidChannel, SHORT_REPORT_LENGTH},
+    channel::{LONG_REPORT_LENGTH, RawHidChannel, RawHidWriteError, SHORT_REPORT_LENGTH},
 };
 #[cfg(target_os = "windows")]
 use tokio::sync::Mutex;
@@ -203,7 +203,7 @@ impl RawHidChannel for WindowsHidppChannel {
         self.info.product_id
     }
 
-    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
+    async fn write_report(&self, src: &[u8]) -> Result<usize, RawHidWriteError> {
         let endpoint = match src.first().copied().and_then(endpoint_for_report_id) {
             Some(ReportEndpoint::Short) => self.short.as_ref(),
             Some(ReportEndpoint::Long) => self.long.as_ref(),
@@ -217,9 +217,13 @@ impl RawHidChannel for WindowsHidppChannel {
                     src.first().copied().unwrap_or_default()
                 ),
             )
-        })?;
+        })
+        .map_err(RawHidWriteError::failed)?;
 
-        endpoint.write_report(src).await
+        endpoint
+            .write_report(src)
+            .await
+            .map_err(RawHidWriteError::failed)
     }
 
     async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {

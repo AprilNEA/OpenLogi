@@ -20,6 +20,8 @@ use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader};
 use async_hid::{DeviceInfo, DeviceWriter, HidBackend};
 use futures_lite::StreamExt as _;
 use hidpp::channel::HidppChannel;
+#[cfg(not(target_os = "windows"))]
+use hidpp::channel::RawHidWriteError;
 use hidpp::nibble::U4;
 #[cfg(not(target_os = "windows"))]
 use hidpp::{async_trait, channel::RawHidChannel};
@@ -478,7 +480,7 @@ impl RawHidChannel for AsyncHidChannel {
         self.info.product_id
     }
 
-    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
+    async fn write_report(&self, src: &[u8]) -> Result<usize, RawHidWriteError> {
         let mut w = self.writer.lock().await;
         match w.write_output_report(src).await {
             Ok(()) => Ok(src.len()),
@@ -486,7 +488,7 @@ impl RawHidChannel for AsyncHidChannel {
                 if matches!(e, async_hid::HidError::Disconnected) {
                     self.mark_disconnected();
                 }
-                Err(e.into())
+                Err(RawHidWriteError::failed(e))
             }
         }
     }
