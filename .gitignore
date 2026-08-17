@@ -33,7 +33,7 @@ devenv.local.yaml
 /.claude/*
 !/.claude/rules/
 
-# Node dependencies for the JS helper scripts under scripts/.
+# Node dependencies for the JS helper scripts under .github/scripts/.
 node_modules/
 
 # macOS finder metadata

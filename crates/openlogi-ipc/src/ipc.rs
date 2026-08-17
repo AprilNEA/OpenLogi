@@ -16,6 +16,7 @@ use openlogi_core::hid::{
     SmartShiftMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
+pub use succession::Identity;
 
 /// Wire-protocol version. Bumped only on a breaking change to the types below —
 /// independent of the crate version. The GUI checks it via
@@ -39,7 +40,14 @@ use serde::{Deserialize, Serialize};
 /// v16: `ActionRingPresentation::literal` inserted (custom labels render
 ///      verbatim instead of passing through localization).
 /// v17: `reload_config` returns a typed parse/validation result.
-pub const PROTOCOL_VERSION: u32 = 17;
+/// v18: `identity` appended (supervised helpers bind to one agent run).
+pub const PROTOCOL_VERSION: u32 = 18;
+
+/// Environment variable through which the agent hands a supervised helper the
+/// run token it will serve, so the helper knows which agent it belongs to
+/// before it has spoken to one. Absent for a hand-started helper, which then
+/// adopts whichever run answers first.
+pub const RUN_ENV: &str = "OPENLOGI_RUN";
 
 /// Why the agent refused to adopt the config currently on disk.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,4 +364,15 @@ pub trait Agent {
     ) -> Result<(), ActionRingCommandError>;
     /// Close a ring without executing an action.
     async fn action_ring_cancel(session_id: u64);
+    /// Identity of this agent *run* — the Actions Ring overlay latches it and
+    /// exits when it changes, so a helper orphaned by an agent restart yields
+    /// the `overlay.lock` role instead of wedging its replacement out of it
+    /// (#621, #644).
+    ///
+    /// **Frozen.** Both halves of [`Identity`] are plain `u64`s and this
+    /// method's position never changes, so any past or future build can read
+    /// it. New facts about the agent go on a new method or in [`AgentStatus`],
+    /// never in here — an identity a helper cannot decode is an identity that
+    /// cannot tell it to leave.
+    async fn identity() -> Identity;
 }

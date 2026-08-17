@@ -37,8 +37,9 @@ and keep working.
 
 ### With devenv (optional)
 
-`devenv.nix` provisions sccache, the stable Rust toolchain, packaging helpers,
-and the macOS env overrides GPUI needs (`DEVELOPER_DIR` / `SDKROOT`). Tasks:
+`devenv.nix` provisions sccache, the stable Rust toolchain, platform libraries,
+nfpm on Linux, and the macOS packaging/env helpers GPUI needs
+(`create-dmg`, `DEVELOPER_DIR`, and `SDKROOT`). Tasks:
 
 ```sh
 devenv tasks run openlogi:gui      # run the desktop app
@@ -59,11 +60,26 @@ shader compiler, and link errors about missing `_write` / `_sysconf` /
 `_waitpid` symbols show up because the Nix `apple-sdk-14.4` stub doesn't
 expose `libSystem` the way Apple's real linker wants.
 
+### Nix package
+
+The root Flake exposes native `x86_64-linux` and `aarch64-linux` packages plus
+the NixOS module. It is separate from the devenv shell:
+
+```sh
+nix flake check --all-systems --no-build  # evaluate every output
+nix build .#openlogi                      # build + test this host's package
+nix run .#openlogi -- list                # run the packaged CLI
+```
+
+The package expression and NixOS module live beside the other Linux packaging
+inputs in `packaging/linux/`. `nix fmt` formats all Nix expressions through the
+Flake's pinned formatter.
+
 ### Dev app bundle (macOS)
 
 On macOS the desktop binary is launched from inside a throwaway
 `target/dev/OpenLogi.app` — a Cargo `runner` wired in `.cargo/config.toml`
-(`scripts/cargo-run-macos.sh`). This makes the dev build show as
+(`.cargo/run-macos.sh`). This makes the dev build show as
 **OpenLogi Dev** in the menu bar and Dock, with the real app icon; a bare
 `cargo run` binary has no bundle, so macOS would otherwise fall back to the
 `openlogi-gui` executable name and a generic icon. The binary is hardlinked in
@@ -90,7 +106,7 @@ installed app's grants and config, which is exactly what releases
 To install the CLI binary on `PATH`:
 
 ```sh
-cargo install --path .
+cargo install --path crates/openlogi
 ```
 
 ## Developing the GUI without hardware
@@ -128,8 +144,8 @@ bundled.
 ## Project layout
 
 ```
-src/                the `openlogi` binary (workspace root package) — a thin wrapper over openlogi-cli
 crates/
+  openlogi/         the `openlogi` binary — a thin wrapper over openlogi-cli
   openlogi-core/    types, config (TOML), paths, button + action catalog — no HID, no async
   openlogi-inject/  OS input synthesis: CGEvent, uinput/MPRIS, and SendInput
   openlogi-hidpp/   vendored HID++ protocol crate (lib name `hidpp`)
@@ -187,6 +203,10 @@ cargo run -p xtask -- linux package
 The package contents (binaries, udev rules, systemd user unit, desktop entry,
 icon) are declared in `packaging/linux/nfpm.yaml`.
 
+The Nix package uses the same shared resources and is declared in
+`packaging/linux/package.nix`; see the Nix package section above for its build
+commands.
+
 ## Release updater publishing
 
 Tagged releases still attach DMGs and `SHA256SUMS` to GitHub Releases for manual
@@ -241,7 +261,7 @@ cargo run -p xtask -- release latest-json \
 [Crowdin](https://crowdin.com/project/openlogi) and opens a `crowdin/i18n` PR
 when a **real** translation value improved — nightly, and on master pushes that
 touch English sources (`en.yml`), `crowdin.yml`, the Crowdin workflow, the merge
-script under `scripts/i18n/`, or the shared GitHub App token action.
+script under `.github/scripts/i18n/`, or the shared GitHub App token action.
 
 **How it helps translation**
 
@@ -258,7 +278,7 @@ does not invent translations; it only stores and syncs them. A raw Crowdin
 download is unsafe: untranslated strings come back as English (#549), and
 `skip_untranslated_strings` overwrites catalogs with sparse files that delete
 keys (#552). The workflow always **snapshots → download → merge** via
-`scripts/i18n/merge_crowdin_download.py` so catalogs stay complete and only real
+`.github/scripts/i18n/merge_crowdin_download.py` so catalogs stay complete and only real
 translations land in git.
 
 Each run:
@@ -300,5 +320,5 @@ Local helpers (with Crowdin credentials configured):
 ```sh
 devenv tasks run openlogi:i18n-upload    # en.yml sources + per-language translations
 devenv tasks run openlogi:i18n-download  # download + merge + i18n tests
-python3 scripts/i18n/merge_crowdin_download.py --self-test
+python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
 ```

@@ -61,7 +61,7 @@ contents:
 
   # ── icon ────────────────────────────────────────────────────────────────────
   - src: design/icon/openlogi.png
-    dst: /usr/share/icons/hicolor/512x512/apps/openlogi.png
+    dst: /usr/share/icons/hicolor/1024x1024/apps/openlogi.png
     file_info:
       mode: 0644
 

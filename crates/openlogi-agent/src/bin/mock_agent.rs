@@ -52,9 +52,10 @@ use openlogi_hid::{
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    ConfigReloadError, FoundDevice, InventoryHealth, MonitorEvent, PROTOCOL_VERSION,
+    ConfigReloadError, FoundDevice, Identity, InventoryHealth, MonitorEvent, PROTOCOL_VERSION,
     PairingCommandError, PairingFailure, PairingUpdate,
 };
+use succession::Compat;
 use tarpc::context::Context;
 use tarpc::server::{BaseChannel, Channel as _};
 use tokio::sync::Mutex;
@@ -632,6 +633,10 @@ impl MockAgent {
 impl Agent for MockAgent {
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
+    }
+
+    async fn identity(self, _: Context) -> Identity {
+        Identity::mine(Compat::from(PROTOCOL_VERSION))
     }
 
     async fn status(self, _: Context) -> AgentStatus {

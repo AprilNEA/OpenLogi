@@ -26,7 +26,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -41,10 +41,11 @@ use gpui::{
 };
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_ipc::{ActionRingInvocation, AgentClient, PROTOCOL_VERSION};
+use openlogi_ipc::{ActionRingInvocation, AgentClient, Identity, PROTOCOL_VERSION, RUN_ENV};
+use succession::{Allegiance, Compat, Record, Role, Run, Standing, Tenancy, Tenant};
 use tarpc::{client, context};
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const WINDOW_SIZE: f32 = 360.0;
@@ -241,8 +242,8 @@ fn main() -> Result<()> {
         .init();
 
     rust_i18n::set_locale(locale::resolve(None));
-    let _guard = openlogi_core::single_instance::acquire("overlay.lock")
-        .context("Actions Ring overlay single-instance check")?;
+    // Held for the whole run: dropping it hands the role to the replacement.
+    let _tenancy = claim_the_role()?;
     let Ipc {
         mut invocations,
         commands,
@@ -509,12 +510,80 @@ fn spawn_ipc() -> Ipc {
     }
 }
 
+/// Take the overlay role and publish who is holding it.
+///
+/// The record is what lets the agent recognize this process later — as its own
+/// helper, or as one left behind by a previous run. Publishing is advisory:
+/// failing it costs identification, not the role, so a helper that cannot write
+/// still runs (and is treated as an unidentified tenant).
+fn claim_the_role() -> Result<Tenancy> {
+    let directory = openlogi_core::paths::config_dir().context("resolving the config directory")?;
+    let tenancy = Role::new(directory, "overlay")
+        .claim()
+        .context("Actions Ring overlay single-instance check")?;
+    let serving = spawned_by().unwrap_or_else(Run::mint);
+    if let Err(error) = tenancy.publish(&Record::new(
+        Identity::new(serving, Compat::from(PROTOCOL_VERSION)),
+        Tenant::current(),
+    )) {
+        warn!(%error, "could not publish the overlay claim record");
+    }
+    Ok(tenancy)
+}
+
+/// The agent run this overlay serves.
+///
+/// Seeded from the run token the supervisor passes in the environment, so even
+/// the first handshake catches an overlay left behind by a previous agent; a
+/// hand-started overlay adopts whichever run answers first.
+fn allegiance() -> &'static Allegiance {
+    static SERVING: OnceLock<Allegiance> = OnceLock::new();
+    SERVING.get_or_init(|| {
+        let ours = Compat::from(PROTOCOL_VERSION);
+        match spawned_by() {
+            Some(run) => Allegiance::to(ours, run),
+            None => Allegiance::new(ours),
+        }
+    })
+}
+
+/// The run token of the agent that started this process, when there is one.
+fn spawned_by() -> Option<Run> {
+    std::env::var(RUN_ENV).ok()?.parse().ok().map(Run::from_raw)
+}
+
 async fn connect() -> Option<AgentClient> {
     let stream = openlogi_ipc::transport::connect().await.ok()?;
     let transport = openlogi_ipc::transport::wrap(stream);
     let client = AgentClient::new(client::Config::default(), transport).spawn();
+    // `protocol_version` is method 0 and wire-stable across every version, so
+    // it is the only call worth making before the two versions agree. A
+    // mismatch is not transient — this binary is from a superseded install.
     let version = client.protocol_version(context::current()).await.ok()?;
-    (version == PROTOCOL_VERSION).then_some(client)
+    if version != PROTOCOL_VERSION {
+        yield_to_replacement(&format!(
+            "agent speaks protocol {version} and this overlay speaks {PROTOCOL_VERSION}"
+        ));
+    }
+    let identity = client.identity(context::current()).await.ok()?;
+    if let Standing::Superseded(because) = allegiance().observe(identity) {
+        yield_to_replacement(&because.to_string());
+    }
+    Some(client)
+}
+
+/// Exit so the replacement overlay can take the role.
+///
+/// Staying alive would be worse than useless: this process cannot serve a ring
+/// it can no longer be asked about, and its claim on the role is exactly what
+/// stops the agent's supervisor from starting the overlay that can.
+#[expect(
+    clippy::exit,
+    reason = "the IPC tasks run off the GPUI main thread and cannot return a status to `main`, which is parked in the application run loop; releasing the role by exiting is the point"
+)]
+fn yield_to_replacement(because: &str) -> ! {
+    info!("{because} — exiting so the agent's own overlay can start");
+    std::process::exit(0)
 }
 
 async fn poll_invocations(tx: mpsc::UnboundedSender<ActionRingInvocation>) {

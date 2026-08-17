@@ -1,0 +1,43 @@
+name: devenv CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".envrc"
+      - "devenv.nix"
+      - "devenv.yaml"
+      - "devenv.lock"
+      - ".github/workflows/devenv.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devenv-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell:
+    name: build developer shell
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install upstream Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Check devenv formatting
+        run: nix fmt -- --check devenv.nix
+      - name: Configure devenv binary cache
+        uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
+        with:
+          name: devenv
+      - name: Install pinned devenv CLI
+        run: |
+          rev="$(jq -er '.nodes.devenv.locked.rev' devenv.lock)"
+          nix profile add "github:cachix/devenv/${rev}" --accept-flake-config
+      - name: Build and enter developer shell
+        run: devenv --no-tui shell -- true

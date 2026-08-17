@@ -13,6 +13,49 @@
   distros).
 - `systemd` + `udev` (standard on Ubuntu, Fedora, Arch, Debian, openSUSE, …).
 
+## NixOS
+
+The repository Flake provides a package and a NixOS module for x86_64 and
+aarch64 Linux. Importing the module is preferred over adding the package to
+`environment.systemPackages` by itself: the module also registers the udev
+rules required for device access and manages the agent's user service.
+
+```nix
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.openlogi = {
+    url = "github:AprilNEA/OpenLogi";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { nixpkgs, openlogi, ... }: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux"; # or aarch64-linux
+      modules = [
+        openlogi.nixosModules.default
+        {
+          programs.openlogi = {
+            enable = true;
+            # Starts openlogi-agent with graphical-session.target by default.
+            launchAtLogin = true;
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+Set `programs.openlogi.launchAtLogin = false` to install the package and udev
+rules without automatically starting the agent. It remains available as
+`systemctl --user start openlogi-agent.service`.
+
+For a build without installing the module:
+
+```sh
+nix build github:AprilNEA/OpenLogi#openlogi
+```
+
 ## Build from source
 
 Pre-built `.deb` and `.rpm` packages are available on the
@@ -23,15 +66,16 @@ from source instead, use the stable Rust toolchain:
 ```sh
 git clone https://github.com/AprilNEA/OpenLogi
 cd OpenLogi
-cargo build --release
+cargo build --release -p openlogi -p openlogi-gui -p openlogi-agent
 ```
 
-The three binaries land in `target/release/`:
+Four production executables land in `target/release/`:
 
 | Binary | Role |
 |---|---|
 | `openlogi` | CLI — inventory, diagnostics, asset sync |
 | `openlogi-gui` | Desktop GUI |
+| `openlogi-overlay` | Actions Ring overlay helper |
 | `openlogi-agent` | Background agent — HID++ loop, input hook |
 
 ## Device access: udev rules

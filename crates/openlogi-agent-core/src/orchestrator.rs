@@ -144,8 +144,9 @@ pub struct Orchestrator {
     /// set/route/online state looks identical across the sleep gap, so the
     /// next refresh re-applies volatile settings to every online device.
     reapply_all_next_refresh: bool,
-    /// Config keys of devices first sighted recently, with remaining confirming
-    /// re-apply budget: the first write can race the device's own boot and be lost.
+    /// Config keys of devices first sighted (or wake-flagged) recently, with
+    /// remaining confirming re-apply budget: the first write can race the
+    /// device's own boot or reconnect and be lost.
     reapply_followup: HashMap<String, u8>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
     /// watcher has not produced its first usable observation yet.
@@ -948,18 +949,21 @@ fn any_device_needs_capture_rearm(
     !reapply_targets(prev, next, reapply_all).is_empty()
 }
 
-/// How many inventory ticks a first-sighted device keeps re-applying its
-/// volatile settings after the initial write. A cold restart leaves a Bolt/
-/// Unifying mouse slow to enumerate, so the first write (and a single confirm)
-/// can both time out against a still-booting device; retrying for ~8s at the 2s
-/// cadence lets the write land once it finishes booting.
+/// How many inventory ticks a first-sighted or wake-flagged device keeps
+/// re-applying its volatile settings after the initial write. A cold restart
+/// leaves a Bolt/Unifying mouse slow to enumerate — and a system wake can
+/// enumerate a receiver whose mouse link is still re-establishing — so the
+/// first write (and a single confirm) can both time out against a
+/// still-booting device; retrying for ~8s at the 2s cadence lets the write
+/// land once it finishes booting.
 const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
 /// plus a bounded run of confirming re-applies for devices first sighted
-/// recently, and the follow-up keys (with remaining retry counts) to confirm
-/// next refresh. Reconnects (offline→online) re-apply once — the device was
-/// already booted, so it needs no boot-race retry.
+/// recently or targeted by a system wake, and the follow-up keys (with
+/// remaining retry counts) to confirm next refresh. Reconnects
+/// (offline→online) re-apply once — the device was already booted, so it
+/// needs no boot-race retry.
 fn plan_reapply(
     prev: &[AgentDevice],
     next: &[AgentDevice],
@@ -970,8 +974,10 @@ fn plan_reapply(
     let mut next_followup: HashMap<String, u8> = targets
         .iter()
         .filter(|&&idx| {
-            let id = stable_id(&next[idx]);
-            !prev.iter().any(|p| stable_id(p) == id)
+            reapply_all || {
+                let id = stable_id(&next[idx]);
+                !prev.iter().any(|p| stable_id(p) == id)
+            }
         })
         .map(|&idx| {
             (

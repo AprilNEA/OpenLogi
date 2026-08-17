@@ -1,4 +1,4 @@
-# Nix package for OpenLogi on Linux (CLI + agent + GUI).
+# Nix package for OpenLogi on Linux (CLI + agent + GUI/overlay).
 #
 # Build via the flake:
 #   nix build .#openlogi
@@ -20,17 +20,20 @@
 #
 # The only recurring maintenance is: when a git pin (gpui, gpui-component,
 # ...) is bumped, update the corresponding entry below — the failing build
-# prints the correct hash to paste. The nix.yml workflow makes that failure
-# happen in the PR that bumps the pin, not silently on master afterwards.
+# prints the correct hash to paste. Nix CI watches Cargo.lock and the workspace
+# manifests so that failure happens in the PR that moves the pin.
 {
   lib,
+  stdenv,
   rustPlatform,
   fetchgit,
   src,
   pkg-config,
-  makeWrapper,
+  patchelf,
+  versionCheckHook,
   fontconfig,
   freetype,
+  libGL,
   libxkbcommon,
   wayland,
   vulkan-loader,
@@ -38,15 +41,36 @@
 }:
 
 let
-  # Single source of truth for the version: [workspace.package] in the
-  # workspace Cargo.toml (every crate uses version.workspace = true).
-  version = (builtins.fromTOML (builtins.readFile "${src}/Cargo.toml")).workspace.package.version;
+  # Keep documentation, CI metadata, and unrelated release tooling out of the
+  # source derivation so editing them does not rebuild the application.
+  source = lib.fileset.toSource {
+    root = src;
+    fileset = lib.fileset.unions [
+      (src + "/Cargo.lock")
+      (src + "/Cargo.toml")
+      (src + "/LICENSE-APACHE")
+      (src + "/LICENSE-MIT")
+      (src + "/crates")
+      (src + "/design/icon/openlogi.png")
+      (src + "/docs/config.example.toml")
+      (src + "/packaging/linux/desktop")
+      (src + "/packaging/linux/systemd")
+      (src + "/packaging/linux/udev")
+      (src + "/xtask")
+    ];
+  };
 
-  # GPUI dlopens libwayland-client / libvulkan at runtime instead of linking
-  # them, so they are absent from the binary's RUNPATH. Supply them through a
-  # wrapper; everything else (libxkbcommon, xcb, fontconfig) resolves via
-  # RUNPATH as usual.
+  # Single source of truth for the version: [workspace.package] in the
+  # workspace Cargo.toml (every crate uses version.workspace = true). Read it
+  # through the flake source accessor so package evaluation does not require
+  # materialising the filtered build source first.
+  version = (builtins.fromTOML (builtins.readFile (src + "/Cargo.toml"))).workspace.package.version;
+
+  # GPUI discovers these graphics backends at runtime instead of linking them,
+  # so normal fixup cannot infer their store paths. Add only those paths to the
+  # GUI's RUNPATH; linked xkbcommon/xcb/font libraries are fixed up normally.
   runtimeLibs = lib.makeLibraryPath [
+    libGL
     wayland
     vulkan-loader
   ];
@@ -68,17 +92,21 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = "openlogi";
-  inherit version src;
+  inherit version;
+  src = source;
+  strictDeps = true;
 
   cargoLock = {
-    lockFile = "${src}/Cargo.lock";
+    # Parse dependency metadata through the flake source accessor as above;
+    # only the actual build consumes the filtered source derivation.
+    lockFile = src + "/Cargo.lock";
     # One hash per git repository, keyed by any crate from that repo.
     # Obtain new values from the error message of a failing build, or with
     # `nix-prefetch-git <url> --rev <rev>`.
     outputHashes = {
       "gpui-0.2.2" = "sha256-Av+unZNI39dEb+zwSIU+SkEjqagHWrc7W8KehEgQ4H8=";
       "gpui-component-0.5.2" = gpuiComponentHash;
-      "gpui-updater-0.0.6" = "sha256-v8rn8tEkKBi8T2LtBV92uB+XtEeuBwj0qxGcDqEIwIw=";
+      "gpui-updater-0.0.7" = "sha256-hxdATcCif7csqKLNoi41ETe09Ym6zM4rVzYvBDEvVg4=";
       "proptest-1.10.0" = "sha256-p5NTcHhruI8QQvANACg8AMRVNmuvGxs2NLit+/8PaWo=";
       "zed-font-kit-0.14.1-zed" = "sha256-KXygi0olNQi5yM8eaJVykNDtbPMDjT+cWPBF8UrtXR4=";
       "zed-reqwest-0.12.15-zed" = "sha256-p4SiUrOrbTlk/3bBrzN/mq/t+1Gzy2ot4nso6w6S+F8=";
@@ -99,63 +127,92 @@ rustPlatform.buildRustPackage {
       exit 1
     fi
     ln -sfn "''${assets[0]}" "$cargoDepsCopy/assets"
-
-    # The workspace cargo config is dev-shell tooling: a macOS-scoped linker
-    # and runner (inert on Linux), a default DEVELOPER_DIR, cargo aliases.
-    # Nothing the sandboxed build needs — drop it so the build stays hermetic
-    # rather than tracking whatever dev ergonomics land there next.
-    rm -f .cargo/config.toml
   '';
 
   env.OPENLOGI_THEMES_DIR = "${gpuiComponentSrc}/themes";
 
   nativeBuildInputs = [
     pkg-config
-    makeWrapper
+    patchelf
     rustPlatform.bindgenHook # `media` (a gpui dep) runs bindgen — needs libclang
   ];
 
-  # Only libraries whose *-sys crates appear in Cargo.lock. TLS is rustls;
-  # evdev/hidraw are opened directly (pure Rust); vulkan is dlopened, so it
-  # belongs in runtimeLibs above, not here.
+  # Only libraries whose *-sys crates appear in Cargo.lock. TLS is rustls and
+  # evdev/hidraw are opened directly. Runtime-selected graphics libraries also
+  # appear here when their headers/pkg-config metadata are needed at build time.
   buildInputs = [
     fontconfig # GPUI text rendering (yeslogic-fontconfig-sys)
     freetype # font-kit (freetype-sys)
+    libGL # GPUI's OpenGL fallback
     libxkbcommon # GPUI keyboard handling
     wayland # wayland-sys
+    vulkan-loader # GPUI's primary Linux renderer
     libxcb # xcb / x11rb — the hook and GPUI's X11 backend
   ];
 
-  # The three shipped binaries; xtask (macOS bundling/DMG) is not used on
-  # Linux.
+  # Select production binaries explicitly: selecting the agent package alone
+  # also builds the development-only openlogi-agent-mock target.
   cargoBuildFlags = [
     "--package=openlogi"
+    "--bin=openlogi"
     "--package=openlogi-agent"
+    "--bin=openlogi-agent"
     "--package=openlogi-gui"
+    "--bin=openlogi-gui"
+    "--bin=openlogi-overlay"
   ];
 
-  # Some tests require real Logitech hardware, D-Bus, or uinput — none of
-  # which exist in the sandbox. The Rust CI workflow runs the test suite.
-  doCheck = false;
+  # Match Linux CI: the pure workspace tests run in the sandbox; GUI tests are
+  # exercised on macOS because GPUI's Linux test harness is not headless.
+  cargoTestFlags = [
+    "--workspace"
+    "--exclude=openlogi-gui"
+  ];
 
-  postInstall = ''
+  installPhase = ''
+    runHook preInstall
+
+    releaseDir=target/${stdenv.hostPlatform.rust.rustcTarget}/release
+    for binary in openlogi openlogi-agent openlogi-gui openlogi-overlay; do
+      install -Dm755 "$releaseDir/$binary" "$out/bin/$binary"
+    done
+
     install -Dm644 packaging/linux/desktop/openlogi.desktop \
       "$out/share/applications/openlogi.desktop"
     install -Dm644 design/icon/openlogi.png \
-      "$out/share/icons/hicolor/512x512/apps/openlogi.png"
+      "$out/share/icons/hicolor/1024x1024/apps/openlogi.png"
     install -Dm644 packaging/linux/udev/70-openlogi.rules \
       "$out/lib/udev/rules.d/70-openlogi.rules"
     install -Dm644 packaging/linux/systemd/openlogi-agent.service \
-      "$out/lib/systemd/user/openlogi-agent.service"
+      "$out/share/systemd/user/openlogi-agent.service"
+    install -Dm644 LICENSE-APACHE "$out/share/licenses/openlogi/LICENSE-APACHE"
+    install -Dm644 LICENSE-MIT "$out/share/licenses/openlogi/LICENSE-MIT"
+
+    substituteInPlace "$out/share/systemd/user/openlogi-agent.service" \
+      --replace-fail \
+        "ExecStart=/usr/bin/openlogi-agent" \
+        "ExecStart=$out/bin/openlogi-agent"
+
+    runHook postInstall
   '';
 
   postFixup = ''
-    wrapProgram "$out/bin/openlogi-gui" \
-      --prefix LD_LIBRARY_PATH : "${runtimeLibs}"
+    patchelf --add-rpath "${runtimeLibs}" "$out/bin/openlogi-gui"
+  '';
 
-    # The packaged unit hardcodes /usr/bin; point it at this output.
-    substituteInPlace "$out/lib/systemd/user/openlogi-agent.service" \
-      --replace-fail /usr/bin/openlogi-agent "$out/bin/openlogi-agent"
+  doInstallCheck = true;
+  nativeInstallCheckInputs = [ versionCheckHook ];
+  preInstallCheck = ''
+    for binary in openlogi openlogi-agent openlogi-gui openlogi-overlay; do
+      test -x "$out/bin/$binary"
+    done
+    test ! -e "$out/bin/openlogi-agent-mock"
+    test -f "$out/lib/udev/rules.d/70-openlogi.rules"
+    test -f "$out/share/applications/openlogi.desktop"
+    test -f "$out/share/icons/hicolor/1024x1024/apps/openlogi.png"
+    grep -Fqx \
+      "ExecStart=$out/bin/openlogi-agent" \
+      "$out/share/systemd/user/openlogi-agent.service"
   '';
 
   meta = {
