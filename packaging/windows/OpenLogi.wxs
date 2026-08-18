@@ -13,6 +13,7 @@
       ExeFile       path to the signed openlogi-desktop exe to package
       AgentExeFile  path to the signed openlogi-agent exe to package
       OverlayExeFile path to the signed openlogi-overlay exe to package
+      CliExeFile    path to the signed openlogi (CLI) exe to package
       IconFile      optional override for the app .ico (Add/Remove Programs
                     entry); defaults to the committed design/icon/openlogi.ico
                     below, so the release workflow needs no extra define
@@ -53,7 +54,16 @@
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="ProgramsFolder" Name="Programs">
-        <Directory Id="INSTALLFOLDER" Name="OpenLogi" />
+        <Directory Id="INSTALLFOLDER" Name="OpenLogi">
+          <!-- The CLI cannot sit beside the GUI: Windows paths are
+               case-insensitive, so `openlogi.exe` and the GUI's `OpenLogi.exe`
+               are the same file name in one directory. WiX catches it as
+               duplicate component GUIDs (WIX0369) — and the portable zip's
+               staging would silently overwrite the GUI with the CLI. A `bin`
+               subdirectory keeps the documented command name intact, and it is
+               `bin` (not INSTALLFOLDER) that goes on PATH. -->
+          <Directory Id="BINFOLDER" Name="bin" />
+        </Directory>
       </Directory>
     </StandardDirectory>
 
@@ -73,6 +83,34 @@
       <Component Id="OverlayExecutable">
         <!-- Warm, non-activating GPUI host for the Actions Ring. -->
         <File Id="OpenLogiOverlayExe" Name="openlogi-overlay.exe" Source="$(var.OverlayExeFile)" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="Cli" Directory="BINFOLDER">
+      <Component Id="CliExecutable">
+        <!-- The `openlogi` CLI: device inventory and the HID++ diagnostics
+             (`openlogi list`, `openlogi diag features`) that docs/USAGE.md and
+             both issue templates ask users to paste into reports. Linux
+             installs the same binary to /usr/bin/openlogi and macOS embeds it
+             at Contents/MacOS/openlogi; Windows shipped no CLI at all, so
+             device reports from Windows arrived with the diagnostic blocks
+             empty. The name must stay `openlogi.exe` — that is the command
+             every doc spells out, which is exactly why it needs its own
+             directory (see BINFOLDER above).
+
+             BINFOLDER joins the user's PATH so the command actually resolves
+             in a shell. System="no" keeps that to HKCU\Environment, matching
+             the package's perUser scope: no elevation, and an uninstall
+             removes the entry again (Permanent="no"). Part="last" appends
+             rather than shadowing anything already on PATH. -->
+        <File Id="OpenLogiCliExe" Name="openlogi.exe" Source="$(var.CliExeFile)" KeyPath="yes" />
+        <Environment Id="OpenLogiCliPath"
+                     Name="PATH"
+                     Value="[BINFOLDER]"
+                     Action="set"
+                     Part="last"
+                     Permanent="no"
+                     System="no" />
       </Component>
     </ComponentGroup>
 
@@ -108,6 +146,14 @@
                            RebootPrompt="no"
                            Timeout="2"
                            TerminateProcess="0" />
+    <!--
+      Target matching is case-insensitive, so this row also matches a running
+      `openlogi.exe` (the CLI). That is harmless and needs no row of its own:
+      the CLI is short-lived and holds no state, no lock, and no IPC pipe, so
+      terminating one mid-upgrade costs the user a re-run at worst — while
+      leaving it out of the match would let a long `assets sync` hold the
+      install directory and stall the upgrade on a FilesInUse prompt.
+    -->
     <util:CloseApplication Id="CloseGui"
                            Target="OpenLogi.exe"
                            CloseMessage="yes"
@@ -133,8 +179,9 @@
     </StandardDirectory>
 
     <Feature Id="Main">
-      <!-- ComponentGroupRef pulls in both MainExecutable and AgentExecutable. -->
+      <!-- App pulls in the GUI, agent, and overlay; Cli adds bin\openlogi.exe. -->
       <ComponentGroupRef Id="App" />
+      <ComponentGroupRef Id="Cli" />
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>
 

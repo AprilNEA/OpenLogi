@@ -419,9 +419,9 @@ jobs:
           : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in the R2 1Password item}"
           : "${OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY in the R2 1Password item}"
 
-      # No separate CLI artifact will ever ship on Windows (cargo install
-      # covers that audience), so job and artifact names carry no GUI
-      # qualifier. The GUI is a thin IPC client; the headless agent (ported in
+      # The CLI ships inside the same zip and MSI rather than as a separate
+      # artifact, so job and artifact names carry no GUI qualifier. The GUI is
+      # a thin IPC client; the headless agent (ported in
       # #167) owns the device I/O, input hook, and IPC server, and the GUI
       # spawns a sibling `openlogi-agent.exe` when the pipe is absent — so the
       # agent MUST ship next to the GUI or the app connects to nothing (#347).
@@ -429,7 +429,7 @@ jobs:
       # key and manifest URL via option_env! at compile time. Unsigned builds
       # get empty values and keep the fail-closed dev behaviour, so the
       # manifest-URL export is guarded rather than derived from an empty base.
-      - name: Build OpenLogi (GUI + agent)
+      - name: Build OpenLogi executables
         shell: bash
         env:
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.update_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
@@ -439,7 +439,7 @@ jobs:
           if [ -n "$OPENLOGI_UPDATE_BASE_URL" ]; then
             export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
           fi
-          cargo build --release -p openlogi-desktop -p openlogi-overlay -p openlogi-agent --target ${{ matrix.target }}
+          cargo build --release -p openlogi-desktop -p openlogi-overlay -p openlogi-agent -p openlogi --target ${{ matrix.target }}
 
       # Federated (passwordless) login. Requires an app registration whose federated
       # credential subject is `repo:AprilNEA/OpenLogi:environment:release`, granted the
@@ -475,11 +475,12 @@ jobs:
           endpoint: ${{ steps.azure_config.outputs.AZURE_SIGNING_ENDPOINT }}
           signing-account-name: ${{ steps.azure_config.outputs.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
-          # `files` is a newline-separated list; one call signs both PE files.
+          # `files` is a newline-separated list; one call signs every PE file.
           files: |
             ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-desktop.exe
             ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-overlay.exe
             ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-agent.exe
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi.exe
           # Timestamping is mandatory: without it the signature expires after
           # 3 days. The URL must stay http — SignTool rejects an https /tr up
           # front ("SignTool Error: Invalid Timestamp URL", v0.6.5) before
@@ -500,7 +501,7 @@ jobs:
           # HashMismatch (bytes no longer match the signature) are trust-store
           # independent and always ship-blockers; NotTrusted/UnknownError depend
           # on the runner's trust store, so they stay log-only.
-          foreach ($exe in 'openlogi-desktop.exe', 'openlogi-overlay.exe', 'openlogi-agent.exe') {
+          foreach ($exe in 'openlogi-desktop.exe', 'openlogi-overlay.exe', 'openlogi-agent.exe', 'openlogi.exe') {
             $sig = Get-AuthenticodeSignature "target\${{ matrix.target }}\release\$exe"
             $sig | Format-List
             if ($null -eq $sig.SignerCertificate -or
@@ -510,17 +511,31 @@ jobs:
             }
           }
 
-      # The portable artifact is a zip of both exes: a bare exe has nowhere to
+      # The portable artifact is a zip of every exe: a bare exe has nowhere to
       # put the agent, and GUI-only can never work (#347). Inside the zip the
       # GUI carries the product name (`OpenLogi.exe`, matching the MSI layout)
       # and the agent keeps the exact name the GUI's sibling lookup expects.
+      # `openlogi.exe` is the CLI the docs and both issue templates ask users to
+      # run; it is the same binary Linux installs to /usr/bin and macOS embeds
+      # at Contents/MacOS/openlogi. It goes in `bin\` rather than beside the
+      # GUI because Windows path comparison is case-insensitive: staging it as
+      # `stage\openlogi.exe` would overwrite `stage\OpenLogi.exe` and ship a zip
+      # with the CLI wearing the GUI's name. The MSI splits them the same way.
       - name: Collect signed portable zip artifact
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist, stage | Out-Null
+          New-Item -ItemType Directory -Force -Path dist, stage, stage\bin | Out-Null
           Copy-Item target\${{ matrix.target }}\release\openlogi-desktop.exe stage\OpenLogi.exe
           Copy-Item target\${{ matrix.target }}\release\openlogi-overlay.exe stage\openlogi-overlay.exe
           Copy-Item target\${{ matrix.target }}\release\openlogi-agent.exe stage\openlogi-agent.exe
+          Copy-Item target\${{ matrix.target }}\release\openlogi.exe stage\bin\openlogi.exe
+          # Guard the collision above: four inputs must produce four staged
+          # files. A case-insensitive overwrite would silently leave three.
+          $staged = (Get-ChildItem stage -Recurse -File).Count
+          if ($staged -ne 4) {
+            Write-Error "expected 4 staged files, found $staged — a name collision dropped one"
+            exit 1
+          }
           # Zipping after signing is safe: Authenticode lives in the PE files.
           $ref = $env:GITHUB_REF_NAME -replace '/', '-'
           Compress-Archive -Path stage\* -DestinationPath "dist\OpenLogi-$ref-windows-${{ matrix.arch }}.zip"
@@ -564,8 +579,9 @@ jobs:
       - uses: actions/checkout@v6
 
       # The portable zip from this arch's windows leg, containing the
-      # already-signed OpenLogi.exe and openlogi-agent.exe. The MSI packages
-      # exactly the bytes the portable artifact ships.
+      # already-signed OpenLogi.exe, openlogi-agent.exe, openlogi-overlay.exe,
+      # and openlogi.exe. The MSI packages exactly the bytes the portable
+      # artifact ships.
       - uses: actions/download-artifact@v8
         with:
           name: OpenLogi-windows-${{ matrix.arch }}
@@ -635,17 +651,18 @@ jobs:
           } else {
             $version = '0.0.0'
           }
-          # Selected by exact name, never by glob order: the zip carries two
-          # exes, and Get-ChildItem's alphabetical sort would put the agent
-          # first. Upstream invariants (upload's if-no-files-found: error, the
+          # Selected by exact name, never by glob order: the zip carries multiple
+          # executables, and Get-ChildItem's alphabetical sort would put the
+          # agent first. Upstream invariants (upload's if-no-files-found: error, the
           # by-name download, the extract step's guard) should make the misses
           # unreachable; the guards turn a confusing "$null.FullName -> empty
           # -d" wix error into a named cause if those invariants ever shift.
           $gui = Get-Item signed-exe\OpenLogi.exe -ErrorAction SilentlyContinue
           $overlay = Get-Item signed-exe\openlogi-overlay.exe -ErrorAction SilentlyContinue
           $agent = Get-Item signed-exe\openlogi-agent.exe -ErrorAction SilentlyContinue
-          if ($null -eq $gui -or $null -eq $overlay -or $null -eq $agent) {
-            Write-Error "signed-exe\ must contain OpenLogi.exe, openlogi-overlay.exe, and openlogi-agent.exe — nothing to package"
+          $cli = Get-Item signed-exe\bin\openlogi.exe -ErrorAction SilentlyContinue
+          if ($null -eq $gui -or $null -eq $overlay -or $null -eq $agent -or $null -eq $cli) {
+            Write-Error "signed-exe\ must contain OpenLogi.exe, openlogi-overlay.exe, openlogi-agent.exe, and bin\openlogi.exe — nothing to package"
             exit 1
           }
           New-Item -ItemType Directory -Force -Path out | Out-Null
@@ -656,6 +673,7 @@ jobs:
             -d ExeFile="$($gui.FullName)" `
             -d AgentExeFile="$($agent.FullName)" `
             -d OverlayExeFile="$($overlay.FullName)" `
+            -d CliExeFile="$($cli.FullName)" `
             -o out\OpenLogi.msi
 
       - name: Azure login (OIDC)
