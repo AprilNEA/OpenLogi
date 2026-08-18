@@ -548,7 +548,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
                         btle: true,
                         bluetooth: false,
                     },
-                    model_ids: [0x408a, 0xb35b, 0],
+                    model_ids: [0xb35b, 0x408a, 0],
                     extended_model_id: 0,
                 }),
                 capabilities: Some(Capabilities {
