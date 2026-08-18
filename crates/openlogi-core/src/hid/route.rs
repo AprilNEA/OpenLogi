@@ -84,20 +84,21 @@ pub const BOLT_PIDS: &[u16] = &[0xc548];
 /// USB product IDs that identify Logi Unifying receivers. Used by callers that
 /// need to construct the correct [`DeviceRoute`] variant from a raw inventory.
 ///
-/// `0xc537` is the Nano receiver bundled with the G602 and `0xc539` is a
-/// Lightspeed gaming receiver. Both answer the same HID++ 1.0 enumeration and
-/// pairing-information registers as Unifying, so they route as
-/// [`DeviceRoute::Unifying`].
-pub const UNIFYING_PIDS: &[u16] = &[0xc52b, 0xc532, 0xc537, 0xc539];
+/// `0xc537` is the Nano receiver bundled with the G602. It answers the same
+/// HID++ 1.0 enumeration and pairing-information registers as Unifying, so it
+/// routes as [`DeviceRoute::Unifying`].
+pub const UNIFYING_PIDS: &[u16] = &[0xc52b, 0xc532, 0xc537];
 
 /// USB product IDs that identify Logitech Lightspeed receivers — the
-/// receivers bundled with G-series wireless devices. `0xc53f` is the nano
-/// receiver of wireless mice such as the G305; `0xc547` ships with newer
-/// G-series devices such as the G915 keyboard and the G502 X LIGHTSPEED.
+/// receivers bundled with G-series wireless devices. `0xc539` ships with the
+/// G502 LIGHTSPEED and the G Pro Wireless — its USB product string is
+/// literally `LIGHTSPEED Receiver`; `0xc53f` is the nano receiver of wireless
+/// mice such as the G305; `0xc547` ships with newer G-series devices such as
+/// the G915 keyboard and the G502 X LIGHTSPEED.
 /// They speak the same HID++ 1.0 receiver register protocol as Unifying, so
 /// they are enumerated, routed, and paired through the Unifying code path;
 /// only the user-facing receiver name (see [`receiver_display_name`]) differs.
-pub const LIGHTSPEED_PIDS: &[u16] = &[0xc53f, 0xc547];
+pub const LIGHTSPEED_PIDS: &[u16] = &[0xc539, 0xc53f, 0xc547];
 
 /// Whether `product_id` is a receiver that speaks the Unifying HID++ 1.0
 /// register protocol — a Unifying receiver proper, or a protocol-compatible
@@ -284,9 +285,15 @@ mod tests {
 
     #[test]
     fn lightspeed_receiver_has_its_own_display_name() {
+        // 0xc539 is the receiver bundled with the G502 LIGHTSPEED and the
+        // G Pro Wireless. It routes through the Unifying code path, but it is
+        // Lightspeed hardware and says so in its own USB product string, so it
+        // must not be surfaced as a Unifying receiver.
+        assert_eq!(receiver_display_name(0xc539), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc53f), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc547), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc52b), "Unifying Receiver");
+        assert_eq!(receiver_display_name(0xc532), "Unifying Receiver");
     }
 
     #[test]
