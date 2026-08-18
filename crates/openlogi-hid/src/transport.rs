@@ -4,9 +4,14 @@
 //! descriptor, but `async-hid 0.4` only exposes descriptors on Linux. We avoid
 //! that path by pre-filtering to the Logitech HID++ vendor collections at
 //! enumeration time (see [`HIDPP_LONG_COLLECTIONS`]) and reporting support
-//! straight from [`AsyncHidChannel::supports_short_long_hidpp`]: USB / receiver
+//! straight from `AsyncHidChannel::supports_short_long_hidpp`: USB / receiver
 //! collections carry both reports; BLE-direct collections are long-only, and the
 //! `hidpp` channel up-converts outgoing short messages to long for them.
+//!
+//! `AsyncHidChannel` is named in plain backticks rather than linked because it
+//! is `cfg(not(target_os = "windows"))` — an intra-doc link to it is
+//! unresolvable on Windows, where `deny(broken_intra_doc_links)` then fails the
+//! whole crate's docs. `node_ledger` names it the same way.
 
 #[cfg(not(target_os = "windows"))]
 use std::error::Error;
