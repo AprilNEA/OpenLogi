@@ -84,10 +84,11 @@ pub const BOLT_PIDS: &[u16] = &[0xc548];
 /// USB product IDs that identify Logi Unifying receivers. Used by callers that
 /// need to construct the correct [`DeviceRoute`] variant from a raw inventory.
 ///
-/// `0xc539` is the Lightspeed gaming receiver: a distinct product line, but it
-/// answers the same HID++ 1.0 enumeration and pairing-information registers as
-/// Unifying, so it routes as [`DeviceRoute::Unifying`].
-pub const UNIFYING_PIDS: &[u16] = &[0xc52b, 0xc532, 0xc539];
+/// `0xc537` is the Nano receiver bundled with the G602 and `0xc539` is a
+/// Lightspeed gaming receiver. Both answer the same HID++ 1.0 enumeration and
+/// pairing-information registers as Unifying, so they route as
+/// [`DeviceRoute::Unifying`].
+pub const UNIFYING_PIDS: &[u16] = &[0xc52b, 0xc532, 0xc537, 0xc539];
 
 /// USB product IDs that identify Logitech Lightspeed receivers — the
 /// receivers bundled with G-series wireless devices. `0xc53f` is the nano
