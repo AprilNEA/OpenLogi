@@ -2,6 +2,7 @@
 
 use std::str::FromStr;
 
+use nutype::nutype;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use thiserror::Error;
 
@@ -16,21 +17,25 @@ const ALL_MODIFIERS: u8 = MOD_COMMAND | MOD_SHIFT | MOD_CONTROL | MOD_OPTION;
 /// Persisting a standard HID usage keeps the config independent of macOS
 /// virtual keys, Linux evdev codes, and Windows virtual-key codes. Unknown
 /// values are rejected during deserialization rather than silently ignored.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "u8", into = "u8")]
+#[nutype(
+    const_fn,
+    validate(with = validate_keyboard_usage, error = KeyboardUsageError),
+    derive(Clone, Copy, Debug, PartialEq, Eq, Hash, TryFrom, Into, Serialize, Deserialize),
+)]
 pub struct KeyboardUsage(u8);
 
 impl KeyboardUsage {
     /// Raw USB HID usage ID for platform injection backends.
     #[must_use]
     pub const fn code(self) -> u8 {
-        self.0
+        self.into_inner()
     }
 
     fn label(self) -> String {
-        match self.0 {
-            0x04..=0x1d => char::from(b'A' + self.0 - 0x04).to_string(),
-            0x1e..=0x26 => char::from(b'1' + self.0 - 0x1e).to_string(),
+        let code = self.into_inner();
+        match code {
+            0x04..=0x1d => char::from(b'A' + code - 0x04).to_string(),
+            0x1e..=0x26 => char::from(b'1' + code - 0x1e).to_string(),
             0x27 => "0".to_string(),
             0x28 => "Enter".to_string(),
             0x29 => "Escape".to_string(),
@@ -48,7 +53,7 @@ impl KeyboardUsage {
             0x36 => ",".to_string(),
             0x37 => ".".to_string(),
             0x38 => "/".to_string(),
-            0x3a..=0x45 => format!("F{}", self.0 - 0x3a + 1),
+            0x3a..=0x45 => format!("F{}", code - 0x3a + 1),
             0x4a => "Home".to_string(),
             0x4b => "PageUp".to_string(),
             0x4c => "Delete".to_string(),
@@ -58,34 +63,9 @@ impl KeyboardUsage {
             0x50 => "Left".to_string(),
             0x51 => "Down".to_string(),
             0x52 => "Up".to_string(),
-            0x68..=0x6f => format!("F{}", self.0 - 0x68 + 13),
-            _ => format!("Usage 0x{:02X}", self.0),
+            0x68..=0x6f => format!("F{}", code - 0x68 + 13),
+            _ => format!("Usage 0x{code:02X}"),
         }
-    }
-}
-
-impl TryFrom<u8> for KeyboardUsage {
-    type Error = KeyboardUsageError;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        if matches!(
-            value,
-            0x04..=0x31
-                | 0x33..=0x38
-                | 0x3a..=0x45
-                | 0x4a..=0x52
-                | 0x68..=0x6f
-        ) {
-            Ok(Self(value))
-        } else {
-            Err(KeyboardUsageError(value))
-        }
-    }
-}
-
-impl From<KeyboardUsage> for u8 {
-    fn from(value: KeyboardUsage) -> Self {
-        value.0
     }
 }
 
@@ -93,6 +73,21 @@ impl From<KeyboardUsage> for u8 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[error("unsupported keyboard usage: {0:#04x}")]
 pub struct KeyboardUsageError(pub u8);
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "nutype custom validators receive a reference to the wrapped value"
+)]
+const fn validate_keyboard_usage(value: &u8) -> Result<(), KeyboardUsageError> {
+    if matches!(
+        value,
+        0x04..=0x31 | 0x33..=0x38 | 0x3a..=0x45 | 0x4a..=0x52 | 0x68..=0x6f
+    ) {
+        Ok(())
+    } else {
+        Err(KeyboardUsageError(*value))
+    }
+}
 
 /// A platform-neutral keyboard chord.
 ///
@@ -381,8 +376,8 @@ mod tests {
     #[test]
     fn rejects_unknown_serialized_usage_and_modifier_bits() {
         // A bare `255` is not a TOML document, so the usage has to arrive in a
-        // wire field — otherwise the parse fails on syntax and never reaches
-        // the `try_from = "u8"` guard.
+        // wire field — otherwise the parse fails on syntax before reaching the
+        // usage guard.
         let Err(error) = toml::from_str::<KeyComboWire>("modifiers = 0\nkey = 255") else {
             panic!("usage 255 is not a supported HID keyboard usage and must be rejected")
         };
@@ -395,7 +390,7 @@ mod tests {
         assert_eq!(
             KeyCombo::try_from(KeyComboWire {
                 modifiers: 128,
-                key: KeyboardUsage(0x04),
+                key: KeyboardUsage::try_from(0x04).expect("0x04 is a valid keyboard usage"),
             }),
             Err(KeyComboParseError::InvalidModifiers(128))
         );

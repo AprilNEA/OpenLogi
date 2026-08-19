@@ -15,7 +15,7 @@ use openlogi_core::binding::ButtonId;
 /// Most targets correspond to one physical button. Thumb-wheel rotation is a
 /// single visual target backed by two directional bindings, so it has its own
 /// identity rather than pretending to be either direction or the wheel click.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, derive_more::From)]
 pub(crate) enum MouseControlId {
     Button(ButtonId),
     ThumbwheelRotation,
@@ -48,12 +48,6 @@ impl MouseControlId {
             Self::Button(button) => button.label(),
             Self::ThumbwheelRotation => "Thumb Wheel",
         }
-    }
-}
-
-impl From<ButtonId> for MouseControlId {
-    fn from(button: ButtonId) -> Self {
-        Self::Button(button)
     }
 }
 

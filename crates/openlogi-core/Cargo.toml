@@ -20,6 +20,7 @@ atomic-write-file = { workspace = true }
 num_enum = { workspace = true }
 strum = { version = "0.27", features = ["derive"] }
 toml_edit = "0.22"
+nutype = { version = "0.7.0", features = ["serde"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1.10.0"

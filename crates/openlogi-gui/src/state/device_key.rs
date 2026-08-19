@@ -1,7 +1,6 @@
 //! Typed key for `AppState`'s per-device UI-state side tables.
 
 use std::borrow::Borrow;
-use std::fmt;
 
 /// Identifies one device across [`AppState`](super::AppState)'s per-device UI
 /// caches: the DPI/SmartShift lazy-read state
@@ -13,31 +12,25 @@ use std::fmt;
 /// so a plain `String` computed for some unrelated purpose (a display name, a
 /// model key, a capture id) can't be passed to one of these maps by
 /// accident: every call site has to go through that one conversion point.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    derive_more::Display,
+    derive_more::From,
+)]
+#[from(forward)]
 pub(crate) struct DeviceKey(String);
 
 impl DeviceKey {
     /// Borrow the underlying key as a string slice.
     pub(crate) fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl fmt::Display for DeviceKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl From<&str> for DeviceKey {
-    fn from(key: &str) -> Self {
-        Self(key.to_string())
-    }
-}
-
-impl From<String> for DeviceKey {
-    fn from(key: String) -> Self {
-        Self(key)
     }
 }
 

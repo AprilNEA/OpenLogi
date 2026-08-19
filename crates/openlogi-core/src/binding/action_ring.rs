@@ -7,7 +7,8 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use nutype::nutype;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::Action;
@@ -84,56 +85,36 @@ pub enum RingActionError {
 /// Construction and deserialization reject actions that would make the ring's
 /// state ambiguous (`None`) or recursively invoke another ring
 /// (`ShowActionsRing`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[nutype(
+    validate(with = validate_ring_action, error = RingActionError),
+    derive(Clone, Debug, PartialEq, Eq, Hash, AsRef, TryFrom, Into, Serialize, Deserialize),
+)]
 pub struct RingAction(Action);
 
 impl RingAction {
     /// Validate and wrap an ordinary action for placement in a ring.
     pub fn new(action: Action) -> Result<Self, RingActionError> {
-        match action {
-            Action::None => Err(RingActionError::EmptyAction),
-            Action::ShowActionsRing => Err(RingActionError::RecursiveTrigger),
-            other => Ok(Self(other)),
-        }
+        Self::try_new(action)
     }
 
     /// The action the agent should execute when this slot is activated.
     #[must_use]
     pub fn action(&self) -> &Action {
-        &self.0
+        self.as_ref()
     }
 
     /// Consume the wrapper and return its action.
     #[must_use]
     pub fn into_action(self) -> Action {
-        self.0
+        self.into_inner()
     }
 }
 
-impl TryFrom<Action> for RingAction {
-    type Error = RingActionError;
-
-    fn try_from(action: Action) -> Result<Self, Self::Error> {
-        Self::new(action)
-    }
-}
-
-impl Serialize for RingAction {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.0.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for RingAction {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let action = Action::deserialize(deserializer)?;
-        Self::new(action).map_err(de::Error::custom)
+fn validate_ring_action(action: &Action) -> Result<(), RingActionError> {
+    match action {
+        Action::None => Err(RingActionError::EmptyAction),
+        Action::ShowActionsRing => Err(RingActionError::RecursiveTrigger),
+        _ => Ok(()),
     }
 }
 
@@ -242,6 +223,10 @@ impl ActionRingLayout {
 }
 
 impl Default for ActionRingLayout {
+    #[expect(
+        clippy::expect_used,
+        reason = "the built-in ring actions are statically known to satisfy RingAction's invariant"
+    )]
     fn default() -> Self {
         use ActionRingSlot as Slot;
 
@@ -257,7 +242,14 @@ impl Default for ActionRingLayout {
         ];
         let slots = actions
             .into_iter()
-            .map(|(slot, action)| (slot, ActionRingEntry::new(RingAction(action))))
+            .map(|(slot, action)| {
+                (
+                    slot,
+                    ActionRingEntry::new(
+                        RingAction::new(action).expect("default ring actions must be valid"),
+                    ),
+                )
+            })
             .collect();
         Self { slots }
     }

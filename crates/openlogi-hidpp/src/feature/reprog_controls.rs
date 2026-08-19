@@ -92,7 +92,19 @@ impl ReprogControlsFeature {
 }
 
 /// A HID++ control ID.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    derive_more::From,
+    derive_more::Into,
+)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ControlId(pub u16);
 
@@ -102,38 +114,26 @@ impl ControlId {
     }
 }
 
-impl From<u16> for ControlId {
-    fn from(value: u16) -> Self {
-        Self(value)
-    }
-}
-
-impl From<ControlId> for u16 {
-    fn from(value: ControlId) -> Self {
-        value.0
-    }
-}
-
 fn u16_from_be_payload(bytes: &[u8]) -> u16 {
     u16::from_be_bytes([bytes[0], bytes[1]])
 }
 
 /// A HID++ task ID.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    derive_more::From,
+    derive_more::Into,
+)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TaskId(pub u16);
-
-impl From<u16> for TaskId {
-    fn from(value: u16) -> Self {
-        Self(value)
-    }
-}
-
-impl From<TaskId> for u16 {
-    fn from(value: TaskId) -> Self {
-        value.0
-    }
-}
 
 /// One `getCidInfo` row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
