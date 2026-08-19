@@ -94,6 +94,7 @@ pub fn lookup(feature_id: u16) -> Option<KnownFeature> {
 
 /// Looks up all implementations supporting a specific feature ID and version
 /// combination.
+#[must_use]
 pub fn lookup_version(feature_id: u16, feature_version: u8) -> Option<Vec<FeatureVersion>> {
     lookup(feature_id).map(|feat| {
         feat.versions
@@ -121,16 +122,28 @@ fn new_dyn<F: CreatableFeature>(
 /// implementations through [`new_dyn`]. Listing several impls mirrors a feature
 /// that ships multiple versions, each contributing its own
 /// [`CreatableFeature::STARTING_VERSION`] in declaration order.
+///
+/// Each listed impl's [`CreatableFeature::ID`] is asserted at compile time to
+/// equal the row's `id` literal, so a typo can never register a feature's
+/// default implementation under the wrong wire id.
 macro_rules! known_features {
     ( $( $id:literal $name:literal $( => $($feat:ty),+ )? ),* $(,)? ) => {
         HashMap::from([ $(
-            ($id, KnownFeature { name: $name, versions: known_features!(@versions $( $($feat),+ )?) }),
+            ($id, KnownFeature { name: $name, versions: known_features!(@versions $id $( $($feat),+ )?) }),
         )* ])
     };
-    (@versions) => { &[] };
-    (@versions $($feat:ty),+) => {
+    (@versions $id:literal) => { &[] };
+    (@versions $id:literal $($feat:ty),+) => {
         &[$(FeatureVersion {
-            starting_version: <$feat>::STARTING_VERSION,
+            starting_version: {
+                const {
+                    assert!(
+                        <$feat>::ID == $id,
+                        "registry id must match the impl's CreatableFeature::ID"
+                    );
+                }
+                <$feat>::STARTING_VERSION
+            },
             producer: new_dyn::<$feat>,
         }),+]
     };
@@ -265,15 +278,20 @@ mod tests {
     #[test]
     fn macro_registers_one_version_per_listed_impl() {
         // The `=> A, B` form keeps the original table's ability to register
-        // several versioned implementations under a single feature id.
+        // several versioned implementations under a single feature id. Every
+        // row's id must match its impls' real `CreatableFeature::ID`, so the
+        // two-impl row lists `FeatureSetFeature` twice under its own id
+        // (0x0001) rather than pairing it with an unrelated feature — no
+        // current registry entry actually ships two version-gated impls
+        // under one id, but the macro's counting behaviour is the same.
         let map: HashMap<u16, KnownFeature> = known_features! {
-            0x0000 "NameOnly",
-            0x0001 "OneImpl" => RootFeature,
-            0xffff "TwoImpls" => RootFeature, FeatureSetFeature,
+            0x0002 "NameOnly",
+            0x0000 "OneImpl" => RootFeature,
+            0x0001 "TwoImpls" => FeatureSetFeature, FeatureSetFeature,
         };
 
-        assert_eq!(map[&0x0000].versions.len(), 0);
-        assert_eq!(map[&0x0001].versions.len(), 1);
-        assert_eq!(map[&0xffff].versions.len(), 2);
+        assert_eq!(map[&0x0002].versions.len(), 0);
+        assert_eq!(map[&0x0000].versions.len(), 1);
+        assert_eq!(map[&0x0001].versions.len(), 2);
     }
 }

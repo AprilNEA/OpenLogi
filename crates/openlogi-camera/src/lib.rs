@@ -32,6 +32,9 @@ pub use capture::{
 };
 
 #[cfg(target_os = "windows")]
+mod com_windows;
+
+#[cfg(target_os = "windows")]
 mod capture_windows;
 #[cfg(target_os = "windows")]
 pub use capture_windows::{

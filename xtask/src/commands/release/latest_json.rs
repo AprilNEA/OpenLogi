@@ -7,7 +7,10 @@ use serde::Serialize;
 use sha2_hasher::Sha2Hasher;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-const APP_ID: &str = "org.openlogi.openlogi";
+// The manifest advertises the identity the shipped bundle is stamped with, so
+// both come from one constant.
+use crate::commands::macos::bundle::identity::APP_BUNDLE_ID;
+
 const CHANNEL: &str = "stable";
 const MACOS_MINIMUM_OS_VERSION: &str = "13.0";
 /// Windows 10+. Informational — the client updater doesn't gate on it today,
@@ -91,7 +94,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 
     let manifest = Manifest {
         schema_version: 1,
-        app_id: APP_ID,
+        app_id: APP_BUNDLE_ID,
         version,
         tag: args.tag.clone(),
         channel: CHANNEL,

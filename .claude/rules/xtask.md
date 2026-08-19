@@ -2,7 +2,7 @@
 paths:
   - "xtask/**"
   - "packaging/**"
-  - "scripts/**"
+  - ".github/scripts/**"
 ---
 
 # xtask & packaging tooling
@@ -25,6 +25,6 @@ paths:
   Windows MSI in `packaging/windows/OpenLogi.wxs`. Packaging env overrides
   (`OPENLOGI_SIGN_IDENTITY`, `OPENLOGI_BUNDLE_ASSETS`, `PKG_ARCH`, …) are documented in
   `docs/DEVELOPMENT.md`.
-- `scripts/cargo-run-macos.sh` (the dev-run bundle wrapper) stays outside xtask on
+- `.cargo/run-macos.sh` (the dev-run bundle wrapper) stays outside xtask on
   purpose — cargo must exec it while running arbitrary binaries, including xtask itself.
-  `scripts/release-notes/` is a dedicated Node/Octokit tool; don't wrap it in xtask.
+  `.github/scripts/release-notes/` is a dedicated Node/Octokit tool; don't wrap it in xtask.

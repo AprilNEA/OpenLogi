@@ -1,4 +1,5 @@
 //! Unit tests for `RgbEffects` payload parsing and event decoding.
+#![allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 
 use super::event::{RgbEffectsEvent, decode_event};
 use super::types::{
@@ -144,7 +145,7 @@ fn ignores_unknown_event_sub_id() {
 fn maps_stable_enum_wire_values() {
     assert_eq!(RgbPowerMode::try_from(1u8).unwrap(), RgbPowerMode::FullRgb);
     assert_eq!(RgbPowerMode::try_from(3u8).unwrap(), RgbPowerMode::PowerOff);
-    assert!(RgbPowerMode::try_from(0u8).is_err());
+    RgbPowerMode::try_from(0u8).unwrap_err();
     assert_eq!(u8::from(PowerModeTarget::PowerSave), 1);
     assert_eq!(
         LedBinIndex::try_from(2u8).unwrap(),
@@ -154,7 +155,7 @@ fn maps_stable_enum_wire_values() {
         SlotInfoType::try_from(6u8).unwrap(),
         SlotInfoType::EffectName21To31
     );
-    assert!(SlotInfoType::try_from(7u8).is_err());
+    SlotInfoType::try_from(7u8).unwrap_err();
 }
 
 /// Totality: the user-activity event must decode for any activity byte.

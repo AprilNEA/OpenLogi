@@ -469,7 +469,7 @@ impl Hook {
 /// `None` when no app is frontmost, when reading fails, or on unsupported
 /// platforms. Costs one X11 round-trip on Linux, four `objc_msgSend`s on
 /// macOS — well under a millisecond at the 1 Hz polling cadence in
-/// `openlogi-gui::app_watcher`.
+/// `openlogi-desktop::app_watcher`.
 #[must_use]
 pub fn frontmost_bundle_id() -> Option<String> {
     cfg_select! {

@@ -75,7 +75,7 @@ pub(crate) fn map_device_type(ty: HidppDeviceType) -> DeviceKind {
 /// > asset registry > **HID++ `0x0005`** > **Bolt pairing register**
 ///
 /// This folds the two HID++ sources; the GUI applies the final asset-registry
-/// override in `effective_kind` (`crates/openlogi-gui/src/state/devices.rs`).
+/// override in `effective_kind` (`crates/openlogi-desktop/src/state/devices.rs`).
 /// Adding a kind source means slotting it into this one chain — and updating
 /// both docs.
 ///

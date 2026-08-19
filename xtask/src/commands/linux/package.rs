@@ -25,14 +25,14 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         println!("==> build release binaries");
         cmd!(
             sh,
-            "cargo build --release -p openlogi -p openlogi-gui -p openlogi-agent"
+            "cargo build --release -p openlogi -p openlogi-desktop -p openlogi-agent"
         )
         .run()?;
     }
 
     for bin in [
         "openlogi",
-        "openlogi-gui",
+        "openlogi-desktop",
         "openlogi-overlay",
         "openlogi-agent",
     ] {

@@ -2,7 +2,7 @@
 
 #![allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 
-use std::assert_matches;
+use std::{assert_matches, fs};
 
 use super::*;
 use crate::binding::{default_binding, default_gesture_binding};
@@ -12,6 +12,13 @@ fn write_and_read(config: &Config) -> Config {
     let path = dir.path().join("config.toml");
     config.save_to_path(&path).expect("save");
     Config::load_from_path(&path).expect("load")
+}
+
+#[test]
+fn canonical_configuration_example_parses() {
+    let body = include_str!("../../../../docs/config.example.toml");
+    let config: Config = toml::from_str(body).expect("documented config must parse");
+    assert_eq!(config.schema_version, SCHEMA_VERSION);
 }
 
 #[test]
@@ -101,9 +108,14 @@ fn key_trigger_parses_and_displays_extended_function_keys() {
 
 #[test]
 fn key_trigger_rejects_unknown() {
-    assert!("f99".parse::<KeyTrigger>().is_err());
-    assert!("shift+".parse::<KeyTrigger>().is_err());
-    assert!("".parse::<KeyTrigger>().is_err());
+    "f99"
+        .parse::<KeyTrigger>()
+        .expect_err("f99 is not a known key name");
+    "shift+"
+        .parse::<KeyTrigger>()
+        .expect_err("a modifier with no key must be rejected");
+    "".parse::<KeyTrigger>()
+        .expect_err("an empty trigger must be rejected");
 }
 
 #[test]
@@ -224,8 +236,8 @@ fn standalone_light_settings_roundtrip_per_device() {
 }
 
 #[test]
-fn standalone_light_brightness_is_clamped_on_load() {
-    let cfg: Config = toml::from_str(
+fn standalone_light_brightness_outside_percentage_range_is_rejected() {
+    let error = toml::from_str::<Config>(
         r"
             schema_version = 3
             [devices.glow.light]
@@ -233,11 +245,8 @@ fn standalone_light_brightness_is_clamped_on_load() {
             brightness_percent = 255
         ",
     )
-    .expect("light config loads");
-    assert_eq!(
-        cfg.light("glow").map(|light| light.brightness_percent),
-        Some(100)
-    );
+    .expect_err("out-of-range brightness must fail");
+    assert!(error.to_string().contains("between 0 and 100"));
 }
 
 #[test]
@@ -264,8 +273,8 @@ fn standalone_light_camera_automation_roundtrips() {
 }
 
 #[test]
-fn unparseable_lighting_color_falls_back_to_white() {
-    let cfg: Config = toml::from_str(
+fn unparseable_lighting_color_is_rejected() {
+    let error = toml::from_str::<Config>(
         r#"
             schema_version = 3
             [devices.g513.lighting]
@@ -274,11 +283,8 @@ fn unparseable_lighting_color_falls_back_to_white() {
             brightness = 50
         "#,
     )
-    .expect("config with a bad color still loads");
-    assert_eq!(
-        cfg.lighting("g513").map(|l| l.color),
-        Some(crate::color::Rgb::WHITE)
-    );
+    .expect_err("invalid RGB must fail");
+    assert!(error.to_string().contains("invalid RGB color"));
 }
 
 #[test]
@@ -428,9 +434,7 @@ fn bindings_roundtrip_per_device() {
         "2b042",
         ButtonId::DpiToggle,
         Binding::Single(Action::CustomShortcut(
-            "Cmd+P"
-                .parse()
-                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+            "Cmd+P".parse().expect("valid shortcut failed"),
         )),
     );
     cfg.set_binding("4082d", ButtonId::Back, Binding::Single(Action::Paste));
@@ -443,9 +447,7 @@ fn bindings_roundtrip_per_device() {
     assert_eq!(
         a.get(&ButtonId::DpiToggle),
         Some(&Binding::Single(Action::CustomShortcut(
-            "Cmd+P"
-                .parse()
-                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"))
+            "Cmd+P".parse().expect("valid shortcut failed")
         )))
     );
 
@@ -552,6 +554,39 @@ fn device_identity_roundtrips_and_is_iterable() {
         parsed.known_identities().collect::<Vec<_>>(),
         vec![("2b034", &mouse)]
     );
+}
+
+#[test]
+fn persisted_identity_strips_per_unit_identifiers() {
+    use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports};
+
+    let mut config = Config::default();
+    config.set_device_identity(
+        "receiver:test:slot:1",
+        DeviceIdentity {
+            display_name: "Mouse".into(),
+            model_info: Some(DeviceModelInfo {
+                entity_count: 1,
+                serial_number: Some("private-serial".into()),
+                unit_id: [1, 2, 3, 4],
+                transports: DeviceTransports::default(),
+                model_ids: [0xb034, 0, 0],
+                extended_model_id: 2,
+            }),
+            codename: None,
+            kind: DeviceKind::Mouse,
+            capabilities: Capabilities::default(),
+            light_capabilities: None,
+            driver_id: None,
+            registry_model_id: None,
+        },
+    );
+    let model = config
+        .device_identity("receiver:test:slot:1")
+        .and_then(|identity| identity.model_info.as_ref())
+        .expect("model info");
+    assert_eq!(model.serial_number, None);
+    assert_eq!(model.unit_id, [0; 4]);
 }
 
 #[test]
@@ -926,6 +961,111 @@ fn rejects_newer_schema_version_but_accepts_v1() {
         Config::load_from_path(&path).is_ok(),
         "v1 should still load"
     );
+}
+
+#[test]
+fn future_version_is_rejected_before_incompatible_fields_are_parsed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        "schema_version = 99\n[app_settings]\nthumbwheel_sensitivity = \"future\"\n",
+    )
+    .expect("write");
+    assert_matches!(
+        Config::load_from_path(&path).expect_err("future schema must fail by version"),
+        ConfigError::UnsupportedSchemaVersion { found: 99, .. }
+    );
+}
+
+#[test]
+fn schema_version_zero_is_rejected() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("config.toml");
+    fs::write(&path, "schema_version = 0\n").expect("write config");
+
+    assert!(matches!(
+        Config::load_from_path(&path),
+        Err(ConfigError::UnsupportedSchemaVersion { found: 0, .. })
+    ));
+}
+
+#[test]
+fn current_schema_rejects_unknown_and_obsolete_fields() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        "schema_version = 4\n[app_settings]\nthumbwheel_sensitivty = 14\n",
+    )
+    .expect("write typo");
+    assert_matches!(
+        Config::load_from_path(&path).expect_err("typo must fail"),
+        ConfigError::Parse { .. }
+    );
+
+    fs::write(
+        &path,
+        r#"schema_version = 4
+[devices.mouse.identity]
+display_name = "Mouse"
+kind = "mouse"
+capabilities = { buttons = true, pointer = true, lighting = false, scroll_inversion = false, typo = true }
+"#,
+    )
+    .expect("write nested typo");
+    assert_matches!(
+        Config::load_from_path(&path).expect_err("nested typo must fail"),
+        ConfigError::Parse { .. }
+    );
+
+    fs::write(
+        &path,
+        "schema_version = 4\n[devices.mouse]\ngesture_owner = \"Off\"\n",
+    )
+    .expect("write obsolete field");
+    assert_matches!(
+        Config::load_from_path(&path).expect_err("v4 legacy field must fail"),
+        ConfigError::ObsoleteField { .. }
+    );
+}
+
+#[test]
+fn persisted_numeric_contracts_reject_unsafe_values() {
+    for body in [
+        "schema_version = 4\n[app_settings]\nthumbwheel_sensitivity = 0\n",
+        "schema_version = 4\n[app_settings]\nthumbwheel_sensitivity = 101\n",
+        "schema_version = 4\n[app_settings]\nthumbwheel_sensitivity = -2147483648\n",
+        "schema_version = 4\n[devices.mouse]\nthumbwheel_sensitivity = -1\n",
+        "schema_version = 4\n[devices.mouse]\ndpi = 65536\n",
+        "schema_version = 4\n[devices.mouse]\ndpi_presets = [800, 70000]\n",
+    ] {
+        assert!(toml::from_str::<Config>(body).is_err(), "accepted: {body}");
+    }
+}
+
+#[test]
+fn tracked_save_preserves_comments_and_rejects_concurrent_edits() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        "# keep this comment\nschema_version = 4\nselected_device = \"one\" # and this one\n",
+    )
+    .expect("write");
+    let (mut config, mut file) = ConfigFile::load_from_path(&path).expect("load tracked");
+    config.set_selected_device(Some("two".into()));
+    file.save(&config).expect("save tracked");
+    let saved = fs::read_to_string(&path).expect("read saved");
+    assert!(saved.contains("# keep this comment"));
+    assert!(saved.contains("# and this one"));
+    assert!(saved.contains("selected_device = \"two\""));
+
+    let external = format!("{saved}# external editor\n");
+    fs::write(&path, &external).expect("external edit");
+    config.set_selected_device(Some("three".into()));
+    assert_matches!(file.save(&config), Err(ConfigError::Conflict { .. }));
+    assert_eq!(fs::read_to_string(path).expect("read conflict"), external);
 }
 
 #[test]

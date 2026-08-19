@@ -105,7 +105,7 @@ pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
 /// mouse bindings these are not per-app-profile (M1 scope — per the spec's
 /// non-goals), so a single map suffices. Keyed by the config `KeyTrigger`
 /// (keycode + modifiers).
-pub type SharedKeyboardBindings = Arc<RwLock<std::collections::HashMap<KeyTrigger, Action>>>;
+pub type SharedKeyboardBindings = Arc<RwLock<BTreeMap<KeyTrigger, Action>>>;
 
 /// Convert the hook-layer modifier state into the config-layer type (the two
 /// live in different crates — core is leaf-level and duplicates the four
@@ -597,7 +597,7 @@ pub fn dispatch_action(
             let target = dpi_cycle.read().ok().and_then(|g| g.target_for(device_key));
             info!("SmartShift toggle → flipping wheel mode");
             if let Some(registry) = registry {
-                toggle_smartshift_in_background(Some(capture), registry, receiver_access, target);
+                toggle_smartshift_in_background(capture, registry, receiver_access, target);
             } else {
                 warn!("no inventory registry — SmartShift toggle skipped");
             }
@@ -627,7 +627,7 @@ pub fn dispatch_action(
     if let Some((dpi, target)) = next {
         info!(dpi, "DPI action → writing to device");
         if let Some(registry) = registry {
-            write_dpi_in_background(Some(capture), registry, receiver_access, target, dpi);
+            write_dpi_in_background(capture, registry, receiver_access, target, dpi);
         } else {
             warn!("no inventory registry — DPI action skipped");
         }

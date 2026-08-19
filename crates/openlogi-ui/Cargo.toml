@@ -1,0 +1,24 @@
+[package]
+name = "openlogi-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Presentation code shared by the OpenLogi settings app and its Actions Ring overlay helper."
+# Not publishable to crates.io: depends on git-only gpui.
+publish = false
+
+[dependencies]
+openlogi-core = { path = "../openlogi-core" }
+# `gpui` only — deliberately neither `gpui-component` nor its icon set. Every
+# dependency added here lands in the overlay helper too, so the widget kit and
+# the artwork only the app draws both stay on the app's side.
+gpui = { workspace = true }
+fluent-langneg = "0.14.2"
+rust-i18n = "4"
+sys-locale = "0.3.2"
+
+[lints]
+workspace = true

@@ -34,13 +34,14 @@ use windows::Win32::Media::MediaFoundation::{
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_MT_DEFAULT_STRIDE,
     MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
-    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION, MFCreateAttributes, MFCreateMediaType,
-    MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video, MFSTARTUP_LITE,
-    MFStartup, MFVideoFormat_NV12, MFVideoFormat_RGB24, MFVideoFormat_RGB32, MFVideoFormat_YUY2,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MFCreateAttributes, MFCreateMediaType,
+    MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video,
+    MFVideoFormat_NV12, MFVideoFormat_RGB24, MFVideoFormat_RGB32, MFVideoFormat_YUY2,
 };
-use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
+use windows::Win32::System::Com::CoTaskMemFree;
 
 pub use crate::capture_types::{CaptureError, Frame};
+use crate::com_windows::{ComApartment, MediaFoundation};
 
 /// The preview's target frame width: matches the macOS backend's 720p preset —
 /// Retina-sharp in the 480pt preview box without 1080p copy/upload cost. The
@@ -177,29 +178,46 @@ pub fn request_camera_access() {}
 
 /// The reader thread: builds the Media Foundation graph, reports the outcome
 /// through `setup`, then pulls and decodes samples until told to stop.
+///
+/// This is an ordinary application thread pulling samples synchronously, not
+/// one of Media Foundation's work queues — the one thread kind on which the
+/// platform calls, and so the guards below, would be illegal.
 fn reader_thread(unique_id: &str, shared: &Shared, setup: &mpsc::Sender<Result<(), CaptureError>>) {
-    // SAFETY: COM + MF init on this thread; every interface is released by the
-    // `windows` wrappers when the thread's locals drop.
-    let reader = unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        if let Err(e) = MFStartup(MF_VERSION, MFSTARTUP_LITE) {
-            let _ = setup.send(Err(CaptureError::Setup(e.to_string())));
+    // Declared before anything COM so it drops last: every Media Foundation
+    // interface built below is a COM object, and releasing one after its
+    // apartment closed is exactly the bug these guards exist to prevent.
+    let com = ComApartment::enter();
+    let media_foundation = match com.start_media_foundation() {
+        Ok(started) => started,
+        Err(e) => {
+            let _ = setup.send(Err(setup_err(e)));
             return;
         }
-        match open_reader(unique_id) {
-            Ok(opened) => opened,
-            Err(e) => {
-                let _ = setup.send(Err(e));
-                return;
-            }
-        }
     };
-    let (reader, stride_hint) = reader;
-    let _ = setup.send(Ok(()));
 
+    // The whole object graph lives in this `match`, so the reader — and with it
+    // the media source and every media type — has released by the time the
+    // platform guard drops at the end of the function.
+    match open_reader(&media_foundation, unique_id) {
+        Ok((reader, stride_hint)) => {
+            let _ = setup.send(Ok(()));
+            pump_frames(&reader, shared, stride_hint);
+        }
+        Err(e) => {
+            let _ = setup.send(Err(e));
+        }
+    }
+    drop(media_foundation);
+}
+
+/// Pull and decode samples into `shared` until the stream is told to stop or
+/// the reader errors out.
+fn pump_frames(reader: &IMFSourceReader, shared: &Shared, stride_hint: StrideHint) {
     while !shared.stop.load(Ordering::Relaxed) {
-        // SAFETY: synchronous ReadSample with documented out-params; the
-        // sample and its buffer are released when the wrappers drop.
+        // SAFETY: synchronous ReadSample with documented out-params, on the
+        // thread that owns the reader and while the platform guard keeps Media
+        // Foundation started; the sample and its buffer are released when the
+        // wrappers drop.
         unsafe {
             let (mut flags, mut sample) = (0u32, None);
             if reader
@@ -244,9 +262,21 @@ struct StrideHint {
 /// Build the source reader for `unique_id`: activate the matching device,
 /// pick the native format closest to [`TARGET_WIDTH`], and negotiate RGB32
 /// output (Media Foundation inserts the decoder/converter).
-unsafe fn open_reader(unique_id: &str) -> Result<(IMFSourceReader, StrideHint), CaptureError> {
+fn open_reader(
+    platform: &MediaFoundation<'_>,
+    unique_id: &str,
+) -> Result<(IMFSourceReader, StrideHint), CaptureError> {
+    // SAFETY: the `platform` borrow is the precondition every call below needs
+    // — Media Foundation started, inside an apartment — and the caller holds
+    // both guards for longer than the returned reader.
+    // `MFCreateAttributes` writes its +1 `IMFAttributes` into the local
+    // `Option`, which is checked before use; that attribute set, the reader, the
+    // media types the enumeration keeps and the output type are all refcounted
+    // wrappers released when they drop. Each method call runs on this thread
+    // against a live interface, and the reader is handed back to the very thread
+    // that will pull samples from it.
     unsafe {
-        let source = activate_source(unique_id)?;
+        let source = activate_source(platform, unique_id)?;
 
         let mut reader_attrs = None;
         MFCreateAttributes(&raw mut reader_attrs, 1).map_err(setup_err)?;
@@ -334,7 +364,21 @@ unsafe fn open_reader(unique_id: &str) -> Result<(IMFSourceReader, StrideHint), 
 /// device path). The two APIs register the camera under different
 /// interface-class GUIDs, so they are matched on the shared device-instance
 /// portion (see [`device_instance`]).
-unsafe fn activate_source(unique_id: &str) -> Result<IMFMediaSource, CaptureError> {
+fn activate_source(
+    _platform: &MediaFoundation<'_>,
+    unique_id: &str,
+) -> Result<IMFMediaSource, CaptureError> {
+    // SAFETY: the `_platform` borrow proves Media Foundation is started inside
+    // an apartment on this thread, which is what these MF calls require of it.
+    // `MFEnumDeviceSources` fills `devices` with one CoTaskMem
+    // allocation holding exactly `count` nullable interface pointers —
+    // `Option<IMFActivate>` is a pointer-sized niche over that — so the slice
+    // spans only memory MF allocated, and the null case is ruled out before it
+    // is built. Every element is moved out with `take`, which is what carries
+    // MF's reference into Rust's ownership, and the array itself is freed once,
+    // after the borrow ends. `GetAllocatedString` hands back a CoTaskMem PWSTR
+    // that is copied into `link_str` before being freed, so nothing outlives
+    // its allocation.
     unsafe {
         let mut enum_attrs = None;
         MFCreateAttributes(&raw mut enum_attrs, 1).map_err(setup_err)?;
@@ -348,9 +392,21 @@ unsafe fn activate_source(unique_id: &str) -> Result<IMFMediaSource, CaptureErro
 
         let (mut devices, mut count) = (std::ptr::null_mut::<Option<IMFActivate>>(), 0u32);
         MFEnumDeviceSources(&enum_attrs, &raw mut devices, &raw mut count).map_err(setup_err)?;
-        let list = std::slice::from_raw_parts(devices, count as usize);
+        if devices.is_null() {
+            return Err(CaptureError::NotFound);
+        }
+        let list = std::slice::from_raw_parts_mut(devices, count as usize);
         let mut chosen = None;
-        for activate in list.iter().flatten() {
+        for slot in &mut *list {
+            // MF hands the caller one reference per device and freeing the
+            // array releases none of them, so every activate is moved out —
+            // the ones that are not chosen are released when they drop below.
+            let Some(activate) = slot.take() else {
+                continue;
+            };
+            if chosen.is_some() {
+                continue;
+            }
             let (mut link, mut len) = (windows::core::PWSTR::null(), 0u32);
             if activate
                 .GetAllocatedString(
@@ -365,8 +421,7 @@ unsafe fn activate_source(unique_id: &str) -> Result<IMFMediaSource, CaptureErro
             let link_str = link.to_string().unwrap_or_default();
             CoTaskMemFree(Some(link.as_ptr().cast()));
             if device_instance(&link_str).eq_ignore_ascii_case(device_instance(unique_id)) {
-                chosen = Some(activate.clone());
-                break;
+                chosen = Some(activate);
             }
         }
         let result = match chosen {

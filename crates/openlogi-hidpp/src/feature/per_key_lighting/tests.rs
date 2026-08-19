@@ -1,4 +1,5 @@
 //! Unit tests for `PerKeyLighting` request encoding.
+#![allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 
 use std::assert_matches;
 
@@ -173,6 +174,6 @@ fn maps_enum_wire_values() {
         ZonePresencePage::try_from(2u8).unwrap(),
         ZonePresencePage::Zones224To255
     );
-    assert!(ZonePresencePage::try_from(3u8).is_err());
+    ZonePresencePage::try_from(3u8).unwrap_err();
     assert_eq!(u8::from(FramePersistence::VolatileAndNonVolatile), 1);
 }

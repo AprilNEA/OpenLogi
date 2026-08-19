@@ -12,11 +12,10 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::Config;
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::gesture::{DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS};
-
-use crate::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 
 /// Everything the capture watcher needs to run one device's session and
 /// dispatch its events.

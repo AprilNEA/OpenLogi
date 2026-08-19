@@ -3,6 +3,7 @@
 use super::types::{
     ActivityEventType, CLUSTER_EFFECT_PARAM_COUNT, PowerModeTarget, RgbPersistence, be16,
 };
+use crate::feature::DecodeEvent;
 
 /// Bit offset of the power-mode target in the cluster-effect flags byte.
 const POWER_TARGET_SHIFT: u8 = 2;
@@ -67,5 +68,11 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<RgbEffectsE
             })
         }
         _ => None,
+    }
+}
+
+impl DecodeEvent for RgbEffectsEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        decode_event(sub_id, payload)
     }
 }

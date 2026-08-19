@@ -11,8 +11,6 @@
 use std::sync::Arc;
 
 use hidpp::{channel::HidppChannel, device::Device, feature::CreatableFeature};
-use openlogi_core::config::LightSettings;
-use openlogi_core::device::LightCapabilities;
 
 use crate::route::{DeviceRoute, open_route_channel};
 
@@ -32,9 +30,13 @@ pub use diagnostics::{
     FeatureEntry, ReprogControlEntry, dump_features, dump_reprog_controls, read_battery_raw,
 };
 pub use dpi::{DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, set_dpi};
+pub(crate) use error::classify_hid_error;
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::set_fn_lock;
-pub use haptic::{play_haptic, play_haptic_on};
+pub(crate) use haptic::clear_haptic_feature_cache_for;
+pub use haptic::{
+    clear_haptic_feature_cache, ensure_haptics_armed_on, play_haptic, play_haptic_on,
+};
 pub use hidpp::feature::haptic_feedback::HapticWaveform;
 pub use lighting::{LightingMethod, set_keyboard_color, set_keyboard_color_with};
 pub use litra::{
@@ -49,28 +51,10 @@ pub use smartshift::{
     get_smartshift_status, set_smartshift, set_smartshift_sensitivity, toggle_smartshift,
 };
 
-/// Expand protocol-neutral saved settings into only the controls advertised
-/// by a standalone light. Unsupported controls are omitted rather than sent
-/// speculatively, which keeps power-only and brightness-only drivers usable.
-#[must_use]
-pub fn commands_for_light_settings(
-    settings: LightSettings,
-    capabilities: LightCapabilities,
-) -> Vec<LightCommand> {
-    let mut commands = Vec::new();
-    if capabilities.power {
-        commands.push(LightCommand::Power(settings.enabled));
-    }
-    if capabilities.brightness.is_some() {
-        commands.push(LightCommand::BrightnessPercent(settings.brightness_percent));
-    }
-    if capabilities.temperature.is_some()
-        && let Some(kelvin) = settings.temperature_kelvin
-    {
-        commands.push(LightCommand::TemperatureKelvin(kelvin));
-    }
-    commands
-}
+// commands_for_light_settings operates purely on openlogi_core config/device
+// types with no HID++ I/O, so it lives in `openlogi_core::hid::light`;
+// re-exported here unchanged so this module's own API surface doesn't churn.
+pub use openlogi_core::hid::light::commands_for_light_settings;
 
 pub(crate) use error::classify_hidpp_error;
 
@@ -101,11 +85,15 @@ where
     F: FnOnce(Arc<HidppChannel>) -> Fut,
     Fut: std::future::Future<Output = Result<T, WriteError>>,
 {
-    match open_route_channel(route).await? {
+    match open_route_channel(route)
+        .await
+        .map_err(|e| classify_hid_error(&e))?
+    {
         Some(channel) => f(channel).await,
         None => Err(WriteError::DeviceNotFound),
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests;

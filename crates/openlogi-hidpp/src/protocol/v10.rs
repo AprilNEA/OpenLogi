@@ -31,16 +31,17 @@ pub enum Message {
 
 impl Message {
     /// Extracts the header of the message.
+    #[must_use]
     pub fn header(&self) -> MessageHeader {
         match *self {
-            Message::Short(header, _) => header,
-            Message::Long(header, _) => header,
+            Message::Short(header, _) | Message::Long(header, _) => header,
         }
     }
 
     /// Extracts the payload of the message and fits it into an array capable of
     /// containing the longest possible payload, filling the rest up with
     /// zeroes.
+    #[must_use]
     pub fn extend_payload(&self) -> [u8; LONG_REPORT_LENGTH - 3] {
         match *self {
             Message::Short(_, payload) => {
@@ -56,20 +57,26 @@ impl Message {
 impl From<HidppMessage> for Message {
     fn from(msg: HidppMessage) -> Self {
         match msg {
-            HidppMessage::Short(payload) => Message::Short(
-                MessageHeader {
-                    device_index: payload[0],
-                    sub_id: payload[1],
-                },
-                payload[2..].try_into().unwrap(),
-            ),
-            HidppMessage::Long(payload) => Message::Long(
-                MessageHeader {
-                    device_index: payload[0],
-                    sub_id: payload[1],
-                },
-                payload[2..].try_into().unwrap(),
-            ),
+            HidppMessage::Short(payload) => {
+                let [_, _, rest @ ..] = payload;
+                Message::Short(
+                    MessageHeader {
+                        device_index: payload[0],
+                        sub_id: payload[1],
+                    },
+                    rest,
+                )
+            }
+            HidppMessage::Long(payload) => {
+                let [_, _, rest @ ..] = payload;
+                Message::Long(
+                    MessageHeader {
+                        device_index: payload[0],
+                        sub_id: payload[1],
+                    },
+                    rest,
+                )
+            }
         }
     }
 }
@@ -99,8 +106,8 @@ impl From<Message> for HidppMessage {
 
 fn is_rap_response(device: u8, msg_type: MessageType, address: u8, msg: &HidppMessage) -> bool {
     let raw: [u8; 4] = match msg {
-        HidppMessage::Short(d) => d[..4].try_into().unwrap(),
-        HidppMessage::Long(d) => d[..4].try_into().unwrap(),
+        HidppMessage::Short(d) => [d[0], d[1], d[2], d[3]],
+        HidppMessage::Long(d) => [d[0], d[1], d[2], d[3]],
     };
 
     raw[0] == device
@@ -145,7 +152,8 @@ impl HidppChannel {
             return Err(Hidpp10Error::RegisterAccess(err));
         }
 
-        Ok(payload[1..=3].try_into().unwrap())
+        let [_, p1, p2, p3, ..] = payload;
+        Ok([p1, p2, p3])
     }
 
     /// Writes data to a short 3-byte register using HID++1.0/RAP.
@@ -217,7 +225,8 @@ impl HidppChannel {
             return Err(Hidpp10Error::RegisterAccess(err));
         }
 
-        Ok(payload[1..=16].try_into().unwrap())
+        let [_, rest @ ..] = payload;
+        Ok(rest)
     }
 
     /// Writes data to a long 16-byte register using HID++1.0/RAP.

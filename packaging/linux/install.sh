@@ -1,7 +1,7 @@
 #!/bin/sh
 # OpenLogi Linux install script.
 #
-# Installs the three OpenLogi binaries plus udev rules, the systemd user-unit
+# Installs the four OpenLogi executables plus udev rules, the systemd user-unit
 # template, the .desktop launcher, and the app icon. Requires sudo for the
 # system-wide paths.
 #
@@ -39,13 +39,13 @@ Options:
 
 The script installs:
   PREFIX/bin/openlogi
-  PREFIX/bin/openlogi-gui
+  PREFIX/bin/openlogi-desktop
   PREFIX/bin/openlogi-overlay
   PREFIX/bin/openlogi-agent
   /etc/udev/rules.d/70-openlogi.rules
   /usr/lib/systemd/user/openlogi-agent.service  (if systemd is present)
   /usr/share/applications/openlogi.desktop
-  /usr/share/icons/hicolor/512x512/apps/openlogi.png
+  /usr/share/icons/hicolor/1024x1024/apps/openlogi.png
 EOF
     exit 0
 fi
@@ -59,10 +59,10 @@ BINDIR="${PREFIX}/bin"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="${REPO_ROOT}/target/release"
 
-for bin in openlogi openlogi-gui openlogi-overlay openlogi-agent; do
+for bin in openlogi openlogi-desktop openlogi-overlay openlogi-agent; do
     if [ ! -x "${BUILD_DIR}/${bin}" ]; then
         echo "Error: ${BUILD_DIR}/${bin} not found." >&2
-        echo "Build first: cargo build --release" >&2
+        echo "Build first: cargo build --release -p openlogi -p openlogi-desktop -p openlogi-overlay -p openlogi-agent" >&2
         exit 1
     fi
 done
@@ -71,7 +71,7 @@ done
 
 echo "Installing binaries to ${BINDIR} …"
 sudo install -Dm755 "${BUILD_DIR}/openlogi"       "${BINDIR}/openlogi"
-sudo install -Dm755 "${BUILD_DIR}/openlogi-gui"     "${BINDIR}/openlogi-gui"
+sudo install -Dm755 "${BUILD_DIR}/openlogi-desktop"     "${BINDIR}/openlogi-desktop"
 sudo install -Dm755 "${BUILD_DIR}/openlogi-overlay" "${BINDIR}/openlogi-overlay"
 sudo install -Dm755 "${BUILD_DIR}/openlogi-agent"   "${BINDIR}/openlogi-agent"
 
@@ -122,7 +122,7 @@ ICON_SRC="${REPO_ROOT}/design/icon/openlogi.png"
 if [ -f "$ICON_SRC" ]; then
     echo "Installing icon …"
     sudo install -Dm644 "$ICON_SRC" \
-        /usr/share/icons/hicolor/512x512/apps/openlogi.png
+        /usr/share/icons/hicolor/1024x1024/apps/openlogi.png
     if command -v gtk-update-icon-cache > /dev/null 2>&1; then
         sudo gtk-update-icon-cache -qtf /usr/share/icons/hicolor || true
     fi
@@ -133,5 +133,5 @@ if command -v update-desktop-database > /dev/null 2>&1; then
 fi
 
 echo ""
-echo "OpenLogi installed. Run 'openlogi-gui' to start, or enable the background"
+echo "OpenLogi installed. Run 'openlogi-desktop' to start, or enable the background"
 echo "agent with: systemctl --user enable --now openlogi-agent.service"

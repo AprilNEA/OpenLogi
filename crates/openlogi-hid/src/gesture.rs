@@ -33,6 +33,15 @@ use crate::route::{DeviceRoute, open_route_channel};
 use crate::thumbwheel::{self, Thumbwheel, ThumbwheelEvent};
 use crate::write::SharedChannel;
 
+/// How often the capture session pings its device to prove the channel still
+/// delivers input reports. Cheap: one HID++ round-trip per interval.
+const LIVENESS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Consecutive all-silent pings after which the capture channel is declared
+/// dead. Two, so one ping lost to transient receiver congestion (which does
+/// happen under pointer load) doesn't churn the session.
+const LIVENESS_PING_STRIKES: u8 = 2;
+
 /// Shared slot holding the active capture session's open channel, so DPI /
 /// SmartShift writes can reuse it instead of opening a fresh one. `None`
 /// whenever no session is connected.
@@ -233,7 +242,48 @@ pub async fn run_capture_session(
         thumbwheel = armed.thumb.is_some(),
         "control capture active"
     );
-    let _ = shutdown.await;
+
+    // Liveness watchdog: this session's channel is the sole delivery path for
+    // every diverted control, and a channel whose input-report delivery dies
+    // (observed on macOS with concurrent opens of one node: writes accepted,
+    // replies and events silently routed elsewhere) turns every captured
+    // button to dead air with nothing to notice. Ping the device through this
+    // channel; consecutive all-silent pings mean the channel — not the device
+    // — is gone (a sleeping/unreachable device still gets us an error *reply*,
+    // which proves delivery and resets the count). Exiting lets the manager
+    // re-arm on a fresh channel.
+    let root = <hidpp::feature::root::RootFeature as hidpp::feature::CreatableFeature>::new(
+        Arc::clone(&chan),
+        device_index,
+        0,
+    );
+    let mut shutdown = std::pin::pin!(shutdown);
+    let mut silent_pings = 0u8;
+    let channel_dead = loop {
+        tokio::select! {
+            _ = &mut shutdown => break false,
+            () = tokio::time::sleep(LIVENESS_PING_INTERVAL) => {
+                match root.ping(0x5a).await {
+                    Err(v20::Hidpp20Error::Channel(
+                        hidpp::channel::ChannelError::Timeout
+                        | hidpp::channel::ChannelError::NoResponse,
+                    )) => {
+                        silent_pings = silent_pings.saturating_add(1);
+                        if silent_pings >= LIVENESS_PING_STRIKES {
+                            warn!(
+                                index = device_index,
+                                "capture channel stopped delivering — restarting session on a fresh channel"
+                            );
+                            break true;
+                        }
+                    }
+                    // Any reply — pong, feature error, unreachable-device
+                    // error — proves the channel still delivers.
+                    _ => silent_pings = 0,
+                }
+            }
+        }
+    };
 
     drop(listener);
     // The slot is one last-writer-wins cell shared by every session, so a
@@ -248,7 +298,14 @@ pub async fn run_capture_session(
     {
         *slot = None;
     }
-    armed.disarm().await;
+    if channel_dead {
+        // Disarm writes would each burn a timeout on a channel that no longer
+        // answers, and the replacement session re-arms the same diverts
+        // anyway; leave the device state for it.
+        debug!(index = device_index, "skipping disarm on a dead channel");
+    } else {
+        armed.disarm().await;
+    }
     debug!(index = device_index, "control capture stopped");
     Ok(())
 }
@@ -493,6 +550,12 @@ async fn arm_reprog_control(
         .get_cid_reporting(cid)
         .await
         .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
+    if original.diverted {
+        // Left over from a session that never tore down (agent killed, or
+        // another Logitech app). Worth a line: it is the state that used to be
+        // replayed on restore, leaving the button dead.
+        debug!(cid, "control was already diverted before arming");
+    }
     let mut change = reprog_controls::CidReportingChange::temporary_diversion(true, raw_xy);
     change.remap = original.remap;
     if let Err(error) = rc.set_cid_reporting_full(cid, change).await {
@@ -503,23 +566,28 @@ async fn arm_reprog_control(
     Ok(ArmedCid { cid, original })
 }
 
-fn reporting_change(
+/// The mirror image of arming: clear the diversion this session turned on and
+/// hand the control's remap target back untouched.
+///
+/// Deliberately *not* a verbatim replay of the snapshot. A control can already
+/// be diverted when the session arms it — the agent was killed mid-session, or
+/// Logi Options+ left its own diversion behind — and replaying that snapshot
+/// hands the button back diverted with nothing listening for its HID++ events
+/// and no OS event either: dead until the device sleeps or reconnects, since
+/// diversion is volatile. Arming only ever sets `diverted` / `raw_xy` (plus
+/// re-asserting `remap`), so undoing exactly those fields is the whole job;
+/// every other bit stays `None`, i.e. unchanged.
+fn undivert_change(
     reporting: reprog_controls::CidReporting,
 ) -> reprog_controls::CidReportingChange {
-    reprog_controls::CidReportingChange {
-        diverted: Some(reporting.diverted),
-        persistently_diverted: Some(reporting.persistently_diverted),
-        force_raw_xy: Some(reporting.force_raw_xy),
-        raw_xy: Some(reporting.raw_xy),
-        remap: reporting.remap,
-        analytics_key_events: Some(reporting.analytics_key_events),
-        raw_wheel: Some(reporting.raw_wheel),
-    }
+    let mut change = reprog_controls::CidReportingChange::temporary_diversion(false, false);
+    change.remap = reporting.remap;
+    change
 }
 
 async fn restore_reporting(rc: &ReprogControlsV4, armed: ArmedCid, what: &str) {
     let result = rc
-        .set_cid_reporting_full(armed.cid, reporting_change(armed.original))
+        .set_cid_reporting_full(armed.cid, undivert_change(armed.original))
         .await
         .map(|_| ());
     restore(result, what);

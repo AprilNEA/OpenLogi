@@ -1,6 +1,7 @@
 //! Events emitted by the `ColorLedEffects` feature (`0x8070`).
 
 use super::types::be16;
+use crate::feature::DecodeEvent;
 
 /// An event emitted by [`ColorLedEffectsFeature`](super::ColorLedEffectsFeature).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -26,5 +27,11 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<ColorLedEff
             effect_counter: be16(payload, 1),
         }),
         _ => None,
+    }
+}
+
+impl DecodeEvent for ColorLedEffectsEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        decode_event(sub_id, payload)
     }
 }

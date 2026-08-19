@@ -1,6 +1,8 @@
 //! OpenLogi CLI implementation. The `openlogi` binary is a thin wrapper that
 //! calls [`run`]; the command tree and argument parsing live here.
 
+use std::process::ExitCode;
+
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -21,7 +23,10 @@ struct Cli {
 }
 
 /// Initialise logging, parse arguments, and dispatch the chosen subcommand.
-pub async fn run() -> Result<()> {
+///
+/// Returns the exit status the process should terminate with — `list` uses a
+/// distinct one to report that no hardware is connected.
+pub async fn run() -> Result<ExitCode> {
     fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -96,7 +101,7 @@ mod tests {
     #[test]
     fn backlight_rejects_an_unknown_action() {
         let result = Cli::try_parse_from(["openlogi", "backlight", "dim"]);
-        assert!(result.is_err());
+        result.expect_err("an unknown backlight action must be rejected");
     }
 
     #[test]
@@ -109,7 +114,7 @@ mod tests {
             "--sensitivity",
             "10",
         ]);
-        assert!(result.is_err());
+        result.expect_err("--leave-flipped and --sensitivity must conflict");
     }
 
     #[test]
@@ -117,7 +122,7 @@ mod tests {
         // `--sensitivity` is a `NonZeroU8`; 0 must fail to parse rather than
         // silently becoming "no change" downstream.
         let result = Cli::try_parse_from(["openlogi", "diag", "smartshift", "--sensitivity", "0"]);
-        assert!(result.is_err());
+        result.expect_err("a zero --sensitivity must fail to parse");
     }
 
     #[test]
@@ -163,7 +168,7 @@ mod tests {
         let result = Cli::try_parse_from([
             "openlogi", "diag", "lighting", "ff0000", "--method", "bogus",
         ]);
-        assert!(result.is_err());
+        result.expect_err("an unknown lighting method must be rejected");
     }
 
     #[test]

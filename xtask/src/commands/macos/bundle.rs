@@ -1,3 +1,5 @@
+pub(crate) mod identity;
+
 use std::env;
 use std::path::Path;
 
@@ -6,12 +8,13 @@ use plist::Value;
 use xshell::{Shell, cmd};
 
 use crate::support::fs::{command_exists, ensure_dir, ensure_file, repo_root};
+use identity::{Channel, Component};
 
 pub(crate) fn generate_icns() -> Result<()> {
     let root = repo_root()?;
     let sh = Shell::new()?;
     let master = root.join("design/icon/openlogi.png");
-    let output_dir = root.join("crates/openlogi-gui/icon");
+    let output_dir = root.join("crates/openlogi-desktop/icon");
     let output = output_dir.join("AppIcon.icns");
 
     ensure_file(&master)?;
@@ -60,15 +63,19 @@ where
     Ok(())
 }
 
-pub(crate) fn run() -> Result<()> {
-    run_with_profile(&BundleProfile::Local)
+/// Build `OpenLogi.app` wearing `channel`'s identity, signing it with whatever
+/// local identity is available (dev) or leaving it unsigned (production).
+pub(crate) fn run(channel: Channel) -> Result<()> {
+    run_with_channel(channel, None)
 }
 
+/// Build the bundle that ships: always the production identity, signed with the
+/// Developer ID identity when one is given.
 pub(crate) fn run_for_distribution(sign_identity: Option<&str>) -> Result<()> {
-    run_with_profile(&BundleProfile::Distribution { sign_identity })
+    run_with_channel(Channel::Production, sign_identity)
 }
 
-fn run_with_profile(profile: &BundleProfile<'_>) -> Result<()> {
+fn run_with_channel(channel: Channel, sign_identity: Option<&str>) -> Result<()> {
     let root = repo_root()?;
     let sh = Shell::new()?;
     let _repo = sh.push_dir(&root);
@@ -84,7 +91,7 @@ fn run_with_profile(profile: &BundleProfile<'_>) -> Result<()> {
             .run()?;
     } else {
         println!("==> device assets: on-demand (not bundled; fetched at first launch)");
-        let assets = root.join("crates/openlogi-gui/assets");
+        let assets = root.join("crates/openlogi-desktop/assets");
         if assets.exists() {
             fs_err::remove_dir_all(&assets)
                 .with_context(|| format!("could not remove {}", assets.display()))?;
@@ -101,7 +108,7 @@ fn run_with_profile(profile: &BundleProfile<'_>) -> Result<()> {
             .run()?;
     }
     {
-        let gui_dir = root.join("crates/openlogi-gui");
+        let gui_dir = root.join("crates/openlogi-desktop");
         let _gui = sh.push_dir(gui_dir);
         cmd!(sh, "cargo bundle --release")
             .envs(xcode_env.iter().map(|(key, value)| (key, value)))
@@ -111,30 +118,27 @@ fn run_with_profile(profile: &BundleProfile<'_>) -> Result<()> {
 
     let app = root.join("target/release/bundle/osx/OpenLogi.app");
     ensure_dir(&app)?;
-    embed_agent_helper(&root, &app, &xcode_env)?;
-    embed_overlay_helper(&root, &app, &xcode_env)?;
+    embed_helpers(&root, &app, &xcode_env)?;
     embed_cli(&root, &app, &xcode_env)?;
     verify_bundle_binaries(&app)?;
     stamp_privacy_usage_descriptions(&app)?;
-    match profile {
-        BundleProfile::Local => {
-            stamp_local_bundle_identity(&app)?;
-            local_sign_app_if_available()?;
+    // Identity first, then the checks, then signing — a signature seals the
+    // `Info.plist` files, so nothing may rewrite them afterwards.
+    identity::stamp(&app, channel)?;
+    identity::verify(&app, channel)?;
+    identity::verify_icons(&app)?;
+    match (channel, sign_identity) {
+        (Channel::Production, Some(identity)) => {
+            sign_app_with_timestamp(identity, TimestampMode::Secure)?;
         }
-        BundleProfile::Distribution { sign_identity } => {
-            if let Some(identity) = sign_identity {
-                sign_app_with_timestamp(identity, TimestampMode::Secure)?;
-            }
+        (Channel::Production, None) => {
+            println!("==> codesign: skipped (unsigned — set OPENLOGI_SIGN_IDENTITY to sign)");
         }
+        (Channel::Dev, _) => local_sign_app_if_available()?,
     }
     println!();
     println!("Bundle ready: {}", app.display());
     Ok(())
-}
-
-enum BundleProfile<'a> {
-    Local,
-    Distribution { sign_identity: Option<&'a str> },
 }
 
 fn remove_cargo_bundle_dmg(root: &Path) -> Result<()> {
@@ -149,79 +153,100 @@ fn remove_cargo_bundle_dmg(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Build the headless agent and embed it as a nested login-item helper at
-/// `OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app`. The agent is
-/// the always-on process (hook + device I/O + menu bar); shipping it inside the
-/// GUI bundle keeps one notarized artifact, lets `open -b` foreground the GUI
-/// from the agent's menu, and gives the agent a stable signed identity so its
-/// Accessibility (TCC) grant survives app updates.
-fn embed_agent_helper(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<()> {
-    let sh = Shell::new()?;
-    let _repo = sh.push_dir(root);
-    println!("==> agent helper (build)");
-    cmd!(sh, "cargo build -p openlogi-agent --release")
-        .envs(xcode_env.iter().map(|(key, value)| (key, value)))
-        .run()?;
-    let agent_bin = root.join("target/release/openlogi-agent");
-    ensure_file(&agent_bin)?;
+/// A nested login-item helper embedded under `Contents/Library/LoginItems`.
+struct Helper {
+    /// Identity component, which also locates the helper inside the app bundle.
+    component: Component,
+    /// Cargo package and binary that build it.
+    package: &'static str,
+    /// Binary name, both in `target/release` and inside the helper bundle.
+    binary: &'static str,
+    /// Checked-in release `Info.plist`, relative to the repo root.
+    info_plist: &'static str,
+    /// What the build log calls it.
+    label: &'static str,
+}
 
-    let helper = app.join("Contents/Library/LoginItems/OpenLogiAgent.app");
-    let helper_macos = helper.join("Contents/MacOS");
-    fs_err::create_dir_all(&helper_macos)
-        .with_context(|| format!("could not create {}", helper_macos.display()))?;
-    fs_err::copy(&agent_bin, helper_macos.join("openlogi-agent"))
-        .with_context(|| "could not copy the agent binary into the helper bundle".to_string())?;
-    let info_src = root.join("crates/openlogi-gui/bundle/agent-release/Info.plist");
-    ensure_file(&info_src)?;
-    let info_dst = helper.join("Contents/Info.plist");
-    fs_err::copy(&info_src, &info_dst)
-        .with_context(|| "could not write the helper Info.plist".to_string())?;
-    // Share the GUI's app icon so the agent shows the OpenLogi mark (not a
-    // generic blank) in System Settings → Accessibility, where the grant now
-    // lives under "OpenLogi Agent". The bundle command runs icon generation
-    // first, so the icns is already on disk. Matches the Info.plist
-    // CFBundleIconFile = "AppIcon".
-    let icon_src = root.join("crates/openlogi-gui/icon/AppIcon.icns");
-    ensure_file(&icon_src)?;
-    let resources = helper.join("Contents/Resources");
-    fs_err::create_dir_all(&resources)
-        .with_context(|| format!("could not create {}", resources.display()))?;
-    fs_err::copy(&icon_src, resources.join("AppIcon.icns"))
-        .with_context(|| "could not copy the app icon into the helper bundle".to_string())?;
+/// Every helper the app bundle ships.
+const HELPERS: [Helper; 2] = [
+    Helper {
+        component: Component::Agent,
+        package: "openlogi-agent",
+        binary: "openlogi-agent",
+        info_plist: "crates/openlogi-desktop/bundle/agent-release/Info.plist",
+        label: "agent helper",
+    },
+    Helper {
+        component: Component::Overlay,
+        package: "openlogi-overlay",
+        binary: "openlogi-overlay",
+        info_plist: "crates/openlogi-desktop/bundle/overlay-release/Info.plist",
+        label: "Actions Ring overlay helper",
+    },
+];
 
-    stamp_bundle_version(&info_dst, env!("CARGO_PKG_VERSION"))?;
-
-    println!("    embedded {}", helper.display());
+/// Build each helper and embed it as a nested login-item bundle.
+///
+/// The agent is the always-on process (hook + device I/O + menu bar); shipping
+/// it inside the GUI bundle keeps one notarized artifact, lets `open -b`
+/// foreground the GUI from the agent's menu, and gives the agent a stable
+/// signed identity so its Accessibility (TCC) grant survives app updates.
+///
+/// Every helper gets the GUI's icon, so each shows the OpenLogi mark rather than
+/// a generic blank wherever macOS lists it — System Settings' Accessibility
+/// pane, Login Items. Icon generation already ran, so the icns is on disk.
+fn embed_helpers(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<()> {
+    let icon = root.join("crates/openlogi-desktop/icon/AppIcon.icns");
+    ensure_file(&icon)?;
+    for helper in &HELPERS {
+        embed_helper(root, app, xcode_env, helper, &icon)?;
+    }
     Ok(())
 }
 
-fn embed_overlay_helper(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<()> {
+fn embed_helper(
+    root: &Path,
+    app: &Path,
+    xcode_env: &[(String, String)],
+    helper: &Helper,
+    icon: &Path,
+) -> Result<()> {
     let sh = Shell::new()?;
     let _repo = sh.push_dir(root);
-    println!("==> Actions Ring overlay helper (build)");
-    cmd!(
-        sh,
-        "cargo build -p openlogi-gui --bin openlogi-overlay --release"
-    )
-    .envs(xcode_env.iter().map(|(key, value)| (key, value)))
-    .run()?;
-    let overlay_bin = root.join("target/release/openlogi-overlay");
-    ensure_file(&overlay_bin)?;
+    let Helper {
+        package,
+        binary,
+        label,
+        ..
+    } = *helper;
+    println!("==> {label} (build)");
+    cmd!(sh, "cargo build -p {package} --bin {binary} --release")
+        .envs(xcode_env.iter().map(|(key, value)| (key, value)))
+        .run()?;
+    let built = root.join("target/release").join(binary);
+    ensure_file(&built)?;
 
-    let helper = app.join("Contents/Library/LoginItems/OpenLogiOverlay.app");
-    let helper_macos = helper.join("Contents/MacOS");
-    fs_err::create_dir_all(&helper_macos)
-        .with_context(|| format!("could not create {}", helper_macos.display()))?;
-    fs_err::copy(&overlay_bin, helper_macos.join("openlogi-overlay"))
-        .with_context(|| "could not copy the Actions Ring overlay binary".to_string())?;
-    let info_src = root.join("crates/openlogi-gui/bundle/overlay-release/Info.plist");
+    let bundle = helper.component.root(app);
+    let bundle_macos = bundle.join("Contents/MacOS");
+    fs_err::create_dir_all(&bundle_macos)
+        .with_context(|| format!("could not create {}", bundle_macos.display()))?;
+    fs_err::copy(&built, bundle_macos.join(binary))
+        .with_context(|| format!("could not copy {binary} into the helper bundle"))?;
+
+    let info_src = root.join(helper.info_plist);
     ensure_file(&info_src)?;
-    let info_dst = helper.join("Contents/Info.plist");
+    let info_dst = helper.component.info_plist(app);
     fs_err::copy(&info_src, &info_dst)
-        .with_context(|| "could not write the overlay helper Info.plist".to_string())?;
+        .with_context(|| format!("could not write the {label} Info.plist"))?;
     stamp_bundle_version(&info_dst, env!("CARGO_PKG_VERSION"))?;
 
-    println!("    embedded {}", helper.display());
+    let resources = bundle.join("Contents/Resources");
+    fs_err::create_dir_all(&resources)
+        .with_context(|| format!("could not create {}", resources.display()))?;
+    fs_err::copy(icon, helper.component.icon(app))
+        .with_context(|| format!("could not copy the app icon into the {label} bundle"))?;
+
+    println!("    embedded {}", bundle.display());
     Ok(())
 }
 
@@ -246,7 +271,7 @@ fn embed_cli(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<
 /// Every Mach-O the finished bundle must ship, relative to the `.app` root.
 const REQUIRED_BUNDLE_BINARIES: [&str; 4] = [
     "Contents/MacOS/openlogi",
-    "Contents/MacOS/openlogi-gui",
+    "Contents/MacOS/openlogi-desktop",
     "Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
     "Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/MacOS/openlogi-overlay",
 ];
@@ -299,47 +324,14 @@ fn xcode_env() -> Result<Vec<(String, String)>> {
     ])
 }
 
-fn stamp_local_bundle_identity(app: &Path) -> Result<()> {
-    println!("==> local bundle identity");
-    let app_info = app.join("Contents/Info.plist");
-    stamp_plist_strings(
-        &app_info,
-        &[
-            ("CFBundleDisplayName", "OpenLogi Dev"),
-            ("CFBundleIdentifier", "org.openlogi.openlogi.dev"),
-            ("CFBundleName", "OpenLogi Dev"),
-        ],
-    )?;
-
-    let helper_info = app.join("Contents/Library/LoginItems/OpenLogiAgent.app/Contents/Info.plist");
-    if helper_info.exists() {
-        stamp_plist_strings(
-            &helper_info,
-            &[
-                ("CFBundleDisplayName", "OpenLogi Agent Dev"),
-                ("CFBundleIdentifier", "org.openlogi.agent.dev"),
-                ("CFBundleName", "OpenLogi Agent Dev"),
-            ],
-        )?;
-    }
-
-    let overlay_info =
-        app.join("Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/Info.plist");
-    if overlay_info.exists() {
-        stamp_plist_strings(
-            &overlay_info,
-            &[
-                ("CFBundleDisplayName", "OpenLogi Overlay Dev"),
-                ("CFBundleIdentifier", "org.openlogi.overlay.dev"),
-                ("CFBundleName", "OpenLogi Overlay Dev"),
-            ],
-        )?;
-    }
-
-    println!(
-        "    stamped local IDs: org.openlogi.openlogi.dev / org.openlogi.agent.dev / org.openlogi.overlay.dev"
-    );
-    Ok(())
+/// Read one string value from an `Info.plist`; `None` when the key is absent.
+fn read_plist_string(info_plist: &Path, key: &str) -> Result<Option<String>> {
+    let plist = Value::from_file(info_plist)
+        .with_context(|| format!("could not read {}", info_plist.display()))?;
+    let dict = plist
+        .as_dictionary()
+        .with_context(|| format!("{} is not a plist dictionary", info_plist.display()))?;
+    Ok(dict.get(key).and_then(Value::as_string).map(str::to_owned))
 }
 
 fn stamp_plist_strings(info_plist: &Path, entries: &[(&str, &str)]) -> Result<()> {
@@ -381,7 +373,7 @@ fn local_sign_app_if_available() -> Result<()> {
         "==> local codesign: skipped (no Apple Development identity found;          set OPENLOGI_LOCAL_CODESIGN_IDENTITY or OPENLOGI_SIGN_IDENTITY to sign)"
     );
     println!(
-        "    warning: unsigned/ad-hoc local bundles with production bundle IDs can          make macOS Accessibility grants appear stale or missing"
+        "    warning: an unsigned bundle is re-signed ad-hoc on every build, so its own Accessibility grant goes stale each time"
     );
     Ok(())
 }
@@ -431,7 +423,7 @@ fn sign_app_with_timestamp(identity: &str, timestamp: TimestampMode) -> Result<(
 
 /// Path to the GUI/CLI entitlements (camera hardened-runtime exception).
 fn camera_entitlements_path(root: &Path) -> std::path::PathBuf {
-    root.join("crates/openlogi-gui/bundle/OpenLogi.entitlements")
+    root.join("crates/openlogi-desktop/bundle/OpenLogi.entitlements")
 }
 
 /// Sign one target with the hardened runtime and the requested timestamp mode.
@@ -505,7 +497,23 @@ fn quoted_identity(line: &str) -> Option<String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "unwrap is idiomatic in tests")]
 mod tests {
+    use strum::VariantArray as _;
+
     use super::*;
+
+    /// Identity work iterates every `Component`, so a component added without a
+    /// `Helper` to embed it would only surface as a stamping failure during a
+    /// real build.
+    #[test]
+    fn every_nested_component_is_embedded_by_a_helper() {
+        for &component in Component::VARIANTS {
+            assert!(
+                component == Component::App
+                    || HELPERS.iter().any(|helper| helper.component == component),
+                "{component} has no Helper entry to embed it"
+            );
+        }
+    }
 
     fn app_with_binaries(binaries: &[&str]) -> tempfile::TempDir {
         let app = tempfile::tempdir().unwrap();
@@ -515,14 +523,6 @@ mod tests {
             fs_err::write(path, b"").unwrap();
         }
         app
-    }
-
-    fn write_info_plist(app: &Path, relative: &str) {
-        let path = app.join(relative);
-        fs_err::create_dir_all(path.parent().unwrap()).unwrap();
-        Value::Dictionary(plist::Dictionary::new())
-            .to_file_xml(path)
-            .unwrap();
     }
 
     #[test]
@@ -545,34 +545,63 @@ mod tests {
         );
     }
 
+    /// The checked-in helper plists are what a fresh bundle starts from, so a
+    /// rename there that never reached the identity table would ship one name in
+    /// the bundle and another in every verification.
     #[test]
-    fn local_identity_stamps_every_nested_helper() {
-        let app = tempfile::tempdir().unwrap();
-        let identities = [
-            ("Contents/Info.plist", "org.openlogi.openlogi.dev"),
-            (
-                "Contents/Library/LoginItems/OpenLogiAgent.app/Contents/Info.plist",
-                "org.openlogi.agent.dev",
-            ),
-            (
-                "Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/Info.plist",
-                "org.openlogi.overlay.dev",
-            ),
-        ];
-        for (path, _) in identities {
-            write_info_plist(app.path(), path);
+    fn shipped_helper_plists_declare_their_production_identity() {
+        let root = repo_root().unwrap();
+
+        for helper in &HELPERS {
+            let plist = root.join(helper.info_plist);
+            let expected = Channel::Production.identity(helper.component);
+
+            for (key, want) in [
+                ("CFBundleIdentifier", &expected.bundle_id),
+                ("CFBundleName", &expected.name),
+                ("CFBundleDisplayName", &expected.name),
+            ] {
+                assert_eq!(
+                    read_plist_string(&plist, key).unwrap().as_ref(),
+                    Some(want),
+                    "{} declares the wrong {key}",
+                    helper.info_plist
+                );
+            }
         }
+    }
 
-        stamp_local_bundle_identity(app.path()).unwrap();
+    /// Every helper must declare the shared icon, or it shows up blank in the
+    /// System Settings panes where users grant it permissions.
+    #[test]
+    fn shipped_helper_plists_declare_the_shared_icon() {
+        let root = repo_root().unwrap();
 
-        for (path, expected) in identities {
-            let plist = Value::from_file(app.path().join(path)).unwrap();
-            let actual = plist
-                .as_dictionary()
-                .unwrap()
-                .get("CFBundleIdentifier")
-                .and_then(Value::as_string);
-            assert_eq!(actual, Some(expected));
+        for helper in &HELPERS {
+            let icon =
+                read_plist_string(&root.join(helper.info_plist), "CFBundleIconFile").unwrap();
+
+            assert_eq!(
+                icon.as_deref().map(|file| file.trim_end_matches(".icns")),
+                Some("AppIcon"),
+                "{} must declare the shared app icon",
+                helper.info_plist
+            );
+        }
+    }
+
+    /// `verify_bundle_binaries` is the list a missing helper build trips over;
+    /// a helper absent from it would embed silently broken.
+    #[test]
+    fn every_helper_binary_is_a_required_bundle_binary() {
+        for helper in &HELPERS {
+            let nested = helper.component.nested_bundle().unwrap();
+            let path = format!("{nested}/Contents/MacOS/{}", helper.binary);
+
+            assert!(
+                REQUIRED_BUNDLE_BINARIES.contains(&path.as_str()),
+                "{path} is embedded but never verified"
+            );
         }
     }
 

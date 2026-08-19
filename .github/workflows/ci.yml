@@ -113,10 +113,14 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc -p openlogi-hidpp --no-deps --document-private-items
+      - name: cargo doc (openlogi-hidpp-derive)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc -p openlogi-hidpp-derive --no-deps --document-private-items
 
   # openlogi-core / openlogi-hid / openlogi-assets / openlogi / openlogi-hook
   # all compile on Linux today (the hook crate has stubs for non-macOS targets).
-  # openlogi-gui needs GPUI's wayland / x11 system libs; the same dependency set
+  # openlogi-desktop needs GPUI's wayland / x11 system libs; the same dependency set
   # the clippy job installs is sufficient. Test workspace there as well so the
   # config-roundtrip and binding suites run on a non-macOS host.
   test-linux:
@@ -137,7 +141,7 @@ jobs:
             gcc g++ clang libfontconfig-dev libwayland-dev \
             libxkbcommon-x11-dev libx11-xcb-dev \
             libssl-dev libzstd-dev pkg-config
-      - run: cargo test --workspace --exclude openlogi-gui
+      - run: cargo test --workspace --exclude openlogi-desktop
 
   test-macos:
     name: tests (macos, ${{ matrix.arch }})
@@ -174,7 +178,13 @@ jobs:
         with:
           tool: cargo-deny
       # Global flags before subcommand (matches cargo-deny-action defaults).
-      - run: cargo deny --all-features check
+      # The graph is rooted at the CLI — i.e. exactly the crates published to
+      # crates.io. cargo-deny picks its roots from the manifest it is given, so
+      # this was implicit while `openlogi` was the workspace root package; with a
+      # virtual root it must be explicit, or the git-pinned gpui/zed tree enters
+      # the graph and the policy in deny.toml no longer holds. Widening the scope
+      # to the app crates is tracked separately — see deny.toml.
+      - run: cargo deny --all-features --manifest-path crates/openlogi/Cargo.toml check
 
   clippy-windows:
     name: clippy (windows)

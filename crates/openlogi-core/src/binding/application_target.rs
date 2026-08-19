@@ -58,6 +58,7 @@ impl ApplicationTarget {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ApplicationTargetWire {
     path: String,
     #[serde(default)]
@@ -82,13 +83,14 @@ impl From<ApplicationTarget> for ApplicationTargetWire {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 
     #[test]
     fn validates_and_derives_display_name() {
-        let target = ApplicationTarget::new("/Applications/Safari.app", "")
-            .unwrap_or_else(|error| panic!("valid target failed: {error}"));
+        let target =
+            ApplicationTarget::new("/Applications/Safari.app", "").expect("valid target failed");
         assert_eq!(target.path(), "/Applications/Safari.app");
         assert_eq!(target.display_name(), "Safari");
         assert_eq!(
@@ -99,10 +101,9 @@ mod tests {
 
     #[test]
     fn roundtrips_as_a_human_readable_target_table() {
-        let target = ApplicationTarget::new("https://example.test", "Example")
-            .unwrap_or_else(|error| panic!("valid target failed: {error}"));
-        let encoded = toml::to_string(&target)
-            .unwrap_or_else(|error| panic!("target serialization failed: {error}"));
+        let target =
+            ApplicationTarget::new("https://example.test", "Example").expect("valid target failed");
+        let encoded = toml::to_string(&target).expect("target serialization failed");
         assert!(encoded.contains("path = \"https://example.test\""));
         assert_eq!(toml::from_str::<ApplicationTarget>(&encoded), Ok(target));
     }

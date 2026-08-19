@@ -204,190 +204,147 @@ pub enum WorkflowStep {
     RunShellCommand(String),
 }
 
-impl Action {
-    /// Display label for the popover row.
-    ///
-    /// Returns `String` rather than `&str` so parameterized variants (e.g.
-    /// `SetDpiPreset(i)`, `CustomShortcut(s)`) can build a label that
-    /// includes their payload.
-    #[must_use]
-    pub fn label(&self) -> String {
-        match self {
-            Action::None => "Do Nothing".into(),
-            Action::LeftClick => "Left Click".into(),
-            Action::RightClick => "Right Click".into(),
-            Action::MiddleClick => "Middle Click".into(),
-            Action::MouseBack => "Back (Button 4)".into(),
-            Action::MouseForward => "Forward (Button 5)".into(),
-            Action::Copy => "Copy".into(),
-            Action::Paste => "Paste".into(),
-            Action::Cut => "Cut".into(),
-            Action::Undo => "Undo".into(),
-            Action::Redo => "Redo".into(),
-            Action::SelectAll => "Select All".into(),
-            Action::Find => "Find".into(),
-            Action::Save => "Save".into(),
-            Action::BrowserBack => "Browser Back".into(),
-            Action::BrowserForward => "Browser Forward".into(),
-            Action::NewTab => "New Tab".into(),
-            Action::CloseTab => "Close Tab".into(),
-            Action::ReopenTab => "Reopen Tab".into(),
-            Action::NextTab => "Next Tab".into(),
-            Action::PrevTab => "Previous Tab".into(),
-            Action::ReloadPage => "Reload Page".into(),
-            Action::MissionControl => "Mission Control".into(),
-            Action::AppExpose => "App Exposé".into(),
-            Action::PreviousDesktop => "Previous Desktop".into(),
-            Action::NextDesktop => "Next Desktop".into(),
-            Action::ShowDesktop => "Show Desktop".into(),
-            Action::LaunchpadShow => "Launchpad".into(),
-            Action::LockScreen => "Lock Screen".into(),
-            Action::Screenshot => "Screenshot".into(),
-            Action::CaptureRegion => "Capture Region".into(),
-            Action::PlayPause => "Play / Pause".into(),
-            Action::NextTrack => "Next Track".into(),
-            Action::PrevTrack => "Previous Track".into(),
-            Action::VolumeUp => "Volume Up".into(),
-            Action::VolumeDown => "Volume Down".into(),
-            Action::MuteVolume => "Mute".into(),
-            Action::CycleDpiPresets => "Cycle DPI Presets".into(),
-            Action::SetDpiPreset(i) => format!("DPI Preset {}", i + 1),
-            Action::ToggleSmartShift => "Toggle SmartShift".into(),
-            Action::ScrollUp => "Scroll Up".into(),
-            Action::ScrollDown => "Scroll Down".into(),
-            Action::HorizontalScrollLeft => "Scroll Left".into(),
-            Action::HorizontalScrollRight => "Scroll Right".into(),
-            Action::CustomShortcut(combo) => combo.rendered_label(),
-            Action::Sleep => "Sleep".into(),
-            Action::TypeText(s) => format!("Type \"{s}\""),
-            Action::RunAppleScript(_) => "Run AppleScript".into(),
-            Action::RunShellCommand(_) => "Run Command".into(),
-            Action::Workflow(steps) => format!("Workflow ({} steps)", steps.len()),
-            Action::ShowActionsRing => "Actions Ring".into(),
-            Action::OpenApplication(target) => format!("Open {}", target.display_name()),
-        }
-    }
-
-    /// Which [`Category`] this action belongs to, used for popover grouping.
-    #[must_use]
-    pub fn category(&self) -> Category {
-        match self {
-            Action::LeftClick
-            | Action::RightClick
-            | Action::MiddleClick
-            | Action::MouseBack
-            | Action::MouseForward => Category::Mouse,
-            // CustomShortcut is assigned to Editing so it doesn't need a
-            // separate arm (it's not in the picker catalog).
-            Action::Copy
-            | Action::Paste
-            | Action::Cut
-            | Action::Undo
-            | Action::Redo
-            | Action::SelectAll
-            | Action::Find
-            | Action::Save
-            | Action::CustomShortcut(_)
-            | Action::TypeText(_)
-            | Action::RunAppleScript(_)
-            | Action::RunShellCommand(_)
-            | Action::Workflow(_) => Category::Editing,
-            Action::BrowserBack
-            | Action::BrowserForward
-            | Action::NewTab
-            | Action::CloseTab
-            | Action::ReopenTab
-            | Action::NextTab
-            | Action::PrevTab
-            | Action::ReloadPage => Category::Browser,
-            Action::MissionControl
-            | Action::AppExpose
-            | Action::PreviousDesktop
-            | Action::NextDesktop
-            | Action::ShowDesktop
-            | Action::LaunchpadShow => Category::Navigation,
-            Action::None
-            | Action::LockScreen
-            | Action::Screenshot
-            | Action::CaptureRegion
-            | Action::Sleep
-            | Action::ShowActionsRing
-            | Action::OpenApplication(_) => Category::System,
-            Action::PlayPause
-            | Action::NextTrack
-            | Action::PrevTrack
-            | Action::VolumeUp
-            | Action::VolumeDown
-            | Action::MuteVolume => Category::Media,
-            Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::ToggleSmartShift => {
-                Category::Dpi
-            }
-            Action::ScrollUp
-            | Action::ScrollDown
-            | Action::HorizontalScrollLeft
-            | Action::HorizontalScrollRight => Category::Scroll,
-        }
-    }
-
-    /// All pickable actions in a deterministic order.
-    ///
-    /// [`Action::CustomShortcut`] is intentionally excluded — it is opened via
-    /// "Record shortcut…" (P1.3), not selected from the catalog.
-    #[must_use]
-    pub fn catalog() -> Vec<Action> {
-        vec![
+/// X-macro table of every payload-free [`Action`] variant.
+///
+/// Each row is `Variant "Label" Category Icon`, optionally followed by
+/// `not_pickable` for a row [`Action::catalog`] must omit. This is the single
+/// place a plain action is declared; payload-carrying variants (`SetDpiPreset`,
+/// `CustomShortcut`, …) build their label/category/icon from their payload and
+/// keep hand-written arms alongside the generated ones instead.
+///
+/// `macro_rules!` can only emit items into the module it is invoked from, so
+/// this table doesn't generate code itself — it forwards its rows verbatim to
+/// a `$callback!` macro chosen by the caller. `action.rs` (below) uses it to
+/// derive [`Action::label`], [`Action::category`], and [`Action::catalog`];
+/// `action_ring::icon` uses it to derive [`ActionRingIcon::for_action`](
+/// super::action_ring::ActionRingIcon::for_action). Row order is
+/// [`Action::catalog`]'s output order, grouped by category to match the
+/// popover section layout — edit rows here only, never in a callback's match.
+macro_rules! for_each_unit_action {
+    ($callback:ident) => {
+        $callback! {
             // Mouse
-            Action::LeftClick,
-            Action::RightClick,
-            Action::MiddleClick,
-            Action::MouseBack,
-            Action::MouseForward,
+            LeftClick "Left Click" Mouse Pointer,
+            RightClick "Right Click" Mouse Pointer,
+            MiddleClick "Middle Click" Mouse Mouse,
+            MouseBack "Back (Button 4)" Mouse MouseBack,
+            MouseForward "Forward (Button 5)" Mouse MouseForward,
             // Editing
-            Action::Copy,
-            Action::Paste,
-            Action::Cut,
-            Action::Undo,
-            Action::Redo,
-            Action::SelectAll,
-            Action::Find,
-            Action::Save,
+            Copy "Copy" Editing Copy,
+            Paste "Paste" Editing Paste,
+            Cut "Cut" Editing Cut,
+            Undo "Undo" Editing Undo,
+            Redo "Redo" Editing Redo,
+            SelectAll "Select All" Editing SelectAll,
+            Find "Find" Editing Search,
+            Save "Save" Editing Save,
             // Browser
-            Action::BrowserBack,
-            Action::BrowserForward,
-            Action::NewTab,
-            Action::CloseTab,
-            Action::ReopenTab,
-            Action::NextTab,
-            Action::PrevTab,
-            Action::ReloadPage,
+            BrowserBack "Browser Back" Browser ArrowLeft,
+            BrowserForward "Browser Forward" Browser ArrowRight,
+            NewTab "New Tab" Browser NewTab,
+            CloseTab "Close Tab" Browser CloseTab,
+            ReopenTab "Reopen Tab" Browser ReopenTab,
+            NextTab "Next Tab" Browser NextTab,
+            PrevTab "Previous Tab" Browser PreviousTab,
+            ReloadPage "Reload Page" Browser Reload,
             // Navigation
-            Action::MissionControl,
-            Action::AppExpose,
-            Action::PreviousDesktop,
-            Action::NextDesktop,
-            Action::ShowDesktop,
-            Action::LaunchpadShow,
+            MissionControl "Mission Control" Navigation Grid,
+            AppExpose "App Exposé" Navigation Layers,
+            PreviousDesktop "Previous Desktop" Navigation PreviousDesktop,
+            NextDesktop "Next Desktop" Navigation NextDesktop,
+            ShowDesktop "Show Desktop" Navigation Monitor,
+            LaunchpadShow "Launchpad" Navigation Applications,
             // System
-            Action::None,
-            Action::LockScreen,
-            Action::Screenshot,
-            Action::CaptureRegion,
-            Action::Sleep,
+            None "Do Nothing" System Ban,
+            LockScreen "Lock Screen" System Lock,
+            Screenshot "Screenshot" System Camera,
+            CaptureRegion "Capture Region" System Camera,
+            Sleep "Sleep" System Monitor,
+            ShowActionsRing "Actions Ring" System Grid not_pickable,
             // Media
-            Action::PlayPause,
-            Action::NextTrack,
-            Action::PrevTrack,
-            Action::VolumeUp,
-            Action::VolumeDown,
-            Action::MuteVolume,
+            PlayPause "Play / Pause" Media Play,
+            NextTrack "Next Track" Media NextTrack,
+            PrevTrack "Previous Track" Media PreviousTrack,
+            VolumeUp "Volume Up" Media Volume,
+            VolumeDown "Volume Down" Media VolumeDown,
+            MuteVolume "Mute" Media Mute,
             // DPI
-            Action::CycleDpiPresets,
-            Action::ToggleSmartShift,
+            CycleDpiPresets "Cycle DPI Presets" Dpi Gauge,
+            ToggleSmartShift "Toggle SmartShift" Dpi Refresh,
             // Scroll
-            Action::ScrollUp,
-            Action::ScrollDown,
-            Action::HorizontalScrollLeft,
-            Action::HorizontalScrollRight,
-        ]
-    }
+            ScrollUp "Scroll Up" Scroll ArrowUp,
+            ScrollDown "Scroll Down" Scroll ArrowDown,
+            HorizontalScrollLeft "Scroll Left" Scroll ScrollLeft,
+            HorizontalScrollRight "Scroll Right" Scroll ScrollRight,
+        }
+    };
 }
+pub(super) use for_each_unit_action;
+
+/// Builds `label`, `category`, and `catalog` from [`for_each_unit_action!`]'s
+/// rows, splicing in the hand-written arms for payload-carrying variants so
+/// each generated `match` still covers every [`Action`] variant exhaustively.
+macro_rules! derive_action_core {
+    ( $( $variant:ident $label:literal $category:ident $icon:ident $( $tag:ident )? ),* $(,)? ) => {
+        impl Action {
+            /// Display label for the popover row.
+            ///
+            /// Returns `String` rather than `&str` so parameterized variants (e.g.
+            /// `SetDpiPreset(i)`, `CustomShortcut(s)`) can build a label that
+            /// includes their payload.
+            #[must_use]
+            pub fn label(&self) -> String {
+                match self {
+                    $( Action::$variant => $label.into(), )*
+                    Action::SetDpiPreset(i) => format!("DPI Preset {}", i + 1),
+                    Action::CustomShortcut(combo) => combo.rendered_label(),
+                    Action::TypeText(s) => format!("Type \"{s}\""),
+                    Action::RunAppleScript(_) => "Run AppleScript".into(),
+                    Action::RunShellCommand(_) => "Run Command".into(),
+                    Action::Workflow(steps) => format!("Workflow ({} steps)", steps.len()),
+                    Action::OpenApplication(target) => format!("Open {}", target.display_name()),
+                }
+            }
+
+            /// Which [`Category`] this action belongs to, used for popover grouping.
+            #[must_use]
+            pub fn category(&self) -> Category {
+                match self {
+                    $( Action::$variant => Category::$category, )*
+                    // CustomShortcut is assigned to Editing so it doesn't need a
+                    // separate arm (it's not in the picker catalog).
+                    Action::CustomShortcut(_)
+                    | Action::TypeText(_)
+                    | Action::RunAppleScript(_)
+                    | Action::RunShellCommand(_)
+                    | Action::Workflow(_) => Category::Editing,
+                    Action::SetDpiPreset(_) => Category::Dpi,
+                    Action::OpenApplication(_) => Category::System,
+                }
+            }
+
+            /// All pickable actions in a deterministic order.
+            ///
+            /// [`Action::CustomShortcut`] is intentionally excluded — it is opened via
+            /// "Record shortcut…" (P1.3), not selected from the catalog. Table rows
+            /// tagged `not_pickable` (currently only [`Action::ShowActionsRing`], the
+            /// fixed default for [`ButtonId::HapticPanel`](super::ButtonId::HapticPanel))
+            /// are excluded from the catalog the same way.
+            #[must_use]
+            pub fn catalog() -> Vec<Action> {
+                [ $( derive_action_core!(@item $variant $( $tag )?) ),* ]
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            }
+        }
+    };
+    (@item $variant:ident) => {
+        Some(Action::$variant)
+    };
+    (@item $variant:ident not_pickable) => {
+        None
+    };
+}
+
+for_each_unit_action!(derive_action_core);

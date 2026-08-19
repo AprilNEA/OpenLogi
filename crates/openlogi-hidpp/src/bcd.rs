@@ -12,8 +12,8 @@ pub fn convert_packed_u8(bcd: u8) -> Result<u8, ()> {
 }
 
 pub fn convert_packed_u16(bcd: u16) -> Result<u16, ()> {
-    let digits_0 = convert_packed_u8((bcd >> 8) as u8)? as u16;
-    let digits_1 = convert_packed_u8((bcd & 0xff) as u8)? as u16;
+    let digits_0 = u16::from(convert_packed_u8((bcd >> 8) as u8)?);
+    let digits_1 = u16::from(convert_packed_u8((bcd & 0xff) as u8)?);
 
     Ok(digits_0 * 100 + digits_1)
 }

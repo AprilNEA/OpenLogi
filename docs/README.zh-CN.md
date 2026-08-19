@@ -38,7 +38,7 @@
 
 OpenLogi 通过 Logi Bolt 和 Unifying 接收器、蓝牙直连或 USB 线缆与 Logitech HID++ 外设通信，完全不需要运行 Logi Options+。它由三个组件组成：
 
-- **[OpenLogi GUI](../crates/openlogi-gui)** —— 基于 GPUI 的桌面应用：可点击热区的交互式鼠标示意图、逐按键动作选择器（内置动作 + 在 TOML 配置中编写的自定义快捷键）、DPI 预设、SmartShift、按设备原生滚动反转、RGB 键盘灯光、按应用的配置叠加层、实时设备轮播，以及界面已本地化为 20 种语言的设置窗口。
+- **[OpenLogi GUI](../crates/openlogi-desktop)** —— 基于 GPUI 的桌面应用：可点击热区的交互式鼠标示意图、逐按键动作选择器（内置动作 + 在 TOML 配置中编写的自定义快捷键）、DPI 预设、SmartShift、按设备原生滚动反转、RGB 键盘灯光、按应用的配置叠加层、实时设备轮播，以及界面已本地化为 20 种语言的设置窗口。
 - **[OpenLogi agent](../crates/openlogi-agent)** —— 拥有输入钩子和全部设备 I/O 的后台服务。GUI 是纯 IPC 客户端，并在需要时启动 agent。
 - **[OpenLogi CLI](../crates/openlogi-cli)** —— 命令行工具：无界面设备清单（`list`）、资产同步与设备诊断子命令。
 
@@ -156,9 +156,10 @@ Windows 支持可正常工作，并已在 Windows 11 实机上完成端到端验
 
 ## 致谢
 
-- [`hidpp`](https://crates.io/crates/hidpp)，作者 [@lus](https://github.com/lus)
-- [Solaar](https://github.com/pwr-Solaar/Solaar)
-- [Mouser](https://github.com/TomBadash/Mouser)，作者 Tom Badash
+- **Windows、摄像头与 i18n**：[@davidbudnick](https://github.com/davidbudnick) —— Windows 输入钩子与 MSI 更新、Logitech 摄像头支持、键盘 RGB、Crowdin 翻译流水线
+- **Linux 移植**：[@cserby](https://github.com/cserby) —— evdev/uinput 钩子、D-Bus 动作、.deb/.rpm 打包
+- [Solaar](https://github.com/pwr-Solaar/Solaar)，作者 [@pwr](https://github.com/pwr) —— 目前最完整的开源 HID++ 实现，也是本项目的协议参考
+- [Mouser](https://github.com/TomBadash/Mouser)，作者 [@TomBadash](https://github.com/TomBadash) —— 同一目标的先行项目：本地、无需账号的 Options+ 替代品
 
 ## 许可证
 
@@ -166,6 +167,10 @@ Windows 支持可正常工作，并已在 Windows 11 实机上完成端到端验
 
 - Apache License 2.0（[LICENSE-APACHE](../LICENSE-APACHE)）
 - MIT 许可证（[LICENSE-MIT](../LICENSE-MIT)）
+
+### 第三方代码
+
+`crates/openlogi-hidpp` 是 [`hidpp`](https://crates.io/crates/hidpp)（作者 [@lus](https://github.com/lus)）的 vendored fork，采用 0BSD 许可证。
 
 ### Logo 与品牌资产
 

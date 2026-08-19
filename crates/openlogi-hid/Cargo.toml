@@ -12,7 +12,7 @@ categories = ["hardware-support", "asynchronous"]
 readme = "README.md"
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", version = "0.6.26" }
+openlogi-core = { path = "../openlogi-core", version = "0.7.1" }
 hidpp = { workspace = true }
 async-hid = { workspace = true }
 tokio = { workspace = true }
@@ -44,6 +44,7 @@ windows-sys = { workspace = true, features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "NSRunningApplication"] }
+objc2-io-kit = { workspace = true, features = ["std", "hidsystem"] }
 
 [lints]
 workspace = true

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Crosses the agent↔GUI IPC, where serde encodes the variant *index*, so
 /// variant order is wire format — changes require a `PROTOCOL_VERSION` bump
-/// (guarded by `openlogi-agent-core/tests/wire_format.rs`).
+/// (guarded by `openlogi-ipc/tests/wire_format.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BacklightMode {
     /// No mode selected.
@@ -38,7 +38,7 @@ pub enum BacklightMode {
 ///
 /// Crosses the agent↔GUI IPC, where serde encodes the variant *index*, so
 /// variant order is wire format — changes require a `PROTOCOL_VERSION` bump
-/// (guarded by `openlogi-agent-core/tests/wire_format.rs`).
+/// (guarded by `openlogi-ipc/tests/wire_format.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BacklightStatus {
     /// Turned off by software — the LEDs stay dark regardless of ambient
@@ -63,7 +63,7 @@ pub enum BacklightStatus {
 ///
 /// Crosses the agent↔GUI IPC, so field order is wire format — changes require
 /// a `PROTOCOL_VERSION` bump (guarded by
-/// `openlogi-agent-core/tests/wire_format.rs`).
+/// `openlogi-ipc/tests/wire_format.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BacklightState {
     /// Whether the backlight system is enabled at all. When `false` the

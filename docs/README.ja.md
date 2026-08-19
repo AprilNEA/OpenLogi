@@ -38,7 +38,7 @@ Logitech アカウントもテレメトリも公式 Options+ のインストー�
 
 OpenLogi は Logi Bolt および Unifying レシーバー、Bluetooth 直結、USB ケーブル経由で Logitech の HID++ 周辺機器と通信します。Logi Options+ を動かす必要はありません。3 つのコンポーネントで構成されます：
 
-- **[OpenLogi GUI](../crates/openlogi-gui)** —— GPUI 製デスクトップアプリ：クリック可能なホットスポット付きのインタラクティブなマウス図、ボタンごとのアクションピッカー（組み込みアクション + TOML 設定で作成するカスタムショートカット）、DPI プリセット、SmartShift、デバイスごとのスクロール反転、RGB キーボード照明、アプリごとのプロファイル、ライブデバイスカルーセル、20 言語にローカライズされた設定ウィンドウ。
+- **[OpenLogi GUI](../crates/openlogi-desktop)** —— GPUI 製デスクトップアプリ：クリック可能なホットスポット付きのインタラクティブなマウス図、ボタンごとのアクションピッカー（組み込みアクション + TOML 設定で作成するカスタムショートカット）、DPI プリセット、SmartShift、デバイスごとのスクロール反転、RGB キーボード照明、アプリごとのプロファイル、ライブデバイスカルーセル、20 言語にローカライズされた設定ウィンドウ。
 - **[OpenLogi agent](../crates/openlogi-agent)** —— 入力フックとすべてのデバイス I/O を所有するバックグラウンドサービス。GUI は純粋な IPC クライアントで、必要時に agent を起動します。
 - **[OpenLogi CLI](../crates/openlogi-cli)** —— ヘッドレスなデバイス一覧（`list`）、アセット同期、デバイス診断のサブコマンドを備えた CLI。
 
@@ -156,9 +156,10 @@ Windows サポートは動作しており、有線キーボードと Unifying �
 
 ## 謝辞
 
-- [`hidpp`](https://crates.io/crates/hidpp) by [@lus](https://github.com/lus)
-- [Solaar](https://github.com/pwr-Solaar/Solaar)
-- [Mouser](https://github.com/TomBadash/Mouser) by Tom Badash
+- **Windows・カメラ・i18n**: [@davidbudnick](https://github.com/davidbudnick) —— Windows の入力フックと MSI アップデート、Logitech ウェブカメラ対応、キーボード RGB、Crowdin 翻訳パイプライン
+- **Linux 移植**: [@cserby](https://github.com/cserby) —— evdev/uinput フック、D-Bus アクション、.deb/.rpm パッケージング
+- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) —— 最も網羅的なオープンソースの HID++ 実装であり、本プロジェクトのプロトコル参照元
+- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) —— 同じ目標の先行プロジェクト：ローカル完結・アカウント不要の Options+ 代替
 
 ## ライセンス
 
@@ -166,6 +167,10 @@ Windows サポートは動作しており、有線キーボードと Unifying �
 
 - Apache License 2.0（[LICENSE-APACHE](../LICENSE-APACHE)）
 - MIT ライセンス（[LICENSE-MIT](../LICENSE-MIT)）
+
+### サードパーティコード
+
+`crates/openlogi-hidpp` は [`hidpp`](https://crates.io/crates/hidpp)（作者 [@lus](https://github.com/lus)）の vendored fork で、0BSD ライセンスです。
 
 ### ロゴとブランドアセット
 

@@ -123,6 +123,7 @@ impl Drop for ExclusiveRequest {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 
@@ -148,12 +149,12 @@ mod tests {
     async fn pooled_sessions_share_access_before_pairing() {
         let access = ReceiverAccess::default();
 
-        let first = access.try_acquire_for_session().unwrap_or_else(|| {
-            panic!("fresh receiver access should grant first session lease");
-        });
-        let second = access.try_acquire_for_session().unwrap_or_else(|| {
-            panic!("pooled sessions should share receiver access");
-        });
+        let first = access
+            .try_acquire_for_session()
+            .expect("fresh receiver access should grant first session lease");
+        let second = access
+            .try_acquire_for_session()
+            .expect("pooled sessions should share receiver access");
 
         drop((first, second));
     }
@@ -161,9 +162,9 @@ mod tests {
     #[tokio::test]
     async fn cancelled_pairing_wait_withdraws_request() {
         let access = ReceiverAccess::default();
-        let capture = access.try_acquire_for_session().unwrap_or_else(|| {
-            panic!("fresh receiver access should grant capture lease");
-        });
+        let capture = access
+            .try_acquire_for_session()
+            .expect("fresh receiver access should grant capture lease");
 
         let waiting = tokio::spawn({
             let access = access.clone();
@@ -211,6 +212,8 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(!waiting.is_finished());
         drop(transition);
-        assert!(waiting.await.is_ok());
+        waiting
+            .await
+            .expect("bounded io must acquire its lease once the host transition releases");
     }
 }

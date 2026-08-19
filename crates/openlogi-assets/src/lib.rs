@@ -4,7 +4,7 @@
 //!
 //! - `openlogi` (CLI): bulk-pulls the whole registry at packaging time
 //!   (`openlogi assets sync`).
-//! - `openlogi-gui`: pulls only the connected device's files at startup
+//! - `openlogi-desktop`: pulls only the connected device's files at startup
 //!   (runtime safety net + dev convenience).
 //!
 //! No filesystem layout opinions live here — both consumers decide where

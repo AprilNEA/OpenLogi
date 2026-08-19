@@ -96,19 +96,7 @@ define_class!(
 
         #[unsafe(method(quitOpenLogi:))]
         fn quit_openlogi(&self, _sender: Option<&AnyObject>) {
-            // Tell a *running* GUI to quit too, but don't let `open` cold-launch
-            // one just to immediately quit it (it would flash a window — and on
-            // first run the update-consent prompt — before exiting). The gate
-            // keeps the target warm in the common case, so the blocking
-            // `.output()` (which guarantees Apple-Event delivery) returns at
-            // once; a GUI that races to exit after the check was quitting anyway.
-            if gui_is_running() {
-                let _ = std::process::Command::new("open")
-                    .arg(DeeplinkCommand::Quit.to_url())
-                    .output();
-            }
-            info!("menu-bar Quit — exiting agent");
-            std::process::exit(0);
+            quit_agent();
         }
     }
 );
@@ -133,6 +121,30 @@ fn open_url(url: &str) {
 /// macOS launches the GUI (cold start) or hands the URL to the running app.
 fn open_command(command: DeeplinkCommand) {
     open_url(&command.to_url());
+}
+
+/// Menu-bar Quit: take a running GUI with us, then end the process.
+///
+/// Kept out of `define_class!` so the lint set actually sees the exit — clippy
+/// does not look inside macro expansions.
+fn quit_agent() -> ! {
+    // Tell a *running* GUI to quit too, but don't let `open` cold-launch one
+    // just to immediately quit it (it would flash a window — and on first run
+    // the update-consent prompt — before exiting). The gate keeps the target
+    // warm in the common case, so the blocking `.output()` (which guarantees
+    // Apple-Event delivery) returns at once; a GUI that races to exit after the
+    // check was quitting anyway.
+    if gui_is_running() {
+        let _ = std::process::Command::new("open")
+            .arg(DeeplinkCommand::Quit.to_url())
+            .output();
+    }
+    info!("menu-bar Quit — exiting agent");
+    #[expect(
+        clippy::exit,
+        reason = "reached from an AppKit menu action on the main thread: the run loop owns `main`'s stack frame, so no status can travel back to it"
+    )]
+    std::process::exit(0)
 }
 
 /// Whether an OpenLogi GUI process is currently running (prod or dev bundle).
@@ -162,6 +174,10 @@ fn gui_is_running() -> bool {
 pub fn run_app_loop(show_in_menu_bar: bool, resume_pending: Arc<AtomicBool>) -> ! {
     let Some(mtm) = MainThreadMarker::new() else {
         warn!("agent AppKit loop not started off the main thread — exiting");
+        #[expect(
+            clippy::exit,
+            reason = "this branch means `run_app_loop` was called off the process main thread, where AppKit cannot run at all; the function is `-> !` and `main` returns `()`, so a failure status has nowhere to propagate"
+        )]
         std::process::exit(1);
     };
     let app = NSApplication::sharedApplication(mtm);
@@ -174,6 +190,10 @@ pub fn run_app_loop(show_in_menu_bar: bool, resume_pending: Arc<AtomicBool>) -> 
     info!(show_in_menu_bar, "agent AppKit loop started");
 
     app.run();
+    #[expect(
+        clippy::exit,
+        reason = "AppKit only returns from `run()` once the loop is torn down, and the agent core is still running on another thread; this function is `-> !` with no return path, so the process ends here"
+    )]
     std::process::exit(0);
 }
 

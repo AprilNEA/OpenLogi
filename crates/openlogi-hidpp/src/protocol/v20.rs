@@ -41,16 +41,17 @@ pub enum Message {
 
 impl Message {
     /// Extracts the header of the message.
+    #[must_use]
     pub fn header(&self) -> MessageHeader {
         match *self {
-            Message::Short(header, _) => header,
-            Message::Long(header, _) => header,
+            Message::Short(header, _) | Message::Long(header, _) => header,
         }
     }
 
     /// Extracts the payload of the message and fits it into an array capable of
     /// containing the longest possible payload, filling the rest up with
     /// zeroes.
+    #[must_use]
     pub fn extend_payload(&self) -> [u8; LONG_REPORT_LENGTH - 4] {
         match *self {
             Message::Short(_, payload) => {
@@ -66,24 +67,30 @@ impl Message {
 impl From<HidppMessage> for Message {
     fn from(msg: HidppMessage) -> Self {
         match msg {
-            HidppMessage::Short(payload) => Message::Short(
-                MessageHeader {
-                    device_index: payload[0],
-                    feature_index: payload[1],
-                    function_id: U4::from_hi(payload[2]),
-                    software_id: U4::from_lo(payload[2]),
-                },
-                payload[3..].try_into().unwrap(),
-            ),
-            HidppMessage::Long(payload) => Message::Long(
-                MessageHeader {
-                    device_index: payload[0],
-                    feature_index: payload[1],
-                    function_id: U4::from_hi(payload[2]),
-                    software_id: U4::from_lo(payload[2]),
-                },
-                payload[3..].try_into().unwrap(),
-            ),
+            HidppMessage::Short(payload) => {
+                let [_, _, _, rest @ ..] = payload;
+                Message::Short(
+                    MessageHeader {
+                        device_index: payload[0],
+                        feature_index: payload[1],
+                        function_id: U4::from_hi(payload[2]),
+                        software_id: U4::from_lo(payload[2]),
+                    },
+                    rest,
+                )
+            }
+            HidppMessage::Long(payload) => {
+                let [_, _, _, rest @ ..] = payload;
+                Message::Long(
+                    MessageHeader {
+                        device_index: payload[0],
+                        feature_index: payload[1],
+                        function_id: U4::from_hi(payload[2]),
+                        software_id: U4::from_lo(payload[2]),
+                    },
+                    rest,
+                )
+            }
         }
     }
 }

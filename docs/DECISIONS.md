@@ -4,6 +4,35 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-08: Shared clippy lint set
+
+The workspace adopted the shared ten-lint set (`assertions_on_result_states`,
+`cast_possible_truncation`, `cast_possible_wrap`, `cast_sign_loss`,
+`error_impl_error`, `exit`, `or_fun_call`, `ptr_as_ptr`,
+`tests_outside_test_module`, `undocumented_unsafe_blocks`) on top of the
+existing `pedantic` + `unwrap_used`/`expect_used` table.
+
+- One table, inherited everywhere. `openlogi-desktop`, `openlogi-camera` and
+  `openlogi-hook` carried hand-copied duplicates of `[workspace.lints]`, so any
+  lint added to the workspace would have silently skipped them — three of the
+  crates holding most of the FFI. Cargo rejects `[lints] workspace = true`
+  alongside local overrides, so `openlogi-hook` moved its `unsafe_code` opt-out
+  into its three platform modules. `openlogi-hidpp` stays out on purpose
+  (vendored).
+- `tests_outside_test_module` only recognises a literal `#[cfg(test)]`. Compound
+  gates are written as stacked attributes (`#[cfg(test)]` then `#[cfg(unix)]`);
+  an integration test under `tests/` carries a file-level `#![expect(…)]`
+  because that file is already a test-only crate. Splitting the attribute also
+  wakes `items_after_test_module`, so such a module belongs last in its file.
+- `exit` gets a real `ExitCode` wherever the call site can return — `openlogi
+  list` hands status 2 back to `main` — and a reasoned `#[expect]` where it
+  cannot (the AppKit run loop, the watchdog threads, the update handover).
+  Clippy does not look inside `define_class!`, so the menu-bar Quit body moved
+  out of the macro rather than escape the lint by accident.
+- Not adopted: the policy's `unexpected_cfgs` / `check-cfg = ['cfg(kani)']`
+  entry. Nothing here uses Kani, and `unexpected_cfgs` already warns by default,
+  so it would be dead configuration.
+
 ## 2026-08: Standalone raw-light boundary
 
 Standalone lights such as Litra stay outside the HID++ receiver/paired-device

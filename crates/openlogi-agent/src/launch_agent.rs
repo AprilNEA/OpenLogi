@@ -309,7 +309,8 @@ fn run_systemctl(args: &[&str]) {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
+#[cfg(target_os = "macos")]
 #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
@@ -356,7 +357,8 @@ mod tests {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 mod linux_tests {
     use super::*;
 

@@ -1,4 +1,15 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
+
+/// Locks `mutex`, treating poisoning as unrecoverable: a panicking holder
+/// leaves the emitter's sender list in an inconsistent state, so continuing
+/// would operate on corrupt data.
+#[expect(
+    clippy::expect_used,
+    reason = "mutex poisoning is unrecoverable here — see doc comment"
+)]
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().expect("mutex poisoned")
+}
 
 /// A simple event emitter sending a single event to multiple MPSC channels.
 #[derive(Debug)]
@@ -16,7 +27,7 @@ impl<T: Clone> EventEmitter<T> {
     /// Creates a new receiver and adds the corresponding sender to the sender
     /// list.
     pub fn create_receiver(&self) -> async_channel::Receiver<T> {
-        let mut senders = self.senders.lock().unwrap();
+        let mut senders = lock(&self.senders);
         senders.retain(|sender| sender.receiver_count() > 0);
         let (tx, rx) = async_channel::unbounded();
         senders.push(tx);
@@ -26,7 +37,7 @@ impl<T: Clone> EventEmitter<T> {
     /// Emits an event to all senders. Senders whose receivers were dropped are
     /// removed from the list.
     pub fn emit(&self, event: T) {
-        let mut senders = self.senders.lock().unwrap();
+        let mut senders = lock(&self.senders);
         senders.retain(|sender| {
             sender.receiver_count() > 0 && sender.send_blocking(event.clone()).is_ok()
         });
@@ -34,6 +45,11 @@ impl<T: Clone> EventEmitter<T> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "expect/unwrap are idiomatic in tests"
+)]
 mod tests {
     use super::*;
 

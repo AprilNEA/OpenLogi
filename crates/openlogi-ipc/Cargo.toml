@@ -1,0 +1,28 @@
+[package]
+name = "openlogi-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The tarpc contract and local-socket transport shared by the OpenLogi agent and GUI."
+# A leaf crate for the agent<->GUI IPC boundary: `openlogi-agent-core` and
+# `openlogi-desktop` both depend on it, but nothing published depends on it, so
+# it is not published to crates.io — see release-plz.toml.
+publish = false
+
+[dependencies]
+openlogi-core = { path = "../openlogi-core" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tarpc = { workspace = true }
+interprocess = { workspace = true }
+tokio = { workspace = true }
+succession = { version = "0.1", features = ["serde"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+bincode = "1.3"

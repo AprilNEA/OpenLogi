@@ -7,7 +7,7 @@
 //!
 //! ```sh
 //! cargo run -p openlogi-agent --bin openlogi-agent-mock
-//! OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-gui   # in a second terminal
+//! OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-desktop   # in a second terminal
 //! ```
 //!
 //! It defaults to the `openlogi-dev` profile — the one the dev app bundle
@@ -37,12 +37,6 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use interprocess::local_socket::traits::tokio::Listener as _;
-use openlogi_agent_core::ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, FoundDevice,
-    InventoryHealth, MonitorEvent, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
-    PairingUpdate,
-};
-use openlogi_agent_core::transport;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::{
@@ -55,6 +49,14 @@ use openlogi_hid::{
     DIRECT_DEVICE_INDEX, DeviceRoute, DpiCapabilities, DpiInfo, LightCommand, PasskeyMethod,
     ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
 };
+use openlogi_ipc::transport;
+use openlogi_ipc::{
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
+    ConfigReloadError, FoundDevice, Generation, Identity, InventoryHealth, MonitorEvent,
+    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, RingObservation,
+};
+use succession::Compat;
 use tarpc::context::Context;
 use tarpc::server::{BaseChannel, Channel as _};
 use tokio::sync::Mutex;
@@ -90,6 +92,11 @@ const PAIRING_HOLD: Duration = Duration::from_secs(2);
 /// reaches the GUI promptly; see [`MockAgent::next_pairing`] for why the hold
 /// polls instead of awaiting the receiver.
 const PAIRING_POLL_TICK: Duration = Duration::from_millis(100);
+
+/// How often a held `observe` re-renders the scripted state looking for a
+/// change. The real agent is told by its watchers and needs no tick at all; a
+/// mock has nothing to be told by, so it compares instead.
+const OBSERVE_TICK: Duration = Duration::from_millis(250);
 
 fn main() -> ExitCode {
     default_to_dev_profile();
@@ -157,13 +164,13 @@ fn default_to_dev_profile() {
     if std::env::var_os("OPENLOGI_PROFILE").is_some() {
         return;
     }
-    // SAFETY: `set_var` is unsound only against concurrent env access. This is
-    // the first statement of `main`: no runtime, no tracing subscriber, no
-    // other thread exists yet, and nothing has read the environment.
     #[expect(
         unsafe_code,
         reason = "the profile must be chosen before openlogi_core::paths caches it, and only a process-wide env var selects it"
     )]
+    // SAFETY: `set_var` is unsound only against concurrent env access. This is
+    // the first statement of `main`: no runtime, no tracing subscriber, no
+    // other thread exists yet, and nothing has read the environment.
     unsafe {
         std::env::set_var("OPENLOGI_PROFILE", "dev");
     }
@@ -248,6 +255,9 @@ struct State {
     /// unique here because the script has a single receiver.
     settings: HashMap<u8, DeviceSettings>,
     pairing: Option<PairingSession>,
+    /// Where pairing stands, for the observable snapshot. Outlives
+    /// [`Self::pairing`]: a terminal phase is the session's result.
+    phase: Option<PairingPhase>,
     /// Id handed to the next pairing session; only ever increases.
     next_pairing_id: u64,
     started: Instant,
@@ -296,9 +306,16 @@ impl State {
             next_slot: KEYBOARD_SLOT + 1,
             settings,
             pairing: None,
+            phase: None,
             next_pairing_id: 0,
             started: Instant::now(),
         })
+    }
+
+    /// Publish where pairing stands. Separate from [`Self::pairing`] because a
+    /// terminal phase is the session's *result* and outlives it.
+    fn set_phase(&mut self, phase: PairingPhase) {
+        self.phase = Some(phase);
     }
 
     /// Register a new pairing session and return its id.
@@ -615,14 +632,45 @@ struct MockAgent {
     /// Long-poll side of the pairing channel, outside [`MockAgent::state`] so a
     /// held `next_pairing` can't block `snapshot`.
     pairing_rx: Arc<Mutex<Option<UnboundedReceiver<PairingUpdate>>>>,
+    /// The last [`Observation`] handed out, so `observe` can stamp a new
+    /// generation when the rendered state differs from it.
+    served: Arc<Mutex<Observation>>,
 }
 
 impl MockAgent {
     fn new(state: State) -> Self {
+        let served = Observation {
+            generation: 1,
+            snapshot: snapshot_of(&state),
+        };
         Self {
             state: Arc::new(Mutex::new(state)),
             pairing_rx: Arc::new(Mutex::new(None)),
+            served: Arc::new(Mutex::new(served)),
         }
+    }
+
+    /// The current observation, stamped with a new generation if the scripted
+    /// state has moved since the last one served.
+    async fn current(&self) -> Observation {
+        let snapshot = snapshot_of(&*self.state.lock().await);
+        let mut served = self.served.lock().await;
+        if served.snapshot != snapshot {
+            served.generation += 1;
+            served.snapshot = snapshot;
+        }
+        served.clone()
+    }
+}
+
+/// Render what the GUI observes out of the scripted state.
+fn snapshot_of(state: &State) -> AgentSnapshot {
+    AgentSnapshot {
+        status: agent_status(),
+        inventory: state.render_inventory(),
+        standalone: vec![standalone_light()],
+        camera_active: state.camera_active(),
+        pairing: state.phase.clone(),
     }
 }
 
@@ -634,6 +682,10 @@ impl Agent for MockAgent {
         PROTOCOL_VERSION
     }
 
+    async fn identity(self, _: Context) -> Identity {
+        Identity::mine(Compat::from(PROTOCOL_VERSION))
+    }
+
     async fn status(self, _: Context) -> AgentStatus {
         agent_status()
     }
@@ -642,16 +694,27 @@ impl Agent for MockAgent {
         self.state.lock().await.render_inventory()
     }
 
-    async fn reload_config(self, _: Context) {
+    async fn reload_config(self, _: Context) -> Result<(), ConfigReloadError> {
         info!("reload_config (no-op in the mock)");
+        Ok(())
     }
 
     // The mock has no Actions Ring hardware: long-polls idle until the
     // overlay's request deadline (returning immediately would hot-loop it),
     // and interaction commands answer like an expired session.
     async fn next_action_ring(self, _: Context) -> Option<ActionRingInvocation> {
-        tokio::time::sleep(Duration::from_secs(20)).await;
+        // Superseded by `observe_action_ring`.
         None
+    }
+
+    async fn observe_action_ring(self, _: Context, _since: Generation) -> RingObservation {
+        // The mock scripts no rings, so it only ever has "none" to report —
+        // held for the window so an overlay polling it doesn't spin.
+        tokio::time::sleep(OBSERVE_HOLD).await;
+        RingObservation {
+            generation: 1,
+            invocation: None,
+        }
     }
 
     async fn action_ring_hover(
@@ -777,6 +840,7 @@ impl Agent for MockAgent {
         };
         *self.pairing_rx.lock().await = Some(rx);
         let _ = tx.send(PairingUpdate::Searching);
+        self.state.lock().await.set_phase(PairingPhase::Searching);
 
         let state = Arc::clone(&self.state);
         tokio::spawn(async move {
@@ -792,7 +856,8 @@ impl Agent for MockAgent {
                 let _ = session
                     .updates
                     .send(PairingUpdate::DeviceFound(found.clone()));
-                session.discovered = Some(found);
+                session.discovered = Some(found.clone());
+                state.set_phase(PairingPhase::Found(vec![found]));
             }
         });
         Ok(())
@@ -813,6 +878,7 @@ impl Agent for MockAgent {
             };
             (session.id, session.updates.clone(), found.name.clone())
         };
+        self.state.lock().await.set_phase(PairingPhase::Pairing);
 
         let state = Arc::clone(&self.state);
         tokio::spawn(async move {
@@ -820,12 +886,15 @@ impl Agent for MockAgent {
             // A cancel in the meantime ends the flow: a plain cancel leaves the
             // GUI polling this very channel, so sending the prompt anyway would
             // show it a passkey *after* `Failed(Cancelled)`.
-            if state.lock().await.pairing_session(id).is_none() {
-                return;
+            let method = PasskeyMethod::Keyboard("482913".to_string());
+            {
+                let mut state = state.lock().await;
+                if state.pairing_session(id).is_none() {
+                    return;
+                }
+                state.set_phase(PairingPhase::Passkey(method.clone()));
             }
-            let _ = tx.send(PairingUpdate::Passkey(PasskeyMethod::Keyboard(
-                "482913".to_string(),
-            )));
+            let _ = tx.send(PairingUpdate::Passkey(method));
             tokio::time::sleep(PASSKEY_TYPING_DELAY).await;
             let mut state = state.lock().await;
             // No session of ours left = cancelled while the "user" was typing.
@@ -835,6 +904,7 @@ impl Agent for MockAgent {
                 return;
             }
             let slot = state.pair_scripted(&name);
+            state.set_phase(PairingPhase::Paired { slot });
             let _ = tx.send(PairingUpdate::Paired { slot });
         });
         Ok(())
@@ -843,7 +913,11 @@ impl Agent for MockAgent {
     async fn cancel_pairing(self, _: Context) -> Result<(), PairingCommandError> {
         // Cancelling with nothing active is `Ok` in the real agent, so it is
         // `Ok` here — the GUI must not see a different contract from the mock.
-        if let Some(session) = self.state.lock().await.pairing.take() {
+        let mut state = self.state.lock().await;
+        // A cancelled session leaves no result, and dismissing a finished one
+        // clears its result — both are "no session" (see the real agent).
+        state.phase = None;
+        if let Some(session) = state.pairing.take() {
             let _ = session
                 .updates
                 .send(PairingUpdate::Failed(PairingFailure::Cancelled));
@@ -874,12 +948,17 @@ impl Agent for MockAgent {
     }
 
     async fn snapshot(self, _: Context) -> AgentSnapshot {
-        let state = self.state.lock().await;
-        AgentSnapshot {
-            status: agent_status(),
-            inventory: state.render_inventory(),
-            standalone: vec![standalone_light()],
-            camera_active: state.camera_active(),
+        snapshot_of(&*self.state.lock().await)
+    }
+
+    async fn observe(self, _: Context, since: Generation) -> Observation {
+        let deadline = Instant::now() + OBSERVE_HOLD;
+        loop {
+            let current = self.current().await;
+            if current.generation != since || Instant::now() >= deadline {
+                return current;
+            }
+            tokio::time::sleep(OBSERVE_TICK).await;
         }
     }
 

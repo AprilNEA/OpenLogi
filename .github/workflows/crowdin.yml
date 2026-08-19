@@ -9,10 +9,10 @@ on:
       - master
     paths:
       # English source is SoT; non-English catalogs come from Crowdin only.
-      - crates/openlogi-gui/locales/en.yml
+      - crates/openlogi-ui/locales/en.yml
       - crowdin.yml
       - .github/workflows/crowdin.yml
-      - scripts/i18n/**
+      - .github/scripts/i18n/**
       - .github/actions/github-app-token-from-1password/**
 
 permissions:
@@ -62,7 +62,7 @@ jobs:
           CROWDIN_PERSONAL_TOKEN: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PERSONAL_TOKEN
 
       - name: Self-test locale merge script
-        run: python3 scripts/i18n/merge_crowdin_download.py --self-test
+        run: python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
 
       # Complete catalogs in git are the merge base. Crowdin download overwrites
       # the working tree; without a snapshot we cannot restore keys the export
@@ -71,7 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/openlogi-locales-before
-          cp crates/openlogi-gui/locales/*.yml /tmp/openlogi-locales-before/
+          cp crates/openlogi-ui/locales/*.yml /tmp/openlogi-locales-before/
 
       # Upload sources + seed per-language translations, then download only
       # (no push/PR — we merge first so sparse/English exports never land).
@@ -98,17 +98,17 @@ jobs:
       - name: Merge Crowdin export into complete catalogs
         run: |
           set -euo pipefail
-          python3 scripts/i18n/merge_crowdin_download.py \
+          python3 .github/scripts/i18n/merge_crowdin_download.py \
             --before /tmp/openlogi-locales-before \
-            --locales crates/openlogi-gui/locales \
-            --en crates/openlogi-gui/locales/en.yml
+            --locales crates/openlogi-ui/locales \
+            --en crates/openlogi-ui/locales/en.yml
 
       - name: Push translation branch and open PR
         env:
           GH_TOKEN: ${{ steps.github_app.outputs.token }}
         run: |
           set -euo pipefail
-          if git diff --quiet -- crates/openlogi-gui/locales/; then
+          if git diff --quiet -- crates/openlogi-ui/locales/; then
             echo "No real Crowdin translation updates"
             exit 0
           fi
@@ -116,7 +116,7 @@ jobs:
           git config user.name "Crowdin Bot"
           git config user.email "support+bot@crowdin.com"
           git checkout -B crowdin/i18n
-          git add crates/openlogi-gui/locales/
+          git add crates/openlogi-ui/locales/
           git commit -m "chore(i18n): sync Crowdin translations"
           git push -f origin crowdin/i18n
 

@@ -133,6 +133,10 @@ fn restart(path: &Path) {
         "executable changed on disk — relaunching as the new macOS agent"
     );
     match schedule_macos_relaunch(path) {
+        #[expect(
+            clippy::exit,
+            reason = "the successor is already scheduled and waits on this process releasing the singleton lock and IPC socket; this watcher thread cannot return a status to `main`, which is parked in the AppKit run loop"
+        )]
         Ok(()) => std::process::exit(0),
         Err(e) => {
             warn!(error = %e, "could not schedule updated agent relaunch — keeping the current image and retrying");
@@ -177,6 +181,10 @@ fn restart(path: &Path) {
         path = %path.display(),
         "executable changed on disk — exiting so the new binary can start"
     );
+    #[expect(
+        clippy::exit,
+        reason = "windows has no `exec`, and this watcher thread cannot return a status to `main`, which is blocked on the agent core; releasing the singleton lock by exiting is what lets the replaced binary start"
+    )]
     std::process::exit(0);
 }
 

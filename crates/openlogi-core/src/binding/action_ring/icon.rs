@@ -119,6 +119,70 @@ pub enum ActionRingIcon {
 }
 
 impl ActionRingIcon {
+    /// Path of this glyph's embedded SVG, as the GPUI frontends' asset source
+    /// serves it. The catalogue of shipped glyphs is a property of the icon
+    /// set, so it lives with the variants rather than in either frontend —
+    /// `openlogi-ui` owns the bytes and tests that every variant resolves.
+    #[must_use]
+    pub const fn asset_path(self) -> &'static str {
+        match self {
+            Self::Pointer => "action-icons/mouse-pointer-click.svg",
+            Self::Mouse => "action-icons/mouse.svg",
+            Self::Copy => "action-icons/copy.svg",
+            Self::Paste => "action-icons/clipboard-paste.svg",
+            Self::Cut => "action-icons/scissors.svg",
+            Self::Search => "action-icons/search.svg",
+            Self::Save => "action-icons/save.svg",
+            Self::Keyboard => "action-icons/keyboard.svg",
+            Self::Applications => "action-icons/grid-3x3.svg",
+            Self::Grid => "action-icons/layout-grid.svg",
+            Self::Layers => "action-icons/layers.svg",
+            Self::Monitor => "action-icons/monitor.svg",
+            Self::Lock => "action-icons/lock.svg",
+            Self::Camera => "action-icons/camera.svg",
+            Self::Play => "action-icons/play.svg",
+            Self::Volume => "action-icons/volume-2.svg",
+            Self::Gauge => "action-icons/gauge.svg",
+            Self::Refresh => "action-icons/refresh-cw.svg",
+            Self::ArrowUp => "action-icons/chevrons-up.svg",
+            Self::ArrowDown => "action-icons/chevrons-down.svg",
+            Self::ArrowLeft => "action-icons/arrow-left.svg",
+            Self::ArrowRight => "action-icons/arrow-right.svg",
+            Self::Undo => "action-icons/undo-2.svg",
+            Self::Redo => "action-icons/redo-2.svg",
+            Self::SelectAll => "action-icons/list-checks.svg",
+            Self::MouseBack => "action-icons/circle-arrow-left.svg",
+            Self::MouseForward => "action-icons/circle-arrow-right.svg",
+            Self::NewTab => "action-icons/square-plus.svg",
+            Self::CloseTab => "action-icons/square-x.svg",
+            Self::ReopenTab => "action-icons/rotate-ccw.svg",
+            Self::NextTab => "action-icons/chevron-right.svg",
+            Self::PreviousTab => "action-icons/chevron-left.svg",
+            Self::Reload => "action-icons/rotate-cw.svg",
+            Self::PreviousDesktop => "action-icons/square-arrow-left.svg",
+            Self::NextDesktop => "action-icons/square-arrow-right.svg",
+            Self::PreviousTrack => "action-icons/skip-back.svg",
+            Self::NextTrack => "action-icons/skip-forward.svg",
+            Self::VolumeDown => "action-icons/volume-1.svg",
+            Self::Mute => "action-icons/volume-x.svg",
+            Self::ScrollLeft => "action-icons/chevrons-left.svg",
+            Self::ScrollRight => "action-icons/chevrons-right.svg",
+            Self::Folder => "action-icons/folder.svg",
+            Self::File => "action-icons/file.svg",
+            Self::Globe => "action-icons/globe.svg",
+            Self::Terminal => "action-icons/square-terminal.svg",
+            Self::Settings => "action-icons/settings.svg",
+            Self::Star => "action-icons/star.svg",
+            Self::Heart => "action-icons/heart.svg",
+            Self::Calendar => "action-icons/calendar.svg",
+            Self::Bell => "action-icons/bell.svg",
+            Self::User => "action-icons/user.svg",
+            Self::Palette => "action-icons/palette.svg",
+            Self::Book => "action-icons/book-open.svg",
+            Self::Ban => "action-icons/ban.svg",
+        }
+    }
+
     /// Every icon offered by the Actions Ring editor.
     pub const ALL: [Self; 54] = [
         Self::Pointer,
@@ -176,56 +240,6 @@ impl ActionRingIcon {
         Self::Book,
         Self::Ban,
     ];
-
-    /// Default icon for an executable action.
-    #[must_use]
-    pub fn for_action(action: &Action) -> Self {
-        match action {
-            Action::None => Self::Ban,
-            Action::LeftClick | Action::RightClick => Self::Pointer,
-            Action::MiddleClick => Self::Mouse,
-            Action::MouseBack => Self::MouseBack,
-            Action::MouseForward => Self::MouseForward,
-            Action::Copy => Self::Copy,
-            Action::Paste => Self::Paste,
-            Action::Cut => Self::Cut,
-            Action::Undo => Self::Undo,
-            Action::Redo => Self::Redo,
-            Action::SelectAll => Self::SelectAll,
-            Action::Find => Self::Search,
-            Action::Save => Self::Save,
-            Action::BrowserBack => Self::ArrowLeft,
-            Action::BrowserForward => Self::ArrowRight,
-            Action::NewTab => Self::NewTab,
-            Action::CloseTab => Self::CloseTab,
-            Action::ReopenTab => Self::ReopenTab,
-            Action::NextTab => Self::NextTab,
-            Action::PrevTab => Self::PreviousTab,
-            Action::ReloadPage => Self::Reload,
-            Action::MissionControl | Action::ShowActionsRing => Self::Grid,
-            Action::AppExpose => Self::Layers,
-            Action::PreviousDesktop => Self::PreviousDesktop,
-            Action::NextDesktop => Self::NextDesktop,
-            Action::ShowDesktop | Action::Sleep => Self::Monitor,
-            Action::LaunchpadShow | Action::OpenApplication(_) => Self::Applications,
-            Action::LockScreen => Self::Lock,
-            Action::Screenshot | Action::CaptureRegion => Self::Camera,
-            Action::PlayPause => Self::Play,
-            Action::NextTrack => Self::NextTrack,
-            Action::PrevTrack => Self::PreviousTrack,
-            Action::VolumeUp => Self::Volume,
-            Action::VolumeDown => Self::VolumeDown,
-            Action::MuteVolume => Self::Mute,
-            Action::CycleDpiPresets | Action::SetDpiPreset(_) => Self::Gauge,
-            Action::ToggleSmartShift => Self::Refresh,
-            Action::ScrollUp => Self::ArrowUp,
-            Action::ScrollDown => Self::ArrowDown,
-            Action::HorizontalScrollLeft => Self::ScrollLeft,
-            Action::HorizontalScrollRight => Self::ScrollRight,
-            Action::CustomShortcut(_) | Action::TypeText(_) | Action::Workflow(_) => Self::Keyboard,
-            Action::RunAppleScript(_) | Action::RunShellCommand(_) => Self::Terminal,
-        }
-    }
 
     /// Existing localization key used as this icon's accessible label.
     #[must_use]
@@ -286,3 +300,29 @@ impl ActionRingIcon {
         }
     }
 }
+
+/// Builds [`ActionRingIcon::for_action`] from
+/// [`for_each_unit_action!`](super::super::action::for_each_unit_action)'s
+/// rows, splicing in the hand-written arms for payload-carrying variants so
+/// the generated `match` still covers every [`Action`] variant exhaustively.
+macro_rules! derive_action_icon {
+    ( $( $variant:ident $label:literal $category:ident $icon:ident $( $tag:ident )? ),* $(,)? ) => {
+        impl ActionRingIcon {
+            /// Default icon for an executable action.
+            #[must_use]
+            pub fn for_action(action: &Action) -> Self {
+                match action {
+                    $( Action::$variant => Self::$icon, )*
+                    Action::SetDpiPreset(_) => Self::Gauge,
+                    Action::CustomShortcut(_) | Action::TypeText(_) | Action::Workflow(_) => {
+                        Self::Keyboard
+                    }
+                    Action::RunAppleScript(_) | Action::RunShellCommand(_) => Self::Terminal,
+                    Action::OpenApplication(_) => Self::Applications,
+                }
+            }
+        }
+    };
+}
+
+super::super::action::for_each_unit_action!(derive_action_icon);

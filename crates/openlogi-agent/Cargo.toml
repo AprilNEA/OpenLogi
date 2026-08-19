@@ -26,6 +26,7 @@ openlogi-agent-core = { path = "../openlogi-agent-core" }
 openlogi-core = { path = "../openlogi-core" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
+openlogi-ipc = { path = "../openlogi-ipc" }
 tarpc = { workspace = true }
 interprocess = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
@@ -34,6 +35,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 opener = { workspace = true }
+succession = { version = "0.1", features = ["supervision", "eviction"] }
 
 # Windows exe resources (app icon + VERSIONINFO) — see build.rs. The exact
 # version already in Cargo.lock as gpui's own build-dependency, so the resolve
@@ -52,13 +54,15 @@ plist = "1.10.0"
 
 # Autostart via the HKCU Run key (launch_agent.rs); winreg also answers the
 # taskbar light/dark theme read for the tray glyph (tray_windows.rs). The
-# notification-area icon itself is raw win32 via the workspace windows-sys.
+# notification-area icon and the suspend/resume listener (resume_windows.rs)
+# are raw win32 via the workspace windows-sys.
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
+    "Win32_System_Power",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

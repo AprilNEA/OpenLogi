@@ -1,5 +1,5 @@
 //! `openlogi assets sync` — pull every device's bundle-required files
-//! into the openlogi-gui crate so `cargo bundle` can pick them up.
+//! into the openlogi-desktop crate so `cargo bundle` can pick them up.
 //!
 //! Probes OpenLogi's asset mirrors, fetches `index.json`, writes per-device
 //! files (skipping cache hits via sha256 compare), and prunes depots that no
@@ -46,8 +46,8 @@ pub struct SyncArgs {
     #[arg(long, env = "OPENLOGI_ASSETS")]
     base: Option<String>,
     /// Destination directory. Default matches the cargo-bundle
-    /// resources path declared in openlogi-gui/Cargo.toml.
-    #[arg(long, default_value = "crates/openlogi-gui/assets")]
+    /// resources path declared in openlogi-desktop/Cargo.toml.
+    #[arg(long, default_value = "crates/openlogi-desktop/assets")]
     out: PathBuf,
 }
 

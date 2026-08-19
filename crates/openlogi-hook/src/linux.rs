@@ -18,6 +18,10 @@
 //! group) and write access to `/dev/uinput` (the `input` or `uinput` group, or
 //! a `udev` rule granting access). Without those, `start()` returns
 //! [`crate::HookError::Linux`].
+#![allow(
+    unsafe_code,
+    reason = "the wake pipe and the Wayland toplevel listener call libc directly"
+)]
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};

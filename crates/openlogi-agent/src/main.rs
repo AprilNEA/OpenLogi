@@ -18,6 +18,8 @@
 mod launch_agent;
 mod overlay;
 mod pairing;
+#[cfg(target_os = "windows")]
+mod resume_windows;
 mod self_restart;
 mod server;
 #[cfg(target_os = "macos")]
@@ -29,12 +31,16 @@ mod tray;
 mod tray_windows;
 
 use std::sync::Arc;
+// Only the resume-notification flag is atomic now, and that exists on the two
+// platforms that have a native suspend/resume signal.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::hook_runtime::ActionDispatcher;
+use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::{hook_runtime, watchers};
 use openlogi_core::config::Config;
@@ -121,7 +127,16 @@ fn main() {
         // Windows hosts the notification-area icon on its own win32 thread
         // (message pump included); the async core keeps the main thread.
         #[cfg(target_os = "windows")]
-        tray_windows::spawn(config.app_settings.show_in_menu_bar);
+        {
+            tray_windows::spawn(config.app_settings.show_in_menu_bar);
+            // Native resume notifications feed the same seam the macOS
+            // workspace observer does: the core replays volatile settings
+            // when the flag is set.
+            let resume_pending = Arc::new(AtomicBool::new(false));
+            resume_windows::register(Arc::clone(&resume_pending));
+            runtime.block_on(run(config, resume_pending));
+        }
+        #[cfg(not(target_os = "windows"))]
         runtime.block_on(run(config));
     }
 }
@@ -167,17 +182,82 @@ fn action_ring_runtime(
     (manager, receiver, dispatcher)
 }
 
+/// Install the OS mouse hook now that Accessibility is granted, or say why it
+/// stays off. `None` means no hook is running, which is what the observable
+/// state reports either way.
+fn start_hook(
+    capture_mouse_events: bool,
+    shared: &SharedRuntime,
+    dispatcher: &ActionDispatcher,
+    event_monitor: &Arc<EventMonitor>,
+) -> Option<Hook> {
+    if !capture_mouse_events {
+        info!(
+            "OS mouse hook disabled by app_settings.capture_mouse_events — \
+             button remapping is off"
+        );
+        return None;
+    }
+    info!("accessibility granted — installing OS mouse hook");
+    hook_runtime::start(
+        shared.hook_maps.clone(),
+        shared.keyboard_bindings.clone(),
+        dispatcher.clone(),
+        Arc::clone(event_monitor),
+    )
+}
+
 async fn begin_action_ring(
     orchestrator: &Mutex<Orchestrator>,
     action_ring: &ActionRingManager,
+    ring_haptics: &server::RingHapticPlayer,
     device_key: Option<&str>,
 ) {
+    // A second trigger press while the ring is showing closes it.
+    if action_ring.dismiss_active() {
+        return;
+    }
     if let Some(session) = orchestrator.lock().await.action_ring_session(device_key) {
+        // Arm the firmware haptic engine before the first buzz: some power
+        // transitions clear its enabled state, after which plays are accepted
+        // without any physical feedback. Sequenced through the haptic worker
+        // so the first hover cannot race a still-disarmed engine.
+        ring_haptics.arm(session.haptic_route.clone());
         action_ring.begin(session);
     }
 }
 
-async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<AtomicBool>) {
+/// Fire the macOS permission prompts this process needs, at startup.
+///
+/// The agent (not the GUI) owns both the CGEventTap and every HID++ device
+/// open, so it must be the binary the user authorizes for Accessibility and
+/// Input Monitoring — a grant is scoped to the code-signing identity that
+/// asks for it. macOS only shows a dialog when the process isn't already
+/// listed, so this doesn't nag on every login. The GUI's Accessibility grant
+/// button drives the same prompt on demand over IPC
+/// (`request_accessibility_prompt`); Input Monitoring has no on-demand IPC
+/// path yet, so it is only requested here, at startup.
+fn prompt_missing_permissions(capture_mouse_events: bool) {
+    // With the hook disabled the agent needs no Accessibility at all, so the
+    // opt-out also silences that prompt.
+    if capture_mouse_events && !Hook::has_accessibility() {
+        Hook::prompt_accessibility();
+    }
+
+    // Without this, macOS never registers a decision at all:
+    // `IOHIDDeviceOpen` is silently denied, the permission never appears in
+    // System Settings for the user to grant, and no HID++ device is ever
+    // discovered. `request_access` blocks on the consent dialog, so it runs
+    // on a blocking thread rather than stalling startup.
+    if !openlogi_hid::permissions::has_access() {
+        tokio::task::spawn_blocking(openlogi_hid::permissions::request_access);
+    }
+}
+
+async fn run(
+    config: Config,
+    #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: Arc<AtomicBool>,
+) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
     // LaunchAgent, before `config` moves into the orchestrator.
     launch_agent::reconcile(config.app_settings.launch_at_login);
@@ -187,24 +267,20 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
     // an agent restart, which the config docs state.
     let capture_mouse_events = config.app_settings.capture_mouse_events;
 
-    // The agent owns the CGEventTap, so it must be the binary the user authorizes
-    // for Accessibility. Fire the prompt at startup when we're not yet trusted so
-    // openlogi-agent appears (named correctly) in System Settings even on a
-    // launchd start with no GUI. macOS only shows the dialog when we're not
-    // already in the list, so this doesn't nag on every login. The GUI's grant
-    // button drives the same prompt over IPC (`request_accessibility_prompt`).
-    // With the hook disabled the agent needs no Accessibility at all, so the
-    // opt-out also silences the permission prompt.
-    if capture_mouse_events && !Hook::has_accessibility() {
-        Hook::prompt_accessibility();
-    }
+    prompt_missing_permissions(capture_mouse_events);
 
     // The orchestrator is shared with the IPC server (which serves inventory /
     // reload / status) and mutated by the watcher select loop, so it lives
     // behind an async mutex. Locks are brief (a map rebuild or a clone).
-    let orchestrator = Arc::new(Mutex::new(Orchestrator::new(config)));
+    // One cell holds everything the GUI can observe. The orchestrator
+    // republishes the device and config facts from its own mutators; the hook
+    // facts are published by the select loop below, which owns the hook.
+    let observable = Arc::new(ObservableState::new(env!("CARGO_PKG_VERSION").to_string()));
+    let orchestrator = Arc::new(Mutex::new(Orchestrator::new(
+        config,
+        Arc::clone(&observable),
+    )));
     let shared = orchestrator.lock().await.shared();
-    let hook_installed = Arc::new(AtomicBool::new(false));
     let (action_ring, mut action_ring_rx, dispatcher) = action_ring_runtime(&shared);
 
     // Live event monitor: shared between the hook callback (which mirrors events
@@ -214,7 +290,10 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
     tokio::spawn(Arc::clone(&event_monitor).run_idle_janitor());
 
     // Pairing runs in the agent (it owns device I/O); the GUI drives it over IPC.
-    let pairing = Arc::new(pairing::PairingManager::new(shared.clone()));
+    let pairing = Arc::new(pairing::PairingManager::new(
+        shared.clone(),
+        Arc::clone(&observable),
+    ));
 
     // HID++ watchers need no Accessibility permission — start them up front.
     spawn_hidpp_watchers(&shared, dispatcher.clone());
@@ -230,15 +309,16 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
     // IPC server: the GUI connects here for device state + "apply now" commands.
     // The endpoint (Unix socket / Windows named pipe) is resolved inside
     // `transport::bind`, called by `server::run`.
-    let server = AgentServer {
-        orchestrator: Arc::clone(&orchestrator),
-        shared: shared.clone(),
-        hook_installed: Arc::clone(&hook_installed),
-        pairing: Arc::clone(&pairing),
-        event_monitor: Arc::clone(&event_monitor),
-        action_ring: Arc::clone(&action_ring),
-        dispatcher: dispatcher.clone(),
-    };
+    let server = AgentServer::new(
+        Arc::clone(&orchestrator),
+        shared.clone(),
+        Arc::clone(&observable),
+        Arc::clone(&pairing),
+        Arc::clone(&event_monitor),
+        Arc::clone(&action_ring),
+        dispatcher.clone(),
+    );
+    let ring_haptics = server.ring_haptics.clone();
     tokio::spawn(server::run(server));
 
     // The CGEventTap hook is installed once Accessibility is granted and dropped
@@ -257,12 +337,13 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
                 Some(watchers::inventory::InventoryEvent::Snapshot { inventories, standalone }) => {
                     let mut orchestrator = orchestrator.lock().await;
                     // The portable watcher catches long sleeps from a polling
-                    // gap. Native macOS notifications also cover short sleeps,
-                    // display wakes, and returning user sessions; consume the
-                    // coalesced signal at the exact point that can replay it.
-                    #[cfg(target_os = "macos")]
+                    // gap. Native notifications (macOS workspace wakes,
+                    // Windows suspend/resume) also cover the sleeps that gap
+                    // misses; consume the coalesced signal at the exact point
+                    // that can replay it.
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
                     if resume_pending.swap(false, Ordering::Relaxed) {
-                        info!("macOS resume notification — replaying volatile settings");
+                        info!("native resume notification — replaying volatile settings");
                         orchestrator.reapply_volatile_on_next_refresh();
                     }
                     orchestrator.refresh_inventory(&inventories, &standalone);
@@ -294,30 +375,24 @@ async fn run(config: Config, #[cfg(target_os = "macos")] resume_pending: Arc<Ato
                 orchestrator.lock().await.set_current_app(bundle);
             }
             Some(device_key) = action_ring_rx.recv() => {
-                begin_action_ring(&orchestrator, &action_ring, device_key.as_deref()).await;
+                begin_action_ring(&orchestrator, &action_ring, &ring_haptics, device_key.as_deref()).await;
             }
             Some(granted) = accessibility_rx.recv() => {
+                observable.set_accessibility_granted(granted);
                 if !granted {
                     hook = None;
-                    hook_installed.store(false, Ordering::Relaxed);
                 }
                 if granted && hook.is_none() {
-                    if capture_mouse_events {
-                        info!("accessibility granted — installing OS mouse hook");
-                        hook = hook_runtime::start(
-                            shared.hook_maps.clone(),
-                            shared.keyboard_bindings.clone(),
-                            dispatcher.clone(),
-                            Arc::clone(&event_monitor),
-                        );
-                        hook_installed.store(hook.is_some(), Ordering::Relaxed);
-                    } else {
-                        info!(
-                            "OS mouse hook disabled by app_settings.capture_mouse_events — \
-                             button remapping is off"
-                        );
-                    }
+                    hook = start_hook(
+                        capture_mouse_events,
+                        &shared,
+                        &dispatcher,
+                        &event_monitor,
+                    );
                 }
+                // One publish for every path above: revoked, installed, kept,
+                // or never installed because capture is off.
+                observable.set_hook_installed(hook.is_some());
             }
             else => break,
         }

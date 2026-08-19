@@ -1,4 +1,5 @@
 //! Unit tests for `ColorLedEffects` payload parsing and event decoding.
+#![allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 
 use std::assert_matches;
 
@@ -163,13 +164,13 @@ fn maps_effect_id_wire_values() {
     assert_eq!(EffectId::try_from(0u16).unwrap(), EffectId::Disabled);
     assert_eq!(EffectId::try_from(1u16).unwrap(), EffectId::FixedColor);
     assert_eq!(EffectId::try_from(11u16).unwrap(), EffectId::Ripple);
-    assert!(EffectId::try_from(12u16).is_err());
+    EffectId::try_from(12u16).unwrap_err();
     assert_eq!(u16::from(EffectId::FixedColor), 1);
 }
 
 #[test]
 fn validates_single_nv_capability() {
-    assert!(validate_single_nv_capability(NvCapabilities::BOOT_UP_EFFECT).is_ok());
+    validate_single_nv_capability(NvCapabilities::BOOT_UP_EFFECT).unwrap();
     assert_matches!(
         validate_single_nv_capability(NvCapabilities::empty()),
         Err(Hidpp20Error::Feature(ErrorType::InvalidArgument))

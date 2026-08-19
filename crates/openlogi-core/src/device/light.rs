@@ -171,6 +171,7 @@ pub enum LightValueRangeError {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawLightValueRange {
     min: u16,
     max: u16,
@@ -193,6 +194,7 @@ impl<'de> Deserialize<'de> for LightValueRange {
 /// Optional ranges are the source of truth for UI controls. A driver must not
 /// advertise a control merely because the product is classified as a light.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "independent optional light controls are a serialized capability DTO"
