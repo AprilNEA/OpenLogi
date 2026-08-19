@@ -155,7 +155,10 @@ crates/
   openlogi-agent-core/  shared orchestration + the agent/GUI IPC contract
   openlogi-agent/   the `openlogi-agent` binary — background agent owning device I/O and the hook
   openlogi-hook/    OS mouse hook: macOS CGEventTap, Linux evdev/uinput, Windows WH_MOUSE_LL
+  openlogi-ui/      presentation shared by the two GPUI processes: ring geometry/icons,
+                    the GPUI asset source, locale negotiation — gpui, no gpui-component
   openlogi-gui/     the `openlogi-gui` binary — GPUI + gpui-component IPC client
+  openlogi-overlay/ the `openlogi-overlay` binary — the cursor-centred Actions Ring
 ```
 
 ## Pre-commit checklist

@@ -12,19 +12,13 @@ default-run = "openlogi-gui"
 # (gpui_platform is not on the registry). Distributed as a bundled .app.
 publish = false
 
-# Both binaries share `src/lib.rs` — ring geometry/icons, the GPUI asset source,
-# and locale negotiation. Everything else stays private to its own binary: the
-# overlay is a pure IPC client and links none of the settings app's UI.
 [[bin]]
 name = "openlogi-gui"
 path = "src/main.rs"
 
-[[bin]]
-name = "openlogi-overlay"
-path = "src/bin/overlay/main.rs"
-
 [dependencies]
 openlogi-core = { path = "../openlogi-core" }
+openlogi-ui = { path = "../openlogi-ui" }
 openlogi-camera = { path = "../openlogi-camera" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-assets = { path = "../openlogi-assets" }
@@ -44,6 +38,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rust-i18n = "4"
+# The raw, un-negotiated system locale for the diagnostics report; locale
+# *negotiation* lives in openlogi-ui.
 sys-locale = "0.3.2"
 gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.7", features = ["gpui"] }
 # Spawn the agent under its own macOS TCC identity (see ipc_client::spawn_agent).
@@ -51,7 +47,6 @@ gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.7
 disclaim = "0.1"
 url = "2.5.8"
 walkdir = "2.5.0"
-fluent-langneg = "0.14.2"
 backon.workspace = true
 opener = { workspace = true }
 succession = "0.1"
@@ -66,19 +61,12 @@ embed-resource = "3.0.9"
 # Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. objc2 gives typed,
 # `Retained<T>`-owned AppKit bindings so the status-item code can't leak (#99).
 [target.'cfg(target_os = "macos")'.dependencies]
-# CGGetActiveDisplayList/CGDisplayBounds for the overlay: locating the cursor's
-# display needs global display bounds, which GPUI's display API doesn't expose
-# (its bounds are display-relative). C FFI, so core-graphics per the rules in
-# src/platform/AGENTS.md; the call site is src/bin/overlay/platform.rs.
-core-graphics = { workspace = true }
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance", "NSWindow", "NSEvent", "block2"] }
+objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance", "NSWindow"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSProcessInfo"] }
 # Input-Monitoring status (`IOHIDCheckAccess`) with typed request/access enums —
 # see platform/permissions.rs.
 objc2-io-kit = { workspace = true, features = ["std", "hidsystem"] }
-# NSEvent global-monitor handlers are ObjC blocks (overlay click-away dismissal).
-block2 = { workspace = true }
 
 # unsafe_code stays denied (from [workspace.lints]); the status-item/tray modules
 # opt in locally with #[expect(unsafe_code)] for the few objc2 calls

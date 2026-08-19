@@ -1,0 +1,51 @@
+[package]
+name = "openlogi-overlay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "OpenLogi Actions Ring overlay — the cursor-centred radial menu, a pure IPC client of the agent."
+# Distributed as a login-item helper inside the bundled .app; never published.
+publish = false
+
+[[bin]]
+name = "openlogi-overlay"
+path = "src/main.rs"
+
+[dependencies]
+openlogi-core = { path = "../openlogi-core" }
+openlogi-hook = { path = "../openlogi-hook" }
+openlogi-ipc = { path = "../openlogi-ipc" }
+openlogi-ui = { path = "../openlogi-ui" }
+anyhow = { workspace = true }
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+rust-i18n = "4"
+succession = "0.1"
+tarpc = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Windows exe resources (app icon + VERSIONINFO) — see build.rs. Pinned to the
+# version already in Cargo.lock as gpui's own build-dependency, so the resolve
+# adds an edge, not a crate, and the pinned gpui rev cannot move.
+[build-dependencies]
+embed-resource = "3.0.9"
+
+# Native window policy for the ring panel — see src/platform.rs, and
+# crates/openlogi-gui/src/platform/AGENTS.md for the rules this code follows.
+[target.'cfg(target_os = "macos")'.dependencies]
+# CGGetActiveDisplayList/CGDisplayBounds: placing the ring on the cursor's
+# display needs global display bounds, which GPUI's display API doesn't expose
+# (its bounds are display-relative). C FFI, so core-graphics.
+core-graphics = { workspace = true }
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSWindow", "NSEvent", "block2"] }
+# NSEvent global-monitor handlers are ObjC blocks (click-away dismissal).
+block2 = { workspace = true }
+
+[lints]
+workspace = true

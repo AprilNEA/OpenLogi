@@ -178,7 +178,7 @@ const HELPERS: [Helper; 2] = [
     },
     Helper {
         component: Component::Overlay,
-        package: "openlogi-gui",
+        package: "openlogi-overlay",
         binary: "openlogi-overlay",
         info_plist: "crates/openlogi-gui/bundle/overlay-release/Info.plist",
         label: "Actions Ring overlay helper",

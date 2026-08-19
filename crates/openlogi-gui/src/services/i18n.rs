@@ -18,10 +18,10 @@
 //! followed by a window refresh so open views re-render with the new locale.
 //!
 //! Which catalog a BCP-47 code resolves to is decided in
-//! [`openlogi_gui::locale`], shared with the overlay helper.
+//! [`openlogi_ui::locale`], shared with the overlay helper.
 
 use openlogi_core::config::AppSettings;
-use openlogi_gui::locale::activate;
+use openlogi_ui::locale::activate;
 
 /// Apply the configured language to the process-global locale at startup.
 /// Safe to call before any window opens — the locale is a plain atomic.

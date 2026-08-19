@@ -159,6 +159,7 @@ rustPlatform.buildRustPackage {
     "--bin=openlogi-agent"
     "--package=openlogi-gui"
     "--bin=openlogi-gui"
+    "--package=openlogi-overlay"
     "--bin=openlogi-overlay"
   ];
 

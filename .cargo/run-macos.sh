@@ -164,10 +164,10 @@ if [ "${OPENLOGI_DEV_AGENT:-1}" != "0" ]; then
   agent_dir="$(dirname "$bin")" # target/debug or target/release
   if [ "${agent_dir##*/}" = "release" ]; then
     cargo build -p openlogi-agent --release --manifest-path "$ROOT/Cargo.toml"
-    cargo build -p openlogi-gui --bin openlogi-overlay --release --manifest-path "$ROOT/Cargo.toml"
+    cargo build -p openlogi-overlay --release --manifest-path "$ROOT/Cargo.toml"
   else
     cargo build -p openlogi-agent --manifest-path "$ROOT/Cargo.toml"
-    cargo build -p openlogi-gui --bin openlogi-overlay --manifest-path "$ROOT/Cargo.toml"
+    cargo build -p openlogi-overlay --manifest-path "$ROOT/Cargo.toml"
   fi
   helper="$APP/Contents/Library/LoginItems/OpenLogi Agent.app"
   rm -rf \

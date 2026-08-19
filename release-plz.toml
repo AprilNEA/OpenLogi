@@ -95,6 +95,16 @@ release = false
 publish = false
 
 [[package]]
+name = "openlogi-ui"
+release = false
+publish = false
+
+[[package]]
+name = "openlogi-overlay"
+release = false
+publish = false
+
+[[package]]
 name = "openlogi-agent-core"
 release = false
 publish = false

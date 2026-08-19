@@ -62,7 +62,7 @@ BUILD_DIR="${REPO_ROOT}/target/release"
 for bin in openlogi openlogi-gui openlogi-overlay openlogi-agent; do
     if [ ! -x "${BUILD_DIR}/${bin}" ]; then
         echo "Error: ${BUILD_DIR}/${bin} not found." >&2
-        echo "Build first: cargo build --release -p openlogi -p openlogi-gui -p openlogi-agent" >&2
+        echo "Build first: cargo build --release -p openlogi -p openlogi-gui -p openlogi-overlay -p openlogi-agent" >&2
         exit 1
     fi
 done

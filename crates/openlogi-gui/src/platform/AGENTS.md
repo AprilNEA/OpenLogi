@@ -12,6 +12,11 @@ FFI is exactly these files — keep them in sync:
 - `crates/openlogi-hook/src/macos.rs` — CGEventTap (on `core-graphics`, see below), the
   `NSWorkspace` frontmost-app read (`objc2`), and the Accessibility-trust check/prompt
   (`objc2-application-services` + `objc2-core-foundation`).
+- `crates/openlogi-overlay/src/platform.rs` — the Actions Ring helper's window policy:
+  accessory activation policy, non-activating borderless panel, the `NSEvent` global
+  click-away monitor (`block2`), and `CGGetActiveDisplayList`/`CGDisplayBounds` for the
+  cursor's display. It lives in its own crate because nothing else links it — but it is
+  bound by every rule in this file.
 
 Spawning the agent under its own macOS TCC identity (so its Accessibility /
 Input-Monitoring grants aren't attributed to the GUI, issue #214) lives in the

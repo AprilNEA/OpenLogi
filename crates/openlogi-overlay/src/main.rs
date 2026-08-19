@@ -9,7 +9,11 @@
     windows_subsystem = "windows"
 )]
 
-rust_i18n::i18n!("locales", fallback = "en");
+// The catalog is owned by the settings app, whose `locales/` directory Crowdin
+// is configured against; the path is relative to this crate's manifest. Moving
+// those files is a Crowdin-coordinated change, not a refactor — until then this
+// is the one place the two crates touch outside Cargo.
+rust_i18n::i18n!("../openlogi-gui/locales", fallback = "en");
 
 mod platform;
 
@@ -77,7 +81,7 @@ struct RingView {
 
 impl RingView {
     fn slot_position(slot: ActionRingSlot) -> (f32, f32) {
-        let (x, y) = openlogi_gui::action_ring::geometry::slot_offset(slot);
+        let (x, y) = openlogi_ui::action_ring::geometry::slot_offset(slot);
         (
             WINDOW_SIZE / 2.0 + x * RADIUS - SLOT_SIZE / 2.0,
             WINDOW_SIZE / 2.0 + y * RADIUS - SLOT_SIZE / 2.0,
@@ -90,7 +94,7 @@ impl RingView {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let presentation = self.invocation.slots.get(&slot)?;
-        let icon_path = openlogi_gui::action_ring::icons::ring_icon_path(presentation.icon);
+        let icon_path = openlogi_ui::action_ring::icons::ring_icon_path(presentation.icon);
         let selected = self.hovered == Some(slot);
         let (left, top) = Self::slot_position(slot);
         let session_id = self.invocation.session_id;
@@ -232,7 +236,7 @@ fn main() -> Result<()> {
         )
         .init();
 
-    openlogi_gui::locale::activate(None);
+    openlogi_ui::locale::activate(None);
     // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
     let Ipc {
@@ -240,7 +244,7 @@ fn main() -> Result<()> {
         commands,
     } = spawn_ipc();
 
-    let app = gpui_platform::application().with_assets(openlogi_gui::app_assets::AppAssets);
+    let app = gpui_platform::application().with_assets(openlogi_ui::app_assets::AppAssets);
     app.run(move |cx| {
         platform::configure_application();
         let live_session = Arc::new(ClickAwaySession::new());
@@ -261,7 +265,7 @@ fn main() -> Result<()> {
                     });
                     continue;
                 }
-                openlogi_gui::locale::activate(invocation.language.as_deref());
+                openlogi_ui::locale::activate(invocation.language.as_deref());
                 cx.update(|cx| {
                     live_session.clear();
                     for handle in cx.windows() {
@@ -805,6 +809,18 @@ fn retry_before(deadline: Option<Instant>) -> bool {
 )]
 mod tests {
     use super::*;
+
+    /// The catalog this binary translates against lives in the settings app's
+    /// crate (see the `i18n!` at the top). A wrong path there does **not** fail
+    /// the build — `rust_i18n` compiles it to an empty catalog, and every ring
+    /// label silently renders as its English key in all 20 locales. Pin one
+    /// action label in a non-English locale so that breakage is loud.
+    #[test]
+    fn the_shared_catalog_is_wired_up() {
+        rust_i18n::set_locale("zh-CN");
+        assert_eq!(rust_i18n::t!("Left Click"), "左键单击");
+        rust_i18n::set_locale("en");
+    }
 
     #[test]
     fn overlay_origin_is_clamped_to_the_display() {

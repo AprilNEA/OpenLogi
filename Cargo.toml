@@ -14,6 +14,8 @@ members = [
     "crates/openlogi-agent-core",
     "crates/openlogi-agent",
     "crates/openlogi-gui",
+    "crates/openlogi-ui",
+    "crates/openlogi-overlay",
     "crates/openlogi-hook",
     "xtask",
 ]
