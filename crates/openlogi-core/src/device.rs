@@ -128,6 +128,9 @@ pub struct Capabilities {
     /// device's `0x1b04` control table.
     #[serde(default)]
     pub haptic_panel: bool,
+    /// HID++ `0x8100 OnboardProfiles` is present.
+    #[serde(default)]
+    pub onboard_profiles: bool,
 }
 
 impl Capabilities {
@@ -153,6 +156,7 @@ impl Capabilities {
             thumbwheel: ids.contains(&0x2150),
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
+            onboard_profiles: ids.contains(&0x8100),
         }
     }
 
@@ -173,6 +177,7 @@ impl Capabilities {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                onboard_profiles: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -478,6 +483,7 @@ mod tests {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    onboard_profiles: false,
                 }),
             }],
         }
@@ -545,9 +551,11 @@ mod tests {
                 thumbwheel: true,
                 haptic_feedback: false,
                 haptic_panel: false,
+                onboard_profiles: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
+        assert!(Capabilities::from_feature_ids(&[0x8100]).onboard_profiles);
         // A wired G-series keyboard: PerKeyLighting (0x8080), no DPI/buttons.
         let keyboard = Capabilities::from_feature_ids(&[0x0001, 0x8080]);
         assert_eq!(
@@ -561,6 +569,7 @@ mod tests {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                onboard_profiles: false,
             }
         );
         // No driving features → nothing offered.
@@ -587,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_capabilities_without_appended_wheel_fields_load_as_unsupported()
+    fn persisted_capabilities_without_appended_fields_load_as_unsupported()
     -> Result<(), toml::de::Error> {
         use super::Capabilities;
 
@@ -602,6 +611,7 @@ mod tests {
 
         assert!(!capabilities.hires_wheel);
         assert!(!capabilities.thumbwheel);
+        assert!(!capabilities.onboard_profiles);
         assert!(capabilities.scroll_inversion);
         Ok(())
     }

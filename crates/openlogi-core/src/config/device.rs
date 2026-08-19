@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::settings::{
-    CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity, deserialize_gesture_owner,
+    CameraControls, GestureOwner, LightSettings, Lighting, OnboardProfiles, ScrollResolution,
+    SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
@@ -197,6 +197,10 @@ pub struct DeviceConfig {
     /// [`Self::dpi`]. `None` means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
+    /// Onboard-profile selection for HID++ `0x8100`, re-applied on every
+    /// reconnect. `None` leaves the device's current mode unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboard_profiles: Option<OnboardProfiles>,
 }
 
 impl Default for DeviceConfig {
@@ -224,6 +228,7 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
+            onboard_profiles: None,
         }
     }
 }
@@ -341,6 +346,8 @@ struct RawDeviceConfig {
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
+    #[serde(default)]
+    onboard_profiles: Option<OnboardProfiles>,
     #[serde(default = "default_true")]
     enabled: bool,
 }
@@ -397,6 +404,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
+            onboard_profiles: raw.onboard_profiles,
         }
     }
 }

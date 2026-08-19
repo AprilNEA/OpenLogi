@@ -25,7 +25,7 @@ use file::{backup_existing_config, config_backup_path};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use settings::LightSettings;
 pub use settings::{
-    AppSettings, Appearance, AssetSourcePreference, CameraControls, Lighting,
+    AppSettings, Appearance, AssetSourcePreference, CameraControls, Lighting, OnboardProfiles,
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
     ThumbwheelSensitivity, WheelMode,
 };
@@ -740,6 +740,24 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .scroll_resolution = resolution;
+    }
+
+    /// The configured onboard-profile selection for `device_key`, or `None`
+    /// when OpenLogi must leave the device's current mode unchanged.
+    #[must_use]
+    pub fn onboard_profiles(&self, device_key: &str) -> Option<OnboardProfiles> {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.onboard_profiles)
+    }
+
+    /// Set or clear the onboard-profile selection OpenLogi should restore for
+    /// `device_key`. Passing `None` returns the device to unmanaged mode.
+    pub fn set_onboard_profiles(&mut self, device_key: &str, profiles: Option<OnboardProfiles>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .onboard_profiles = profiles;
     }
 
     /// Whether OpenLogi manages `device_key` at all (capture + volatile

@@ -447,6 +447,26 @@ pub enum ScrollResolution {
     High,
 }
 
+/// Per-device source selection for HID++ `0x8100` onboard profile memory.
+///
+/// Tagged serialization preserves the existing TOML shape
+/// (`mode = "host"` or `mode = "onboard"`). Making host and onboard distinct
+/// variants prevents a host-mode configuration from carrying an ignored
+/// profile sector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OnboardProfiles {
+    /// Host mode: OpenLogi drives the device and onboard profiles are dormant.
+    Host {},
+    /// Onboard mode: the device applies a profile from its own flash.
+    Onboard {
+        /// Flash sector to activate, or `None` to keep the device's current
+        /// active profile.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<u16>,
+    },
+}
+
 /// Scroll-wheel mode for [`SmartShift`]: free-spin or ratchet (clicky).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -559,6 +579,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn onboard_profiles_parse_both_toml_shapes() {
+        let onboard: OnboardProfiles =
+            toml::from_str("mode = \"onboard\"\nprofile = 2\n").expect("parse onboard");
+        assert_eq!(onboard, OnboardProfiles::Onboard { profile: Some(2) });
+
+        let host: OnboardProfiles = toml::from_str("mode = \"host\"\n").expect("parse host");
+        assert_eq!(host, OnboardProfiles::Host {});
+        assert!(
+            !toml::to_string(&host)
+                .expect("serialize")
+                .contains("profile"),
+            "host mode must not serialize a profile"
+        );
+    }
+
+    #[test]
+    fn host_mode_rejects_a_profile_sector() {
+        let result = toml::from_str::<OnboardProfiles>("mode = \"host\"\nprofile = 2\n");
+
+        assert!(result.is_err(), "host mode must not accept a profile");
+    }
 
     #[test]
     fn smartshift_rejects_values_outside_the_persisted_contract() {
