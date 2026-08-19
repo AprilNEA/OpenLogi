@@ -16,7 +16,6 @@ use openlogi_core::device::{
     LightCapabilities, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, ThumbwheelCaptureMode};
-use std::sync::Arc;
 
 use crate::observable::ObservableState;
 
@@ -775,7 +774,7 @@ fn app_switch_republishes_capture_plans() {
 }
 
 fn thumbwheel_policy(config: Config) -> (Action, bool, ThumbwheelCaptureMode) {
-    let orchestrator = Orchestrator::new(config);
+    let orchestrator = orchestrator(config);
     let maps = orchestrator.hook_maps_for(Some("mouse"), None);
     let tap_action = maps
         .bindings
@@ -857,7 +856,7 @@ fn live_app_switch_updates_thumbwheel_tap_delivery_in_place() {
         ButtonId::ThumbwheelScrollUp,
         Binding::Single(Action::MissionControl),
     );
-    let mut orchestrator = Orchestrator::new(config);
+    let mut orchestrator = orchestrator(config);
     orchestrator.devices = vec![dev(DEVICE, 1, true)];
     orchestrator.rebuild();
 
