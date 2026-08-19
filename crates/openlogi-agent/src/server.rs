@@ -19,8 +19,8 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, Dpi, DpiInfo, HapticWaveform, HidppOperation, LightCommand, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, HapticWaveform, HidppOperation, LightCommand, OnboardProfilesInfo,
+    ProfilesMode, ReceiverSelector, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -299,6 +299,36 @@ impl Agent for AgentServer {
 
     async fn action_ring_cancel(self, _: Context, session_id: u64) {
         self.action_ring.cancel(session_id);
+    }
+
+    async fn set_onboard_profiles(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        mode: ProfilesMode,
+        profile: Option<u16>,
+    ) -> Result<(), WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::WriteOnboardProfiles, |c| async move {
+                openlogi_hid::apply_profiles_config_on(&c, mode, profile)
+                    .await
+                    .map(|_written| ())
+            })
+            .await
+    }
+
+    async fn read_onboard_profiles(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<OnboardProfilesInfo, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadOnboardProfiles, |c| async move {
+                openlogi_hid::get_onboard_profiles_on(&c).await
+            })
+            .await
     }
 }
 

@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, ChannelRegistry, DeviceRoute, Dpi, HidppOperation, ScrollResolution,
-    SharedChannel, SmartShiftStatus, WriteError,
+    CaptureChannel, ChannelRegistry, DeviceRoute, Dpi, HidppOperation, ProfilesMode,
+    ScrollResolution, SharedChannel, SmartShiftStatus, WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
@@ -264,6 +264,14 @@ pub fn write_fn_lock_in_background(op: DeviceOp<'_>, on: bool) {
     );
 }
 
+/// Desired onboard-profile state for a reconnect re-apply.
+#[derive(Debug, Clone, Copy)]
+pub struct OnboardProfilesApply {
+    /// Whether host software or onboard flash drives the device.
+    pub mode: ProfilesMode,
+    /// User-profile sector to activate in onboard mode, when configured.
+    pub profile: Option<u16>,
+}
 /// Re-apply every volatile mouse setting for `op`'s device on a **single**
 /// background thread, sequentially, on the current inventory-owned channel.
 ///
@@ -280,6 +288,7 @@ pub fn write_fn_lock_in_background(op: DeviceOp<'_>, on: bool) {
 /// hands the operation itself to [`DeviceOp::run`] or [`DeviceOp::detach`].
 pub fn reapply_mouse_volatile_in_background(
     op: &DeviceOp<'_>,
+    profiles: Option<OnboardProfilesApply>,
     resolution: Option<ScrollResolution>,
     inverted: Option<bool>,
     dpi: Option<Dpi>,
@@ -297,6 +306,32 @@ pub fn reapply_mouse_volatile_in_background(
         };
         rt.block_on(async {
             let _lease = receiver_access.acquire_for_io().await;
+            if let Some(profiles) = profiles {
+                let result = tokio::time::timeout(WRITE_BUDGET, async {
+                    openlogi_hid::apply_profiles_config_on(&shared, profiles.mode, profiles.profile)
+                        .await
+                })
+                .await;
+                match result {
+                    Ok(Ok(written)) => debug!(
+                        index,
+                        mode = ?profiles.mode,
+                        profile = ?profiles.profile,
+                        written,
+                        "onboard-profiles config applied"
+                    ),
+                    Ok(Err(WriteError::FeatureUnsupported { feature_hex })) => debug!(
+                        index,
+                        feature = format_args!("{feature_hex:#06x}"),
+                        "onboard-profile memory unsupported"
+                    ),
+                    Ok(Err(e)) => warn!(error = ?e, "onboard-profiles apply failed"),
+                    Err(_) => warn!(
+                        index,
+                        "onboard-profiles apply timed out (device asleep/unresponsive)"
+                    ),
+                }
+            }
             if resolution.is_some() || inverted.is_some() {
                 let result = tokio::time::timeout(WRITE_BUDGET, async {
                     apply_wheel_mode(&shared, resolution, inverted).await

@@ -2,17 +2,17 @@
 
 use super::{
     AgentDevice, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
-    pick_current, plan_reapply, reapply_targets,
+    any_device_needs_capture_rearm, build_devices, configured_onboard_profiles,
+    configured_wheel_mode, host_switch_links, pick_current, plan_reapply, reapply_targets,
 };
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, ButtonId};
-use openlogi_core::config::{Config, LightSettings, ScrollResolution};
+use openlogi_core::config::{Config, LightSettings, OnboardProfiles, ScrollResolution};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
     LightCapabilities, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, ProfilesMode};
 use std::sync::Arc;
 
 use crate::observable::ObservableState;
@@ -273,6 +273,33 @@ fn configured_wheel_mode_leaves_unset_resolution_unmanaged() {
     });
 
     assert_eq!(configured_wheel_mode(&config, &device), (None, None));
+}
+
+#[test]
+fn configured_onboard_profiles_requires_capability_and_explicit_config() {
+    let mut config = Config::default();
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        onboard_profiles: true,
+        ..Capabilities::default()
+    });
+
+    assert_eq!(configured_onboard_profiles(&config, &device), None);
+
+    config.set_onboard_profiles("a", Some(OnboardProfiles::Host {}));
+    assert_eq!(
+        configured_onboard_profiles(&config, &device),
+        Some((ProfilesMode::Host, None))
+    );
+
+    config.set_onboard_profiles("a", Some(OnboardProfiles::Onboard { profile: Some(2) }));
+    assert_eq!(
+        configured_onboard_profiles(&config, &device),
+        Some((ProfilesMode::Onboard, Some(2)))
+    );
+
+    device.capabilities = Some(Capabilities::default());
+    assert_eq!(configured_onboard_profiles(&config, &device), None);
 }
 
 #[test]

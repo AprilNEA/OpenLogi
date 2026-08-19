@@ -58,8 +58,8 @@ pub use litra::{
     litra_model_for_route, matches_litra,
 };
 pub use onboard_profiles::{
-    apply_profiles_config, apply_profiles_config_on, get_onboard_profiles, set_active_profile,
-    set_profiles_mode,
+    apply_profiles_config, apply_profiles_config_on, get_onboard_profiles, get_onboard_profiles_on,
+    set_active_profile, set_profiles_mode,
 };
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,

@@ -17,8 +17,8 @@ use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, LightCommand, OnboardProfilesInfo, PairingError, PasskeyMethod,
+    ProfilesMode, ReceiverSelector, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -59,7 +59,9 @@ pub use succession::Identity;
 /// v27: `AgentSnapshot::foreground` appended — the frontmost application the
 ///      agent matches per-app profiles against, plus the ones it saw recently.
 /// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
-pub const PROTOCOL_VERSION: u32 = 28;
+/// v29: onboard-profile DTOs and capability/error/operation variants added;
+///      `set_onboard_profiles` and `read_onboard_profiles` appended.
+pub const PROTOCOL_VERSION: u32 = 29;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -533,4 +535,14 @@ pub trait Agent {
     /// then return it. Same contract as [`Agent::observe`] — whole state, hold
     /// window, `0` for "seen nothing" — over the ring's own cell.
     async fn observe_action_ring(since: Generation) -> RingObservation;
+    /// Apply an onboard-profile mode to `route` now, optionally selecting a
+    /// user-profile sector when entering onboard mode.
+    async fn set_onboard_profiles(
+        route: DeviceRoute,
+        mode: ProfilesMode,
+        profile: Option<u16>,
+    ) -> Result<(), WriteError>;
+    /// Read the onboard-profile memory description, current state, and
+    /// complete user + factory directory from `route`.
+    async fn read_onboard_profiles(route: DeviceRoute) -> Result<OnboardProfilesInfo, WriteError>;
 }
