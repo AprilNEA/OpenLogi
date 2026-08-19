@@ -397,6 +397,7 @@ fn device_inventory() {
                 thumbwheel: true,
                 haptic_feedback: true,
                 haptic_panel: true,
+                onboard_profiles: true,
             }),
         }],
     }];

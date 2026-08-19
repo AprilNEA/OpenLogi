@@ -12,7 +12,9 @@
 use std::sync::Arc;
 
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_core::hid::{LightCommand, PairingError, WriteError};
+use openlogi_core::hid::{
+    LightCommand, OnboardProfilesInfo, PairingError, ProfilesMode, WriteError,
+};
 
 use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
@@ -51,6 +53,35 @@ pub async fn get_dpi_info(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
 /// Write a new sensor DPI to the device `route` reaches.
 pub async fn set_dpi(route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
     device::set_dpi(&*native_backend(), route, dpi).await
+}
+
+/// Read the onboard-profile state of the device `route` reaches.
+pub async fn get_onboard_profiles(
+    route: &DeviceRoute,
+) -> Result<OnboardProfilesInfo, WriteError> {
+    device::get_onboard_profiles(&*native_backend(), route).await
+}
+
+/// Set the onboard-profile mode of the device `route` reaches.
+pub async fn set_profiles_mode(
+    route: &DeviceRoute,
+    mode: ProfilesMode,
+) -> Result<ProfilesMode, WriteError> {
+    device::set_profiles_mode(&*native_backend(), route, mode).await
+}
+
+/// Select an onboard profile on the device `route` reaches.
+pub async fn set_active_profile(route: &DeviceRoute, sector: u16) -> Result<u16, WriteError> {
+    device::set_active_profile(&*native_backend(), route, sector).await
+}
+
+/// Apply saved onboard-profile settings to the device `route` reaches.
+pub async fn apply_profiles_config(
+    route: &DeviceRoute,
+    mode: ProfilesMode,
+    profile: Option<u16>,
+) -> Result<bool, WriteError> {
+    device::apply_profiles_config(&*native_backend(), route, mode, profile).await
 }
 
 /// Read the SmartShift mode, threshold and torque of the device `route` reaches.
