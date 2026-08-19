@@ -1,6 +1,6 @@
 //! Settings-app localization.
 //!
-//! Translations live in `crates/openlogi-gui/locales/*.yml` and are loaded at
+//! Translations live in `crates/openlogi-desktop/locales/*.yml` and are loaded at
 //! compile time by the `rust_i18n::i18n!` macro in `main.rs` (fallback `"en"`).
 //! **`en.yml` is the English source of truth** (the English text IS the key).
 //! New or changed copy must land in **every** `locales/*.yml` in the same

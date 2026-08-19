@@ -38,7 +38,7 @@ Logitech 계정도, 텔레메트리도, 공식 Options+ 설치도 없이 버튼�
 
 OpenLogi는 Logi Bolt 및 Unifying 수신기, Bluetooth 직접 연결 또는 USB 케이블을 통해 Logitech HID++ 주변기기와 통신하며, Logi Options+를 실행할 필요가 없습니다. 세 가지 구성 요소로 이루어집니다:
 
-- **[OpenLogi GUI](../crates/openlogi-gui)** — GPUI 데스크톱 앱: 클릭 가능한 핫스팟이 있는 인터랙티브 마우스 다이어그램, 버튼별 액션 선택기(내장 액션 + TOML 설정에서 작성하는 사용자 지정 단축키), DPI 프리셋, SmartShift, 기기별 스크롤 반전, RGB 키보드 조명, 앱별 프로필, 실시간 기기 캐러셀, 20개 언어로 현지화된 설정 창.
+- **[OpenLogi GUI](../crates/openlogi-desktop)** — GPUI 데스크톱 앱: 클릭 가능한 핫스팟이 있는 인터랙티브 마우스 다이어그램, 버튼별 액션 선택기(내장 액션 + TOML 설정에서 작성하는 사용자 지정 단축키), DPI 프리셋, SmartShift, 기기별 스크롤 반전, RGB 키보드 조명, 앱별 프로필, 실시간 기기 캐러셀, 20개 언어로 현지화된 설정 창.
 - **[OpenLogi agent](../crates/openlogi-agent)** — 입력 훅과 모든 기기 I/O를 소유하는 백그라운드 서비스. GUI는 순수 IPC 클라이언트이며 필요할 때 agent를 시작합니다.
 - **[OpenLogi CLI](../crates/openlogi-cli)** — 헤드리스 기기 목록(`list`), 에셋 동기화, 기기 진단 하위 명령을 갖춘 CLI.
 

@@ -13,7 +13,7 @@ members = [
     "crates/openlogi-ipc",
     "crates/openlogi-agent-core",
     "crates/openlogi-agent",
-    "crates/openlogi-gui",
+    "crates/openlogi-desktop",
     "crates/openlogi-ui",
     "crates/openlogi-overlay",
     "crates/openlogi-hook",

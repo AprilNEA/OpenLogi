@@ -100,7 +100,7 @@ in
       exec = ''
         set -e
         ${requireXcodeMetal}
-        cargo run -p openlogi-gui
+        cargo run -p openlogi-desktop
       '';
     };
     "openlogi:check" = {
@@ -133,13 +133,13 @@ in
         ${pkgs.python3}/bin/python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
         before="$(mktemp -d)"
         trap 'rm -rf "$before"' EXIT
-        cp crates/openlogi-gui/locales/*.yml "$before/"
+        cp crates/openlogi-desktop/locales/*.yml "$before/"
         ${pkgs.crowdin-cli}/bin/crowdin download --skip-untranslated-strings
         ${pkgs.python3}/bin/python3 .github/scripts/i18n/merge_crowdin_download.py \
           --before "$before" \
-          --locales crates/openlogi-gui/locales \
-          --en crates/openlogi-gui/locales/en.yml
-        cargo test -p openlogi-gui i18n
+          --locales crates/openlogi-desktop/locales \
+          --en crates/openlogi-desktop/locales/en.yml
+        cargo test -p openlogi-desktop i18n
       '';
     };
     "openlogi:check-windows" = {

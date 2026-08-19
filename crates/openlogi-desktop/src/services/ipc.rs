@@ -410,7 +410,7 @@ fn agent_binary_path() -> Option<PathBuf> {
     if sibling.exists() {
         return Some(sibling);
     }
-    // Packaged: …/OpenLogi.app/Contents/MacOS/openlogi-gui → the helper at
+    // Packaged: …/OpenLogi.app/Contents/MacOS/openlogi-desktop → the helper at
     // …/OpenLogi.app/Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent
     // Dev uses a spaced bundle path so macOS privacy panes never fall back to
     // displaying the old path-derived `OpenLogiAgent` name when metadata is stale.

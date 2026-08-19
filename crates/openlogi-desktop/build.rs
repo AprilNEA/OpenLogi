@@ -1,4 +1,4 @@
-//! Build script for openlogi-gui.
+//! Build script for openlogi-desktop.
 //!
 //! Besides the existing update-manifest env hook, this embeds the upstream
 //! gpui-component themes *without* vendoring copies into this repo. Those theme
@@ -130,7 +130,7 @@ BEGIN
             VALUE "CompanyName", "AprilNEA"
             VALUE "FileDescription", "OpenLogi"
             VALUE "FileVersion", "{version}"
-            VALUE "InternalName", "openlogi-gui"
+            VALUE "InternalName", "openlogi-desktop"
             VALUE "OriginalFilename", "OpenLogi.exe"
             VALUE "ProductName", "OpenLogi"
             VALUE "ProductVersion", "{version}"
@@ -144,7 +144,7 @@ END
 "#
     );
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
-    let rc_path = out.join("openlogi-gui.rc");
+    let rc_path = out.join("openlogi-desktop.rc");
     fs::write(&rc_path, rc).expect("write generated .rc into OUT_DIR");
     // manifest_optional: a missing resource compiler downgrades to a cargo
     // warning (icon-less but working exe) instead of failing dev builds on

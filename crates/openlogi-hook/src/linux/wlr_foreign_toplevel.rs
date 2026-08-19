@@ -23,7 +23,7 @@
 //! ## Dispatch model
 //!
 //! The protocol is event-driven, but the [`super::FrontmostSource`] contract is
-//! a synchronous poll (~1 Hz from `openlogi-gui::app_watcher`). Two primitives
+//! a synchronous poll (~1 Hz from `openlogi-desktop::app_watcher`). Two primitives
 //! bridge that gap:
 //!
 //! - **`drain_events`** (poll path) — flushes pending writes, then attempts a

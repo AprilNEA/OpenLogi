@@ -26,8 +26,8 @@ contents:
     file_info:
       mode: 0755
 
-  - src: target/release/openlogi-gui
-    dst: /usr/bin/openlogi-gui
+  - src: target/release/openlogi-desktop
+    dst: /usr/bin/openlogi-desktop
     file_info:
       mode: 0755
 

@@ -14,7 +14,7 @@ linker = "/usr/bin/cc"
 # `OpenLogi.app` so macOS shows the real app name + Dock icon during
 # development (both are read from a bundle's Info.plist / Resources, which a
 # bare `cargo run` binary lacks). The runner is a transparent passthrough for
-# the CLI, tests, and every other binary — only `openlogi-gui` is wrapped.
+# the CLI, tests, and every other binary — only `openlogi-desktop` is wrapped.
 # A path with a separator is resolved relative to the parent of the directory
 # holding this config file — the repo root — so it works from any cwd.
 runner = ".cargo/run-macos.sh"

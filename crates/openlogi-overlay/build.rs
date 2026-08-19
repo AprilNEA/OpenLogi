@@ -3,7 +3,7 @@
 //! the ring helper instead of showing a generic blank binary.
 //!
 //! Kept in sync with its twins in `crates/openlogi-agent/build.rs` and
-//! `crates/openlogi-gui/build.rs` — only the description/filename strings
+//! `crates/openlogi-desktop/build.rs` — only the description/filename strings
 //! differ. `embed-resource` is pinned to the exact version already in
 //! Cargo.lock as gpui's own build-dependency, so it adds an edge, not a crate,
 //! and cannot move the pinned gpui rev.

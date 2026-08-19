@@ -8,7 +8,7 @@ repository.workspace = true
 authors.workspace = true
 description = "The tarpc contract and local-socket transport shared by the OpenLogi agent and GUI."
 # A leaf crate for the agent<->GUI IPC boundary: `openlogi-agent-core` and
-# `openlogi-gui` both depend on it, but nothing published depends on it, so
+# `openlogi-desktop` both depend on it, but nothing published depends on it, so
 # it is not published to crates.io — see release-plz.toml.
 publish = false
 

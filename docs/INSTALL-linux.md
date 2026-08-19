@@ -66,7 +66,7 @@ from source instead, use the stable Rust toolchain:
 ```sh
 git clone https://github.com/AprilNEA/OpenLogi
 cd OpenLogi
-cargo build --release -p openlogi -p openlogi-gui -p openlogi-agent
+cargo build --release -p openlogi -p openlogi-desktop -p openlogi-agent
 ```
 
 Four production executables land in `target/release/`:
@@ -74,7 +74,7 @@ Four production executables land in `target/release/`:
 | Binary | Role |
 |---|---|
 | `openlogi` | CLI — inventory, diagnostics, asset sync |
-| `openlogi-gui` | Desktop GUI |
+| `openlogi-desktop` | Desktop GUI |
 | `openlogi-overlay` | Actions Ring overlay helper |
 | `openlogi-agent` | Background agent — HID++ loop, input hook |
 
@@ -173,7 +173,7 @@ automatically.
 openlogi list
 
 # Launch the GUI:
-openlogi-gui
+openlogi-desktop
 ```
 
 ## Known limitations

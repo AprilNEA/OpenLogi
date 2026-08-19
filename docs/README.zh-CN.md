@@ -38,7 +38,7 @@
 
 OpenLogi 通过 Logi Bolt 和 Unifying 接收器、蓝牙直连或 USB 线缆与 Logitech HID++ 外设通信，完全不需要运行 Logi Options+。它由三个组件组成：
 
-- **[OpenLogi GUI](../crates/openlogi-gui)** —— 基于 GPUI 的桌面应用：可点击热区的交互式鼠标示意图、逐按键动作选择器（内置动作 + 在 TOML 配置中编写的自定义快捷键）、DPI 预设、SmartShift、按设备原生滚动反转、RGB 键盘灯光、按应用的配置叠加层、实时设备轮播，以及界面已本地化为 20 种语言的设置窗口。
+- **[OpenLogi GUI](../crates/openlogi-desktop)** —— 基于 GPUI 的桌面应用：可点击热区的交互式鼠标示意图、逐按键动作选择器（内置动作 + 在 TOML 配置中编写的自定义快捷键）、DPI 预设、SmartShift、按设备原生滚动反转、RGB 键盘灯光、按应用的配置叠加层、实时设备轮播，以及界面已本地化为 20 种语言的设置窗口。
 - **[OpenLogi agent](../crates/openlogi-agent)** —— 拥有输入钩子和全部设备 I/O 的后台服务。GUI 是纯 IPC 客户端，并在需要时启动 agent。
 - **[OpenLogi CLI](../crates/openlogi-cli)** —— 命令行工具：无界面设备清单（`list`）、资产同步与设备诊断子命令。
 

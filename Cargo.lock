@@ -5239,7 +5239,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openlogi-gui"
+name = "openlogi-desktop"
 version = "0.7.1"
 dependencies = [
  "anyhow",

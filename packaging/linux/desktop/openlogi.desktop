@@ -2,7 +2,7 @@
 Type=Application
 Name=OpenLogi
 Comment=Logitech HID++ device control — remap buttons, DPI, SmartShift
-Exec=openlogi-gui
+Exec=openlogi-desktop
 Icon=openlogi
 Terminal=false
 # Ties the running window (Wayland xdg-toplevel app_id / X11 WM_CLASS) back to

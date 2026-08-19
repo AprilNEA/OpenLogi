@@ -120,7 +120,7 @@ jobs:
 
   # openlogi-core / openlogi-hid / openlogi-assets / openlogi / openlogi-hook
   # all compile on Linux today (the hook crate has stubs for non-macOS targets).
-  # openlogi-gui needs GPUI's wayland / x11 system libs; the same dependency set
+  # openlogi-desktop needs GPUI's wayland / x11 system libs; the same dependency set
   # the clippy job installs is sufficient. Test workspace there as well so the
   # config-roundtrip and binding suites run on a non-macOS host.
   test-linux:
@@ -141,7 +141,7 @@ jobs:
             gcc g++ clang libfontconfig-dev libwayland-dev \
             libxkbcommon-x11-dev libx11-xcb-dev \
             libssl-dev libzstd-dev pkg-config
-      - run: cargo test --workspace --exclude openlogi-gui
+      - run: cargo test --workspace --exclude openlogi-desktop
 
   test-macos:
     name: tests (macos, ${{ matrix.arch }})

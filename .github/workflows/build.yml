@@ -425,7 +425,7 @@ jobs:
       # #167) owns the device I/O, input hook, and IPC server, and the GUI
       # spawns a sibling `openlogi-agent.exe` when the pipe is absent — so the
       # agent MUST ship next to the GUI or the app connects to nothing (#347).
-      # The updater env mirrors the macOS bundle step: openlogi-gui reads the
+      # The updater env mirrors the macOS bundle step: openlogi-desktop reads the
       # key and manifest URL via option_env! at compile time. Unsigned builds
       # get empty values and keep the fail-closed dev behaviour, so the
       # manifest-URL export is guarded rather than derived from an empty base.
@@ -439,7 +439,7 @@ jobs:
           if [ -n "$OPENLOGI_UPDATE_BASE_URL" ]; then
             export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
           fi
-          cargo build --release -p openlogi-gui -p openlogi-overlay -p openlogi-agent --target ${{ matrix.target }}
+          cargo build --release -p openlogi-desktop -p openlogi-overlay -p openlogi-agent --target ${{ matrix.target }}
 
       # Federated (passwordless) login. Requires an app registration whose federated
       # credential subject is `repo:AprilNEA/OpenLogi:environment:release`, granted the
@@ -477,7 +477,7 @@ jobs:
           certificate-profile-name: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
           # `files` is a newline-separated list; one call signs both PE files.
           files: |
-            ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-gui.exe
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-desktop.exe
             ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-overlay.exe
             ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-agent.exe
           # Timestamping is mandatory: without it the signature expires after
@@ -500,7 +500,7 @@ jobs:
           # HashMismatch (bytes no longer match the signature) are trust-store
           # independent and always ship-blockers; NotTrusted/UnknownError depend
           # on the runner's trust store, so they stay log-only.
-          foreach ($exe in 'openlogi-gui.exe', 'openlogi-overlay.exe', 'openlogi-agent.exe') {
+          foreach ($exe in 'openlogi-desktop.exe', 'openlogi-overlay.exe', 'openlogi-agent.exe') {
             $sig = Get-AuthenticodeSignature "target\${{ matrix.target }}\release\$exe"
             $sig | Format-List
             if ($null -eq $sig.SignerCertificate -or
@@ -518,7 +518,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist, stage | Out-Null
-          Copy-Item target\${{ matrix.target }}\release\openlogi-gui.exe stage\OpenLogi.exe
+          Copy-Item target\${{ matrix.target }}\release\openlogi-desktop.exe stage\OpenLogi.exe
           Copy-Item target\${{ matrix.target }}\release\openlogi-overlay.exe stage\openlogi-overlay.exe
           Copy-Item target\${{ matrix.target }}\release\openlogi-agent.exe stage\openlogi-agent.exe
           # Zipping after signing is safe: Authenticode lives in the PE files.
@@ -767,7 +767,7 @@ jobs:
           NFPM_SHA256: ${{ matrix.nfpm_sha256 }}
         run: |
           sudo apt-get update
-          # The Linux packaging task builds openlogi-gui, which links GPUI's full
+          # The Linux packaging task builds openlogi-desktop, which links GPUI's full
           # wayland / x11 stack — keep this in sync with ci.yml's Linux deps
           # (the proven set). The previous short list was missing
           # libxkbcommon-x11-dev / libwayland-dev / libx11-xcb-dev, so every

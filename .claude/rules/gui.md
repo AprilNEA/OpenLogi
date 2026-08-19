@@ -1,6 +1,6 @@
 ---
 paths:
-  - "crates/openlogi-gui/**"
+  - "crates/openlogi-desktop/**"
   - "crates/openlogi-ui/**"
   - "crates/openlogi-overlay/**"
 ---
@@ -8,10 +8,10 @@ paths:
 # GUI (GPUI + gpui-component)
 
 - The UI stack is GPUI + gpui-component — a settled choice; don't propose alternatives.
-- **Three crates, not one.** `openlogi-gui` is the settings app; `openlogi-overlay` is
+- **Three crates, not one.** `openlogi-desktop` is the settings app; `openlogi-overlay` is
   the Actions Ring helper, a separate process and a pure IPC client; `openlogi-ui` is
   what they share — ring geometry/icons, the GPUI asset source, locale negotiation.
-  The overlay must never depend on `openlogi-gui`. Before putting anything in
+  The overlay must never depend on `openlogi-desktop`. Before putting anything in
   `openlogi-ui`, check both binaries actually need it: every dependency added there is
   also added to the overlay, which is why `gpui-component` is *not* one of them.
 - The overlay translates against the settings app's `locales/` via a relative path in
@@ -39,6 +39,6 @@ paths:
   new capability in `Capabilities::from_feature_ids` plus a `tabs_for` arm.
 - Mouse-diagram hotspots come from Logi metadata; if the metadata omits a button
   marker, omit the button — never synthesize hotspot positions.
-- Verifying UI changes needs the running app: re-`cargo run -p openlogi-gui` (a plain
+- Verifying UI changes needs the running app: re-`cargo run -p openlogi-desktop` (a plain
   `cargo build` leaves the dev bundle stale) after quitting the previous instance
   (singleton lock). The GUI shows only the empty state unless the agent is running.

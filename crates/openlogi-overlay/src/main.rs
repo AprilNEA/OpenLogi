@@ -13,7 +13,7 @@
 // is configured against; the path is relative to this crate's manifest. Moving
 // those files is a Crowdin-coordinated change, not a refactor — until then this
 // is the one place the two crates touch outside Cargo.
-rust_i18n::i18n!("../openlogi-gui/locales", fallback = "en");
+rust_i18n::i18n!("../openlogi-desktop/locales", fallback = "en");
 
 mod platform;
 

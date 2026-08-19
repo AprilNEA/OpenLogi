@@ -75,7 +75,7 @@ jobs:
           : "${AZURE_CERT_PROFILE:?Configure AZURE_CERT_PROFILE in the Azure 1Password item}"
 
       - name: Build OpenLogi (GUI + agent)
-        run: cargo build --release -p openlogi-gui -p openlogi-agent --target ${{ matrix.target }}
+        run: cargo build --release -p openlogi-desktop -p openlogi-agent --target ${{ matrix.target }}
 
       - name: Azure login (OIDC)
         uses: azure/login@v3
@@ -92,7 +92,7 @@ jobs:
           certificate-profile-name: ${{ steps.azure_config.outputs.AZURE_CERT_PROFILE }}
           # `files` is a newline-separated list; one call signs both PE files.
           files: |
-            ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-gui.exe
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-desktop.exe
             ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-overlay.exe
             ${{ github.workspace }}\target\${{ matrix.target }}\release\openlogi-agent.exe
           # Must stay http — SignTool rejects an https /tr ("Invalid Timestamp
@@ -106,7 +106,7 @@ jobs:
           # NotSigned and HashMismatch are trust-store independent and always
           # ship-blockers; NotTrusted/UnknownError depend on the runner's
           # trust store, so they stay log-only.
-          foreach ($exe in 'openlogi-gui.exe', 'openlogi-overlay.exe', 'openlogi-agent.exe') {
+          foreach ($exe in 'openlogi-desktop.exe', 'openlogi-overlay.exe', 'openlogi-agent.exe') {
             $sig = Get-AuthenticodeSignature "target\${{ matrix.target }}\release\$exe"
             $sig | Format-List
             if ($null -eq $sig.SignerCertificate -or

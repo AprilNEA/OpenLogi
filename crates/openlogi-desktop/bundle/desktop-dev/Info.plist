@@ -4,7 +4,7 @@
 <dict>
   <key>CFBundleName</key><string>OpenLogi Dev</string>
   <key>CFBundleDisplayName</key><string>OpenLogi Dev</string>
-  <key>CFBundleExecutable</key><string>openlogi-gui</string>
+  <key>CFBundleExecutable</key><string>openlogi-desktop</string>
   <key>CFBundleIdentifier</key><string>org.openlogi.openlogi.dev</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>

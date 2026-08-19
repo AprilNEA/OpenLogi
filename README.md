@@ -40,7 +40,7 @@ OpenLogi talks to Logitech HID++ peripherals over Logi Bolt and Unifying
 receivers, Bluetooth-direct connections, or USB cables — without running Logi
 Options+. It consists of three components:
 
-- **[OpenLogi GUI](crates/openlogi-gui)** — a GPUI desktop app: an interactive mouse diagram with clickable hotspots, a per-button action picker (built-in actions plus custom keyboard shortcuts authored in the TOML config), DPI presets, SmartShift, per-device scroll inversion, RGB keyboard lighting, per-application profiles, a live device carousel, and a Settings window localized into 20 languages.
+- **[OpenLogi GUI](crates/openlogi-desktop)** — a GPUI desktop app: an interactive mouse diagram with clickable hotspots, a per-button action picker (built-in actions plus custom keyboard shortcuts authored in the TOML config), DPI presets, SmartShift, per-device scroll inversion, RGB keyboard lighting, per-application profiles, a live device carousel, and a Settings window localized into 20 languages.
 - **[OpenLogi agent](crates/openlogi-agent)** — the background service that owns the input hook and all device I/O. The GUI is a pure IPC client and starts the agent when needed.
 - **[OpenLogi CLI](crates/openlogi-cli)** — a CLI for headless inventory (`list`) plus asset-sync and on-device diagnostic subcommands.
 

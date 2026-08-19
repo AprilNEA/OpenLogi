@@ -11,7 +11,7 @@ devenv shell -- cargo run -p xtask -- <command>
 
 ## Commands
 
-- `macos icns` — generate `crates/openlogi-gui/icon/AppIcon.icns` from the master PNG.
+- `macos icns` — generate `crates/openlogi-desktop/icon/AppIcon.icns` from the master PNG.
 - `macos bundle [--channel dev|production]` — build `OpenLogi.app` and embed the
   agent and overlay helpers.
 - `macos dmg` — package an existing app bundle into the branded DMG.

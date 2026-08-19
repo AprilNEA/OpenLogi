@@ -38,7 +38,7 @@ Logitech アカウントもテレメトリも公式 Options+ のインストー�
 
 OpenLogi は Logi Bolt および Unifying レシーバー、Bluetooth 直結、USB ケーブル経由で Logitech の HID++ 周辺機器と通信します。Logi Options+ を動かす必要はありません。3 つのコンポーネントで構成されます：
 
-- **[OpenLogi GUI](../crates/openlogi-gui)** —— GPUI 製デスクトップアプリ：クリック可能なホットスポット付きのインタラクティブなマウス図、ボタンごとのアクションピッカー（組み込みアクション + TOML 設定で作成するカスタムショートカット）、DPI プリセット、SmartShift、デバイスごとのスクロール反転、RGB キーボード照明、アプリごとのプロファイル、ライブデバイスカルーセル、20 言語にローカライズされた設定ウィンドウ。
+- **[OpenLogi GUI](../crates/openlogi-desktop)** —— GPUI 製デスクトップアプリ：クリック可能なホットスポット付きのインタラクティブなマウス図、ボタンごとのアクションピッカー（組み込みアクション + TOML 設定で作成するカスタムショートカット）、DPI プリセット、SmartShift、デバイスごとのスクロール反転、RGB キーボード照明、アプリごとのプロファイル、ライブデバイスカルーセル、20 言語にローカライズされた設定ウィンドウ。
 - **[OpenLogi agent](../crates/openlogi-agent)** —— 入力フックとすべてのデバイス I/O を所有するバックグラウンドサービス。GUI は純粋な IPC クライアントで、必要時に agent を起動します。
 - **[OpenLogi CLI](../crates/openlogi-cli)** —— ヘッドレスなデバイス一覧（`list`）、アセット同期、デバイス診断のサブコマンドを備えた CLI。
 

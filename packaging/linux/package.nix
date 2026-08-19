@@ -157,8 +157,8 @@ rustPlatform.buildRustPackage {
     "--bin=openlogi"
     "--package=openlogi-agent"
     "--bin=openlogi-agent"
-    "--package=openlogi-gui"
-    "--bin=openlogi-gui"
+    "--package=openlogi-desktop"
+    "--bin=openlogi-desktop"
     "--package=openlogi-overlay"
     "--bin=openlogi-overlay"
   ];
@@ -167,14 +167,14 @@ rustPlatform.buildRustPackage {
   # exercised on macOS because GPUI's Linux test harness is not headless.
   cargoTestFlags = [
     "--workspace"
-    "--exclude=openlogi-gui"
+    "--exclude=openlogi-desktop"
   ];
 
   installPhase = ''
     runHook preInstall
 
     releaseDir=target/${stdenv.hostPlatform.rust.rustcTarget}/release
-    for binary in openlogi openlogi-agent openlogi-gui openlogi-overlay; do
+    for binary in openlogi openlogi-agent openlogi-desktop openlogi-overlay; do
       install -Dm755 "$releaseDir/$binary" "$out/bin/$binary"
     done
 
@@ -198,13 +198,13 @@ rustPlatform.buildRustPackage {
   '';
 
   postFixup = ''
-    patchelf --add-rpath "${runtimeLibs}" "$out/bin/openlogi-gui"
+    patchelf --add-rpath "${runtimeLibs}" "$out/bin/openlogi-desktop"
   '';
 
   doInstallCheck = true;
   nativeInstallCheckInputs = [ versionCheckHook ];
   preInstallCheck = ''
-    for binary in openlogi openlogi-agent openlogi-gui openlogi-overlay; do
+    for binary in openlogi openlogi-agent openlogi-desktop openlogi-overlay; do
       test -x "$out/bin/$binary"
     done
     test ! -e "$out/bin/openlogi-agent-mock"

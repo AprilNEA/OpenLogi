@@ -36,7 +36,7 @@ tracing-subscriber = { workspace = true }
 embed-resource = "3.0.9"
 
 # Native window policy for the ring panel — see src/platform.rs, and
-# crates/openlogi-gui/src/platform/AGENTS.md for the rules this code follows.
+# crates/openlogi-desktop/src/platform/AGENTS.md for the rules this code follows.
 [target.'cfg(target_os = "macos")'.dependencies]
 # CGGetActiveDisplayList/CGDisplayBounds: placing the ring on the cursor's
 # display needs global display bounds, which GPUI's display API doesn't expose

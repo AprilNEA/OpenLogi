@@ -2,7 +2,7 @@
 //! app icon and a VERSIONINFO block — so Task Manager and Explorer identify
 //! the background agent instead of showing a generic blank binary.
 //!
-//! Kept in sync with the twin in `crates/openlogi-gui/build.rs` — only the
+//! Kept in sync with the twin in `crates/openlogi-desktop/build.rs` — only the
 //! description/filename strings differ. `embed-resource` is pinned to the
 //! exact version already in Cargo.lock as gpui's own build-dependency, so it
 //! adds an edge, not a crate, and cannot move the pinned gpui rev.

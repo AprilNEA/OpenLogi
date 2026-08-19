@@ -10,7 +10,7 @@
 //! registration yet — so just "Show Main Window" (also the left-click action)
 //! and "Quit OpenLogi". Show focuses the running GUI if there is one (a
 //! second launch would exit on the `openlogi.lock` singleton) or spawns the
-//! sibling `OpenLogi.exe` / `openlogi-gui.exe`. Quit terminates the GUI
+//! sibling `OpenLogi.exe` / `openlogi-desktop.exe`. Quit terminates the GUI
 //! first — a surviving GUI's IPC retry loop would immediately respawn the
 //! agent we are quitting — then exits.
 //!
@@ -290,7 +290,7 @@ fn open_or_focus_gui() {
 }
 
 /// PIDs of this user's running GUI processes: `OpenLogi.exe` (installed /
-/// portable layout) or `openlogi-gui.exe` (cargo target dir).
+/// portable layout) or `openlogi-desktop.exe` (cargo target dir).
 ///
 /// Matching by *name* rather than by install directory is deliberate: the
 /// GUI is a per-user singleton (`openlogi.lock` lives under the profile), so
@@ -325,7 +325,7 @@ fn gui_pids() -> Vec<u32> {
 /// which `eq_ignore_ascii_case` would accept, and the dev target dir holds
 /// both. Windows reports image names with their on-disk case, so this holds.
 fn is_gui_process_name(name: &str) -> bool {
-    name == "OpenLogi.exe" || name.eq_ignore_ascii_case("openlogi-gui.exe")
+    name == "OpenLogi.exe" || name.eq_ignore_ascii_case("openlogi-desktop.exe")
 }
 
 /// Bring the first visible top-level window owned by one of `pids` to the
@@ -373,12 +373,12 @@ fn spawn_gui() {
     };
     let Some(dir) = exe.parent() else { return };
     // Dev target dir first: it holds both `openlogi.exe` (CLI) and
-    // `openlogi-gui.exe`, and the CLI shares `OpenLogi.exe`'s name on the
+    // `openlogi-desktop.exe`, and the CLI shares `OpenLogi.exe`'s name on the
     // case-insensitive filesystem — so `dir.join("OpenLogi.exe").exists()`
     // there resolves to the CLI and would launch it. Probing the unambiguous
-    // `openlogi-gui.exe` first avoids that; the installed layout has only
+    // `openlogi-desktop.exe` first avoids that; the installed layout has only
     // `OpenLogi.exe` and falls through to it.
-    let gui = ["openlogi-gui.exe", "OpenLogi.exe"]
+    let gui = ["openlogi-desktop.exe", "OpenLogi.exe"]
         .iter()
         .map(|name| dir.join(name))
         .find(|p| p.exists());
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn the_cli_binary_is_not_the_gui() {
         assert!(is_gui_process_name("OpenLogi.exe"));
-        assert!(is_gui_process_name("openlogi-gui.exe"));
+        assert!(is_gui_process_name("openlogi-desktop.exe"));
         assert!(!is_gui_process_name("openlogi.exe")); // the CLI
     }
 }

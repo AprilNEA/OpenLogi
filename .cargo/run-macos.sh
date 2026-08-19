@@ -6,10 +6,10 @@
 # `cargo run` / `cargo test` / `cargo bench` on macOS. For everything except
 # the desktop binary it's a transparent passthrough (`exec "$@"`).
 #
-# For `openlogi-gui` it launches the build from inside a throwaway
+# For `openlogi-desktop` it launches the build from inside a throwaway
 # `OpenLogi.app` so macOS shows the dev app name (the bold menu-bar title)
 # and the Dock icon during development. Both are read from the bundle's
-# `Info.plist` / `Resources` — a bare `target/debug/openlogi-gui` has neither,
+# `Info.plist` / `Resources` — a bare `target/debug/openlogi-desktop` has neither,
 # so macOS falls back to the executable name and a generic icon.
 #
 # The dev bundles are codesigned after assembly so LaunchServices/TCC see a
@@ -39,7 +39,7 @@ fi
 bin="$1"
 shift
 
-if [ "${bin##*/}" != "openlogi-gui" ] || [ "${OPENLOGI_DEV_BUNDLE:-1}" = "0" ]; then
+if [ "${bin##*/}" != "openlogi-desktop" ] || [ "${OPENLOGI_DEV_BUNDLE:-1}" = "0" ]; then
   exec "$bin" "$@"
 fi
 
@@ -47,10 +47,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP="$ROOT/target/dev/OpenLogi.app"
 MACOS="$APP/Contents/MacOS"
 RES="$APP/Contents/Resources"
-ICON_SRC="$ROOT/crates/openlogi-gui/icon/AppIcon.icns"
-PLIST_SRC="$ROOT/crates/openlogi-gui/bundle/gui-dev/Info.plist"
-AGENT_PLIST_SRC="$ROOT/crates/openlogi-gui/bundle/agent-dev/Info.plist"
-OVERLAY_PLIST_SRC="$ROOT/crates/openlogi-gui/bundle/overlay-dev/Info.plist"
+ICON_SRC="$ROOT/crates/openlogi-desktop/icon/AppIcon.icns"
+PLIST_SRC="$ROOT/crates/openlogi-desktop/bundle/desktop-dev/Info.plist"
+AGENT_PLIST_SRC="$ROOT/crates/openlogi-desktop/bundle/agent-dev/Info.plist"
+OVERLAY_PLIST_SRC="$ROOT/crates/openlogi-desktop/bundle/overlay-dev/Info.plist"
 CODESIGN_ENABLED="${OPENLOGI_DEV_CODESIGN:-1}"
 
 check_external_agent() {
@@ -126,9 +126,9 @@ fi
 # atomically on rebuild (new inode), so relink every run; `ln -f` repoints a
 # stale link. Fall back to a copy if the bundle ever lands on another volume.
 if [ "$CODESIGN_ENABLED" != "0" ]; then
-  cp -f "$bin" "$MACOS/openlogi-gui"
+  cp -f "$bin" "$MACOS/openlogi-desktop"
 else
-  ln -f "$bin" "$MACOS/openlogi-gui" 2>/dev/null || cp -f "$bin" "$MACOS/openlogi-gui"
+  ln -f "$bin" "$MACOS/openlogi-desktop" 2>/dev/null || cp -f "$bin" "$MACOS/openlogi-desktop"
 fi
 
 # Register the dev .app with LaunchServices so the `openlogi://` URL scheme
@@ -156,7 +156,7 @@ fi
 # Embed the headless agent so the GUI can auto-spawn it in dev. The GUI's IPC
 # client (ipc_client::agent_binary_path) looks for the agent as the embedded
 # login-item helper beside the GUI executable — exactly the production layout
-# xtask's embed_agent_helper assembles. `cargo run -p openlogi-gui` builds only
+# xtask's embed_agent_helper assembles. `cargo run -p openlogi-desktop` builds only
 # the GUI, so build the agent in the matching profile and mirror that layout
 # here. Cheap after the first build (an incremental no-op); set
 # OPENLOGI_DEV_AGENT=0 to run the GUI against a separately launched agent.
@@ -227,4 +227,4 @@ if [ -x "$LSREGISTER" ]; then
   fi
 fi
 
-exec "$MACOS/openlogi-gui" "$@"
+exec "$MACOS/openlogi-desktop" "$@"

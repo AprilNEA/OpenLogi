@@ -1,5 +1,5 @@
 [package]
-name = "openlogi-gui"
+name = "openlogi-desktop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,13 +7,13 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "GPUI-based desktop UI for OpenLogi."
-default-run = "openlogi-gui"
+default-run = "openlogi-desktop"
 # Not publishable to crates.io: depends on git-only gpui / gpui_platform
 # (gpui_platform is not on the registry). Distributed as a bundled .app.
 publish = false
 
 [[bin]]
-name = "openlogi-gui"
+name = "openlogi-desktop"
 path = "src/main.rs"
 
 [dependencies]

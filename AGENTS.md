@@ -30,18 +30,18 @@ sits beneath both.
 | `crates/openlogi-ipc` | The tarpc IPC contract (`src/ipc.rs`) + its local-socket transport, shared by agent and GUI |
 | `crates/openlogi-agent` | The `openlogi-agent` binary — hook + device I/O server |
 | `crates/openlogi-ui` | Presentation shared by the two GPUI processes: ring geometry/icons, the GPUI asset source, locale negotiation. Depends on `gpui` but **not** `gpui-component` |
-| `crates/openlogi-gui` | GPUI + gpui-component desktop app — polls the agent, no device I/O |
+| `crates/openlogi-desktop` | GPUI + gpui-component desktop app — polls the agent, no device I/O |
 | `crates/openlogi-overlay` | The `openlogi-overlay` binary — cursor-centred Actions Ring, a pure IPC client |
 | `xtask` | `cargo xtask` maintenance: bundling, packaging, release manifest |
 
 - GUI ↔ agent speak tarpc/bincode over an `interprocess` local socket. The wire format
   is versioned and **append-only** — read `.claude/rules/ipc-protocol.md` before touching it.
 - Three processes ship in the bundle — GUI, agent, overlay — and the overlay is a
-  *sibling* of the GUI, not a part of it: it links `openlogi-ui`, never `openlogi-gui`.
+  *sibling* of the GUI, not a part of it: it links `openlogi-ui`, never `openlogi-desktop`.
   Anything both need goes in `openlogi-ui`; adding a dependency there puts it in the
   overlay too, so keep the widget kit (`gpui-component`) on the app's side.
 - Platform code is cfg-gated per crate (`[target.'cfg(target_os = …)'.dependencies]`).
-  `crates/openlogi-gui/src/platform/AGENTS.md` is the contract for the workspace's ObjC
+  `crates/openlogi-desktop/src/platform/AGENTS.md` is the contract for the workspace's ObjC
   FFI and indexes every file that carries any — read it before editing one, including
   `crates/openlogi-overlay/src/platform.rs`, which lives outside that directory.
 
@@ -139,15 +139,15 @@ If the change touches anything that crosses the agent↔GUI boundary
 ### i18n
 
 New GUI strings: insert the same key in the **same position** in every
-`crates/openlogi-gui/locales/*.yml` (parity is required). Run
-`cargo test -p openlogi-gui i18n`.
+`crates/openlogi-desktop/locales/*.yml` (parity is required). Run
+`cargo test -p openlogi-desktop i18n`.
 
 ### App / agent runtime notes
 
 - The macOS GUI build needs full Xcode for GPUI's Metal shaders. devenv sets
   `DEVELOPER_DIR`/`SDKROOT` when present; without it, use system Xcode. If the
   shader compile fails under devenv, `direnv reload` first.
-- Dev-run the app with `cargo run -p openlogi-gui` — a cargo runner wraps it
+- Dev-run the app with `cargo run -p openlogi-desktop` — a cargo runner wraps it
   into `target/dev/OpenLogi.app`. `cargo build` does NOT refresh that bundle,
   and a second instance exits on the singleton lock: quit the old instance and
   re-`run` before judging a UI change "not applied".
@@ -292,12 +292,12 @@ including what was NOT verified.
 3. If cfg-gated files changed: cross-lint or hand-audit against master (see above).
 4. If wire types changed: `wire_format` tests green + `PROTOCOL_VERSION` bumped.
 5. If locales changed: every `locales/*.yml` must have the same keys as
-   `en.yml`; run `cargo test -p openlogi-gui i18n`.
+   `en.yml`; run `cargo test -p openlogi-desktop i18n`.
 6. Only then `git push` / force-push to the PR branch.
 
 ## i18n (all locale files, then Crowdin)
 
-- Add or change UI strings in **every** `crates/openlogi-gui/locales/*.yml` in
+- Add or change UI strings in **every** `crates/openlogi-desktop/locales/*.yml` in
   the same PR. `en.yml` is the English source of truth (the English text IS the
   key); other files must not lag — the parity test fails the build.
 - Crowdin improves non-English **values** over time. The sync job **merges**
@@ -313,11 +313,11 @@ before editing that area.
 
 | Area | Rule file |
 |---|---|
-| `crates/openlogi-gui/**`, `crates/openlogi-ui/**`, `crates/openlogi-overlay/**` (GPUI) | `.claude/rules/gui.md` |
-| `crates/openlogi-gui/locales/**`, `src/i18n.rs` | `.claude/rules/i18n.md` |
+| `crates/openlogi-desktop/**`, `crates/openlogi-ui/**`, `crates/openlogi-overlay/**` (GPUI) | `.claude/rules/gui.md` |
+| `crates/openlogi-desktop/locales/**`, `src/i18n.rs` | `.claude/rules/i18n.md` |
 | `crates/openlogi-agent-core/**`, `crates/openlogi-agent/**`, `crates/openlogi-ipc/**` (IPC wire) | `.claude/rules/ipc-protocol.md` |
 | `crates/openlogi-hidpp/**` (hard fork of `hidpp`) | `crates/openlogi-hidpp/AGENTS.md` |
 | `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |
 | `crates/openlogi-hook/**` (event taps) | `.claude/rules/hook.md` |
 | `xtask/**`, `packaging/**`, `.github/scripts/**` | `.claude/rules/xtask.md` (+ `xtask/README.md`) |
-| `crates/openlogi-gui/src/platform/**`, `crates/openlogi-overlay/src/platform.rs` (ObjC FFI) | `crates/openlogi-gui/src/platform/AGENTS.md` |
+| `crates/openlogi-desktop/src/platform/**`, `crates/openlogi-overlay/src/platform.rs` (ObjC FFI) | `crates/openlogi-desktop/src/platform/AGENTS.md` |

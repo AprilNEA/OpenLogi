@@ -7,7 +7,7 @@
 //!
 //! ```sh
 //! cargo run -p openlogi-agent --bin openlogi-agent-mock
-//! OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-gui   # in a second terminal
+//! OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-desktop   # in a second terminal
 //! ```
 //!
 //! It defaults to the `openlogi-dev` profile — the one the dev app bundle

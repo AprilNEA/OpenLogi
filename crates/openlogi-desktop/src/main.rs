@@ -37,7 +37,7 @@ mod state;
 mod ui;
 mod windows;
 
-// Loads the Crowdin-managed `crates/openlogi-gui/locales/*.yml` files at compile
+// Loads the Crowdin-managed `crates/openlogi-desktop/locales/*.yml` files at compile
 // time and generates the `t!`/`tr!` lookup backend for this crate. `fallback =
 // "en"` matches the codes gpui-component ships, so the framework's own widgets
 // localize alongside ours.

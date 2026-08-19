@@ -2,7 +2,7 @@
 //!
 //! Everything here is GUI-free: the CGEventTap hook runtime, background HID++
 //! writes, DPI-cycle state, and the Actions Ring's runtime session state. It
-//! was extracted from `openlogi-gui` so the always-on agent process can own
+//! was extracted from `openlogi-desktop` so the always-on agent process can own
 //! the input/device path without linking gpui.
 //!
 //! The wire contract this agent answers over IPC lives in `openlogi-ipc`, and

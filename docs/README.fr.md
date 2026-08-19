@@ -38,7 +38,7 @@ Remappez les boutons, pilotez le DPI et SmartShift, basculez de profil selon l'a
 
 OpenLogi dialogue avec les périphériques Logitech HID++ via des récepteurs Logi Bolt et Unifying, une connexion Bluetooth directe ou un câble USB — sans exécuter Logi Options+. Il se compose de trois éléments :
 
-- **[OpenLogi GUI](../crates/openlogi-gui)** — une application de bureau GPUI : schéma de souris interactif avec zones cliquables, sélecteur d'action par bouton (actions intégrées et raccourcis personnalisés rédigés dans la configuration TOML), préréglages DPI, SmartShift, inversion native du défilement par appareil, éclairage RGB des claviers, profils par application, carrousel d'appareils en direct et fenêtre de réglages traduite en 20 langues.
+- **[OpenLogi GUI](../crates/openlogi-desktop)** — une application de bureau GPUI : schéma de souris interactif avec zones cliquables, sélecteur d'action par bouton (actions intégrées et raccourcis personnalisés rédigés dans la configuration TOML), préréglages DPI, SmartShift, inversion native du défilement par appareil, éclairage RGB des claviers, profils par application, carrousel d'appareils en direct et fenêtre de réglages traduite en 20 langues.
 - **[OpenLogi agent](../crates/openlogi-agent)** — le service d'arrière-plan qui possède le hook d'entrée et toutes les E/S des appareils. La GUI est un pur client IPC et démarre l'agent au besoin.
 - **[OpenLogi CLI](../crates/openlogi-cli)** — un outil en ligne de commande : inventaire headless (`list`), synchronisation des assets et sous-commandes de diagnostic des appareils.
 

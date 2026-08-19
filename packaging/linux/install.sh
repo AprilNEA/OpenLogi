@@ -39,7 +39,7 @@ Options:
 
 The script installs:
   PREFIX/bin/openlogi
-  PREFIX/bin/openlogi-gui
+  PREFIX/bin/openlogi-desktop
   PREFIX/bin/openlogi-overlay
   PREFIX/bin/openlogi-agent
   /etc/udev/rules.d/70-openlogi.rules
@@ -59,10 +59,10 @@ BINDIR="${PREFIX}/bin"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="${REPO_ROOT}/target/release"
 
-for bin in openlogi openlogi-gui openlogi-overlay openlogi-agent; do
+for bin in openlogi openlogi-desktop openlogi-overlay openlogi-agent; do
     if [ ! -x "${BUILD_DIR}/${bin}" ]; then
         echo "Error: ${BUILD_DIR}/${bin} not found." >&2
-        echo "Build first: cargo build --release -p openlogi -p openlogi-gui -p openlogi-overlay -p openlogi-agent" >&2
+        echo "Build first: cargo build --release -p openlogi -p openlogi-desktop -p openlogi-overlay -p openlogi-agent" >&2
         exit 1
     fi
 done
@@ -71,7 +71,7 @@ done
 
 echo "Installing binaries to ${BINDIR} …"
 sudo install -Dm755 "${BUILD_DIR}/openlogi"       "${BINDIR}/openlogi"
-sudo install -Dm755 "${BUILD_DIR}/openlogi-gui"     "${BINDIR}/openlogi-gui"
+sudo install -Dm755 "${BUILD_DIR}/openlogi-desktop"     "${BINDIR}/openlogi-desktop"
 sudo install -Dm755 "${BUILD_DIR}/openlogi-overlay" "${BINDIR}/openlogi-overlay"
 sudo install -Dm755 "${BUILD_DIR}/openlogi-agent"   "${BINDIR}/openlogi-agent"
 
@@ -133,5 +133,5 @@ if command -v update-desktop-database > /dev/null 2>&1; then
 fi
 
 echo ""
-echo "OpenLogi installed. Run 'openlogi-gui' to start, or enable the background"
+echo "OpenLogi installed. Run 'openlogi-desktop' to start, or enable the background"
 echo "agent with: systemctl --user enable --now openlogi-agent.service"

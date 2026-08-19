@@ -90,7 +90,7 @@ version_group = "openlogi"
 # App crates: not crates.io packages (git gpui deps / login-item binary).
 # `publish = false` must mirror each crate's Cargo.toml.
 [[package]]
-name = "openlogi-gui"
+name = "openlogi-desktop"
 release = false
 publish = false
 

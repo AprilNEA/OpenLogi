@@ -14,7 +14,7 @@ pub(crate) fn generate_icns() -> Result<()> {
     let root = repo_root()?;
     let sh = Shell::new()?;
     let master = root.join("design/icon/openlogi.png");
-    let output_dir = root.join("crates/openlogi-gui/icon");
+    let output_dir = root.join("crates/openlogi-desktop/icon");
     let output = output_dir.join("AppIcon.icns");
 
     ensure_file(&master)?;
@@ -91,7 +91,7 @@ fn run_with_channel(channel: Channel, sign_identity: Option<&str>) -> Result<()>
             .run()?;
     } else {
         println!("==> device assets: on-demand (not bundled; fetched at first launch)");
-        let assets = root.join("crates/openlogi-gui/assets");
+        let assets = root.join("crates/openlogi-desktop/assets");
         if assets.exists() {
             fs_err::remove_dir_all(&assets)
                 .with_context(|| format!("could not remove {}", assets.display()))?;
@@ -108,7 +108,7 @@ fn run_with_channel(channel: Channel, sign_identity: Option<&str>) -> Result<()>
             .run()?;
     }
     {
-        let gui_dir = root.join("crates/openlogi-gui");
+        let gui_dir = root.join("crates/openlogi-desktop");
         let _gui = sh.push_dir(gui_dir);
         cmd!(sh, "cargo bundle --release")
             .envs(xcode_env.iter().map(|(key, value)| (key, value)))
@@ -173,14 +173,14 @@ const HELPERS: [Helper; 2] = [
         component: Component::Agent,
         package: "openlogi-agent",
         binary: "openlogi-agent",
-        info_plist: "crates/openlogi-gui/bundle/agent-release/Info.plist",
+        info_plist: "crates/openlogi-desktop/bundle/agent-release/Info.plist",
         label: "agent helper",
     },
     Helper {
         component: Component::Overlay,
         package: "openlogi-overlay",
         binary: "openlogi-overlay",
-        info_plist: "crates/openlogi-gui/bundle/overlay-release/Info.plist",
+        info_plist: "crates/openlogi-desktop/bundle/overlay-release/Info.plist",
         label: "Actions Ring overlay helper",
     },
 ];
@@ -196,7 +196,7 @@ const HELPERS: [Helper; 2] = [
 /// a generic blank wherever macOS lists it — System Settings' Accessibility
 /// pane, Login Items. Icon generation already ran, so the icns is on disk.
 fn embed_helpers(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<()> {
-    let icon = root.join("crates/openlogi-gui/icon/AppIcon.icns");
+    let icon = root.join("crates/openlogi-desktop/icon/AppIcon.icns");
     ensure_file(&icon)?;
     for helper in &HELPERS {
         embed_helper(root, app, xcode_env, helper, &icon)?;
@@ -271,7 +271,7 @@ fn embed_cli(root: &Path, app: &Path, xcode_env: &[(String, String)]) -> Result<
 /// Every Mach-O the finished bundle must ship, relative to the `.app` root.
 const REQUIRED_BUNDLE_BINARIES: [&str; 4] = [
     "Contents/MacOS/openlogi",
-    "Contents/MacOS/openlogi-gui",
+    "Contents/MacOS/openlogi-desktop",
     "Contents/Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
     "Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/MacOS/openlogi-overlay",
 ];
@@ -423,7 +423,7 @@ fn sign_app_with_timestamp(identity: &str, timestamp: TimestampMode) -> Result<(
 
 /// Path to the GUI/CLI entitlements (camera hardened-runtime exception).
 fn camera_entitlements_path(root: &Path) -> std::path::PathBuf {
-    root.join("crates/openlogi-gui/bundle/OpenLogi.entitlements")
+    root.join("crates/openlogi-desktop/bundle/OpenLogi.entitlements")
 }
 
 /// Sign one target with the hardened runtime and the requested timestamp mode.

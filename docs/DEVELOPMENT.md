@@ -28,7 +28,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 git clone https://github.com/AprilNEA/OpenLogi
 cd OpenLogi
 cargo run -p openlogi --release -- list
-cargo run -p openlogi-gui --release
+cargo run -p openlogi-desktop --release
 ```
 
 If you use [direnv](https://direnv.net) without devenv installed, `.envrc`
@@ -82,11 +82,11 @@ On macOS the desktop binary is launched from inside a throwaway
 (`.cargo/run-macos.sh`). This makes the dev build show as
 **OpenLogi Dev** in the menu bar and Dock, with the real app icon; a bare
 `cargo run` binary has no bundle, so macOS would otherwise fall back to the
-`openlogi-gui` executable name and a generic icon. The binary is hardlinked in
+`openlogi-desktop` executable name and a generic icon. The binary is hardlinked in
 (no copy) and the icon is generated on demand by
 `cargo run -p xtask -- macos icns`. The runner is a transparent passthrough for
 everything else (the CLI, tests); set
-`OPENLOGI_DEV_BUNDLE=0` to launch the raw `openlogi-gui` binary instead.
+`OPENLOGI_DEV_BUNDLE=0` to launch the raw `openlogi-desktop` binary instead.
 
 Packaged local dev bundles (`cargo run` and
 `cargo run -p xtask -- macos bundle`) use `.dev` bundle identifiers and the
@@ -117,7 +117,7 @@ device (or receiver) attached:
 
 ```sh
 cargo run -p openlogi-agent --bin openlogi-agent-mock   # then, in another terminal:
-OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-gui
+OPENLOGI_DEV_AGENT=0 cargo run -p openlogi-desktop
 ```
 
 The mock defaults itself to the `openlogi-dev` profile (as if `OPENLOGI_PROFILE=dev`
@@ -157,7 +157,7 @@ crates/
   openlogi-hook/    OS mouse hook: macOS CGEventTap, Linux evdev/uinput, Windows WH_MOUSE_LL
   openlogi-ui/      presentation shared by the two GPUI processes: ring geometry/icons,
                     the GPUI asset source, locale negotiation — gpui, no gpui-component
-  openlogi-gui/     the `openlogi-gui` binary — GPUI + gpui-component IPC client
+  openlogi-desktop/     the `openlogi-desktop` binary — GPUI + gpui-component IPC client
   openlogi-overlay/ the `openlogi-overlay` binary — the cursor-centred Actions Ring
 ```
 

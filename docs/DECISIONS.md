@@ -12,7 +12,7 @@ The workspace adopted the shared ten-lint set (`assertions_on_result_states`,
 `tests_outside_test_module`, `undocumented_unsafe_blocks`) on top of the
 existing `pedantic` + `unwrap_used`/`expect_used` table.
 
-- One table, inherited everywhere. `openlogi-gui`, `openlogi-camera` and
+- One table, inherited everywhere. `openlogi-desktop`, `openlogi-camera` and
   `openlogi-hook` carried hand-copied duplicates of `[workspace.lints]`, so any
   lint added to the workspace would have silently skipped them — three of the
   crates holding most of the FFI. Cargo rejects `[lints] workspace = true`
