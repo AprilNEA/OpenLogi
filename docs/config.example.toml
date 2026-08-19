@@ -57,6 +57,11 @@ mode = "ratchet"
 auto_disengage = 16
 tunable_torque = 50
 
+# Omit this table to leave the device's current mode unmanaged.
+[devices."receiver:aabbccdd:slot:1".onboard_profiles]
+mode = "onboard"
+profile = 2
+
 # Put host-switch links on the keyboard's physical entry.
 [devices."receiver:aabbccdd:slot:2"]
 host_switch_targets = ["receiver:aabbccdd:slot:1"]
