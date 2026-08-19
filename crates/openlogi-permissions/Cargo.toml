@@ -1,0 +1,25 @@
+[package]
+name = "openlogi-permissions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Privacy-permission status and remediation deep links for OpenLogi (macOS TCC, Linux device-file access)."
+# Not publishable to crates.io: depends on the unpublished openlogi-camera path.
+publish = false
+
+# Reading status never prompts, so this crate stays free of any UI toolkit —
+# whoever owns the resource raises its prompt (see the crate docs).
+[target.'cfg(target_os = "macos")'.dependencies]
+openlogi-camera = { path = "../openlogi-camera" }
+# `+[CBManager authorization]` by class lookup; see the `macos` module.
+objc2 = { workspace = true }
+# Input-Monitoring status (`IOHIDCheckAccess`) with typed request/access enums.
+objc2-io-kit = { workspace = true, features = ["std", "hidsystem"] }
+opener = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

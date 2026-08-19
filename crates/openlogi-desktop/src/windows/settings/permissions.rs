@@ -10,9 +10,9 @@ use super::{
     IntoElement, ParentElement, PermissionStatus, SettingField, SettingGroup, SettingItem,
     SharedString, Styled, div, h_flex, px, rgb, theme,
 };
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-use crate::platform::permissions;
 use crate::ui::theme::Typography as _;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use openlogi_permissions as permissions;
 
 #[cfg_attr(
     not(any(target_os = "macos", target_os = "linux")),
@@ -207,7 +207,7 @@ fn permission_field(
                     // The Camera pane only lists an app after its first
                     // AVFoundation request, so a deep link can't grant it.
                     if prompts_here {
-                        permissions::request_camera_access(cx);
+                        crate::features::camera::request_camera_access(cx);
                         return;
                     }
                     permissions::open_pane(permission);

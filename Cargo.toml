@@ -8,6 +8,7 @@ members = [
     "crates/openlogi-hidpp-derive",
     "crates/openlogi-hid",
     "crates/openlogi-camera",
+    "crates/openlogi-permissions",
     "crates/openlogi-assets",
     "crates/openlogi-cli",
     "crates/openlogi-ipc",

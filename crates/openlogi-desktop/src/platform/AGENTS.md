@@ -7,8 +7,9 @@ FFI is exactly these files — keep them in sync:
 
 - `status_item.rs` — safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem`.
 - `tray.rs` — the OpenLogi menu-bar semantics + the `OpenLogiMenuTarget` (`define_class!`).
-- `permissions.rs` — `CBCentralManager.authorization` (`objc2` class lookup) + `IOHIDCheckAccess`
-  (`objc2-io-kit`).
+- `crates/openlogi-permissions/src/lib.rs` — `CBCentralManager.authorization` (`objc2` class
+  lookup) + `IOHIDCheckAccess` (`objc2-io-kit`). Its own crate because permission *status* is
+  toolkit-free and shared, not a property of the settings window; bound by every rule here.
 - `crates/openlogi-hook/src/macos.rs` — CGEventTap (on `core-graphics`, see below), the
   `NSWorkspace` frontmost-app read (`objc2`), and the Accessibility-trust check/prompt
   (`objc2-application-services` + `objc2-core-foundation`).
@@ -59,10 +60,11 @@ That is *why* this code can't reproduce issue #99 (a `+1` `NSString` leaked on e
 
 ## Privacy permissions (TCC): typed framework crates, never a hand-rolled `extern`
 
-There is no general TCC API, and no crate that wraps one: Apple ships no public way to
-enumerate or request TCC state generically, and `TCC.db` is SIP-protected (reading it needs
-Full Disk Access). Every permission is its own framework call, so "the TCC layer" is just
-this table:
+There is no general TCC API: Apple ships no public way to enumerate or request TCC state
+generically, and `TCC.db` is SIP-protected (reading it needs Full Disk Access). Crates that
+paper over this exist — `permission-flow` covers many services — but none fit here, for the
+reason in the rules below. Every permission is its own framework call, so "the TCC layer" is
+just this table, and it lives in `openlogi-permissions`:
 
 | Permission | Crate | Symbol |
 |---|---|---|
@@ -90,7 +92,11 @@ Rules:
   raises the Accessibility prompt (it owns the tap) and opens HID; the GUI only reads status
   and deep-links to System Settings (`open_pane`). Don't call `IOHIDRequestAccess` or the
   `kAXTrustedCheckOptionPrompt` variant from the GUI — the grant would land on the wrong
-  code-signing identity (issue #214, see `disclaim`).
+  code-signing identity (issue #214, see `disclaim`). This split is also why the ready-made
+  permission crates don't fit: they model one app asking for itself. `permission-flow`
+  additionally brings its own onboarding UI and links the Swift runtime into every downstream
+  binary; `macos-accessibility-client` is a raw-`extern` wrapper where this file requires
+  typed bindings.
 - `CBCentralManager.authorization` deliberately stays an `AnyClass::get` + `msg_send!` lookup
   rather than `objc2-core-bluetooth`: a missing class must degrade to `Unknown`, not panic.
 - Deliberate raw-FFI exceptions, all of them symbols with no bindings to migrate to:

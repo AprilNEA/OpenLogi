@@ -10,7 +10,7 @@
 //!
 //! While permission is undetermined the placeholder is a click target that
 //! fires the system consent prompt
-//! ([`crate::platform::permissions::request_camera_access`]) — the prompt must
+//! ([`crate::features::camera::request_camera_access`]) — the prompt must
 //! originate in-app because macOS only lists an app under Privacy → Camera
 //! after it has requested access at least once. Once the grant lands, the
 //! helper's window refresh re-runs [`Self::set_target`], which starts the
@@ -178,7 +178,7 @@ impl Render for CameraPreview {
                 .cursor_pointer()
                 .hover(|s| s.text_color(pal.text_primary))
                 .child(tr!("Click to enable camera access."))
-                .on_click(|_, _, cx| crate::platform::permissions::request_camera_access(cx))
+                .on_click(|_, _, cx| crate::features::camera::request_camera_access(cx))
                 .into_any_element()
         } else {
             note(tr!("Enable Camera access in Settings to preview."), pal)

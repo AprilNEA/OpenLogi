@@ -5263,6 +5263,7 @@ dependencies = [
  "openlogi-core",
  "openlogi-hook",
  "openlogi-ipc",
+ "openlogi-permissions",
  "openlogi-ui",
  "rust-i18n",
  "serde",
@@ -5416,6 +5417,17 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "openlogi-permissions"
+version = "0.7.1"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-io-kit",
+ "opener",
+ "openlogi-camera",
+ "tracing",
 ]
 
 [[package]]

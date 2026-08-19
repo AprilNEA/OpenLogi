@@ -29,6 +29,7 @@ sits beneath both.
 | `crates/openlogi-agent-core` | Shared agent orchestration: hook runtime, HID++ writes, DPI cycle, Actions Ring session state |
 | `crates/openlogi-ipc` | The tarpc IPC contract (`src/ipc.rs`) + its local-socket transport, shared by agent and GUI |
 | `crates/openlogi-agent` | The `openlogi-agent` binary — hook + device I/O server |
+| `crates/openlogi-permissions` | Privacy-permission status + System-Settings deep links: macOS TCC reads, Linux device-file probes. Reads only — never prompts |
 | `crates/openlogi-ui` | Presentation shared by the two GPUI processes: ring geometry/icons, the GPUI asset source, locale negotiation. Depends on `gpui` but **not** `gpui-component` |
 | `crates/openlogi-desktop` | GPUI + gpui-component desktop app — polls the agent, no device I/O |
 | `crates/openlogi-overlay` | The `openlogi-overlay` binary — cursor-centred Actions Ring, a pure IPC client |
@@ -320,4 +321,4 @@ before editing that area.
 | `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |
 | `crates/openlogi-hook/**` (event taps) | `.claude/rules/hook.md` |
 | `xtask/**`, `packaging/**`, `.github/scripts/**` | `.claude/rules/xtask.md` (+ `xtask/README.md`) |
-| `crates/openlogi-desktop/src/platform/**`, `crates/openlogi-overlay/src/platform.rs` (ObjC FFI) | `crates/openlogi-desktop/src/platform/AGENTS.md` |
+| `crates/openlogi-desktop/src/platform/**`, `crates/openlogi-overlay/src/platform.rs`, `crates/openlogi-permissions/**` (ObjC FFI) | `crates/openlogi-desktop/src/platform/AGENTS.md` |

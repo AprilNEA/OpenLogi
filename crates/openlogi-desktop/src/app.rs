@@ -372,7 +372,7 @@ impl AppView {
 }
 
 fn request_accessibility(cx: &mut App) {
-    use crate::platform::permissions::{self, Permission};
+    use openlogi_permissions::{self as permissions, Permission};
     // Ask the *agent* to fire the prompt (it owns the hook, so the system dialog
     // must name and authorize openlogi-agent — prompting in the GUI would grant
     // the wrong binary), then open the System Settings pane so the user can flip
