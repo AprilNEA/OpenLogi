@@ -10,12 +10,14 @@
 //! its input-report stream, so all captured controls share this session.
 //!
 //! The session is transport-only — it has no opinion on what an input *does*.
-//! The GUI maps each [`CapturedInput`] to the user's bound action and dispatches
+//! The agent maps each [`CapturedInput`] to the user's bound action and dispatches
 //! it, mirroring how the CGEventTap hook handles the side buttons. The thumb
-//! wheel is special: diverting it stops native horizontal scroll, so the GUI
+//! wheel is special: diverting it stops native horizontal scroll, so the agent
 //! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas — the wheel
 //! is therefore only diverted when the user's thumbwheel config leaves its
-//! defaults (click bound, rotation rebound, or sensitivity changed).
+//! defaults (click bound, rotation rebound, or sensitivity changed). While
+//! diverted, the transport forwards every report; the agent applies the current
+//! app/profile policy before dispatching a tap.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
@@ -28,7 +30,7 @@ use tracing::{debug, info, warn};
 
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::route::{DeviceRoute, open_route_channel};
-use crate::thumbwheel::{self, Thumbwheel};
+use crate::thumbwheel::{self, Thumbwheel, ThumbwheelEvent};
 use crate::write::SharedChannel;
 
 /// How often the capture session pings its device to prove the channel still
@@ -52,6 +54,16 @@ pub enum CaptureStop {
     Graceful,
     /// Lease revoked / channel dying — skip restore writes.
     Revoked,
+}
+
+/// How a capture session handles the thumb wheel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ThumbwheelCaptureMode {
+    /// Leave the wheel in its native HID reporting mode.
+    #[default]
+    Native,
+    /// Divert the wheel to HID++ and forward all decoded reports to the agent.
+    Diverted,
 }
 
 /// One input captured from the active device.
@@ -144,9 +156,10 @@ pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 2] = [
 /// Which of one device's controls a capture session should divert.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CaptureSpec {
-    /// Divert the thumb wheel over `0x2150` (rotation rebind / sensitivity /
-    /// click bound).
-    pub capture_thumbwheel: bool,
+    /// Whether to leave the thumb wheel native or divert it over `0x2150`.
+    /// Either diverted mode arms the same physical reporting state; tap intent
+    /// is filtered against the latest binding map by the agent.
+    pub thumbwheel_mode: ThumbwheelCaptureMode,
     /// Gesture-source CIDs ([`GESTURE_SOURCE_BUTTONS`] members) to divert
     /// with raw-XY — one per source in gesture mode; empty when no HID++
     /// control gestures.
@@ -216,12 +229,7 @@ pub async fn run_capture_session(
             if let Some(idx) = thumb_index
                 && let Some(event) = thumbwheel::decode_event(&msg, device_index, idx)
             {
-                if event.single_tap {
-                    let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::Thumbwheel, None));
-                }
-                if event.rotation != 0 {
-                    let _ = sink.send(CapturedInput::Scroll(event.rotation));
-                }
+                forward_thumbwheel_event(event, &sink);
             }
         }
     });
@@ -302,6 +310,19 @@ pub async fn run_capture_session(
     Ok(())
 }
 
+/// Forward every actionable part of a decoded diverted thumb-wheel report.
+///
+/// Tap intent is deliberately not captured here: app/profile changes update the
+/// agent's live policy without restarting this hardware session.
+fn forward_thumbwheel_event(event: ThumbwheelEvent, sink: &mpsc::UnboundedSender<CapturedInput>) {
+    if event.single_tap {
+        let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::Thumbwheel, None));
+    }
+    if event.rotation != 0 {
+        let _ = sink.send(CapturedInput::Scroll(event.rotation));
+    }
+}
+
 /// Reason-aware capture: maps stop reasons onto a unit oneshot shutdown.
 pub async fn run_capture_session_with_stop_reason(
     route: DeviceRoute,
@@ -317,7 +338,11 @@ pub async fn run_capture_session_with_stop_reason(
         let _ = tx.send(());
     });
     let spec = CaptureSpec {
-        capture_thumbwheel,
+        thumbwheel_mode: if capture_thumbwheel {
+            ThumbwheelCaptureMode::Diverted
+        } else {
+            ThumbwheelCaptureMode::Native
+        },
         // The bool-era API only ever meant the dedicated gesture button; the
         // haptic panel is reachable through [`CaptureSpec`] itself.
         divert_gesture_sources: divert_gesture_button
@@ -393,7 +418,8 @@ impl ArmedControls {
 
 /// Resolve features off the device's root and divert the controls `spec`
 /// selects: the gesture sources (raw-XY), DPI/ModeShift buttons and rebindable
-/// standard buttons over `0x1b04`, and the thumb wheel over `0x2150`. The
+/// standard buttons over `0x1b04`, and — when `spec.thumbwheel_mode` is
+/// diverted — the thumb wheel over `0x2150`. The
 /// root-feature lookup mirrors `write::open_feature`,
 /// since hidpp 0.2's registry doesn't carry the features OpenLogi reimplements.
 ///
@@ -477,7 +503,7 @@ async fn arm_controls_into(
         }
     }
 
-    if spec.capture_thumbwheel
+    if spec.thumbwheel_mode != ThumbwheelCaptureMode::Native
         && let Some(info) = device
             .root()
             .get_feature(thumbwheel::FEATURE_ID)

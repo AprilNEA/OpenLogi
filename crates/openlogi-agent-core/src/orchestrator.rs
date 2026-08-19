@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use openlogi_core::binding::Action;
+use openlogi_core::binding::{Action, ButtonId};
 use openlogi_core::bindings::{bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution};
 use openlogi_core::device::{
@@ -244,6 +244,11 @@ impl Orchestrator {
         }
         HookMaps {
             bindings: bindings_for(&self.config, key, app),
+            thumbwheel_tap_bound: key.is_some_and(|key| {
+                self.config
+                    .effective_bindings(key, app)
+                    .contains_key(&ButtonId::Thumbwheel)
+            }),
             gestures: oshook_gestures_for(&self.config, key, app),
         }
     }

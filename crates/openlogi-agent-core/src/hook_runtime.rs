@@ -88,6 +88,8 @@ impl ActionDispatcher {
 pub struct HookMaps {
     /// Per-button single action — the single-action dispatch path.
     pub bindings: BTreeMap<ButtonId, Action>,
+    /// Whether the effective thumb-wheel tap binding was explicitly configured.
+    pub thumbwheel_tap_bound: bool,
     /// Per-direction maps for the OS-hook gesture buttons (Middle/Back/Forward in
     /// gesture mode), so a hold+swipe resolves to a bound action. The dedicated
     /// HID++ gesture button (0x00c3) uses the gesture watcher's separate map
@@ -795,6 +797,7 @@ mod tests {
                 (ButtonId::ThumbwheelScrollDown, Action::PrevTab),
             ]),
             gestures: BTreeMap::new(),
+            thumbwheel_tap_bound: false,
         };
         assert_eq!(
             rebound_thumbwheel_action(&maps, 1.0),
@@ -821,6 +824,7 @@ mod tests {
                 ),
             ]),
             gestures: BTreeMap::new(),
+            thumbwheel_tap_bound: false,
         };
         assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
         assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
