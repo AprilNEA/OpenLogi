@@ -14,32 +14,48 @@ const BOTH: &[u16] = &[
     reprog_controls::HAPTIC_PANEL_CID,
 ];
 
-#[test]
-fn reporting_restore_preserves_every_mutable_field() {
-    let remap = reprog_controls::ControlId(0x0053);
-    let original = reprog_controls::CidReporting {
+fn reporting(
+    diverted: bool,
+    remap: Option<reprog_controls::ControlId>,
+) -> reprog_controls::CidReporting {
+    reprog_controls::CidReporting {
         cid: reprog_controls::ControlId(reprog_controls::GESTURE_BUTTON_CID),
-        diverted: true,
+        diverted,
         persistently_diverted: true,
         force_raw_xy: true,
-        raw_xy: false,
-        remap: Some(remap),
+        raw_xy: true,
+        remap,
         analytics_key_events: true,
         raw_wheel: true,
-    };
+    }
+}
 
-    assert_eq!(
-        reporting_change(original),
-        reprog_controls::CidReportingChange {
-            diverted: Some(true),
-            persistently_diverted: Some(true),
-            force_raw_xy: Some(true),
-            raw_xy: Some(false),
-            remap: Some(remap),
-            analytics_key_events: Some(true),
-            raw_wheel: Some(true),
-        }
-    );
+/// A control that was *already* diverted when the session armed it — an agent
+/// killed mid-session, or another Logitech app — must not be handed that state
+/// back. Replaying it leaves the button diverted with no listener: no OS event
+/// and no HID++ consumer, dead until the device sleeps.
+#[test]
+fn restore_clears_a_diversion_it_found_already_set() {
+    let change = undivert_change(reporting(true, None));
+
+    assert_eq!(change.diverted, Some(false));
+    assert_eq!(change.raw_xy, Some(false));
+}
+
+/// Arming only ever writes `diverted` / `raw_xy` and re-asserts `remap`, so
+/// restoring must leave every other bit alone rather than writing back a
+/// snapshot that may itself be this session's leftovers.
+#[test]
+fn restore_returns_the_remap_target_and_touches_nothing_else() {
+    let remap = reprog_controls::ControlId(0x0053);
+
+    let change = undivert_change(reporting(false, Some(remap)));
+
+    assert_eq!(change.remap, Some(remap));
+    assert_eq!(change.persistently_diverted, None);
+    assert_eq!(change.force_raw_xy, None);
+    assert_eq!(change.analytics_key_events, None);
+    assert_eq!(change.raw_wheel, None);
 }
 
 fn press() -> RawControlEvent {
@@ -521,7 +537,10 @@ fn a_dpi_button_re_presses_after_a_release() {
         Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle, None)),
         "a release re-arms the rising edge"
     );
-    assert!(rx.try_recv().is_err());
+    assert!(
+        rx.try_recv().is_err(),
+        "press → release → press emits exactly two presses"
+    );
 }
 
 #[test]

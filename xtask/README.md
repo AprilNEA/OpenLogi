@@ -11,28 +11,43 @@ devenv shell -- cargo run -p xtask -- <command>
 
 ## Commands
 
-- `macos icns` — generate `crates/openlogi-gui/icon/AppIcon.icns` from the master PNG.
-- `macos bundle` — build the release `OpenLogi.app` and embed the agent helper.
+- `macos icns` — generate `crates/openlogi-desktop/icon/AppIcon.icns` from the master PNG.
+- `macos bundle [--channel dev|production]` — build `OpenLogi.app` and embed the
+  agent and overlay helpers.
 - `macos dmg` — package an existing app bundle into the branded DMG.
 - `macos package` — build the app bundle, optionally sign it, then create the branded DMG.
 - `linux package` — build release binaries and package `.deb`, `.rpm`, and
   `.pkg.tar.zst` artifacts with nfpm.
 - `release latest-json` — generate the static updater manifest for the stable channel.
 
-For local testing, `macos bundle` stamps the built app/helper as
-`org.openlogi.openlogi.dev` / `org.openlogi.agent.dev`, then signs the final
-layout with `OPENLOGI_LOCAL_CODESIGN_IDENTITY` or the first Apple Development
-identity it finds. This keeps local Accessibility/TCC grants isolated from the
-installed production `org.openlogi.agent` grant. Set `OPENLOGI_LOCAL_CODESIGN=0`
-only when you explicitly want an unsigned local bundle. `macos package` keeps
-the production bundle IDs and signs with `OPENLOGI_SIGN_IDENTITY` / `--sign-identity`.
+### Bundle identity
+
+macOS keys TCC grants to a bundle's code identity, and OpenLogi keys its config
+profile to the identifier's suffix — so the identity decides whose permission
+grants and whose settings a build inherits. Every bundle therefore gets it
+written explicitly and read back:
+
+| channel | app | agent helper | overlay helper |
+|---|---|---|---|
+| `production` | `org.openlogi.openlogi` / OpenLogi | `org.openlogi.agent` / OpenLogi Agent | `org.openlogi.overlay` / OpenLogi Overlay |
+| `dev` | the same, suffixed `.dev` / ` Dev` | | |
+
+`macos bundle` defaults to `--channel dev`, so a local build can never claim the
+installed app's grants, and signs the result with `OPENLOGI_LOCAL_CODESIGN_IDENTITY`
+or the first Apple Development identity it finds (`OPENLOGI_LOCAL_CODESIGN=0`
+leaves it unsigned). `macos package` always builds the production channel and
+signs with `OPENLOGI_SIGN_IDENTITY` / `--sign-identity`; `macos dmg` refuses to
+package anything but a production bundle once it is given a signing identity, so
+a dev build cannot reach users. That check is what releases 0.6.24–0.6.26 lacked
+when the release workflow shipped `.dev` identifiers.
+
 The raw DMG emitted by `cargo-bundle` is deleted during `macos bundle` because it
-is created before xtask embeds and signs the helper; use `macos package` when
+is created before xtask embeds and signs the helpers; use `macos package` when
 you need a DMG.
 
-The Cargo runner in `../scripts/cargo-run-macos.sh` stays outside xtask because
+The Cargo runner in `../.cargo/run-macos.sh` stays outside xtask because
 Cargo must execute it while running arbitrary binaries, including this crate.
-The release-notes generator stays in `../scripts/release-notes` because it is a
+The release-notes generator stays in `../.github/scripts/release-notes` because it is a
 dedicated Node tool with Octokit, changelog parsing, and OpenAI dependencies;
 xtask should not add a one-line wrapper around a canonical specialized tool.
 

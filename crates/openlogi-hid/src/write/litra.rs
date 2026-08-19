@@ -11,13 +11,17 @@ use std::time::Duration;
 
 use async_hid::AsyncHidWrite as _;
 use openlogi_core::device::{LightCapabilities, LightValueRange, LightValueUnit};
-use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::debug;
 
 use crate::route::DeviceRoute;
 
-use super::WriteError;
+use super::{WriteError, classify_hid_error};
+
+// LightCommand is pure IPC wire data with no HID++ I/O, so it lives in
+// `openlogi_core::hid::light`; re-exported here unchanged so this module's
+// own API surface doesn't churn.
+pub use openlogi_core::hid::light::LightCommand;
 
 /// Logitech vendor ID.
 pub const LOGITECH_VENDOR_ID: u16 = 0x046d;
@@ -144,21 +148,6 @@ pub fn matches_litra(vendor_id: u16, product_id: u16, usage_page: u16, usage_id:
         && LitraModel::from_product_id(product_id).is_some()
 }
 
-/// A semantic command accepted by the standalone-light layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LightCommand {
-    /// Turn the light on or off.
-    Power(bool),
-    /// Set normalized brightness from 0 to 100 percent.
-    BrightnessPercent(u8),
-    /// Set colour temperature in Kelvin.
-    TemperatureKelvin(u16),
-    /// Set brightness in the native unit advertised by the selected model.
-    /// This is primarily a diagnostic/CLI convenience; persisted settings
-    /// remain normalized percentages.
-    BrightnessNative(u16),
-}
-
 /// Encode a semantic command into the exact fixed-width Litra report.
 pub fn encode_command(
     model: LitraModel,
@@ -268,7 +257,7 @@ pub async fn apply(
         .map_err(|_| WriteError::RequestTimedOut {
             operation: super::HidppOperation::Light,
         })?
-        .map_err(WriteError::from)?;
+        .map_err(|e| classify_hid_error(&e))?;
     debug!(route = %route, "applied raw Litra command");
     Ok(())
 }
@@ -336,8 +325,12 @@ mod tests {
 
     #[test]
     fn glow_temperature_accepts_only_aligned_inclusive_boundaries() {
-        assert!(encode_command(LitraModel::Glow, LightCommand::TemperatureKelvin(2700)).is_ok());
-        assert!(encode_command(LitraModel::Glow, LightCommand::TemperatureKelvin(6500)).is_ok());
+        let minimum = encode_command(LitraModel::Glow, LightCommand::TemperatureKelvin(2700))
+            .expect("2700 K is the inclusive lower bound");
+        let maximum = encode_command(LitraModel::Glow, LightCommand::TemperatureKelvin(6500))
+            .expect("6500 K is the inclusive upper bound");
+        assert_eq!(&minimum[3..6], &[COMMAND_TEMPERATURE, 0x0a, 0x8c]);
+        assert_eq!(&maximum[3..6], &[COMMAND_TEMPERATURE, 0x19, 0x64]);
         for invalid in [2600, 2750, 6600] {
             assert_matches!(
                 encode_command(LitraModel::Glow, LightCommand::TemperatureKelvin(invalid)),

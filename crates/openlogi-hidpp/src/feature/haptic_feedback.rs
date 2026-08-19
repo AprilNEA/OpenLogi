@@ -4,15 +4,10 @@
 //! Master 4. Logitech has not published this feature in the public HID++ spec,
 //! so additions must be verified against hardware rather than guessed.
 
-use std::sync::Arc;
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use openlogi_hidpp_derive::Feature;
 
-use crate::{
-    channel::HidppChannel,
-    feature::{CreatableFeature, Feature, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
-};
+use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 
 bitflags::bitflags! {
     /// Waveforms the device reports as playable.
@@ -87,23 +82,11 @@ pub struct HapticCapabilities {
 }
 
 /// Implements `HapticFeedback` / `0x19b0`.
-#[derive(Clone)]
+#[derive(Clone, Feature)]
+#[creatable(id = 0x19b0, version = 0)]
 pub struct HapticFeedbackFeature {
     endpoint: FeatureEndpoint,
 }
-
-impl CreatableFeature for HapticFeedbackFeature {
-    const ID: u16 = 0x19b0;
-    const STARTING_VERSION: u8 = 0;
-
-    fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
-        Self {
-            endpoint: FeatureEndpoint::new(chan, device_index, feature_index),
-        }
-    }
-}
-
-impl Feature for HapticFeedbackFeature {}
 
 impl HapticFeedbackFeature {
     /// Read the device's supported waveform mask.

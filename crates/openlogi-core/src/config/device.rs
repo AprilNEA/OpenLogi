@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
-    deserialize_gesture_owner,
+    deserialize_gesture_owner, deserialize_optional_thumbwheel_sensitivity,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
@@ -26,6 +26,7 @@ use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities
 /// vanishing from the device list (and losing its Pointer/Buttons panels)
 /// until a cold probe happens to win its race — see issue #159.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceIdentity {
     /// The name shown in the carousel, as resolved from the asset registry the
     /// last time the device was online.
@@ -58,13 +59,25 @@ pub struct DeviceIdentity {
     pub registry_model_id: Option<String>,
 }
 
+impl DeviceIdentity {
+    /// Remove per-unit identifiers before this model snapshot is persisted.
+    #[must_use]
+    pub fn without_unit_identifiers(mut self) -> Self {
+        if let Some(model) = &mut self.model_info {
+            model.serial_number = None;
+            model.unit_id = [0; 4];
+        }
+        self
+    }
+}
+
 /// Settings scoped to a single physical device.
 ///
 /// Deserialization goes through `RawDeviceConfig` (`#[serde(from)]`) so
 /// pre-v2 files — which split bindings across `button_bindings` +
 /// `gesture_bindings` — fold into the unified [`Self::bindings`] map. Only
-/// `bindings` is ever serialized, so a migrated file self-heals to the v2 shape
-/// on its next save.
+/// `bindings` is ever serialized, so a migrated file is rewritten to the v2
+/// shape on its next save.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "RawDeviceConfig")]
 pub struct DeviceConfig {
@@ -81,7 +94,7 @@ pub struct DeviceConfig {
     /// (gesture mode is per-button; see
     /// [`Config::set_gesture_mode`](crate::config::Config::set_gesture_mode)).
     #[serde(skip_serializing)]
-    pub gesture_owner: Option<GestureOwner>,
+    pub(super) gesture_owner: Option<GestureOwner>,
     /// Last-known identity (name / kind / capabilities), captured while the
     /// device was online. Lets the UI render this device — with the right
     /// config panels — on a cold start before any probe, or while it sleeps.
@@ -115,13 +128,21 @@ pub struct DeviceConfig {
     /// [`Action::CycleDpiPresets`] and indexed by
     /// [`Action::SetDpiPreset`]. Empty means "no presets configured" —
     /// the cycle action becomes a no-op until the user adds at least one.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_dpi_presets",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub dpi_presets: Vec<u32>,
     /// The sensor DPI the user committed for this device. Persisted because
     /// the value lives in device RAM and resets on a power cycle (#189); the
     /// agent re-applies it when the device reconnects. `None` until the user
     /// first changes DPI.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_dpi",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub dpi: Option<u32>,
     /// Per-device RGB lighting (static color + brightness + on/off). `None`
     /// until the user changes it, so it stays out of `config.toml` otherwise.
@@ -149,7 +170,11 @@ pub struct DeviceConfig {
     /// Per-device thumb-wheel sensitivity override. `None` falls back to the
     /// app-wide
     /// [`AppSettings::thumbwheel_sensitivity`](crate::config::AppSettings::thumbwheel_sensitivity).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_thumbwheel_sensitivity",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub thumbwheel_sensitivity: Option<i32>,
     /// Invert this device's scroll-wheel direction relative to the OS setting
     /// (issue #126): on, a wheel tick scrolls the opposite way, so a user who
@@ -230,17 +255,45 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+fn deserialize_dpi_presets<'de, D>(deserializer: D) -> Result<Vec<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<u32>::deserialize(deserializer)?;
+    if let Some(value) = values.iter().find(|value| u16::try_from(**value).is_err()) {
+        return Err(serde::de::Error::custom(format_args!(
+            "DPI must fit the HID++ 16-bit range, got {value}"
+        )));
+    }
+    Ok(values)
+}
+
+fn deserialize_optional_dpi<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<u32>::deserialize(deserializer)?;
+    if let Some(value) = value
+        && u16::try_from(value).is_err()
+    {
+        return Err(serde::de::Error::custom(format_args!(
+            "DPI must fit the HID++ 16-bit range, got {value}"
+        )));
+    }
+    Ok(value)
+}
+
 /// Deserialize-only shim that folds the pre-v2 `button_bindings` +
 /// `gesture_bindings` fields into [`DeviceConfig::bindings`]. Never serialized
 /// (only [`DeviceConfig`] is), so reading a legacy file and saving rewrites it
 /// in the v2 shape.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawDeviceConfig {
     /// Explicit gesture owner (v2.1+). Absent on older configs → `None` → the
-    /// owner is inferred in
-    /// [`Config::gesture_owner`](crate::config::Config::gesture_owner). A
-    /// present-but-invalid value is tolerated as `None` (infer), not a parse
-    /// error — see [`deserialize_gesture_owner`].
+    /// owner is inferred during the version-gated migration. A
+    /// present-but-invalid legacy value is tolerated as `None` for compatibility
+    /// with v3-and-older behavior; current schemas reject the field first.
     #[serde(default, deserialize_with = "deserialize_gesture_owner")]
     gesture_owner: Option<GestureOwner>,
     #[serde(default)]
@@ -261,9 +314,9 @@ struct RawDeviceConfig {
     per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
     #[serde(default)]
     action_ring: ActionRingConfig,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_dpi_presets")]
     dpi_presets: Vec<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_dpi")]
     dpi: Option<u32>,
     #[serde(default)]
     lighting: Option<Lighting>,
@@ -277,7 +330,10 @@ struct RawDeviceConfig {
     camera_profiles: BTreeMap<String, CameraControls>,
     #[serde(default)]
     camera_profile: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_thumbwheel_sensitivity"
+    )]
     thumbwheel_sensitivity: Option<i32>,
     #[serde(default)]
     invert_scroll: bool,
@@ -325,7 +381,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
         DeviceConfig {
             enabled: raw.enabled,
             gesture_owner: raw.gesture_owner,
-            identity: raw.identity,
+            identity: raw.identity.map(DeviceIdentity::without_unit_identifiers),
             bindings,
             disabled_gestures: raw.disabled_gestures,
             per_app_bindings: raw.per_app_bindings,

@@ -1,0 +1,72 @@
+# OpenLogi configuration example. Copy only the sections you need.
+schema_version = 4
+selected_device = "receiver:aabbccdd:slot:1"
+
+[app_settings]
+launch_at_login = true
+check_for_updates = false
+auto_install_updates = false
+show_in_menu_bar = true
+capture_mouse_events = true
+auto_download_assets = true
+asset_source = "automatic"
+language = "en"
+thumbwheel_sensitivity = 14
+appearance = "system"
+
+[devices."receiver:aabbccdd:slot:1"]
+dpi = 1600
+dpi_presets = [800, 1600, 3200]
+thumbwheel_sensitivity = 20
+invert_scroll = false
+scroll_resolution = "high"
+
+[devices."receiver:aabbccdd:slot:1".bindings]
+Back = "BrowserBack"
+Forward = "BrowserForward"
+
+[devices."receiver:aabbccdd:slot:1".bindings.GestureButton]
+Click = "MissionControl"
+Up = "MissionControl"
+Down = "AppExpose"
+Left = "PreviousDesktop"
+Right = "NextDesktop"
+
+[devices."receiver:aabbccdd:slot:1".per_app_bindings."com.microsoft.VSCode"]
+Back = "Undo"
+
+[devices."receiver:aabbccdd:slot:1".per_app_bindings."exe:sharex.exe"]
+MiddleClick = { CustomShortcut = "F1" }
+
+[devices."receiver:aabbccdd:slot:1".action_ring]
+enabled = true
+haptics = true
+
+[devices."receiver:aabbccdd:slot:1".action_ring.default.slots]
+Top = { action = "Copy", icon = "Keyboard" }
+Right = { action = { OpenApplication = { path = "/Applications/Safari.app", display_name = "Safari" } }, icon = "Applications" }
+Bottom = { action = "ShowDesktop", label = "Desktop" }
+
+[devices."receiver:aabbccdd:slot:1".lighting]
+enabled = true
+color = "ff0000"
+brightness = 80
+
+[devices."receiver:aabbccdd:slot:1".smartshift]
+mode = "ratchet"
+auto_disengage = 16
+tunable_torque = 50
+
+# Put host-switch links on the keyboard's physical entry.
+[devices."receiver:aabbccdd:slot:2"]
+host_switch_targets = ["receiver:aabbccdd:slot:1"]
+fn_lock = false
+
+[devices."receiver:aabbccdd:slot:2".bindings]
+KeySearch = "MissionControl"
+KeyScreenCapture = "Sleep"
+
+# Global function-key remapping, independent of a device.
+[keyboard.bindings]
+f1 = "MissionControl"
+"shift+command+f5" = "ShowDesktop"

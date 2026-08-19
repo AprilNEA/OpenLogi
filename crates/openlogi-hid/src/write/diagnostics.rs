@@ -44,8 +44,9 @@ impl From<CidInfo> for ReprogControlEntry {
 
 /// Enumerate every HID++ feature the device on `route` reports — used by
 /// `openlogi diag features` to confirm which DPI / SmartShift / etc.
-/// feature IDs a given peripheral actually exposes (e.g. some mice use
-/// `0x2202 ExtendedAdjustableDpi` instead of `0x2201 AdjustableDpi`).
+/// feature IDs a given peripheral actually exposes (e.g. whether a mouse
+/// speaks `0x2201 AdjustableDpi`, `0x2202 ExtendedAdjustableDpi`, or both —
+/// `write::dpi` drives either).
 pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, WriteError> {
     let index = route.device_index();
     with_route(route, move |channel| async move {

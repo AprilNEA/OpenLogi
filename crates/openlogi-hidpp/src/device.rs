@@ -24,6 +24,11 @@ pub struct Device {
     /// The underlying HID++ channel.
     chan: Arc<HidppChannel>,
 
+    /// Cached handle to the root feature. [`Self::new`] always installs one
+    /// before returning, so [`Self::root`] can hand it back directly instead
+    /// of going through the generic (and fallible) `features` lookup.
+    root: Arc<RootFeature>,
+
     /// The initialized implementation of features the device supports.
     features: HashMap<TypeId, Arc<dyn Feature>>,
 
@@ -46,35 +51,36 @@ impl Device {
     /// Returns [`DeviceError::UnsupportedProtocolVersion`] if the device only
     /// supports [`ProtocolVersion::V10`].
     pub async fn new(chan: Arc<HidppChannel>, device_index: u8) -> Result<Self, DeviceError> {
-        let protocol_version = protocol::determine_version(&chan, device_index).await?;
-
-        if protocol_version.is_none() {
+        let Some(version) = protocol::determine_version(&chan, device_index).await? else {
             return Err(DeviceError::DeviceNotFound);
-        }
-        let version = protocol_version.unwrap();
+        };
 
         if version == ProtocolVersion::V10 {
             return Err(DeviceError::UnsupportedProtocolVersion);
         }
 
-        let mut device = Self {
-            chan,
-            features: HashMap::new(),
-            device_index,
-            protocol_version: version,
-        };
-
         // Every HID++2.0 device supports the root feature.
         // We implicitly verified that using [`protocol::determine_version`].
-        device.add_feature::<RootFeature>(0);
+        let mut features: HashMap<TypeId, Arc<dyn Feature>> = HashMap::new();
+        let root = insert_feature(
+            &mut features,
+            RootFeature::new(Arc::clone(&chan), device_index, 0),
+        );
 
-        Ok(device)
+        Ok(Self {
+            chan,
+            root,
+            features,
+            device_index,
+            protocol_version: version,
+        })
     }
 
     /// A convenience wrapper around [`Self::get_feature`] to obtain the root
     /// feature.
+    #[must_use]
     pub fn root(&self) -> Arc<RootFeature> {
-        self.get_feature::<RootFeature>().unwrap()
+        Arc::clone(&self.root)
     }
 
     /// Adds a new feature implementation to the list of available features.
@@ -82,12 +88,7 @@ impl Device {
     /// The caller is responsible for making sure the device actually supports
     /// the feature.
     pub fn add_feature_instance<F: Feature>(&mut self, feature: F) -> Arc<F> {
-        let feat_rc: Arc<dyn Feature> = Arc::new(feature);
-
-        self.features
-            .insert(TypeId::of::<F>(), Arc::clone(&feat_rc));
-
-        Arc::downcast::<F>(feat_rc).unwrap()
+        insert_feature(&mut self.features, feature)
     }
 
     /// Adds a new feature implementation to the list of available features.
@@ -108,6 +109,7 @@ impl Device {
 
     /// Checks whether a specific feature implementation is provided by the
     /// device.
+    #[must_use]
     pub fn provides_feature<F: Feature>(&self) -> bool {
         self.features.contains_key(&TypeId::of::<F>())
     }
@@ -116,6 +118,7 @@ impl Device {
     ///
     /// Returns [`None`] if the requested feature implementation is not
     /// provided.
+    #[must_use]
     pub fn get_feature<F: Feature>(&self) -> Option<Arc<F>> {
         self.features
             .get(&TypeId::of::<F>())
@@ -176,6 +179,21 @@ impl Device {
     }
 }
 
+/// Inserts a feature implementation into a device's feature map, returning a
+/// concretely-typed handle to it.
+///
+/// Building the `Arc<F>` once and coercing a clone to `Arc<dyn Feature>` for
+/// storage avoids an erase-then-downcast round trip through the map, so the
+/// returned handle can never fail to be `F`.
+fn insert_feature<F: Feature>(
+    features: &mut HashMap<TypeId, Arc<dyn Feature>>,
+    feature: F,
+) -> Arc<F> {
+    let feat_rc = Arc::new(feature);
+    features.insert(TypeId::of::<F>(), Arc::clone(&feat_rc) as Arc<dyn Feature>);
+    feat_rc
+}
+
 /// Per-attempt deadline for one feature-table read during enumeration.
 ///
 /// The channel's default [`crate::channel::SEND_RESPONSE_TIMEOUT`] (5s) is
@@ -211,7 +229,7 @@ async fn read_feature_entry(
         let mut read = std::pin::pin!(feature_set.get_feature(index).fuse());
         let outcome = select! {
             result = read => Some(result),
-            _ = futures_timer::Delay::new(FEATURE_READ_ATTEMPT).fuse() => None,
+            () = futures_timer::Delay::new(FEATURE_READ_ATTEMPT).fuse() => None,
         };
         match outcome {
             Some(Ok(info)) => return Ok(info),
@@ -234,6 +252,11 @@ async fn read_feature_entry(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "expect/unwrap are idiomatic in tests"
+)]
 mod tests {
     use std::sync::Arc;
 

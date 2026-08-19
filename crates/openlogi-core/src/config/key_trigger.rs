@@ -1,5 +1,7 @@
 //! Keyboard key triggers and the global keyboard-bindings section.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::binding::Action;
@@ -173,8 +175,9 @@ impl std::str::FromStr for KeyTrigger {
 
 /// The top-level `[keyboard]` table. Bindings are keyed by [`KeyTrigger`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KeyboardConfig {
     /// Function-key trigger → action map for the remapper.
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub bindings: std::collections::HashMap<KeyTrigger, Action>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<KeyTrigger, Action>,
 }

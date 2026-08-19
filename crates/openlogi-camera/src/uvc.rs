@@ -12,11 +12,10 @@
 //! attached), open it via the IOKit `IOUSBDeviceInterface` plug-in, parse the
 //! configuration descriptor for the VideoControl interface number and the
 //! Processing-Unit id, then issue UVC `GET_*`/`SET_CUR` requests.
+//!
+//! The IOKit handles themselves live in [`iokit`], which owns every `unsafe`
+//! block in this backend and hands the descriptor up as a plain `&[u8]`.
 
-#![expect(
-    unsafe_code,
-    reason = "IOKit USB (IOUSBDeviceInterface) control-transfer FFI for UVC Processing-Unit controls"
-)]
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
@@ -24,8 +23,15 @@
     reason = "UVC payloads are bounded 16-bit values copied verbatim"
 )]
 
-use std::ffi::{CString, c_void};
-use std::ptr;
+mod iokit;
+
+use std::collections::HashMap;
+use std::ffi::c_void;
+
+use objc2_core_foundation::{CFNumber, CFString};
+use objc2_io_kit::IOUSBDevRequest;
+
+use iokit::{IoObject, SeizedDevice, UsbInterface};
 
 /// Which UVC entity a control request addresses: the Camera Terminal (lens:
 /// zoom/focus/exposure) or the Processing Unit (image: brightness/…).
@@ -39,65 +45,84 @@ pub use crate::controls::{
     AutoState, AutoToggle, CameraControl, CameraState, ControlError, ControlRange,
 };
 
+/// The wire type of a control's value: how many bytes it occupies on the bus
+/// and how a read is sign-extended. UVC controls have exactly one of these
+/// per selector — `len` and `signed` are not independent, so this collapses
+/// them into the one combination each control actually uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Payload {
+    /// 2-byte unsigned (most controls).
+    U16,
+    /// 2-byte signed (brightness, hue).
+    I16,
+    /// 4-byte unsigned (exposure time, a dwExposureTimeAbsolute).
+    U32,
+}
+
+impl Payload {
+    /// Size in bytes on the wire.
+    const fn len(self) -> usize {
+        match self {
+            Self::U16 | Self::I16 => 2,
+            Self::U32 => 4,
+        }
+    }
+}
+
+/// A control's complete UVC wire description: the entity it addresses, its
+/// selector, and its payload type.
+struct ControlSpec {
+    unit: Unit,
+    selector: u16,
+    payload: Payload,
+}
+
 impl CameraControl {
-    fn unit(self) -> Unit {
-        match self {
-            Self::Zoom | Self::Focus | Self::Exposure => Unit::CameraTerminal,
-            _ => Unit::Processing,
+    /// UVC entity, control selector (Camera Terminal §A.9.4, Processing Unit
+    /// §A.9.5), and wire payload type for this control.
+    const fn spec(self) -> ControlSpec {
+        use Payload::{I16, U16, U32};
+        use Unit::{CameraTerminal, Processing};
+        let (unit, selector, payload) = match self {
+            Self::Zoom => (CameraTerminal, 0x0B, U16), // CT_ZOOM_ABSOLUTE_CONTROL
+            Self::Focus => (CameraTerminal, 0x06, U16), // CT_FOCUS_ABSOLUTE_CONTROL
+            Self::Exposure => (CameraTerminal, 0x04, U32), // CT_EXPOSURE_TIME_ABSOLUTE_CONTROL
+            Self::Brightness => (Processing, 0x02, I16), // PU_BRIGHTNESS_CONTROL
+            Self::Contrast => (Processing, 0x03, U16), // PU_CONTRAST_CONTROL
+            Self::Saturation => (Processing, 0x07, U16), // PU_SATURATION_CONTROL
+            Self::Sharpness => (Processing, 0x08, U16), // PU_SHARPNESS_CONTROL
+            Self::WhiteBalance => (Processing, 0x0A, U16), // PU_WHITE_BALANCE_TEMPERATURE_CONTROL
+            Self::Tint => (Processing, 0x06, I16),     // PU_HUE_CONTROL
+        };
+        ControlSpec {
+            unit,
+            selector,
+            payload,
         }
     }
+}
 
-    /// UVC control selector (Camera Terminal §A.9.4, Processing Unit §A.9.5).
-    #[allow(
-        clippy::match_same_arms,
-        reason = "Focus (CT) and Tint (PU) share 0x06 by coincidence — they address different units"
-    )]
-    fn selector(self) -> u16 {
-        match self {
-            Self::Zoom => 0x0B,         // CT_ZOOM_ABSOLUTE_CONTROL
-            Self::Focus => 0x06,        // CT_FOCUS_ABSOLUTE_CONTROL
-            Self::Exposure => 0x04,     // CT_EXPOSURE_TIME_ABSOLUTE_CONTROL
-            Self::Brightness => 0x02,   // PU_BRIGHTNESS_CONTROL
-            Self::Contrast => 0x03,     // PU_CONTRAST_CONTROL
-            Self::Saturation => 0x07,   // PU_SATURATION_CONTROL
-            Self::Sharpness => 0x08,    // PU_SHARPNESS_CONTROL
-            Self::WhiteBalance => 0x0A, // PU_WHITE_BALANCE_TEMPERATURE_CONTROL
-            Self::Tint => 0x06,         // PU_HUE_CONTROL
-        }
-    }
-
-    /// Payload size in bytes (exposure time is a dwExposureTimeAbsolute u32).
-    fn len(self) -> usize {
-        match self {
-            Self::Exposure => 4,
-            _ => 2,
-        }
-    }
-
-    /// Brightness and hue are signed controls; the rest are unsigned.
-    fn signed(self) -> bool {
-        matches!(self, Self::Brightness | Self::Tint)
-    }
+/// An auto toggle's complete UVC wire description: the entity it addresses
+/// and its selector.
+struct ToggleSpec {
+    unit: Unit,
+    selector: u16,
 }
 
 impl AutoToggle {
-    fn unit(self) -> Unit {
-        match self {
-            Self::Focus | Self::Exposure => Unit::CameraTerminal,
-            Self::WhiteBalance => Unit::Processing,
-        }
-    }
-
-    fn selector(self) -> u16 {
-        match self {
-            Self::Focus => 0x08,        // CT_FOCUS_AUTO_CONTROL
-            Self::Exposure => 0x02,     // CT_AE_MODE_CONTROL
-            Self::WhiteBalance => 0x0B, // PU_WHITE_BALANCE_TEMPERATURE_AUTO_CONTROL
-        }
+    /// UVC entity and control selector (Camera Terminal §A.9.4, Processing
+    /// Unit §A.9.5) for this auto toggle.
+    const fn spec(self) -> ToggleSpec {
+        use Unit::{CameraTerminal, Processing};
+        let (unit, selector) = match self {
+            Self::Focus => (CameraTerminal, 0x08), // CT_FOCUS_AUTO_CONTROL
+            Self::Exposure => (CameraTerminal, 0x02), // CT_AE_MODE_CONTROL
+            Self::WhiteBalance => (Processing, 0x0B), // PU_WHITE_BALANCE_TEMPERATURE_AUTO_CONTROL
+        };
+        ToggleSpec { unit, selector }
     }
 }
 
-// ── UVC constants ────────────────────────────────────────────────────────────
 const UVC_SET_CUR: u8 = 0x01;
 const UVC_GET_CUR: u8 = 0x81;
 const UVC_GET_MIN: u8 = 0x82;
@@ -122,8 +147,6 @@ const AE_MANUAL: u8 = 0x01;
 /// Auto modes to try when enabling auto-exposure, most- to least-automatic
 /// (full auto, aperture priority, shutter priority) — cameras support subsets.
 const AE_AUTO_MODES: [u8; 3] = [0x02, 0x08, 0x04];
-
-const KIO_RETURN_SUCCESS: i32 = 0;
 
 /// Hold the process-wide seize/enumeration lock — see [`crate::USB_QUIESCE`].
 fn quiesce() -> std::sync::MutexGuard<'static, ()> {
@@ -280,301 +303,48 @@ pub(crate) fn location_hint(unique_id: &str) -> Option<u32> {
 ///
 /// Read from the IORegistry only — no device open — so enumeration can prefer
 /// the port-stable serial for config keys without racing a control seize.
-pub(crate) fn usb_serials_by_location() -> std::collections::HashMap<u32, String> {
-    use std::collections::HashMap;
-
-    let mut out = HashMap::new();
-    let Ok(class) = CString::new("IOUSBDevice") else {
-        return out;
-    };
-    // SAFETY: matching dict is consumed by GetMatchingServices; each service
-    // is released after we read its registry properties.
-    unsafe {
-        let matching = IOServiceMatching(class.as_ptr());
-        if matching.is_null() {
-            return out;
-        }
-        let mut iter: IoIterator = 0;
-        if IOServiceGetMatchingServices(kIOMainPortDefault, matching, &raw mut iter)
-            != KIO_RETURN_SUCCESS
-        {
-            return out;
-        }
-        let key = cf_string("USB Serial Number");
-        loop {
-            let service = IOIteratorNext(iter);
-            if service == 0 {
-                break;
-            }
-            if let Some((location, serial)) = registry_location_and_serial(service, key) {
-                out.entry(location).or_insert(serial);
-            }
-            IOObjectRelease(service);
-        }
-        if !key.is_null() {
-            CFRelease(key);
-        }
-        IOObjectRelease(iter);
-    }
-    out
+pub(crate) fn usb_serials_by_location() -> HashMap<u32, String> {
+    let serial_key = CFString::from_static_str("USB Serial Number");
+    let location_key = CFString::from_static_str("locationID");
+    iokit::usb_devices()
+        .into_iter()
+        .flatten()
+        .filter_map(|service| registry_location_and_serial(&service, &serial_key, &location_key))
+        .fold(HashMap::new(), |mut serials, (location, serial)| {
+            serials.entry(location).or_insert(serial);
+            serials
+        })
 }
 
 /// Location id + USB serial from an `IOUSBDevice` service, without opening it.
-unsafe fn registry_location_and_serial(
-    service: IoService,
-    serial_key: *const c_void,
+fn registry_location_and_serial(
+    service: &IoObject,
+    serial_key: &CFString,
+    location_key: &CFString,
 ) -> Option<(u32, String)> {
-    unsafe {
-        // Prefer the USB device interface for location (matches control open);
-        // fall back to the registry number property when the plug-in is busy.
-        let location = device_location_id(service).or_else(|| {
-            let key = cf_string("locationID");
-            let loc = cf_number_u32(IORegistryEntryCreateCFProperty(
-                service,
-                key,
-                ptr::null(),
-                0,
-            ));
-            if !key.is_null() {
-                CFRelease(key);
-            }
-            loc
+    // Prefer the USB device interface for the location (it is what the control
+    // path matches on); fall back to the registry number when the plug-in is
+    // busy.
+    let location = UsbInterface::open(service)
+        .and_then(|interface| interface.location_id())
+        .or_else(|| {
+            iokit::registry_property(service, location_key)?
+                .downcast::<CFNumber>()
+                .ok()?
+                .as_i32()
+                .map(i32::cast_unsigned)
         })?;
-        let serial_ref = IORegistryEntryCreateCFProperty(service, serial_key, ptr::null(), 0);
-        let serial = cf_string_value(serial_ref)?;
-        if serial.is_empty() {
-            return None;
-        }
-        Some((location, serial))
-    }
+    let serial = iokit::registry_property(service, serial_key)?
+        .downcast::<CFString>()
+        .ok()?
+        .to_string();
+    (!serial.is_empty()).then_some((location, serial))
 }
 
-/// Location id via a transient `IOUSBDeviceInterface` (no open/seize).
-unsafe fn device_location_id(service: IoService) -> Option<u32> {
-    unsafe {
-        let user_client = make_uuid(&KIO_USB_DEVICE_USER_CLIENT_TYPE_ID);
-        let plugin_type = make_uuid(&KIO_CF_PLUGIN_INTERFACE_ID);
-        let mut plugin: *mut *mut PlugInInterface = ptr::null_mut();
-        let mut score: i32 = 0;
-        let rc = IOCreatePlugInInterfaceForService(
-            service,
-            user_client,
-            plugin_type,
-            &raw mut plugin,
-            &raw mut score,
-        );
-        CFRelease(user_client);
-        CFRelease(plugin_type);
-        if rc != KIO_RETURN_SUCCESS || plugin.is_null() {
-            return None;
-        }
-        let dev_uuid_ref = make_uuid(&KIO_USB_DEVICE_INTERFACE_ID);
-        let dev_uuid = CFUUIDGetUUIDBytes(dev_uuid_ref);
-        CFRelease(dev_uuid_ref);
-        let mut dev_ptr: *mut c_void = ptr::null_mut();
-        let qrc = ((**plugin).query_interface)(plugin.cast::<c_void>(), dev_uuid, &raw mut dev_ptr);
-        IODestroyPlugInInterface(plugin);
-        if qrc != 0 || dev_ptr.is_null() {
-            return None;
-        }
-        let dev = dev_ptr.cast::<*mut UsbDeviceInterface>();
-        let mut location: u32 = 0;
-        let ok = ((**dev).get_location_id)(dev.cast::<c_void>(), &raw mut location)
-            == KIO_RETURN_SUCCESS;
-        ((**dev).release)(dev.cast::<c_void>());
-        ok.then_some(location)
-    }
-}
-
-fn cf_string(s: &str) -> *const c_void {
-    let Ok(c) = CString::new(s) else {
-        return ptr::null();
-    };
-    // SAFETY: UTF-8 C string; returned CFString is owned by the caller.
-    unsafe { CFStringCreateWithCString(ptr::null(), c.as_ptr(), K_CF_STRING_ENCODING_UTF8) }
-}
-
-unsafe fn cf_string_value(cf: *const c_void) -> Option<String> {
-    if cf.is_null() {
-        return None;
-    }
-    unsafe {
-        if CFGetTypeID(cf) != CFStringGetTypeID() {
-            CFRelease(cf);
-            return None;
-        }
-        let len = CFStringGetLength(cf);
-        // UTF-8 worst case 4 bytes/char + NUL.
-        let cap = usize::try_from(len).ok()?.checked_mul(4)?.checked_add(1)?;
-        let mut buf = vec![0u8; cap];
-        let ok = CFStringGetCString(
-            cf,
-            buf.as_mut_ptr().cast(),
-            isize::try_from(cap).ok()?,
-            K_CF_STRING_ENCODING_UTF8,
-        ) != 0;
-        CFRelease(cf);
-        if !ok {
-            return None;
-        }
-        let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        String::from_utf8(buf[..nul].to_vec()).ok()
-    }
-}
-
-unsafe fn cf_number_u32(cf: *const c_void) -> Option<u32> {
-    if cf.is_null() {
-        return None;
-    }
-    unsafe {
-        if CFGetTypeID(cf) != CFNumberGetTypeID() {
-            CFRelease(cf);
-            return None;
-        }
-        let mut value: u32 = 0;
-        let ok = CFNumberGetValue(cf, K_CF_NUMBER_SINT32_TYPE, (&raw mut value).cast()) != 0;
-        CFRelease(cf);
-        ok.then_some(value)
-    }
-}
-
-// ── IOKit / CoreFoundation FFI ───────────────────────────────────────────────
-type IoReturn = i32;
-type IoService = u32;
-type IoIterator = u32;
-type CfUuidRef = *const c_void;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CfUuidBytes {
-    bytes: [u8; 16],
-}
-
-#[repr(C)]
-struct IoUsbDevRequest {
-    bm_request_type: u8,
-    b_request: u8,
-    w_value: u16,
-    w_index: u16,
-    w_length: u16,
-    p_data: *mut c_void,
-    w_len_done: u32,
-}
-
-// IOCFPlugInInterface — we only need the IUnknown head (QueryInterface/Release).
-#[repr(C)]
-struct PlugInInterface {
-    _reserved: *mut c_void,
-    query_interface: extern "C" fn(*mut c_void, CfUuidBytes, *mut *mut c_void) -> i32,
-    add_ref: extern "C" fn(*mut c_void) -> u32,
-    release: extern "C" fn(*mut c_void) -> u32,
-}
-
-// IOUSBDeviceInterface vtable (IOUSBLib.h). Slots we don't call are typed as
-// opaque pointers so the offsets of the ones we *do* call stay correct.
-#[repr(C)]
-struct UsbDeviceInterface {
-    _reserved: *mut c_void,
-    query_interface: extern "C" fn(*mut c_void, CfUuidBytes, *mut *mut c_void) -> i32,
-    add_ref: extern "C" fn(*mut c_void) -> u32,
-    release: extern "C" fn(*mut c_void) -> u32,
-    create_device_async_event_source: *const c_void,
-    get_device_async_event_source: *const c_void,
-    create_device_async_port: *const c_void,
-    get_device_async_port: *const c_void,
-    usb_device_open: extern "C" fn(*mut c_void) -> IoReturn,
-    usb_device_close: extern "C" fn(*mut c_void) -> IoReturn,
-    get_device_class: *const c_void,
-    get_device_sub_class: *const c_void,
-    get_device_protocol: *const c_void,
-    get_device_vendor: extern "C" fn(*mut c_void, *mut u16) -> IoReturn,
-    get_device_product: extern "C" fn(*mut c_void, *mut u16) -> IoReturn,
-    get_device_release_number: *const c_void,
-    get_device_address: *const c_void,
-    get_device_bus_power_available: *const c_void,
-    get_device_speed: *const c_void,
-    get_number_of_configurations: extern "C" fn(*mut c_void, *mut u8) -> IoReturn,
-    get_location_id: extern "C" fn(*mut c_void, *mut u32) -> IoReturn,
-    get_configuration_descriptor_ptr: extern "C" fn(*mut c_void, u8, *mut *const u8) -> IoReturn,
-    get_configuration: *const c_void,
-    set_configuration: *const c_void,
-    get_bus_frame_number: *const c_void,
-    reset_device: *const c_void,
-    device_request: extern "C" fn(*mut c_void, *mut IoUsbDevRequest) -> IoReturn,
-    device_request_async: *const c_void,
-    create_interface_iterator: *const c_void,
-    // IOUSBDeviceInterface182 adds OpenSeize: open even while the kernel video
-    // driver holds the device for streaming, so controls work during a preview.
-    usb_device_open_seize: extern "C" fn(*mut c_void) -> IoReturn,
-    // remaining methods unused
-}
-
-#[link(name = "IOKit", kind = "framework")]
-unsafe extern "C" {
-    static kIOMainPortDefault: u32;
-    fn IOServiceMatching(name: *const i8) -> *mut c_void;
-    fn IOServiceGetMatchingServices(
-        main_port: u32,
-        matching: *mut c_void,
-        existing: *mut IoIterator,
-    ) -> IoReturn;
-    fn IOIteratorNext(iterator: IoIterator) -> IoService;
-    fn IOObjectRelease(object: u32) -> IoReturn;
-    fn IOCreatePlugInInterfaceForService(
-        service: IoService,
-        plugin_type: CfUuidRef,
-        interface_type: CfUuidRef,
-        plug_in: *mut *mut *mut PlugInInterface,
-        score: *mut i32,
-    ) -> IoReturn;
-    fn IODestroyPlugInInterface(interface: *mut *mut PlugInInterface) -> IoReturn;
-    fn IORegistryEntryCreateCFProperty(
-        entry: IoService,
-        key: *const c_void,
-        allocator: *const c_void,
-        options: u32,
-    ) -> *const c_void;
-}
-
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFUUIDCreateFromUUIDBytes(allocator: *const c_void, bytes: CfUuidBytes) -> CfUuidRef;
-    fn CFUUIDGetUUIDBytes(uuid: CfUuidRef) -> CfUuidBytes;
-    fn CFRelease(cf: *const c_void);
-    fn CFStringCreateWithCString(
-        allocator: *const c_void,
-        c_str: *const i8,
-        encoding: u32,
-    ) -> *const c_void;
-    fn CFStringGetTypeID() -> usize;
-    fn CFNumberGetTypeID() -> usize;
-    fn CFGetTypeID(cf: *const c_void) -> usize;
-    fn CFStringGetLength(s: *const c_void) -> isize;
-    fn CFStringGetCString(s: *const c_void, buf: *mut i8, buffer_size: isize, encoding: u32) -> u8;
-    fn CFNumberGetValue(number: *const c_void, the_type: i32, value_ptr: *mut c_void) -> u8;
-}
-
-/// `kCFStringEncodingUTF8`.
-const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
-/// `kCFNumberSInt32Type` — locationID is a 32-bit number in the registry.
-const K_CF_NUMBER_SINT32_TYPE: i32 = 3;
-
-// IOUSBLib UUIDs, as raw bytes (UUID order).
-const KIO_USB_DEVICE_USER_CLIENT_TYPE_ID: [u8; 16] = [
-    0x9d, 0xc7, 0xb7, 0x80, 0x9e, 0xc0, 0x11, 0xd4, 0xa5, 0x4f, 0x00, 0x0a, 0x27, 0x05, 0x28, 0x61,
-];
-const KIO_CF_PLUGIN_INTERFACE_ID: [u8; 16] = [
-    0xc2, 0x44, 0xe8, 0x58, 0x10, 0x9c, 0x11, 0xd4, 0x91, 0xd4, 0x00, 0x50, 0xe4, 0xc6, 0x42, 0x6f,
-];
-// kIOUSBDeviceInterfaceID182 — the first version exposing USBDeviceOpenSeize.
-const KIO_USB_DEVICE_INTERFACE_ID: [u8; 16] = [
-    0x15, 0x2f, 0xc4, 0x96, 0x48, 0x91, 0x11, 0xd5, 0x9d, 0x52, 0x00, 0x0a, 0x27, 0x80, 0x1e, 0x86,
-];
-
-/// An opened IOKit USB device interface, with its UVC topology resolved. Closes
-/// and releases on drop.
+/// An opened IOKit USB device with its UVC topology resolved. The seize is
+/// released when [`iokit::SeizedDevice`] drops.
 struct UsbDevice {
-    dev: *mut *mut UsbDeviceInterface,
+    device: SeizedDevice,
     vc_interface: u8,
     /// Processing-Unit id (image controls).
     unit_id: u8,
@@ -593,77 +363,62 @@ impl UsbDevice {
         // pick the one whose location matches), but parse it as a fallback.
         let want_location = location_hint(unique_id);
 
-        // SAFETY: standard IOKit device enumeration; each retained object is
-        // released, and the matching dictionary is consumed by the call.
-        unsafe {
-            let class = CString::new("IOUSBDevice").map_err(|e| ControlError::Io(e.to_string()))?;
-            let matching = IOServiceMatching(class.as_ptr());
-            if matching.is_null() {
-                return Err(ControlError::Io("IOServiceMatching".into()));
+        let services = iokit::usb_devices().map_err(|call| ControlError::Io(call.to_string()))?;
+        let mut chosen: Option<Opened> = None;
+        // Count Logitech cameras reached on the location-less path. With a
+        // parseable location only an exact match opens; without a hint (an
+        // unparseable unique id) the first Logitech camera is a best effort
+        // that is only safe when it's the *only* one — see the fail-closed
+        // check after the loop.
+        let mut vendor_candidates = 0usize;
+        for service in services {
+            let Some(found) = Self::try_open(&service, want_vid) else {
+                continue;
+            };
+            if want_location.is_some_and(|want| found.matched_location == Some(want)) {
+                chosen = Some(found);
+                break;
             }
-            let mut iter: IoIterator = 0;
-            if IOServiceGetMatchingServices(kIOMainPortDefault, matching, &raw mut iter)
-                != KIO_RETURN_SUCCESS
-            {
-                return Err(ControlError::Io("IOServiceGetMatchingServices".into()));
-            }
-
-            let mut chosen: Option<Opened> = None;
-            // Count Logitech cameras reached on the location-less path. With a
-            // parseable location only an exact match opens; without a hint (an
-            // unparseable unique id) the first Logitech camera is a best effort
-            // that is only safe when it's the *only* one — see the fail-closed
-            // check after the loop.
-            let mut vendor_candidates = 0usize;
-            loop {
-                let service = IOIteratorNext(iter);
-                if service == 0 {
-                    break;
-                }
-                match Self::try_open(service, want_vid, want_location) {
-                    Some(found) => {
-                        let exact =
-                            want_location.is_some_and(|l| found.matched_location == Some(l));
-                        IOObjectRelease(service);
-                        if exact {
-                            if let Some(prev) = chosen.take() {
-                                prev.into_device().close();
-                            }
-                            chosen = Some(found);
-                            break;
-                        } else if want_location.is_none() {
-                            vendor_candidates += 1;
-                            if chosen.is_none() {
-                                chosen = Some(found);
-                            } else {
-                                found.into_device().close();
-                            }
-                        } else {
-                            found.into_device().close();
-                        }
-                    }
-                    None => {
-                        IOObjectRelease(service);
-                    }
+            if want_location.is_none() {
+                vendor_candidates += 1;
+                if chosen.is_none() {
+                    chosen = Some(found);
                 }
             }
-            IOObjectRelease(iter);
-
-            // A location-less match is only unambiguous with exactly one
-            // Logitech camera attached; with two (and a unique id we couldn't
-            // parse into a USB location) we can't tell them apart, so refuse
-            // rather than write the wrong camera's registers.
-            if want_location.is_none() && vendor_candidates > 1 {
-                if let Some(dev) = chosen.take() {
-                    dev.into_device().close();
-                }
-                return Err(ControlError::Ambiguous);
-            }
-
-            chosen
-                .map(Opened::into_device)
-                .ok_or(ControlError::NotFound)
         }
+
+        // A location-less match is only unambiguous with exactly one Logitech
+        // camera attached; with two (and a unique id we couldn't parse into a
+        // USB location) we can't tell them apart, so refuse rather than write
+        // the wrong camera's registers.
+        if want_location.is_none() && vendor_candidates > 1 {
+            return Err(ControlError::Ambiguous);
+        }
+
+        chosen
+            .map(Opened::into_device)
+            .ok_or(ControlError::NotFound)
+    }
+
+    /// Try to build an [`Opened`] from a USB service: query the device
+    /// interface, match the vendor id, seize it, and resolve its UVC topology.
+    fn try_open(service: &IoObject, want_vid: u16) -> Option<Opened> {
+        let interface = UsbInterface::open(service)?;
+        if interface.vendor_id()? != want_vid {
+            return None;
+        }
+        let matched_location = interface.location_id();
+        let device = interface.seize()?;
+        let topology = video_control_topology(&device)?;
+        Some(Opened {
+            device: Self {
+                device,
+                vc_interface: topology.vc_interface,
+                unit_id: topology.processing_unit,
+                terminal_id: topology.camera_terminal,
+            },
+            matched_location,
+        })
     }
 
     /// The entity id addressed for `unit`, or `Unsupported` when the camera's
@@ -678,37 +433,46 @@ impl UsbDevice {
     /// Issue a UVC GET request (`req` = GET_MIN/MAX/DEF/CUR), returning the
     /// control-sized little-endian value, sign-extended per the control.
     fn get(&self, control: CameraControl, req: u8) -> Result<i32, ControlError> {
-        let entity = self.entity(control.unit())?;
+        let ControlSpec {
+            unit,
+            selector,
+            payload,
+        } = control.spec();
+        let entity = self.entity(unit)?;
         let mut buf = [0u8; 4];
-        let len = control.len();
-        self.transfer(RT_GET, req, control.selector(), entity, &mut buf[..len])?;
-        Ok(match (len, control.signed()) {
-            (4, _) => i32::try_from(u32::from_le_bytes(buf)).unwrap_or(i32::MAX),
-            (_, true) => i32::from(i16::from_le_bytes([buf[0], buf[1]])),
-            (_, false) => i32::from(u16::from_le_bytes([buf[0], buf[1]])),
+        self.transfer(RT_GET, req, selector, entity, &mut buf[..payload.len()])?;
+        Ok(match payload {
+            Payload::U32 => i32::try_from(u32::from_le_bytes(buf)).unwrap_or(i32::MAX),
+            Payload::I16 => i32::from(i16::from_le_bytes([buf[0], buf[1]])),
+            Payload::U16 => i32::from(u16::from_le_bytes([buf[0], buf[1]])),
         })
     }
 
     /// Issue a UVC SET_CUR request with `value` truncated to the control's size.
     fn set(&self, control: CameraControl, value: i32) -> Result<(), ControlError> {
-        let entity = self.entity(control.unit())?;
+        let ControlSpec {
+            unit,
+            selector,
+            payload,
+        } = control.spec();
+        let entity = self.entity(unit)?;
         let mut buf = (value as u32).to_le_bytes();
-        let len = control.len();
         self.transfer(
             RT_SET,
             UVC_SET_CUR,
-            control.selector(),
+            selector,
             entity,
-            &mut buf[..len],
+            &mut buf[..payload.len()],
         )
     }
 
     /// Read an auto toggle (`req` = GET_CUR/GET_DEF) as a boolean. For the
     /// AE-mode bitmap anything but fully-manual counts as auto.
     fn get_auto(&self, toggle: AutoToggle, req: u8) -> Result<bool, ControlError> {
-        let entity = self.entity(toggle.unit())?;
+        let ToggleSpec { unit, selector } = toggle.spec();
+        let entity = self.entity(unit)?;
         let mut buf = [0u8; 1];
-        self.transfer(RT_GET, req, toggle.selector(), entity, &mut buf)?;
+        self.transfer(RT_GET, req, selector, entity, &mut buf)?;
         Ok(match toggle {
             AutoToggle::Exposure => buf[0] != AE_MANUAL,
             _ => buf[0] != 0,
@@ -718,8 +482,8 @@ impl UsbDevice {
     /// Switch an auto toggle. Enabling auto-exposure tries each AE mode the
     /// camera might support, most-automatic first.
     fn set_auto(&self, toggle: AutoToggle, on: bool) -> Result<(), ControlError> {
-        let entity = self.entity(toggle.unit())?;
-        let selector = toggle.selector();
+        let ToggleSpec { unit, selector } = toggle.spec();
+        let entity = self.entity(unit)?;
         let candidates: &[u8] = match (toggle, on) {
             (AutoToggle::Exposure, true) => &AE_AUTO_MODES,
             (AutoToggle::Exposure, false) => &[AE_MANUAL],
@@ -744,36 +508,19 @@ impl UsbDevice {
         entity: u8,
         data: &mut [u8],
     ) -> Result<(), ControlError> {
-        let mut req = IoUsbDevRequest {
-            bm_request_type: request_type,
-            b_request: request,
-            w_value: selector << 8,
-            w_index: (u16::from(entity) << 8) | u16::from(self.vc_interface),
-            w_length: data.len() as u16,
-            p_data: data.as_mut_ptr().cast::<c_void>(),
-            w_len_done: 0,
+        let mut req = IOUSBDevRequest {
+            bmRequestType: request_type,
+            bRequest: request,
+            wValue: selector << 8,
+            wIndex: (u16::from(entity) << 8) | u16::from(self.vc_interface),
+            wLength: data.len() as u16,
+            pData: data.as_mut_ptr().cast::<c_void>(),
+            wLenDone: 0,
         };
-        // SAFETY: `self.dev` is a live IOUSBDeviceInterface**; DeviceRequest reads
-        // `req` and writes into the `data` buffer it points at.
-        let rc = unsafe { ((**self.dev).device_request)(self.dev.cast::<c_void>(), &raw mut req) };
-        if rc != KIO_RETURN_SUCCESS {
-            return Err(ControlError::Unsupported);
-        }
-        Ok(())
-    }
-
-    fn close(self) {
-        // Drop handles the teardown.
-        drop(self);
-    }
-}
-
-impl Drop for UsbDevice {
-    fn drop(&mut self) {
-        // SAFETY: `self.dev` is a live interface we opened; close then release it.
-        unsafe {
-            let _ = ((**self.dev).usb_device_close)(self.dev.cast::<c_void>());
-            ((**self.dev).release)(self.dev.cast::<c_void>());
+        if self.device.control_request(&mut req) {
+            Ok(())
+        } else {
+            Err(ControlError::Unsupported)
         }
     }
 }
@@ -791,165 +538,97 @@ impl Opened {
     }
 }
 
-impl UsbDevice {
-    /// Try to build an [`Opened`] from an `io_service_t`: query the device
-    /// interface, match the vendor id, open it, and resolve its UVC topology.
-    unsafe fn try_open(
-        service: IoService,
-        want_vid: u16,
-        _want_location: Option<u32>,
-    ) -> Option<Opened> {
-        unsafe {
-            let user_client = make_uuid(&KIO_USB_DEVICE_USER_CLIENT_TYPE_ID);
-            let plugin_type = make_uuid(&KIO_CF_PLUGIN_INTERFACE_ID);
-            let mut plugin: *mut *mut PlugInInterface = ptr::null_mut();
-            let mut score: i32 = 0;
-            let rc = IOCreatePlugInInterfaceForService(
-                service,
-                user_client,
-                plugin_type,
-                &raw mut plugin,
-                &raw mut score,
-            );
-            CFRelease(user_client);
-            CFRelease(plugin_type);
-            if rc != KIO_RETURN_SUCCESS || plugin.is_null() {
-                return None;
-            }
-
-            let dev_uuid_ref = make_uuid(&KIO_USB_DEVICE_INTERFACE_ID);
-            let dev_uuid = CFUUIDGetUUIDBytes(dev_uuid_ref);
-            CFRelease(dev_uuid_ref);
-            let mut dev_ptr: *mut c_void = ptr::null_mut();
-            let qrc =
-                ((**plugin).query_interface)(plugin.cast::<c_void>(), dev_uuid, &raw mut dev_ptr);
-            IODestroyPlugInInterface(plugin);
-            if qrc != 0 || dev_ptr.is_null() {
-                return None;
-            }
-            let dev = dev_ptr.cast::<*mut UsbDeviceInterface>();
-
-            let mut vid: u16 = 0;
-            ((**dev).get_device_vendor)(dev.cast::<c_void>(), &raw mut vid);
-            if vid != want_vid {
-                ((**dev).release)(dev.cast::<c_void>());
-                return None;
-            }
-
-            let mut location: u32 = 0;
-            let loc_ok = ((**dev).get_location_id)(dev.cast::<c_void>(), &raw mut location)
-                == KIO_RETURN_SUCCESS;
-
-            // Seize (not plain open) so a control transfer succeeds even while
-            // the camera is streaming in this or another app. Callers batch their
-            // reads/writes into one open to keep this churn low.
-            if ((**dev).usb_device_open_seize)(dev.cast::<c_void>()) != KIO_RETURN_SUCCESS {
-                ((**dev).release)(dev.cast::<c_void>());
-                return None;
-            }
-
-            let Some(topology) = video_control_topology(dev) else {
-                let _ = ((**dev).usb_device_close)(dev.cast::<c_void>());
-                ((**dev).release)(dev.cast::<c_void>());
-                return None;
-            };
-
-            Some(Opened {
-                device: UsbDevice {
-                    dev,
-                    vc_interface: topology.vc_interface,
-                    unit_id: topology.processing_unit,
-                    terminal_id: topology.camera_terminal,
-                },
-                matched_location: loc_ok.then_some(location),
-            })
-        }
-    }
-}
-
 /// The VideoControl entities a control request can address, parsed from the
 /// configuration descriptor.
+#[derive(Debug, PartialEq, Eq)]
 struct VcTopology {
     vc_interface: u8,
     processing_unit: u8,
     camera_terminal: Option<u8>,
 }
 
-/// Parse the configuration descriptor for the VideoControl interface number,
-/// the Processing-Unit id, and the camera (input) terminal id.
-unsafe fn video_control_topology(dev: *mut *mut UsbDeviceInterface) -> Option<VcTopology> {
-    unsafe {
-        let mut num_configs: u8 = 0;
-        ((**dev).get_number_of_configurations)(dev.cast::<c_void>(), &raw mut num_configs);
-        for cfg in 0..num_configs {
-            let mut desc: *const u8 = ptr::null();
-            if ((**dev).get_configuration_descriptor_ptr)(dev.cast::<c_void>(), cfg, &raw mut desc)
-                != KIO_RETURN_SUCCESS
-                || desc.is_null()
-            {
-                continue;
-            }
-            // wTotalLength at offset 2..4 (little-endian).
-            let total = u16::from(*desc.add(2)) | (u16::from(*desc.add(3)) << 8);
-            if let Some(found) = scan_descriptors(desc, total as usize) {
-                return Some(found);
-            }
-        }
-        None
-    }
+/// Parse the device's configuration descriptors for the VideoControl interface
+/// number, the Processing-Unit id, and the camera (input) terminal id.
+fn video_control_topology(device: &SeizedDevice) -> Option<VcTopology> {
+    (0..device.configuration_count()?)
+        .filter_map(|index| device.configuration_descriptor(index))
+        .find_map(scan_descriptors)
 }
 
-/// Walk a configuration descriptor blob, collecting the first VideoControl
+/// The VideoControl interface the descriptor walk is currently inside, and the
+/// entities seen in it so far.
+///
+/// A class-specific descriptor belongs to the interface it follows, so this is
+/// dropped on leaving the block: VideoStreaming reuses descriptor type `0x24`
+/// with its own subtype numbering, in which `0x05` is a frame descriptor rather
+/// than a Processing Unit and `0x02` an output header rather than an input
+/// terminal. Tracking the block — instead of a bare "have we seen a
+/// VideoControl interface" flag — is what keeps a frame index from being read
+/// as a Processing-Unit id on a camera whose VideoControl block has none.
+struct VcBlock {
+    interface: u8,
+    camera_terminal: Option<u8>,
+}
+
+/// Walk a configuration-descriptor blob, collecting the first VideoControl
 /// interface's Processing-Unit and camera-terminal entity ids.
-unsafe fn scan_descriptors(base: *const u8, total: usize) -> Option<VcTopology> {
-    unsafe {
-        let mut off = 0usize;
-        let mut vc_interface: Option<u8> = None;
-        let mut camera_terminal: Option<u8> = None;
-        while off + 2 <= total {
-            let len = *base.add(off) as usize;
-            if len < 2 || off + len > total {
-                break;
-            }
-            let dtype = *base.add(off + 1);
-            if dtype == DESC_INTERFACE && len >= 9 {
-                let class = *base.add(off + 5);
-                let sub = *base.add(off + 6);
-                vc_interface = (class == CC_VIDEO && sub == SC_VIDEOCONTROL)
-                    .then(|| *base.add(off + 2))
-                    .or(vc_interface);
-            } else if dtype == DESC_CS_INTERFACE && len >= 4 && vc_interface.is_some() {
-                let subtype = *base.add(off + 2);
-                // bUnitID / bTerminalID sit at offset 3 in both descriptors;
-                // an input terminal's wTerminalType (offset 4..6) must be the
-                // camera sensor — skip composite/other input terminals.
-                if subtype == VC_INPUT_TERMINAL && len >= 8 {
-                    let ttype =
-                        u16::from(*base.add(off + 4)) | (u16::from(*base.add(off + 5)) << 8);
-                    if ttype == ITT_CAMERA && camera_terminal.is_none() {
-                        camera_terminal = Some(*base.add(off + 3));
-                    }
-                } else if subtype == VC_PROCESSING_UNIT {
-                    return vc_interface.map(|vc| VcTopology {
-                        vc_interface: vc,
-                        processing_unit: *base.add(off + 3),
-                        camera_terminal,
-                    });
-                }
-            }
-            off += len;
+///
+/// The walk stops at the first descriptor whose `bLength` is nonsense or would
+/// run past the blob, so a malformed descriptor truncates the scan rather than
+/// misreading the bytes after it.
+fn scan_descriptors(blob: &[u8]) -> Option<VcTopology> {
+    let mut rest = blob;
+    let mut block: Option<VcBlock> = None;
+    while rest.len() >= 2 {
+        let len = usize::from(rest[0]);
+        let dtype = rest[1];
+        if len < 2 || len > rest.len() {
+            break;
         }
-        None
-    }
-}
+        let (descriptor, tail) = rest.split_at(len);
+        rest = tail;
 
-unsafe fn make_uuid(bytes: &[u8; 16]) -> CfUuidRef {
-    unsafe { CFUUIDCreateFromUUIDBytes(ptr::null(), CfUuidBytes { bytes: *bytes }) }
+        if dtype == DESC_INTERFACE {
+            // bInterfaceNumber, bInterfaceClass and bInterfaceSubClass sit at
+            // offsets 2, 5 and 6 of an interface descriptor.
+            block = match (descriptor.get(2), descriptor.get(5), descriptor.get(6)) {
+                (Some(&interface), Some(&class), Some(&subclass))
+                    if class == CC_VIDEO && subclass == SC_VIDEOCONTROL =>
+                {
+                    Some(VcBlock {
+                        interface,
+                        camera_terminal: None,
+                    })
+                }
+                _ => None,
+            };
+        } else if dtype == DESC_CS_INTERFACE
+            && let Some(block) = block.as_mut()
+            && let (Some(&subtype), Some(&entity)) = (descriptor.get(2), descriptor.get(3))
+        {
+            // bUnitID / bTerminalID sit at offset 3 in both descriptors; an
+            // input terminal's wTerminalType (offsets 4..6) must be the camera
+            // sensor — skip composite/other input terminals.
+            if subtype == VC_INPUT_TERMINAL && descriptor.len() >= 8 {
+                let terminal_type = u16::from(descriptor[4]) | (u16::from(descriptor[5]) << 8);
+                if terminal_type == ITT_CAMERA && block.camera_terminal.is_none() {
+                    block.camera_terminal = Some(entity);
+                }
+            } else if subtype == VC_PROCESSING_UNIT {
+                return Some(VcTopology {
+                    vc_interface: block.interface,
+                    processing_unit: entity,
+                    camera_terminal: block.camera_terminal,
+                });
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::location_hint;
+    use super::{ITT_CAMERA, VcTopology, location_hint, scan_descriptors};
 
     /// AVFoundation prints the location id unpadded: a StreamCam on bus
     /// 0x01123000 yields a 15-digit id whose leading run is only 7 digits.
@@ -971,5 +650,117 @@ mod tests {
         assert_eq!(location_hint("0x46d0893"), None);
         assert_eq!(location_hint("46d0893"), None);
         assert_eq!(location_hint(""), None);
+    }
+
+    /// A 9-byte interface descriptor with the given number/class/subclass.
+    fn interface(number: u8, class: u8, subclass: u8) -> Vec<u8> {
+        vec![9, 0x04, number, 0, 0, class, subclass, 0, 0]
+    }
+
+    /// An 8-byte VC_INPUT_TERMINAL descriptor for `entity`.
+    fn input_terminal(entity: u8, terminal_type: u16) -> Vec<u8> {
+        vec![
+            8,
+            0x24,
+            0x02,
+            entity,
+            terminal_type as u8,
+            (terminal_type >> 8) as u8,
+            0,
+            0,
+        ]
+    }
+
+    /// A minimal VC_PROCESSING_UNIT descriptor for `entity`.
+    fn processing_unit(entity: u8) -> Vec<u8> {
+        vec![4, 0x24, 0x05, entity]
+    }
+
+    #[test]
+    fn finds_the_processing_unit_behind_a_videocontrol_interface() {
+        let blob: Vec<u8> = [
+            vec![9, 0x02, 0, 0, 0, 0, 0, 0, 0], // configuration header
+            interface(3, 0x0E, 0x01),           // VideoControl
+            input_terminal(1, ITT_CAMERA),
+            processing_unit(2),
+        ]
+        .concat();
+        assert_eq!(
+            scan_descriptors(&blob),
+            Some(VcTopology {
+                vc_interface: 3,
+                processing_unit: 2,
+                camera_terminal: Some(1),
+            })
+        );
+    }
+
+    /// Composite/other input terminals are not the camera sensor, so lens
+    /// controls must report unsupported rather than address the wrong entity.
+    #[test]
+    fn a_non_camera_input_terminal_leaves_lens_controls_unsupported() {
+        let blob: Vec<u8> = [
+            interface(0, 0x0E, 0x01),
+            input_terminal(1, 0x0401), // ITT_MEDIA_TRANSPORT_INPUT
+            processing_unit(5),
+        ]
+        .concat();
+        assert_eq!(
+            scan_descriptors(&blob),
+            Some(VcTopology {
+                vc_interface: 0,
+                processing_unit: 5,
+                camera_terminal: None,
+            })
+        );
+    }
+
+    /// Class-specific descriptors before any VideoControl interface belong to
+    /// some other function and must not be read as UVC entities.
+    #[test]
+    fn class_descriptors_outside_a_videocontrol_interface_are_ignored() {
+        let blob: Vec<u8> = [
+            interface(0, 0x01, 0x01), // audio
+            processing_unit(9),
+        ]
+        .concat();
+        assert_eq!(scan_descriptors(&blob), None);
+    }
+
+    /// …and neither do the ones *after* it. VideoStreaming reuses descriptor
+    /// type 0x24 with its own subtype numbering, where 0x05 is
+    /// VS_FRAME_UNCOMPRESSED rather than VC_PROCESSING_UNIT. A camera whose
+    /// VideoControl block has no Processing Unit must report none, not the
+    /// first frame descriptor's bFrameIndex — which would send every image
+    /// control to whatever entity happens to share that id.
+    #[test]
+    fn a_videostreaming_frame_descriptor_is_not_a_processing_unit() {
+        // A real VS_FRAME_UNCOMPRESSED: 30 bytes, descriptor type 0x24 like a
+        // VideoControl unit, subtype 0x05, and bFrameIndex sitting exactly
+        // where a unit keeps its bUnitID.
+        let mut vs_frame = vec![0u8; 30];
+        vs_frame[0] = 30;
+        vs_frame[1] = 0x24;
+        vs_frame[2] = 0x05;
+        vs_frame[3] = 1;
+        let blob: Vec<u8> = [
+            interface(0, 0x0E, 0x01), // VideoControl — no processing unit
+            input_terminal(1, ITT_CAMERA),
+            interface(1, 0x0E, 0x02), // VideoStreaming
+            vs_frame,
+        ]
+        .concat();
+        assert_eq!(scan_descriptors(&blob), None);
+    }
+
+    /// A descriptor whose bLength overruns the blob truncates the walk instead
+    /// of reading past it — and a zero length must not loop forever.
+    #[test]
+    fn malformed_lengths_stop_the_walk() {
+        let overrun: Vec<u8> = [interface(0, 0x0E, 0x01), vec![64, 0x24, 0x05, 7]].concat();
+        assert_eq!(scan_descriptors(&overrun), None);
+
+        let zero_length: Vec<u8> = [interface(0, 0x0E, 0x01), vec![0, 0x24]].concat();
+        assert_eq!(scan_descriptors(&zero_length), None);
     }
 }

@@ -38,7 +38,7 @@ Tasten neu belegen, DPI und SmartShift steuern, Profile pro App umschalten — o
 
 OpenLogi spricht mit Logitech-HID++-Peripheriegeräten über Logi-Bolt- und Unifying-Empfänger, Bluetooth-Direktverbindungen oder USB-Kabel — ganz ohne Logi Options+. Es besteht aus drei Komponenten:
 
-- **[OpenLogi GUI](../crates/openlogi-gui)** — eine GPUI-Desktop-App: interaktives Mausdiagramm mit klickbaren Hotspots, Aktions-Picker pro Taste (eingebaute Aktionen plus eigene Tastenkürzel aus der TOML-Konfiguration), DPI-Voreinstellungen, SmartShift, native Scroll-Umkehr pro Gerät, RGB-Tastaturbeleuchtung, Profile pro Anwendung, Live-Gerätekarussell und ein in 20 Sprachen lokalisiertes Einstellungsfenster.
+- **[OpenLogi GUI](../crates/openlogi-desktop)** — eine GPUI-Desktop-App: interaktives Mausdiagramm mit klickbaren Hotspots, Aktions-Picker pro Taste (eingebaute Aktionen plus eigene Tastenkürzel aus der TOML-Konfiguration), DPI-Voreinstellungen, SmartShift, native Scroll-Umkehr pro Gerät, RGB-Tastaturbeleuchtung, Profile pro Anwendung, Live-Gerätekarussell und ein in 20 Sprachen lokalisiertes Einstellungsfenster.
 - **[OpenLogi agent](../crates/openlogi-agent)** — der Hintergrunddienst, dem der Input-Hook und sämtliche Geräte-I/O gehören. Die GUI ist ein reiner IPC-Client und startet den Agent bei Bedarf.
 - **[OpenLogi CLI](../crates/openlogi-cli)** — ein Kommandozeilenwerkzeug für headless Inventar (`list`) sowie Asset-Sync- und Geräte-Diagnose-Unterbefehle.
 
@@ -156,9 +156,10 @@ Siehe [DEVELOPMENT.md](DEVELOPMENT.md)
 
 ## Danksagungen
 
-- [`hidpp`](https://crates.io/crates/hidpp) von [@lus](https://github.com/lus)
-- [Solaar](https://github.com/pwr-Solaar/Solaar)
-- [Mouser](https://github.com/TomBadash/Mouser) von Tom Badash
+- **Windows, Kameras und i18n** von [@davidbudnick](https://github.com/davidbudnick) — der Windows-Eingabe-Hook und MSI-Updates, Logitech-Webcam-Unterstützung, Tastatur-RGB und die Crowdin-Übersetzungspipeline
+- **Linux-Portierung** von [@cserby](https://github.com/cserby) — evdev/uinput-Hook, D-Bus-Aktionen, .deb/.rpm-Paketierung
+- [Solaar](https://github.com/pwr-Solaar/Solaar) von [@pwr](https://github.com/pwr) — die vollständigste quelloffene HID++-Implementierung und unsere Protokollreferenz
+- [Mouser](https://github.com/TomBadash/Mouser) von [@TomBadash](https://github.com/TomBadash) — Vorarbeit zum selben Ziel: ein lokaler Options+-Ersatz ohne Konto
 
 ## Lizenz
 
@@ -166,6 +167,11 @@ Doppelt lizenziert, wahlweise unter
 
 - Apache License, Version 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
 - MIT-Lizenz ([LICENSE-MIT](../LICENSE-MIT))
+
+### Code von Dritten
+
+`crates/openlogi-hidpp` ist ein eingebundener Fork von [`hidpp`](https://crates.io/crates/hidpp)
+von [@lus](https://github.com/lus), lizenziert unter 0BSD.
 
 ### Logo & Markenressourcen
 

@@ -1,43 +1,31 @@
-[package]
-name = "openlogi"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-authors.workspace = true
-description = "OpenLogi command-line interface — a local-first companion for Logitech HID++ peripherals."
-keywords = ["logitech", "hidpp", "hid", "mouse", "cli"]
-categories = ["command-line-utilities", "hardware-support"]
-readme = "README.md"
-
-[dependencies]
-openlogi-cli = { path = "crates/openlogi-cli", version = "0.6.26" }
-anyhow = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
-
-[lints]
-workspace = true
-
 [workspace]
 resolver = "3"
 members = [
+    "crates/openlogi",
     "crates/openlogi-core",
     "crates/openlogi-inject",
     "crates/openlogi-hidpp",
+    "crates/openlogi-hidpp-derive",
     "crates/openlogi-hid",
     "crates/openlogi-camera",
     "crates/openlogi-assets",
     "crates/openlogi-cli",
+    "crates/openlogi-ipc",
     "crates/openlogi-agent-core",
     "crates/openlogi-agent",
-    "crates/openlogi-gui",
+    "crates/openlogi-desktop",
+    "crates/openlogi-ui",
+    "crates/openlogi-overlay",
     "crates/openlogi-hook",
     "xtask",
 ]
+# The CLI used to be the root package, so a bare `cargo build` / `cargo run`
+# built it alone. Keep that: without this, a virtual workspace defaults to every
+# member, dragging GPUI's Metal shader toolchain into the simplest build there is.
+default-members = ["crates/openlogi"]
 
 [workspace.package]
-version = "0.6.26"
+version = "0.7.1"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT OR Apache-2.0"
@@ -46,14 +34,17 @@ authors = ["AprilNEA <dev@aprilnea.me>"]
 description = "Lightweight, local-first alternative to Logitech Options+ for HID++ devices"
 
 [workspace.dependencies]
-hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.6.26" }
+hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.7.1" }
 async-hid = "0.5.2"
 # Cross-platform local IPC for the agent <-> GUI tarpc transport: a Unix-domain
 # socket on Unix, a named pipe on Windows. The `tokio` feature gives the async
 # Stream/Listener used by serde_transport.
 interprocess = { version = "2", features = ["tokio"] }
 # The agent <-> GUI RPC layer itself, over the `interprocess` transport above.
-tarpc = { version = "0.37", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
+# 0.38 is a hard floor: earlier releases hard-depend on opentelemetry 0.30 (not
+# feature-gated — google/tarpc#564), which drags the vulnerable
+# opentelemetry_sdk 0.30 into the graph (GHSA-w9wp-h8wv-79jx).
+tarpc = { version = "0.38", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
 # Windows FFI for the leaf input/HID paths (WH_MOUSE_LL hook, SendInput action
 # synthesis, native HID writes). Features are selected per crate.
 windows-sys = "0.61"
@@ -62,7 +53,7 @@ futures-lite = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "json"] }
 sha2 = "0.10"
 atomic-write-file = "0.3.0"
 backon = { version = "1.6", default-features = false, features = ["std", "std-blocking-sleep"] }
@@ -77,12 +68,21 @@ core-foundation = { version = "0.10", default-features = false, features = ["lin
 opener = "0.8.5"
 shellexpand = "3.1.2"
 evdev = "0.13"
-# macOS ObjC FFI (see platform/CLAUDE.md): objc2 gives leak-proof Retained<T>
-# bindings. Feature lists are selected per crate; the version stays unified so
-# a resolve can't move gpui's Cargo.lock pin out from under the GUI.
+# macOS ObjC / C FFI (see platform/CLAUDE.md): objc2 gives leak-proof Retained<T>
+# bindings, and the framework crates give typed bindings for the C APIs (privacy
+# permissions included) instead of hand-written `#[link] extern "C"` blocks.
+# Feature lists are selected per crate — these crates are huge, so every entry is
+# `default-features = false`. The version stays unified so a resolve can't move
+# gpui's Cargo.lock pin out from under the GUI.
 objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"
 objc2-foundation = "0.3.2"
+objc2-core-foundation = { version = "0.3.2", default-features = false }
+objc2-application-services = { version = "0.3.2", default-features = false }
+objc2-io-kit = { version = "0.3.2", default-features = false }
+# The block ABI crate objc2's generated bindings use for handler arguments;
+# same unified-version rationale as the objc2 crates above.
+block2 = "0.6.2"
 
 # gpui / gpui_platform track zed's default branch, matching how gpui-component
 # declares them (an explicit rev here would fork the git source and conflict).
@@ -106,19 +106,22 @@ unwrap_used = "warn"
 expect_used = "warn"
 missing_errors_doc = "allow"
 doc_markdown = "allow"
+# Shared lint set, kept in sync with
+# https://gist.github.com/AprilNEA/cdf81f76840fcb883a32503ee7caa539.
+# `cast_*` and `ptr_as_ptr` are pedantic members already; they are listed
+# explicitly so the set stands on its own if the pedantic group ever moves.
+assertions_on_result_states = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+error_impl_error = "warn"
+exit = "warn"
+or_fun_call = "warn"
+ptr_as_ptr = "warn"
+tests_outside_test_module = "warn"
+undocumented_unsafe_blocks = "warn"
 
 [profile.release]
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
-
-# tarpc 0.37 hard-pins opentelemetry 0.30 / tracing-opentelemetry 0.31, which
-# pulls vulnerable opentelemetry_sdk 0.30 (GHSA-w9wp-h8wv-79jx, fixed in
-# 0.32.1). Dependabot cannot bump it alone: the fixed SDK is semver-incompatible
-# with tarpc's pins, and no crates.io tarpc release allows the 0.32 line yet.
-# Patch a 0.37-compatible tree onto otel 0.32 / tracing-opentelemetry 0.33 so
-# opentelemetry_sdk drops out of the runtime graph. Remove when upstream tarpc
-# depends on tracing-opentelemetry >= 0.32.1 (or otherwise sheds the vulnerable
-# SDK). See third_party/tarpc/README.md.
-[patch.crates-io]
-tarpc = { path = "third_party/tarpc" }

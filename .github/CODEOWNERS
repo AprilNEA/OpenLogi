@@ -1,0 +1,77 @@
+# Code owners for AprilNEA/OpenLogi.
+#
+# This is a personal repository, so every owner must be an individual account
+# with write access — `@org/team` entries do not exist here, and an owner
+# without write access is silently ignored by GitHub. Grant write access
+# before adding someone below.
+#
+# The LAST matching pattern wins. The order is deliberate: a broad default,
+# then delegated paths, then the high-risk paths that always narrow back to
+# the maintainer.
+
+# ── Default ────────────────────────────────────────────────────────────────
+*                               @AprilNEA
+
+# ── Windows port ───────────────────────────────────────────────────────────
+# Listed file by file rather than by a `*windows*` glob: in this repo the word
+# means two different things, and `openlogi-gui/src/windows.rs` is the app's
+# auxiliary-window registry (Settings, Add Device), not Win32 code.
+#
+# Windows-only branches living in multi-platform files (openlogi-agent's
+# main.rs / launch_agent.rs / self_restart.rs / takeover.rs, hid/transport.rs,
+# hook/lib.rs, …) stay with the maintainer: CODEOWNERS scopes by path, so it
+# cannot hand out ownership of a single `#[cfg(windows)]` branch.
+#
+# The installer manifest (packaging/windows) and the signing workflow also stay
+# with the maintainer — see the supply-chain block below.
+/crates/openlogi-agent/src/resume_windows.rs    @AprilNEA @davidbudnick
+/crates/openlogi-agent/src/tray_windows.rs      @AprilNEA @davidbudnick
+/crates/openlogi-camera/src/capture_windows.rs  @AprilNEA @davidbudnick
+/crates/openlogi-camera/src/com_windows.rs      @AprilNEA @davidbudnick
+/crates/openlogi-camera/src/uvc_windows.rs      @AprilNEA @davidbudnick
+/crates/openlogi-hid/src/transport/windows.rs   @AprilNEA @davidbudnick
+/crates/openlogi-hid/src/windows_hid.rs         @AprilNEA @davidbudnick
+/crates/openlogi-hook/src/windows.rs            @AprilNEA @davidbudnick
+/crates/openlogi-inject/src/inject/windows.rs   @AprilNEA @davidbudnick
+
+# ── Release, packaging, supply chain ───────────────────────────────────────
+# Anything here can reach the release pipeline's signing and notarization
+# credentials, or change what ends up inside a published artifact.
+/.github/                       @AprilNEA
+/xtask/                         @AprilNEA
+/packaging/                     @AprilNEA
+/.cargo/                        @AprilNEA
+/Cargo.toml                     @AprilNEA
+/Cargo.lock                     @AprilNEA
+/release-plz.toml               @AprilNEA
+/cliff.toml                     @AprilNEA
+/deny.toml                      @AprilNEA
+/crowdin.yml                    @AprilNEA
+/rust-toolchain.toml            @AprilNEA
+/rustfmt.toml                   @AprilNEA
+/prek.toml                      @AprilNEA
+/flake.nix                      @AprilNEA
+/flake.lock                     @AprilNEA
+/devenv.nix                     @AprilNEA
+/devenv.yaml                    @AprilNEA
+/devenv.lock                    @AprilNEA
+
+# ── Licensing and brand ────────────────────────────────────────────────────
+# design/ is proprietary; the license files define the dual-license boundary.
+/LICENSE-MIT                    @AprilNEA
+/LICENSE-APACHE                 @AprilNEA
+/design/                        @AprilNEA
+
+# ── Cross-crate contracts ──────────────────────────────────────────────────
+# openlogi-ipc is an append-only wire format, openlogi-core is the shared
+# config and device model, openlogi-hidpp is a hard fork with its own rules.
+/crates/openlogi-ipc/           @AprilNEA
+/crates/openlogi-core/          @AprilNEA
+/crates/openlogi-hidpp/         @AprilNEA
+/crates/openlogi-hidpp-derive/  @AprilNEA
+
+# ── Agent guides ───────────────────────────────────────────────────────────
+/AGENTS.md                      @AprilNEA
+/CLAUDE.md                      @AprilNEA
+/.claude/                       @AprilNEA
+/.agents/                       @AprilNEA

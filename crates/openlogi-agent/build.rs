@@ -2,15 +2,15 @@
 //! app icon and a VERSIONINFO block — so Task Manager and Explorer identify
 //! the background agent instead of showing a generic blank binary.
 //!
-//! Kept in sync with the twin in `crates/openlogi-gui/build.rs` — only the
+//! Kept in sync with the twin in `crates/openlogi-desktop/build.rs` — only the
 //! description/filename strings differ. `embed-resource` is pinned to the
 //! exact version already in Cargo.lock as gpui's own build-dependency, so it
 //! adds an edge, not a crate, and cannot move the pinned gpui rev.
 
-// A build script fails by panicking, so `expect` (with a message that surfaces
-// in the build log) is the idiomatic error path here — exempt it from the
-// workspace's strict runtime lints.
-#![allow(clippy::expect_used)]
+#![allow(
+    clippy::expect_used,
+    reason = "a build script fails by panicking, so expect — whose message surfaces in the build log — is the idiomatic error path"
+)]
 
 use std::path::PathBuf;
 use std::{env, fs};

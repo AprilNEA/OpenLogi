@@ -16,6 +16,16 @@ use openlogi_core::device::{
     LightCapabilities, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, ThumbwheelCaptureMode};
+use std::sync::Arc;
+
+use crate::observable::ObservableState;
+
+/// An orchestrator wired to a state cell nobody subscribes to. The publishing
+/// paths still run, so a mutator that stops republishing shows up here rather
+/// than only in the running agent.
+fn orchestrator(config: Config) -> Orchestrator {
+    Orchestrator::new(config, Arc::new(ObservableState::new("test".to_string())))
+}
 
 fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
     AgentDevice {
@@ -204,7 +214,7 @@ fn runtime_selection_tracks_online_transition_without_device_set_change() {
     let other_key = "direct:046d:b034:unit:02000000";
     let mut config = Config::default();
     config.set_selected_device(Some(saved_key.to_string()));
-    let mut orchestrator = Orchestrator::new(config);
+    let mut orchestrator = orchestrator(config);
 
     orchestrator.refresh_inventory(
         &[
@@ -327,7 +337,7 @@ fn reapply_targets_new_arrivals_and_transitions() {
 
 #[test]
 fn dpi_cycle_drops_offline_device_and_restores_on_return() {
-    let mut orch = Orchestrator::new(Config::default());
+    let mut orch = orchestrator(Config::default());
     orch.devices = vec![dev("mouse", 1, true)];
     orch.rebuild();
     {
@@ -467,6 +477,30 @@ fn plan_reapply_transitions_are_not_queued_for_confirmation() {
 }
 
 #[test]
+fn plan_reapply_wake_targets_get_a_confirm_retry_run() {
+    use std::collections::HashMap;
+    // A system wake re-applies to every online device *and* queues the same
+    // confirm-retry run a first sighting gets: post-wake, a receiver can
+    // enumerate while its mouse link is still re-establishing, so the first
+    // write can time out just like the cold-boot race (#527). Offline devices
+    // stay untargeted and unqueued; they re-apply on their own transition.
+    let prev = [dev("a", 1, true), dev("b", 2, false)];
+    let (targets, followup) = plan_reapply(&prev, &prev, &HashMap::new(), true);
+    assert_eq!(targets, vec![0]);
+    assert_eq!(
+        followup,
+        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES)])
+    );
+    // The run then drains at the usual cadence on steady ticks.
+    let (targets, followup) = plan_reapply(&prev, &prev, &followup, false);
+    assert_eq!(targets, vec![0]);
+    assert_eq!(
+        followup,
+        HashMap::from([("a".to_string(), VOLATILE_REAPPLY_CONFIRM_RETRIES - 1)])
+    );
+}
+
+#[test]
 fn plan_reapply_skips_a_followup_that_went_offline() {
     use std::collections::HashMap;
     let prev = [dev("a", 1, true)];
@@ -486,7 +520,7 @@ fn plan_reapply_skips_a_followup_that_went_offline() {
 /// health exists to carry.
 #[test]
 fn empty_refresh_marks_inventory_ready() {
-    let mut orch = Orchestrator::new(Config::default());
+    let mut orch = orchestrator(Config::default());
     assert_eq!(orch.inventory_health(), InventoryHealth::Scanning);
     orch.refresh_inventory(&[], &[]);
     assert_eq!(orch.inventory_health(), InventoryHealth::Ready);
@@ -498,13 +532,47 @@ fn empty_refresh_marks_inventory_ready() {
 /// watcher's keep-last-snapshot policy).
 #[test]
 fn unavailable_only_downgrades_a_pending_inventory() {
-    let mut orch = Orchestrator::new(Config::default());
+    let mut orch = orchestrator(Config::default());
     orch.mark_inventory_unavailable();
     assert_eq!(orch.inventory_health(), InventoryHealth::Unavailable);
     orch.refresh_inventory(&[], &[]);
     assert_eq!(orch.inventory_health(), InventoryHealth::Ready);
     orch.mark_inventory_unavailable();
     assert_eq!(orch.inventory_health(), InventoryHealth::Ready);
+}
+
+#[test]
+fn every_inventory_mutator_republishes_what_the_ipc_server_answers() {
+    let observable = Arc::new(ObservableState::new("test".to_string()));
+    let mut orch = Orchestrator::new(Config::default(), Arc::clone(&observable));
+    assert_eq!(
+        observable.snapshot().status.inventory,
+        InventoryHealth::Scanning,
+        "a fresh agent has not enumerated yet"
+    );
+
+    orch.mark_inventory_unavailable();
+    assert_eq!(
+        observable.snapshot().status.inventory,
+        InventoryHealth::Unavailable
+    );
+
+    orch.refresh_inventory(&[direct_inventory(Some("serial-1"), [1, 2, 3, 4])], &[]);
+    let published = observable.snapshot();
+    assert_eq!(published.status.inventory, InventoryHealth::Ready);
+    assert_eq!(published.inventory, orch.inventory());
+    assert_eq!(published.standalone, orch.standalone());
+    assert_eq!(published.inventory.len(), 1);
+
+    // A camera sample and a config reload are the other two facts the cell
+    // carries; both must reach it from inside the mutator.
+    orch.set_camera_active(true);
+    assert!(observable.snapshot().camera_active);
+
+    let mut config = Config::default();
+    config.app_settings.launch_at_login = true;
+    orch.reload_config(config);
+    assert!(observable.snapshot().status.launch_at_login);
 }
 
 #[test]
@@ -521,7 +589,7 @@ fn camera_automation_overrides_only_effective_power() {
             color: None,
         },
     );
-    let mut orch = Orchestrator::new(config);
+    let mut orch = orchestrator(config);
 
     orch.set_camera_active(false);
     assert_eq!(
@@ -562,7 +630,7 @@ fn manual_camera_light_override_is_transient() {
             color: None,
         },
     );
-    let mut orch = Orchestrator::new(config);
+    let mut orch = orchestrator(config);
     orch.set_camera_active(true);
     let mut device = dev(key, 1, true);
     device.light_capabilities = Some(LightCapabilities {
@@ -606,7 +674,7 @@ fn config_reload_keeps_manual_override_for_parameter_edits() {
             color: None,
         },
     );
-    let mut orch = Orchestrator::new(config.clone());
+    let mut orch = orchestrator(config.clone());
     orch.set_camera_active(false);
     orch.manual_light_overrides.insert(key.to_string(), true);
 
@@ -648,7 +716,7 @@ fn config_reload_clears_override_when_camera_mode_changes() {
             color: None,
         },
     );
-    let mut orch = Orchestrator::new(config.clone());
+    let mut orch = orchestrator(config.clone());
     orch.manual_light_overrides.insert(key.to_string(), false);
 
     let mut updated = config;
@@ -694,7 +762,7 @@ fn app_switch_republishes_capture_plans() {
         ButtonId::Back,
         Some(Action::Undo),
     );
-    let mut orch = Orchestrator::new(config);
+    let mut orch = orchestrator(config);
     orch.devices = vec![dev("a", 1, true)];
     orch.rebuild();
     assert_ne!(

@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 
 use crate::channel_registry::ChannelRegistry;
 use crate::node_ledger::NodeLedger;
-use crate::route::DeviceRoute;
+use crate::route::{DeviceRoute, is_receiver_pid};
 use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};
 
 mod cache;
@@ -56,6 +56,26 @@ const MAX_BOLT_SLOTS: u8 = 6;
 /// re-asks for per entry. At 6 s one lost report consumed the whole budget and
 /// the walk was abandoned mid-table, surfacing as a mouse that never appeared.
 const PROBE_BUDGET: Duration = Duration::from_secs(25);
+
+/// Probe budget for receiver nodes (Bolt/Unifying/Lightspeed dongles).
+///
+/// The 25 s [`PROBE_BUDGET`] is sized for Bluetooth-direct feature walks that
+/// receivers never perform. Keeping the receiver budget tighter matters
+/// because a full-budget timeout is also the detection path for a channel
+/// whose input-report delivery died (observed on macOS with concurrent opens
+/// of the same node: requests keep being written and answered, but the
+/// replies are delivered only to the other open handle). Until the channel is
+/// replaced every write on it stalls — DPI, SmartShift, ring haptics — so
+/// this budget bounds that outage.
+///
+/// It must still fit a receiver probe's real worst case, which is NOT the
+/// millisecond register reads but a paired device's full HID++ 2.0 feature
+/// walk: 1.5 s arrival drain + the sequential pairing-register pass + one
+/// slot's [`BOLT_SLOT_PROBE`] (10 s). 6 s proved too tight — a legitimate
+/// deep walk tripped the dead-delivery eviction, the surfaced-empty inventory
+/// tore down capture plans, and a pinned stale channel Arc then deadlocked
+/// recovery (dead buttons until restart). 13 s clears the honest worst case.
+const RECEIVER_PROBE_BUDGET: Duration = Duration::from_secs(13);
 
 /// Per-slot budget for the HID++ 2.0 feature walk on a Unifying paired device.
 ///
@@ -170,10 +190,15 @@ impl<Node: Eq + Hash + Clone, Channel> ChannelCache<Node, Channel> {
         self.active.insert(node, channel);
     }
 
-    fn retire_node(&mut self, node: &Node) -> Option<()> {
+    fn retire_node(&mut self, node: &Node) -> Option<&Channel> {
         let channel = self.active.remove(node)?;
+        // Overwrite rather than keep an older retirement. Holding a node in
+        // both maps is a bug `insert` only debug-asserts against, and the
+        // caller uses what comes back to release *this* channel's cache pin —
+        // handed the stale one, it would clear the wrong pointer and leave the
+        // real pin in place, which is what blocks a node from reopening.
         self.retiring.insert(node.clone(), channel);
-        Some(())
+        self.retiring.get(node)
     }
 
     /// Whether this node may be opened during the current tick. A quiescent
@@ -188,7 +213,7 @@ impl<Node: Eq + Hash + Clone, Channel> ChannelCache<Node, Channel> {
         false
     }
 
-    fn retire_absent(&mut self, seen: &HashSet<Node>) {
+    fn retire_absent(&mut self, seen: &HashSet<Node>, mut on_retire: impl FnMut(&Channel)) {
         let absent = self
             .active
             .keys()
@@ -196,7 +221,9 @@ impl<Node: Eq + Hash + Clone, Channel> ChannelCache<Node, Channel> {
             .cloned()
             .collect::<Vec<_>>();
         for node in absent {
-            let _ = self.retire_node(&node);
+            if let Some(channel) = self.retire_node(&node) {
+                on_retire(channel);
+            }
         }
     }
 
@@ -416,6 +443,7 @@ impl Enumerator {
                 .channels
                 .prepare_open(&node, |cached| Arc::strong_count(&cached.channel) == 1)
             {
+                debug!("node still retiring — waiting for its channel's remaining users to drop");
                 retiring.push(node);
                 continue;
             }
@@ -451,7 +479,9 @@ impl Enumerator {
         if let Some(registry) = &self.registry {
             registry.retain_nodes(&seen_nodes);
         }
-        self.channels.retire_absent(&seen_nodes);
+        self.channels.retire_absent(&seen_nodes, |cached| {
+            crate::write::clear_haptic_feature_cache_for(&cached.channel);
+        });
         self.channels.reap_absent(&seen_nodes, |cached| {
             Arc::strong_count(&cached.channel) == 1
         });
@@ -528,12 +558,21 @@ impl Enumerator {
                 .into_iter()
                 .map(|(info, channel)| async move {
                     let node = info.id.clone();
-                    let probe = timeout(
-                        PROBE_BUDGET,
-                        probe_one(info, Arc::clone(&channel), cache, tick),
-                    )
-                    .await;
-                    (node, channel, probe)
+                    // Receivers answer register reads over local USB in
+                    // milliseconds; only direct (esp. Bluetooth) devices need
+                    // the long feature-walk budget. A tight receiver budget
+                    // bounds the outage when its channel's input-report
+                    // delivery dies (writes accepted, replies never seen —
+                    // observed on macOS with concurrent opens of one node).
+                    let receiver = is_receiver_pid(info.product_id);
+                    let budget = if receiver {
+                        RECEIVER_PROBE_BUDGET
+                    } else {
+                        PROBE_BUDGET
+                    };
+                    let probe =
+                        timeout(budget, probe_one(info, Arc::clone(&channel), cache, tick)).await;
+                    (node, channel, probe, budget, receiver)
                 })
                 .collect::<Vec<_>>()
                 .join()
@@ -548,26 +587,44 @@ impl Enumerator {
         // governed by `probe.healthy`.
         let mut all_complete = true;
         let mut all_healthy = true;
-        for (node, channel, result) in results {
+        for (node, channel, result, budget, receiver) in results {
             let probe = if let Ok(probe) = result {
                 probe
             } else {
                 // The probe burned the whole budget — an asleep direct device,
-                // or a channel whose read loop parked on a dead handle (see
-                // `AsyncHidChannel::read_report`). Either way: "couldn't
+                // or a channel whose input-report delivery died (writes
+                // accepted, replies never seen). Either way: "couldn't
                 // check", not "nothing there".
-                warn!(budget = ?PROBE_BUDGET, "device probe timed out — treating as a failed probe");
+                warn!(
+                    ?budget,
+                    receiver, "device probe timed out — treating as a failed probe"
+                );
                 NodeProbe::failed()
             };
             all_complete &= probe.complete;
             all_healthy &= probe.healthy;
             outcomes.extend(probe.outcomes);
             let settled = self.ledger.settle(&node, probe.healthy, probe.inventory);
+            // Every node waits for the ledger's consecutive-failure threshold,
+            // receivers included. One full-budget timeout is not evidence of
+            // dead delivery: [`RECEIVER_PROBE_BUDGET`] leaves barely a second
+            // over its own documented worst case, so a legitimate deep walk
+            // plus a single lost reply (5 s `SEND_RESPONSE_TIMEOUT`) already
+            // exceeds it. Evicting on that unpublishes *every* device behind
+            // the receiver — a Bolt publishes all six slots under one node —
+            // and tears down each one's capture plan. A channel whose delivery
+            // really is dead times out again on the next tick and is replaced
+            // then, with the ledger replaying its last-good inventory
+            // meanwhile, so nothing disappears from the GUI in between.
             if settled.evict_channel {
                 if let Some(registry) = &self.registry {
                     registry.remove_node(&node);
                 }
-                if self.channels.retire_node(&node).is_some() {
+                if let Some(cached) = self.channels.retire_node(&node) {
+                    // Release the haptic cache's pin on this channel NOW —
+                    // waiting for the next haptic route-miss deadlocks when
+                    // capture dies with it (see clear_haptic_feature_cache_for).
+                    crate::write::clear_haptic_feature_cache_for(&cached.channel);
                     warn!("node probe keeps failing — retiring its channel before reopen");
                 }
             } else if let Some(registry) = &self.registry {

@@ -1,205 +1,85 @@
 # Configuration
 
-How OpenLogi stores its settings. For install and usage, see the
-[README](../README.md).
+OpenLogi stores settings as plain TOML. The GUI and agent read the same file:
 
-Config is a TOML file, read on startup and written atomically on change. Before
-the first save in each app process, OpenLogi preserves the previous file as
-`config.toml.backup.1` and rotates up to `config.toml.backup.5`.
-
-- macOS & Linux: `$XDG_CONFIG_HOME/openlogi/config.toml` (default `~/.config/openlogi/config.toml`)
+- macOS and Linux: `$XDG_CONFIG_HOME/openlogi/config.toml` (normally
+  `~/.config/openlogi/config.toml`)
 - Windows: `%USERPROFILE%\.config\openlogi\config.toml`
 
-Most settings below are managed by the GUI (Settings window, action picker,
-DPI / SmartShift / lighting panels), but the file stays hand-editable;
-per-application overlays and custom shortcuts are currently authored there.
-OpenLogi reloads it on startup. Older schemas are migrated on load, including
-`schema_version = 1` files that split button and gesture bindings.
+The complete, tested example is [config.example.toml](config.example.toml).
+Copy only the sections you need and replace its example physical device keys
+with keys already written by OpenLogi for your devices.
 
-Per-device settings are keyed by physical identity, such as
-`receiver:aabbccdd:slot:1` for a receiver-connected device. This keeps two
-mice of the same model independent:
+## Editing and recovery
 
-- `bindings` — one entry per rebindable button: either a single action, or a
-  per-direction table for the gesture button.
-- `per_app_bindings` — overlays keyed by application id (bundle id such as
-  `com.microsoft.VSCode` on macOS, `WM_CLASS` on Linux/X11, or a lower-cased
-  executable path on Windows) that take precedence while that app is
-  frontmost. Windows also accepts `exe:<filename>.exe`, for example
-  `exe:sharex.exe`, as a stable fallback for Store and self-updating apps. An
-  exact path entry wins when both forms exist.
-- `action_ring` — the enabled state, haptic-feedback preference, default
-  eight-slot layout, and complete per-application layouts.
-- `dpi_presets` — the ordered list cycled by the `CycleDpiPresets` action.
-- `smartshift` — wheel mode, sensitivity, and permanent-ratchet state.
-- `invert_scroll` — reverse this device's native vertical wheel direction
-  without changing the system trackpad direction.
-- `lighting` — static RGB colour, brightness (0–100), and on/off for wired
-  RGB keyboards.
-- `light` — standalone-light power, normalized brightness, and temperature.
-  Set `auto_camera = true` on macOS to turn the light on while any camera is in
-  use and off when camera use stops; the manual power preference and the other
-  light settings remain independent.
-- `gesture_owner` — which button owns the gesture role, when chosen
-  explicitly (otherwise inferred).
-- `host_switch_targets` — on a compatible keyboard, physical config keys of
-  mice that should follow its Easy-Switch channel. Both devices must already
-  be paired on corresponding channels. The keyboard's host controls and every
-  target must expose the HID++ features needed for host switching. Configure
-  the link on every computer from which the keyboard may initiate a switch.
-- `fn_lock` — keyboards only: `true` makes the F-row send F1–F12 without
-  holding Fn, `false` keeps the printed media/shortcut functions. Absent
-  means the keyboard's own state is left alone. Re-applied on reconnect.
+The GUI writes atomically and keeps `config.toml.backup.1` through
+`config.toml.backup.5`. Existing comments and formatting are retained when the
+GUI updates known fields.
 
-The app-wide `[app_settings]` block holds `launch_at_login`,
-`check_for_updates`, and `auto_install_updates` (all off by default);
-`show_in_menu_bar` (macOS menu bar / Windows tray, ignored on Linux; on by
-default); `capture_mouse_events` (on by default; set to `false` to keep the
-agent from installing the OS-level mouse hook at all — button remapping stops
-working, but no input device is grabbed or intercepted; DPI, SmartShift, and
-the other HID++-side features keep working; takes effect on agent restart);
-`auto_download_assets` (on by default); `language` (absent = follow the system
-locale); `thumbwheel_sensitivity` (default `14`); and the `appearance` (default
-`"system"`), `theme_light`, `theme_dark`, and `ui_radius` presentation
-settings. The theme and radius overrides are absent by default.
+The schema is strict: misspelled, obsolete, and out-of-range fields stop the
+config from loading instead of silently selecting a default or disappearing on
+the next save. The GUI then opens in read-only mode and shows the exact TOML
+error. Fix the file and relaunch OpenLogi.
 
-```toml
-schema_version = 3
-selected_device = "receiver:aabbccdd:slot:1"
+If the file changes in an editor while the GUI is open, the next GUI save is
+refused rather than overwriting the external edit. Relaunch to load that
+revision. Opening the GUI also tells the resident agent to reload the current
+file, so hand edits and runtime behavior converge immediately.
 
-[app_settings]
-launch_at_login = true
-check_for_updates = false
-auto_install_updates = false
-show_in_menu_bar = true
-auto_download_assets = true
-language = "en"
-thumbwheel_sensitivity = 14
-appearance = "system"
-# Optional presentation overrides (omit to use the theme defaults):
-# theme_light = "OpenLogi Light"
-# theme_dark = "OpenLogi Dark"
-# ui_radius = 6
+Schema versions newer than the running build are rejected before their fields
+are parsed. v1 binding maps and the v2–v3 gesture-owner layout migrate on load.
+The v3 physical-device-key transition cannot safely assign older model-scoped
+device settings when two identical devices exist, so v2 model-key entries must
+be copied manually to the generated physical keys.
 
-[devices.2b042]
-dpi_presets = [800, 1600, 3200]
+## Shape
 
-# Put this on the keyboard's physical device entry. Values are the physical
-# keys of the mice that should follow it; use the exact keys already present
-# under [devices] in your generated config.
-[devices."receiver:aabbccdd:slot:1"]
-host_switch_targets = ["receiver:aabbccdd:slot:2"]
+`schema_version` is required and currently `4`. `selected_device` is an
+optional physical device key.
 
-[devices."receiver:aabbccdd:slot:1".action_ring]
-enabled = true
-haptics = true
+`[app_settings]` contains application-wide preferences:
 
-# Each populated slot owns its action, an optional presentation icon, and an
-# optional hover label. Omit `icon` to use the action's normal icon; omit
-# `label` to use the action's generic name (useful for `RunShellCommand`
-# slots, which otherwise all read "Run Command"); omit the slot to leave it
-# empty. Custom labels always render exactly as written — they are never
-# passed through localization, even when they match a built-in action name.
-[devices."receiver:aabbccdd:slot:1".action_ring.default.slots]
-Top = { action = "Copy", icon = "Keyboard" }
-TopRight = { action = "Paste", label = "Paste It" }
-Right = { action = "BrowserForward" }
-BottomRight = { action = "NextTab" }
-Bottom = { action = "ShowDesktop", icon = "Applications" }
-BottomLeft = { action = "PrevTab" }
-Left = { action = "BrowserBack" }
-TopLeft = { action = "Cut" }
+- startup, update, menu-bar / tray, input-capture, and asset-download toggles
+- `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
+- `language`, `appearance`, optional theme names, and optional UI radius
+- `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
 
-# A per-app ring is a complete layout, not a sparse overlay.
-[devices."receiver:aabbccdd:slot:1".action_ring.per_app."com.microsoft.VSCode".slots]
-Top = { action = "Copy" }
-TopRight = { action = "Paste" }
-Right = { action = "Redo" }
-BottomRight = { action = "NextTab" }
-Bottom = { action = "ShowDesktop" }
-BottomLeft = { action = "PrevTab" }
-Left = { action = "Undo" }
-TopLeft = { action = "Cut" }
+`[devices."<physical-key>"]` contains per-device state. Receiver keys look like
+`receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use
+other generated keys. Do not substitute a model id such as `2b042`.
 
-[devices.2b042.bindings]
-Back = "BrowserBack"
-Forward = "BrowserForward"
+Common device fields are:
 
-# Gesture button: one action per swipe direction; Click = plain press.
-[devices.2b042.bindings.GestureButton]
-Click = "MissionControl"
-Up = "MissionControl"
-Down = "AppExpose"
-Left = "PreviousDesktop"
-Right = "NextDesktop"
+- `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity, scroll inversion,
+  and scroll resolution
+- `bindings`: a button maps either to one action or to a gesture-direction map
+- `per_app_bindings`: sparse action overlays keyed by macOS bundle id, Linux
+  application id, exact lower-cased Windows executable path, or
+  `exe:<filename>.exe`
+- `action_ring`: default and complete per-application eight-slot layouts
+- `lighting`, `smartshift`, standalone `light`, and camera controls / profiles
+- `host_switch_targets` and `fn_lock` for compatible keyboards
+- `identity` and `disabled_gestures`, which are application-managed metadata
 
-# Per-app overlay: Back becomes Undo only while VS Code is frontmost.
-[devices.2b042.per_app_bindings."com.microsoft.VSCode"]
-Back = "Undo"
+`[keyboard.bindings]` contains global key triggers such as `f1` or
+`shift+command+f5`. Supported trigger modifiers are `shift`, `control`,
+`option`, and `command`; aliases such as `ctrl`, `alt`, and `cmd` are accepted.
 
-# Stable Windows executable-name selector (exact paths still take precedence).
-[devices.2b042.per_app_bindings."exe:sharex.exe"]
-MiddleClick = { CustomShortcut = { modifiers = 0, key_code = 122, display = "F1" } }
+## Actions
 
-# Actions Ring slots couple an executable action with an optional custom icon.
-[devices.2b042.action_ring]
-enabled = true
-haptics = true
-
-[devices.2b042.action_ring.default.slots]
-Top = { action = "Copy", icon = "Keyboard" }
-Right = { action = { OpenApplication = { path = "/Applications/Safari.app", display_name = "Safari" } }, icon = "Applications" }
-Bottom = { action = "ShowDesktop" }
-
-[devices.2b042.lighting]
-enabled = true
-color = "ff0000"
-brightness = 80
-
-# Keyboard F-row keys (Signature-series layout): a bound key is diverted
-# over HID++ and dispatches its action; an unbound key keeps its native
-# firmware function. Key names: KeySearch, KeyDictation, KeyEmoji,
-# KeyScreenCapture, KeyMicMute, KeyPlayPause, KeyMute, KeyVolumeDown,
-# KeyVolumeUp.
-[devices.2b372]
-fn_lock = false
-
-[devices.2b372.bindings]
-KeySearch = "MissionControl"
-KeyScreenCapture = "Sleep"
-
-# Standalone light (for example, a Litra Glow). The GUI writes this block under
-# the serial-backed physical key; `openlogi light list` shows its HID tuple and
-# identity when diagnosing discovery.
-# A serial-bearing Litra key looks like:
-# [devices."raw:046d:c900:ff43:0202:serial:YOUR-SERIAL".light]
-# If the HID backend exposes only a transient OS-node identity, OpenLogi does
-# not persist that key; reconnect persistence then requires a device serial.
-[devices."<raw-device-key>".light]
-enabled = true
-auto_camera = true
-brightness_percent = 65
-temperature_kelvin = 4600
-```
-
-Action names are the catalog's variant names (`LeftClick`, `MouseBack`,
-`Copy`, `PlayPause`, `CycleDpiPresets`, …). `ShowActionsRing` opens the ring;
-a detected Haptic Sense Panel uses it by default. Ring slots reject
-`ShowActionsRing` itself to prevent recursive sessions. `OpenApplication`
-accepts an application, folder, filesystem path, or URL. A leading `~` is
-expanded when the action runs; for example:
+Action names are the serialized Rust variant names, including `Copy`,
+`BrowserBack`, `PlayPause`, `CycleDpiPresets`, and `ShowActionsRing`.
+Payload actions use a one-key inline table:
 
 ```toml
-Top = { action = { OpenApplication = { path = "/Applications/Safari.app", display_name = "Safari" } } }
-Bottom = { action = { OpenApplication = { path = "~/Downloads", display_name = "Downloads" } } }
+Back = { CustomShortcut = "Cmd+Shift+P" }
+MiddleClick = { OpenApplication = { path = "~/Downloads", display_name = "Downloads" } }
 ```
 
-`CustomShortcut` stores a platform-neutral textual chord, for example:
+An Actions Ring entry wraps the action and may add an icon or literal label:
 
 ```toml
-Top = { action = { CustomShortcut = "Cmd+Shift+P" } }
+Top = { action = { CustomShortcut = "Cmd+Shift+P" }, icon = "Keyboard", label = "Command Palette" }
 ```
 
-The GUI accepts chords such as `Cmd+Shift+P`, `Ctrl+Alt+Left`, or `F5`. It also
-lets each ring slot keep its action-derived icon or choose a custom icon from
-the built-in gallery.
+`ShowActionsRing` is rejected inside a ring slot to prevent recursive rings.

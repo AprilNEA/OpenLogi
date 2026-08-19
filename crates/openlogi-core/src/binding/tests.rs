@@ -91,11 +91,7 @@ fn workflow_label_category_and_catalog_exclusion() {
     let wf = Action::Workflow(vec![
         WorkflowStep::TypeText("bite me".into()),
         WorkflowStep::Delay { millis: 5000 },
-        WorkflowStep::PressKey(
-            "Enter"
-                .parse()
-                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
-        ),
+        WorkflowStep::PressKey("Enter".parse().expect("valid shortcut failed")),
     ]);
     assert_eq!(wf.label(), "Workflow (3 steps)");
     assert_eq!(wf.category(), Category::Editing);
@@ -112,11 +108,7 @@ fn workflow_roundtrips_toml() {
     let wf = Action::Workflow(vec![
         WorkflowStep::TypeText("bite me".into()),
         WorkflowStep::Delay { millis: 5000 },
-        WorkflowStep::PressKey(
-            "Shift+Enter"
-                .parse()
-                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
-        ),
+        WorkflowStep::PressKey("Shift+Enter".parse().expect("valid shortcut failed")),
         WorkflowStep::RunShellCommand("echo done".into()),
     ]);
     let toml = toml::to_string(&wf).expect("serialize");
@@ -151,9 +143,7 @@ fn binding_single_roundtrips_including_payload_variants() {
     bindings.insert(
         ButtonId::Forward,
         Binding::Single(Action::CustomShortcut(
-            "Cmd+P"
-                .parse()
-                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+            "Cmd+P".parse().expect("valid shortcut failed"),
         )),
     );
     let back = binding_roundtrip(bindings);
@@ -257,28 +247,112 @@ fn all_catalog_variants_roundtrip_toml() {
 }
 
 #[test]
+fn persisted_action_variant_names_are_stable() {
+    let mut actions = Action::catalog();
+    actions.extend([
+        Action::SetDpiPreset(0),
+        Action::CustomShortcut(
+            "F1".parse()
+                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+        ),
+        Action::TypeText(String::new()),
+        Action::RunAppleScript(String::new()),
+        Action::RunShellCommand(String::new()),
+        Action::Workflow(Vec::new()),
+        Action::ShowActionsRing,
+        Action::OpenApplication(
+            ApplicationTarget::new("/Applications/OpenLogi.app", "OpenLogi")
+                .unwrap_or_else(|error| panic!("valid target failed: {error}")),
+        ),
+    ]);
+    let mut actual: Vec<String> = actions
+        .into_iter()
+        .map(
+            |action| match toml::Value::try_from(action).expect("serialize action") {
+                toml::Value::String(name) => name,
+                toml::Value::Table(table) if table.len() == 1 => table
+                    .into_iter()
+                    .next()
+                    .map(|(key, _)| key)
+                    .expect("one variant key"),
+                value => panic!("unexpected action shape: {value:?}"),
+            },
+        )
+        .collect();
+    actual.sort();
+    let mut expected = [
+        "AppExpose",
+        "BrowserBack",
+        "BrowserForward",
+        "CaptureRegion",
+        "CloseTab",
+        "Copy",
+        "CustomShortcut",
+        "Cut",
+        "CycleDpiPresets",
+        "Find",
+        "HorizontalScrollLeft",
+        "HorizontalScrollRight",
+        "LaunchpadShow",
+        "LeftClick",
+        "LockScreen",
+        "MiddleClick",
+        "MissionControl",
+        "MouseBack",
+        "MouseForward",
+        "MuteVolume",
+        "NewTab",
+        "NextDesktop",
+        "NextTab",
+        "NextTrack",
+        "None",
+        "OpenApplication",
+        "Paste",
+        "PlayPause",
+        "PrevTab",
+        "PrevTrack",
+        "PreviousDesktop",
+        "Redo",
+        "ReloadPage",
+        "ReopenTab",
+        "RightClick",
+        "RunAppleScript",
+        "RunShellCommand",
+        "Save",
+        "Screenshot",
+        "ScrollDown",
+        "ScrollUp",
+        "SelectAll",
+        "SetDpiPreset",
+        "ShowActionsRing",
+        "ShowDesktop",
+        "Sleep",
+        "ToggleSmartShift",
+        "TypeText",
+        "Undo",
+        "VolumeDown",
+        "VolumeUp",
+        "Workflow",
+    ];
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn custom_shortcut_roundtrips_toml() {
-    let action = Action::CustomShortcut(
-        "Cmd+Shift+P"
-            .parse()
-            .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
-    );
+    let action = Action::CustomShortcut("Cmd+Shift+P".parse().expect("valid shortcut failed"));
     assert_eq!(roundtrip(&action), action);
 }
 
 #[test]
 fn key_combo_rendered_label_is_canonical() {
-    let combo: KeyCombo = "Cmd+Shift+P"
-        .parse()
-        .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
+    let combo: KeyCombo = "Cmd+Shift+P".parse().expect("valid shortcut failed");
     assert_eq!(combo.rendered_label(), "Cmd+Shift+P");
 }
 
 #[test]
 fn key_combo_rendered_label_falls_back_to_modifiers_plus_key() {
-    let combo: KeyCombo = "Cmd+Shift+P"
-        .parse()
-        .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
+    let combo: KeyCombo = "Cmd+Shift+P".parse().expect("valid shortcut failed");
     assert_eq!(combo.rendered_label(), "Cmd+Shift+P");
 }
 
@@ -391,4 +465,82 @@ fn haptic_panel_defaults_to_opening_the_actions_ring() {
         Action::ShowActionsRing
     );
     assert!(ButtonId::ALL.contains(&ButtonId::HapticPanel));
+}
+
+// ── Effect classification ─────────────────────────────────────────────────
+//
+// `Action::effect()` is the platform-neutral IR `openlogi-inject`'s three
+// backends dispatch on instead of matching `Action` directly. These tests
+// don't re-derive the match (that would be tautological) — they assert the
+// one property every caller actually depends on: every pickable action
+// lowers to *some* real effect, and only `Action::None` is `Effect::None`.
+
+#[test]
+fn catalog_actions_lower_to_a_non_none_effect_except_none() {
+    for action in Action::catalog() {
+        let is_none_effect = matches!(action.effect(), Effect::None);
+        assert_eq!(
+            is_none_effect,
+            action == Action::None,
+            "{action:?} effect classification disagrees with being Action::None"
+        );
+    }
+}
+
+#[test]
+fn power_user_and_device_side_actions_lower_to_the_expected_bucket() {
+    let combo: KeyCombo = "Cmd+P"
+        .parse()
+        .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
+    let custom_shortcut = Action::CustomShortcut(combo);
+    assert_matches!(custom_shortcut.effect(), Effect::Key(_));
+
+    let type_text = Action::TypeText("hi".into());
+    assert_matches!(type_text.effect(), Effect::Text("hi"));
+
+    let run_apple_script = Action::RunAppleScript("beep".into());
+    assert_matches!(
+        run_apple_script.effect(),
+        Effect::Script(Script::AppleScript("beep"))
+    );
+
+    let run_shell_command = Action::RunShellCommand("date".into());
+    assert_matches!(
+        run_shell_command.effect(),
+        Effect::Script(Script::ShellCommand("date"))
+    );
+
+    let workflow = Action::Workflow(vec![]);
+    assert_matches!(workflow.effect(), Effect::Script(Script::Workflow(&[])));
+
+    // DPI/SmartShift/the Actions Ring/OpenApplication are all handled above
+    // or beside the injector, never inside a backend's own dispatch.
+    for action in [
+        Action::CycleDpiPresets,
+        Action::SetDpiPreset(2),
+        Action::ToggleSmartShift,
+        Action::ShowActionsRing,
+    ] {
+        assert_matches!(action.effect(), Effect::AgentSide);
+    }
+    let target = ApplicationTarget::new("/Applications/Safari.app", "")
+        .unwrap_or_else(|error| panic!("valid target failed: {error}"));
+    assert_matches!(Action::OpenApplication(target).effect(), Effect::AgentSide);
+}
+
+#[test]
+fn scroll_actions_lower_to_unit_direction() {
+    assert_eq!(Action::ScrollUp.effect(), Effect::Scroll { dx: 0, dy: 1 });
+    assert_eq!(
+        Action::ScrollDown.effect(),
+        Effect::Scroll { dx: 0, dy: -1 }
+    );
+    assert_eq!(
+        Action::HorizontalScrollLeft.effect(),
+        Effect::Scroll { dx: -1, dy: 0 }
+    );
+    assert_eq!(
+        Action::HorizontalScrollRight.effect(),
+        Effect::Scroll { dx: 1, dy: 0 }
+    );
 }

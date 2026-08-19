@@ -57,7 +57,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-          cache-dependency-path: scripts/release-notes/pnpm-lock.yaml
+          cache-dependency-path: .github/scripts/release-notes/pnpm-lock.yaml
 
       - name: Load Codex release-notes credentials from 1Password
         id: release_notes_config
@@ -80,7 +80,7 @@ jobs:
           op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
 
       - name: Install release-notes dependencies
-        run: pnpm --dir scripts/release-notes install --frozen-lockfile
+        run: pnpm --dir .github/scripts/release-notes install --frozen-lockfile
 
       - name: Generate GitHub Release notes
         env:
@@ -90,7 +90,7 @@ jobs:
           GH_TOKEN: ${{ steps.release_notes_app_token.outputs.token }}
         run: |
           set -euo pipefail
-          node scripts/release-notes/generate.ts \
+          node .github/scripts/release-notes/generate.ts \
             --tag "$GITHUB_REF_NAME" \
             --output .release/RELEASE_NOTES.md
 

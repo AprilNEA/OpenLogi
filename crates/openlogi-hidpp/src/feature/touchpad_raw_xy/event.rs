@@ -1,5 +1,7 @@
 //! The raw touch-data event emitted by `TouchpadRawXy` (`0x6100`).
 
+use crate::feature::DecodeEvent;
+
 /// One touch point from a [`DualXyData`] frame.
 ///
 /// `x`/`y` are 14-bit device coordinates. The `z` and `area` bytes are
@@ -97,5 +99,11 @@ pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<TouchpadRaw
             finger_count: payload[15] & 0x0f,
         })),
         _ => None,
+    }
+}
+
+impl DecodeEvent for TouchpadRawEvent {
+    fn decode(sub_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        decode_event(sub_id, payload)
     }
 }

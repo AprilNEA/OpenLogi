@@ -38,7 +38,7 @@ Remappez les boutons, pilotez le DPI et SmartShift, basculez de profil selon l'a
 
 OpenLogi dialogue avec les périphériques Logitech HID++ via des récepteurs Logi Bolt et Unifying, une connexion Bluetooth directe ou un câble USB — sans exécuter Logi Options+. Il se compose de trois éléments :
 
-- **[OpenLogi GUI](../crates/openlogi-gui)** — une application de bureau GPUI : schéma de souris interactif avec zones cliquables, sélecteur d'action par bouton (actions intégrées et raccourcis personnalisés rédigés dans la configuration TOML), préréglages DPI, SmartShift, inversion native du défilement par appareil, éclairage RGB des claviers, profils par application, carrousel d'appareils en direct et fenêtre de réglages traduite en 20 langues.
+- **[OpenLogi GUI](../crates/openlogi-desktop)** — une application de bureau GPUI : schéma de souris interactif avec zones cliquables, sélecteur d'action par bouton (actions intégrées et raccourcis personnalisés rédigés dans la configuration TOML), préréglages DPI, SmartShift, inversion native du défilement par appareil, éclairage RGB des claviers, profils par application, carrousel d'appareils en direct et fenêtre de réglages traduite en 20 langues.
 - **[OpenLogi agent](../crates/openlogi-agent)** — le service d'arrière-plan qui possède le hook d'entrée et toutes les E/S des appareils. La GUI est un pur client IPC et démarre l'agent au besoin.
 - **[OpenLogi CLI](../crates/openlogi-cli)** — un outil en ligne de commande : inventaire headless (`list`), synchronisation des assets et sous-commandes de diagnostic des appareils.
 
@@ -156,9 +156,10 @@ Voir [DEVELOPMENT.md](DEVELOPMENT.md)
 
 ## Remerciements
 
-- [`hidpp`](https://crates.io/crates/hidpp) par [@lus](https://github.com/lus)
-- [Solaar](https://github.com/pwr-Solaar/Solaar)
-- [Mouser](https://github.com/TomBadash/Mouser) par Tom Badash
+- **Windows, caméras et i18n** par [@davidbudnick](https://github.com/davidbudnick) — le hook d'entrée Windows et les mises à jour MSI, la prise en charge des webcams Logitech, le RGB clavier et le pipeline de traduction Crowdin
+- **Portage Linux** par [@cserby](https://github.com/cserby) — le hook evdev/uinput, les actions D-Bus, l'empaquetage .deb/.rpm
+- [Solaar](https://github.com/pwr-Solaar/Solaar) par [@pwr](https://github.com/pwr) — l'implémentation open source la plus complète de HID++, et notre référence pour le protocole
+- [Mouser](https://github.com/TomBadash/Mouser) par [@TomBadash](https://github.com/TomBadash) — un précurseur avec le même objectif : un remplacement d'Options+ local et sans compte
 
 ## Licence
 
@@ -166,6 +167,11 @@ Sous double licence, au choix :
 
 - Apache License, version 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
 - Licence MIT ([LICENSE-MIT](../LICENSE-MIT))
+
+### Code tiers
+
+`crates/openlogi-hidpp` est un fork intégré de [`hidpp`](https://crates.io/crates/hidpp)
+par [@lus](https://github.com/lus), sous licence 0BSD.
 
 ### Logo et ressources de marque
 

@@ -158,6 +158,10 @@ impl SetLevels {
                 if !(1..=7).contains(&values.len()) || *start_index > 0x0f || *level_count > 0x0f {
                     return Err(Hidpp20Error::Feature(ErrorType::InvalidArgument));
                 }
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "values.len() was just checked to be in 1..=7, so it always fits in a u8"
+                )]
                 let valid_count = (values.len() as u8) & 0x07;
                 args[0] = valid_count << 5; // linear = 0, reset = 0
                 args[1] = (start_index << 4) | (level_count & 0x0f);

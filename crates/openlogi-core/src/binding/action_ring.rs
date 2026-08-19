@@ -7,7 +7,8 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use nutype::nutype;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::Action;
@@ -52,6 +53,37 @@ impl ActionRingSlot {
         Self::TopLeft,
     ];
 
+    /// Unit vector from the ring's centre to this slot, with positive Y
+    /// pointing **down** — the screen convention both GPUI frontends draw in,
+    /// not the mathematical one.
+    #[must_use]
+    pub fn unit_offset(self) -> (f32, f32) {
+        let diagonal = std::f32::consts::FRAC_1_SQRT_2;
+        match self {
+            Self::Top => (0.0, -1.0),
+            Self::TopRight => (diagonal, -diagonal),
+            Self::Right => (1.0, 0.0),
+            Self::BottomRight => (diagonal, diagonal),
+            Self::Bottom => (0.0, 1.0),
+            Self::BottomLeft => (-diagonal, diagonal),
+            Self::Left => (-1.0, 0.0),
+            Self::TopLeft => (-diagonal, -diagonal),
+        }
+    }
+
+    /// Top-left corner at which to place this slot's `slot_size` box, on a
+    /// square `canvas` whose ring has the given `radius`. All in the caller's
+    /// own units; the live overlay and the settings preview differ only in
+    /// what they pass.
+    #[must_use]
+    pub fn placement(self, canvas: f32, radius: f32, slot_size: f32) -> (f32, f32) {
+        let (x, y) = self.unit_offset();
+        (
+            canvas / 2.0 + x * radius - slot_size / 2.0,
+            canvas / 2.0 + y * radius - slot_size / 2.0,
+        )
+    }
+
     /// Stable display index matching [`Self::ALL`].
     #[must_use]
     pub const fn index(self) -> usize {
@@ -84,56 +116,36 @@ pub enum RingActionError {
 /// Construction and deserialization reject actions that would make the ring's
 /// state ambiguous (`None`) or recursively invoke another ring
 /// (`ShowActionsRing`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[nutype(
+    validate(with = validate_ring_action, error = RingActionError),
+    derive(Clone, Debug, PartialEq, Eq, Hash, AsRef, TryFrom, Into, Serialize, Deserialize),
+)]
 pub struct RingAction(Action);
 
 impl RingAction {
     /// Validate and wrap an ordinary action for placement in a ring.
     pub fn new(action: Action) -> Result<Self, RingActionError> {
-        match action {
-            Action::None => Err(RingActionError::EmptyAction),
-            Action::ShowActionsRing => Err(RingActionError::RecursiveTrigger),
-            other => Ok(Self(other)),
-        }
+        Self::try_new(action)
     }
 
     /// The action the agent should execute when this slot is activated.
     #[must_use]
     pub fn action(&self) -> &Action {
-        &self.0
+        self.as_ref()
     }
 
     /// Consume the wrapper and return its action.
     #[must_use]
     pub fn into_action(self) -> Action {
-        self.0
+        self.into_inner()
     }
 }
 
-impl TryFrom<Action> for RingAction {
-    type Error = RingActionError;
-
-    fn try_from(action: Action) -> Result<Self, Self::Error> {
-        Self::new(action)
-    }
-}
-
-impl Serialize for RingAction {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.0.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for RingAction {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let action = Action::deserialize(deserializer)?;
-        Self::new(action).map_err(de::Error::custom)
+fn validate_ring_action(action: &Action) -> Result<(), RingActionError> {
+    match action {
+        Action::None => Err(RingActionError::EmptyAction),
+        Action::ShowActionsRing => Err(RingActionError::RecursiveTrigger),
+        _ => Ok(()),
     }
 }
 
@@ -142,6 +154,7 @@ impl<'de> Deserialize<'de> for RingAction {
 /// Keeping the action and optional presentation icon in one value makes an
 /// orphan icon impossible: clearing a slot removes the complete entry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionRingEntry {
     action: RingAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -203,6 +216,7 @@ impl ActionRingEntry {
 
 /// The actions displayed at the eight fixed ring positions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionRingLayout {
     /// Populated ring positions. An absent key is an intentionally empty slot.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -240,6 +254,10 @@ impl ActionRingLayout {
 }
 
 impl Default for ActionRingLayout {
+    #[expect(
+        clippy::expect_used,
+        reason = "the built-in ring actions are statically known to satisfy RingAction's invariant"
+    )]
     fn default() -> Self {
         use ActionRingSlot as Slot;
 
@@ -255,7 +273,14 @@ impl Default for ActionRingLayout {
         ];
         let slots = actions
             .into_iter()
-            .map(|(slot, action)| (slot, ActionRingEntry::new(RingAction(action))))
+            .map(|(slot, action)| {
+                (
+                    slot,
+                    ActionRingEntry::new(
+                        RingAction::new(action).expect("default ring actions must be valid"),
+                    ),
+                )
+            })
             .collect();
         Self { slots }
     }
@@ -263,6 +288,7 @@ impl Default for ActionRingLayout {
 
 /// Per-device Actions Ring settings and application-specific layouts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionRingConfig {
     /// Whether `ShowActionsRing` opens this device's ring.
     #[serde(default = "default_true")]
@@ -312,6 +338,7 @@ const fn default_true() -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;
 
@@ -345,9 +372,9 @@ mod tests {
             action: RingAction,
         }
 
-        let action = RingAction::new(Action::Copy).unwrap_or_else(|error| panic!("{error}"));
-        let encoded = toml::to_string(&Wrapper { action })
-            .unwrap_or_else(|error| panic!("could not serialize ring action: {error}"));
+        let action = RingAction::new(Action::Copy).expect("copy must be a valid ring action");
+        let encoded =
+            toml::to_string(&Wrapper { action }).expect("could not serialize ring action");
         assert_eq!(encoded, "action = \"Copy\"\n");
     }
 
@@ -359,22 +386,21 @@ mod tests {
             Top = { action = "Copy", label = "Copy Invoice" }
             "#,
         )
-        .unwrap_or_else(|error| panic!("could not deserialize labelled layout: {error}"));
+        .expect("could not deserialize labelled layout");
         assert_eq!(
             layout.slots[&ActionRingSlot::Top].custom_label(),
             Some("Copy Invoice")
         );
 
-        let encoded = toml::to_string(&layout)
-            .unwrap_or_else(|error| panic!("could not serialize labelled layout: {error}"));
+        let encoded = toml::to_string(&layout).expect("could not serialize labelled layout");
         let decoded = toml::from_str::<ActionRingLayout>(&encoded)
-            .unwrap_or_else(|error| panic!("could not deserialize labelled layout: {error}"));
+            .expect("could not deserialize labelled layout");
         assert_eq!(decoded, layout);
 
         // Like icons, a label sticks to its slot when the action is replaced.
         layout.set_action(
             ActionRingSlot::Top,
-            Some(RingAction::new(Action::Paste).unwrap_or_else(|error| panic!("{error}"))),
+            Some(RingAction::new(Action::Paste).expect("paste must be a valid ring action")),
         );
         assert_eq!(
             layout.slots[&ActionRingSlot::Top].custom_label(),
@@ -385,8 +411,7 @@ mod tests {
     #[test]
     fn unlabelled_entries_serialize_without_a_label_key() {
         let layout = ActionRingLayout::default();
-        let encoded = toml::to_string(&layout)
-            .unwrap_or_else(|error| panic!("could not serialize ring layout: {error}"));
+        let encoded = toml::to_string(&layout).expect("could not serialize ring layout");
         assert!(!encoded.contains("label"));
     }
 
@@ -402,10 +427,9 @@ mod tests {
     fn custom_icons_roundtrip_without_changing_slot_actions() {
         let mut layout = ActionRingLayout::default();
         layout.set_icon(ActionRingSlot::Top, Some(ActionRingIcon::Keyboard));
-        let encoded = toml::to_string(&layout)
-            .unwrap_or_else(|error| panic!("could not serialize ring layout: {error}"));
+        let encoded = toml::to_string(&layout).expect("could not serialize ring layout");
         let decoded = toml::from_str::<ActionRingLayout>(&encoded)
-            .unwrap_or_else(|error| panic!("could not deserialize ring layout: {error}"));
+            .expect("could not deserialize ring layout");
         assert_eq!(decoded, layout);
         assert_eq!(decoded.slots[&ActionRingSlot::Top].action(), &Action::Cut);
         assert_eq!(
@@ -423,7 +447,7 @@ Top = { action = "Copy", icon = "Keyboard" }
 Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
 "#,
         )
-        .unwrap_or_else(|error| panic!("documented ring layout failed: {error}"));
+        .expect("documented ring layout failed");
         assert_eq!(layout.slots[&ActionRingSlot::Top].action(), &Action::Copy);
         assert_eq!(
             layout.slots[&ActionRingSlot::Top].custom_icon(),
@@ -437,8 +461,19 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
 
     #[test]
     fn recursive_action_fails_deserialization() {
-        let parsed = toml::from_str::<RingAction>("\"ShowActionsRing\"");
-        assert!(parsed.is_err());
+        // A bare `"ShowActionsRing"` is not a TOML document, so the slot has to
+        // be deserialized the way config.toml stores it — otherwise the parse
+        // fails on syntax and never reaches the recursion guard.
+        let error = match toml::from_str::<ActionRingEntry>("action = \"ShowActionsRing\"") {
+            Ok(entry) => panic!("a ring slot must not recursively open the ring, got {entry:?}"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(&RingActionError::RecursiveTrigger.to_string()),
+            "expected the recursion guard to reject the slot, got: {error}"
+        );
     }
 
     #[test]
@@ -448,7 +483,7 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
             slots: BTreeMap::from([(
                 ActionRingSlot::Top,
                 ActionRingEntry::new(
-                    RingAction::new(Action::NewTab).unwrap_or_else(|error| panic!("{error}")),
+                    RingAction::new(Action::NewTab).expect("new tab must be a valid ring action"),
                 ),
             )]),
         };

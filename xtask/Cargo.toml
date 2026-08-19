@@ -18,6 +18,7 @@ plist = "1.10.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2_hasher = { version = "0.3.2", features = ["sync"] }
+strum = { version = "0.27", features = ["derive"] }
 tempfile = "3.27.0"
 time = { version = "0.3", features = ["formatting"] }
 which = "8.0.4"

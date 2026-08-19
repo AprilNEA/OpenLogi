@@ -38,7 +38,7 @@ Logitech 계정도, 텔레메트리도, 공식 Options+ 설치도 없이 버튼�
 
 OpenLogi는 Logi Bolt 및 Unifying 수신기, Bluetooth 직접 연결 또는 USB 케이블을 통해 Logitech HID++ 주변기기와 통신하며, Logi Options+를 실행할 필요가 없습니다. 세 가지 구성 요소로 이루어집니다:
 
-- **[OpenLogi GUI](../crates/openlogi-gui)** — GPUI 데스크톱 앱: 클릭 가능한 핫스팟이 있는 인터랙티브 마우스 다이어그램, 버튼별 액션 선택기(내장 액션 + TOML 설정에서 작성하는 사용자 지정 단축키), DPI 프리셋, SmartShift, 기기별 스크롤 반전, RGB 키보드 조명, 앱별 프로필, 실시간 기기 캐러셀, 20개 언어로 현지화된 설정 창.
+- **[OpenLogi GUI](../crates/openlogi-desktop)** — GPUI 데스크톱 앱: 클릭 가능한 핫스팟이 있는 인터랙티브 마우스 다이어그램, 버튼별 액션 선택기(내장 액션 + TOML 설정에서 작성하는 사용자 지정 단축키), DPI 프리셋, SmartShift, 기기별 스크롤 반전, RGB 키보드 조명, 앱별 프로필, 실시간 기기 캐러셀, 20개 언어로 현지화된 설정 창.
 - **[OpenLogi agent](../crates/openlogi-agent)** — 입력 훅과 모든 기기 I/O를 소유하는 백그라운드 서비스. GUI는 순수 IPC 클라이언트이며 필요할 때 agent를 시작합니다.
 - **[OpenLogi CLI](../crates/openlogi-cli)** — 헤드리스 기기 목록(`list`), 에셋 동기화, 기기 진단 하위 명령을 갖춘 CLI.
 
@@ -156,9 +156,10 @@ Windows 지원은 정상 작동하며 유선 키보드와 Unifying 수신기 마
 
 ## 감사의 말
 
-- [`hidpp`](https://crates.io/crates/hidpp) — [@lus](https://github.com/lus)
-- [Solaar](https://github.com/pwr-Solaar/Solaar)
-- [Mouser](https://github.com/TomBadash/Mouser) — Tom Badash
+- **Windows·카메라·i18n** — [@davidbudnick](https://github.com/davidbudnick): Windows 입력 훅과 MSI 업데이트, Logitech 웹캠 지원, 키보드 RGB, Crowdin 번역 파이프라인
+- **Linux 포팅** — [@cserby](https://github.com/cserby): evdev/uinput 훅, D-Bus 액션, .deb/.rpm 패키징
+- [Solaar](https://github.com/pwr-Solaar/Solaar) — [@pwr](https://github.com/pwr)가 만든, 가장 완성도 높은 오픈소스 HID++ 구현이자 이 프로젝트의 프로토콜 참고 자료
+- [Mouser](https://github.com/TomBadash/Mouser) — [@TomBadash](https://github.com/TomBadash)가 만든, 같은 목표의 선행 프로젝트: 로컬에서 동작하는 계정 없는 Options+ 대체제
 
 ## 라이선스
 
@@ -166,6 +167,10 @@ Windows 지원은 정상 작동하며 유선 키보드와 Unifying 수신기 마
 
 - Apache License 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
 - MIT 라이선스 ([LICENSE-MIT](../LICENSE-MIT))
+
+### 서드파티 코드
+
+`crates/openlogi-hidpp`는 [`hidpp`](https://crates.io/crates/hidpp)([@lus](https://github.com/lus) 제작)의 vendored fork이며, 0BSD 라이선스를 따릅니다.
 
 ### 로고 및 브랜드 자산
 

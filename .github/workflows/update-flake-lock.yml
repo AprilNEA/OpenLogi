@@ -1,0 +1,55 @@
+name: Update flake.lock
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Refresh pinned nixpkgs monthly; the resulting PR runs the full Nix CI.
+    - cron: "23 5 1 * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-flake-lock
+  cancel-in-progress: true
+
+jobs:
+  update:
+    name: update locked Nix inputs
+    if: github.repository == 'AprilNEA/OpenLogi'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install upstream Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      # An App token, rather than GITHUB_TOKEN, makes the generated PR trigger
+      # Nix CI. Credentials stay in the existing release 1Password item.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: ./.github/actions/github-app-token-from-1password
+        with:
+          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+      - name: Update flake.lock and open a PR
+        uses: DeterminateSystems/update-flake-lock@834c491b2ece4de0bbd00d85214bb5e83b4da5c6 # v28
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: automation/update-flake-lock
+          commit-msg: "chore(nix): update flake.lock"
+          pr-title: "chore(nix): update flake.lock"
+          pr-body: |
+            ## Summary
+
+            Refresh the pinned Nix inputs used to build OpenLogi.
+
+            ## Changes
+
+            - Update `flake.lock` from the declared `nixpkgs-unstable` input.
+
+            ## Testing
+
+            - The generated PR triggers the x86_64 and aarch64 Nix CI builds.

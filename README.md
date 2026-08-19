@@ -30,25 +30,25 @@
 
 > **Options+ ? Try OpenLogi.**
 
-Remap buttons, drive DPI and SmartShift, and switch profiles per app — without a Logitech account, telemetry, or the official Options+ install. No cloud, plain TOML config. By default, device-image fetches are the only automatic network calls; update checks and downloads run only when you request or opt into them.
+Remap buttons, drive DPI and SmartShift, and switch profiles per app, without a Logitech account, telemetry, or the official Options+ install. No cloud, plain TOML config. By default, device-image fetches are the only automatic network calls; update checks and downloads run only when you request or opt into them.
 
 ---
 
 ## What it is
 
 OpenLogi talks to Logitech HID++ peripherals over Logi Bolt and Unifying
-receivers, Bluetooth-direct connections, or USB cables — without running Logi
+receivers, Bluetooth-direct connections, or USB cables, without running Logi
 Options+. It consists of three components:
 
-- **[OpenLogi GUI](crates/openlogi-gui)** — a GPUI desktop app: an interactive mouse diagram with clickable hotspots, a per-button action picker (built-in actions plus custom keyboard shortcuts authored in the TOML config), DPI presets, SmartShift, per-device scroll inversion, RGB keyboard lighting, per-application profiles, a live device carousel, and a Settings window localized into 20 languages.
-- **[OpenLogi agent](crates/openlogi-agent)** — the background service that owns the input hook and all device I/O. The GUI is a pure IPC client and starts the agent when needed.
-- **[OpenLogi CLI](crates/openlogi-cli)** — a CLI for headless inventory (`list`) plus asset-sync and on-device diagnostic subcommands.
+- **[OpenLogi GUI](crates/openlogi-desktop)**, a GPUI desktop app: an interactive mouse diagram with clickable hotspots, a per-button action picker (built-in actions plus custom keyboard shortcuts authored in the TOML config), DPI presets, SmartShift, per-device scroll inversion, RGB keyboard lighting, per-application profiles, a live device carousel, and a Settings window localized into 20 languages.
+- **[OpenLogi agent](crates/openlogi-agent)**, the background service that owns the input hook and all device I/O. The GUI is a pure IPC client and starts the agent when needed.
+- **[OpenLogi CLI](crates/openlogi-cli)** for headless inventory (`list`) plus asset-sync and on-device diagnostic subcommands.
 
 Everything stays local: bindings live in a plain TOML file, the agent remaps
 button presses through the OS input hook, and writes DPI, SmartShift, scroll,
 and lighting changes straight to the device over HID++.
 
-macOS, Linux, and Windows are supported. Windows is the newest port: it has
+OpenLogi runs on macOS, Linux, and Windows. Windows is the newest port: it has
 been validated end-to-end on Windows 11 hardware, but may still have more rough
 edges than the macOS and Linux builds; see [Roadmap](#roadmap).
 
@@ -59,16 +59,15 @@ Things OpenLogi does that Options+ won't:
 - **Run on Linux.** Options+ ships for macOS and Windows only. OpenLogi treats
   Linux as a first-class platform: evdev/uinput hook, udev rules, a systemd
   user unit, and `.deb` / `.rpm` / `.pkg.tar.zst` packages.
-- **Move the Gesture Button.** Pick which physical button owns the gesture
-  role — the dedicated Gesture Button, middle, back, or forward — with per-direction swipe
-  bindings, or turn gestures off entirely. Options+ pins the gesture role to
-  the dedicated Gesture Button.
+- **Put gestures on any button.** The dedicated Gesture Button, middle, back,
+  and forward buttons can each have their own per-direction swipe bindings.
+  Options+ pins gestures to the dedicated Gesture Button.
 - **Keep config in plain text.** Everything is one TOML file you can read,
   diff, version-control, and copy between machines.
 - **Script it.** A real CLI: device inventory, asset prefetch, and on-device
   HID++ diagnostics (feature/control dumps, DPI / SmartShift round-trips, and
   keyboard lighting checks).
-- **Stay light.** Native Rust + GPUI binaries — no Electron suite, no resident
+- **Stay light.** Native Rust + GPUI binaries: no Electron suite, no resident
   updaters, no account, no telemetry.
 
 ## Roadmap
@@ -102,7 +101,7 @@ Help improve the interface translations on [Crowdin](https://crowdin.com/project
 ## Install
 
 > [!IMPORTANT]
-> Quit **Logi Options+** first — the two applications fight over HID++ access and only one can own a given receiver at a time.
+> Quit **Logi Options+** first: the two applications fight over HID++ access, and only one can own a given receiver at a time.
 
 ### macOS
 
@@ -146,28 +145,51 @@ sudo pacman -U openlogi-*.pkg.tar.zst
 
 Packages are published for both `x86_64`/`amd64` and `arm64`/`aarch64`.
 
-The package installs udev rules that grant your user access to
+NixOS users can instead import the repository's module, which installs the
+package and udev rules and starts the agent with the graphical session:
+
+```nix
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.openlogi = {
+    url = "github:AprilNEA/OpenLogi";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { nixpkgs, openlogi, ... }: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux"; # or aarch64-linux
+      modules = [
+        openlogi.nixosModules.default
+        { programs.openlogi.enable = true; }
+      ];
+    };
+  };
+}
+```
+
+All Linux packages install udev rules that grant your user access to
 `/dev/hidraw*`, `/dev/uinput` and your Logitech mouse's `/dev/input/event*`
-node without `sudo`. After installation,
-enable the background agent for your user:
+node without `sudo`. The NixOS module starts the agent automatically; after a
+`.deb`, `.rpm`, or `.pkg.tar.zst` installation, enable it for your user:
 
 ```sh
 systemctl --user enable --now openlogi-agent.service
 ```
 
-See [docs/INSTALL-linux.md](docs/INSTALL-linux.md) for manual / source installs
-and distros without systemd.
+See [docs/INSTALL-linux.md](docs/INSTALL-linux.md) for complete NixOS options,
+manual / source installs, and distros without systemd.
 
 ### Windows
 
 Signed portable `.zip` archives and per-user `.msi` installers (x86_64 and
 arm64) are attached to each release. Both ship the GUI (`OpenLogi.exe`)
 together with the background agent (`openlogi-agent.exe`), which owns all
-device I/O — keep the two files side by side when using the portable zip, or
+device I/O. Keep the two files side by side when using the portable zip, or
 the GUI has nothing to connect to.
 
-Windows support works and has been validated end-to-end on Windows 11 with
-real hardware — a wired keyboard and a Unifying-receiver mouse, including
+Windows support has been validated end-to-end on Windows 11 with real
+hardware (a wired keyboard and a Unifying-receiver mouse), including
 install, in-place upgrade, and uninstall of the MSI. It is newer than the
 macOS build, so if you hit a rough edge please
 [report it](https://github.com/AprilNEA/OpenLogi/issues). The agent shows a
@@ -193,9 +215,10 @@ See [DEVELOPMENT.md](docs/DEVELOPMENT.md)
 
 ## Acknowledgments
 
-- [`hidpp`](https://crates.io/crates/hidpp) by [@lus](https://github.com/lus)
-- [Solaar](https://github.com/pwr-Solaar/Solaar)
-- [Mouser](https://github.com/TomBadash/Mouser) by Tom Badash
+- **Windows, cameras, and i18n** by [@davidbudnick](https://github.com/davidbudnick) — the Windows input hook and MSI updates, Logitech webcam support, keyboard RGB, and the Crowdin translation pipeline
+- **Linux port** by [@cserby](https://github.com/cserby) — the evdev/uinput hook, D-Bus actions, .deb/.rpm packaging
+- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) — the most complete open-source HID++ implementation, and our protocol reference
+- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) — prior art for a local, account-free Options+ replacement
 
 ## License
 
@@ -206,10 +229,16 @@ Dual-licensed under either of
 
 at your option.
 
+### Third-party code
+
+`crates/openlogi-hidpp` is a vendored fork of [`hidpp`](https://crates.io/crates/hidpp)
+by [@lus](https://github.com/lus), licensed 0BSD.
+
 ### Logo & brand assets
 
-The OpenLogi logo and app icon — the brand assets under [`design/`](design/) —
-are © 2026 AprilNEA, all rights reserved, and are not covered by the MIT/Apache
+Thanks to [@kubai087](https://github.com/kubai087) for designing the OpenLogi
+logo. The OpenLogi logo and app icon (the brand assets under
+[`design/`](design/)) are © 2026 AprilNEA, all rights reserved, and are not covered by the MIT/Apache
 licenses above; see [`design/LICENSE`](design/LICENSE). Forking the code grants
 no right to the OpenLogi name, logo, or icon; please don't use them to represent
 your own projects, forks, or distributions without prior written permission.

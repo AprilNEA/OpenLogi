@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step_started=$SECONDS
+echo "==> Checking Linux build dependencies"
+packages=(
+  libudev-dev
+  gcc
+  g++
+  clang
+  libfontconfig-dev
+  libwayland-dev
+  libxkbcommon-x11-dev
+  libx11-xcb-dev
+  libssl-dev
+  libzstd-dev
+  pkg-config
+)
+missing_packages=()
+for package in "${packages[@]}"; do
+  if ! dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null | grep -Fqx installed; then
+    missing_packages+=("$package")
+  fi
+done
+
+if ((${#missing_packages[@]})); then
+  if ((EUID == 0)); then
+    sudo=()
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true; then
+    sudo=(sudo -n)
+  else
+    echo "Passwordless sudo is required to install: ${missing_packages[*]}" >&2
+    exit 1
+  fi
+
+  "${sudo[@]}" apt-get update
+  "${sudo[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
+else
+  echo "    Linux build dependencies are already installed"
+fi
+echo "    completed in $((SECONDS - step_started))s"
+
+step_started=$SECONDS
+echo "==> Installing the Rust toolchain"
+if [[ -f "$HOME/.cargo/env" ]]; then
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
+if ! command -v rustup >/dev/null 2>&1; then
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --no-modify-path
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
+
+profile_marker="# OpenLogi orb Rust toolchain"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >>"$HOME/.bash_profile" <<'EOF'
+
+# OpenLogi orb Rust toolchain
+if [ -f "$HOME/.cargo/env" ]; then
+  . "$HOME/.cargo/env"
+fi
+EOF
+fi
+
+rustup toolchain install stable \
+  --profile minimal \
+  --component rustfmt \
+  --component clippy \
+  --target x86_64-pc-windows-gnu
+echo "    completed in $((SECONDS - step_started))s"
+
+step_started=$SECONDS
+echo "==> Fetching locked Cargo dependencies"
+cargo fetch --locked
+echo "    completed in $((SECONDS - step_started))s"
+
+step_started=$SECONDS
+echo "==> Installing locked release-notes dependencies"
+corepack pnpm@10.11.0 --dir scripts/release-notes install --frozen-lockfile
+echo "    completed in $((SECONDS - step_started))s"
+
+echo "==> OpenLogi orb setup complete"

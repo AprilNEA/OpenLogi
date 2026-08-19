@@ -157,7 +157,8 @@ pub fn agent_socket_path() -> Result<PathBuf, PathsError> {
     Ok(runtime_dir()?.join("agent.sock"))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]
 mod tests {
     use super::*;

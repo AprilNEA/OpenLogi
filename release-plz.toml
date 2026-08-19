@@ -63,6 +63,16 @@ version_group = "openlogi"
 name = "openlogi-assets"
 version_group = "openlogi"
 
+# UVC webcam discovery. Published because `openlogi-cli` (published) depends on
+# it by an exact version — a crates.io package cannot depend on an unpublished
+# path dependency. It must stay in the version group for that same reason: with
+# an independently computed next version it can disagree with the group on the
+# single shared `version.workspace` field, and a cli published against a
+# camera version that was never pushed to crates.io is a hard publish failure.
+[[package]]
+name = "openlogi-camera"
+version_group = "openlogi"
+
 [[package]]
 name = "openlogi-cli"
 version_group = "openlogi"
@@ -80,7 +90,17 @@ version_group = "openlogi"
 # App crates: not crates.io packages (git gpui deps / login-item binary).
 # `publish = false` must mirror each crate's Cargo.toml.
 [[package]]
-name = "openlogi-gui"
+name = "openlogi-desktop"
+release = false
+publish = false
+
+[[package]]
+name = "openlogi-ui"
+release = false
+publish = false
+
+[[package]]
+name = "openlogi-overlay"
 release = false
 publish = false
 
@@ -91,5 +111,15 @@ publish = false
 
 [[package]]
 name = "openlogi-agent"
+release = false
+publish = false
+
+# Leaf IPC contract crate for the agent<->GUI boundary. Only the two app
+# crates above depend on it, so it stays unpublished like they do; if a
+# published crate (openlogi-cli, openlogi-hid, …) ever depends on it, it must
+# move into the "openlogi" version_group instead — a published crate cannot
+# depend on an unpublished path dependency.
+[[package]]
+name = "openlogi-ipc"
 release = false
 publish = false

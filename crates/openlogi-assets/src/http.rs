@@ -21,6 +21,7 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 use ureq::Agent;
+use ureq::tls::{RootCerts, TlsConfig};
 
 use crate::error::AssetError;
 use crate::index::{FileEntry, Index};
@@ -109,6 +110,16 @@ impl AssetClient {
     fn agent() -> Agent {
         Agent::config_builder()
             .user_agent(USER_AGENT)
+            // Validate against the OS trust store, not ureq's bundled Mozilla
+            // roots: enterprise TLS-inspection proxies (Zscaler et al.)
+            // re-sign every connection with a private CA that exists only in
+            // the OS store, so the bundled roots failed every asset fetch
+            // behind one with "invalid peer certificate: UnknownIssuer" (#398).
+            .tls_config(
+                TlsConfig::builder()
+                    .root_certs(RootCerts::PlatformVerifier)
+                    .build(),
+            )
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .build()
             .into()

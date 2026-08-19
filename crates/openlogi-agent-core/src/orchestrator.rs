@@ -15,22 +15,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::binding::{Action, ButtonId};
+use openlogi_core::bindings::{bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
 };
+use openlogi_core::device_order::DeviceStableId;
 use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceRoute,
     KEYBOARD_KEY_CIDS,
 };
+use openlogi_ipc::InventoryHealth;
 use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
-use crate::bindings::{bindings_for, oshook_gestures_for};
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
-use crate::device_order::DeviceStableId;
+use crate::hardware::DeviceOp;
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
-use crate::ipc::InventoryHealth;
+use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
@@ -39,7 +41,7 @@ use crate::{DpiCycleState, DpiCycles};
 /// The minimal per-device facts the agent needs: the config key (binding /
 /// preset lookup), the HID++ route (DPI/SmartShift writes + capture target), and
 /// the identity fields the canonical ordering keys on (so the no-selection
-/// fallback agrees with the GUI carousel — see [`crate::device_order`]).
+/// fallback agrees with the GUI carousel — see [`openlogi_core::device_order`]).
 struct AgentDevice {
     config_key: String,
     model_key: String,
@@ -98,6 +100,34 @@ pub struct SharedRuntime {
     pub host_switch_links: HostSwitchLinks,
 }
 
+impl SharedRuntime {
+    /// Bind a device operation to `route` on the mouse/pointer capture
+    /// channel — the registry-confirmed capture channel or the exact current
+    /// inventory channel that every device write already resolves through.
+    #[must_use]
+    pub fn device(&self, route: &DeviceRoute) -> DeviceOp<'_> {
+        DeviceOp::new(
+            &self.capture_channel,
+            &self.channel_registry,
+            &self.receiver_access,
+            route,
+        )
+    }
+
+    /// Same, but against the keyboard capture channel — Fn-lock writes run on
+    /// the keyboard's own capture session, not the mouse-oriented
+    /// [`Self::capture_channel`].
+    #[must_use]
+    pub fn keyboard_device(&self, route: &DeviceRoute) -> DeviceOp<'_> {
+        DeviceOp::new(
+            &self.keyboard_channel,
+            &self.channel_registry,
+            &self.receiver_access,
+            route,
+        )
+    }
+}
+
 /// Owns the config + device selection and keeps [`SharedRuntime`] in sync.
 pub struct Orchestrator {
     config: Config,
@@ -115,8 +145,9 @@ pub struct Orchestrator {
     /// set/route/online state looks identical across the sleep gap, so the
     /// next refresh re-applies volatile settings to every online device.
     reapply_all_next_refresh: bool,
-    /// Config keys of devices first sighted recently, with remaining confirming
-    /// re-apply budget: the first write can race the device's own boot and be lost.
+    /// Config keys of devices first sighted (or wake-flagged) recently, with
+    /// remaining confirming re-apply budget: the first write can race the
+    /// device's own boot or reconnect and be lost.
     reapply_followup: HashMap<String, u8>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
     /// watcher has not produced its first usable observation yet.
@@ -125,6 +156,10 @@ pub struct Orchestrator {
     /// transition clears them; they are never written to the config.
     manual_light_overrides: BTreeMap<String, bool>,
     shared: SharedRuntime,
+    /// The state the GUI observes. Every mutator below that changes one of its
+    /// facts republishes here, so the cell cannot go stale behind a new code
+    /// path — see [`ObservableState`].
+    observable: Arc<ObservableState>,
 }
 
 /// See [`Orchestrator::inventory`] (the field) — the agent-side superset of
@@ -145,8 +180,11 @@ impl Orchestrator {
     /// Build from a loaded config. Creates the shared `Arc`s and seeds them
     /// from the config with no devices yet; the first inventory tick fills in
     /// the routes and presets.
+    ///
+    /// `observable` is the cell the IPC server answers from; the config facts
+    /// it carries are seeded here.
     #[must_use]
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, observable: Arc<ObservableState>) -> Self {
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
@@ -172,8 +210,11 @@ impl Orchestrator {
             camera_active: None,
             manual_light_overrides: BTreeMap::new(),
             shared,
+            observable,
         };
         orch.rebuild();
+        orch.observable
+            .set_launch_at_login(orch.config.app_settings.launch_at_login);
         orch
     }
 
@@ -374,6 +415,7 @@ impl Orchestrator {
             inventories: inventories.to_vec(),
             standalone: standalone.to_vec(),
         };
+        self.publish_inventory();
         let devices = build_devices(inventories, standalone);
         // Volatile settings (lighting colour, sensor DPI, SmartShift, native
         // wheel mode) live in device RAM and reset on a power cycle. Every
@@ -458,10 +500,7 @@ impl Orchestrator {
             });
         if resolution.is_some() || inverted.is_some() || dpi.is_some() || smartshift.is_some() {
             crate::hardware::reapply_mouse_volatile_in_background(
-                Some(&self.shared.capture_channel),
-                &self.shared.channel_registry,
-                &self.shared.receiver_access,
-                route.clone(),
+                &self.shared.device(&route),
                 resolution,
                 inverted,
                 dpi,
@@ -469,20 +508,11 @@ impl Orchestrator {
             );
         }
         if let Some(lighting) = self.config.lighting(key).filter(|l| l.enabled) {
-            crate::hardware::set_lighting_in_background(
-                Some(&self.shared.capture_channel),
-                &self.shared.channel_registry,
-                &self.shared.receiver_access,
-                Some(route.clone()),
-                &lighting,
-            );
+            crate::hardware::set_lighting_in_background(self.shared.device(&route), &lighting);
         }
         if let Some(fn_lock) = self.config.fn_lock(key) {
             crate::hardware::write_fn_lock_in_background(
-                Some(&self.shared.keyboard_channel),
-                &self.shared.channel_registry,
-                &self.shared.receiver_access,
-                Some(route.clone()),
+                self.shared.keyboard_device(&route),
                 fn_lock,
             );
         }
@@ -502,6 +532,7 @@ impl Orchestrator {
         }
         let previous = self.camera_active;
         self.camera_active = Some(active);
+        self.observable.set_camera_active(active);
         self.manual_light_overrides.clear();
         let mut applied = 0;
         for dev in self
@@ -562,19 +593,13 @@ impl Orchestrator {
     /// it on every reload costs at most one wheel-mode read per device — and
     /// still recovers a device whose earlier write timed out while it was waking.
     fn apply_native_wheel_modes(&self) {
-        for dev in self
-            .devices
-            .iter()
-            .filter(|dev| dev.online && dev.route.is_some())
-        {
+        for dev in self.devices.iter().filter(|dev| dev.online) {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
             let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
             crate::hardware::write_scroll_wheel_mode_in_background(
-                Some(&self.shared.capture_channel),
-                &self.shared.channel_registry,
-                &self.shared.receiver_access,
-                (resolution.is_some() || inverted.is_some())
-                    .then(|| dev.route.clone())
-                    .flatten(),
+                self.shared.device(&route),
                 resolution,
                 inverted,
             );
@@ -599,13 +624,6 @@ impl Orchestrator {
             InventoryState::Ready { standalone, .. } => standalone.clone(),
             InventoryState::Pending | InventoryState::Unavailable => Vec::new(),
         }
-    }
-
-    /// The latest aggregate camera-use sample, or `false` before the first
-    /// successful macOS observation.
-    #[must_use]
-    pub fn camera_active(&self) -> bool {
-        self.camera_active.unwrap_or(false)
     }
 
     /// Snapshot the active device and effective ring layout for a new
@@ -655,6 +673,26 @@ impl Orchestrator {
         }
     }
 
+    /// Republish the device facts the GUI observes, reading the one field that
+    /// holds them so this can never disagree with the `inventory` /
+    /// `standalone` / `inventory_health` accessors. Called by every mutator
+    /// that touches the `inventory` field, and it clones only when something
+    /// actually changed.
+    fn publish_inventory(&self) {
+        let health = self.inventory_health();
+        match &self.inventory {
+            InventoryState::Ready {
+                inventories,
+                standalone,
+            } => self
+                .observable
+                .set_inventory(health, inventories, standalone),
+            InventoryState::Pending | InventoryState::Unavailable => {
+                self.observable.set_inventory(health, &[], &[]);
+            }
+        }
+    }
+
     /// Record that enumeration has never worked and has stopped being treated
     /// as "still starting" (persistent initial failure, or the watcher died).
     /// Downgrades only [`InventoryState::Pending`]: once a snapshot exists the
@@ -663,13 +701,8 @@ impl Orchestrator {
     pub fn mark_inventory_unavailable(&mut self) {
         if matches!(self.inventory, InventoryState::Pending) {
             self.inventory = InventoryState::Unavailable;
+            self.publish_inventory();
         }
-    }
-
-    /// Whether autostart is enabled in the current config (for IPC `status`).
-    #[must_use]
-    pub fn launch_at_login(&self) -> bool {
-        self.config.app_settings.launch_at_login
     }
 
     /// Foreground-app change → re-overlay per-app bindings on the hook maps and
@@ -699,6 +732,8 @@ impl Orchestrator {
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
         self.config = config;
+        self.observable
+            .set_launch_at_login(self.config.app_settings.launch_at_login);
         let retained_overrides: HashSet<String> = self
             .manual_light_overrides
             .keys()
@@ -723,17 +758,13 @@ impl Orchestrator {
     /// [`Self::reapply_volatile_settings`]); the write is a single HID++ call,
     /// so re-applying an unchanged state is cheap.
     fn apply_fn_locks(&self) {
-        for dev in self
-            .devices
-            .iter()
-            .filter(|dev| dev.online && dev.route.is_some())
-        {
+        for dev in self.devices.iter().filter(|dev| dev.online) {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
             if let Some(fn_lock) = self.config.fn_lock(&dev.config_key) {
                 crate::hardware::write_fn_lock_in_background(
-                    Some(&self.shared.keyboard_channel),
-                    &self.shared.channel_registry,
-                    &self.shared.receiver_access,
-                    dev.route.clone(),
+                    self.shared.keyboard_device(&route),
                     fn_lock,
                 );
             }
@@ -932,18 +963,21 @@ fn any_device_needs_capture_rearm(
     !reapply_targets(prev, next, reapply_all).is_empty()
 }
 
-/// How many inventory ticks a first-sighted device keeps re-applying its
-/// volatile settings after the initial write. A cold restart leaves a Bolt/
-/// Unifying mouse slow to enumerate, so the first write (and a single confirm)
-/// can both time out against a still-booting device; retrying for ~8s at the 2s
-/// cadence lets the write land once it finishes booting.
+/// How many inventory ticks a first-sighted or wake-flagged device keeps
+/// re-applying its volatile settings after the initial write. A cold restart
+/// leaves a Bolt/Unifying mouse slow to enumerate — and a system wake can
+/// enumerate a receiver whose mouse link is still re-establishing — so the
+/// first write (and a single confirm) can both time out against a
+/// still-booting device; retrying for ~8s at the 2s cadence lets the write
+/// land once it finishes booting.
 const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
 /// plus a bounded run of confirming re-applies for devices first sighted
-/// recently, and the follow-up keys (with remaining retry counts) to confirm
-/// next refresh. Reconnects (offline→online) re-apply once — the device was
-/// already booted, so it needs no boot-race retry.
+/// recently or targeted by a system wake, and the follow-up keys (with
+/// remaining retry counts) to confirm next refresh. Reconnects
+/// (offline→online) re-apply once — the device was already booted, so it
+/// needs no boot-race retry.
 fn plan_reapply(
     prev: &[AgentDevice],
     next: &[AgentDevice],
@@ -954,8 +988,10 @@ fn plan_reapply(
     let mut next_followup: HashMap<String, u8> = targets
         .iter()
         .filter(|&&idx| {
-            let id = stable_id(&next[idx]);
-            !prev.iter().any(|p| stable_id(p) == id)
+            reapply_all || {
+                let id = stable_id(&next[idx]);
+                !prev.iter().any(|p| stable_id(p) == id)
+            }
         })
         .map(|&idx| {
             (

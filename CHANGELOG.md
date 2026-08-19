@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-15
+
+### Added
+
+- *(gui)* add a reversed Volume preset for the thumb wheel ([#608](https://github.com/AprilNEA/OpenLogi/pull/608))
+
+### Fixed
+
+- *(agent)* request Input Monitoring access at startup on macOS ([#607](https://github.com/AprilNEA/OpenLogi/pull/607))
+- *(infra)* stop ignoring the committed Amp orb lifecycle scripts ([#637](https://github.com/AprilNEA/OpenLogi/pull/637))
+- *(assets)* trust the OS certificate store, not bundled Mozilla roots ([#634](https://github.com/AprilNEA/OpenLogi/pull/634))
+- *(hid)* never switch a device to a host slot it is not paired on ([#631](https://github.com/AprilNEA/OpenLogi/pull/631))
+
+## [0.7.0] - 2026-08-16
+
+A minor bump rather than a patch: your `config.toml` is now read strictly and
+never silently replaced, and the GUI↔agent protocol moved to v17. Both change
+observable behaviour, so they do not belong in a patch release.
+
+### Highlights
+
+- **Your config is no longer silently discarded.** A malformed, hand-edited, or
+  future-schema `config.toml` used to fall back to defaults without saying so —
+  losing every binding in it. It is now parsed strictly (unknown, obsolete, and
+  out-of-range fields are rejected with the file path and TOML location), and
+  the failure is shown in the window instead of being papered over. Saves keep
+  your comments and formatting, and a file edited behind OpenLogi's back is
+  refused rather than overwritten.
+- **Mice and keyboards that speak only the newer HID++ features work now.** A
+  mouse exposing `0x2202 ExtendedAdjustableDpi` without the older `0x2201` used
+  to get a DPI panel where every read and write failed; a keyboard exposing
+  `0x8081 PerKeyLighting2` without `0x8080` got no lighting tab at all. Both are
+  driven properly. ([#629](https://github.com/AprilNEA/OpenLogi/pull/629))
+- **The Actions Ring is reliable under repeat use.** Haptics no longer fire from
+  a retired session, a stale feature handle can no longer be reused across a
+  reconnect, and the ring stays alive as long as it is clickable.
+  ([#596](https://github.com/AprilNEA/OpenLogi/pull/596),
+  [#597](https://github.com/AprilNEA/OpenLogi/pull/597),
+  [#598](https://github.com/AprilNEA/OpenLogi/pull/598),
+  [#599](https://github.com/AprilNEA/OpenLogi/pull/599))
+- **Windows camera control stops leaking.** Every COM and Media Foundation
+  initialization is now paired with its release, and a UVC entity scan stays
+  inside its own VideoControl block instead of walking into a neighbour's.
+
+### Upgrade notes
+
+- `schema_version` is `4`; v1–v4 configs still migrate automatically. A config
+  that fails to parse now surfaces an error rather than resetting to defaults —
+  see [Editing and recovery](docs/CONFIGURATION.md) if OpenLogi reports one.
+  `docs/config.example.toml` is a tested canonical example.
+- The GUI and agent negotiate protocol v17. A stale agent left running from an
+  older install is detected and replaced; no action is needed.
+
+### Changed
+
+- *(gui)* build fallbacks lazily
+
+### Fixed
+
+- *(config)* harden schema and persistence ([#604](https://github.com/AprilNEA/OpenLogi/pull/604))
+- *(hid)* drive 0x2202 DPI and 0x8081 lighting, not just their predecessors ([#629](https://github.com/AprilNEA/OpenLogi/pull/629))
+- *(release)* put openlogi-camera in the workspace version group ([#618](https://github.com/AprilNEA/OpenLogi/pull/618))
+- *(agent)* bound the background lighting write by WRITE_BUDGET
+- *(camera)* pair every COM and Media Foundation initialization
+- *(camera)* scope a UVC entity scan to its own VideoControl block
+- *(camera)* release every activate Media Foundation hands back
+- keep the ring session alive as long as the ring is clickable ([#599](https://github.com/AprilNEA/OpenLogi/pull/599))
+- *(agent)* bound the Actions Ring haptic worker to the session it serves ([#598](https://github.com/AprilNEA/OpenLogi/pull/598))
+- *(hid)* never cache a haptic feature for a retired channel ([#597](https://github.com/AprilNEA/OpenLogi/pull/597))
+- *(hid)* four defects from the Actions Ring review ([#596](https://github.com/AprilNEA/OpenLogi/pull/596))
+- *(xtask)* stamp and verify the macOS bundle identity per channel
+
+## [0.6.27] - 2026-08-13
+
+### Added
+
+- *(gui)* dismiss the Actions Ring on a click outside it ([#591](https://github.com/AprilNEA/OpenLogi/pull/591))
+- *(agent)* pressing the ring trigger again dismisses the Actions Ring ([#592](https://github.com/AprilNEA/OpenLogi/pull/592))
+- *(agent)* add a hardware-free mock agent for GUI development ([#568](https://github.com/AprilNEA/OpenLogi/pull/568))
+- per-slot custom labels for the Actions Ring ([#584](https://github.com/AprilNEA/OpenLogi/pull/584))
+- *(core)* support stable Windows app selectors ([#572](https://github.com/AprilNEA/OpenLogi/pull/572))
+- *(gui)* add capability-driven actions ring ([#528](https://github.com/AprilNEA/OpenLogi/pull/528))
+- *(hid)* persist the immutable probe cache across restarts ([#564](https://github.com/AprilNEA/OpenLogi/pull/564))
+- *(gui)* back navigation via the mouse's back button and Alt+Left ([#563](https://github.com/AprilNEA/OpenLogi/pull/563))
+- capture the MX Master 4 haptic panel as a first-class control ([#565](https://github.com/AprilNEA/OpenLogi/pull/565))
+- *(hid)* recognise Lightspeed receiver 046d:c547 (G915, G502 X) ([#574](https://github.com/AprilNEA/OpenLogi/pull/574))
+- *(hid,hidpp)* read battery over BatteryVoltage (0x1001) ([#575](https://github.com/AprilNEA/OpenLogi/pull/575))
+
+### Fixed
+
+- *(gui)* open the Actions Ring on the display containing the cursor ([#588](https://github.com/AprilNEA/OpenLogi/pull/588))
+- *(hid)* detect and recover dead-delivery HID channels ([#589](https://github.com/AprilNEA/OpenLogi/pull/589))
+- Actions Ring haptic reliability — coalescing, feature cache, firmware arming, deadlock guards ([#590](https://github.com/AprilNEA/OpenLogi/pull/590))
+- *(agent)* implement the Actions Ring IPC surface in the mock agent ([#587](https://github.com/AprilNEA/OpenLogi/pull/587))
+- *(gui)* redraw the Actions Ring on hover changes ([#585](https://github.com/AprilNEA/OpenLogi/pull/585))
+- *(hid)* widen the Bolt per-slot probe budget for high-latency USB paths ([#562](https://github.com/AprilNEA/OpenLogi/pull/562))
+- *(macos)* prevent corrupted small app icons ([#570](https://github.com/AprilNEA/OpenLogi/pull/570))
+- *(hook)* release macOS tap after accessibility revocation ([#578](https://github.com/AprilNEA/OpenLogi/pull/578))
+- *(ui)* prevent middle and thumb wheel popover flicker ([#559](https://github.com/AprilNEA/OpenLogi/pull/559))
+
 ## [0.6.26] - 2026-08-10
 
 ### Fixed

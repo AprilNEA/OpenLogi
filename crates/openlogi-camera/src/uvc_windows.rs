@@ -19,16 +19,16 @@
     reason = "DirectShow COM (device enumeration + IAMVideoProcAmp / IAMCameraControl)"
 )]
 
+use std::marker::PhantomData;
+
 use windows::Win32::Media::DirectShow::{IAMCameraControl, IAMVideoProcAmp, IBaseFilter};
 use windows::Win32::System::Com::StructuredStorage::IPropertyBag;
-use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, IEnumMoniker,
-    IMoniker,
-};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IEnumMoniker, IMoniker};
 use windows::Win32::System::Variant::{VARIANT, VT_BSTR};
 use windows::core::{GUID, Interface, w};
 
 use crate::Camera;
+use crate::com_windows::ComApartment;
 use crate::controls::{
     AutoState, AutoToggle, CameraControl, CameraState, ControlError, ControlRange,
 };
@@ -91,7 +91,8 @@ impl AutoToggle {
 /// vendor/product ids parsed out of the device path. Non-USB sources (virtual
 /// cameras) carry no `vid_`/`pid_` markers and are dropped.
 pub fn enumerate() -> Vec<Camera> {
-    monikers()
+    let com = ComApartment::enter();
+    monikers(&com)
         .map(|monikers| {
             monikers
                 .into_iter()
@@ -110,7 +111,8 @@ pub fn control_range(
     unique_id: &str,
     control: CameraControl,
 ) -> Result<ControlRange, ControlError> {
-    let dev = Device::open(unique_id)?;
+    let com = ComApartment::enter();
+    let dev = Device::open(&com, unique_id)?;
     dev.range(control.prop()).map(|(range, _)| range)
 }
 
@@ -128,7 +130,8 @@ pub fn control_ranges(unique_id: &str) -> Result<Vec<(CameraControl, ControlRang
 /// # Errors
 /// [`ControlError::NotFound`] when no camera matches `unique_id`.
 pub fn read_camera_state(unique_id: &str) -> Result<CameraState, ControlError> {
-    let dev = Device::open(unique_id)?;
+    let com = ComApartment::enter();
+    let dev = Device::open(&com, unique_id)?;
     let mut state = CameraState::default();
     for control in CameraControl::ALL {
         if let Ok((range, _)) = dev.range(control.prop()) {
@@ -164,7 +167,8 @@ pub fn set_control(
     control: CameraControl,
     value: i32,
 ) -> Result<(), ControlError> {
-    let dev = Device::open(unique_id)?;
+    let com = ComApartment::enter();
+    let dev = Device::open(&com, unique_id)?;
     dev.set(control.prop(), value, FLAG_MANUAL)
 }
 
@@ -173,7 +177,8 @@ pub fn set_control(
 /// # Errors
 /// As [`control_range`].
 pub fn set_auto(unique_id: &str, toggle: AutoToggle, on: bool) -> Result<(), ControlError> {
-    let dev = Device::open(unique_id)?;
+    let com = ComApartment::enter();
+    let dev = Device::open(&com, unique_id)?;
     dev.set_auto(toggle.prop(), on)
 }
 
@@ -189,7 +194,8 @@ pub fn apply_settings(
     autos: &[(AutoToggle, bool)],
     values: &[(CameraControl, i32)],
 ) -> Result<(), ControlError> {
-    let dev = Device::open(unique_id)?;
+    let com = ComApartment::enter();
+    let dev = Device::open(&com, unique_id)?;
     let mut first_err = None;
     for (toggle, on) in autos {
         if let Err(e) = dev.set_auto(toggle.prop(), *on) {
@@ -206,16 +212,22 @@ pub fn apply_settings(
 
 /// A camera's bound capture filter, with the two control interfaces it may
 /// implement (a camera without lens motors typically lacks `IAMCameraControl`).
-struct Device {
+///
+/// Borrowing the apartment it was bound in is what keeps the interfaces from
+/// outliving it: callers enter the apartment first, so this drops first, and
+/// any ordering that would release a filter after `CoUninitialize` does not
+/// compile.
+struct Device<'a> {
     proc_amp: Option<IAMVideoProcAmp>,
     camera_control: Option<IAMCameraControl>,
+    _com: PhantomData<&'a ComApartment>,
 }
 
-impl Device {
+impl<'a> Device<'a> {
     /// Bind the capture filter whose device path equals `unique_id`. Exact
     /// match only — guessing another camera could adjust the wrong hardware.
-    fn open(unique_id: &str) -> Result<Self, ControlError> {
-        let monikers = monikers().map_err(|e| ControlError::Io(e.to_string()))?;
+    fn open(com: &'a ComApartment, unique_id: &str) -> Result<Self, ControlError> {
+        let monikers = monikers(com).map_err(|e| ControlError::Io(e.to_string()))?;
         for moniker in monikers {
             if read_property(&moniker, w!("DevicePath")).as_deref() != Some(unique_id) {
                 continue;
@@ -227,6 +239,7 @@ impl Device {
             return Ok(Self {
                 proc_amp: filter.cast().ok(),
                 camera_control: filter.cast().ok(),
+                _com: PhantomData,
             });
         }
         Err(ControlError::NotFound)
@@ -333,12 +346,16 @@ impl Device {
 
 /// Every video-input moniker DirectShow reports (empty when the category has
 /// no devices, which the enumerator signals with `S_FALSE`).
-fn monikers() -> windows::core::Result<Vec<IMoniker>> {
-    // SAFETY: standard COM setup + documented enumerator calls. Double
-    // initialization (or an existing STA on this thread) is harmless here —
-    // the enumerator works under either apartment model.
+///
+/// The monikers are COM objects belonging to the caller's apartment, so the
+/// guard is a parameter rather than something entered here: it proves one is
+/// live for the call, and leaves the caller — which drops the returned vector
+/// well before its own guard — owning the ordering.
+fn monikers(_com: &ComApartment) -> windows::core::Result<Vec<IMoniker>> {
+    // SAFETY: documented enumerator calls, made under the caller's apartment.
+    // The enumerator works under either apartment model, so it does not matter
+    // whether that guard entered the MTA or joined an existing STA.
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let dev_enum: windows::Win32::Media::DirectShow::ICreateDevEnum =
             CoCreateInstance(&CLSID_SYSTEM_DEVICE_ENUM, None, CLSCTX_INPROC_SERVER)?;
         let mut enum_moniker: Option<IEnumMoniker> = None;

@@ -1,4 +1,5 @@
 //! Unit tests for `TouchMouseRaw` info parsing and raw-event decoding.
+#![allow(clippy::unwrap_used, reason = "expect/unwrap are idiomatic in tests")]
 
 use super::event::{TouchMousePoint, TouchMouseRawEvent, TouchMouseStatus, decode_event};
 use super::{Origin, RawMode, TouchMouseInfo};
@@ -79,6 +80,6 @@ fn ignores_unknown_event_sub_id() {
 fn maps_raw_mode_wire_values() {
     assert_eq!(RawMode::try_from(0u8).unwrap(), RawMode::NativeGestures);
     assert_eq!(RawMode::try_from(4u8).unwrap(), RawMode::RawUnfilteredWithZ);
-    assert!(RawMode::try_from(5u8).is_err());
+    RawMode::try_from(5u8).unwrap_err();
     assert_eq!(u8::from(RawMode::RawFiltered), 1);
 }

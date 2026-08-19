@@ -94,6 +94,7 @@ impl DeviceKind {
 /// (issue #127): kind is an identity guess, capability is what the firmware
 /// actually announced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "capabilities is a serialized feature-bit DTO; independent booleans keep the IPC/config shape explicit"
@@ -136,11 +137,12 @@ impl Capabilities {
     pub fn from_feature_ids(ids: &[u16]) -> Self {
         const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
-        // PerKeyLighting (0x8080) and ColorLedEffects (0x8070) — both now driven
-        // by `set_keyboard_color` (it prefers 0x8070's fixed effect to override a
-        // running onboard profile, falling back to 0x8080 per-key). Other families
-        // (backlight 0x198x) stay out so they don't earn a tab the panel can't drive.
-        const LIGHTING: [u16; 2] = [0x8080, 0x8070];
+        // ColorLedEffects (0x8070), PerKeyLighting2 (0x8081) and PerKeyLighting
+        // (0x8080) — all three driven by `set_keyboard_color`, which prefers
+        // 0x8070's fixed effect to override a running onboard profile and falls
+        // back through 0x8081 to 0x8080. Other families (backlight 0x198x) stay
+        // out so they don't earn a tab the panel can't drive.
+        const LIGHTING: [u16; 3] = [0x8080, 0x8070, 0x8081];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
             buttons: has(&BUTTONS),
@@ -253,6 +255,7 @@ pub struct ReceiverInfo {
 /// of an extended-model byte and one of these PIDs, so callers usually want
 /// to format `extended_model_id` + `model_ids[N]` to match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceModelInfo {
     /// Number of firmware entities (main firmware, bootloader, …) the
     /// device reports.
@@ -297,6 +300,7 @@ impl DeviceModelInfo {
     reason = "bitfield mirroring HID++ DeviceInformation; transports are independent flags"
 )]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceTransports {
     /// Wired USB.
     pub usb: bool,
@@ -405,7 +409,7 @@ pub struct StandaloneDevice {
 /// [`PairedDevice`], battery/model-info/capability types). bincode encodes
 /// field and variant *order*, so reordering, retyping, or wrapping any field
 /// in this tree is a wire-format change and requires a `PROTOCOL_VERSION`
-/// bump (guarded by `openlogi-agent-core/tests/wire_format.rs`).
+/// bump (guarded by `openlogi-ipc/tests/wire_format.rs`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceInventory {
     /// The receiver's identity — synthetic (mirroring the device itself)
@@ -563,6 +567,22 @@ mod tests {
     }
 
     #[test]
+    fn every_driveable_lighting_family_earns_the_tab() {
+        // `set_keyboard_color` walks 0x8070 → 0x8081 → 0x8080, so a keyboard
+        // exposing any one of them can be coloured and must get the tab.
+        // 0x8081 was missing here, which left such a keyboard with no lighting
+        // UI at all.
+        for id in [0x8070, 0x8080, 0x8081] {
+            assert!(
+                Capabilities::from_feature_ids(&[0x0001, id]).lighting,
+                "0x{id:04x} must offer the lighting tab"
+            );
+        }
+        // Backlight (0x198x) stays out — the panel cannot drive it.
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).lighting);
+    }
+
+    #[test]
     fn persisted_capabilities_without_appended_wheel_fields_load_as_unsupported()
     -> Result<(), toml::de::Error> {
         use super::Capabilities;
@@ -598,10 +618,14 @@ mod tests {
 
     #[test]
     fn light_ranges_reject_invalid_grids_and_units() {
-        assert!(LightValueRange::new(10, 1, 1, LightValueUnit::Lumens).is_err());
-        assert!(LightValueRange::new(0, 10, 0, LightValueUnit::Lumens).is_err());
-        assert!(LightValueRange::new(0, 10, 3, LightValueUnit::Lumens).is_err());
-        assert!(LightValueRange::new(0, 101, 1, LightValueUnit::Percent).is_err());
+        LightValueRange::new(10, 1, 1, LightValueUnit::Lumens)
+            .expect_err("a minimum above the maximum must be rejected");
+        LightValueRange::new(0, 10, 0, LightValueUnit::Lumens)
+            .expect_err("a zero step must be rejected");
+        LightValueRange::new(0, 10, 3, LightValueUnit::Lumens)
+            .expect_err("a step that does not divide the span must be rejected");
+        LightValueRange::new(0, 101, 1, LightValueUnit::Percent)
+            .expect_err("a percent range above 100 must be rejected");
     }
 
     #[test]
@@ -619,6 +643,6 @@ mod tests {
         let result = toml::from_str::<LightValueRange>(
             "min = 2700\nmax = 6500\nstep = 0\nunit = 'kelvin'\n",
         );
-        assert!(result.is_err());
+        result.expect_err("a zero step must not survive deserialization");
     }
 }

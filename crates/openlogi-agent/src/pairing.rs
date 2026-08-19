@@ -18,11 +18,12 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use openlogi_agent_core::ipc::{FoundDevice, PairingCommandError, PairingUpdate};
+use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::SharedRuntime;
 use openlogi_agent_core::receiver_access::{ExclusiveAccessReason, ExclusiveReceiverLease};
 use openlogi_agent_core::watchers::pairing::{self, Control};
 use openlogi_hid::{DiscoveredDevice, PairingEvent, ReceiverSelector};
+use openlogi_ipc::{FoundDevice, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate};
 use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
 
@@ -50,13 +51,17 @@ pub struct PairingManager {
     sessions: Arc<AtomicUsize>,
     receiver_lease: ReceiverLeaseSlot,
     shared: SharedRuntime,
+    /// Where the session's progress is published for the GUI to observe. The
+    /// event channel above is the same information as a stream; this is the
+    /// form that survives a missed poll or a reconnect.
+    observable: Arc<ObservableState>,
 }
 
 impl PairingManager {
     /// Spawn the pairing watcher and its event translator. One per agent; must
     /// be called inside the tokio runtime (it spawns the translator task).
     #[must_use]
-    pub fn new(shared: SharedRuntime) -> Self {
+    pub fn new(shared: SharedRuntime, observable: Arc<ObservableState>) -> Self {
         let (ctrl, raw_events) = pairing::spawn();
         let (upd_tx, upd_rx) = mpsc::unbounded_channel();
         let devices: DeviceCache = Arc::new(StdMutex::new(HashMap::new()));
@@ -68,6 +73,7 @@ impl PairingManager {
             Arc::clone(&devices),
             Arc::clone(&sessions),
             Arc::clone(&receiver_lease),
+            Arc::clone(&observable),
         ));
         Self {
             ctrl,
@@ -76,6 +82,7 @@ impl PairingManager {
             sessions,
             receiver_lease,
             shared,
+            observable,
         }
     }
 
@@ -114,6 +121,9 @@ impl PairingManager {
             return Err(PairingCommandError::WatcherUnavailable);
         }
         admission.commit();
+        // A session exists the moment it is admitted, before the watcher's own
+        // first event: the user clicked Add Device and the window must show it.
+        self.observable.set_pairing(Some(PairingPhase::Searching));
         Ok(())
     }
 
@@ -127,7 +137,9 @@ impl PairingManager {
         if let Some(device) = device {
             self.ctrl
                 .send(Control::Pair(device))
-                .map_err(|_| PairingCommandError::WatcherUnavailable)
+                .map_err(|_| PairingCommandError::WatcherUnavailable)?;
+            self.observable.set_pairing(Some(PairingPhase::Pairing));
+            Ok(())
         } else {
             warn!(?address, "pair requested for an unknown device");
             Err(PairingCommandError::UnknownDevice)
@@ -139,6 +151,10 @@ impl PairingManager {
     /// capture could re-acquire the receiver while `run_pairing` still holds it.
     pub fn cancel(&self) -> Result<(), PairingCommandError> {
         if self.sessions.load(Ordering::Acquire) == 0 {
+            // Nothing running, so this is the GUI dismissing a *finished*
+            // session's result. Clearing the phase is the whole job — without
+            // it the next observation would put the result straight back.
+            self.observable.set_pairing(None);
             return Ok(());
         }
         self.ctrl
@@ -208,6 +224,7 @@ async fn translate(
     devices: DeviceCache,
     sessions: Arc<AtomicUsize>,
     receiver_lease: ReceiverLeaseSlot,
+    observable: Arc<ObservableState>,
 ) {
     while let Some(event) = raw.recv().await {
         let update = match event {
@@ -226,6 +243,22 @@ async fn translate(
             PairingEvent::Paired { slot } => PairingUpdate::Paired { slot },
             PairingEvent::Failed(error) => PairingUpdate::Failed(error.into()),
         };
+        match &update {
+            PairingUpdate::Searching => observable.set_pairing(Some(PairingPhase::Searching)),
+            PairingUpdate::DeviceFound(found) => observable.found_pairing_device(found.clone()),
+            PairingUpdate::Passkey(method) => {
+                observable.set_pairing(Some(PairingPhase::Passkey(method.clone())));
+            }
+            PairingUpdate::Paired { slot } => {
+                observable.set_pairing(Some(PairingPhase::Paired { slot: *slot }));
+            }
+            // A cancelled session leaves no result to show: the user asked it
+            // to stop, so the session simply stops existing.
+            PairingUpdate::Failed(PairingFailure::Cancelled) => observable.set_pairing(None),
+            PairingUpdate::Failed(failure) => {
+                observable.set_pairing(Some(PairingPhase::Failed(failure.clone())));
+            }
+        }
         if matches!(
             update,
             PairingUpdate::Paired { .. } | PairingUpdate::Failed(_)
@@ -267,7 +300,7 @@ mod tests {
     fn shared_runtime() -> SharedRuntime {
         SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
-            keyboard_bindings: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            keyboard_bindings: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
             capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),
@@ -290,6 +323,7 @@ mod tests {
             sessions: Arc::new(AtomicUsize::new(0)),
             receiver_lease: Arc::new(StdMutex::new(None)),
             shared: shared_runtime(),
+            observable: Arc::new(ObservableState::new("test".to_string())),
         }
     }
 
@@ -321,7 +355,11 @@ mod tests {
         let result = manager.cancel();
 
         assert_eq!(result, Ok(()));
-        assert!(ctrl_rx.try_recv().is_err());
+        let sent = ctrl_rx.try_recv();
+        assert!(
+            sent.is_err(),
+            "cancel without an active session must not reach the watcher, got {sent:?}"
+        );
     }
 
     #[tokio::test]
@@ -391,6 +429,10 @@ mod tests {
             panic!("test device cache lock should not be poisoned");
         };
         assert_eq!(devices.len(), 1);
-        assert!(ctrl_rx.try_recv().is_err());
+        let sent = ctrl_rx.try_recv();
+        assert!(
+            sent.is_err(),
+            "an overlapping start must not reach the watcher, got {sent:?}"
+        );
     }
 }

@@ -391,10 +391,12 @@ fn write_value(device: &Device, id: u32, value: i64) -> Result<(), ControlError>
 /// Standard UVC controls fit comfortably; saturating keeps a driver reporting
 /// an absurd bound from wrapping into a negative slider bound.
 fn clamp_i32(value: i64) -> i32 {
-    i32::try_from(value).unwrap_or(if value.is_negative() {
-        i32::MIN
-    } else {
-        i32::MAX
+    i32::try_from(value).unwrap_or_else(|_| {
+        if value.is_negative() {
+            i32::MIN
+        } else {
+            i32::MAX
+        }
     })
 }
 

@@ -61,7 +61,7 @@ pub fn try_replace_stale() -> Option<InstanceGuard> {
 
 #[cfg(unix)]
 fn replace_stale() -> Option<InstanceGuard> {
-    use openlogi_agent_core::ipc::{AgentClient, PROTOCOL_VERSION};
+    use openlogi_ipc::{AgentClient, PROTOCOL_VERSION};
     use std::ffi::OsStr;
     use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
     use tarpc::{client, context};
@@ -72,8 +72,8 @@ fn replace_stale() -> Option<InstanceGuard> {
         .ok()?;
     let holder_version = rt.block_on(async {
         let handshake = async {
-            let stream = openlogi_agent_core::transport::connect().await.ok()?;
-            let transport = openlogi_agent_core::transport::wrap(stream);
+            let stream = openlogi_ipc::transport::connect().await.ok()?;
+            let transport = openlogi_ipc::transport::wrap(stream);
             let client = AgentClient::new(client::Config::default(), transport).spawn();
             client.protocol_version(context::current()).await.ok()
         };

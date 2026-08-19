@@ -8,8 +8,10 @@ paths:
 - macOS: the CGEventTap freeze-hazard state machine is load-bearing. The tap must
   self-disable when Accessibility is revoked, on its own thread, with the bounded
   run-loop slice — a stopped watcher after grant once froze all input on the machine.
-  Don't restructure it casually, and don't migrate the tap to `objc2-core-graphics`
-  (the `NSWorkspace` read is the only part that moved to `objc2`).
+  Don't restructure it casually, and don't migrate the tap to `objc2-core-graphics`.
+  The `NSWorkspace` read and the Accessibility-trust check/prompt are the parts that
+  did move to the objc2 framework crates — see `platform/AGENTS.md` for the rule that
+  every TCC call uses a typed binding rather than a hand-written `extern` block.
 - The tap callback must never block and never panic: use `try_read`/`try_lock` only,
   queue bound actions off-thread, wrap the user callback in `catch_unwind`, and keep
   the stuck-callback watchdog that force-exits the agent if the budget is exceeded.
