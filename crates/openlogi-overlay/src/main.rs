@@ -9,11 +9,10 @@
     windows_subsystem = "windows"
 )]
 
-// The catalog is owned by the settings app, whose `locales/` directory Crowdin
-// is configured against; the path is relative to this crate's manifest. Moving
-// those files is a Crowdin-coordinated change, not a refactor — until then this
-// is the one place the two crates touch outside Cargo.
-rust_i18n::i18n!("../openlogi-desktop/locales", fallback = "en");
+// `t!` resolves against a backend the invoking crate must generate itself, so
+// both binaries expand `i18n!` over the one catalog in `openlogi-ui` — the same
+// crate this one already depends on for locale negotiation.
+rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
 mod platform;
 
@@ -810,11 +809,12 @@ fn retry_before(deadline: Option<Instant>) -> bool {
 mod tests {
     use super::*;
 
-    /// The catalog this binary translates against lives in the settings app's
-    /// crate (see the `i18n!` at the top). A wrong path there does **not** fail
-    /// the build — `rust_i18n` compiles it to an empty catalog, and every ring
-    /// label silently renders as its English key in all 20 locales. Pin one
-    /// action label in a non-English locale so that breakage is loud.
+    /// The catalog this binary translates against lives in `openlogi-ui` and is
+    /// reached by the relative path in the `i18n!` at the top. A wrong path
+    /// there does **not** fail the build — `rust_i18n` compiles it to an empty
+    /// catalog, and every ring label silently renders as its English key in all
+    /// 20 locales. Pin one action label in a non-English locale so that
+    /// breakage is loud.
     #[test]
     fn the_shared_catalog_is_wired_up() {
         rust_i18n::set_locale("zh-CN");

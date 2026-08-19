@@ -139,7 +139,7 @@ If the change touches anything that crosses the agent↔GUI boundary
 ### i18n
 
 New GUI strings: insert the same key in the **same position** in every
-`crates/openlogi-desktop/locales/*.yml` (parity is required). Run
+`crates/openlogi-ui/locales/*.yml` (parity is required). Run
 `cargo test -p openlogi-desktop i18n`.
 
 ### App / agent runtime notes
@@ -297,7 +297,7 @@ including what was NOT verified.
 
 ## i18n (all locale files, then Crowdin)
 
-- Add or change UI strings in **every** `crates/openlogi-desktop/locales/*.yml` in
+- Add or change UI strings in **every** `crates/openlogi-ui/locales/*.yml` in
   the same PR. `en.yml` is the English source of truth (the English text IS the
   key); other files must not lag — the parity test fails the build.
 - Crowdin improves non-English **values** over time. The sync job **merges**
@@ -314,7 +314,7 @@ before editing that area.
 | Area | Rule file |
 |---|---|
 | `crates/openlogi-desktop/**`, `crates/openlogi-ui/**`, `crates/openlogi-overlay/**` (GPUI) | `.claude/rules/gui.md` |
-| `crates/openlogi-desktop/locales/**`, `src/i18n.rs` | `.claude/rules/i18n.md` |
+| `crates/openlogi-ui/locales/**`, `openlogi-ui/src/locale.rs`, `openlogi-desktop/src/services/i18n.rs` | `.claude/rules/i18n.md` |
 | `crates/openlogi-agent-core/**`, `crates/openlogi-agent/**`, `crates/openlogi-ipc/**` (IPC wire) | `.claude/rules/ipc-protocol.md` |
 | `crates/openlogi-hidpp/**` (hard fork of `hidpp`) | `crates/openlogi-hidpp/AGENTS.md` |
 | `crates/openlogi-hid/**` | `.claude/rules/hidpp.md` |

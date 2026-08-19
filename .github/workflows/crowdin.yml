@@ -9,7 +9,7 @@ on:
       - master
     paths:
       # English source is SoT; non-English catalogs come from Crowdin only.
-      - crates/openlogi-desktop/locales/en.yml
+      - crates/openlogi-ui/locales/en.yml
       - crowdin.yml
       - .github/workflows/crowdin.yml
       - .github/scripts/i18n/**
@@ -71,7 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/openlogi-locales-before
-          cp crates/openlogi-desktop/locales/*.yml /tmp/openlogi-locales-before/
+          cp crates/openlogi-ui/locales/*.yml /tmp/openlogi-locales-before/
 
       # Upload sources + seed per-language translations, then download only
       # (no push/PR — we merge first so sparse/English exports never land).
@@ -100,15 +100,15 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/i18n/merge_crowdin_download.py \
             --before /tmp/openlogi-locales-before \
-            --locales crates/openlogi-desktop/locales \
-            --en crates/openlogi-desktop/locales/en.yml
+            --locales crates/openlogi-ui/locales \
+            --en crates/openlogi-ui/locales/en.yml
 
       - name: Push translation branch and open PR
         env:
           GH_TOKEN: ${{ steps.github_app.outputs.token }}
         run: |
           set -euo pipefail
-          if git diff --quiet -- crates/openlogi-desktop/locales/; then
+          if git diff --quiet -- crates/openlogi-ui/locales/; then
             echo "No real Crowdin translation updates"
             exit 0
           fi
@@ -116,7 +116,7 @@ jobs:
           git config user.name "Crowdin Bot"
           git config user.email "support+bot@crowdin.com"
           git checkout -B crowdin/i18n
-          git add crates/openlogi-desktop/locales/
+          git add crates/openlogi-ui/locales/
           git commit -m "chore(i18n): sync Crowdin translations"
           git push -f origin crowdin/i18n
 

@@ -14,9 +14,11 @@ paths:
   The overlay must never depend on `openlogi-desktop`. Before putting anything in
   `openlogi-ui`, check both binaries actually need it: every dependency added there is
   also added to the overlay, which is why `gpui-component` is *not* one of them.
-- The overlay translates against the settings app's `locales/` via a relative path in
-  its `rust_i18n::i18n!` (the catalog stays put because Crowdin is configured against
-  that path). A wrong path there compiles to an **empty catalog** rather than an error —
+- One catalog, in `openlogi-ui/locales/`, beside the `locale` module that negotiates
+  over it. `t!` resolves against a backend the invoking crate must generate itself, so
+  each binary still expands its own `rust_i18n::i18n!` over that shared directory by
+  relative path. A wrong path there compiles to an **empty catalog** rather than an
+  error, and every string silently renders as its English key —
   `the_shared_catalog_is_wired_up` in `openlogi-overlay` is what makes that fail loudly.
 - `gpui`/`gpui_platform` track zed's default branch on purpose; the compatible zed
   commit is pinned **only in `Cargo.lock`**, in lockstep with the `gpui-component` rev.
