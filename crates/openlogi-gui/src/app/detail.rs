@@ -35,7 +35,7 @@ use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::state::{AppState, DeviceRecord};
-use crate::theme::{HEADER_H, Palette, SCREEN_PAD, Typography as _};
+use crate::ui::theme::{HEADER_H, Palette, SCREEN_PAD, Typography as _};
 
 /// Device-detail top bar, in three zones: a back affordance + device name
 /// (leading), the section tabs as a centred segmented control (middle), and the

@@ -42,7 +42,7 @@ use crate::features::mouse::picker::{
     section_header,
 };
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette};
+use crate::ui::theme::{self, ACCENT_BLUE, Palette};
 use gpui::ease_in_out;
 use gpui::{Animation, AnimationExt, img};
 

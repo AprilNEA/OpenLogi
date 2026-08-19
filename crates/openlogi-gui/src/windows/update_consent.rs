@@ -6,7 +6,7 @@
 //! is how a user opts in on first launch. Either choice marks the prompt seen
 //! so it never reappears; "Enable" also runs one check immediately.
 
-use crate::theme::Typography as _;
+use crate::ui::theme::Typography as _;
 use gpui::{
     App, BorrowAppContext as _, Context, FocusHandle, InteractiveElement, IntoElement,
     ParentElement as _, Render, Size, Styled as _, Subscription, Window, div,
@@ -20,7 +20,7 @@ use gpui_updater::Updater;
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::state::AppState;
-use crate::theme;
+use crate::ui::theme;
 use crate::windows::{self, AuxWindow};
 
 /// Standalone first-run update-consent window root view.

@@ -7,7 +7,7 @@
 use gpui::{Bounds, PathBuilder, Pixels, Point, Window, hsla, point, px, rgb};
 
 use super::hotspots::{Hotspot, MouseControlId};
-use crate::theme::ACCENT_BLUE;
+use crate::ui::theme::ACCENT_BLUE;
 
 /// Length of the horizontal stub before turning toward the label.
 /// Kept small enough to fit inside the gap between mouse and card so

@@ -20,7 +20,7 @@ use openlogi_core::binding::{
 
 use super::action_icons::action_icon_path;
 use crate::state::AppState;
-use crate::theme::{self, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 use openlogi_gui::action_ring::icons::ring_icon_path;
 
 pub(super) fn action_library(

@@ -1,4 +1,4 @@
-//! The lazy device-read skeleton shared by the DPI and SmartShift panels.
+//! Lazy device reads shared by the DPI and SmartShift panels.
 //!
 //! Both panels resolve their state by sending a one-shot read request to the
 //! agent over IPC and awaiting the typed reply off the render thread, then

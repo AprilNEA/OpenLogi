@@ -35,7 +35,7 @@ use openlogi_core::config::KeyTrigger;
 use super::function_row::FunctionRowView;
 use crate::features::mouse::picker::{PickFn, divider, menu_card, menu_row, scroll_list, title};
 use crate::state::AppState;
-use crate::theme::Palette;
+use crate::ui::theme::Palette;
 
 /// Which power-user editor is showing for the selected key.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

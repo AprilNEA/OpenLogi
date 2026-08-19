@@ -5,7 +5,7 @@ use super::{
     FluentBuilder, IconName, IntoElement, ParentElement, SettingField, SettingGroup, SettingItem,
     SettingPage, Slider, SliderState, Styled, div, h_flex, px, theme, v_flex,
 };
-use crate::theme::Typography as _;
+use crate::ui::theme::Typography as _;
 
 pub(super) fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPage {
     let group = SettingGroup::new()

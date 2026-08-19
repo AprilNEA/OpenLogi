@@ -16,7 +16,7 @@ use openlogi_core::hid::DeviceRoute;
 
 use super::AppView;
 use crate::state::AppState;
-use crate::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, Typography as _};
 
 /// True when the device is charging but still reports 0% — the MX2S `0x1000`
 /// firmware can't gauge charge under load, and on a cold start there's no

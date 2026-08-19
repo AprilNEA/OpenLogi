@@ -1,4 +1,4 @@
-//! A centre-stage ("coverflow") carousel.
+//! A centered coverflow carousel.
 //!
 //! The selected item is rendered large and centred; its immediate neighbours
 //! peek smaller on either side. Selecting a neighbour — by clicking it, an

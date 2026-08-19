@@ -29,10 +29,10 @@ use openlogi_core::config::{
 };
 use openlogi_core::hid::{AUTO_DISENGAGE_PERMANENT, DeviceRoute, SmartShiftMode, SmartShiftStatus};
 
-use crate::components::device_read::issue_device_read;
-use crate::components::status::{retry_line, status_line};
 use crate::state::{AppState, DeviceKey, SmartShiftLoad, SmartShiftWriteStatus};
-use crate::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::device_read::issue_device_read;
+use crate::ui::status::{retry_line, status_line};
+use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
 /// Friendly slider range for the `autoDisengage` threshold. The wire field is
 /// `0x01`–`0xFE` (0.25 turn/s steps); the slider exposes the usable band

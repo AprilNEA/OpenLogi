@@ -9,7 +9,7 @@ use super::{
     Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter, ThemeMode, ThemeRegistry, div, h_flex, px,
     rgb, theme, v_flex,
 };
-use crate::theme::Typography as _;
+use crate::ui::theme::Typography as _;
 
 /// The Appearance page: light/dark mode, the theme grid, corner radius, and the
 /// interface language. Every theme here re-skins the whole app — the bespoke

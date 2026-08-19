@@ -2,7 +2,7 @@
 //! event stream — a common pointer-lag cause — and, in debug builds, dumps the
 //! full event-tap list plus a live event monitor.
 
-use crate::theme::Typography as _;
+use crate::ui::theme::Typography as _;
 #[cfg(not(debug_assertions))]
 use openlogi_hook::Hook;
 

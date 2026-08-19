@@ -19,10 +19,10 @@ use gpui_component::{
 use openlogi_core::hid::{DeviceRoute, DpiCapabilities};
 use tracing::debug;
 
-use crate::components::device_read::issue_device_read;
-use crate::components::status::{retry_line, status_line};
 use crate::state::{AppState, DeviceKey, DpiStatus};
-use crate::theme::{self, Palette, SelectableStyle, Typography as _};
+use crate::ui::device_read::issue_device_read;
+use crate::ui::status::{retry_line, status_line};
+use crate::ui::theme::{self, Palette, SelectableStyle, Typography as _};
 
 pub struct DpiPanel {
     slider_state: Option<Entity<SliderState>>,

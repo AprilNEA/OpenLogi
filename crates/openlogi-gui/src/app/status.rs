@@ -12,7 +12,7 @@ use gpui_component::{
 };
 
 use crate::app_menu::OpenConfigFolder;
-use crate::theme::{self, FOOTER_H, Palette, Typography as _};
+use crate::ui::theme::{self, FOOTER_H, Palette, Typography as _};
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"
 /// body shared by the pre-connection frame and the scanning state, so the two

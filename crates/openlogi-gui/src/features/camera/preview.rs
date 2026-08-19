@@ -31,7 +31,7 @@ use gpui_component::v_flex;
 use image::{Frame as ImageFrame, RgbaImage};
 use openlogi_camera::{CameraAuthorization, CameraStream, Frame};
 
-use crate::theme::{self, Palette};
+use crate::ui::theme::{self, Palette};
 
 const PREVIEW_W: f32 = 480.;
 const PREVIEW_H: f32 = 270.; // 16:9

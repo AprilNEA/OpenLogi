@@ -1,4 +1,4 @@
-//! Shared status / retry lines for the lazily-loaded device-config panels.
+//! Status and retry lines for lazily loaded device settings.
 //!
 //! The DPI and SmartShift panels both resolve their device state in the
 //! background and surface the same handful of non-`Ready` states — "reading…",
@@ -9,7 +9,7 @@
 use gpui::{AnyElement, App, ElementId, IntoElement, ParentElement, SharedString, Styled, div, px};
 use gpui_component::button::{Button, ButtonVariants as _};
 
-use crate::theme::{Palette, Typography as _};
+use crate::ui::theme::{Palette, Typography as _};
 
 /// Fixed height for a status / retry row, so swapping a slider out for a status
 /// message (or back) doesn't make the panel jump.

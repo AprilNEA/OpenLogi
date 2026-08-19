@@ -1,6 +1,6 @@
 //! Assets (device-image cache) settings page.
 
-use crate::theme::Typography as _;
+use crate::ui::theme::Typography as _;
 use std::time::Duration;
 
 use super::{

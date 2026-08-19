@@ -7,13 +7,13 @@
 //! copy. [`WindowRegistry`] holds the live [`WindowHandle`] per slot;
 //! [`open_or_focus`] activates it when still open, otherwise opens a fresh one
 //! wired for per-window light/dark tracking via
-//! [`crate::theme::apply_from_settings`].
+//! [`crate::ui::theme::apply_from_settings`].
 
 pub mod add_device;
 pub mod settings;
 pub mod update_consent;
 
-use crate::theme::Typography as _;
+use crate::ui::theme::Typography as _;
 use gpui::{
     App, AppContext as _, Bounds, Context, Global, IntoElement, ParentElement as _, Pixels, Render,
     SharedString, Size, Styled as _, Subscription, TitlebarOptions, WindowBounds, WindowHandle,
@@ -123,10 +123,10 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
     };
 
     let opened = cx.open_window(options, |window, cx| {
-        crate::theme::apply_from_settings(Some(window), cx);
+        crate::ui::theme::apply_from_settings(Some(window), cx);
         let view = cx.new(|cx| build_view(window, cx));
         let appearance_obs = window.observe_window_appearance(|window, cx| {
-            crate::theme::apply_from_settings(Some(window), cx);
+            crate::ui::theme::apply_from_settings(Some(window), cx);
         });
         view.update(cx, |v, _| v.set_appearance_obs(appearance_obs));
         cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))

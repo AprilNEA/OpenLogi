@@ -29,7 +29,7 @@ use openlogi_ipc::{FoundDevice, PairingFailure, PairingUpdate};
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
 use crate::ipc_client::Command;
 use crate::state::AppState;
-use crate::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, Typography as _};
 use crate::windows::{self, AuxWindow};
 
 /// The pairing flow's current UI state. Mirrors the [`PairingUpdate`] stream.

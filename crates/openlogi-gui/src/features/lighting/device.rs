@@ -19,7 +19,7 @@ use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
 use crate::state::AppState;
-use crate::theme::{self, Palette, SelectableStyle, Typography as _};
+use crate::ui::theme::{self, Palette, SelectableStyle, Typography as _};
 
 const SWATCH: f32 = 28.;
 

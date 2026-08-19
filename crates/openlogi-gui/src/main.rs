@@ -32,14 +32,13 @@ macro_rules! tr {
 mod app;
 mod app_menu;
 mod asset;
-mod components;
 mod diagnostics;
 mod features;
 mod i18n;
 mod ipc_client;
 mod platform;
 mod state;
-mod theme;
+mod ui;
 mod windows;
 
 // Loads the Crowdin-managed `crates/openlogi-gui/locales/*.yml` files at compile
@@ -67,6 +66,7 @@ use crate::asset::sync::{
     AssetCommand, AssetControl, SyncOutcome, model_key, run_asset_sync, sync_retry_delay,
 };
 use crate::state::{AppState, ConfigPersistence};
+use crate::ui::theme;
 
 fn dispatch_gui_command(command: DeeplinkCommand, cx: &mut gpui::App) {
     use DeeplinkCommand as Cmd;

@@ -37,7 +37,7 @@ use openlogi_core::binding::{
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
+use crate::ui::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
 
 /// Floor width for the [`action_picker`] popover. The action labels drive the
 /// actual width; this only stops the list from collapsing too narrow. Matches

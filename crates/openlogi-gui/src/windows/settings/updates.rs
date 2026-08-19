@@ -6,7 +6,7 @@ use super::{
     SettingGroup, SettingItem, SettingPage, Sizable, Styled, Tag, UpdateStatus, Updater, div,
     h_flex, img, px, v_flex,
 };
-use crate::theme::Typography as _;
+use crate::ui::theme::Typography as _;
 
 /// The Updates page: a hero card with the running build, its update status, and
 /// the contextual check / install / restart action; the opt-in auto-check and

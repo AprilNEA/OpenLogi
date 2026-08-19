@@ -1,4 +1,4 @@
-//! Colors and shared sizes for the OpenLogi UI.
+//! OpenLogi UI theme and shared sizes.
 //!
 //! Two layers:
 //!
@@ -183,7 +183,7 @@ pub fn palette(cx: &App) -> Palette {
 /// checkout into `OUT_DIR` and generates the `UPSTREAM_THEME_JSON` list included
 /// just below (gpui-component doesn't ship them inside its compiled crate, so
 /// they must be embedded to be selectable).
-const OPENLOGI_THEME_JSON: &str = include_str!("../themes/openlogi.json");
+const OPENLOGI_THEME_JSON: &str = include_str!("../../themes/openlogi.json");
 
 // Defines `static UPSTREAM_THEME_JSON: &[&str]` from build-time-embedded copies.
 include!(concat!(env!("OUT_DIR"), "/builtin_themes.rs"));

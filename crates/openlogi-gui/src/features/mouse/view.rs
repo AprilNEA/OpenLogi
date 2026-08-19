@@ -21,7 +21,7 @@ use super::thumbwheel::ThumbwheelPreset;
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::asset::{GlowGeometry, ResolvedAsset};
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
 const SIDE_W: f32 = 180.;
 const SIDE_GAP: f32 = 24.;

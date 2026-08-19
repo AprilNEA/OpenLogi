@@ -12,7 +12,7 @@ use super::{
 };
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::platform::permissions;
-use crate::theme::Typography as _;
+use crate::ui::theme::Typography as _;
 
 #[cfg_attr(
     not(any(target_os = "macos", target_os = "linux")),

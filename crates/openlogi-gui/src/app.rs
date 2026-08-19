@@ -25,7 +25,7 @@ use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::state::{AgentLink, AppState, DeviceRecord};
-use crate::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, Typography as _};
 
 mod detail;
 mod home;

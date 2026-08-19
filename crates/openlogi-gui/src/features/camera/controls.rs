@@ -34,7 +34,7 @@ use openlogi_core::config::CameraControls;
 use tracing::debug;
 
 use crate::state::AppState;
-use crate::theme::{self, ACCENT_BLUE, Palette};
+use crate::ui::theme::{self, ACCENT_BLUE, Palette};
 
 /// Built-in profiles: `values` are fractions of each control's own range, so
 /// they scale to whatever the camera reports. Auto modes all engage — the

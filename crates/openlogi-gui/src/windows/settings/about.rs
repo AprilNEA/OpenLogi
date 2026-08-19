@@ -6,7 +6,7 @@ use super::{
     SettingItem, SettingPage, SettingsView, SharedString, Sizable, Styled, div, h_flex, img, px,
     v_flex,
 };
-use crate::theme::Typography as _;
+use crate::ui::theme::Typography as _;
 
 /// The About page: a hero card with the build identity and outbound links, the
 /// on-disk config location, and a trademark disclaimer.

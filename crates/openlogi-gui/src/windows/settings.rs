@@ -45,7 +45,7 @@ pub(super) use crate::platform::permissions::Permission;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(super) use crate::platform::permissions::PermissionStatus;
 pub(super) use crate::state::AppState;
-pub(super) use crate::theme::{self, Palette};
+pub(super) use crate::ui::theme::{self, Palette};
 
 use crate::windows::{self, AuxWindow};
 

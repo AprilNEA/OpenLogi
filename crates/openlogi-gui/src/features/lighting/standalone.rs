@@ -1,7 +1,7 @@
 //! Controls for standalone lights.
 
 use crate::state::{AppState, LightCommandStatus};
-use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::theme::{self, ACCENT_BLUE, Palette, SelectableStyle as _, Typography as _};
 use gpui::{
     AppContext as _, BorrowAppContext as _, BoxShadow, Context, Entity, Hsla, InteractiveElement,
     IntoElement, ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription,

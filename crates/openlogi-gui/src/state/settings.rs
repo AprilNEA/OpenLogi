@@ -67,7 +67,7 @@ impl AppState {
         self.persist_config("auto-install setting");
     }
     /// Persist the light/dark appearance preference. The caller re-applies the
-    /// live theme via [`crate::theme::apply_from_settings`]; this only writes the
+    /// live theme via [`crate::ui::theme::apply_from_settings`]; this only writes the
     /// choice. No-op when unchanged.
     pub fn set_appearance(&mut self, appearance: Appearance) {
         if self.config.app_settings.appearance == appearance {
