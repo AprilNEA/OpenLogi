@@ -26,7 +26,7 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingUpdate,
+    PairingCommandError, PairingUpdate, RingObservation,
 };
 use succession::Compat;
 
@@ -247,7 +247,13 @@ impl Agent for AgentServer {
     }
 
     async fn next_action_ring(self, _: Context) -> Option<ActionRingInvocation> {
-        self.action_ring.next_invocation().await
+        // Superseded by `observe_action_ring`; nothing calls this, and a
+        // matching-version overlay never will (see the trait's note).
+        None
+    }
+
+    async fn observe_action_ring(self, _: Context, since: Generation) -> RingObservation {
+        self.action_ring.observe(since).await
     }
 
     async fn action_ring_hover(

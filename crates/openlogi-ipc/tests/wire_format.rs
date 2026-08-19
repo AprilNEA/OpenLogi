@@ -42,7 +42,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, ConfigReloadError, FoundDevice, Identity, InventoryHealth,
     MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate,
+    PairingUpdate, RingObservation,
 };
 use succession::{Compat, Run};
 
@@ -71,7 +71,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 20);
+    assert_eq!(PROTOCOL_VERSION, 21);
 }
 
 #[test]
@@ -147,6 +147,7 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::ActionRingCancel { session_id: 42 }, "152a");
     assert_wire(&AgentRequest::Identity {}, "16");
     assert_wire(&AgentRequest::Observe { since: 7 }, "1707");
+    assert_wire(&AgentRequest::ObserveActionRing { since: 7 }, "1807");
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
@@ -188,6 +189,13 @@ fn action_ring_types() {
     assert_wire(&ActionRingSlot::Top, "00");
     assert_wire(&ActionRingSlot::TopLeft, "07");
     assert_wire(&ActionRingIcon::Keyboard, "07");
+    assert_wire(
+        &RingObservation {
+            generation: 5,
+            invocation: None,
+        },
+        "0500",
+    );
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
     assert_wire(&HidppOperation::PlayHaptic, "0e");

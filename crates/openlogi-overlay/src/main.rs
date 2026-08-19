@@ -54,21 +54,18 @@ fn main() -> Result<()> {
         let live_session = Arc::new(ClickAwaySession::new());
         spawn_click_away_dismissal(cx, Arc::clone(&live_session));
         cx.spawn(async move |cx| {
-            while let Some(invocation) = invocations.recv().await {
-                // An empty invocation is the agent's dismissal signal (second
-                // trigger press): close any showing ring, open nothing, and
-                // acknowledge so the agent can clear the placeholder session.
-                if invocation.slots.is_empty() {
+            while let Some(observed) = invocations.recv().await {
+                // No ring is what a dismissal looks like: close whatever is
+                // showing and open nothing. The agent has already forgotten the
+                // session, so there is nothing to acknowledge either.
+                let Some(invocation) = observed else {
                     cx.update(|cx| {
                         for handle in cx.windows() {
                             let _ = handle.update(cx, |_, window, _| window.remove_window());
                         }
                     });
-                    let _ = commands.send(OverlayCommand::Cancel {
-                        session_id: invocation.session_id,
-                    });
                     continue;
-                }
+                };
                 openlogi_ui::locale::activate(invocation.language.as_deref());
                 cx.update(|cx| {
                     live_session.clear();

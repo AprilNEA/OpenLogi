@@ -54,7 +54,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     ConfigReloadError, FoundDevice, Generation, Identity, InventoryHealth, MonitorEvent,
     OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate,
+    PairingUpdate, RingObservation,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -703,8 +703,18 @@ impl Agent for MockAgent {
     // overlay's request deadline (returning immediately would hot-loop it),
     // and interaction commands answer like an expired session.
     async fn next_action_ring(self, _: Context) -> Option<ActionRingInvocation> {
-        tokio::time::sleep(Duration::from_secs(20)).await;
+        // Superseded by `observe_action_ring`.
         None
+    }
+
+    async fn observe_action_ring(self, _: Context, _since: Generation) -> RingObservation {
+        // The mock scripts no rings, so it only ever has "none" to report —
+        // held for the window so an overlay polling it doesn't spin.
+        tokio::time::sleep(OBSERVE_HOLD).await;
+        RingObservation {
+            generation: 1,
+            invocation: None,
+        }
     }
 
     async fn action_ring_hover(

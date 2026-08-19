@@ -12,10 +12,11 @@ use std::time::{Duration, Instant};
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::{Action, ActionRingIcon, ActionRingLayout, ActionRingSlot};
 use openlogi_hid::DeviceRoute;
-use openlogi_ipc::{ActionRingCommandError, ActionRingInvocation, ActionRingPresentation};
-use tokio::sync::Notify;
-
-const LONG_POLL_HOLD: Duration = Duration::from_secs(20);
+use openlogi_ipc::{
+    ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, Generation, OBSERVE_HOLD,
+    RingObservation,
+};
+use tokio::sync::watch;
 
 /// Slack between the window closing and the session expiring.
 ///
@@ -61,7 +62,6 @@ pub struct ActionRingHover {
 
 struct Session {
     invocation: ActionRingInvocation,
-    pending: bool,
     device_key: String,
     haptic_route: Option<DeviceRoute>,
     actions: BTreeMap<ActionRingSlot, Action>,
@@ -98,15 +98,24 @@ impl State {
 pub struct ActionRingManager {
     next_session: AtomicU64,
     state: Mutex<State>,
-    changed: Notify,
+    /// What the overlay observes. Derived from [`Self::state`] after every
+    /// change, so "no ring" is simply the absence of one — there is no closed
+    /// message to invent, and an overlay that restarts mid-ring reads the live
+    /// one instead of having missed its invocation.
+    published: watch::Sender<RingObservation>,
 }
 
 impl Default for ActionRingManager {
     fn default() -> Self {
+        // Generation 1: 0 is the observer's "seen nothing" sentinel.
+        let (published, _) = watch::channel(RingObservation {
+            generation: 1,
+            invocation: None,
+        });
         Self {
             next_session: AtomicU64::new(1),
             state: Mutex::new(State::default()),
-            changed: Notify::new(),
+            published,
         }
     }
 }
@@ -138,72 +147,63 @@ impl ActionRingManager {
         let mut state = self.state();
         state.active = Some(Session {
             invocation: invocation.clone(),
-            pending: true,
             device_key: spec.device_key,
             haptic_route: spec.haptic_route,
             actions,
             hovered: None,
             opened_at: Instant::now(),
         });
-        drop(state);
-        self.changed.notify_one();
+        self.publish(&state);
         invocation
     }
 
     /// Dismiss the showing session, if any, and return whether one was
-    /// dismissed. Queues an **empty invocation** (zero slots) — the overlay
-    /// treats that as "close the ring without opening a new one", which keeps
-    /// the dismissal inside the existing `next_action_ring` wire format. Lets
-    /// a second press of the ring trigger toggle the ring closed.
+    /// dismissed — which is what lets a second press of the ring trigger toggle
+    /// the ring closed.
     ///
-    /// The empty placeholder session is not "showing" (it has no actions), so
-    /// a trigger press racing the overlay's close acknowledgement re-opens the
-    /// ring instead of dismissing nothing.
+    /// Dismissing simply removes the session. The old wire format could only
+    /// carry invocations, so a dismissal had to be encoded as an *empty*
+    /// invocation for the overlay to acknowledge; observing state needs no such
+    /// placeholder, and a trigger press racing the close now finds no session
+    /// and opens a fresh ring.
     pub fn dismiss_active(&self) -> bool {
         let mut state = self.state();
         state.expire();
-        match state.active.take() {
-            Some(session) if !session.actions.is_empty() => {
-                let session_id = self.next_session.fetch_add(1, Ordering::Relaxed);
-                state.active = Some(Session {
-                    invocation: ActionRingInvocation {
-                        session_id,
-                        slots: BTreeMap::new(),
-                        language: None,
-                    },
-                    pending: true,
-                    device_key: session.device_key,
-                    haptic_route: session.haptic_route,
-                    actions: BTreeMap::new(),
-                    hovered: None,
-                    opened_at: Instant::now(),
-                });
-                drop(state);
-                self.changed.notify_one();
-                true
-            }
-            _ => false,
+        let dismissed = matches!(&state.active, Some(session) if !session.actions.is_empty());
+        if dismissed {
+            state.active = None;
+        }
+        self.publish(&state);
+        dismissed
+    }
+
+    /// Serve one [`Agent::observe_action_ring`](openlogi_ipc::Agent::observe_action_ring).
+    pub async fn observe(&self, since: Generation) -> RingObservation {
+        let mut rx = self.published.subscribe();
+        let changed = rx.wait_for(|observed| observed.generation != since);
+        match tokio::time::timeout(OBSERVE_HOLD, changed).await {
+            Ok(Ok(observed)) => observed.clone(),
+            // Hold elapsed, or the manager is gone: answer with what we have.
+            Ok(Err(_)) | Err(_) => self.published.borrow().clone(),
         }
     }
 
-    /// Wait for the next invocation, returning `None` when the hold window
-    /// elapses so the overlay can check its agent connection and poll again.
-    pub async fn next_invocation(&self) -> Option<ActionRingInvocation> {
-        let deadline = tokio::time::Instant::now() + LONG_POLL_HOLD;
-        loop {
-            if let Some(invocation) = self.take_pending() {
-                return Some(invocation);
+    /// Republish what the overlay should be showing. Called after every change
+    /// to [`Self::state`], and a republish that says the same thing wakes
+    /// nobody.
+    fn publish(&self, state: &State) {
+        let invocation = state
+            .active
+            .as_ref()
+            .map(|session| session.invocation.clone());
+        self.published.send_if_modified(|observed| {
+            if observed.invocation == invocation {
+                return false;
             }
-            let notified = self.changed.notified();
-            // Close the notification race between checking the slot and
-            // registering this waiter.
-            if let Some(invocation) = self.take_pending() {
-                return Some(invocation);
-            }
-            if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                return None;
-            }
-        }
+            observed.invocation = invocation;
+            observed.generation += 1;
+            true
+        });
     }
 
     /// Record a changed highlighted slot. Repeated hover reports are ignored so
@@ -214,7 +214,15 @@ impl ActionRingManager {
         slot: ActionRingSlot,
     ) -> Result<Option<ActionRingHover>, ActionRingCommandError> {
         let mut state = self.state();
-        let session = state.active_session(session_id)?;
+        // `active_session` expires a stale session, which the overlay must hear
+        // about even though the hover itself then fails.
+        let session = match state.active_session(session_id) {
+            Ok(session) => session,
+            Err(error) => {
+                self.publish(&state);
+                return Err(error);
+            }
+        };
         if !session.actions.contains_key(&slot) {
             return Err(ActionRingCommandError::SlotEmpty);
         }
@@ -244,6 +252,7 @@ impl ActionRingManager {
         let Some(mut session) = state.active.take() else {
             return Err(ActionRingCommandError::SessionNotFound);
         };
+        self.publish(&state);
         let Some(action) = session.actions.remove(&slot) else {
             return Err(ActionRingCommandError::SlotEmpty);
         };
@@ -264,17 +273,7 @@ impl ActionRingManager {
         {
             state.active = None;
         }
-    }
-
-    fn take_pending(&self) -> Option<ActionRingInvocation> {
-        let mut state = self.state();
-        state.expire();
-        let session = state.active.as_mut()?;
-        if !session.pending {
-            return None;
-        }
-        session.pending = false;
-        Some(session.invocation.clone())
+        self.publish(&state);
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -298,10 +297,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invocation_is_queued_before_the_overlay_polls() {
+    async fn an_overlay_that_has_seen_nothing_gets_the_showing_ring() {
         let manager = ActionRingManager::default();
         let expected = manager.begin(spec());
-        assert_eq!(manager.next_invocation().await, Some(expected));
+        // Generation 0 is "seen nothing", so this answers at once — which is
+        // also how an overlay restarted mid-ring picks up the live one.
+        let observed = manager.observe(0).await;
+        assert_eq!(observed.invocation, Some(expected));
     }
 
     #[test]
@@ -330,22 +332,22 @@ mod tests {
         // Nothing showing yet: the first press must open, not dismiss.
         assert!(!manager.dismiss_active());
         let opened = manager.begin(spec());
-        assert_eq!(manager.next_invocation().await, Some(opened.clone()));
+        let showing = manager.observe(0).await;
+        assert_eq!(showing.invocation, Some(opened.clone()));
 
-        // Second press: dismissed via an empty invocation on the same poll.
+        // Second press: dismissed, and the overlay observes "no ring" rather
+        // than a placeholder invocation it has to acknowledge.
         assert!(manager.dismiss_active());
-        let dismissal = manager.next_invocation().await.expect("dismissal queued");
-        assert!(dismissal.slots.is_empty());
-        assert_ne!(dismissal.session_id, opened.session_id);
+        let dismissed = manager.observe(showing.generation).await;
+        assert_eq!(dismissed.invocation, None);
 
-        // The placeholder is not "showing": a third press opens again.
+        // Nothing is showing, so a third press opens again.
         assert!(!manager.dismiss_active());
         let reopened = manager.begin(spec());
         assert!(!reopened.slots.is_empty());
 
-        // The overlay's Cancel for the dismissal id must not kill the new
-        // session.
-        manager.cancel(dismissal.session_id);
+        // A stale Cancel for the dismissed session must not kill the new one.
+        manager.cancel(opened.session_id);
         assert!(manager.dismiss_active());
     }
 
@@ -392,12 +394,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cancellation_discards_an_unclaimed_invocation() {
+    #[tokio::test]
+    async fn cancellation_stops_the_ring_being_shown() {
         let manager = ActionRingManager::default();
         let invocation = manager.begin(spec());
         manager.cancel(invocation.session_id);
-        assert_eq!(manager.take_pending(), None);
+        assert_eq!(manager.observe(0).await.invocation, None);
     }
 
     #[test]
@@ -441,6 +443,5 @@ mod tests {
             manager.activate(invocation.session_id, ActionRingSlot::Top),
             Err(ActionRingCommandError::SessionNotFound)
         ));
-        assert_eq!(manager.take_pending(), None);
     }
 }

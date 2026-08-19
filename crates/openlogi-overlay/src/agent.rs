@@ -16,7 +16,7 @@ use std::{
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_ipc::{ActionRingInvocation, AgentClient, PROTOCOL_VERSION};
+use openlogi_ipc::{ActionRingInvocation, AgentClient, Generation, OBSERVE_HOLD, PROTOCOL_VERSION};
 use succession::Standing;
 use tarpc::context;
 use tokio::sync::mpsc;
@@ -46,8 +46,10 @@ impl OverlayCommand {
 }
 
 pub(crate) struct Ipc {
-    /// Ring invocations pushed by the agent, in arrival order.
-    pub(crate) invocations: mpsc::UnboundedReceiver<ActionRingInvocation>,
+    /// The ring the agent says should be showing, each time that changes.
+    /// `None` is no ring — including a dismissal, which is why there is no
+    /// separate "close" message to recognise.
+    pub(crate) invocations: mpsc::UnboundedReceiver<Option<ActionRingInvocation>>,
     /// Where the view reports hover, activation, and cancellation.
     pub(crate) commands: mpsc::UnboundedSender<OverlayCommand>,
 }
@@ -112,27 +114,37 @@ pub(crate) fn yield_to_replacement(because: &str) -> ! {
     std::process::exit(0)
 }
 
-async fn poll_invocations(tx: mpsc::UnboundedSender<ActionRingInvocation>) {
+async fn poll_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>>) {
     let mut client = None;
+    // Generation 0 says "I have seen nothing", so the first answer is whatever
+    // is showing right now — an overlay restarted mid-ring paints the live one
+    // instead of having missed its invocation. Reset on every disconnect: the
+    // replacement agent numbers its own generations.
+    let mut seen: Generation = 0;
     loop {
         if client.is_none() {
             client = connect().await;
+            seen = 0;
         }
         let Some(active) = client.as_ref() else {
             tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         };
         let mut ctx = context::current();
-        ctx.deadline = std::time::Instant::now() + Duration::from_secs(25);
-        match active.next_action_ring(ctx).await {
-            Ok(Some(invocation)) => {
-                if tx.send(invocation).is_err() {
+        // Above the agent's hold, or tarpc would cancel the handler mid-wait.
+        ctx.deadline = std::time::Instant::now() + OBSERVE_HOLD + Duration::from_secs(5);
+        match active.observe_action_ring(ctx, seen).await {
+            Ok(observed) => {
+                if observed.generation == seen {
+                    continue; // the hold elapsed: still alive, still nothing new
+                }
+                seen = observed.generation;
+                if tx.send(observed.invocation).is_err() {
                     return;
                 }
             }
-            Ok(None) => {}
             Err(error) => {
-                debug!(?error, "Actions Ring long-poll disconnected");
+                debug!(?error, "Actions Ring state channel disconnected");
                 client = None;
             }
         }

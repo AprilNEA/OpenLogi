@@ -48,7 +48,9 @@ pub use succession::Identity;
 /// v19: `observe` appended (level-triggered state channel; see [`Agent::observe`]).
 /// v20: `AgentSnapshot::pairing` appended — the pairing session is state now,
 ///      not a stream of steps (see [`PairingPhase`]).
-pub const PROTOCOL_VERSION: u32 = 20;
+/// v21: `observe_action_ring` appended — the showing ring is state too (see
+///      [`RingObservation`]).
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -329,6 +331,21 @@ pub struct ActionRingInvocation {
     pub language: Option<String>,
 }
 
+/// The ring the overlay should be showing, stamped with its generation.
+///
+/// Its own cell rather than a field of [`AgentSnapshot`]: the overlay is a
+/// different observer with a different working set, and waking it on every
+/// device hotplug to hand it a full device inventory would be wrong for a
+/// helper whose only job is to paint a ring the instant a button goes down.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RingObservation {
+    /// See [`Generation`]. Pass it back to the next [`Agent::observe_action_ring`].
+    pub generation: Generation,
+    /// The ring to show, or `None` for none — which is also how a dismissal
+    /// arrives, so there is no "closed" message to invent.
+    pub invocation: Option<ActionRingInvocation>,
+}
+
 /// Why an Actions Ring interaction command was rejected.
 ///
 /// Variants are append-only because this enum crosses bincode IPC.
@@ -416,9 +433,12 @@ pub trait Agent {
     /// Manually override effective power for a camera-linked light until the
     /// next aggregate camera-use transition.
     async fn set_light_manual_power(route: DeviceRoute, enabled: bool) -> Result<(), WriteError>;
-    /// Long-poll the next Actions Ring invocation. The overlay helper keeps this
-    /// request on a dedicated connection so interaction commands are never
-    /// queued behind it.
+    /// Long-poll the next Actions Ring invocation.
+    ///
+    /// Superseded by [`Agent::observe_action_ring`], which reports the showing
+    /// ring as state: an overlay that restarts mid-ring then paints the live one
+    /// instead of having missed its invocation. The method stays because trait
+    /// order is wire format.
     async fn next_action_ring() -> Option<ActionRingInvocation>;
     /// Report a changed highlighted slot for optional haptic feedback.
     async fn action_ring_hover(
@@ -458,4 +478,8 @@ pub trait Agent {
     /// unchanged state, which doubles as a liveness heartbeat — an agent that is
     /// hung rather than gone stops answering, while a dead one drops the socket.
     async fn observe(since: Generation) -> Observation;
+    /// Block until the ring the overlay should be showing differs from `since`,
+    /// then return it. Same contract as [`Agent::observe`] — whole state, hold
+    /// window, `0` for "seen nothing" — over the ring's own cell.
+    async fn observe_action_ring(since: Generation) -> RingObservation;
 }
