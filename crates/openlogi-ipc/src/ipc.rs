@@ -1,12 +1,16 @@
 //! tarpc service contract between the GUI (client) and the agent (server).
 //!
 //! tarpc generates the `AgentClient` and the `serve` glue from this trait. tarpc
-//! is strict request/response — no server push — so the streaming needs become
-//! polling: the GUI polls [`Agent::snapshot`] on a timer, and the Add Device
-//! flow long-polls [`Agent::next_pairing`], which the agent holds open until a
-//! pairing event arrives or the request deadline elapses.
+//! is strict request/response — no server push — so anything the agent needs to
+//! *tell* a client is shaped as a request the client leaves open, and the agent
+//! holds it until there is something to say or its hold window elapses.
+//! [`Agent::observe`] is that channel for state: it answers the moment the
+//! agent's observable state changes, and answers with the whole of it, so a
+//! client needs no subscription and no replay to converge. `next_pairing` and
+//! `next_action_ring` are the same shape for their own streams.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
@@ -41,7 +45,8 @@ pub use succession::Identity;
 ///      verbatim instead of passing through localization).
 /// v17: `reload_config` returns a typed parse/validation result.
 /// v18: `identity` appended (supervised helpers bind to one agent run).
-pub const PROTOCOL_VERSION: u32 = 18;
+/// v19: `observe` appended (level-triggered state channel; see [`Agent::observe`]).
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -93,7 +98,7 @@ pub struct AgentStatus {
 /// Status and inventory as one poll result. Kept together so the GUI never
 /// pairs inventory readiness from one orchestrator state with the inventory
 /// list from another.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSnapshot {
     pub status: AgentStatus,
     pub inventory: Vec<DeviceInventory>,
@@ -103,6 +108,29 @@ pub struct AgentSnapshot {
     /// Whether at least one host camera stream is currently in use.
     /// Runtime-only state used by camera-linked light rendering.
     pub camera_active: bool,
+}
+
+/// How long the agent holds an [`Agent::observe`] request that has nothing to
+/// report before answering with the unchanged state. Exported so a client can
+/// set its request deadline above it — tarpc cancels a handler whose deadline
+/// passes, so a shorter deadline would kill the hold instead of waiting it out.
+pub const OBSERVE_HOLD: Duration = Duration::from_secs(20);
+
+/// Monotonic stamp on the agent's observable state, bumped only when something
+/// in it actually changes.
+///
+/// `0` is the client's "I have seen nothing" sentinel and the agent's cell
+/// starts at 1, so a first [`Agent::observe`] answers immediately instead of
+/// waiting out the hold for a change that already happened.
+pub type Generation = u64;
+
+/// The agent's observable state together with the generation it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Observation {
+    /// See [`Generation`]. Pass it back to the next [`Agent::observe`].
+    pub generation: Generation,
+    /// The complete state at that generation — never a delta.
+    pub snapshot: AgentSnapshot,
 }
 
 /// A nearby unpaired device surfaced during Bolt discovery, in the minimal form
@@ -375,4 +403,19 @@ pub trait Agent {
     /// never in here — an identity a helper cannot decode is an identity that
     /// cannot tell it to leave.
     async fn identity() -> Identity;
+    /// Block until the agent's observable state differs from `since`, then
+    /// return it whole.
+    ///
+    /// This is the state channel the GUI runs on. The *timing* is edge-driven —
+    /// the agent answers the moment one of its watchers changes something — but
+    /// the *content* is always the complete current state, never a delta, so a
+    /// client converges from any starting point (a fresh window, a reconnect, an
+    /// agent restart) by asking once with the last generation it saw, or `0`.
+    /// That is what keeps the protocol free of subscriptions, replay, and
+    /// gap detection: nothing has to be remembered on either side.
+    ///
+    /// With nothing to report the agent answers after [`OBSERVE_HOLD`] with the
+    /// unchanged state, which doubles as a liveness heartbeat — an agent that is
+    /// hung rather than gone stops answering, while a dead one drops the socket.
+    async fn observe(since: Generation) -> Observation;
 }

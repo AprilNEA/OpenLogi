@@ -16,12 +16,15 @@
 
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
-use openlogi_ipc::{AgentSnapshot, AgentStatus, InventoryHealth, PROTOCOL_VERSION};
+use openlogi_ipc::{
+    AgentSnapshot, AgentStatus, Generation, InventoryHealth, OBSERVE_HOLD, Observation,
+    PROTOCOL_VERSION,
+};
 use tokio::sync::watch;
 
 /// The agent's observable state, and the notification that it changed.
 pub struct ObservableState {
-    tx: watch::Sender<AgentSnapshot>,
+    tx: watch::Sender<Observation>,
 }
 
 impl ObservableState {
@@ -35,18 +38,23 @@ impl ObservableState {
     /// reader can observe the placeholder.
     #[must_use]
     pub fn new(agent_version: String) -> Self {
-        let (tx, _) = watch::channel(AgentSnapshot {
-            status: AgentStatus {
-                accessibility_granted: Hook::has_accessibility(),
-                hook_installed: false,
-                launch_at_login: false,
-                inventory: InventoryHealth::Scanning,
-                protocol_version: PROTOCOL_VERSION,
-                agent_version,
+        // Generation 1, not 0: 0 is the client sentinel for "I have seen
+        // nothing", so a first `observe(0)` must differ from whatever is here.
+        let (tx, _) = watch::channel(Observation {
+            generation: 1,
+            snapshot: AgentSnapshot {
+                status: AgentStatus {
+                    accessibility_granted: Hook::has_accessibility(),
+                    hook_installed: false,
+                    launch_at_login: false,
+                    inventory: InventoryHealth::Scanning,
+                    protocol_version: PROTOCOL_VERSION,
+                    agent_version,
+                },
+                inventory: Vec::new(),
+                standalone: Vec::new(),
+                camera_active: false,
             },
-            inventory: Vec::new(),
-            standalone: Vec::new(),
-            camera_active: false,
         });
         Self { tx }
     }
@@ -54,22 +62,50 @@ impl ObservableState {
     /// Clone the whole current state.
     #[must_use]
     pub fn snapshot(&self) -> AgentSnapshot {
-        self.tx.borrow().clone()
+        self.tx.borrow().snapshot.clone()
     }
 
     /// Read part of the current state without cloning the rest. The closure
     /// runs under the cell's read lock, so it must not block or await.
     pub fn read<R>(&self, read: impl FnOnce(&AgentSnapshot) -> R) -> R {
         let state = self.tx.borrow();
-        read(&state)
+        read(&state.snapshot)
     }
 
     /// Observe changes. The receiver starts out seeing the current value as
     /// already delivered, and is notified only when a write actually changes
     /// something.
     #[must_use]
-    pub fn subscribe(&self) -> watch::Receiver<AgentSnapshot> {
+    pub fn subscribe(&self) -> watch::Receiver<Observation> {
         self.tx.subscribe()
+    }
+
+    /// Serve one [`Agent::observe`](openlogi_ipc::Agent::observe): wait until
+    /// the state differs from `since`, then answer with all of it. With nothing
+    /// to report the hold elapses and the caller gets the unchanged state, which
+    /// is how it learns the agent is still alive.
+    pub async fn observe(&self, since: Generation) -> Observation {
+        let mut rx = self.tx.subscribe();
+        let changed = rx.wait_for(|state| state.generation != since);
+        match tokio::time::timeout(OBSERVE_HOLD, changed).await {
+            Ok(Ok(state)) => state.clone(),
+            // The hold elapsed, or every sender is gone (the agent is shutting
+            // down). Answer with what we have; the caller compares generations.
+            Ok(Err(_)) | Err(_) => self.tx.borrow().clone(),
+        }
+    }
+
+    /// Apply `change`, and stamp the next generation if it reported a real
+    /// difference. A change that reports `false` notifies nobody — that is what
+    /// lets a reader block on this cell instead of resampling it.
+    fn update(&self, change: impl FnOnce(&mut AgentSnapshot) -> bool) {
+        self.tx.send_if_modified(|state| {
+            if !change(&mut state.snapshot) {
+                return false;
+            }
+            state.generation += 1;
+            true
+        });
     }
 
     /// Publish where enumeration stands together with the device set it
@@ -83,38 +119,38 @@ impl ObservableState {
         inventories: &[DeviceInventory],
         standalone: &[StandaloneDevice],
     ) {
-        self.tx.send_if_modified(|state| {
-            if state.status.inventory == health
-                && state.inventory == inventories
-                && state.standalone == standalone
+        self.update(|snapshot| {
+            if snapshot.status.inventory == health
+                && snapshot.inventory == inventories
+                && snapshot.standalone == standalone
             {
                 return false;
             }
-            state.status.inventory = health;
-            state.inventory = inventories.to_vec();
-            state.standalone = standalone.to_vec();
+            snapshot.status.inventory = health;
+            snapshot.inventory = inventories.to_vec();
+            snapshot.standalone = standalone.to_vec();
             true
         });
     }
 
     /// Publish the latest aggregate camera-use sample.
     pub fn set_camera_active(&self, active: bool) {
-        self.tx.send_if_modified(|state| {
-            if state.camera_active == active {
+        self.update(|snapshot| {
+            if snapshot.camera_active == active {
                 return false;
             }
-            state.camera_active = active;
+            snapshot.camera_active = active;
             true
         });
     }
 
     /// Publish the autostart state the current config asks for.
     pub fn set_launch_at_login(&self, enabled: bool) {
-        self.tx.send_if_modified(|state| {
-            if state.status.launch_at_login == enabled {
+        self.update(|snapshot| {
+            if snapshot.status.launch_at_login == enabled {
                 return false;
             }
-            state.status.launch_at_login = enabled;
+            snapshot.status.launch_at_login = enabled;
             true
         });
     }
@@ -122,22 +158,22 @@ impl ObservableState {
     /// Publish an Accessibility trust change, as observed by
     /// [`watchers::accessibility`](crate::watchers::accessibility).
     pub fn set_accessibility_granted(&self, granted: bool) {
-        self.tx.send_if_modified(|state| {
-            if state.status.accessibility_granted == granted {
+        self.update(|snapshot| {
+            if snapshot.status.accessibility_granted == granted {
                 return false;
             }
-            state.status.accessibility_granted = granted;
+            snapshot.status.accessibility_granted = granted;
             true
         });
     }
 
     /// Publish whether the OS input hook is currently installed.
     pub fn set_hook_installed(&self, installed: bool) {
-        self.tx.send_if_modified(|state| {
-            if state.status.hook_installed == installed {
+        self.update(|snapshot| {
+            if snapshot.status.hook_installed == installed {
                 return false;
             }
-            state.status.hook_installed = installed;
+            snapshot.status.hook_installed = installed;
             true
         });
     }
@@ -153,6 +189,8 @@ mod tests {
     use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
     use openlogi_hid::DIRECT_DEVICE_INDEX;
     use openlogi_ipc::InventoryHealth;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     fn state() -> ObservableState {
         ObservableState::new("test".to_string())
@@ -235,6 +273,65 @@ mod tests {
         assert!(snapshot.status.accessibility_granted);
         assert_eq!(snapshot.inventory.len(), 1);
         assert_eq!(snapshot.status.inventory, InventoryHealth::Ready);
+    }
+
+    #[tokio::test]
+    async fn a_client_that_has_seen_nothing_gets_the_current_state_at_once() {
+        let state = state();
+        let observed = state.observe(0).await;
+        assert_eq!(observed.generation, 1, "the cell starts past the sentinel");
+        assert_eq!(
+            observed.snapshot.status.inventory,
+            InventoryHealth::Scanning
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_generation_gets_the_current_state_at_once() {
+        let state = state();
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+
+        let observed = state.observe(1).await;
+        assert_eq!(observed.generation, 2);
+        assert_eq!(observed.snapshot.inventory.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_up_to_date_client_is_woken_by_the_next_change() {
+        let state = Arc::new(state());
+        let writer = Arc::clone(&state);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            writer.set_hook_installed(true);
+        });
+
+        let observed = state.observe(1).await;
+        assert_eq!(observed.generation, 2);
+        assert!(observed.snapshot.status.hook_installed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nothing_to_report_answers_with_the_unchanged_state() {
+        let state = state();
+        // Up to date and nobody writes: the hold elapses and the caller learns
+        // the agent is alive without learning anything new.
+        let observed = state.observe(1).await;
+        assert_eq!(observed.generation, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_write_does_not_end_the_hold() {
+        let state = Arc::new(state());
+        state.set_hook_installed(true);
+        let writer = Arc::clone(&state);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            // Same value: this must not be mistaken for news.
+            writer.set_hook_installed(true);
+        });
+
+        let observed = state.observe(2).await;
+        assert_eq!(observed.generation, 2, "the hold ran out, nothing changed");
     }
 
     #[test]

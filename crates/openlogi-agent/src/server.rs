@@ -25,8 +25,8 @@ use openlogi_hid::{
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    ConfigReloadError, Identity, MonitorEvent, PROTOCOL_VERSION, PairingCommandError,
-    PairingUpdate,
+    ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
+    PairingCommandError, PairingUpdate,
 };
 use succession::Compat;
 
@@ -207,6 +207,10 @@ impl Agent for AgentServer {
 
     async fn snapshot(self, _: Context) -> AgentSnapshot {
         self.observable.snapshot()
+    }
+
+    async fn observe(self, _: Context, since: Generation) -> Observation {
+        self.observable.observe(since).await
     }
 
     async fn poll_event_monitor(self, _: Context) -> Vec<MonitorEvent> {

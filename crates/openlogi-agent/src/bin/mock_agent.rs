@@ -52,8 +52,9 @@ use openlogi_hid::{
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    ConfigReloadError, FoundDevice, Identity, InventoryHealth, MonitorEvent, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingUpdate,
+    ConfigReloadError, FoundDevice, Generation, Identity, InventoryHealth, MonitorEvent,
+    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    PairingUpdate,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -91,6 +92,11 @@ const PAIRING_HOLD: Duration = Duration::from_secs(2);
 /// reaches the GUI promptly; see [`MockAgent::next_pairing`] for why the hold
 /// polls instead of awaiting the receiver.
 const PAIRING_POLL_TICK: Duration = Duration::from_millis(100);
+
+/// How often a held `observe` re-renders the scripted state looking for a
+/// change. The real agent is told by its watchers and needs no tick at all; a
+/// mock has nothing to be told by, so it compares instead.
+const OBSERVE_TICK: Duration = Duration::from_millis(250);
 
 fn main() -> ExitCode {
     default_to_dev_profile();
@@ -616,14 +622,44 @@ struct MockAgent {
     /// Long-poll side of the pairing channel, outside [`MockAgent::state`] so a
     /// held `next_pairing` can't block `snapshot`.
     pairing_rx: Arc<Mutex<Option<UnboundedReceiver<PairingUpdate>>>>,
+    /// The last [`Observation`] handed out, so `observe` can stamp a new
+    /// generation when the rendered state differs from it.
+    served: Arc<Mutex<Observation>>,
 }
 
 impl MockAgent {
     fn new(state: State) -> Self {
+        let served = Observation {
+            generation: 1,
+            snapshot: snapshot_of(&state),
+        };
         Self {
             state: Arc::new(Mutex::new(state)),
             pairing_rx: Arc::new(Mutex::new(None)),
+            served: Arc::new(Mutex::new(served)),
         }
+    }
+
+    /// The current observation, stamped with a new generation if the scripted
+    /// state has moved since the last one served.
+    async fn current(&self) -> Observation {
+        let snapshot = snapshot_of(&*self.state.lock().await);
+        let mut served = self.served.lock().await;
+        if served.snapshot != snapshot {
+            served.generation += 1;
+            served.snapshot = snapshot;
+        }
+        served.clone()
+    }
+}
+
+/// Render what the GUI observes out of the scripted state.
+fn snapshot_of(state: &State) -> AgentSnapshot {
+    AgentSnapshot {
+        status: agent_status(),
+        inventory: state.render_inventory(),
+        standalone: vec![standalone_light()],
+        camera_active: state.camera_active(),
     }
 }
 
@@ -880,12 +916,17 @@ impl Agent for MockAgent {
     }
 
     async fn snapshot(self, _: Context) -> AgentSnapshot {
-        let state = self.state.lock().await;
-        AgentSnapshot {
-            status: agent_status(),
-            inventory: state.render_inventory(),
-            standalone: vec![standalone_light()],
-            camera_active: state.camera_active(),
+        snapshot_of(&*self.state.lock().await)
+    }
+
+    async fn observe(self, _: Context, since: Generation) -> Observation {
+        let deadline = Instant::now() + OBSERVE_HOLD;
+        loop {
+            let current = self.current().await;
+            if current.generation != since || Instant::now() >= deadline {
+                return current;
+            }
+            tokio::time::sleep(OBSERVE_TICK).await;
         }
     }
 

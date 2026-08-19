@@ -41,7 +41,8 @@ use openlogi_core::hid::{
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, ConfigReloadError, FoundDevice, Identity, InventoryHealth,
-    MonitorEvent, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate,
+    MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    PairingUpdate,
 };
 use succession::{Compat, Run};
 
@@ -70,7 +71,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 18);
+    assert_eq!(PROTOCOL_VERSION, 19);
 }
 
 #[test]
@@ -145,6 +146,7 @@ fn request_variant_order() {
     );
     assert_wire(&AgentRequest::ActionRingCancel { session_id: 42 }, "152a");
     assert_wire(&AgentRequest::Identity {}, "16");
+    assert_wire(&AgentRequest::Observe { since: 7 }, "1707");
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
@@ -245,6 +247,13 @@ fn agent_snapshot() {
         camera_active: false,
     };
     assert_wire(&snapshot, "010001010705302e362e36000000");
+
+    // The observation is the snapshot with its generation in front.
+    let observed = Observation {
+        generation: 3,
+        snapshot,
+    };
+    assert_wire(&observed, "03010001010705302e362e36000000");
 }
 
 #[test]

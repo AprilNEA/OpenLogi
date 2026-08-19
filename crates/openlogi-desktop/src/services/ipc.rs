@@ -1,33 +1,38 @@
 //! Agent IPC client.
 //!
 //! The agent owns all device I/O, so the GUI never opens a device — it connects
-//! to the agent's Unix socket and (a) polls status + inventory snapshots on a
-//! timer to drive the device list and the Accessibility gate, and (b) forwards
-//! "apply now" / "read" device commands. Both run on one dedicated OS thread with a
-//! tokio runtime (the GPUI thread owns no async runtime), mirroring the old
-//! watcher pattern: results cross back over `mpsc` to the GPUI loop.
+//! to the agent's local socket and (a) keeps one [`Agent::observe`] request open
+//! for the agent's state, and (b) forwards "apply now" / "read" device commands.
+//! Both run on one dedicated OS thread with a tokio runtime (the GPUI thread owns
+//! no async runtime): results cross back over `mpsc` to the GPUI loop.
 //!
-//! The single client connection is re-established by this loop itself: polling
-//! runs at [`STARTUP_POLL_PERIOD`] until the agent's first completed
-//! enumeration and again after any disconnect (an agent self-exec on update, a
-//! crash), and [`spawn_agent`] relaunches the binary when the socket stays
-//! down — there is no launchd dependency here (`KeepAlive` only acts when the
-//! agent *exits*, and autostart may be off entirely). When the agent stays
-//! unreachable or answers with a newer protocol, that is pushed to the GUI as
-//! a [`GuiUpdate`] so the window can say so instead of spinning forever.
+//! There is no poll cadence to tune. `observe` carries a generation, and the
+//! agent answers the moment its state differs from the one this client last saw,
+//! so the GUI is told *when* to look instead of asking on a timer — and because
+//! every answer is the complete state, a reconnect needs no resynchronisation:
+//! ask again with generation 0 and the next answer is the whole truth.
+//!
+//! What is left to time is failure. [`spawn_agent`] relaunches the binary when
+//! the socket stays down (no launchd dependency: `KeepAlive` only acts when the
+//! agent *exits*, and autostart may be off entirely), and a stretch without a
+//! usable connection longer than [`UNREACHABLE_AFTER`] is pushed to the GUI as
+//! [`GuiUpdate::Unreachable`] so the window can say so instead of waiting
+//! forever. A dead agent is noticed the moment the socket closes; a *hung* one
+//! is noticed when its hold window passes without an answer.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use openlogi_core::config::Lighting;
-use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
     DeviceRoute, DpiInfo, LightCommand, ReceiverSelector, SmartShiftMode, SmartShiftStatus,
     WriteError,
 };
 use openlogi_ipc::{
-    AgentClient, AgentStatus, ConfigReloadError, InventoryHealth, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingUpdate,
+    AgentClient, AgentSnapshot, ConfigReloadError, Generation, OBSERVE_HOLD, Observation,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate,
 };
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
@@ -38,28 +43,28 @@ use tracing::{debug, info, warn};
 /// tight loop, short enough that a quit / crashed agent is recovered promptly.
 const SPAWN_RETRY_PERIOD: Duration = Duration::from_secs(30);
 
-/// Poll cadence until the agent reports its first completed enumeration
-/// ([`InventoryHealth::Ready`]). The steady `poll_period` is tuned for quiet
-/// background refresh; at startup it would leave the window on its loading
-/// frame for up to a full period *after* the agent already knows the devices.
-/// A snapshot round every 250 ms is noise for the agent and gets the
-/// gallery up moments after enumeration lands.
-const STARTUP_POLL_PERIOD: Duration = Duration::from_millis(250);
+/// How long to wait before retrying a connect that failed. This is a retry
+/// cadence, not a poll: once connected, nothing here runs on a timer. Short
+/// enough that a just-started agent is picked up immediately.
+const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 
-/// How long the fast phase may run without readiness before falling back to
-/// the steady cadence (agent start plus a worst-case first enumeration is
-/// ~6 s) — an agent that never becomes ready must not hold the loop at 4 Hz
-/// for the GUI's lifetime. Doubles as the threshold after which a snapshot-
-/// less connection is reported to the GUI as [`GuiUpdate::Unreachable`].
-const FAST_PHASE_MAX: Duration = Duration::from_secs(15);
+/// How long the client may go without a usable connection before the GUI is
+/// told the agent is genuinely unreachable rather than still starting (agent
+/// start plus a worst-case first enumeration is ~6 s).
+const UNREACHABLE_AFTER: Duration = Duration::from_secs(15);
+
+/// Request deadline for a held `observe`, above the agent's own
+/// [`OBSERVE_HOLD`]: tarpc cancels a handler whose deadline passes, so a
+/// shorter one would kill the hold instead of waiting it out.
+const OBSERVE_DEADLINE: Duration = OBSERVE_HOLD.saturating_add(Duration::from_secs(5));
 
 /// What the client thread tells the GPUI loop.
 pub enum GuiUpdate {
-    /// A delivered status + inventory snapshot.
-    Snapshot(PollUpdate),
-    /// No snapshot for [`FAST_PHASE_MAX`] while disconnected: the agent is
-    /// genuinely unreachable (not just starting up). Sent once per outage;
-    /// the next snapshot supersedes it.
+    /// The agent's state, as of a generation this client had not seen.
+    Snapshot(AgentSnapshot),
+    /// No usable connection for [`UNREACHABLE_AFTER`]: the agent is genuinely
+    /// unreachable (not just starting up). Sent once per outage; the next
+    /// snapshot supersedes it.
     Unreachable,
     /// The agent answered the handshake with a *newer* protocol — the app was
     /// updated on disk while this GUI kept running, and only a relaunch
@@ -79,14 +84,6 @@ pub enum GuiUpdate {
     },
     /// Whether the agent adopted the config currently on disk.
     ConfigReloadResult(Result<(), ConfigReloadError>),
-}
-
-/// A poll snapshot pushed to the GPUI loop on every successful poll round.
-pub struct PollUpdate {
-    pub inventory: Vec<DeviceInventory>,
-    pub standalone: Vec<StandaloneDevice>,
-    pub status: AgentStatus,
-    pub camera_active: bool,
 }
 
 /// A device command sent from the GPUI thread to the client thread. Reads carry
@@ -133,7 +130,7 @@ pub struct IpcClient {
 /// Spawn the IPC client thread. Returns immediately; the thread connects (and
 /// reconnects) on its own.
 #[must_use]
-pub fn spawn(poll_period: Duration) -> IpcClient {
+pub fn spawn() -> IpcClient {
     let (update_tx, updates) = mpsc::unbounded_channel();
     let (commands, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
     let (pairing_tx, pairing) = mpsc::unbounded_channel();
@@ -155,7 +152,7 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
                 // Pairing events stream on their own connection + long-poll so
                 // a held next_pairing never delays the snapshot poll.
                 tokio::spawn(pairing_poll(pairing_tx.clone()));
-                poll_loop(poll_period, &update_tx, &pairing_tx, &mut cmd_rx).await;
+                observe_loop(&update_tx, &pairing_tx, &mut cmd_rx).await;
             });
         });
     if let Err(e) = spawn_result {
@@ -169,11 +166,14 @@ pub fn spawn(poll_period: Duration) -> IpcClient {
     }
 }
 
-/// The poll/command select loop. Cadence policy lives in [`pacing::Pacing`];
-/// this function maps its decisions onto the tokio interval and owns the
-/// connection, the spawn retry, and the once-per-episode GUI notices.
-async fn poll_loop(
-    poll_period: Duration,
+/// The state/command loop.
+///
+/// One `observe` request is kept in flight at all times, carrying the last
+/// generation this client saw; the agent answers when its state differs from
+/// that, or after its hold window with the same state as a heartbeat. Commands
+/// share the connection — tarpc multiplexes requests, and the in-flight poll is
+/// held across command handling so a device write never cancels it.
+async fn observe_loop(
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     pairing_tx: &mpsc::UnboundedSender<PairingUpdate>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Command>,
@@ -186,108 +186,129 @@ async fn poll_loop(
     // binary can't become a tight respawn loop.
     let mut last_spawn_attempt: Option<Instant> = None;
     let started = Instant::now();
-    let mut last_delivery: Option<Instant> = None;
+    let mut connected_since: Option<Instant> = None;
     let mut notified_unreachable = false;
     let mut notified_outdated = false;
-    let mut pacing = pacing::Pacing::new(poll_period, FAST_PHASE_MAX, started);
-    let mut interval = ticker(None, STARTUP_POLL_PERIOD);
+    // Generation 0 means "I have seen nothing", so the first answer is the
+    // agent's whole state rather than a wait for the next change. Reset on
+    // every disconnect: the replacement agent numbers its own generations.
+    let mut seen: Generation = 0;
+    let mut inflight: Option<ObserveFuture> = None;
+    let mut retry = ticker(RECONNECT_DELAY);
     loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                let now = Instant::now();
-                // Skip the spawn gate on the tick that *detected* a drop: an
-                // agent self-exec rebinds the socket within a tick, and
-                // spawning a duplicate right away would race it for the
-                // singleton lock (and could knock the launchd-tracked copy
-                // out of supervision via a clean duplicate-exit).
-                let mut just_disconnected = false;
-                let cadence = match poll(&mut client, update_tx).await {
-                    Ok(PollOutcome::Delivered { ready }) => {
-                        last_delivery = Some(now);
-                        notified_unreachable = false;
-                        notified_outdated = false;
-                        pacing.on_delivered(ready, now)
-                    }
-                    Ok(PollOutcome::NoAgent) => pacing.on_unreachable(now),
-                    Ok(PollOutcome::NewerAgent) => {
-                        if !notified_outdated {
-                            notified_outdated = true;
-                            let _ = update_tx.send(GuiUpdate::OutdatedGui);
-                        }
-                        pacing.on_newer_agent(now)
-                    }
-                    Err(()) => {
-                        client = None; // drop the dead connection; reconnect next tick
-                        just_disconnected = true;
-                        pacing.on_disconnect(now)
-                    }
-                };
-                if let Some(cadence) = cadence {
-                    interval = apply_cadence(cadence, &pacing);
+        // Taken for the duration of the select so the completed arm can consume
+        // it while the others hand it back untouched.
+        let mut pending = inflight.take();
+        let woken = tokio::select! {
+            observed = maybe(pending.as_mut()) => Woken::Observed(observed),
+            cmd = cmd_rx.recv() => Woken::Command(cmd),
+            _ = retry.tick(), if pending.is_none() => Woken::Reconnect,
+        };
+        match woken {
+            // The poll answered: apply it and arm the next one. `pending` is
+            // finished, so it is deliberately not handed back.
+            Woken::Observed(Ok(observation)) => {
+                connected_since = Some(Instant::now());
+                notified_unreachable = false;
+                notified_outdated = false;
+                if observation.generation != seen {
+                    seen = observation.generation;
+                    let _ = update_tx.send(GuiUpdate::Snapshot(observation.snapshot));
                 }
-                if client.is_none()
-                    && !notified_unreachable
-                    && now.duration_since(last_delivery.unwrap_or(started)) >= FAST_PHASE_MAX
-                {
-                    notified_unreachable = true;
-                    let _ = update_tx.send(GuiUpdate::Unreachable);
-                }
-                if client.is_none()
-                    && !just_disconnected
-                    && last_spawn_attempt.is_none_or(|t| t.elapsed() >= SPAWN_RETRY_PERIOD)
-                {
-                    spawn_agent();
-                    last_spawn_attempt = Some(Instant::now());
+                if let Some(client) = client.as_ref() {
+                    inflight = Some(observe(client, seen));
                 }
             }
-            cmd = cmd_rx.recv() => {
-                let Some(cmd) = cmd else { break }; // GUI dropped the sender → shut down
-                if handle(&mut client, update_tx, pairing_tx, cmd).await.is_err() {
-                    // Same as a poll-detected drop: back to the fast cadence
-                    // so the reconnect (agent self-exec, crash) re-converges
-                    // just as quickly as at startup.
+            // The connection dropped (agent self-exec on update, or a crash).
+            // Reconnecting re-reads the whole state, so nothing is lost.
+            Woken::Observed(Err(())) => {
+                client = None;
+                seen = 0;
+                connected_since = None;
+            }
+            Woken::Command(None) => break, // GUI dropped the sender → shut down
+            Woken::Command(Some(cmd)) => {
+                inflight = pending;
+                if handle(&mut client, update_tx, pairing_tx, cmd)
+                    .await
+                    .is_err()
+                {
                     client = None;
-                    if let Some(cadence) = pacing.on_disconnect(Instant::now()) {
-                        interval = apply_cadence(cadence, &pacing);
+                    seen = 0;
+                    connected_since = None;
+                }
+            }
+            Woken::Reconnect => match ensure(&mut client).await {
+                Ok(client) => inflight = Some(observe(client, seen)),
+                Err(ConnectFailure::Unreachable) => {}
+                Err(ConnectFailure::NewerAgent) => {
+                    if !notified_outdated {
+                        notified_outdated = true;
+                        let _ = update_tx.send(GuiUpdate::OutdatedGui);
                     }
                 }
+            },
+        }
+        if client.is_none() {
+            let down_since = connected_since.unwrap_or(started);
+            if !notified_unreachable && down_since.elapsed() >= UNREACHABLE_AFTER {
+                notified_unreachable = true;
+                let _ = update_tx.send(GuiUpdate::Unreachable);
+            }
+            if last_spawn_attempt.is_none_or(|t| t.elapsed() >= SPAWN_RETRY_PERIOD) {
+                spawn_agent();
+                last_spawn_attempt = Some(Instant::now());
             }
         }
     }
 }
 
-/// Build the interval for a cadence decision. The fast interval ticks
-/// immediately — after a disconnect that means one instant reconnect probe,
-/// which is deliberate. The steady interval starts a full period out: the
-/// poll that triggered the switch already ran, and a fresh `interval` would
-/// fire a redundant back-to-back poll.
-fn apply_cadence(cadence: pacing::Cadence, pacing: &pacing::Pacing) -> tokio::time::Interval {
-    match cadence {
-        pacing::Cadence::Fast => ticker(None, STARTUP_POLL_PERIOD),
-        pacing::Cadence::Steady => ticker(Some(pacing.steady_period()), pacing.steady_period()),
+/// Why [`observe_loop`] woke up. Named so the in-flight poll can be handed back
+/// after the select ends rather than mutated from inside a borrowed arm.
+enum Woken {
+    /// The long-poll answered, or its connection dropped.
+    Observed(Result<Observation, ()>),
+    /// A device command, or `None` once the GUI drops the sender.
+    Command(Option<Command>),
+    /// Time to try connecting again.
+    Reconnect,
+}
+
+/// A long-poll in flight. Boxed because it is stored across loop turns, and it
+/// owns a clone of the client so the loop can still replace its own `client`
+/// while the poll is outstanding.
+type ObserveFuture = Pin<Box<dyn Future<Output = Result<Observation, ()>> + Send>>;
+
+/// Ask for the next state newer than `seen`.
+fn observe(client: &AgentClient, seen: Generation) -> ObserveFuture {
+    let client = client.clone();
+    Box::pin(async move {
+        let mut ctx = context::current();
+        ctx.deadline = Instant::now() + OBSERVE_DEADLINE;
+        client.observe(ctx, seen).await.map_err(|error| {
+            debug!(%error, "observe failed — reconnecting");
+        })
+    })
+}
+
+/// Await a future that may not exist, never resolving when there is none. The
+/// caller pairs it with a precondition, so "none" is a disabled select arm
+/// rather than a stall.
+async fn maybe<F: Future>(future: Option<F>) -> F::Output {
+    match future {
+        Some(future) => future.await,
+        None => std::future::pending().await,
     }
 }
 
-/// A tokio interval that *delays* missed ticks instead of bursting them: a
-/// stalled poll (the RPC deadline is ~10 s) would otherwise accrue dozens of
-/// 250 ms ticks and replay them back-to-back once it returns.
-fn ticker(first_in: Option<Duration>, period: Duration) -> tokio::time::Interval {
-    let mut interval = match first_in {
-        Some(delay) => tokio::time::interval_at(tokio::time::Instant::now() + delay, period),
-        None => tokio::time::interval(period),
-    };
+/// A tokio interval that *delays* missed ticks instead of bursting them: while
+/// a connection is live this arm is disabled for hours, and a fresh burst of
+/// backdated ticks on reconnect would buy nothing.
+fn ticker(period: Duration) -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     interval
 }
-
-/// Poll-cadence policy: fast until the agent's first completed enumeration,
-/// steady afterwards; fast again on every disconnect; and a cap so the states
-/// where fast polling buys nothing (an agent that never becomes ready, a
-/// protocol mismatch) fall back to steady instead of running at 4 Hz forever.
-///
-/// Pure bookkeeping — the caller maps [`Cadence`] switches onto its timer —
-/// so the transitions are unit-testable.
-mod pacing;
 
 /// Long-poll the agent's pairing event stream on a dedicated connection, pushing
 /// each [`PairingUpdate`] to the GUI. Runs for the client's lifetime; when no
@@ -479,45 +500,6 @@ async fn ensure(client: &mut Option<AgentClient>) -> Result<&AgentClient, Connec
     // `client` is `Some` here (just set, or already was); the `None` arm is
     // unreachable but keeps this `expect`-free.
     client.as_ref().ok_or(ConnectFailure::Unreachable)
-}
-
-/// One poll round's outcome, driving the cadence policy.
-enum PollOutcome {
-    /// A snapshot was pushed; `ready` is whether enumeration has completed.
-    Delivered { ready: bool },
-    /// The agent isn't reachable (or usable) yet; nothing was pushed.
-    NoAgent,
-    /// The agent speaks a newer protocol than this GUI.
-    NewerAgent,
-}
-
-/// Poll status + inventory as one agent snapshot and push it. `Err` means a
-/// live connection dropped (the caller reconnects fast); the no-agent cases come back as
-/// [`PollOutcome`] so the caller can tell them apart from a delivery.
-async fn poll(
-    client: &mut Option<AgentClient>,
-    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
-) -> Result<PollOutcome, ()> {
-    let client = match ensure(client).await {
-        Ok(client) => client,
-        Err(ConnectFailure::Unreachable) => return Ok(PollOutcome::NoAgent),
-        Err(ConnectFailure::NewerAgent) => return Ok(PollOutcome::NewerAgent),
-    };
-    // Fetch status + inventory in one RPC so inventory readiness and the list
-    // are interpreted from the same orchestrator state.
-    let snapshot = client.snapshot(context::current()).await.map_err(|_| ())?;
-    let status = snapshot.status;
-    let inventory = snapshot.inventory;
-    let standalone = snapshot.standalone;
-    let camera_active = snapshot.camera_active;
-    let ready = status.inventory == InventoryHealth::Ready;
-    let _ = update_tx.send(GuiUpdate::Snapshot(PollUpdate {
-        inventory,
-        standalone,
-        status,
-        camera_active,
-    }));
-    Ok(PollOutcome::Delivered { ready })
 }
 
 /// Run one device command. `Err` signals a dropped connection so the caller

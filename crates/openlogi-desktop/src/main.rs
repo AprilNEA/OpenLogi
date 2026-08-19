@@ -45,7 +45,7 @@ mod windows;
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use gpui::{
@@ -110,6 +110,164 @@ fn set_agent_link(link: state::AgentLink, cx: &mut gpui::App) {
     }
 }
 
+/// How often the UI re-enumerates USB cameras. They are UVC devices the agent
+/// never opens, so nothing tells the GUI when one is plugged in — this is the
+/// one thing here that still has to be asked on a timer.
+const CAMERA_SCAN_PERIOD: Duration = Duration::from_secs(2);
+
+/// Where the background asset sync stands.
+///
+/// A manual Refresh / Clear that arrives mid-fetch has to wait for it —
+/// otherwise a Clear would wipe the cache out from under the running writer —
+/// so the pending command lives *inside* the running state rather than beside
+/// it, where it could be set with nothing to wait for.
+enum SyncState {
+    Idle,
+    Running { deferred: Option<AssetCommand> },
+}
+
+/// The background asset sync's bookkeeping, which outlives any one snapshot.
+struct AssetSync {
+    tx: tokio::sync::mpsc::UnboundedSender<SyncOutcome>,
+    /// Whether the automatic sync runs in this build at all (release bundles
+    /// already ship the art).
+    enabled: bool,
+    state: SyncState,
+    attempts: u32,
+    last_at: Option<Instant>,
+    index_refreshed: bool,
+    synced_keys: HashSet<String>,
+    /// A finished sync landed new art, so the next merge must be forced past
+    /// the unchanged-list early return.
+    dirty: bool,
+}
+
+impl AssetSync {
+    fn is_running(&self) -> bool {
+        matches!(self.state, SyncState::Running { .. })
+    }
+}
+
+/// Merge one agent snapshot plus the locally enumerated camera set into the UI
+/// state, then re-arm the background asset sync.
+///
+/// Called from two places on purpose. The agent tells us when *its* half of the
+/// device list changed; cameras are UVC rather than HID++, so they never come
+/// over IPC and the UI scans for them itself — but they feed the same merge, so
+/// a camera hotplug has to be able to drive it with the last known snapshot.
+fn apply_agent_state(
+    cx: &gpui::AsyncApp,
+    snapshot: &openlogi_ipc::AgentSnapshot,
+    cams: &[openlogi_camera::Camera],
+    cache: &assets::AssetResolver,
+    sync: &mut AssetSync,
+    latest_inv: &mut Vec<DeviceInventory>,
+    latest_standalone: &mut Vec<StandaloneDevice>,
+) {
+    // Keep the latest completed enumeration for the manual
+    // Refresh / Clear arm — a not-yet-ready agent's empty
+    // pre-enumeration list must not shrink it.
+    let inventory_ready = snapshot.status.inventory == openlogi_ipc::InventoryHealth::Ready;
+    if inventory_ready {
+        latest_inv.clone_from(&snapshot.inventory);
+        latest_standalone.clone_from(&snapshot.standalone);
+    }
+    // A completed sync may have put real photos where
+    // silhouettes were resolved: the resolver was rebuilt
+    // when its outcome landed; force this merge through
+    // the unchanged-list early-return so the fresh records
+    // become visible. Only consume the flag on a `Ready`
+    // snapshot that will actually run the merge below —
+    // `refresh_inventories` is skipped while the agent is
+    // still `Scanning`, so taking it there would drop the
+    // repaint and strand the device on its silhouette until
+    // the next inventory change or a restart (seen after an
+    // update relaunches GUI and agent together: the agent's
+    // Scanning window overlaps the first sync's completion).
+    let force_refresh = inventory_ready && std::mem::take(&mut sync.dirty);
+    let (auto_download, asset_source, models) = cx.update(|cx| {
+        let (changed, merged, auto_download, asset_source, models) = cx
+            .update_global::<AppState, _>(|state, _| {
+                // Merge only completed enumerations. A scanning agent serves
+                // an empty pre-enumeration list, which must not burn the GUI's
+                // miss grace or replace the last known device set.
+                let merged = inventory_ready
+                    && state.refresh_inventories(
+                        &snapshot.inventory,
+                        &snapshot.standalone,
+                        cache,
+                        force_refresh,
+                        cams,
+                    );
+                if inventory_ready {
+                    state.store_inventory_snapshot(&snapshot.inventory);
+                }
+                // Bitwise `|`: the link must be set even when the
+                // merge already reported a change.
+                let changed = merged
+                    | state.set_agent_link(state::AgentLink::Ready(snapshot.status.clone()))
+                    | state.set_camera_active(snapshot.camera_active);
+                let settings = state.app_settings();
+                (
+                    changed,
+                    merged,
+                    settings.auto_download_assets,
+                    settings.asset_source,
+                    state.asset_models(),
+                )
+            });
+        // The steady poll mostly repeats an identical snapshot;
+        // skip the full-window invalidation and menu rebuild for those.
+        if changed {
+            cx.refresh_windows();
+        }
+        if merged {
+            app::menu::rebuild(cx);
+        }
+        (auto_download, asset_source, models)
+    });
+    // Kick off (or re-arm) the background asset sync. The
+    // index prefetch needs no devices; depot fetches fire
+    // only for models not already synced this session. Use
+    // the UI's merged device set so persisted identities are
+    // covered when a live probe temporarily lacks model info.
+    // The whole automatic path is skipped when the user
+    // turned auto-download off — a manual Refresh still
+    // works via the AssetControl arm below.
+    let backoff_passed = sync
+        .last_at
+        .is_none_or(|t| t.elapsed() >= sync_retry_delay(sync.attempts));
+    // Cameras are enumerated on the UI side (UVC, not HID++),
+    // so `asset_models` — built from the HID++ device list —
+    // can't see them. Fold their synthesized models in so a
+    // webcam's product art downloads like any other device's.
+    let mut models = models;
+    models.extend(cams.iter().map(|c| sync::AssetTarget::Hidpp {
+        model: state::camera_model_info(c),
+        codename: Some(c.name.clone()),
+    }));
+    let pending: Vec<_> = models
+        .into_iter()
+        .filter(|m| !sync.synced_keys.contains(&model_key(m)))
+        .collect();
+    if auto_download
+        && sync.enabled
+        && !sync.is_running()
+        && backoff_passed
+        && (!sync.index_refreshed || !pending.is_empty())
+    {
+        sync.state = SyncState::Running { deferred: None };
+        sync.attempts = sync.attempts.saturating_add(1);
+        sync.last_at = Some(Instant::now());
+        let tx = sync.tx.clone();
+        std::thread::spawn(move || {
+            let keys = pending.iter().map(model_key).collect();
+            let ok = run_asset_sync(asset_source, &pending);
+            let _ = tx.send(SyncOutcome { ok, keys });
+        });
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "startup orchestration: watcher spawns + the GPUI run/event loop read most clearly inline"
@@ -160,7 +318,7 @@ fn main() -> Result<()> {
         updates: mut ipc_updates,
         commands: ipc_commands,
         pairing: mut ipc_pairing,
-    } = ipc::spawn(std::time::Duration::from_secs(2));
+    } = ipc::spawn();
 
     // Manual asset actions (Settings → Assets): Refresh / Clear cache. The
     // sender is published as a global so the Settings window can drive the
@@ -282,13 +440,16 @@ fn main() -> Result<()> {
             // capped delay so a permanently-down host isn't polled every tick
             // yet a recovered one still self-heals.
             let (sync_tx, mut sync_rx) = tokio::sync::mpsc::unbounded_channel::<SyncOutcome>();
-            let sync_enabled = sync::should_run(cache.has_bundle_root());
-            let mut sync_running = false;
-            let mut sync_attempts: u32 = 0;
-            let mut last_sync_at: Option<Instant> = None;
-            let mut index_refreshed = false;
-            let mut synced_keys: HashSet<String> = HashSet::new();
-            let mut assets_dirty = false;
+            let mut sync = AssetSync {
+                tx: sync_tx,
+                enabled: sync::should_run(cache.has_bundle_root()),
+                state: SyncState::Idle,
+                attempts: 0,
+                last_at: None,
+                index_refreshed: false,
+                synced_keys: HashSet::new(),
+                dirty: false,
+            };
             // Most recent completed enumeration, kept so a manual Refresh /
             // Clear (the AssetControl arm below) can sync the current devices
             // without waiting for the next snapshot.
@@ -298,138 +459,32 @@ fn main() -> Result<()> {
             // flight: stashed here and run by the sync-outcome arm the moment
             // that sync finishes, so a Clear's cache wipe never races the
             // in-flight fetch's writes and the manual fetch is never dropped.
-            let mut deferred_manual: Option<AssetCommand> = None;
             // Consecutive empty camera scans while cameras were showing — see
             // the grace logic in the snapshot arm.
             let mut camera_misses: u8 = 0;
+            // The agent's last reported state, so a camera hotplug can re-run
+            // the merge without waiting for the agent to change something of
+            // its own.
+            let mut latest_snapshot: Option<openlogi_ipc::AgentSnapshot> = None;
+            let mut camera_scan = tokio::time::interval(CAMERA_SCAN_PERIOD);
+            camera_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // Cleared when the IPC update channel closes (the client thread
             // died), so the select stops polling a closed receiver.
             let mut ipc_open = true;
             loop {
                 tokio::select! {
                     update = ipc_updates.recv(), if ipc_open => match update {
-                        Some(ipc::GuiUpdate::Snapshot(update)) => {
-                        // Refresh the camera set off the UI thread (AVFoundation
-                        // discovery is far too slow for the render path) so the
-                        // merge below sees hot-plugs without ever stalling paint.
-                        // An empty scan gets a two-snapshot grace before it
-                        // evicts anything: a USB control seize (e.g. another
-                        // process's CLI) blinks the camera out of discovery for
-                        // a moment, and one blink must not tear down the card —
-                        // or the detail page — the user is looking at.
-                        let scanned = cx
-                            .background_executor()
-                            .spawn(async { openlogi_camera::enumerate_cameras() })
-                            .await;
-                        if scanned.is_empty() && !latest_cams.is_empty() && camera_misses < 2 {
-                            camera_misses += 1;
-                        } else {
-                            camera_misses = 0;
-                            latest_cams = scanned;
-                        }
-                        // Keep the latest completed enumeration for the manual
-                        // Refresh / Clear arm — a not-yet-ready agent's empty
-                        // pre-enumeration list must not shrink it.
-                        let inventory_ready =
-                            update.status.inventory == openlogi_ipc::InventoryHealth::Ready;
-                        if inventory_ready {
-                            latest_inv.clone_from(&update.inventory);
-                            latest_standalone.clone_from(&update.standalone);
-                        }
-                        // A completed sync may have put real photos where
-                        // silhouettes were resolved: the resolver was rebuilt
-                        // when its outcome landed; force this merge through
-                        // the unchanged-list early-return so the fresh records
-                        // become visible. Only consume the flag on a `Ready`
-                        // snapshot that will actually run the merge below —
-                        // `refresh_inventories` is skipped while the agent is
-                        // still `Scanning`, so taking it there would drop the
-                        // repaint and strand the device on its silhouette until
-                        // the next inventory change or a restart (seen after an
-                        // update relaunches GUI and agent together: the agent's
-                        // Scanning window overlaps the first sync's completion).
-                        let force_refresh = inventory_ready && std::mem::take(&mut assets_dirty);
-                        let (auto_download, asset_source, models) = cx.update(|cx| {
-                            let (changed, merged, auto_download, asset_source, models) = cx.update_global::<AppState, _>(|state, _| {
-                                // Merge only completed enumerations. A scanning agent serves
-                                // an empty pre-enumeration list, which must not burn the GUI's
-                                // miss grace or replace the last known device set.
-                                let merged = inventory_ready
-                                    && state.refresh_inventories(
-                                        &update.inventory,
-                                        &update.standalone,
-                                        &cache,
-                                        force_refresh,
-                                        &latest_cams,
-                                    );
-                                if inventory_ready {
-                                    state.store_inventory_snapshot(&update.inventory);
-                                }
-                                // Bitwise `|`: the link must be set even when the
-                                // merge already reported a change.
-                                let changed = merged
-                                    | state.set_agent_link(state::AgentLink::Ready(update.status))
-                                    | state.set_camera_active(update.camera_active);
-                                let settings = state.app_settings();
-                                (
-                                    changed,
-                                    merged,
-                                    settings.auto_download_assets,
-                                    settings.asset_source,
-                                    state.asset_models(),
-                                )
-                            });
-                            // The steady poll mostly repeats an identical snapshot;
-                            // skip the full-window invalidation and menu rebuild for those.
-                            if changed {
-                                cx.refresh_windows();
-                            }
-                            if merged {
-                                app::menu::rebuild(cx);
-                            }
-                            (auto_download, asset_source, models)
-                        });
-                        // Kick off (or re-arm) the background asset sync. The
-                        // index prefetch needs no devices; depot fetches fire
-                        // only for models not already synced this session. Use
-                        // the UI's merged device set so persisted identities are
-                        // covered when a live probe temporarily lacks model info.
-                        // The whole automatic path is skipped when the user
-                        // turned auto-download off — a manual Refresh still
-                        // works via the AssetControl arm below.
-                        let backoff_passed = last_sync_at
-                            .is_none_or(|t| t.elapsed() >= sync_retry_delay(sync_attempts));
-                        // Cameras are enumerated on the UI side (UVC, not HID++),
-                        // so `asset_models` — built from the HID++ device list —
-                        // can't see them. Fold their synthesized models in so a
-                        // webcam's product art downloads like any other device's.
-                        let mut models = models;
-                        models.extend(latest_cams.iter().map(|c| {
-                            sync::AssetTarget::Hidpp {
-                                model: state::camera_model_info(c),
-                                codename: Some(c.name.clone()),
-                            }
-                        }));
-                        let pending: Vec<_> = models
-                            .into_iter()
-                            .filter(|m| !synced_keys.contains(&model_key(m)))
-                            .collect();
-                        if auto_download
-                            && sync_enabled
-                            && !sync_running
-                            && backoff_passed
-                            && (!index_refreshed || !pending.is_empty())
-                        {
-                            sync_running = true;
-                            sync_attempts = sync_attempts.saturating_add(1);
-                            last_sync_at = Some(Instant::now());
-                            let tx = sync_tx.clone();
-                            std::thread::spawn(move || {
-                                let keys = pending.iter().map(model_key).collect();
-                                let ok = run_asset_sync(asset_source, &pending);
-                                let _ = tx.send(SyncOutcome { ok, keys });
-                            });
-                        }
+                        Some(ipc::GuiUpdate::Snapshot(snapshot)) => {
+                            apply_agent_state(
+                                cx,
+                                &snapshot,
+                                &latest_cams,
+                                &cache,
+                                &mut sync,
+                                &mut latest_inv,
+                                &mut latest_standalone,
+                            );
+                            latest_snapshot = Some(snapshot);
                         }
                         Some(ipc::GuiUpdate::Unreachable) => {
                             cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
@@ -467,6 +522,38 @@ fn main() -> Result<()> {
                             cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
                         }
                     },
+                    _ = camera_scan.tick() => {
+                        // Off the UI thread: AVFoundation discovery is far too
+                        // slow for the render path.
+                        let scanned = cx
+                            .background_executor()
+                            .spawn(async { openlogi_camera::enumerate_cameras() })
+                            .await;
+                        // An empty scan gets a two-tick grace before it evicts
+                        // anything: a USB control seize (e.g. another process's
+                        // CLI) blinks the camera out of discovery for a moment,
+                        // and one blink must not tear down the card — or the
+                        // detail page — the user is looking at.
+                        if scanned.is_empty() && !latest_cams.is_empty() && camera_misses < 2 {
+                            camera_misses += 1;
+                        } else {
+                            camera_misses = 0;
+                            if scanned != latest_cams {
+                                latest_cams = scanned;
+                                if let Some(snapshot) = latest_snapshot.as_ref() {
+                                    apply_agent_state(
+                                        cx,
+                                        snapshot,
+                                        &latest_cams,
+                                        &cache,
+                                        &mut sync,
+                                        &mut latest_inv,
+                                        &mut latest_standalone,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     Some(cmd) = asset_ctrl_rx.recv() => {
                         // Manual Refresh / Clear from Settings → Assets. Both
                         // force a fresh fetch for the current devices —
@@ -474,7 +561,7 @@ fn main() -> Result<()> {
                         // release-bundle `sync_enabled` gate — and Clear wipes
                         // the per-user cache first, resetting the retry backoff
                         // so the next automatic attempt isn't delayed.
-                        if sync_running {
+                        if let SyncState::Running { deferred } = &mut sync.state {
                             // A sync is writing the cache right now. Stash the
                             // command; the outcome arm re-issues it the moment
                             // that sync finishes, so a Clear never wipes the
@@ -484,9 +571,9 @@ fn main() -> Result<()> {
                             // re-fetches too, so collapsing to Refresh would
                             // silently drop the wipe.
                             if matches!(cmd, AssetCommand::ClearCache)
-                                || !matches!(deferred_manual, Some(AssetCommand::ClearCache))
+                                || !matches!(deferred, Some(AssetCommand::ClearCache))
                             {
-                                deferred_manual = Some(cmd);
+                                *deferred = Some(cmd);
                             }
                         } else {
                             if matches!(cmd, AssetCommand::ClearCache) {
@@ -499,8 +586,8 @@ fn main() -> Result<()> {
                                 // the resolver, and repaint so cleared art falls
                                 // back to the silhouette (or bundled art)
                                 // immediately.
-                                synced_keys.clear();
-                                index_refreshed = false;
+                                sync.synced_keys.clear();
+                                sync.index_refreshed = false;
                                 cache = assets::AssetResolver::new();
                                 cx.update(|cx| {
                                     let changed = cx.update_global::<AppState, _>(|state, _| {
@@ -517,9 +604,9 @@ fn main() -> Result<()> {
                                     }
                                 });
                             }
-                            sync_running = true;
-                            sync_attempts = 0;
-                            last_sync_at = None;
+                            sync.state = SyncState::Running { deferred: None };
+                            sync.attempts = 0;
+                            sync.last_at = None;
                             let (models, asset_source) = cx.update(|cx| {
                                 let state = cx.global::<AppState>();
                                 (state.asset_models(), state.app_settings().asset_source)
@@ -533,7 +620,7 @@ fn main() -> Result<()> {
                                     codename: Some(c.name.clone()),
                                 }
                             }));
-                            let tx = sync_tx.clone();
+                            let tx = sync.tx.clone();
                             std::thread::spawn(move || {
                                 let keys = models.iter().map(model_key).collect();
                                 let ok = run_asset_sync(asset_source, &models);
@@ -545,25 +632,30 @@ fn main() -> Result<()> {
                     // flight — we hold a live `sync_tx`, so an unguarded recv
                     // would pend forever and keep the `else => break` exit
                     // from ever firing once the other channels close.
-                    Some(outcome) = sync_rx.recv(), if sync_running => {
-                        sync_running = false;
+                    Some(outcome) = sync_rx.recv(), if sync.is_running() => {
+                        // Taking the state also takes whatever manual command
+                        // was waiting on this fetch.
+                        let deferred = match std::mem::replace(&mut sync.state, SyncState::Idle) {
+                            SyncState::Running { deferred } => deferred,
+                            SyncState::Idle => None,
+                        };
                         if outcome.ok {
                             // Success resets the backoff so a device appearing
                             // later syncs immediately instead of waiting out a
                             // stale failure delay.
-                            sync_attempts = 0;
-                            last_sync_at = None;
-                            index_refreshed = true;
-                            synced_keys.extend(outcome.keys);
+                            sync.attempts = 0;
+                            sync.last_at = None;
+                            sync.index_refreshed = true;
+                            sync.synced_keys.extend(outcome.keys);
                             cache = assets::AssetResolver::new();
-                            assets_dirty = true;
+                            sync.dirty = true;
                         }
                         // A manual Refresh / Clear that landed mid-sync waited
                         // for this moment: re-issue it now that the cache is no
                         // longer being written. The arm above runs it (sync is
                         // idle again) — or re-defers if a new sync already
                         // started in the meantime.
-                        if let Some(cmd) = deferred_manual.take() {
+                        if let Some(cmd) = deferred {
                             let _ = asset_ctrl_self_tx.send(cmd);
                         }
                     }
