@@ -3,7 +3,8 @@
 use openlogi_core::binding::ActionRingIcon;
 
 /// Embedded icon path for a user-selected Actions Ring glyph.
-pub(crate) fn ring_icon_path(icon: ActionRingIcon) -> &'static str {
+#[must_use]
+pub fn ring_icon_path(icon: ActionRingIcon) -> &'static str {
     match icon {
         ActionRingIcon::Pointer => "action-icons/mouse-pointer-click.svg",
         ActionRingIcon::Mouse => "action-icons/mouse.svg",

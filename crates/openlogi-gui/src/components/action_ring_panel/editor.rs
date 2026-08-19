@@ -19,9 +19,9 @@ use openlogi_core::binding::{
 };
 
 use crate::action_icons::action_icon_path;
-use crate::action_ring_icons::ring_icon_path;
 use crate::state::AppState;
 use crate::theme::{self, Palette, SelectableStyle as _, Typography as _};
+use openlogi_gui::action_ring_icons::ring_icon_path;
 
 pub(super) fn action_library(
     slot: ActionRingSlot,

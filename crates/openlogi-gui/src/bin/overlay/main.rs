@@ -11,16 +11,7 @@
 
 rust_i18n::i18n!("locales", fallback = "en");
 
-#[path = "../action_ring_geometry.rs"]
-mod action_ring_geometry;
-#[path = "../action_ring_icons.rs"]
-mod action_ring_icons;
-#[path = "../app_assets.rs"]
-mod app_assets;
-#[path = "../locale.rs"]
-mod locale;
-#[path = "../platform/overlay.rs"]
-mod overlay_platform;
+mod platform;
 
 use std::{
     future::Future,
@@ -86,7 +77,7 @@ struct RingView {
 
 impl RingView {
     fn slot_position(slot: ActionRingSlot) -> (f32, f32) {
-        let (x, y) = action_ring_geometry::slot_offset(slot);
+        let (x, y) = openlogi_gui::action_ring_geometry::slot_offset(slot);
         (
             WINDOW_SIZE / 2.0 + x * RADIUS - SLOT_SIZE / 2.0,
             WINDOW_SIZE / 2.0 + y * RADIUS - SLOT_SIZE / 2.0,
@@ -99,7 +90,7 @@ impl RingView {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let presentation = self.invocation.slots.get(&slot)?;
-        let icon_path = action_ring_icons::ring_icon_path(presentation.icon);
+        let icon_path = openlogi_gui::action_ring_icons::ring_icon_path(presentation.icon);
         let selected = self.hovered == Some(slot);
         let (left, top) = Self::slot_position(slot);
         let session_id = self.invocation.session_id;
@@ -241,7 +232,7 @@ fn main() -> Result<()> {
         )
         .init();
 
-    rust_i18n::set_locale(locale::resolve(None));
+    openlogi_gui::locale::activate(None);
     // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
     let Ipc {
@@ -249,9 +240,9 @@ fn main() -> Result<()> {
         commands,
     } = spawn_ipc();
 
-    let app = gpui_platform::application().with_assets(app_assets::AppAssets);
+    let app = gpui_platform::application().with_assets(openlogi_gui::app_assets::AppAssets);
     app.run(move |cx| {
-        overlay_platform::configure_application();
+        platform::configure_application();
         let live_session = Arc::new(ClickAwaySession::new());
         spawn_click_away_dismissal(cx, Arc::clone(&live_session));
         cx.spawn(async move |cx| {
@@ -270,7 +261,7 @@ fn main() -> Result<()> {
                     });
                     continue;
                 }
-                rust_i18n::set_locale(locale::resolve(invocation.language.as_deref()));
+                openlogi_gui::locale::activate(invocation.language.as_deref());
                 cx.update(|cx| {
                     live_session.clear();
                     for handle in cx.windows() {
@@ -289,7 +280,7 @@ fn main() -> Result<()> {
                     }) {
                         Ok(handle) => {
                             live_session.set(session_id);
-                            overlay_platform::configure_windows();
+                            platform::configure_windows();
                             cx.spawn(async move |cx| {
                                 cx.background_executor().timer(DISPLAY_LIFETIME).await;
                                 if handle
@@ -359,7 +350,7 @@ const fn click_away_targets(observed: u64, open: u64) -> bool {
 /// ring that opened afterward.
 fn spawn_click_away_dismissal(cx: &mut gpui::App, live: Arc<ClickAwaySession>) {
     let (clicks_tx, mut clicks) = mpsc::unbounded_channel();
-    let monitor = overlay_platform::watch_clicks_outside(move || {
+    let monitor = platform::watch_clicks_outside(move || {
         if let Some(session_id) = live.observe() {
             let _ = clicks_tx.send(session_id);
         }
@@ -383,7 +374,7 @@ fn spawn_click_away_dismissal(cx: &mut gpui::App, live: Arc<ClickAwaySession>) {
 
 /// Drop the stub monitor; non-macOS has no native owner to keep alive.
 #[cfg(not(target_os = "macos"))]
-const fn drop_unused_click_away_monitor(_monitor: Option<overlay_platform::ClickAwayMonitor>) {}
+const fn drop_unused_click_away_monitor(_monitor: Option<platform::ClickAwayMonitor>) {}
 
 /// Cancel the open ring only if it is still the session the click named.
 fn dismiss_click_away(cx: &mut gpui::App, session_id: u64) {
@@ -417,7 +408,7 @@ fn ring_window_options(cx: &mut gpui::App) -> WindowOptions {
     // pins a ring triggered on a secondary display to the primary one's edge.
     let native_display = cursor
         .as_ref()
-        .and_then(|cursor| overlay_platform::display_containing(cursor.x, cursor.y));
+        .and_then(|cursor| platform::display_containing(cursor.x, cursor.y));
     let (display_id, center, display_bounds) =
         if let (Some(cursor), Some(display)) = (&cursor, native_display) {
             (

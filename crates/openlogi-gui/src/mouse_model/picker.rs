@@ -499,7 +499,7 @@ pub(crate) fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
 /// bound action.
 pub(crate) const GESTURE_BUTTON_ICON: &str = "action-icons/move.svg";
 
-/// Asset path (served by [`crate::app_assets`]) of the vendored lucide glyph for
+/// Asset path (served by [`openlogi_gui::app_assets`]) of the vendored lucide glyph for
 /// an action — the leading icon in each action row and in the leader-line label
 /// card. Exhaustive on purpose: a new [`Action`] variant must pick an icon here
 /// (no catch-all fallback).

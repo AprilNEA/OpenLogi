@@ -3,7 +3,8 @@
 use openlogi_core::binding::ActionRingSlot;
 
 /// Unit vector for a slot, with positive Y pointing down in GPUI coordinates.
-pub(crate) fn slot_offset(slot: ActionRingSlot) -> (f32, f32) {
+#[must_use]
+pub fn slot_offset(slot: ActionRingSlot) -> (f32, f32) {
     let diagonal = std::f32::consts::FRAC_1_SQRT_2;
     match slot {
         ActionRingSlot::Top => (0.0, -1.0),

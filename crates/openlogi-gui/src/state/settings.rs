@@ -192,7 +192,7 @@ impl AppState {
         self.config.app_settings.language.as_deref()
     }
     /// Set the UI language (`None` = follow system), persist it, switch the
-    /// process-global locale live via [`crate::i18n`], and repaint open UI.
+    /// process-global locale via [`openlogi_gui::locale`], and repaint open UI.
     /// No-op when unchanged.
     pub fn set_language(&mut self, language: Option<String>, cx: &mut App) {
         if self.config.app_settings.language == language {
@@ -200,7 +200,7 @@ impl AppState {
         }
         self.config.app_settings.language = language;
         self.persist_config("language setting");
-        crate::i18n::activate(self.config.app_settings.language.as_deref());
+        openlogi_gui::locale::activate(self.config.app_settings.language.as_deref());
         cx.refresh_windows();
         crate::app_menu::rebuild(cx);
     }

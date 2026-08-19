@@ -12,13 +12,16 @@ default-run = "openlogi-gui"
 # (gpui_platform is not on the registry). Distributed as a bundled .app.
 publish = false
 
+# Both binaries share `src/lib.rs` — ring geometry/icons, the GPUI asset source,
+# and locale negotiation. Everything else stays private to its own binary: the
+# overlay is a pure IPC client and links none of the settings app's UI.
 [[bin]]
 name = "openlogi-gui"
 path = "src/main.rs"
 
 [[bin]]
 name = "openlogi-overlay"
-path = "src/bin/openlogi-overlay.rs"
+path = "src/bin/overlay/main.rs"
 
 [dependencies]
 openlogi-core = { path = "../openlogi-core" }
@@ -64,7 +67,8 @@ embed-resource = "3.0.9"
 [target.'cfg(target_os = "macos")'.dependencies]
 # CGGetActiveDisplayList/CGDisplayBounds for the overlay: locating the cursor's
 # display needs global display bounds, which GPUI's display API doesn't expose
-# (its bounds are display-relative). C FFI, so core-graphics per platform/AGENTS.md.
+# (its bounds are display-relative). C FFI, so core-graphics per the rules in
+# src/platform/AGENTS.md; the call site is src/bin/overlay/platform.rs.
 core-graphics = { workspace = true }
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSAppearance", "NSWindow", "NSEvent", "block2"] }

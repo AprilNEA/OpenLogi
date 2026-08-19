@@ -1,4 +1,4 @@
-//! The app's GPUI [`AssetSource`].
+//! The app's GPUI [`gpui::AssetSource`].
 //!
 //! Serves source-owned embedded artwork and delegates every other path to
 //! gpui-component's icon assets (the lucide SVGs behind `IconName`). Embedding
