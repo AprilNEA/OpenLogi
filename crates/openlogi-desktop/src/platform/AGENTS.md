@@ -97,6 +97,21 @@ Rules:
   additionally brings its own onboarding UI and links the Swift runtime into every downstream
   binary; `macos-accessibility-client` is a raw-`extern` wrapper where this file requires
   typed bindings.
+- **TCC matches the full Designated Requirement, not the bundle ID** ([TN3127]). Re-signing one
+  bundle ID with a different *kind* of certificate leaves a record that can never match again,
+  and toggling the checkbox does not rewrite the stored `csreq`. Not hypothetical: 0.6.24–0.6.26
+  shipped `.dev` bundle IDs signed with Developer ID (`a344e22f`), so a dev build of the same ID
+  signed *Apple Development* meets a stale Developer ID requirement and `tccd` logs
+  `Failed to match existing code requirement`. Suspect this first when a grant silently does
+  nothing; `tccutil reset <service> <bundle-id>` clears the record, and a never-used bundle ID
+  (or a fresh user/VM) is the only clean re-test.
+- **Accessibility does not use `tccd`'s generic consent sheet**, so its logs read oddly: a
+  request answers *"Service kTCCServiceAccessibility does not allow prompting; returning
+  Unknown"* with `DB Action:None`. That describes the `tccd` preflight **only** — the flow
+  continues into `universalAccessAuthWarn`, which makes its own `TCCAccessCopyInformation` call
+  and pre-creates an unchecked row when no matching record exists. Reading `DB Action:None` as
+  "nothing is ever written" is wrong, and it points debugging away from the stale-requirement
+  case above.
 - `CBCentralManager.authorization` deliberately stays an `AnyClass::get` + `msg_send!` lookup
   rather than `objc2-core-bluetooth`: a missing class must degrade to `Unknown`, not panic.
 - Deliberate raw-FFI exceptions, all of them symbols with no bindings to migrate to:
@@ -106,6 +121,8 @@ Rules:
   `AXUIElement` navigation + manual `CFRetain`/`CFRelease`) and `openlogi-camera`'s
   `AVAuthorizationStatus` integers — both have typed homes (`objc2-application-services`,
   `objc2-av-foundation`) whenever someone touches them next.
+
+[TN3127]: https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements
 
 ## The `unsafe` that remains (and the `# SAFETY` rule)
 
