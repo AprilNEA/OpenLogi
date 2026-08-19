@@ -57,44 +57,59 @@ async fn open_profiles(
 pub async fn get_onboard_profiles(route: &DeviceRoute) -> Result<OnboardProfilesInfo, WriteError> {
     let index = route.device_index();
     with_route(route, move |channel| async move {
-        let (_device, feature) = open_profiles(&channel, index).await?;
-
-        let read = |e| {
-            classify_hidpp_error(
-                e,
-                HidppOperation::ReadOnboardProfiles,
-                OnboardProfilesFeature::ID,
-            )
-        };
-        let descr = feature.get_description().await.map_err(read)?;
-        let mode = feature.get_onboard_mode().await.map_err(read)?;
-        let active_profile = feature.get_current_profile().await.map_err(read)?;
-        let directory = feature
-            .read_profile_directory(&descr)
-            .await
-            .map_err(read)?
-            .into_iter()
-            .map(|entry| ProfileEntry {
-                sector: entry.sector,
-                enabled: entry.enabled,
-            })
-            .collect();
-
-        Ok(OnboardProfilesInfo {
-            profile_count: descr.profile_count,
-            profile_count_oob: descr.profile_count_oob,
-            button_count: descr.button_count,
-            sector_count: descr.sector_count,
-            sector_size: descr.sector_size,
-            memory_model_id: descr.memory_model_id,
-            profile_format_id: descr.profile_format_id,
-            macro_format_id: descr.macro_format_id,
-            mode: onboard_mode_to_profiles(mode),
-            active_profile,
-            directory,
-        })
+        get_onboard_profiles_on_channel(&channel, index).await
     })
     .await
+}
+
+/// Read onboard-profile state on an already-open [`SharedChannel`].
+pub async fn get_onboard_profiles_on(
+    shared: &SharedChannel,
+) -> Result<OnboardProfilesInfo, WriteError> {
+    get_onboard_profiles_on_channel(shared.channel(), shared.device_index()).await
+}
+
+/// Read onboard-profile state on an already-open HID++ channel.
+pub(super) async fn get_onboard_profiles_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<OnboardProfilesInfo, WriteError> {
+    let (_device, feature) = open_profiles(channel, index).await?;
+
+    let read = |e| {
+        classify_hidpp_error(
+            e,
+            HidppOperation::ReadOnboardProfiles,
+            OnboardProfilesFeature::ID,
+        )
+    };
+    let descr = feature.get_description().await.map_err(read)?;
+    let mode = feature.get_onboard_mode().await.map_err(read)?;
+    let active_profile = feature.get_current_profile().await.map_err(read)?;
+    let directory = feature
+        .read_profile_directory(&descr)
+        .await
+        .map_err(read)?
+        .into_iter()
+        .map(|entry| ProfileEntry {
+            sector: entry.sector,
+            enabled: entry.enabled,
+        })
+        .collect();
+
+    Ok(OnboardProfilesInfo {
+        profile_count: descr.profile_count,
+        profile_count_oob: descr.profile_count_oob,
+        button_count: descr.button_count,
+        sector_count: descr.sector_count,
+        sector_size: descr.sector_size,
+        memory_model_id: descr.memory_model_id,
+        profile_format_id: descr.profile_format_id,
+        macro_format_id: descr.macro_format_id,
+        mode: onboard_mode_to_profiles(mode),
+        active_profile,
+        directory,
+    })
 }
 
 /// Write the onboard/host mode on `route` and return the read-back mode so the

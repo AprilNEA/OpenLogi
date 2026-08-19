@@ -16,14 +16,14 @@ use std::sync::{Arc, RwLock};
 
 use openlogi_core::binding::Action;
 use openlogi_core::bindings::{bindings_for, oshook_gestures_for};
-use openlogi_core::config::{Config, LightSettings, ScrollResolution};
+use openlogi_core::config::{Config, LightSettings, OnboardProfiles, ScrollResolution};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
 };
 use openlogi_core::device_order::DeviceStableId;
 use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceRoute,
-    KEYBOARD_KEY_CIDS,
+    KEYBOARD_KEY_CIDS, ProfilesMode,
 };
 use openlogi_ipc::InventoryHealth;
 use tracing::{debug, info, warn};
@@ -469,10 +469,12 @@ impl Orchestrator {
         self.reapply_all_next_refresh = true;
     }
 
-    /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift,
-    /// native wheel mode) to one device. Mouse settings run on one background
-    /// thread and one HID++ channel so concurrent multi-open of the same
-    /// receiver cannot cross-talk (#485); lighting stays a separate path
+    /// Push the persisted volatile settings (onboard-profile mode, lighting,
+    /// sensor DPI, SmartShift, native wheel mode) to one device. Mouse
+    /// settings run sequentially on one background thread and one HID++
+    /// channel so the onboard-mode switch settles before the writes it can
+    /// otherwise shadow or reject, and concurrent multi-open of the same
+    /// receiver cannot cross-talk (#485). Lighting stays a separate path
     /// (keyboards / different feature).
     fn reapply_volatile_settings(&self, dev: &AgentDevice) {
         // A disabled device is left fully native — no writes of any kind.
@@ -483,15 +485,23 @@ impl Orchestrator {
             return;
         };
         let key = &dev.config_key;
+        let profiles = configured_onboard_profiles(&self.config, dev)
+            .map(|(mode, profile)| crate::hardware::OnboardProfilesApply { mode, profile });
         let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
         let dpi = self.config.dpi(key);
         let smartshift = self
             .config
             .smartshift(key)
             .map(openlogi_hid::SmartShiftStatus::from);
-        if resolution.is_some() || inverted.is_some() || dpi.is_some() || smartshift.is_some() {
+        if profiles.is_some()
+            || resolution.is_some()
+            || inverted.is_some()
+            || dpi.is_some()
+            || smartshift.is_some()
+        {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
+                profiles,
                 resolution,
                 inverted,
                 dpi,
@@ -776,6 +786,23 @@ impl Orchestrator {
                 crate::hardware::set_light_in_background(dev.route.clone(), &light, capabilities);
             }
         }
+    }
+}
+
+/// Resolve the onboard-profile mode and optional user sector to re-apply to
+/// `dev`. An unconfigured device stays unmanaged: OpenLogi does not silently
+/// take it out of the mode its hardware selected. Once configured, the mode is
+/// asserted on every reconnect because host mode is volatile.
+fn configured_onboard_profiles(
+    config: &Config,
+    dev: &AgentDevice,
+) -> Option<(ProfilesMode, Option<u16>)> {
+    if !dev.capabilities?.onboard_profiles {
+        return None;
+    }
+    match config.onboard_profiles(&dev.config_key)? {
+        OnboardProfiles::Host {} => Some((ProfilesMode::Host, None)),
+        OnboardProfiles::Onboard { profile } => Some((ProfilesMode::Onboard, profile)),
     }
 }
 
