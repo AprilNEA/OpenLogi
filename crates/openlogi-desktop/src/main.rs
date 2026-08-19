@@ -465,8 +465,15 @@ fn main() -> Result<()> {
             // the merge without waiting for the agent to change something of
             // its own.
             let mut latest_snapshot: Option<openlogi_ipc::AgentSnapshot> = None;
-            let mut camera_scan = tokio::time::interval(CAMERA_SCAN_PERIOD);
-            camera_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // GPUI drives this task on its own executor, never inside a Tokio
+            // runtime, so a `tokio::time::interval` panics the moment it is
+            // built ("there is no reactor running"). The background executor's
+            // timer is what the rest of the app schedules on. It is armed once
+            // and re-armed only after it fires, so a busy IPC arm cannot keep
+            // starving the scan the way a per-iteration timer would, and a late
+            // tick simply runs late instead of catching up — the same behaviour
+            // `MissedTickBehavior::Delay` asked for.
+            let mut camera_scan = Box::pin(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
             // Cleared when the IPC update channel closes (the client thread
             // died), so the select stops polling a closed receiver.
             let mut ipc_open = true;
@@ -525,7 +532,8 @@ fn main() -> Result<()> {
                             cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
                         }
                     },
-                    _ = camera_scan.tick() => {
+                    () = &mut camera_scan => {
+                        camera_scan.set(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
                         // Nothing to show it to. The app runs from the menu bar
                         // with every window closed, and this scan is the only
                         // work left that is not driven by an agent change — so
