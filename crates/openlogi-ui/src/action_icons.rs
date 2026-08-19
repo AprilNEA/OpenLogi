@@ -1,22 +1,17 @@
-//! The app's GPUI [`gpui::AssetSource`].
+//! The vendored Actions Ring glyphs, as a GPUI [`AssetSource`].
 //!
-//! Serves source-owned embedded artwork and delegates every other path to
-//! gpui-component's icon assets (the lucide SVGs behind `IconName`). Embedding
-//! these files via `include_bytes!` means they resolve the same inside a
-//! packaged `.app` as they do from a dev build — a filesystem path would not.
+//! Both frontends draw ring slots, so both need these bytes; nothing else in
+//! either app's artwork is shared, which is why this source serves *only*
+//! `action-icons/` and reports every other path as absent. A frontend needing
+//! more composes this with its own source rather than growing this one —
+//! anything added here is added to the overlay too.
+//!
+//! Embedding via `include_bytes!` means the paths resolve identically inside a
+//! packaged `.app` and from a dev build; a filesystem path would not.
 
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
-
-/// Asset path [`AppAssets`] resolves to the embedded app logo.
-pub const LOGO: &str = "openlogi.png";
-
-/// The 1024×1024 app icon, embedded into the binary.
-const LOGO_BYTES: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../design/icon/openlogi.png"
-));
 
 /// Vendored [lucide](https://lucide.dev) icons (ISC license) for the binding
 /// menus, embedded so they resolve identically in a packaged `.app` and a dev
@@ -91,22 +86,41 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/volume-x.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/volume-x.svg"))),
 ];
 
-/// GPUI asset source: the embedded logo + vendored action icons, then
-/// gpui-component's bundled icons for everything else.
-pub struct AppAssets;
+/// GPUI asset source for the embedded ring glyphs, and nothing else.
+pub struct ActionIcons;
 
-impl AssetSource for AppAssets {
+impl AssetSource for ActionIcons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if path == LOGO {
-            return Ok(Some(Cow::Borrowed(LOGO_BYTES)));
-        }
-        if let Some((_, bytes)) = ACTION_ICONS.iter().find(|(p, _)| *p == path) {
-            return Ok(Some(Cow::Borrowed(*bytes)));
-        }
-        gpui_component_assets::Assets.load(path)
+        Ok(ACTION_ICONS
+            .iter()
+            .find(|(candidate, _)| *candidate == path)
+            .map(|(_, bytes)| Cow::Borrowed(*bytes)))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        gpui_component_assets::Assets.list(path)
+        Ok(ACTION_ICONS
+            .iter()
+            .filter(|(candidate, _)| candidate.starts_with(path))
+            .map(|(candidate, _)| SharedString::from(*candidate))
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::AssetSource as _;
+    use openlogi_core::binding::ActionRingIcon;
+
+    use super::*;
+
+    #[test]
+    fn every_ring_gallery_icon_is_embedded() {
+        for icon in ActionRingIcon::ALL {
+            let loaded = ActionIcons.load(icon.asset_path());
+            assert!(
+                matches!(loaded, Ok(Some(_))),
+                "missing embedded asset for {icon:?}"
+            );
+        }
     }
 }

@@ -5423,7 +5423,6 @@ version = "0.7.1"
 dependencies = [
  "fluent-langneg",
  "gpui",
- "gpui-component-assets",
  "openlogi-core",
  "rust-i18n",
  "sys-locale",

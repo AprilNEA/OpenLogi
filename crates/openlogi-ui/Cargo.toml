@@ -12,10 +12,10 @@ publish = false
 
 [dependencies]
 openlogi-core = { path = "../openlogi-core" }
-# `gpui` only — deliberately NOT `gpui-component`. Every dependency added here
-# lands in the overlay helper too, so the widget kit stays on the app's side.
+# `gpui` only — deliberately neither `gpui-component` nor its icon set. Every
+# dependency added here lands in the overlay helper too, so the widget kit and
+# the artwork only the app draws both stay on the app's side.
 gpui = { workspace = true }
-gpui-component-assets = { workspace = true }
 fluent-langneg = "0.14.2"
 rust-i18n = "4"
 sys-locale = "0.3.2"

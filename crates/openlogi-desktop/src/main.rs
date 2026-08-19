@@ -30,6 +30,7 @@ macro_rules! tr {
 }
 
 mod app;
+mod app_assets;
 mod features;
 mod platform;
 mod services;
@@ -170,9 +171,9 @@ fn main() -> Result<()> {
     let asset_ctrl_self_tx = asset_ctrl_tx.clone();
 
     // `with_assets` registers the embedded app logo
-    // ([`openlogi_ui::app_assets`]) plus the lucide SVGs that back
+    // ([`app_assets`]) plus the lucide SVGs that back
     // `gpui_component::IconName`; without it `img()` / `Icon` would fail to load.
-    let app = gpui_platform::application().with_assets(openlogi_ui::app_assets::AppAssets);
+    let app = gpui_platform::application().with_assets(app_assets::AppAssets);
 
     // URL scheme: `open openlogi://open-settings` from the agent's tray or
     // external apps. Works for both cold start (macOS launches the app then

@@ -12,14 +12,12 @@ use gpui_component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
     v_flex,
 };
-use openlogi_core::binding::{ActionRingEntry, ActionRingLayout, ActionRingSlot};
+use openlogi_core::binding::{ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot};
 
 use self::action_icons::action_icon_path;
 use self::editor::action_library;
 use crate::state::AppState;
 use crate::ui::theme::{self, Palette, Typography as _};
-use openlogi_ui::action_ring::geometry::slot_offset;
-use openlogi_ui::action_ring::icons::ring_icon_path;
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
 /// [`AppState`]; this entity owns selection and editor input state.
@@ -246,17 +244,16 @@ fn slot_button(
     pal: Palette,
 ) -> impl IntoElement {
     let index = slot.index();
-    let (x, y) = slot_offset(slot);
-    let left = PREVIEW_SIZE / 2.0 + x * PREVIEW_RADIUS - PREVIEW_SLOT_SIZE / 2.0;
-    let top = PREVIEW_SIZE / 2.0 + y * PREVIEW_RADIUS - PREVIEW_SLOT_SIZE / 2.0;
+    let (left, top) = slot.placement(PREVIEW_SIZE, PREVIEW_RADIUS, PREVIEW_SLOT_SIZE);
     let label = entry.map_or_else(
         || tr!("Empty slot").to_string(),
         |entry| rust_i18n::t!(entry.action().label()).into_owned(),
     );
     let icon_path = entry.map(|entry| {
-        entry
-            .custom_icon()
-            .map_or_else(|| action_icon_path(entry.action()), ring_icon_path)
+        entry.custom_icon().map_or_else(
+            || action_icon_path(entry.action()),
+            ActionRingIcon::asset_path,
+        )
     });
     let accessible_label = label.clone();
     let selected_view = view.clone();

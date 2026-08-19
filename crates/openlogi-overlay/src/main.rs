@@ -79,23 +79,15 @@ struct RingView {
 }
 
 impl RingView {
-    fn slot_position(slot: ActionRingSlot) -> (f32, f32) {
-        let (x, y) = openlogi_ui::action_ring::geometry::slot_offset(slot);
-        (
-            WINDOW_SIZE / 2.0 + x * RADIUS - SLOT_SIZE / 2.0,
-            WINDOW_SIZE / 2.0 + y * RADIUS - SLOT_SIZE / 2.0,
-        )
-    }
-
     fn slot_element(
         &self,
         slot: ActionRingSlot,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let presentation = self.invocation.slots.get(&slot)?;
-        let icon_path = openlogi_ui::action_ring::icons::ring_icon_path(presentation.icon);
+        let icon_path = presentation.icon.asset_path();
         let selected = self.hovered == Some(slot);
-        let (left, top) = Self::slot_position(slot);
+        let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
         let session_id = self.invocation.session_id;
         let activate = self.commands.clone();
         Some(
@@ -243,7 +235,7 @@ fn main() -> Result<()> {
         commands,
     } = spawn_ipc();
 
-    let app = gpui_platform::application().with_assets(openlogi_ui::app_assets::AppAssets);
+    let app = gpui_platform::application().with_assets(openlogi_ui::action_icons::ActionIcons);
     app.run(move |cx| {
         platform::configure_application();
         let live_session = Arc::new(ClickAwaySession::new());

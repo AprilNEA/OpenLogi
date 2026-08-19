@@ -53,6 +53,37 @@ impl ActionRingSlot {
         Self::TopLeft,
     ];
 
+    /// Unit vector from the ring's centre to this slot, with positive Y
+    /// pointing **down** — the screen convention both GPUI frontends draw in,
+    /// not the mathematical one.
+    #[must_use]
+    pub fn unit_offset(self) -> (f32, f32) {
+        let diagonal = std::f32::consts::FRAC_1_SQRT_2;
+        match self {
+            Self::Top => (0.0, -1.0),
+            Self::TopRight => (diagonal, -diagonal),
+            Self::Right => (1.0, 0.0),
+            Self::BottomRight => (diagonal, diagonal),
+            Self::Bottom => (0.0, 1.0),
+            Self::BottomLeft => (-diagonal, diagonal),
+            Self::Left => (-1.0, 0.0),
+            Self::TopLeft => (-diagonal, -diagonal),
+        }
+    }
+
+    /// Top-left corner at which to place this slot's `slot_size` box, on a
+    /// square `canvas` whose ring has the given `radius`. All in the caller's
+    /// own units; the live overlay and the settings preview differ only in
+    /// what they pass.
+    #[must_use]
+    pub fn placement(self, canvas: f32, radius: f32, slot_size: f32) -> (f32, f32) {
+        let (x, y) = self.unit_offset();
+        (
+            canvas / 2.0 + x * radius - slot_size / 2.0,
+            canvas / 2.0 + y * radius - slot_size / 2.0,
+        )
+    }
+
     /// Stable display index matching [`Self::ALL`].
     #[must_use]
     pub const fn index(self) -> usize {

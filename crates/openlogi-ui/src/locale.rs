@@ -46,8 +46,7 @@ pub const SUPPORTED: &[(&str, &str)] = &[
 /// Resolve the locale to apply, preferring an explicit stored `setting`, then
 /// the system locale, and finally `"en"`. An unrecognized stored code is
 /// treated as "follow system" rather than failing.
-#[must_use]
-pub fn resolve(setting: Option<&str>) -> &'static str {
+fn resolve(setting: Option<&str>) -> &'static str {
     setting
         .and_then(match_supported)
         .or_else(|| {

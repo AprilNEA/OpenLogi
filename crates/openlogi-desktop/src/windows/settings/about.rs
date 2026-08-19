@@ -50,7 +50,7 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, pal: Palette, _: &mut A
         .w_full()
         .items_start()
         .gap_3()
-        .child(img(openlogi_ui::app_assets::LOGO).w(px(56.)).h(px(56.)))
+        .child(img(crate::app_assets::LOGO).w(px(56.)).h(px(56.)))
         .child(
             v_flex()
                 .gap_2()

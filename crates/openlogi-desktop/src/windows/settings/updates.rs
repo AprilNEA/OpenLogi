@@ -146,7 +146,7 @@ fn update_hero(updater: &Entity<Updater>, pal: Palette, cx: &mut App) -> AnyElem
                 .gap_3()
                 .flex_1()
                 .min_w_0()
-                .child(img(openlogi_ui::app_assets::LOGO).w(px(52.)).h(px(52.)))
+                .child(img(crate::app_assets::LOGO).w(px(52.)).h(px(52.)))
                 .child(
                     v_flex()
                         .gap_1()

@@ -2,9 +2,7 @@
 
 use openlogi_core::binding::{Action, ActionRingIcon};
 
-use openlogi_ui::action_ring::icons::ring_icon_path;
-
 /// Embedded Lucide asset for an action.
 pub(crate) fn action_icon_path(action: &Action) -> &'static str {
-    ring_icon_path(ActionRingIcon::for_action(action))
+    ActionRingIcon::for_action(action).asset_path()
 }

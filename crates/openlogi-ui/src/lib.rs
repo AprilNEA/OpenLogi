@@ -6,6 +6,5 @@
 //! `gpui` but not on `gpui-component`, so nothing the settings app pulls in can
 //! reach the overlay through the back door.
 
-pub mod action_ring;
-pub mod app_assets;
+pub mod action_icons;
 pub mod locale;

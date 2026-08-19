@@ -21,7 +21,6 @@ use openlogi_core::binding::{
 use super::action_icons::action_icon_path;
 use crate::state::AppState;
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
-use openlogi_ui::action_ring::icons::ring_icon_path;
 
 pub(super) fn action_library(
     slot: ActionRingSlot,
@@ -130,7 +129,7 @@ fn icon_editor(
                     .map(move |(index, icon)| {
                         icon_button(
                             ("ring-custom-icon", index),
-                            ring_icon_path(icon),
+                            icon.asset_path(),
                             rust_i18n::t!(icon.label()),
                             current == Some(icon),
                             pal,
