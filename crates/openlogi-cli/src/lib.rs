@@ -147,6 +147,40 @@ mod tests {
     }
 
     #[test]
+    fn profiles_read_only_and_device_flags_are_mapped() {
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "diag",
+            "profiles",
+            "--read-only",
+            "--device",
+            "G502",
+        ])
+        .expect("valid profiles invocation parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::Profiles(args)) => {
+                assert!(args.read_only);
+                assert!(!args.leave_onboard);
+                assert_eq!(args.device.as_deref(), Some("G502"));
+            }
+            other => panic!("expected Diag(Profiles), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn profiles_read_only_conflicts_with_leave_onboard() {
+        Cli::try_parse_from([
+            "openlogi",
+            "diag",
+            "profiles",
+            "--read-only",
+            "--leave-onboard",
+        ])
+        .expect_err("read-only and leave-onboard must conflict");
+    }
+
+    #[test]
     fn lighting_color_is_positional_and_method_is_a_flag() {
         let cli = Cli::try_parse_from([
             "openlogi", "diag", "lighting", "ff0000", "--method", "effects",
