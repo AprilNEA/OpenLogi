@@ -10,6 +10,7 @@
 //! stays in `openlogi-agent-core`, which depends on this crate rather than
 //! the other way around.
 
+pub mod client;
 mod ipc;
 pub mod transport;
 

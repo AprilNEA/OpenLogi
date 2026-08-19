@@ -37,7 +37,7 @@ use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_ipc::{ActionRingInvocation, AgentClient, Identity, PROTOCOL_VERSION, RUN_ENV};
 use succession::{Allegiance, Compat, Record, Role, Run, Standing, Tenancy, Tenant};
-use tarpc::{client, context};
+use tarpc::context;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -539,18 +539,17 @@ fn spawned_by() -> Option<Run> {
 }
 
 async fn connect() -> Option<AgentClient> {
-    let stream = openlogi_ipc::transport::connect().await.ok()?;
-    let transport = openlogi_ipc::transport::wrap(stream);
-    let client = AgentClient::new(client::Config::default(), transport).spawn();
-    // `protocol_version` is method 0 and wire-stable across every version, so
-    // it is the only call worth making before the two versions agree. A
-    // mismatch is not transient — this binary is from a superseded install.
-    let version = client.protocol_version(context::current()).await.ok()?;
-    if version != PROTOCOL_VERSION {
+    let connection = openlogi_ipc::client::connect().await.ok()?;
+    // A mismatch in either direction is not transient — this binary is from a
+    // superseded install, and the agent will start the overlay that matches it
+    // as soon as this one releases the role.
+    if connection.version != PROTOCOL_VERSION {
         yield_to_replacement(&format!(
-            "agent speaks protocol {version} and this overlay speaks {PROTOCOL_VERSION}"
+            "agent speaks protocol {} and this overlay speaks {PROTOCOL_VERSION}",
+            connection.version
         ));
     }
+    let client = connection.client;
     let identity = client.identity(context::current()).await.ok()?;
     if let Standing::Superseded(because) = allegiance().observe(identity) {
         yield_to_replacement(&because.to_string());

@@ -15,6 +15,7 @@ publish = false
 [dependencies]
 openlogi-core = { path = "../openlogi-core" }
 serde = { workspace = true }
+thiserror = { workspace = true }
 tarpc = { workspace = true }
 interprocess = { workspace = true }
 tokio = { workspace = true }

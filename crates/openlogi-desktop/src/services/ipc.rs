@@ -29,7 +29,6 @@ use openlogi_ipc::{
     AgentClient, AgentStatus, ConfigReloadError, InventoryHealth, PROTOCOL_VERSION,
     PairingCommandError, PairingFailure, PairingUpdate,
 };
-use tarpc::client;
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
@@ -446,21 +445,20 @@ enum ConnectFailure {
 /// Ensure a live client, connecting on demand.
 async fn ensure(client: &mut Option<AgentClient>) -> Result<&AgentClient, ConnectFailure> {
     if client.is_none() {
-        let stream = openlogi_ipc::transport::connect()
-            .await
-            .map_err(|_| ConnectFailure::Unreachable)?;
-        let transport = openlogi_ipc::transport::wrap(stream);
-        let fresh = AgentClient::new(client::Config::default(), transport).spawn();
-        // Protocol handshake before any real RPC: mismatched bincode layouts
-        // would otherwise surface only as opaque RpcErrors and a silently
-        // empty device list. Refuse the connection with a clear log instead
-        // and report the direction — who is stale decides who must restart.
-        match fresh.protocol_version(context::current()).await {
-            Ok(version) if version == PROTOCOL_VERSION => {
-                *client = Some(fresh);
+        // The handshake happens before any real RPC: mismatched bincode layouts
+        // would otherwise surface only as opaque RpcErrors and a silently empty
+        // device list. Refuse with a clear log instead, and report the
+        // direction — who is stale decides who must restart.
+        let connection = openlogi_ipc::client::connect().await.map_err(|error| {
+            debug!(%error, "no usable agent");
+            ConnectFailure::Unreachable
+        })?;
+        match connection.version {
+            version if version == PROTOCOL_VERSION => {
+                *client = Some(connection.client);
                 debug!("connected to agent IPC socket");
             }
-            Ok(version) if version < PROTOCOL_VERSION => {
+            version if version < PROTOCOL_VERSION => {
                 warn!(
                     agent = version,
                     gui = PROTOCOL_VERSION,
@@ -468,16 +466,13 @@ async fn ensure(client: &mut Option<AgentClient>) -> Result<&AgentClient, Connec
                 );
                 return Err(ConnectFailure::Unreachable);
             }
-            Ok(version) => {
+            version => {
                 warn!(
                     agent = version,
                     gui = PROTOCOL_VERSION,
                     "agent IPC protocol is newer — this GUI needs a relaunch"
                 );
                 return Err(ConnectFailure::NewerAgent);
-            }
-            Err(_) => {
-                return Err(ConnectFailure::Unreachable);
             }
         }
     }
