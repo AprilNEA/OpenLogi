@@ -1,15 +1,15 @@
-//! Lazy per-device load state for background HID++ reads, shared by DPI
-//! capability discovery and SmartShift reads.
+//! Lazy per-device load state for background HID++ reads, shared by DPI,
+//! SmartShift, and onboard-profile discovery.
 
 use std::collections::BTreeMap;
 
-use openlogi_core::hid::{DpiInfo, SmartShiftStatus, WriteError};
+use openlogi_core::hid::{DpiInfo, OnboardProfilesInfo, SmartShiftStatus, WriteError};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
 
-/// How many times to retry a device read (DPI capability discovery or a
-/// SmartShift read) after a transient HID++ error (read timeout, busy device)
+/// How many times to retry a device read after a transient HID++ error
+/// (read timeout, busy device)
 /// before giving up. A genuine "feature not supported" reply is permanent and
 /// never retried.
 const LOAD_MAX_ATTEMPTS: u8 = 3;
@@ -46,6 +46,9 @@ pub type DpiStatus = Load<DpiInfo>;
 /// GUI only ever reads and writes the device.
 pub type SmartShiftLoad = Load<SmartShiftStatus>;
 
+/// Per-device onboard-profile (`0x8100`) state load. See [`Load`].
+pub type ProfilesLoad = Load<OnboardProfilesInfo>;
+
 /// The lazily-loaded DPI and SmartShift read caches, grouped so callers reach
 /// them as `state.reads.dpi` / `state.reads.smartshift` and use
 /// [`LazyDeviceData`]'s own methods directly — instead of `AppState` growing
@@ -55,6 +58,7 @@ pub type SmartShiftLoad = Load<SmartShiftStatus>;
 pub(crate) struct DeviceReads {
     pub(crate) dpi: LazyDeviceData<DpiInfo>,
     pub(crate) smartshift: LazyDeviceData<SmartShiftStatus>,
+    pub(crate) profiles: LazyDeviceData<OnboardProfilesInfo>,
 }
 
 /// Per-device lazy-load cache for a background HID++ read, keyed by

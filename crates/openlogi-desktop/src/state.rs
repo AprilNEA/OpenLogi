@@ -27,7 +27,7 @@ pub use devices::DeviceRecord;
 pub use light::LightCommandStatus;
 #[cfg(test)]
 pub use load::Load;
-pub use load::{DpiStatus, SmartShiftLoad};
+pub use load::{DpiStatus, ProfilesLoad, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +63,7 @@ mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod profiles;
 mod scroll;
 mod settings;
 mod smartshift;
@@ -184,7 +185,8 @@ pub struct AppState {
     /// Sorted (`BTreeMap`) for stable render order in the function-row view.
     pub keyboard_bindings: BTreeMap<KeyTrigger, Action>,
     pub dpi: Dpi,
-    /// Lazily-loaded DPI and SmartShift read caches, keyed by [`DeviceKey`].
+    /// Lazily-loaded DPI, SmartShift, and onboard-profile read caches, keyed
+    /// by [`DeviceKey`].
     /// HID++ reads must not block device switching or rendering, so callers
     /// reach these directly (`state.reads.dpi.retry(&key)`,
     /// `state.reads.smartshift.status(&key)`, …) rather than through a

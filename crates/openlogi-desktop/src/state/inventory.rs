@@ -126,9 +126,11 @@ impl AppState {
         for key in &rerouted {
             self.reads.dpi.remove(key);
             self.reads.smartshift.remove(key);
+            self.reads.profiles.remove(key);
             if let Some(entry) = self.device_ui.get_mut(key) {
                 entry.smartshift_pending_confirm = None;
                 entry.smartshift_write_status = None;
+                entry.profiles_pending_confirm = false;
             }
         }
         let present = |key: &str| {
@@ -138,6 +140,7 @@ impl AppState {
         };
         self.reads.dpi.retain_present(present);
         self.reads.smartshift.retain_present(present);
+        self.reads.profiles.retain_present(present);
         self.current_device = new_index;
         // The active device may have changed (selection fell back to index 0
         // when the previous one vanished); re-seed the displayed DPI so it
@@ -309,6 +312,9 @@ impl AppState {
             }
             if matches!(self.reads.smartshift.get(&key), Some(Load::Failed(_))) {
                 self.retry_smartshift(&key);
+            }
+            if matches!(self.reads.profiles.get(&key), Some(Load::Failed(_))) {
+                self.retry_profiles(&key);
             }
         }
         // `self.dpi` is the active device's value; adopt the newly-selected
