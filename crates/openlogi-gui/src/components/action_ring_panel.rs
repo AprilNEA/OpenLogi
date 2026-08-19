@@ -17,8 +17,8 @@ use self::editor::action_library;
 use crate::action_icons::action_icon_path;
 use crate::state::AppState;
 use crate::theme::{self, Palette, Typography as _};
-use openlogi_gui::action_ring_geometry::slot_offset;
-use openlogi_gui::action_ring_icons::ring_icon_path;
+use openlogi_gui::action_ring::geometry::slot_offset;
+use openlogi_gui::action_ring::icons::ring_icon_path;
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
 /// [`AppState`]; this entity owns selection and editor input state.

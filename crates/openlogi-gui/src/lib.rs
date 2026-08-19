@@ -5,7 +5,6 @@
 //! IPC client with no settings UI, so the app's views, state, and platform
 //! integration stay private to `main.rs`.
 
-pub mod action_ring_geometry;
-pub mod action_ring_icons;
+pub mod action_ring;
 pub mod app_assets;
 pub mod locale;

@@ -77,7 +77,7 @@ struct RingView {
 
 impl RingView {
     fn slot_position(slot: ActionRingSlot) -> (f32, f32) {
-        let (x, y) = openlogi_gui::action_ring_geometry::slot_offset(slot);
+        let (x, y) = openlogi_gui::action_ring::geometry::slot_offset(slot);
         (
             WINDOW_SIZE / 2.0 + x * RADIUS - SLOT_SIZE / 2.0,
             WINDOW_SIZE / 2.0 + y * RADIUS - SLOT_SIZE / 2.0,
@@ -90,7 +90,7 @@ impl RingView {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let presentation = self.invocation.slots.get(&slot)?;
-        let icon_path = openlogi_gui::action_ring_icons::ring_icon_path(presentation.icon);
+        let icon_path = openlogi_gui::action_ring::icons::ring_icon_path(presentation.icon);
         let selected = self.hovered == Some(slot);
         let (left, top) = Self::slot_position(slot);
         let session_id = self.invocation.session_id;

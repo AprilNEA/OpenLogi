@@ -1,4 +1,4 @@
-//! Embedded icon mapping shared by the settings GUI and ring overlay.
+//! Embedded icon mapping shared by the settings app and ring overlay.
 
 use openlogi_core::binding::ActionRingIcon;
 

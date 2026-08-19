@@ -1,4 +1,4 @@
-//! Shared radial placement for the overlay and settings preview.
+//! Radial slot placement shared by the overlay and settings preview.
 
 use openlogi_core::binding::ActionRingSlot;
 
