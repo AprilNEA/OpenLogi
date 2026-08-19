@@ -35,12 +35,12 @@ use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
 };
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::asset::{GlowGeometry, ResolvedAsset};
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::mouse::picker::{
     PickFn, action_icon_path, action_rows, divider, menu_card, menu_row, scroll_list,
     section_header,
 };
+use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::AppState;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette};
 use gpui::ease_in_out;

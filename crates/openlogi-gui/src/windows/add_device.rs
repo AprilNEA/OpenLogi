@@ -7,7 +7,7 @@
 //! - The buttons send [`Command::StartPairing`] / [`Command::PairDevice`] /
 //!   [`Command::CancelPairing`] through the agent IPC client.
 //! - [`PairingUi`] — the latest session state, updated from the agent's pairing
-//!   long-poll ([`crate::ipc_client::IpcClient::pairing`]) in [`crate::main`]'s
+//!   long-poll ([`crate::services::ipc::IpcClient::pairing`]) in [`crate::main`]'s
 //!   loop via [`apply_update`]. The view observes it and repaints on change.
 //!
 //! Bolt is interactive (discover → pick → enter a passkey on the device);
@@ -27,7 +27,7 @@ use openlogi_core::hid::{Click, PasskeyMethod, ReceiverSelector};
 use openlogi_ipc::{FoundDevice, PairingFailure, PairingUpdate};
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
-use crate::ipc_client::Command;
+use crate::services::ipc::Command;
 use crate::state::AppState;
 use crate::ui::theme::{self, Palette, Typography as _};
 use crate::windows::{self, AuxWindow};

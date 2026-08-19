@@ -202,7 +202,7 @@ impl SmartShiftPanel {
             cx,
             key,
             route,
-            crate::ipc_client::Command::ReadSmartShift,
+            crate::services::ipc::Command::ReadSmartShift,
             move |state, key, route, result| {
                 state.store_smartshift_status(key, route, write_id, result);
             },

@@ -1,4 +1,4 @@
-//! Render-time device→asset resolver, backed by a two-tier filesystem cache.
+//! Device asset resolution and cache management.
 //!
 //! At render time [`AssetResolver::resolve`] probes (in order):
 //!

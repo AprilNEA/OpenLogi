@@ -1,4 +1,4 @@
-//! UI localization plumbing.
+//! Settings-app localization.
 //!
 //! Translations live in `crates/openlogi-gui/locales/*.yml` and are loaded at
 //! compile time by the `rust_i18n::i18n!` macro in `main.rs` (fallback `"en"`).
@@ -144,7 +144,7 @@ mod tests {
     fn locale_files_have_the_same_keys() {
         use std::collections::BTreeSet;
 
-        let source: BTreeSet<&str> = locale_keys(include_str!("../locales/en.yml"))
+        let source: BTreeSet<&str> = locale_keys(include_str!("../../locales/en.yml"))
             .into_iter()
             .collect();
         assert!(
@@ -153,25 +153,25 @@ mod tests {
         );
 
         for (locale, file) in [
-            ("ja", include_str!("../locales/ja.yml")),
-            ("ru", include_str!("../locales/ru.yml")),
-            ("zh-CN", include_str!("../locales/zh-CN.yml")),
-            ("zh-HK", include_str!("../locales/zh-HK.yml")),
-            ("zh-TW", include_str!("../locales/zh-TW.yml")),
-            ("it", include_str!("../locales/it.yml")),
-            ("da", include_str!("../locales/da.yml")),
-            ("de", include_str!("../locales/de.yml")),
-            ("el", include_str!("../locales/el.yml")),
-            ("es", include_str!("../locales/es.yml")),
-            ("fi", include_str!("../locales/fi.yml")),
-            ("fr", include_str!("../locales/fr.yml")),
-            ("ko", include_str!("../locales/ko.yml")),
-            ("nb", include_str!("../locales/nb.yml")),
-            ("nl", include_str!("../locales/nl.yml")),
-            ("pl", include_str!("../locales/pl.yml")),
-            ("pt-BR", include_str!("../locales/pt-BR.yml")),
-            ("pt-PT", include_str!("../locales/pt-PT.yml")),
-            ("sv", include_str!("../locales/sv.yml")),
+            ("ja", include_str!("../../locales/ja.yml")),
+            ("ru", include_str!("../../locales/ru.yml")),
+            ("zh-CN", include_str!("../../locales/zh-CN.yml")),
+            ("zh-HK", include_str!("../../locales/zh-HK.yml")),
+            ("zh-TW", include_str!("../../locales/zh-TW.yml")),
+            ("it", include_str!("../../locales/it.yml")),
+            ("da", include_str!("../../locales/da.yml")),
+            ("de", include_str!("../../locales/de.yml")),
+            ("el", include_str!("../../locales/el.yml")),
+            ("es", include_str!("../../locales/es.yml")),
+            ("fi", include_str!("../../locales/fi.yml")),
+            ("fr", include_str!("../../locales/fr.yml")),
+            ("ko", include_str!("../../locales/ko.yml")),
+            ("nb", include_str!("../../locales/nb.yml")),
+            ("nl", include_str!("../../locales/nl.yml")),
+            ("pl", include_str!("../../locales/pl.yml")),
+            ("pt-BR", include_str!("../../locales/pt-BR.yml")),
+            ("pt-PT", include_str!("../../locales/pt-PT.yml")),
+            ("sv", include_str!("../../locales/sv.yml")),
         ] {
             let keys: BTreeSet<&str> = locale_keys(file).into_iter().collect();
             let missing: Vec<&str> = source.difference(&keys).copied().collect();

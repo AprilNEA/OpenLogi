@@ -146,7 +146,7 @@ impl AppState {
         {
             pending.pending = pending.pending.saturating_add(1);
         }
-        if !self.send_ipc(crate::ipc_client::Command::SetLight(
+        if !self.send_ipc(crate::services::ipc::Command::SetLight(
             route,
             command,
             key.to_string(),
@@ -508,7 +508,7 @@ impl AppState {
                 pending.manual_override_rollback = manual_override_rollback;
                 pending.superseded = superseded;
             }
-            if !self.send_ipc(crate::ipc_client::Command::SetLightManualPower(
+            if !self.send_ipc(crate::services::ipc::Command::SetLightManualPower(
                 route,
                 enabled,
                 runtime_key.to_string(),

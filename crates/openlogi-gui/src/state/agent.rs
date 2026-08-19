@@ -35,7 +35,7 @@ impl AppState {
     /// binary; prompting in the GUI process (as the pre-split build did) would
     /// grant the wrong binary and the hook would never install.
     pub fn request_accessibility_prompt(&self) {
-        self.send_ipc(crate::ipc_client::Command::RequestAccessibilityPrompt);
+        self.send_ipc(crate::services::ipc::Command::RequestAccessibilityPrompt);
     }
     /// The agent connection state the render path branches on.
     #[must_use]

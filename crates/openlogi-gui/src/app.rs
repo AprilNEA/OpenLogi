@@ -14,7 +14,6 @@ use openlogi_ipc::InventoryHealth;
 use tracing::info;
 
 use crate::app_menu::{CloseWindow, Minimize, Zoom};
-use crate::asset::AssetResolver;
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
@@ -24,6 +23,7 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
+use crate::services::assets::AssetResolver;
 use crate::state::{AgentLink, AppState, DeviceRecord};
 use crate::ui::theme::{self, Palette, Typography as _};
 

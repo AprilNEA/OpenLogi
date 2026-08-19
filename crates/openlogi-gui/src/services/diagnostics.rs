@@ -1,4 +1,4 @@
-//! Maps live GUI state onto the platform-free [`openlogi_core::diagnostics`] report.
+//! Builds platform-free diagnostics reports from live GUI state.
 
 use std::path::Path;
 
@@ -11,7 +11,7 @@ use openlogi_core::diagnostics::{
 use openlogi_core::hid::DeviceRoute;
 use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION};
 
-use crate::asset::AssetResolver;
+use crate::services::assets::AssetResolver;
 use crate::state::{AppState, DpiStatus};
 
 /// Build the report from the current app state, defaulting to an empty report before the global is installed.

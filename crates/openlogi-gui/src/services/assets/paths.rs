@@ -1,4 +1,4 @@
-//! Filesystem roots and index loading for render-time assets.
+//! Asset filesystem roots and index loading.
 
 use std::path::PathBuf;
 

@@ -7,7 +7,7 @@ use openlogi_core::binding::ButtonId;
 
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use super::leader_lines::{Label, Side};
-use crate::asset::ResolvedAsset;
+use crate::services::assets::ResolvedAsset;
 
 /// Approx pixel width of each hotspot hit-target. Logitech only gives us a
 /// marker point per button, not a rectangle, so we size by hand.

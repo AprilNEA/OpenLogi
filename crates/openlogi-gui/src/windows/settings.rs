@@ -39,11 +39,11 @@ pub(super) use openlogi_core::config::{
 };
 
 pub(super) use crate::app_menu::{CloseWindow, Minimize, Zoom};
-pub(super) use crate::asset::sync::{AssetCommand, AssetControl};
 #[cfg(target_os = "macos")]
 pub(super) use crate::platform::permissions::Permission;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(super) use crate::platform::permissions::PermissionStatus;
+pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
 pub(super) use crate::state::AppState;
 pub(super) use crate::ui::theme::{self, Palette};
 
@@ -214,7 +214,7 @@ impl SettingsView {
                 let sender = cx.update_global::<AppState, _>(|s, _| s.ipc_sender());
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 let events = if sender
-                    .send(crate::ipc_client::Command::PollEventMonitor(tx))
+                    .send(crate::services::ipc::Command::PollEventMonitor(tx))
                     .is_ok()
                 {
                     rx.await.unwrap_or_default()

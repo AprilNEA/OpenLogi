@@ -49,7 +49,7 @@ use device_ui::DeviceUiState;
 pub(crate) use devices::camera_model_info;
 use load::DeviceReads;
 
-use crate::asset::AssetResolver;
+use crate::services::assets::AssetResolver;
 use crate::state::devices::{build_device_list, pick_initial_device};
 
 mod agent;
@@ -201,10 +201,10 @@ pub struct AppState {
     persisted_config: Config,
     /// Sender to the IPC client thread. The agent owns the hook + all device
     /// I/O, so binding / setting writes persist to `config.toml` and then send
-    /// [`Command::ReloadConfig`](crate::ipc_client::Command) for the agent to
+    /// [`Command::ReloadConfig`](crate::services::ipc::Command) for the agent to
     /// rebuild, and "apply now" device changes (DPI / SmartShift / lighting)
     /// go out as their own commands. The GUI never opens a device itself.
-    ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
+    ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
     /// Explicit persistence boundary; tests use an in-memory-only state.
     config_persistence: ConfigPersistence,
     /// User-visible load, save, conflict, or agent-reload failure.
@@ -242,7 +242,7 @@ impl AppState {
         cache: &AssetResolver,
         cameras: &[openlogi_camera::Camera],
         config_persistence: ConfigPersistence,
-        ipc_commands: mpsc::UnboundedSender<crate::ipc_client::Command>,
+        ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
     ) -> Self {
         let persisted_config = config.clone();
         let config_issue = match &config_persistence {
@@ -300,13 +300,13 @@ impl AppState {
         if state.config_issue.is_none()
             && matches!(&state.config_persistence, ConfigPersistence::UserFile(_))
         {
-            state.send_ipc(crate::ipc_client::Command::ReloadConfig);
+            state.send_ipc(crate::services::ipc::Command::ReloadConfig);
         }
         state
     }
     /// Send a device command to the agent over IPC, logging a dropped channel
     /// (the client thread is gone) rather than surfacing it.
-    fn send_ipc(&self, command: crate::ipc_client::Command) -> bool {
+    fn send_ipc(&self, command: crate::services::ipc::Command) -> bool {
         if self.ipc_commands.send(command).is_err() {
             warn!("IPC client thread is gone — device command dropped");
             return false;
@@ -323,7 +323,7 @@ impl AppState {
     /// config and surfaces the persistence error in the GUI.
     fn persist_and_reload(&mut self, what: &str) -> bool {
         if self.persist_config(what) {
-            self.send_ipc(crate::ipc_client::Command::ReloadConfig);
+            self.send_ipc(crate::services::ipc::Command::ReloadConfig);
             true
         } else {
             false
@@ -390,7 +390,7 @@ impl AppState {
     /// A clone of the IPC command sender, so views (the DPI / SmartShift panels)
     /// can issue device reads and writes through the agent themselves.
     #[must_use]
-    pub fn ipc_sender(&self) -> mpsc::UnboundedSender<crate::ipc_client::Command> {
+    pub fn ipc_sender(&self) -> mpsc::UnboundedSender<crate::services::ipc::Command> {
         self.ipc_commands.clone()
     }
     /// Cache a *completed* inventory snapshot for the diagnostics report.

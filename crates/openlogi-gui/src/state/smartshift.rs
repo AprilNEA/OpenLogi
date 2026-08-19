@@ -128,7 +128,7 @@ impl AppState {
             }
         }
         if let Some(route) = route {
-            self.send_ipc(crate::ipc_client::Command::SetSmartShift(
+            self.send_ipc(crate::services::ipc::Command::SetSmartShift(
                 route,
                 mode,
                 auto_disengage,

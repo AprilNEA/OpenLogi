@@ -1,4 +1,4 @@
-//! Image and depot-manifest helpers for asset resolution.
+//! Device image and depot-manifest helpers.
 
 use std::path::Path;
 

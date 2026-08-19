@@ -8,7 +8,7 @@ use gpui::{AnyElement, BoxShadow, IntoElement, ParentElement, Styled, div, hsla,
 use gpui_component::{Icon, IconName};
 use openlogi_core::config::LightSettings;
 
-use crate::asset::ResolvedAsset;
+use crate::services::assets::ResolvedAsset;
 use crate::ui::theme::Palette;
 
 /// Render a standalone light inside a home-gallery image slot.

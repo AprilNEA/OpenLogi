@@ -14,8 +14,8 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::WriteError;
 
-use crate::asset::AssetResolver;
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
+use crate::services::assets::AssetResolver;
 
 use openlogi_core::hid::{SmartShiftMode, SmartShiftStatus};
 
@@ -129,9 +129,10 @@ fn superseded_litra_light() -> StandaloneDevice {
 }
 
 fn next_light_command(
-    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<crate::ipc_client::Command>,
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<crate::services::ipc::Command>,
 ) -> (openlogi_core::hid::LightCommand, u64) {
-    let Ok(crate::ipc_client::Command::SetLight(_, command, _, request_id)) = receiver.try_recv()
+    let Ok(crate::services::ipc::Command::SetLight(_, command, _, request_id)) =
+        receiver.try_recv()
     else {
         panic!("expected a light command");
     };
@@ -470,7 +471,7 @@ fn known_offline_device_is_an_asset_sync_target() {
 
     assert_eq!(
         state.asset_models(),
-        vec![crate::asset::sync::AssetTarget::Hidpp {
+        vec![crate::services::assets::sync::AssetTarget::Hidpp {
             model,
             codename: Some("MX Anywhere 3S".to_string()),
         }]
@@ -496,7 +497,7 @@ fn identical_standalone_units_share_one_model_asset_target() {
 
     assert_eq!(
         state.asset_models(),
-        vec![crate::asset::sync::AssetTarget::Standalone {
+        vec![crate::services::assets::sync::AssetTarget::Standalone {
             registry_model_id: "8c900".into(),
         }]
     );
@@ -648,7 +649,7 @@ fn light_write_failure_reaches_the_gui_state() {
         .clone();
     let requested = LightSettings::new(false, 50, None);
     state.commit_light(requested);
-    let Ok(crate::ipc_client::Command::SetLight(
+    let Ok(crate::services::ipc::Command::SetLight(
         _,
         openlogi_core::hid::LightCommand::Power(false),
         _,
@@ -657,7 +658,7 @@ fn light_write_failure_reaches_the_gui_state() {
     else {
         panic!("expected the power command");
     };
-    let Ok(crate::ipc_client::Command::SetLight(
+    let Ok(crate::services::ipc::Command::SetLight(
         _,
         openlogi_core::hid::LightCommand::BrightnessPercent(50),
         _,
@@ -821,7 +822,7 @@ fn transient_light_state_is_kept_in_memory_and_only_supported_commands_are_sent(
     assert!(!state.light_enabled());
     assert!(matches!(
         receiver.try_recv(),
-        Ok(crate::ipc_client::Command::SetLight(
+        Ok(crate::services::ipc::Command::SetLight(
             _,
             openlogi_core::hid::LightCommand::BrightnessPercent(37),
             _,
@@ -891,7 +892,7 @@ fn camera_automation_preserves_manual_power_and_clears_transient_override() {
     assert!(!state.light_enabled());
     assert!(matches!(
         receiver.try_recv(),
-        Ok(crate::ipc_client::Command::SetLightManualPower(
+        Ok(crate::services::ipc::Command::SetLightManualPower(
             _,
             false,
             _,
@@ -949,7 +950,7 @@ fn enabling_camera_automation_queues_effective_camera_power() {
 
     assert!(matches!(
         receiver.try_recv(),
-        Ok(crate::ipc_client::Command::SetLight(
+        Ok(crate::services::ipc::Command::SetLight(
             _,
             openlogi_core::hid::LightCommand::Power(true),
             _,

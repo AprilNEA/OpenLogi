@@ -19,7 +19,7 @@ use super::picker::{
 };
 use super::thumbwheel::ThumbwheelPreset;
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::asset::{GlowGeometry, ResolvedAsset};
+use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::AppState;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 

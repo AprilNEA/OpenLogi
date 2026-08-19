@@ -1,3 +1,5 @@
+//! Startup and steady-state polling cadence.
+
 use std::time::{Duration, Instant};
 
 /// Which poll period the loop should run on.

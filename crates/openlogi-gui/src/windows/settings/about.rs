@@ -108,7 +108,8 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, pal: Palette, _: &mut A
                                 .icon(IconName::Copy)
                                 .label(diag_label)
                                 .on_click(move |_, _, cx| {
-                                    let report = crate::diagnostics::collect(cx).to_markdown();
+                                    let report =
+                                        crate::services::diagnostics::collect(cx).to_markdown();
                                     cx.write_to_clipboard(ClipboardItem::new_string(report));
                                     view.update(cx, |this, cx| {
                                         this.copied = true;

@@ -1,4 +1,4 @@
-//! Inter-key "hole glow" for a light-up keyboard, painted live from a baked mask.
+//! Keyboard inter-key glow painted from a baked mask.
 //!
 //! A floating-key keyboard render (e.g. the G513) has many small *enclosed*
 //! transparent gaps between its keys. Painting only those holes in the device's

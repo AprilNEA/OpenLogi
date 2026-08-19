@@ -13,7 +13,7 @@ use openlogi_core::hid::DeviceRoute;
 use tracing::debug;
 
 use super::device_key::DeviceKey;
-use crate::asset::{AssetResolver, ResolvedAsset};
+use crate::services::assets::{AssetResolver, ResolvedAsset};
 
 /// One paired device with everything the UI needs to switch to it in O(1):
 /// the physical config key (for bindings/DPI persistence), a display name, the
@@ -663,7 +663,7 @@ mod tests {
         DeviceInventory, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
     };
 
-    use crate::asset::AssetResolver;
+    use crate::services::assets::AssetResolver;
 
     use std::collections::HashSet;
 

@@ -6,8 +6,8 @@ use openlogi_core::config::{Config, DeviceIdentity};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use tracing::debug;
 
-use crate::asset::AssetResolver;
-use crate::asset::sync::{AssetTarget, model_key};
+use crate::services::assets::AssetResolver;
+use crate::services::assets::sync::{AssetTarget, model_key};
 use crate::state::devices::{
     DeviceRecord, adopt_transient_record, build_device_list, direct_key_prefix, sort_device_list,
 };

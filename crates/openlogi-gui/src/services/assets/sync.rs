@@ -1,4 +1,4 @@
-//! Background HTTP sync against OpenLogi's asset mirrors.
+//! Background sync against OpenLogi's asset mirrors.
 //!
 //! Always fetches `index.json` first — even with no devices connected, so
 //! the registry is on disk before the first device needs resolving. Then,

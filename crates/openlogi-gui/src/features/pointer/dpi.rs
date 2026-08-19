@@ -91,7 +91,7 @@ impl DpiPanel {
             cx,
             key,
             route,
-            crate::ipc_client::Command::ReadDpi,
+            crate::services::ipc::Command::ReadDpi,
             AppState::store_dpi_info,
             |state, key| state.reads.dpi.clear_loading(key),
         );

@@ -139,7 +139,7 @@ pub(super) fn assets_page(
                 tr!("Cache location"),
                 SettingField::render(move |_, _, _| {
                     action_button("assets-open", tr!("Open"), pal, |_| {
-                        crate::asset::reveal_cache_in_file_manager();
+                        crate::services::assets::reveal_cache_in_file_manager();
                     })
                 }),
             )
@@ -195,7 +195,7 @@ pub(super) fn cache_size_description() -> SharedString {
         reason = "the cache is at most a few hundred MB; f64 is exact far past that, \
                   and this is a display-only size"
     )]
-    let mb = crate::asset::cache_size_bytes() as f64 / 1024.0 / 1024.0;
+    let mb = crate::services::assets::cache_size_bytes() as f64 / 1024.0 / 1024.0;
     tr!("Downloaded images currently use %{size}.", size => format!("{mb:.1} MB"))
 }
 

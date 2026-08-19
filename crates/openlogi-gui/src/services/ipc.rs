@@ -1,4 +1,4 @@
-//! Client side of the agent IPC.
+//! Agent IPC client.
 //!
 //! The agent owns all device I/O, so the GUI never opens a device — it connects
 //! to the agent's Unix socket and (a) polls status + inventory snapshots on a

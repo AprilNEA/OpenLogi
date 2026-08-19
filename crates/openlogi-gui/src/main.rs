@@ -31,12 +31,9 @@ macro_rules! tr {
 
 mod app;
 mod app_menu;
-mod asset;
-mod diagnostics;
 mod features;
-mod i18n;
-mod ipc_client;
 mod platform;
+mod services;
 mod state;
 mod ui;
 mod windows;
@@ -62,9 +59,11 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::app::AppView;
-use crate::asset::sync::{
+use crate::services::assets::sync::{
     AssetCommand, AssetControl, SyncOutcome, model_key, run_asset_sync, sync_retry_delay,
 };
+use crate::services::assets::{self, sync};
+use crate::services::{i18n, ipc};
 use crate::state::{AppState, ConfigPersistence};
 use crate::ui::theme;
 
@@ -157,11 +156,11 @@ fn main() -> Result<()> {
     // The always-on agent owns the hook, the HID++ capture, and all device I/O.
     // The GUI is a client: it polls inventory + status and forwards device
     // commands over IPC. Started here so the first poll is already in flight.
-    let ipc_client::IpcClient {
+    let ipc::IpcClient {
         updates: mut ipc_updates,
         commands: ipc_commands,
         pairing: mut ipc_pairing,
-    } = ipc_client::spawn(std::time::Duration::from_secs(2));
+    } = ipc::spawn(std::time::Duration::from_secs(2));
 
     // Manual asset actions (Settings → Assets): Refresh / Clear cache. The
     // sender is published as a global so the Settings window can drive the
@@ -238,7 +237,7 @@ fn main() -> Result<()> {
             // launch; closing it leaves the app live in the menu bar.
             cx.update(|cx| {
                 if !cx.has_global::<AppState>() {
-                    let cache = asset::AssetResolver::new();
+                    let cache = assets::AssetResolver::new();
                     cx.set_global(AppState::with_runtime(
                         initial_config,
                         &inventories,
@@ -268,11 +267,11 @@ fn main() -> Result<()> {
             // snapshots — rebuilding only when the background sync lands new
             // assets (below). Rebuilding per snapshot was pure waste: the
             // unchanged-list early-return discarded the fresh records anyway.
-            let mut cache = asset::AssetResolver::new();
+            let mut cache = assets::AssetResolver::new();
             // One-time sweep of the legacy pre-rendered glow PNGs the old overlay
             // baked into the user cache; the glow is painted live now, so they're
             // dead bytes. Off-thread so it never delays the first paint.
-            std::thread::spawn(asset::cleanup_legacy_glow_pngs);
+            std::thread::spawn(assets::cleanup_legacy_glow_pngs);
             // Asset sync runs in the background, in two stages: the first
             // agent snapshot — even a deviceless one — triggers an index
             // prefetch so the registry is on disk before any device needs
@@ -283,7 +282,7 @@ fn main() -> Result<()> {
             // capped delay so a permanently-down host isn't polled every tick
             // yet a recovered one still self-heals.
             let (sync_tx, mut sync_rx) = tokio::sync::mpsc::unbounded_channel::<SyncOutcome>();
-            let sync_enabled = asset::sync::should_run(cache.has_bundle_root());
+            let sync_enabled = sync::should_run(cache.has_bundle_root());
             let mut sync_running = false;
             let mut sync_attempts: u32 = 0;
             let mut last_sync_at: Option<Instant> = None;
@@ -309,7 +308,7 @@ fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     update = ipc_updates.recv(), if ipc_open => match update {
-                        Some(ipc_client::GuiUpdate::Snapshot(update)) => {
+                        Some(ipc::GuiUpdate::Snapshot(update)) => {
                         // Refresh the camera set off the UI thread (AVFoundation
                         // discovery is far too slow for the render path) so the
                         // merge below sees hot-plugs without ever stalling paint.
@@ -406,7 +405,7 @@ fn main() -> Result<()> {
                         // webcam's product art downloads like any other device's.
                         let mut models = models;
                         models.extend(latest_cams.iter().map(|c| {
-                            crate::asset::sync::AssetTarget::Hidpp {
+                            sync::AssetTarget::Hidpp {
                                 model: state::camera_model_info(c),
                                 codename: Some(c.name.clone()),
                             }
@@ -432,13 +431,13 @@ fn main() -> Result<()> {
                             });
                         }
                         }
-                        Some(ipc_client::GuiUpdate::Unreachable) => {
+                        Some(ipc::GuiUpdate::Unreachable) => {
                             cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
                         }
-                        Some(ipc_client::GuiUpdate::OutdatedGui) => {
+                        Some(ipc::GuiUpdate::OutdatedGui) => {
                             cx.update(|cx| set_agent_link(state::AgentLink::OutdatedGui, cx));
                         }
-                        Some(ipc_client::GuiUpdate::LightCommandResult {
+                        Some(ipc::GuiUpdate::LightCommandResult {
                             key,
                             request_id,
                             command,
@@ -451,7 +450,7 @@ fn main() -> Result<()> {
                                 cx.update(gpui::App::refresh_windows);
                             }
                         }
-                        Some(ipc_client::GuiUpdate::ConfigReloadResult(result)) => {
+                        Some(ipc::GuiUpdate::ConfigReloadResult(result)) => {
                             let changed = cx.update_global::<AppState, _>(|state, _| {
                                 state.apply_config_reload_result(result)
                             });
@@ -491,7 +490,7 @@ fn main() -> Result<()> {
                             }
                         } else {
                             if matches!(cmd, AssetCommand::ClearCache) {
-                                if let Err(e) = asset::clear_cache() {
+                                if let Err(e) = assets::clear_cache() {
                                     warn!(error = %e, "could not clear asset cache");
                                 }
                                 // The on-disk cache is gone: drop the bookkeeping
@@ -502,7 +501,7 @@ fn main() -> Result<()> {
                                 // immediately.
                                 synced_keys.clear();
                                 index_refreshed = false;
-                                cache = asset::AssetResolver::new();
+                                cache = assets::AssetResolver::new();
                                 cx.update(|cx| {
                                     let changed = cx.update_global::<AppState, _>(|state, _| {
                                         state.refresh_inventories(
@@ -529,7 +528,7 @@ fn main() -> Result<()> {
                             // arm) so a manual Refresh fetches camera art too.
                             let mut models = models;
                             models.extend(latest_cams.iter().map(|c| {
-                                crate::asset::sync::AssetTarget::Hidpp {
+                                sync::AssetTarget::Hidpp {
                                     model: state::camera_model_info(c),
                                     codename: Some(c.name.clone()),
                                 }
@@ -556,7 +555,7 @@ fn main() -> Result<()> {
                             last_sync_at = None;
                             index_refreshed = true;
                             synced_keys.extend(outcome.keys);
-                            cache = asset::AssetResolver::new();
+                            cache = assets::AssetResolver::new();
                             assets_dirty = true;
                         }
                         // A manual Refresh / Clear that landed mid-sync waited

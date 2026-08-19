@@ -10,7 +10,7 @@ use gpui::{BorrowAppContext as _, Context};
 use openlogi_core::hid::DeviceRoute;
 use tokio::sync::oneshot;
 
-use crate::ipc_client::Command;
+use crate::services::ipc::Command;
 use crate::state::{AppState, DeviceKey};
 
 /// Issue a one-shot device read over IPC and apply its typed result to
