@@ -38,6 +38,10 @@ use serde::Deserialize;
 use crate::error::AssetError;
 use crate::http;
 
+/// Filename of the registry at the asset host's root, and of its cached
+/// copy in every asset root on disk.
+pub const INDEX_NAME: &str = "index.json";
+
 #[derive(Debug, Deserialize)]
 pub struct Index {
     pub schema_version: u32,

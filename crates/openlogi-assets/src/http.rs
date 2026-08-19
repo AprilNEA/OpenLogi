@@ -24,6 +24,7 @@ use ureq::Agent;
 use ureq::tls::{RootCerts, TlsConfig};
 
 use crate::error::AssetError;
+use crate::index::INDEX_NAME;
 use crate::index::{FileEntry, Index};
 
 const USER_AGENT: &str = concat!(
@@ -31,9 +32,6 @@ const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (+https://github.com/AprilNEA/OpenLogi)"
 );
-
-/// Filename of the registry at the asset host's root.
-const INDEX_NAME: &str = "index.json";
 
 /// Bound on DNS + TCP + TLS connect. Deliberately does *not* cap body-read
 /// time, so a slow-but-progressing download of a large asset isn't killed.

@@ -40,8 +40,8 @@ pub use haptic::{
 pub use hidpp::feature::haptic_feedback::HapticWaveform;
 pub use lighting::{LightingMethod, set_keyboard_color, set_keyboard_color_with};
 pub use litra::{
-    LightCommand, LitraModel, apply as apply_litra, encode_command as encode_litra_command,
-    matches_litra,
+    LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraModel, apply as apply_litra,
+    encode_command as encode_litra_command, matches_litra,
 };
 pub use shared::{
     SharedChannel, get_dpi_info_on, get_smartshift_status_on, set_dpi_on, set_fn_lock_on,

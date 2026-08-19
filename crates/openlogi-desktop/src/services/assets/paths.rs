@@ -2,10 +2,8 @@
 
 use std::path::PathBuf;
 
-use openlogi_assets::Index;
+use openlogi_assets::{INDEX_NAME, Index};
 use tracing::{debug, warn};
-
-const INDEX_FILE: &str = "index.json";
 
 /// Per-user writable cache root: `openlogi_core::paths::data_dir()` plus an
 /// `assets/` subdir, keeping the render cache out of the config dir. Falls
@@ -23,14 +21,14 @@ pub(super) fn user_cache_root() -> PathBuf {
 pub(super) fn bundle_assets_root() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let candidate = exe.parent()?.parent()?.join("Resources").join("assets");
-    candidate.join(INDEX_FILE).is_file().then_some(candidate)
+    candidate.join(INDEX_NAME).is_file().then_some(candidate)
 }
 
 /// Walk read roots looking for the first parseable `index.json`. Bundle
 /// wins over user cache so a release-time snapshot stays authoritative.
 pub(super) fn load_index(roots: &[PathBuf]) -> Option<Index> {
     for root in roots {
-        let path = root.join(INDEX_FILE);
+        let path = root.join(INDEX_NAME);
         if !path.exists() {
             continue;
         }

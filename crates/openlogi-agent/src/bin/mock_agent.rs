@@ -47,8 +47,8 @@ use openlogi_core::device::{
 use openlogi_core::hid::LOGITECH_VENDOR_ID;
 use openlogi_core::single_instance::{self, InstanceError};
 use openlogi_hid::{
-    DIRECT_DEVICE_INDEX, DeviceRoute, DpiCapabilities, DpiInfo, LightCommand, PasskeyMethod,
-    ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
+    DIRECT_DEVICE_INDEX, DeviceRoute, DpiCapabilities, DpiInfo, LITRA_GLOW_PRODUCT_ID,
+    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -74,7 +74,6 @@ const KEYBOARD_SLOT: u8 = 3;
 /// is matched against it.
 const DIRECT_PID: u16 = 0xb020;
 /// Product ID of the scripted standalone Litra light (Litra Glow).
-const LITRA_PID: u16 = 0xc900;
 /// How often the scripted `camera_active` flag flips.
 const CAMERA_TOGGLE_PERIOD: Duration = Duration::from_secs(30);
 
@@ -402,7 +401,7 @@ fn standalone_light() -> StandaloneDevice {
     StandaloneDevice {
         address: RawDeviceAddress {
             vendor_id: LOGITECH_VENDOR_ID,
-            product_id: LITRA_PID,
+            product_id: LITRA_GLOW_PRODUCT_ID,
             usage_page: 0xff43,
             usage_id: 0x0202,
             identity: "MOCK-LITRA-01".to_string(),
@@ -434,7 +433,7 @@ fn standalone_light() -> StandaloneDevice {
 fn light_route() -> DeviceRoute {
     DeviceRoute::Direct {
         vendor_id: LOGITECH_VENDOR_ID,
-        product_id: LITRA_PID,
+        product_id: LITRA_GLOW_PRODUCT_ID,
     }
 }
 

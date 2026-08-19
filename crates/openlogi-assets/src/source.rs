@@ -16,9 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::AssetError;
 use crate::http::{AssetClient, write_replace};
-use crate::index::Index;
-
-const INDEX_NAME: &str = "index.json";
+use crate::index::{INDEX_NAME, Index};
 
 /// Mutable production endpoint behind the OpenLogi custom domain.
 const PRODUCTION_BASE: &str = "https://assets.openlogi.org";
