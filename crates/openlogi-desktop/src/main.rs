@@ -526,6 +526,14 @@ fn main() -> Result<()> {
                         }
                     },
                     _ = camera_scan.tick() => {
+                        // Nothing to show it to. The app runs from the menu bar
+                        // with every window closed, and this scan is the only
+                        // work left that is not driven by an agent change — so
+                        // idling in the tray should cost nothing. The first tick
+                        // after a window opens picks up whatever changed.
+                        if cx.update(|cx| cx.windows().is_empty()) {
+                            continue;
+                        }
                         // Off the UI thread: AVFoundation discovery is far too
                         // slow for the render path.
                         let scanned = cx
