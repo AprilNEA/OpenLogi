@@ -1,4 +1,4 @@
-//! Tests for the pure classification logic behind [`crate::input_device_access`].
+//! Pure `classify` cases — no device nodes involved.
 
 use crate::PermissionStatus;
 use crate::linux::classify;
