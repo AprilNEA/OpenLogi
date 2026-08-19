@@ -24,6 +24,7 @@ use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profile_scope::ProfileIconCache;
+use crate::features::profiles::ProfilesPanel;
 use crate::services::assets::AssetResolver;
 use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
@@ -65,11 +66,8 @@ enum Route {
 /// The active section of the device-detail screen. Backs the detail `TabBar`;
 /// reset to the device's first tab whenever a device is opened.
 ///
-/// The tab *set* depends on the device kind — see [`DetailTab::tabs_for`]. A
-/// mouse gets button-mapping + pointer tuning; a wired keyboard gets RGB
-/// lighting; every device gets the info tab. Tailoring the tabs is what keeps a
-/// keyboard from rendering a mouse silhouette and an irrelevant DPI panel
-/// (issue #19).
+/// The tab set follows measured device capabilities — see
+/// [`DetailTab::tabs_for`]. Every device also gets the info tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DetailTab {
     /// The mouse model with clickable button hotspots.
@@ -82,6 +80,8 @@ enum DetailTab {
     Pointer,
     /// RGB lighting — color, brightness, on/off.
     Lighting,
+    /// Onboard profile source and active profile.
+    Profiles,
     /// Live webcam preview (UVC cameras only).
     Camera,
     /// Standalone light controls driven by a raw-HID device driver.
@@ -133,6 +133,9 @@ impl DetailTab {
         if caps.lighting {
             tabs.push(Self::Lighting);
         }
+        if caps.onboard_profiles {
+            tabs.push(Self::Profiles);
+        }
         if record.light_capabilities.is_some() {
             tabs.push(Self::Light);
         }
@@ -155,6 +158,7 @@ impl DetailTab {
             Self::Keys => tr!("Keys"),
             Self::Pointer => tr!("Pointer"),
             Self::Lighting | Self::Light => tr!("Lighting"),
+            Self::Profiles => tr!("Profiles"),
             Self::Camera => tr!("Camera"),
             Self::Device => tr!("Device"),
         }
@@ -171,6 +175,7 @@ pub struct AppView {
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
+    profiles_panel: Entity<ProfilesPanel>,
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
     light_panel: Entity<LightPanel>,
@@ -230,6 +235,7 @@ impl AppView {
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
+        let profiles_panel = cx.new(ProfilesPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
         let light_panel = cx.new(LightPanel::new);
@@ -284,6 +290,7 @@ impl AppView {
             dpi_panel,
             smartshift_panel,
             lighting_panel,
+            profiles_panel,
             camera_preview,
             camera_controls,
             light_panel,
@@ -603,6 +610,7 @@ impl Render for AppView {
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,
                         lighting_panel: &self.lighting_panel,
+                        profiles_panel: &self.profiles_panel,
                         camera_preview: &self.camera_preview,
                         camera_controls: &self.camera_controls,
                         light_panel: &self.light_panel,
@@ -834,6 +842,16 @@ mod tests {
         assert!(tabs.contains(&DetailTab::Buttons));
         assert!(tabs.contains(&DetailTab::Pointer));
         assert!(!tabs.contains(&DetailTab::Lighting));
+    }
+
+    #[test]
+    fn profiles_tab_follows_onboard_profiles_capability() {
+        let caps = Some(Capabilities {
+            onboard_profiles: true,
+            ..Capabilities::default()
+        });
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
+        assert_eq!(tabs, vec![DetailTab::Profiles, DetailTab::Device]);
     }
 
     /// A keyboard that exposes ReprogControls (buttons=true) but has no resolved

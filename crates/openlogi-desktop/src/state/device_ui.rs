@@ -6,12 +6,12 @@ use super::SmartShiftWriteStatus;
 use super::light::PendingLightCommand;
 
 /// Everything `AppState` tracks per device outside the persisted config and
-/// the swr-backed DPI/SmartShift reads.
+/// the swr-backed DPI, SmartShift, and onboard-profile reads.
 ///
-/// Replaces six parallel `BTreeMap<String, _>` fields that all shared the
+/// Replaces the parallel `BTreeMap<String, _>` fields that all shared the
 /// same device-key domain — manual camera-light override, volatile light
 /// settings, an in-flight light command, the inventory-miss counter, a
-/// pending SmartShift write id, and the SmartShift write-confirmation status
+/// pending SmartShift write id, and SmartShift write-confirmation status
 /// — with one row per device. A device absent from the owning map is
 /// equivalent to every field here at its default.
 #[derive(Debug, Default)]
