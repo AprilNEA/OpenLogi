@@ -1,5 +1,6 @@
 //! Eight-slot Actions Ring editor for the active device.
 
+mod action_icons;
 mod editor;
 
 use gpui::{
@@ -13,8 +14,8 @@ use gpui_component::{
 };
 use openlogi_core::binding::{ActionRingEntry, ActionRingLayout, ActionRingSlot};
 
+use self::action_icons::action_icon_path;
 use self::editor::action_library;
-use crate::action_icons::action_icon_path;
 use crate::state::AppState;
 use crate::theme::{self, Palette, Typography as _};
 use openlogi_gui::action_ring::geometry::slot_offset;

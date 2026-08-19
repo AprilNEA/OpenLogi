@@ -1,4 +1,4 @@
-//! Live webcam preview, driven by the parent view's tab visibility.
+//! Live camera preview, driven by the parent view's tab visibility.
 //!
 //! [`CameraPreview::set_target`] is the single lifecycle switch: the parent
 //! ([`crate::app::AppView`]) calls it each render with the active camera's id

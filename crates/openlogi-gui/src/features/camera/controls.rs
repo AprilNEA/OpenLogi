@@ -1,5 +1,4 @@
-//! Camera controls for the Camera tab: lens (zoom/focus/exposure) and image
-//! (brightness/contrast/…) sliders, auto toggles, and profiles.
+//! Camera controls and profiles.
 //!
 //! Each slider drives a UVC control straight on the device, so a change is
 //! seen by every app that opens the camera — Google Meet, Zoom, OBS — not just

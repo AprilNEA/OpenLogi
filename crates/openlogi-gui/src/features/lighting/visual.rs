@@ -1,4 +1,4 @@
-//! Shared standalone-light visuals used by the gallery and detail screen.
+//! Standalone-light visuals used by the gallery and detail screen.
 //!
 //! Known models can opt into source-owned product artwork. Unknown models keep
 //! the protocol-neutral generated visual and never borrow another model's

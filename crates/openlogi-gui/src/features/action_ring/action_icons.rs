@@ -1,4 +1,4 @@
-//! Action-derived icon selection for the settings GUI.
+//! Action icon selection for the Actions Ring editor.
 
 use openlogi_core::binding::{Action, ActionRingIcon};
 

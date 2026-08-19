@@ -1,4 +1,4 @@
-//! DPI slider for the right-side config column.
+//! Device DPI controls.
 //!
 //! The slider range comes from the selected device's HID++ DPI capability
 //! (`0x2201` AdjustableDpi or `0x2202` ExtendedAdjustableDpi, whichever it

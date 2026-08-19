@@ -10,7 +10,7 @@
 //! torque in volatile RAM that resets on a power cycle (#189), so the agent
 //! re-applies the saved config when the device reconnects. The current state is
 //! read lazily on the same background-thread pattern as
-//! [`crate::components::dpi_panel`].
+//! [`crate::features::pointer::dpi`].
 
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, IntoElement,
@@ -152,7 +152,7 @@ impl SmartShiftPanel {
 
     /// Kick off a one-shot SmartShift read for the active device when it hasn't
     /// been queried yet — same lazy, dedicated-OS-thread pattern as
-    /// [`crate::components::dpi_panel::DpiPanel`].
+    /// [`crate::features::pointer::dpi::DpiPanel`].
     fn ensure_smartshift_load(cx: &mut Context<Self>) {
         let Some((key, route, write_id)) = smartshift_load_target(cx) else {
             return;

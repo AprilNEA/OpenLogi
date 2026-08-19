@@ -1,4 +1,4 @@
-//! Capability-driven controls for standalone lights.
+//! Controls for standalone lights.
 
 use crate::state::{AppState, LightCommandStatus};
 use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle as _, Typography as _};

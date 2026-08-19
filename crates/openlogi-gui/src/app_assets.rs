@@ -21,7 +21,7 @@ const LOGO_BYTES: &[u8] = include_bytes!(concat!(
 /// Vendored [lucide](https://lucide.dev) icons (ISC license) for the binding
 /// menus, embedded so they resolve identically in a packaged `.app` and a dev
 /// build. Served under the `action-icons/` path prefix and rendered by
-/// `action_icons::action_icon_path` via `svg().path(..)`. These are
+/// the settings action picker via `svg().path(..)`. These are
 /// command glyphs (paste / cut / volume / lock / …) plus a couple of About-page
 /// icons (changelog, bug) that gpui-component's bundled `IconName` set does not
 /// cover.

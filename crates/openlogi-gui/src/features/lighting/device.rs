@@ -1,4 +1,4 @@
-//! Basic RGB lighting controls for a keyboard's detail panel.
+//! RGB keyboard lighting controls.
 //!
 //! A palette of color swatches, an on/off toggle, and a brightness slider,
 //! persisted per device via [`AppState::commit_lighting`] and pushed to the

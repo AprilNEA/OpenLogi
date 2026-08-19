@@ -25,7 +25,7 @@ use super::status::{loading_body, notice_body};
 use super::widgets::{add_device_button, kind_label, settings_button};
 use crate::asset::GlowGeometry;
 use crate::components::carousel::Carousel;
-use crate::components::light_visual;
+use crate::features::lighting::visual as light_visual;
 use crate::state::{AppState, DeviceRecord};
 use crate::theme::{self, HEADER_H, Palette, SelectableStyle as _, Typography as _};
 

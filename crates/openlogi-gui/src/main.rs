@@ -29,13 +29,13 @@ macro_rules! tr {
     };
 }
 
-mod action_icons;
 mod app;
 mod app_menu;
 mod asset;
 mod components;
 mod data;
 mod diagnostics;
+mod features;
 mod i18n;
 mod ipc_client;
 mod keyboard_model;
