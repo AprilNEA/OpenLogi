@@ -556,13 +556,9 @@ mod tests {
             let plist = root.join(helper.info_plist);
             let expected = Channel::Production.identity(helper.component);
 
-            for (key, want) in [
-                ("CFBundleIdentifier", &expected.bundle_id),
-                ("CFBundleName", &expected.name),
-                ("CFBundleDisplayName", &expected.name),
-            ] {
+            for (key, want) in identity::identity_entries(&expected) {
                 assert_eq!(
-                    read_plist_string(&plist, key).unwrap().as_ref(),
+                    read_plist_string(&plist, key).unwrap().as_deref(),
                     Some(want),
                     "{} declares the wrong {key}",
                     helper.info_plist

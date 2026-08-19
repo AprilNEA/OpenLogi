@@ -63,6 +63,21 @@ pub(crate) enum Component {
 }
 
 impl Component {
+    /// This component's checked-in dev `Info.plist`, relative to the repo root.
+    ///
+    /// Test-only, because the consumer is a shell script: `.cargo/run-macos.sh`
+    /// copies these verbatim and never calls [`stamp`], so the literals in them
+    /// *are* the dev identity. `dev_plists_match_the_derived_identity` is what
+    /// keeps them in step with the suffixing in [`Channel::identity`].
+    #[cfg(test)]
+    const fn dev_template_plist(self) -> &'static str {
+        match self {
+            Self::App => "crates/openlogi-desktop/bundle/desktop-dev/Info.plist",
+            Self::Agent => "crates/openlogi-desktop/bundle/agent-dev/Info.plist",
+            Self::Overlay => "crates/openlogi-desktop/bundle/overlay-dev/Info.plist",
+        }
+    }
+
     /// Where this component lives inside the app bundle; `None` is the app itself.
     pub(super) fn nested_bundle(self) -> Option<&'static str> {
         match self {
@@ -127,7 +142,7 @@ impl Channel {
 }
 
 /// The `Info.plist` keys that carry the identity.
-fn identity_entries(identity: &Identity) -> [(&str, &str); 3] {
+pub(super) fn identity_entries(identity: &Identity) -> [(&str, &str); 3] {
     [
         ("CFBundleIdentifier", identity.bundle_id.as_str()),
         ("CFBundleName", identity.name.as_str()),
@@ -265,6 +280,29 @@ mod tests {
                 !ids[index + 1..].contains(id),
                 "{id} is claimed by two components"
             );
+        }
+    }
+
+    /// The checked-in dev plists are the only identity the dev bundle gets:
+    /// `.cargo/run-macos.sh` copies them verbatim and never calls [`stamp`], so
+    /// a literal here that drifts from the `.dev` suffixing silently gives the
+    /// dev build a different identity than the one packaging derives — and TCC
+    /// keys grants off exactly that.
+    #[test]
+    fn dev_plists_match_the_derived_identity() {
+        let root = crate::support::fs::repo_root().unwrap();
+        for &component in Component::VARIANTS {
+            let plist = root.join(component.dev_template_plist());
+            let identity = Channel::Dev.identity(component);
+            for (key, want) in identity_entries(&identity) {
+                let found = read_plist_string(&plist, key).unwrap();
+                assert_eq!(
+                    found.as_deref(),
+                    Some(want),
+                    "{} carries a stale {key}",
+                    component.dev_template_plist()
+                );
+            }
         }
     }
 
