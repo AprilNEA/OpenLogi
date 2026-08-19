@@ -1,8 +1,13 @@
 use std::sync::Arc;
 
 use hidpp::{
-    device::Device, feature::CreatableFeature, feature::battery_status::BatteryStatusFeature,
-    feature::feature_set::FeatureSetFeature, feature::unified_battery::UnifiedBatteryFeature,
+    device::Device,
+    feature::CreatableFeature,
+    feature::FeatureType,
+    feature::battery_status::BatteryStatusFeature,
+    feature::device_information::{DeviceEntityType, DeviceInformationFeature},
+    feature::feature_set::FeatureSetFeature,
+    feature::unified_battery::UnifiedBatteryFeature,
 };
 
 use crate::channel::route::DeviceRoute;
@@ -17,6 +22,9 @@ pub struct FeatureEntry {
     pub id: u16,
     /// Feature version reported by the device.
     pub version: u8,
+    /// Obsolete / hidden / engineering flags the device advertises alongside
+    /// the feature.
+    pub typ: FeatureType,
 }
 
 /// Snapshot of one HID++ `0x1b04` reprogrammable control. Returned by
@@ -78,6 +86,7 @@ pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, Wri
             entries.push(FeatureEntry {
                 id: info.id,
                 version: info.version,
+                typ: info.typ,
             });
         }
         Ok(entries)
@@ -171,6 +180,85 @@ pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError>
         Err(WriteError::FeatureUnsupported {
             feature_hex: 0x1004,
         })
+    })
+    .await
+}
+
+/// Snapshot of one firmware entity a device reports through HID++ `0x0003`
+/// function 1. Returned by [`dump_firmware_entities`] so a device report can
+/// name the exact firmware it is running.
+#[derive(Debug, Clone)]
+pub struct FirmwareEntityEntry {
+    /// Index of the entity in the device's own table.
+    pub index: u8,
+    /// What the entity is: main application, bootloader, radio stack, and so
+    /// on. `None` when the entity's record could not be parsed.
+    pub kind: Option<DeviceEntityType>,
+    /// Version string built from the entity's prefix, number, revision and
+    /// build, e.g. `MPM17.00_B0008`. `None` when the record could not be
+    /// parsed.
+    pub version: Option<String>,
+    /// USB or wireless product ID the entity runs under. A bootloader entity
+    /// reports the PID the device enumerates as while in DFU mode.
+    pub transport_pid: Option<u16>,
+    /// Whether this is the entity currently running.
+    pub active: bool,
+    /// Why the entity's record could not be read, when it could not.
+    pub error: Option<String>,
+}
+
+/// Read every firmware entity the device on `route` reports.
+///
+/// A device lists its main application firmware alongside its bootloader and,
+/// on many models, a separate radio stack. `openlogi diag features` prints
+/// them so a bug report names the firmware that produced the behaviour rather
+/// than just the model.
+///
+/// A single unreadable entity does not fail the call. The device declares how
+/// many entities it has, and one of them refusing to parse is itself worth
+/// seeing, so the entry carries the error and the rest are still returned.
+pub async fn dump_firmware_entities(
+    route: &DeviceRoute,
+) -> Result<Vec<FirmwareEntityEntry>, WriteError> {
+    let index = route.device_index();
+    with_route(route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let feature = open_feature::<DeviceInformationFeature>(&mut device).await?;
+        let info = feature.get_device_info().await.map_err(|e| {
+            classify_hidpp_error(
+                e,
+                HidppOperation::DumpFeatures,
+                DeviceInformationFeature::ID,
+            )
+        })?;
+
+        let mut entries = Vec::with_capacity(usize::from(info.entity_count));
+        for entity in 0..info.entity_count {
+            entries.push(match feature.get_fw_info(entity).await {
+                Ok(fw) => FirmwareEntityEntry {
+                    index: entity,
+                    kind: Some(fw.entity_type),
+                    version: Some(format!(
+                        "{}{:02}.{:02}_B{:04}",
+                        fw.firmware_prefix, fw.firmware_number, fw.revision, fw.build
+                    )),
+                    transport_pid: Some(fw.transport_pid),
+                    active: fw.active,
+                    error: None,
+                },
+                Err(e) => FirmwareEntityEntry {
+                    index: entity,
+                    kind: None,
+                    version: None,
+                    transport_pid: None,
+                    active: false,
+                    error: Some(format!("{e:?}")),
+                },
+            });
+        }
+        Ok(entries)
     })
     .await
 }
