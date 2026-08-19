@@ -18,12 +18,12 @@ use crate::asset::AssetResolver;
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
+use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::device::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
+use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
-use crate::keyboard_model::function_row::FunctionRowView;
-use crate::mouse_model::view::MouseModelView;
 use crate::state::{AgentLink, AppState, DeviceRecord};
 use crate::theme::{self, Palette, Typography as _};
 
@@ -32,7 +32,7 @@ mod home;
 mod status;
 mod widgets;
 
-// `mouse_model::view` paints the same keyboard-lighting glow as the Home
+// The mouse diagram paints the same keyboard-lighting glow as the Home
 // gallery card, so it reaches these through the crate-stable `crate::app::…`
 // path rather than the internal `app::home` submodule.
 pub(crate) use home::{glow_canvas, keyboard_glow};

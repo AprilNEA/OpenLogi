@@ -6,7 +6,7 @@
 //! returns to the action list; the panel itself closes when the key is
 //! deselected.
 //!
-//! [`menu_card`]: crate::mouse_model::picker::menu_card
+//! [`menu_card`]: crate::features::mouse::picker::menu_card
 
 #![allow(
     clippy::needless_pass_by_value,
@@ -32,8 +32,8 @@ use gpui_component::{
 use openlogi_core::binding::{Action, KeyCombo, WorkflowStep};
 use openlogi_core::config::KeyTrigger;
 
-use crate::keyboard_model::function_row::FunctionRowView;
-use crate::mouse_model::picker::{PickFn, divider, menu_card, menu_row, scroll_list, title};
+use super::function_row::FunctionRowView;
+use crate::features::mouse::picker::{PickFn, divider, menu_card, menu_row, scroll_list, title};
 use crate::state::AppState;
 use crate::theme::Palette;
 

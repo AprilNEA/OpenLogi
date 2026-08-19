@@ -12,6 +12,10 @@
 use std::collections::BTreeMap;
 
 use gpui::Global;
+use openlogi_core::binding::{
+    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, ButtonId, GestureDirection,
+    RingAction,
+};
 use openlogi_core::config::{Config, ConfigFile, KeyTrigger};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::SmartShiftStatus;
@@ -46,9 +50,7 @@ pub(crate) use devices::camera_model_info;
 use load::DeviceReads;
 
 use crate::asset::AssetResolver;
-use crate::data::mouse_buttons::{Action, ButtonId, GestureDirection};
 use crate::state::devices::{build_device_list, pick_initial_device};
-use openlogi_core::binding::{ActionRingConfig, ActionRingIcon, ActionRingSlot, RingAction};
 
 mod agent;
 mod bindings;

@@ -30,12 +30,12 @@ use gpui::{
     prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Icon, IconName, h_flex, popover::PopoverState, v_flex};
-
-use crate::data::mouse_buttons::{
+use openlogi_core::binding::{
     Action, ButtonId, Category, GestureDirection, default_binding, default_gesture_binding,
 };
-use crate::mouse_model::thumbwheel::ThumbwheelPreset;
-use crate::mouse_model::view::MouseModelView;
+
+use super::thumbwheel::ThumbwheelPreset;
+use super::view::MouseModelView;
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette, SelectableStyle, Typography as _};
 

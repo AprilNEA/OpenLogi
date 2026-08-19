@@ -3,9 +3,11 @@
 //! These functions keep Logitech asset coordinate translation and fallback
 //! label layout separate from the GPUI element tree in `view`.
 
+use openlogi_core::binding::ButtonId;
+
+use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
+use super::leader_lines::{Label, Side};
 use crate::asset::ResolvedAsset;
-use crate::data::mouse_buttons::{ButtonId, Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
-use crate::mouse_model::leader_lines::{Label, Side};
 
 /// Approx pixel width of each hotspot hit-target. Logitech only gives us a
 /// marker point per button, not a rectangle, so we size by hand.
@@ -195,7 +197,7 @@ fn map_slot_name(name: &str) -> Option<MouseControlId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::mouse_buttons::default_hotspots;
+    use crate::features::mouse::hotspots::default_hotspots;
 
     #[test]
     fn default_labels_include_capability_gated_thumbwheel() {

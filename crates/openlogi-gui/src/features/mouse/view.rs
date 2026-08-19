@@ -6,24 +6,20 @@ use gpui::{
     Subscription, Window, canvas, div, hsla, img, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Icon, IconName, Selectable, h_flex, popover::Popover, v_flex};
+use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
-use crate::app::{glow_canvas, keyboard_glow};
-use crate::asset::{GlowGeometry, ResolvedAsset};
-use crate::data::mouse_buttons::{
-    Action, ButtonId, GestureDirection, Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_binding,
-    default_hotspots,
-};
-use crate::mouse_model::geometry::{
+use super::geometry::{
     asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png, default_labels,
     labels_from_hotspots,
 };
-use crate::mouse_model::leader_lines::{
-    Geometry as LeaderGeometry, Label, Side, paint as paint_leader_lines,
-};
-use crate::mouse_model::picker::{
+use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
+use super::leader_lines::{Geometry as LeaderGeometry, Label, Side, paint as paint_leader_lines};
+use super::picker::{
     GESTURE_BUTTON_ICON, action_icon_path, action_picker, gesture_overview, thumbwheel_picker,
 };
-use crate::mouse_model::thumbwheel::ThumbwheelPreset;
+use super::thumbwheel::ThumbwheelPreset;
+use crate::app::{glow_canvas, keyboard_glow};
+use crate::asset::{GlowGeometry, ResolvedAsset};
 use crate::state::AppState;
 use crate::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 

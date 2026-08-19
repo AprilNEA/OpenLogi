@@ -5,6 +5,7 @@
     reason = "state fixture construction is intentionally asserted in tests"
 )]
 
+use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::config::{Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -14,8 +15,7 @@ use openlogi_core::device::{
 use openlogi_core::hid::WriteError;
 
 use crate::asset::AssetResolver;
-use crate::data::mouse_buttons::{Action, Binding, ButtonId};
-use crate::mouse_model::thumbwheel::ThumbwheelPreset;
+use crate::features::mouse::thumbwheel::ThumbwheelPreset;
 
 use openlogi_core::hid::{SmartShiftMode, SmartShiftStatus};
 

@@ -1,4 +1,4 @@
-//! GUI-only projection of the two persisted thumb-wheel direction bindings.
+//! GUI projection of the two persisted thumb-wheel direction bindings.
 //!
 //! Configuration remains backward-compatible: the picker writes the existing
 //! `ThumbwheelScrollDown` and `ThumbwheelScrollUp` entries. This module only

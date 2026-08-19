@@ -28,17 +28,16 @@ use gpui::{
     prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{h_flex, input::InputState, v_flex};
-use openlogi_core::binding::WorkflowStep;
+use openlogi_core::binding::{Action, WorkflowStep};
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
 
-use crate::app::{glow_canvas, keyboard_glow};
-use crate::asset::{GlowGeometry, ResolvedAsset};
-use crate::data::mouse_buttons::Action;
-use crate::keyboard_model::editors::{
+use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
 };
-use crate::mouse_model::geometry::asset_dimensions_for_png;
-use crate::mouse_model::picker::{
+use crate::app::{glow_canvas, keyboard_glow};
+use crate::asset::{GlowGeometry, ResolvedAsset};
+use crate::features::mouse::geometry::asset_dimensions_for_png;
+use crate::features::mouse::picker::{
     PickFn, action_icon_path, action_rows, divider, menu_card, menu_row, scroll_list,
     section_header,
 };
@@ -777,7 +776,7 @@ fn config_panel(
 
     // If an editor is active, render it instead of the list.
     if let Some(kind) = active_editor {
-        return crate::keyboard_model::editors::editor_card(
+        return super::editors::editor_card(
             trigger,
             kind,
             text_state,

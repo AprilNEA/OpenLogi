@@ -1,6 +1,6 @@
-//! Keyboard remapper UI — the global function-key binding surface.
+//! Keyboard remapper UI for global function-key bindings.
 //!
-//! Mirrors [`crate::mouse_model`]: a hardware-style diagram whose clickable
+//! Mirrors [`crate::features::mouse`]: a hardware-style diagram whose clickable
 //! hotspots (here, function-row key-caps) each open the same action picker the
 //! mouse buttons use. The key difference is scope — mouse bindings are
 //! per-device under `config.devices[key].bindings`, while keyboard F-key

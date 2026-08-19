@@ -2,12 +2,12 @@
 
 use std::collections::BTreeMap;
 
+use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
 use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::KeyTrigger;
 use tracing::debug;
 
-use crate::data::mouse_buttons::{Action, Binding, ButtonId, GestureDirection};
-use crate::mouse_model::thumbwheel::{ThumbwheelPair, ThumbwheelPreset};
+use crate::features::mouse::thumbwheel::{ThumbwheelPair, ThumbwheelPreset};
 use crate::state::devices::DeviceRecord;
 
 use super::AppState;

@@ -1,20 +1,14 @@
-//! Mouse-model hotspot geometry. Hotspot bounds are authored in mouse-model-
-//! local pixels (the SVG canvas is 420×560 — see [`MOUSE_MODEL_SIZE`]) and
+//! Mouse hotspot geometry. Bounds are authored in model-local pixels (the
+//! SVG canvas is 420×560 — see [`MOUSE_MODEL_SIZE`]) and
 //! stored as plain `f32` tuples so this module stays purely data and doesn't
 //! drag in `gpui` types.
-//!
-//! Button identifiers and the action vocabulary live in
-//! [`openlogi_core::binding`]; this module re-exports them so existing call
-//! sites can keep importing from the GUI crate without churn.
 
 #![allow(
     dead_code,
     reason = "scaffolding consumed by UI.md phases 3–6 (carousel, popover, hotspots)"
 )]
 
-pub use openlogi_core::binding::{
-    Action, Binding, ButtonId, Category, GestureDirection, default_binding, default_gesture_binding,
-};
+use openlogi_core::binding::ButtonId;
 
 /// One visual target in the mouse diagram.
 ///

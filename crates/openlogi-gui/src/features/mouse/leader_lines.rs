@@ -6,7 +6,7 @@
 
 use gpui::{Bounds, PathBuilder, Pixels, Point, Window, hsla, point, px, rgb};
 
-use crate::data::mouse_buttons::{Hotspot, MouseControlId};
+use super::hotspots::{Hotspot, MouseControlId};
 use crate::theme::ACCENT_BLUE;
 
 /// Length of the horizontal stub before turning toward the label.
