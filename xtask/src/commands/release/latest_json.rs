@@ -9,7 +9,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 // The manifest advertises the identity the shipped bundle is stamped with, so
 // both come from one constant.
-use crate::commands::macos::bundle::identity::APP_BUNDLE_ID;
+use openlogi_core::brand::APP_ID;
 
 const CHANNEL: &str = "stable";
 const MACOS_MINIMUM_OS_VERSION: &str = "13.0";
@@ -94,7 +94,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 
     let manifest = Manifest {
         schema_version: 1,
-        app_id: APP_BUNDLE_ID,
+        app_id: APP_ID,
         version,
         tag: args.tag.clone(),
         channel: CHANNEL,

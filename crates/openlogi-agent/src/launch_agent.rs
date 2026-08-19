@@ -44,10 +44,18 @@ use tracing::warn;
 use tracing::{info, warn};
 
 /// Stable launch-agent identifier for the background agent.
+///
+/// Deliberately *not* `brand::AGENT_ID`, though it currently matches: this is a
+/// filesystem key (`~/Library/LaunchAgents/<label>.plist`), so renaming it
+/// orphans the plist already on disk. Following a bundle-id change silently
+/// would leave users with two autostart entries; changing it is a migration,
+/// which is what [`LEGACY_LABEL`] is for.
 #[cfg(target_os = "macos")]
 const LABEL: &str = "org.openlogi.agent";
 
-/// The pre-split GUI autostart label, removed on migration.
+/// The pre-split GUI autostart label, removed on migration. Frozen history —
+/// never link it to `brand::APP_ID`, which it happens to match: if that value
+/// ever changes, this one must not, or the stale plist is never cleaned up.
 #[cfg(target_os = "macos")]
 const LEGACY_LABEL: &str = "org.openlogi.openlogi";
 

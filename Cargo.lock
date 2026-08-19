@@ -9952,6 +9952,7 @@ dependencies = [
  "anyhow",
  "clap",
  "fs-err",
+ "openlogi-core",
  "path-absolutize",
  "plist",
  "serde",

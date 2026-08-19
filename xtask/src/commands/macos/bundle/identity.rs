@@ -16,13 +16,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use clap::ValueEnum;
+use openlogi_core::brand;
 use strum::{Display, VariantArray};
 
 use super::{read_plist_string, stamp_plist_strings};
-
-/// The app's production bundle identifier, also advertised by the update
-/// manifest so the running app and the manifest cannot disagree.
-pub(crate) const APP_BUNDLE_ID: &str = "org.openlogi.openlogi";
 
 /// The icon every component shares, as `CFBundleIconFile` spells it (the `.icns`
 /// extension is optional there, so it is trimmed before comparing).
@@ -107,9 +104,9 @@ impl Component {
     /// The shipped identity — the one macOS ties existing grants to.
     fn production(self) -> Identity {
         let (bundle_id, name) = match self {
-            Self::App => (APP_BUNDLE_ID, "OpenLogi"),
-            Self::Agent => ("org.openlogi.agent", "OpenLogi Agent"),
-            Self::Overlay => ("org.openlogi.overlay", "OpenLogi Overlay"),
+            Self::App => (brand::APP_ID, "OpenLogi"),
+            Self::Agent => (brand::AGENT_ID, "OpenLogi Agent"),
+            Self::Overlay => (brand::OVERLAY_ID, "OpenLogi Overlay"),
         };
         Identity {
             bundle_id: bundle_id.to_owned(),
@@ -134,7 +131,7 @@ impl Channel {
         match self {
             Self::Production => production,
             Self::Dev => Identity {
-                bundle_id: format!("{}.dev", production.bundle_id),
+                bundle_id: brand::dev_id(&production.bundle_id),
                 name: format!("{} Dev", production.name),
             },
         }

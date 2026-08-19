@@ -32,7 +32,7 @@ use objc2_app_kit::{
     NSWorkspaceSessionDidBecomeActiveNotification,
 };
 use objc2_foundation::{NSNotification, NSNotificationName, NSString};
-use openlogi_core::brand::DeeplinkCommand;
+use openlogi_core::brand::{self, DeeplinkCommand};
 use tracing::{info, warn};
 
 use crate::status_item;
@@ -150,10 +150,10 @@ fn quit_agent() -> ! {
 /// Whether an OpenLogi GUI process is currently running (prod or dev bundle).
 /// Used to avoid cold-launching the GUI from the Quit handler just to quit it.
 fn gui_is_running() -> bool {
-    // The release bundle id and the dev bundle's `.dev` suffix; the agent's own
-    // id is `org.openlogi.agent`, so neither matches the agent itself.
-    const GUI_BUNDLE_IDS: [&str; 2] = ["org.openlogi.openlogi", "org.openlogi.openlogi.dev"];
-    GUI_BUNDLE_IDS.iter().any(|id| {
+    // Release and dev; the agent's own id is `brand::AGENT_ID`, so neither
+    // matches the agent itself.
+    let dev = brand::dev_id(brand::APP_ID);
+    [brand::APP_ID, dev.as_str()].iter().any(|id| {
         let running =
             NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(id));
         !running.is_empty()

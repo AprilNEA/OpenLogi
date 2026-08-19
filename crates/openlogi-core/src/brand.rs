@@ -23,6 +23,29 @@ pub const RELEASES_URL: &str = "https://github.com/AprilNEA/OpenLogi/releases/la
 /// own literal copy (it can't reference Rust) — keep the two in sync.
 pub const APP_ID: &str = "org.openlogi.openlogi";
 
+/// The always-on agent's bundle identifier — the process that owns the hook and
+/// holds the Accessibility grant, shipped as a nested login item.
+pub const AGENT_ID: &str = "org.openlogi.agent";
+
+/// The Actions Ring overlay's bundle identifier, the second nested login item.
+pub const OVERLAY_ID: &str = "org.openlogi.overlay";
+
+/// What a dev build appends to every identifier above, so a local build can
+/// never claim a shipped TCC grant and System Settings shows which of the two
+/// installed copies a row belongs to.
+const DEV_SUFFIX: &str = ".dev";
+
+/// `id`'s dev-channel counterpart.
+///
+/// Packaging (`cargo xtask macos`) stamps the result into every `Info.plist`;
+/// the agent matches running GUI processes against it. Defined here so the
+/// identity a dev bundle carries and the identity anything looks for cannot
+/// diverge.
+#[must_use]
+pub fn dev_id(id: &str) -> String {
+    format!("{id}{DEV_SUFFIX}")
+}
+
 /// The release page for a specific version tag (e.g. the running build).
 #[must_use]
 pub fn release_tag_url(version: &str) -> String {
