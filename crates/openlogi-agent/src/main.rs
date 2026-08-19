@@ -290,7 +290,10 @@ async fn run(
     tokio::spawn(Arc::clone(&event_monitor).run_idle_janitor());
 
     // Pairing runs in the agent (it owns device I/O); the GUI drives it over IPC.
-    let pairing = Arc::new(pairing::PairingManager::new(shared.clone()));
+    let pairing = Arc::new(pairing::PairingManager::new(
+        shared.clone(),
+        Arc::clone(&observable),
+    ));
 
     // HID++ watchers need no Accessibility permission — start them up front.
     spawn_hidpp_watchers(&shared, dispatcher.clone());

@@ -24,7 +24,7 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::hid::{Click, PasskeyMethod, ReceiverSelector};
-use openlogi_ipc::{FoundDevice, PairingFailure, PairingUpdate};
+use openlogi_ipc::{FoundDevice, PairingFailure, PairingPhase};
 
 use crate::app::menu::{CloseWindow, Minimize, Zoom};
 use crate::services::ipc::Command;
@@ -32,8 +32,9 @@ use crate::state::AppState;
 use crate::ui::theme::{self, Palette, Typography as _};
 use crate::windows::{self, AuxWindow};
 
-/// The pairing flow's current UI state. Mirrors the [`PairingUpdate`] stream.
-#[derive(Clone, Default)]
+/// The pairing flow as the window renders it: the agent's [`PairingPhase`]
+/// plus [`Self::Idle`] for no session.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub enum PairingUi {
     /// No session in flight (initial, or after Done / dismissing a failure).
     #[default]
@@ -75,27 +76,34 @@ pub fn open(cx: &mut App) {
     );
 }
 
-/// Fold a pairing update into [`PairingUi`]. Called from the GPUI event loop as
-/// the agent's pairing long-poll delivers events.
-pub fn apply_update(cx: &mut App, update: PairingUpdate) {
-    let current = cx.try_global::<PairingUi>().cloned().unwrap_or_default();
-    let next = match update {
-        PairingUpdate::Searching => PairingUi::Searching,
-        PairingUpdate::DeviceFound(device) => {
-            let mut devices = match current {
-                PairingUi::Found(devices) => devices,
-                _ => Vec::new(),
-            };
-            if !devices.iter().any(|d| d.address == device.address) {
-                devices.push(device);
-            }
-            PairingUi::Found(devices)
-        }
-        PairingUpdate::Passkey(method) => PairingUi::Passkey(method),
-        PairingUpdate::Paired { slot } => PairingUi::Paired { slot },
-        PairingUpdate::Failed(failure) => PairingUi::Failed(failure),
+/// Show the agent's pairing session. `None` is no session — including after a
+/// cancel, and after an agent restart, which is why a window left mid-flow no
+/// longer needs a terminal event synthesized on its behalf.
+///
+/// The accumulation this used to do (collecting discovered devices out of an
+/// event stream) belongs to the agent, which is the side that knows what it has
+/// discovered; nothing is folded here any more.
+pub fn apply_state(cx: &mut App, phase: Option<PairingPhase>) -> bool {
+    let next = match phase {
+        None => PairingUi::Idle,
+        Some(PairingPhase::Searching) => PairingUi::Searching,
+        Some(PairingPhase::Found(devices)) => PairingUi::Found(devices),
+        Some(PairingPhase::Pairing) => PairingUi::Pairing,
+        Some(PairingPhase::Passkey(method)) => PairingUi::Passkey(method),
+        Some(PairingPhase::Paired { slot }) => PairingUi::Paired { slot },
+        Some(PairingPhase::Failed(failure)) => PairingUi::Failed(failure),
     };
+    if cx.try_global::<PairingUi>() == Some(&next) {
+        return false;
+    }
     cx.set_global(next);
+    true
+}
+
+/// Report a pairing command the client could not deliver. No session will ever
+/// appear to explain the silence, so the window has to be told directly.
+pub fn apply_undeliverable(cx: &mut App, failure: PairingFailure) {
+    cx.set_global(PairingUi::Failed(failure));
 }
 
 fn pairing_failure_text(failure: &PairingFailure) -> String {
@@ -142,7 +150,6 @@ fn send(cx: &App, command: Command) {
 }
 
 fn start_search(cx: &mut App) {
-    cx.set_global(PairingUi::Searching);
     send(cx, Command::StartPairing(ReceiverSelector::First));
 }
 
@@ -269,7 +276,7 @@ fn body(state: &PairingUi, pal: Palette) -> impl IntoElement {
                 ))
                 .child(
                     action_button("ad-done", tr!("Done"), false)
-                        .on_click(|_, _, cx| cx.set_global(PairingUi::Idle)),
+                        .on_click(|_, _, cx| send(cx, Command::CancelPairing)),
                 );
         }
         PairingUi::Failed(failure) => {
@@ -321,10 +328,7 @@ fn device_row(idx: usize, device: &FoundDevice, pal: Palette) -> impl IntoElemen
                 .text_body()
                 .child(SharedString::from(device.name.clone())),
         )
-        .on_click(move |_, _, cx| {
-            send(cx, Command::PairDevice(address));
-            cx.set_global(PairingUi::Pairing);
-        })
+        .on_click(move |_, _, cx| send(cx, Command::PairDevice(address)))
 }
 
 /// The passkey-entry instructions panel.
@@ -381,8 +385,6 @@ fn action_button(id: &'static str, label: impl Into<SharedString>, primary: bool
 }
 
 fn cancel_button() -> impl IntoElement {
-    action_button("ad-cancel", tr!("Cancel"), false).on_click(|_, _, cx| {
-        send(cx, Command::CancelPairing);
-        cx.set_global(PairingUi::Idle);
-    })
+    action_button("ad-cancel", tr!("Cancel"), false)
+        .on_click(|_, _, cx| send(cx, Command::CancelPairing))
 }

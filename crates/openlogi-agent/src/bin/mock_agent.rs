@@ -53,7 +53,7 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     ConfigReloadError, FoundDevice, Generation, Identity, InventoryHealth, MonitorEvent,
-    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
     PairingUpdate,
 };
 use succession::Compat;
@@ -255,6 +255,9 @@ struct State {
     /// unique here because the script has a single receiver.
     settings: HashMap<u8, DeviceSettings>,
     pairing: Option<PairingSession>,
+    /// Where pairing stands, for the observable snapshot. Outlives
+    /// [`Self::pairing`]: a terminal phase is the session's result.
+    phase: Option<PairingPhase>,
     /// Id handed to the next pairing session; only ever increases.
     next_pairing_id: u64,
     started: Instant,
@@ -303,9 +306,16 @@ impl State {
             next_slot: KEYBOARD_SLOT + 1,
             settings,
             pairing: None,
+            phase: None,
             next_pairing_id: 0,
             started: Instant::now(),
         })
+    }
+
+    /// Publish where pairing stands. Separate from [`Self::pairing`] because a
+    /// terminal phase is the session's *result* and outlives it.
+    fn set_phase(&mut self, phase: PairingPhase) {
+        self.phase = Some(phase);
     }
 
     /// Register a new pairing session and return its id.
@@ -660,6 +670,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         inventory: state.render_inventory(),
         standalone: vec![standalone_light()],
         camera_active: state.camera_active(),
+        pairing: state.phase.clone(),
     }
 }
 
@@ -819,6 +830,7 @@ impl Agent for MockAgent {
         };
         *self.pairing_rx.lock().await = Some(rx);
         let _ = tx.send(PairingUpdate::Searching);
+        self.state.lock().await.set_phase(PairingPhase::Searching);
 
         let state = Arc::clone(&self.state);
         tokio::spawn(async move {
@@ -834,7 +846,8 @@ impl Agent for MockAgent {
                 let _ = session
                     .updates
                     .send(PairingUpdate::DeviceFound(found.clone()));
-                session.discovered = Some(found);
+                session.discovered = Some(found.clone());
+                state.set_phase(PairingPhase::Found(vec![found]));
             }
         });
         Ok(())
@@ -855,6 +868,7 @@ impl Agent for MockAgent {
             };
             (session.id, session.updates.clone(), found.name.clone())
         };
+        self.state.lock().await.set_phase(PairingPhase::Pairing);
 
         let state = Arc::clone(&self.state);
         tokio::spawn(async move {
@@ -862,12 +876,15 @@ impl Agent for MockAgent {
             // A cancel in the meantime ends the flow: a plain cancel leaves the
             // GUI polling this very channel, so sending the prompt anyway would
             // show it a passkey *after* `Failed(Cancelled)`.
-            if state.lock().await.pairing_session(id).is_none() {
-                return;
+            let method = PasskeyMethod::Keyboard("482913".to_string());
+            {
+                let mut state = state.lock().await;
+                if state.pairing_session(id).is_none() {
+                    return;
+                }
+                state.set_phase(PairingPhase::Passkey(method.clone()));
             }
-            let _ = tx.send(PairingUpdate::Passkey(PasskeyMethod::Keyboard(
-                "482913".to_string(),
-            )));
+            let _ = tx.send(PairingUpdate::Passkey(method));
             tokio::time::sleep(PASSKEY_TYPING_DELAY).await;
             let mut state = state.lock().await;
             // No session of ours left = cancelled while the "user" was typing.
@@ -877,6 +894,7 @@ impl Agent for MockAgent {
                 return;
             }
             let slot = state.pair_scripted(&name);
+            state.set_phase(PairingPhase::Paired { slot });
             let _ = tx.send(PairingUpdate::Paired { slot });
         });
         Ok(())
@@ -885,7 +903,11 @@ impl Agent for MockAgent {
     async fn cancel_pairing(self, _: Context) -> Result<(), PairingCommandError> {
         // Cancelling with nothing active is `Ok` in the real agent, so it is
         // `Ok` here — the GUI must not see a different contract from the mock.
-        if let Some(session) = self.state.lock().await.pairing.take() {
+        let mut state = self.state.lock().await;
+        // A cancelled session leaves no result, and dismissing a finished one
+        // clears its result — both are "no session" (see the real agent).
+        state.phase = None;
+        if let Some(session) = state.pairing.take() {
             let _ = session
                 .updates
                 .send(PairingUpdate::Failed(PairingFailure::Cancelled));

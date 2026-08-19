@@ -185,6 +185,8 @@ fn apply_agent_state(
     // update relaunches GUI and agent together: the agent's
     // Scanning window overlaps the first sync's completion).
     let force_refresh = inventory_ready && std::mem::take(&mut sync.dirty);
+    let pairing_changed =
+        cx.update(|cx| crate::windows::add_device::apply_state(cx, snapshot.pairing.clone()));
     let (auto_download, asset_source, models) = cx.update(|cx| {
         let (changed, merged, auto_download, asset_source, models) = cx
             .update_global::<AppState, _>(|state, _| {
@@ -216,9 +218,7 @@ fn apply_agent_state(
                     state.asset_models(),
                 )
             });
-        // The steady poll mostly repeats an identical snapshot;
-        // skip the full-window invalidation and menu rebuild for those.
-        if changed {
+        if changed || pairing_changed {
             cx.refresh_windows();
         }
         if merged {
@@ -317,7 +317,6 @@ fn main() -> Result<()> {
     let ipc::IpcClient {
         updates: mut ipc_updates,
         commands: ipc_commands,
-        pairing: mut ipc_pairing,
     } = ipc::spawn();
 
     // Manual asset actions (Settings → Assets): Refresh / Clear cache. The
@@ -358,9 +357,9 @@ fn main() -> Result<()> {
         theme::register_builtin_themes(cx);
         app::menu::install(cx);
 
-        // Seed the Add Device window's initial state. Its buttons drive pairing
-        // through the agent over IPC; the agent's pairing long-poll feeds events
-        // back into this global via the select loop below.
+        // Seed the Add Device window's initial state. Its buttons only send
+        // intents; the session itself is the agent's, and every observation
+        // republishes it into this global.
         cx.set_global(windows::add_device::PairingUi::Idle);
 
         // The Settings → Assets buttons drive the asset sync (which lives on
@@ -504,6 +503,10 @@ fn main() -> Result<()> {
                             if changed {
                                 cx.update(gpui::App::refresh_windows);
                             }
+                        }
+                        Some(ipc::GuiUpdate::PairingUndeliverable(failure)) => {
+                            cx.update(|cx| windows::add_device::apply_undeliverable(cx, failure));
+                            cx.update(gpui::App::refresh_windows);
                         }
                         Some(ipc::GuiUpdate::ConfigReloadResult(result)) => {
                             let changed = cx.update_global::<AppState, _>(|state, _| {
@@ -658,11 +661,6 @@ fn main() -> Result<()> {
                         if let Some(cmd) = deferred {
                             let _ = asset_ctrl_self_tx.send(cmd);
                         }
-                    }
-                    Some(update) = ipc_pairing.recv() => {
-                        cx.update(|cx| {
-                            windows::add_device::apply_update(cx, update);
-                        });
                     }
                     Some(cmd) = gui_cmd_rx.recv() => {
                         cx.update(|cx| dispatch_gui_command(cmd, cx));

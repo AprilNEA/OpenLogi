@@ -32,7 +32,7 @@ use openlogi_core::hid::{
 };
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ConfigReloadError, Generation, OBSERVE_HOLD, Observation,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure,
 };
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
@@ -84,6 +84,10 @@ pub enum GuiUpdate {
     },
     /// Whether the agent adopted the config currently on disk.
     ConfigReloadResult(Result<(), ConfigReloadError>),
+    /// A pairing command could not be delivered, so no session will ever appear
+    /// in the observed state to explain the silence. Reported locally rather
+    /// than faked as a session the agent never had.
+    PairingUndeliverable(PairingFailure),
 }
 
 /// A device command sent from the GPUI thread to the client thread. Reads carry
@@ -118,13 +122,12 @@ pub enum Command {
     PollEventMonitor(oneshot::Sender<Vec<openlogi_ipc::MonitorEvent>>),
 }
 
-/// Handle the GUI holds to talk to the agent: a stream of poll updates, a
-/// sender for device commands, and a stream of pairing events (long-polled on a
-/// separate connection so a held pairing poll never stalls inventory).
+/// Handle the GUI holds to talk to the agent: a stream of state updates and a
+/// sender for device commands. Pairing progress arrives through the same state
+/// updates as everything else.
 pub struct IpcClient {
     pub updates: mpsc::UnboundedReceiver<GuiUpdate>,
     pub commands: mpsc::UnboundedSender<Command>,
-    pub pairing: mpsc::UnboundedReceiver<PairingUpdate>,
 }
 
 /// Spawn the IPC client thread. Returns immediately; the thread connects (and
@@ -133,7 +136,6 @@ pub struct IpcClient {
 pub fn spawn() -> IpcClient {
     let (update_tx, updates) = mpsc::unbounded_channel();
     let (commands, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
-    let (pairing_tx, pairing) = mpsc::unbounded_channel();
 
     let spawn_result = std::thread::Builder::new()
         .name("openlogi-ipc-client".into())
@@ -149,21 +151,14 @@ pub fn spawn() -> IpcClient {
                 }
             };
             rt.block_on(async move {
-                // Pairing events stream on their own connection + long-poll so
-                // a held next_pairing never delays the snapshot poll.
-                tokio::spawn(pairing_poll(pairing_tx.clone()));
-                observe_loop(&update_tx, &pairing_tx, &mut cmd_rx).await;
+                observe_loop(&update_tx, &mut cmd_rx).await;
             });
         });
     if let Err(e) = spawn_result {
         warn!(error = %e, "could not spawn IPC client thread — agent state unavailable");
     }
 
-    IpcClient {
-        updates,
-        commands,
-        pairing,
-    }
+    IpcClient { updates, commands }
 }
 
 /// The state/command loop.
@@ -175,7 +170,6 @@ pub fn spawn() -> IpcClient {
 /// held across command handling so a device write never cancels it.
 async fn observe_loop(
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
-    pairing_tx: &mpsc::UnboundedSender<PairingUpdate>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Command>,
 ) {
     let mut client: Option<AgentClient> = None;
@@ -229,10 +223,7 @@ async fn observe_loop(
             Woken::Command(None) => break, // GUI dropped the sender → shut down
             Woken::Command(Some(cmd)) => {
                 inflight = pending;
-                if handle(&mut client, update_tx, pairing_tx, cmd)
-                    .await
-                    .is_err()
-                {
+                if handle(&mut client, update_tx, cmd).await.is_err() {
                     client = None;
                     seen = 0;
                     connected_since = None;
@@ -308,62 +299,6 @@ fn ticker(period: Duration) -> tokio::time::Interval {
     let mut interval = tokio::time::interval(period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     interval
-}
-
-/// Long-poll the agent's pairing event stream on a dedicated connection, pushing
-/// each [`PairingUpdate`] to the GUI. Runs for the client's lifetime; when no
-/// session is active the agent returns `None` at its hold window and we re-poll.
-async fn pairing_poll(tx: mpsc::UnboundedSender<PairingUpdate>) {
-    let mut client: Option<AgentClient> = None;
-    // Whether the last forwarded update was non-terminal, i.e. the Add Device
-    // window believes a session is live. The agent guarantees a terminal event
-    // for every session end — but that guarantee dies with the process (a
-    // self-exec on update, a crash), and the replacement agent knows nothing
-    // of the session. Synthesize the failure then, or the window would sit in
-    // "Searching…" until the user cancels by hand.
-    let mut session_active = false;
-    loop {
-        match poll_pairing_once(&mut client, &tx, &mut session_active).await {
-            Ok(true) => {}       // delivered an event / hold elapsed; keep polling
-            Ok(false) => return, // GUI dropped the pairing receiver → stop
-            Err(()) => {
-                client = None; // connection dropped (agent restart) — reconnect
-                if session_active {
-                    session_active = false;
-                    let _ = tx.send(PairingUpdate::Failed(PairingFailure::AgentRestarted));
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        }
-    }
-}
-
-/// One pairing long-poll. `Ok(false)` means the GUI receiver is gone; `Err` a
-/// dropped connection the caller should reconnect.
-async fn poll_pairing_once(
-    client: &mut Option<AgentClient>,
-    tx: &mpsc::UnboundedSender<PairingUpdate>,
-    session_active: &mut bool,
-) -> Result<bool, ()> {
-    let Ok(client) = ensure(client).await else {
-        tokio::time::sleep(Duration::from_secs(1)).await; // agent not up yet
-        return Ok(true);
-    };
-    // The agent holds the poll ~20s; give the request a bit longer so the agent
-    // answers (with an event or None) before the client deadline fires.
-    let mut ctx = context::current();
-    ctx.deadline = Instant::now() + Duration::from_secs(25);
-    match client.next_pairing(ctx).await {
-        Ok(Some(update)) => {
-            *session_active = !matches!(
-                update,
-                PairingUpdate::Paired { .. } | PairingUpdate::Failed(_)
-            );
-            Ok(tx.send(update).is_ok())
-        }
-        Ok(None) => Ok(true),
-        Err(_) => Err(()),
-    }
 }
 
 /// Launch the agent once when the socket is unreachable. Detached so it
@@ -507,12 +442,11 @@ async fn ensure(client: &mut Option<AgentClient>) -> Result<&AgentClient, Connec
 async fn handle(
     client: &mut Option<AgentClient>,
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
-    pairing_tx: &mpsc::UnboundedSender<PairingUpdate>,
     cmd: Command,
 ) -> Result<(), ()> {
     // keep `client` None on connect failure; that's not a dropped live connection
     let Ok(client) = ensure(client).await else {
-        reply_disconnected(update_tx, pairing_tx, cmd);
+        reply_disconnected(update_tx, cmd);
         return Ok(());
     };
     let ctx = context::current();
@@ -573,13 +507,13 @@ async fn handle(
             .await
             .map_err(|_| ())?,
         Command::StartPairing(selector) => {
-            pairing_command_result(pairing_tx, client.start_pairing(ctx, selector).await)?;
+            pairing_command_result(update_tx, client.start_pairing(ctx, selector).await)?;
         }
         Command::PairDevice(address) => {
-            pairing_command_result(pairing_tx, client.pair_device(ctx, address).await)?;
+            pairing_command_result(update_tx, client.pair_device(ctx, address).await)?;
         }
         Command::CancelPairing => {
-            pairing_command_result(pairing_tx, client.cancel_pairing(ctx).await)?;
+            pairing_command_result(update_tx, client.cancel_pairing(ctx).await)?;
         }
         #[cfg(all(target_os = "macos", debug_assertions))]
         Command::PollEventMonitor(reply) => {
@@ -589,14 +523,17 @@ async fn handle(
     Ok(())
 }
 
+/// An accepted pairing command needs no reply — its progress shows up in the
+/// observed state. A *rejected* one never becomes a session, so the refusal is
+/// reported here or the window would wait for something that will never come.
 fn pairing_command_result(
-    tx: &mpsc::UnboundedSender<PairingUpdate>,
+    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     result: Result<Result<(), PairingCommandError>, tarpc::client::RpcError>,
 ) -> Result<(), ()> {
     match result.map_err(|_| ())? {
         Ok(()) => Ok(()),
         Err(error) => {
-            let _ = tx.send(PairingUpdate::Failed(PairingFailure::from(error)));
+            let _ = update_tx.send(GuiUpdate::PairingUndeliverable(PairingFailure::from(error)));
             Ok(())
         }
     }
@@ -653,11 +590,7 @@ fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
     clippy::match_same_arms,
     reason = "the two read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
 )]
-fn reply_disconnected(
-    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
-    pairing_tx: &mpsc::UnboundedSender<PairingUpdate>,
-    cmd: Command,
-) {
+fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command) {
     // Transient, not a permanent feature error: the agent is just restarting,
     // so the panel should keep retrying, not latch "unsupported".
     match cmd {
@@ -684,7 +617,9 @@ fn reply_disconnected(
             });
         }
         Command::StartPairing(_) | Command::PairDevice(_) => {
-            let _ = pairing_tx.send(PairingUpdate::Failed(PairingFailure::AgentRestarted));
+            let _ = update_tx.send(GuiUpdate::PairingUndeliverable(
+                PairingFailure::AgentRestarted,
+            ));
         }
         Command::CancelPairing => {}
         // Unlike the device commands above, a missed reload is not something a
@@ -714,9 +649,8 @@ mod tests {
         // dispatched, so dropping this result silently would leave the window
         // showing settings the agent is not running.
         let (update_tx, mut update_rx) = mpsc::unbounded_channel();
-        let (pairing_tx, _pairing_rx) = mpsc::unbounded_channel();
 
-        reply_disconnected(&update_tx, &pairing_tx, Command::ReloadConfig);
+        reply_disconnected(&update_tx, Command::ReloadConfig);
 
         let Ok(GuiUpdate::ConfigReloadResult(Err(error))) = update_rx.try_recv() else {
             panic!("a reload that never reached the agent must be reported as failed");

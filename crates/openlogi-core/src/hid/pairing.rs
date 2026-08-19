@@ -34,7 +34,7 @@ pub enum Click {
 /// included), so variant and field order are wire format — changes require a
 /// `PROTOCOL_VERSION` bump (guarded by
 /// `openlogi-ipc/tests/wire_format.rs`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PasskeyMethod {
     /// Type these digits on the new keyboard, then press Enter.
     Keyboard(String),

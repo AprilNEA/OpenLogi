@@ -46,7 +46,9 @@ pub use succession::Identity;
 /// v17: `reload_config` returns a typed parse/validation result.
 /// v18: `identity` appended (supervised helpers bind to one agent run).
 /// v19: `observe` appended (level-triggered state channel; see [`Agent::observe`]).
-pub const PROTOCOL_VERSION: u32 = 19;
+/// v20: `AgentSnapshot::pairing` appended — the pairing session is state now,
+///      not a stream of steps (see [`PairingPhase`]).
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -108,6 +110,36 @@ pub struct AgentSnapshot {
     /// Whether at least one host camera stream is currently in use.
     /// Runtime-only state used by camera-linked light rendering.
     pub camera_active: bool,
+    /// The pairing session the agent has open, if any. See [`PairingPhase`].
+    pub pairing: Option<PairingPhase>,
+}
+
+/// Where a pairing session stands.
+///
+/// State, not a stream of steps, and the GUI renders it directly. That is what
+/// makes an agent restart mid-session self-healing: the replacement agent has no
+/// session, so a window left on "Searching…" resolves itself instead of needing
+/// a terminal event synthesized on its behalf.
+///
+/// A terminal phase ([`Self::Paired`], [`Self::Failed`]) stays until the session
+/// is cancelled or a new one starts, so a result cannot fall between two
+/// observations the way an event can.
+///
+/// bincode encodes the variant *index*, so variants are append-only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PairingPhase {
+    /// Discovery (Bolt) or the pairing lock (Unifying) is open.
+    Searching,
+    /// Bolt: the devices discovered so far, in discovery order.
+    Found(Vec<FoundDevice>),
+    /// A discovered device was picked; the agent is driving the receiver.
+    Pairing,
+    /// Bolt: the device asks the user to authenticate with a passkey.
+    Passkey(PasskeyMethod),
+    /// A device paired into `slot`.
+    Paired { slot: u8 },
+    /// The session ended without pairing.
+    Failed(PairingFailure),
 }
 
 /// How long the agent holds an [`Agent::observe`] request that has nothing to
@@ -138,7 +170,7 @@ pub struct Observation {
 /// full `openlogi_hid::DiscoveredDevice` (kind, auth bits) internally, keyed by
 /// this address, so the wire form needs neither the non-serializable device-kind
 /// nor the auth bitfield.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FoundDevice {
     pub address: [u8; 6],
     pub name: String,
@@ -170,6 +202,10 @@ pub enum PairingFailure {
     /// The pairing watcher is unavailable inside the agent process.
     WatcherUnavailable,
     /// The background agent restarted during an active pairing session.
+    ///
+    /// No longer produced by the agent: a restart is now visible as the absence
+    /// of a session in [`PairingPhase`], so nothing has to synthesize this. The
+    /// GUI still reports it locally when a pairing command cannot be delivered.
     AgentRestarted,
     /// The agent could not store its exclusive receiver ownership lease.
     ReceiverAccessUnavailable,
@@ -357,8 +393,12 @@ pub trait Agent {
     /// Abort the in-progress pairing session.
     async fn cancel_pairing() -> Result<(), PairingCommandError>;
     /// Long-poll the next pairing step. Returns `None` when the agent's hold
-    /// window elapses with no event (the GUI simply re-polls); the GUI drives
-    /// this in a loop while the Add Device window is open.
+    /// window elapses with no event.
+    ///
+    /// Superseded by [`PairingPhase`] in [`AgentSnapshot::pairing`], which the
+    /// GUI observes instead — a session's progress is state, so it survives a
+    /// missed poll and a reconnect. The agent still serves this faithfully; the
+    /// method stays because trait order is wire format.
     async fn next_pairing() -> Option<PairingUpdate>;
     /// Atomically fetch status and the latest inventory for the GUI poll loop.
     ///

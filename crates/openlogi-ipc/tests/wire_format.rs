@@ -41,7 +41,7 @@ use openlogi_core::hid::{
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, ConfigReloadError, FoundDevice, Identity, InventoryHealth,
-    MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
     PairingUpdate,
 };
 use succession::{Compat, Run};
@@ -71,7 +71,7 @@ fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 19);
+    assert_eq!(PROTOCOL_VERSION, 20);
 }
 
 #[test]
@@ -245,15 +245,35 @@ fn agent_snapshot() {
         inventory: Vec::new(),
         standalone: Vec::new(),
         camera_active: false,
+        pairing: None,
     };
-    assert_wire(&snapshot, "010001010705302e362e36000000");
+    assert_wire(&snapshot, "010001010705302e362e3600000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e36000000");
+    assert_wire(&observed, "03010001010705302e362e3600000000");
+}
+
+/// The pairing session is state, so its phases are wire format like any enum.
+#[test]
+fn pairing_phases() {
+    assert_wire(&PairingPhase::Searching, "00");
+    assert_wire(
+        &PairingPhase::Found(vec![FoundDevice {
+            address: [1, 2, 3, 4, 5, 6],
+            name: "ERGO K860".into(),
+        }]),
+        "0101010203040506094552474f204b383630",
+    );
+    assert_wire(&PairingPhase::Pairing, "02");
+    assert_wire(&PairingPhase::Paired { slot: 3 }, "0403");
+    assert_wire(
+        &PairingPhase::Failed(PairingFailure::ReceiverNotFound),
+        "0501",
+    );
 }
 
 #[test]
