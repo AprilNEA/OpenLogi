@@ -67,8 +67,8 @@ pub use pairing::{
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
 };
 pub use route::{
-    BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, LIGHTSPEED_PIDS, UNIFYING_PIDS,
-    receiver_display_name, speaks_unifying_protocol,
+    BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, LIGHTSPEED_PIDS, LOGITECH_VENDOR_ID,
+    UNIFYING_PIDS, receiver_display_name, speaks_unifying_protocol,
 };
 pub use smartshift::{AUTO_DISENGAGE_PERMANENT, SmartShiftMode, SmartShiftStatus};
 pub use standalone::enumerate_standalone;

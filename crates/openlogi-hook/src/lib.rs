@@ -29,8 +29,10 @@ use std::cfg_select;
 
 pub use openlogi_core::binding::ButtonId;
 
-/// Logitech's USB/Bluetooth vendor id (`0x046D`).
-pub const LOGITECH_VENDOR_ID: u32 = 0x046d;
+/// Logitech's USB/Bluetooth vendor id (`0x046D`), widened from
+/// [`openlogi_core::hid::LOGITECH_VENDOR_ID`] because the hook's identity
+/// sources (IOKit, evdev) hand it back as a `u32`.
+pub const LOGITECH_VENDOR_ID: u32 = openlogi_core::hid::LOGITECH_VENDOR_ID as u32;
 
 /// Cursor position in the operating system's global screen coordinate space.
 #[derive(Clone, Copy, Debug, PartialEq)]

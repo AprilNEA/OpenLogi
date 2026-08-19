@@ -5427,6 +5427,7 @@ dependencies = [
  "objc2-io-kit",
  "opener",
  "openlogi-camera",
+ "openlogi-core",
  "tracing",
 ]
 

@@ -8,9 +8,9 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 
-use crate::PermissionStatus;
+use openlogi_core::hid::LOGITECH_VENDOR_ID;
 
-const LOGITECH_VID: u32 = 0x046d;
+use crate::PermissionStatus;
 
 /// Probe Linux input-device access: `/dev/uinput` (write) and at least one
 /// Logitech `/dev/hidraw*` (read/write).
@@ -90,7 +90,7 @@ fn is_logitech_hidraw(hidraw_name: &str) -> bool {
             && line
                 .split(':')
                 .nth(1)
-                .and_then(|vendor| u32::from_str_radix(vendor.trim(), 16).ok())
-                .is_some_and(|vid| vid == LOGITECH_VID)
+                .and_then(|vendor| u16::from_str_radix(vendor.trim(), 16).ok())
+                .is_some_and(|vid| vid == LOGITECH_VENDOR_ID)
     })
 }

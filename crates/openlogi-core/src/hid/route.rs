@@ -23,6 +23,11 @@ use crate::device::DeviceInventory;
 /// features (USB-cable or Bluetooth, no receiver indirection).
 pub const DIRECT_DEVICE_INDEX: u8 = 0xff;
 
+/// Logitech's USB/Bluetooth vendor ID. `u16` because that is the width of the
+/// field itself; readers whose API hands back a wider integer widen at the
+/// comparison.
+pub const LOGITECH_VENDOR_ID: u16 = 0x046d;
+
 /// How to reach a controllable HID++ device.
 ///
 /// Crosses the agent↔GUI IPC (every per-device RPC takes one), so variant and

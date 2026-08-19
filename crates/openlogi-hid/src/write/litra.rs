@@ -14,6 +14,7 @@ use openlogi_core::device::{LightCapabilities, LightValueRange, LightValueUnit};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::debug;
 
+use crate::LOGITECH_VENDOR_ID;
 use crate::route::DeviceRoute;
 
 use super::{WriteError, classify_hid_error};
@@ -23,8 +24,6 @@ use super::{WriteError, classify_hid_error};
 // own API surface doesn't churn.
 pub use openlogi_core::hid::light::LightCommand;
 
-/// Logitech vendor ID.
-pub const LOGITECH_VENDOR_ID: u16 = 0x046d;
 /// Stable driver-family identifier carried by standalone inventory records.
 pub const LITRA_DRIVER_ID: &str = "litra";
 /// Litra Glow product ID.

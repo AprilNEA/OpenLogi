@@ -15,8 +15,8 @@ use hidpp::{
 };
 
 pub use openlogi_core::hid::route::{
-    BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, LIGHTSPEED_PIDS, UNIFYING_PIDS, is_receiver_pid,
-    receiver_display_name, speaks_unifying_protocol,
+    BOLT_PIDS, DIRECT_DEVICE_INDEX, DeviceRoute, LIGHTSPEED_PIDS, LOGITECH_VENDOR_ID,
+    UNIFYING_PIDS, is_receiver_pid, receiver_display_name, speaks_unifying_protocol,
 };
 
 use crate::transport::{enumerate_hidpp_devices, open_hidpp_channel};

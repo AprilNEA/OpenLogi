@@ -44,6 +44,7 @@ use openlogi_core::device::{
     DeviceModelInfo, DeviceTransports, LightCapabilities, LightValueRange, LightValueUnit,
     PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
+use openlogi_core::hid::LOGITECH_VENDOR_ID;
 use openlogi_core::single_instance::{self, InstanceError};
 use openlogi_hid::{
     DIRECT_DEVICE_INDEX, DeviceRoute, DpiCapabilities, DpiInfo, LightCommand, PasskeyMethod,
@@ -64,7 +65,6 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-const LOGITECH_VID: u16 = 0x046d;
 /// Unique ID of the scripted Bolt receiver; Bolt routes are matched against it.
 const RECEIVER_UID: &str = "MOCK-BOLT-01";
 const MOUSE_SLOT: u8 = 1;
@@ -401,7 +401,7 @@ impl State {
 fn standalone_light() -> StandaloneDevice {
     StandaloneDevice {
         address: RawDeviceAddress {
-            vendor_id: LOGITECH_VID,
+            vendor_id: LOGITECH_VENDOR_ID,
             product_id: LITRA_PID,
             usage_page: 0xff43,
             usage_id: 0x0202,
@@ -433,7 +433,7 @@ fn standalone_light() -> StandaloneDevice {
 /// The route the GUI addresses the scripted light by.
 fn light_route() -> DeviceRoute {
     DeviceRoute::Direct {
-        vendor_id: LOGITECH_VID,
+        vendor_id: LOGITECH_VENDOR_ID,
         product_id: LITRA_PID,
     }
 }
@@ -443,7 +443,7 @@ fn settings_key(route: &DeviceRoute) -> Option<u8> {
     match route {
         DeviceRoute::Bolt { receiver_uid, slot } if receiver_uid == RECEIVER_UID => Some(*slot),
         DeviceRoute::Direct {
-            vendor_id: LOGITECH_VID,
+            vendor_id: LOGITECH_VENDOR_ID,
             product_id: DIRECT_PID,
         } => Some(DIRECT_DEVICE_INDEX),
         _ => None,
@@ -472,7 +472,7 @@ fn bolt_inventory(mouse_battery: BatteryInfo) -> DeviceInventory {
     DeviceInventory {
         receiver: ReceiverInfo {
             name: "Logi Bolt Receiver".to_string(),
-            vendor_id: LOGITECH_VID,
+            vendor_id: LOGITECH_VENDOR_ID,
             product_id: 0xc548,
             unique_id: Some(RECEIVER_UID.to_string()),
         },
@@ -565,7 +565,7 @@ fn direct_inventory() -> DeviceInventory {
     DeviceInventory {
         receiver: ReceiverInfo {
             name: "MX Vertical".to_string(),
-            vendor_id: LOGITECH_VID,
+            vendor_id: LOGITECH_VENDOR_ID,
             product_id: DIRECT_PID,
             unique_id: None,
         },

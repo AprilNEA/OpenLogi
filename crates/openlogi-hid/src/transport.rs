@@ -27,6 +27,7 @@ use hidpp::{async_trait, channel::RawHidChannel};
 use tokio::sync::Mutex;
 use tracing::debug;
 
+use crate::LOGITECH_VENDOR_ID;
 use crate::write::{WriteError, classify_hid_error, matches_litra};
 
 /// Bitmask of leased HID++ software ids (`1..=15`; bit `N` means id `N` is taken).
@@ -46,8 +47,6 @@ use windows::WindowsHidppChannel;
 #[cfg(test)]
 use windows::normalize_collection_path;
 
-/// Logitech HID vendor ID.
-const LOGITECH_VID: u16 = 0x046d;
 /// HID++ long-report vendor collections, as `(usage_page, usage_id, long_only)`.
 ///
 /// Logitech exposes its HID++ long-report (report id `0x11`) under a
@@ -132,7 +131,7 @@ pub(crate) async fn enumerate_devices() -> Result<Vec<async_hid::Device>, async_
     // One-time visibility into what the OS actually reports for Logitech nodes,
     // so a transport that uses an unexpected vendor page (e.g. a new BLE mouse)
     // can be diagnosed from `OPENLOGI_LOG=debug` without a rebuild.
-    for d in all.iter().filter(|d| d.vendor_id == LOGITECH_VID) {
+    for d in all.iter().filter(|d| d.vendor_id == LOGITECH_VENDOR_ID) {
         debug!(
             name = %d.name,
             pid = format_args!("{:04x}", d.product_id),
@@ -195,7 +194,7 @@ fn is_hidpp_candidate(
     usage_id: u16,
     receiver_child: bool,
 ) -> bool {
-    vendor_id == LOGITECH_VID
+    vendor_id == LOGITECH_VENDOR_ID
         && is_hidpp_long_collection(usage_page, usage_id)
         && !matches_litra(vendor_id, product_id, usage_page, usage_id)
         && !receiver_child
@@ -243,7 +242,7 @@ fn is_receiver_child_sysfs_path(path: &str) -> bool {
         .chain(crate::UNIFYING_PIDS.iter())
         .chain(crate::LIGHTSPEED_PIDS.iter())
         .any(|&pid| {
-            let marker = format!(":{LOGITECH_VID:04X}:{pid:04X}.");
+            let marker = format!(":{LOGITECH_VENDOR_ID:04X}:{pid:04X}.");
             // A parent component contains the marker followed by at least one
             // more "/" — it is not the terminal component of the path.
             path.find(&marker)
