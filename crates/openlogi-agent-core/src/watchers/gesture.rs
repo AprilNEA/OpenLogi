@@ -34,7 +34,9 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
-use crate::hook_runtime::{ActionDispatcher, SharedHookMaps};
+use crate::hook_runtime::ActionDispatcher;
+#[cfg(test)]
+use crate::hook_runtime::SharedHookMaps;
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
 
 /// How often to re-read the device capture plans. It also paces the respawn of
@@ -98,6 +100,7 @@ pub fn spawn(
 /// Non-default sensitivity or rotation bindings require diversion so OpenLogi
 /// can re-synthesise the rotation. An explicit tap binding also requires
 /// diversion; whether a forwarded tap is dispatched remains live agent policy.
+#[cfg(test)]
 pub(crate) fn thumbwheel_capture_mode(
     hook_maps: &SharedHookMaps,
     sensitivity: i32,
@@ -210,6 +213,7 @@ enum DoneAction {
 /// A diverted thumb wheel can keep reporting taps while an app/profile switch
 /// removes its click binding. The provenance bit gates those stale in-flight
 /// reports; other captured buttons use the effective action map directly.
+#[cfg(test)]
 pub(crate) fn captured_button_action(
     hook_maps: &SharedHookMaps,
     button: ButtonId,
