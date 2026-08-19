@@ -32,6 +32,7 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
 use crate::hardware::DeviceOp;
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
+use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
@@ -155,6 +156,10 @@ pub struct Orchestrator {
     /// transition clears them; they are never written to the config.
     manual_light_overrides: BTreeMap<String, bool>,
     shared: SharedRuntime,
+    /// The state the GUI observes. Every mutator below that changes one of its
+    /// facts republishes here, so the cell cannot go stale behind a new code
+    /// path — see [`ObservableState`].
+    observable: Arc<ObservableState>,
 }
 
 /// See [`Orchestrator::inventory`] (the field) — the agent-side superset of
@@ -175,8 +180,11 @@ impl Orchestrator {
     /// Build from a loaded config. Creates the shared `Arc`s and seeds them
     /// from the config with no devices yet; the first inventory tick fills in
     /// the routes and presets.
+    ///
+    /// `observable` is the cell the IPC server answers from; the config facts
+    /// it carries are seeded here.
     #[must_use]
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, observable: Arc<ObservableState>) -> Self {
         let shared = SharedRuntime {
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
@@ -202,8 +210,11 @@ impl Orchestrator {
             camera_active: None,
             manual_light_overrides: BTreeMap::new(),
             shared,
+            observable,
         };
         orch.rebuild();
+        orch.observable
+            .set_launch_at_login(orch.config.app_settings.launch_at_login);
         orch
     }
 
@@ -399,6 +410,7 @@ impl Orchestrator {
             inventories: inventories.to_vec(),
             standalone: standalone.to_vec(),
         };
+        self.publish_inventory();
         let devices = build_devices(inventories, standalone);
         // Volatile settings (lighting colour, sensor DPI, SmartShift, native
         // wheel mode) live in device RAM and reset on a power cycle. Every
@@ -515,6 +527,7 @@ impl Orchestrator {
         }
         let previous = self.camera_active;
         self.camera_active = Some(active);
+        self.observable.set_camera_active(active);
         self.manual_light_overrides.clear();
         let mut applied = 0;
         for dev in self
@@ -608,13 +621,6 @@ impl Orchestrator {
         }
     }
 
-    /// The latest aggregate camera-use sample, or `false` before the first
-    /// successful macOS observation.
-    #[must_use]
-    pub fn camera_active(&self) -> bool {
-        self.camera_active.unwrap_or(false)
-    }
-
     /// Snapshot the active device and effective ring layout for a new
     /// invocation. `None` means the ring is disabled, empty, or has no active
     /// persistent device. The returned layout is owned so later config and
@@ -662,6 +668,26 @@ impl Orchestrator {
         }
     }
 
+    /// Republish the device facts the GUI observes, reading the one field that
+    /// holds them so this can never disagree with the `inventory` /
+    /// `standalone` / `inventory_health` accessors. Called by every mutator
+    /// that touches the `inventory` field, and it clones only when something
+    /// actually changed.
+    fn publish_inventory(&self) {
+        let health = self.inventory_health();
+        match &self.inventory {
+            InventoryState::Ready {
+                inventories,
+                standalone,
+            } => self
+                .observable
+                .set_inventory(health, inventories, standalone),
+            InventoryState::Pending | InventoryState::Unavailable => {
+                self.observable.set_inventory(health, &[], &[]);
+            }
+        }
+    }
+
     /// Record that enumeration has never worked and has stopped being treated
     /// as "still starting" (persistent initial failure, or the watcher died).
     /// Downgrades only [`InventoryState::Pending`]: once a snapshot exists the
@@ -670,13 +696,8 @@ impl Orchestrator {
     pub fn mark_inventory_unavailable(&mut self) {
         if matches!(self.inventory, InventoryState::Pending) {
             self.inventory = InventoryState::Unavailable;
+            self.publish_inventory();
         }
-    }
-
-    /// Whether autostart is enabled in the current config (for IPC `status`).
-    #[must_use]
-    pub fn launch_at_login(&self) -> bool {
-        self.config.app_settings.launch_at_login
     }
 
     /// Foreground-app change → re-overlay per-app bindings on the hook maps and
@@ -706,6 +727,8 @@ impl Orchestrator {
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
         self.config = config;
+        self.observable
+            .set_launch_at_login(self.config.app_settings.launch_at_login);
         let retained_overrides: HashSet<String> = self
             .manual_light_overrides
             .keys()

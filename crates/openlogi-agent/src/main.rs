@@ -31,12 +31,16 @@ mod tray;
 mod tray_windows;
 
 use std::sync::Arc;
+// Only the resume-notification flag is atomic now, and that exists on the two
+// platforms that have a native suspend/resume signal.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::hook_runtime::ActionDispatcher;
+use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::{hook_runtime, watchers};
 use openlogi_core::config::Config;
@@ -178,6 +182,31 @@ fn action_ring_runtime(
     (manager, receiver, dispatcher)
 }
 
+/// Install the OS mouse hook now that Accessibility is granted, or say why it
+/// stays off. `None` means no hook is running, which is what the observable
+/// state reports either way.
+fn start_hook(
+    capture_mouse_events: bool,
+    shared: &SharedRuntime,
+    dispatcher: &ActionDispatcher,
+    event_monitor: &Arc<EventMonitor>,
+) -> Option<Hook> {
+    if !capture_mouse_events {
+        info!(
+            "OS mouse hook disabled by app_settings.capture_mouse_events — \
+             button remapping is off"
+        );
+        return None;
+    }
+    info!("accessibility granted — installing OS mouse hook");
+    hook_runtime::start(
+        shared.hook_maps.clone(),
+        shared.keyboard_bindings.clone(),
+        dispatcher.clone(),
+        Arc::clone(event_monitor),
+    )
+}
+
 async fn begin_action_ring(
     orchestrator: &Mutex<Orchestrator>,
     action_ring: &ActionRingManager,
@@ -243,9 +272,15 @@ async fn run(
     // The orchestrator is shared with the IPC server (which serves inventory /
     // reload / status) and mutated by the watcher select loop, so it lives
     // behind an async mutex. Locks are brief (a map rebuild or a clone).
-    let orchestrator = Arc::new(Mutex::new(Orchestrator::new(config)));
+    // One cell holds everything the GUI can observe. The orchestrator
+    // republishes the device and config facts from its own mutators; the hook
+    // facts are published by the select loop below, which owns the hook.
+    let observable = Arc::new(ObservableState::new(env!("CARGO_PKG_VERSION").to_string()));
+    let orchestrator = Arc::new(Mutex::new(Orchestrator::new(
+        config,
+        Arc::clone(&observable),
+    )));
     let shared = orchestrator.lock().await.shared();
-    let hook_installed = Arc::new(AtomicBool::new(false));
     let (action_ring, mut action_ring_rx, dispatcher) = action_ring_runtime(&shared);
 
     // Live event monitor: shared between the hook callback (which mirrors events
@@ -274,7 +309,7 @@ async fn run(
     let server = AgentServer::new(
         Arc::clone(&orchestrator),
         shared.clone(),
-        Arc::clone(&hook_installed),
+        Arc::clone(&observable),
         Arc::clone(&pairing),
         Arc::clone(&event_monitor),
         Arc::clone(&action_ring),
@@ -340,27 +375,21 @@ async fn run(
                 begin_action_ring(&orchestrator, &action_ring, &ring_haptics, device_key.as_deref()).await;
             }
             Some(granted) = accessibility_rx.recv() => {
+                observable.set_accessibility_granted(granted);
                 if !granted {
                     hook = None;
-                    hook_installed.store(false, Ordering::Relaxed);
                 }
                 if granted && hook.is_none() {
-                    if capture_mouse_events {
-                        info!("accessibility granted — installing OS mouse hook");
-                        hook = hook_runtime::start(
-                            shared.hook_maps.clone(),
-                            shared.keyboard_bindings.clone(),
-                            dispatcher.clone(),
-                            Arc::clone(&event_monitor),
-                        );
-                        hook_installed.store(hook.is_some(), Ordering::Relaxed);
-                    } else {
-                        info!(
-                            "OS mouse hook disabled by app_settings.capture_mouse_events — \
-                             button remapping is off"
-                        );
-                    }
+                    hook = start_hook(
+                        capture_mouse_events,
+                        &shared,
+                        &dispatcher,
+                        &event_monitor,
+                    );
                 }
+                // One publish for every path above: revoked, installed, kept,
+                // or never installed because capture is off.
+                observable.set_hook_installed(hook.is_some());
             }
             else => break,
         }

@@ -6,7 +6,6 @@
 //! "apply now" / "read" commands here, and polls snapshots.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
@@ -14,6 +13,7 @@ use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
 use openlogi_agent_core::hardware;
 use openlogi_agent_core::hook_runtime::ActionDispatcher;
+use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
@@ -45,7 +45,9 @@ use tracing::{info, warn};
 pub struct AgentServer {
     pub orchestrator: Arc<Mutex<Orchestrator>>,
     pub shared: SharedRuntime,
-    pub hook_installed: Arc<AtomicBool>,
+    /// Everything the GUI observes, answered from here rather than recomposed
+    /// per request: reads take no orchestrator lock and no permission syscall.
+    pub observable: Arc<ObservableState>,
     pub pairing: Arc<PairingManager>,
     pub event_monitor: SharedEventMonitor,
     pub action_ring: Arc<ActionRingManager>,
@@ -58,7 +60,7 @@ impl AgentServer {
     pub fn new(
         orchestrator: Arc<Mutex<Orchestrator>>,
         shared: SharedRuntime,
-        hook_installed: Arc<AtomicBool>,
+        observable: Arc<ObservableState>,
         pairing: Arc<PairingManager>,
         event_monitor: SharedEventMonitor,
         action_ring: Arc<ActionRingManager>,
@@ -68,7 +70,7 @@ impl AgentServer {
         Self {
             orchestrator,
             shared,
-            hook_installed,
+            observable,
             pairing,
             event_monitor,
             action_ring,
@@ -90,22 +92,11 @@ impl Agent for AgentServer {
     }
 
     async fn status(self, _: Context) -> AgentStatus {
-        let (launch_at_login, inventory) = {
-            let orch = self.orchestrator.lock().await;
-            (orch.launch_at_login(), orch.inventory_health())
-        };
-        AgentStatus {
-            accessibility_granted: Hook::has_accessibility(),
-            hook_installed: self.hook_installed.load(Ordering::Relaxed),
-            launch_at_login,
-            inventory,
-            protocol_version: PROTOCOL_VERSION,
-            agent_version: env!("CARGO_PKG_VERSION").to_string(),
-        }
+        self.observable.read(|state| state.status.clone())
     }
 
     async fn inventory(self, _: Context) -> Vec<DeviceInventory> {
-        self.orchestrator.lock().await.inventory()
+        self.observable.read(|state| state.inventory.clone())
     }
 
     async fn reload_config(self, _: Context) -> Result<(), ConfigReloadError> {
@@ -215,29 +206,7 @@ impl Agent for AgentServer {
     }
 
     async fn snapshot(self, _: Context) -> AgentSnapshot {
-        let (launch_at_login, inventory_health, inventory, standalone, camera_active) = {
-            let orch = self.orchestrator.lock().await;
-            (
-                orch.launch_at_login(),
-                orch.inventory_health(),
-                orch.inventory(),
-                orch.standalone(),
-                orch.camera_active(),
-            )
-        };
-        AgentSnapshot {
-            status: AgentStatus {
-                accessibility_granted: Hook::has_accessibility(),
-                hook_installed: self.hook_installed.load(Ordering::Relaxed),
-                launch_at_login,
-                inventory: inventory_health,
-                protocol_version: PROTOCOL_VERSION,
-                agent_version: env!("CARGO_PKG_VERSION").to_string(),
-            },
-            inventory,
-            standalone,
-            camera_active,
-        }
+        self.observable.snapshot()
     }
 
     async fn poll_event_monitor(self, _: Context) -> Vec<MonitorEvent> {
