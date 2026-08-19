@@ -117,23 +117,58 @@ pub enum BacklightEffect {
 }
 
 /// The current backlight status from `getBacklightInfo`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+///
+/// Newer `0x1982` firmware reports status codes beyond the six this enum names
+/// — an Alto Keys K98M on version 4 answers `6`. An unrecognised code is kept
+/// verbatim in [`Self::Unknown`] rather than failing the decode, so one
+/// unfamiliar byte cannot take down the whole backlight read; callers already
+/// treat the enum as `#[non_exhaustive]` and fall back on their own default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
-#[repr(u8)]
 pub enum BacklightStatus {
     /// Disabled by software.
-    DisabledBySoftware = 0,
+    DisabledBySoftware,
     /// Disabled because the battery is critically low.
-    DisabledByCriticalBattery = 1,
+    DisabledByCriticalBattery,
     /// Automatic (ALS) mode.
-    AlsAutomatic = 2,
+    AlsAutomatic,
     /// Automatic mode, saturated — the backlight is off.
-    AlsSaturated = 3,
+    AlsSaturated,
     /// Temporary manual mode (set by hardware).
-    TemporaryManual = 4,
+    TemporaryManual,
     /// Permanent manual mode (set by software).
-    PermanentManual = 5,
+    PermanentManual,
+    /// A status code this version of OpenLogi does not model, kept as reported.
+    Unknown(u8),
+}
+
+impl From<u8> for BacklightStatus {
+    fn from(raw: u8) -> Self {
+        match raw {
+            0 => Self::DisabledBySoftware,
+            1 => Self::DisabledByCriticalBattery,
+            2 => Self::AlsAutomatic,
+            3 => Self::AlsSaturated,
+            4 => Self::TemporaryManual,
+            5 => Self::PermanentManual,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+impl From<BacklightStatus> for u8 {
+    fn from(status: BacklightStatus) -> Self {
+        match status {
+            BacklightStatus::DisabledBySoftware => 0,
+            BacklightStatus::DisabledByCriticalBattery => 1,
+            BacklightStatus::AlsAutomatic => 2,
+            BacklightStatus::AlsSaturated => 3,
+            BacklightStatus::TemporaryManual => 4,
+            BacklightStatus::PermanentManual => 5,
+            BacklightStatus::Unknown(raw) => raw,
+        }
+    }
 }
 
 /// The backlight configuration from [`BacklightFeature::get_backlight_config`].
@@ -318,8 +353,7 @@ impl BacklightFeature {
         Ok(BacklightInfo {
             nb_levels: payload[0],
             current_level: payload[1],
-            status: BacklightStatus::try_from(payload[2])
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+            status: BacklightStatus::from(payload[2]),
             effect: BacklightEffect::try_from(payload[3])
                 .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
             oob_duration_hands_out: u16::from_le_bytes([payload[4], payload[5]]),
@@ -340,8 +374,7 @@ impl BacklightInfoUpdate {
         Ok(Self {
             nb_levels: payload[0],
             current_level: payload[1],
-            status: BacklightStatus::try_from(payload[2])
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+            status: BacklightStatus::from(payload[2]),
             effect: BacklightEffect::try_from(payload[3])
                 .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
         })
@@ -385,6 +418,26 @@ mod tests {
         assert_eq!(update.current_level, 5);
         assert_eq!(update.status, BacklightStatus::PermanentManual);
         assert_eq!(update.effect, BacklightEffect::Breathing);
+    }
+
+    #[test]
+    fn keeps_unmodelled_status_codes() {
+        // An Alto Keys K98M on `0x1982` v4 answers `getBacklightInfo` with
+        // status 6, which none of the six named variants cover. Decoding has to
+        // survive it — erroring here used to fail the entire backlight read.
+        let mut payload = [0; 16];
+        payload[0] = 8;
+        payload[1] = 2;
+        payload[2] = 6;
+        payload[3] = 0;
+
+        let update = BacklightInfoUpdate::from_payload(&payload).unwrap();
+        assert_eq!(update.status, BacklightStatus::Unknown(6));
+        assert_eq!(update.nb_levels, 8);
+        assert_eq!(update.current_level, 2);
+        assert_eq!(update.effect, BacklightEffect::Static);
+        // The raw code survives the round trip so diagnostics can report it.
+        assert_eq!(u8::from(update.status), 6);
     }
 
     #[test]
