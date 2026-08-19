@@ -18,7 +18,7 @@ use gpui_component::{
 };
 use gpui_updater::Updater;
 
-use crate::app_menu::{CloseWindow, Minimize, Zoom};
+use crate::app::menu::{CloseWindow, Minimize, Zoom};
 use crate::state::AppState;
 use crate::ui::theme;
 use crate::windows::{self, AuxWindow};

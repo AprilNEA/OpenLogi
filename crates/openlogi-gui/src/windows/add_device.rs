@@ -26,7 +26,7 @@ use gpui_component::{
 use openlogi_core::hid::{Click, PasskeyMethod, ReceiverSelector};
 use openlogi_ipc::{FoundDevice, PairingFailure, PairingUpdate};
 
-use crate::app_menu::{CloseWindow, Minimize, Zoom};
+use crate::app::menu::{CloseWindow, Minimize, Zoom};
 use crate::services::ipc::Command;
 use crate::state::AppState;
 use crate::ui::theme::{self, Palette, Typography as _};

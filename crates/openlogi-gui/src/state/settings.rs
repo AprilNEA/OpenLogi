@@ -202,6 +202,6 @@ impl AppState {
         self.persist_config("language setting");
         openlogi_gui::locale::activate(self.config.app_settings.language.as_deref());
         cx.refresh_windows();
-        crate::app_menu::rebuild(cx);
+        crate::app::menu::rebuild(cx);
     }
 }

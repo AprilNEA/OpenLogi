@@ -38,7 +38,7 @@ pub(super) use openlogi_core::config::{
     MIN_THUMBWHEEL_SENSITIVITY,
 };
 
-pub(super) use crate::app_menu::{CloseWindow, Minimize, Zoom};
+pub(super) use crate::app::menu::{CloseWindow, Minimize, Zoom};
 #[cfg(target_os = "macos")]
 pub(super) use crate::platform::permissions::Permission;
 #[cfg(any(target_os = "macos", target_os = "linux"))]

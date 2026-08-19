@@ -23,7 +23,7 @@ use super::widgets::{
     route_label, sidebar_action, status_badge,
 };
 use super::{AppView, DetailTab};
-use crate::app_menu::file_url;
+use crate::app::menu::file_url;
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;

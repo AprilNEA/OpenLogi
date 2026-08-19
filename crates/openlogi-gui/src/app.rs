@@ -13,7 +13,7 @@ use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
 
-use crate::app_menu::{CloseWindow, Minimize, Zoom};
+use self::menu::{CloseWindow, Minimize, Zoom};
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
@@ -29,6 +29,7 @@ use crate::ui::theme::{self, Palette, Typography as _};
 
 mod detail;
 mod home;
+pub(crate) mod menu;
 mod status;
 mod widgets;
 

@@ -30,7 +30,6 @@ macro_rules! tr {
 }
 
 mod app;
-mod app_menu;
 mod features;
 mod platform;
 mod services;
@@ -88,7 +87,7 @@ fn dispatch_gui_command(command: DeeplinkCommand, cx: &mut gpui::App) {
         }
         Cmd::CheckForUpdates => {
             ensure_main_window(cx);
-            app_menu::check_for_updates(cx);
+            app::menu::check_for_updates(cx);
         }
     }
 }
@@ -198,7 +197,7 @@ fn main() -> Result<()> {
     app.run(move |cx| {
         gpui_component::init(cx);
         theme::register_builtin_themes(cx);
-        app_menu::install(cx);
+        app::menu::install(cx);
 
         // Seed the Add Device window's initial state. Its buttons drive pairing
         // through the agent over IPC; the agent's pairing long-poll feeds events
@@ -385,7 +384,7 @@ fn main() -> Result<()> {
                                 cx.refresh_windows();
                             }
                             if merged {
-                                app_menu::rebuild(cx);
+                                app::menu::rebuild(cx);
                             }
                             (auto_download, asset_source, models)
                         });

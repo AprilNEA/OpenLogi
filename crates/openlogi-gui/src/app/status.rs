@@ -11,7 +11,7 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::app_menu::OpenConfigFolder;
+use crate::app::menu::OpenConfigFolder;
 use crate::ui::theme::{self, FOOTER_H, Palette, Typography as _};
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"

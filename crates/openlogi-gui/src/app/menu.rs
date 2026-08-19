@@ -1,4 +1,4 @@
-//! macOS application menu bar.
+//! Application menus and actions.
 //!
 //! GPUI's menu support is driven by registered actions + a `Keymap`: the
 //! platform layer reads bindings via `cx.set_menus` and stamps the matching
