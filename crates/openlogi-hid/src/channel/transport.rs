@@ -4,7 +4,7 @@
 //! descriptor, but `async-hid 0.4` only exposes descriptors on Linux. We avoid
 //! that path by pre-filtering to the Logitech HID++ vendor collections at
 //! enumeration time (see [`HIDPP_LONG_COLLECTIONS`]) and reporting support
-//! straight from [`AsyncHidChannel::supports_short_long_hidpp`]: USB / receiver
+//! straight from [`hidpp::channel::RawHidChannel::supports_short_long_hidpp`]: USB / receiver
 //! collections carry both reports; BLE-direct collections are long-only, and the
 //! `hidpp` channel up-converts outgoing short messages to long for them.
 
