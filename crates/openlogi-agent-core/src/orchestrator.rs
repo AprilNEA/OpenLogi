@@ -164,6 +164,10 @@ pub struct Orchestrator {
     /// Transient manual power choices for camera-linked lights. A camera-use
     /// transition clears them; they are never written to the config.
     manual_light_overrides: BTreeMap<String, bool>,
+    /// Whether the OS mouse hook is currently installed. Device-owned
+    /// Back/Forward gestures need its pointer deltas, so their HID++ diversion
+    /// is published only while this is true.
+    os_mouse_hook_available: bool,
     shared: SharedRuntime,
     /// The state the GUI observes. Every mutator below that changes one of its
     /// facts republishes here, so the cell cannot go stale behind a new code
@@ -223,6 +227,7 @@ impl Orchestrator {
             reapply_followup: HashMap::new(),
             camera_active: None,
             manual_light_overrides: BTreeMap::new(),
+            os_mouse_hook_available: false,
             shared,
             observable,
         };
@@ -323,11 +328,7 @@ impl Orchestrator {
     /// forget the other — a waking device needs both its capture session and
     /// its DPI-cycle slot.
     fn publish_device_runtime(&self) {
-        write_value(
-            &self.shared.capture_plans,
-            self.capture_plans_for(),
-            "capture_plans",
-        );
+        self.publish_capture_plans();
         self.rebuild_dpi_cycles(self.current_key());
         // Keyboard F-key bindings are global (not per-device), so they key off
         // the top-level config map rather than the selected device. Published
@@ -347,6 +348,14 @@ impl Orchestrator {
             &self.shared.keyboard_spec,
             self.keyboard_spec_for(),
             "keyboard_spec",
+        );
+    }
+
+    fn publish_capture_plans(&self) {
+        write_value(
+            &self.shared.capture_plans,
+            self.capture_plans_for(),
+            "capture_plans",
         );
     }
 
@@ -401,9 +410,23 @@ impl Orchestrator {
                     route,
                     self.current_app.as_deref(),
                     rearm_generation,
+                    self.os_mouse_hook_available,
                 ))
             })
             .collect()
+    }
+
+    /// Publish whether the OS movement hook is currently usable.
+    ///
+    /// HID++ Back/Forward diversion is coupled to this state because its
+    /// gesture accumulator receives movement from the hook. Other HID++-only
+    /// controls do not depend on Accessibility and remain captured.
+    pub fn set_os_mouse_hook_available(&mut self, available: bool) {
+        if self.os_mouse_hook_available == available {
+            return;
+        }
+        self.os_mouse_hook_available = available;
+        self.publish_capture_plans();
     }
 
     /// Apply a fresh inventory snapshot. Always refreshes the snapshot the IPC
