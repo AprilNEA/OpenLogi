@@ -110,6 +110,8 @@ _version: 1
 "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.": "Behold OpenLogi-ikonet i menylinjen. Når av forblir det i Dock-en i stedet."
 "Show in the notification area": "Vis i varslingsområdet"
 "Keep OpenLogi's icon in the taskbar notification area. Takes effect the next time the background agent starts.": "Beholder OpenLogi-ikonet i varslingsområdet på oppgavelinjen. Trer i kraft neste gang bakgrunnsagenten starter."
+"Haptics API for other apps": "Haptikk-API for andre apper"
+"Let apps on this computer trigger your mouse's haptics over a local socket. Off by default; takes effect the next time the background agent starts.": "La apper på denne datamaskinen utløse musens haptiske tilbakemelding over en lokal socket. Av som standard; trer i kraft neste gang bakgrunnsagenten starter."
 "Assets": "Ressurser"
 "Asset source": "Asset source"
 "Automatic (recommended)": "Automatic (recommended)"

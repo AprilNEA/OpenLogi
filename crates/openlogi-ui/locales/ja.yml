@@ -110,6 +110,8 @@ _version: 1
 "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.": "OpenLogi のアイコンをメニューバーに表示します。オフにすると Dock に残ります。"
 "Show in the notification area": "通知領域に表示"
 "Keep OpenLogi's icon in the taskbar notification area. Takes effect the next time the background agent starts.": "タスクバーの通知領域に OpenLogi のアイコンを表示します。バックグラウンドエージェントの次回起動時に反映されます。"
+"Haptics API for other apps": "他のアプリ向けハプティクス API"
+"Let apps on this computer trigger your mouse's haptics over a local socket. Off by default; takes effect the next time the background agent starts.": "このコンピュータ上のアプリがローカルソケット経由でマウスのハプティクスを実行できるようにします。既定ではオフです。バックグラウンドエージェントの次回起動時に反映されます。"
 "Assets": "アセット"
 "Asset source": "アセットソース"
 "Automatic (recommended)": "自動（推奨）"

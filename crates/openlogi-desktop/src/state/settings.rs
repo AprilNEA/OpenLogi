@@ -45,6 +45,19 @@ impl AppState {
         self.config.app_settings.show_in_menu_bar = enabled;
         self.persist_and_reload("show-in-menu-bar setting");
     }
+    /// Toggle the JSON haptics API and persist it.
+    ///
+    /// The agent binds `haptic.sock` once at startup, so — like the menu-bar
+    /// switch — this one describes the next agent launch rather than this
+    /// instant. The reload still goes out so the agent's *other* config stays
+    /// current. No-op when unchanged.
+    pub fn set_haptic_api(&mut self, enabled: bool) {
+        if self.config.app_settings.haptic_api == enabled {
+            return;
+        }
+        self.config.app_settings.haptic_api = enabled;
+        self.persist_and_reload("haptics-API setting");
+    }
     /// Toggle the opt-in update check and persist it. No immediate side
     /// effect beyond the next launch reading the new value. No-op when
     /// unchanged.
