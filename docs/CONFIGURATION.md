@@ -40,6 +40,9 @@ optional physical device key.
 `[app_settings]` contains application-wide preferences:
 
 - startup, update, menu-bar / tray, input-capture, and asset-download toggles
+- `haptic_api`: serve the JSON haptics socket for third-party apps
+  (off by default; takes effect on agent restart — see
+  [HAPTIC-API.md](HAPTIC-API.md))
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
 - `language`, `appearance`, optional theme names, and optional UI radius
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)

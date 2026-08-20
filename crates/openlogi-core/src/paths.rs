@@ -159,6 +159,19 @@ pub fn agent_socket_path() -> Result<PathBuf, PathsError> {
     Ok(runtime_dir()?.join("agent.sock"))
 }
 
+/// Path to the agent's optional JSON haptics socket — the integration API for
+/// third-party apps, off unless `app_settings.haptic_api` is set.
+///
+/// Deliberately a second endpoint rather than a second protocol on
+/// [`agent_socket_path`]: that socket carries the full agent contract (device
+/// writes, pairing, config reloads) in a positional binary format both ends
+/// must agree on exactly, while this one exposes haptics alone in a format a
+/// script can speak. Keeping them apart is what lets the integration surface
+/// stay small no matter how the internal one grows.
+pub fn haptic_socket_path() -> Result<PathBuf, PathsError> {
+    Ok(runtime_dir()?.join("haptic.sock"))
+}
+
 #[cfg(test)]
 #[cfg(unix)]
 #[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]

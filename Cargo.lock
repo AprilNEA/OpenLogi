@@ -5153,6 +5153,8 @@ dependencies = [
  "openlogi-hook",
  "openlogi-ipc",
  "plist",
+ "serde",
+ "serde_json",
  "succession",
  "sysinfo 0.38.4",
  "tarpc",

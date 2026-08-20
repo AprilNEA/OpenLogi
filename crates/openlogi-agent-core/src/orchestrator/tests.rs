@@ -27,6 +27,7 @@ fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
     AgentDevice {
         config_key: key.to_string(),
         model_key: key.to_string(),
+        name: None,
         route: Some(DeviceRoute::Bolt {
             receiver_uid: "AA00".to_string(),
             slot,
@@ -45,6 +46,7 @@ fn raw_light_dev(key: &str) -> AgentDevice {
     AgentDevice {
         config_key: key.to_string(),
         model_key: "Litra Glow".to_string(),
+        name: Some("Litra Glow".to_string()),
         route: Some(DeviceRoute::RawHid {
             vendor_id: 0x046d,
             product_id: 0xc900,

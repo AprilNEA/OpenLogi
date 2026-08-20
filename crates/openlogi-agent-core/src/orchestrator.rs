@@ -45,6 +45,9 @@ use crate::{DpiCycleState, DpiCycles};
 struct AgentDevice {
     config_key: String,
     model_key: String,
+    /// Human-readable label, when the device supplied one. Purely for display
+    /// to a person — never matched on; `config_key` is the identity.
+    name: Option<String>,
     route: Option<DeviceRoute>,
     slot: u8,
     serial: Option<String>,
@@ -680,6 +683,45 @@ impl Orchestrator {
         buzzable(device)
     }
 
+    /// The same resolution keyed by `config_key` — the stable per-device
+    /// identifier the JSON haptics API hands to third-party callers, since a
+    /// `DeviceRoute` is an internal addressing detail they should not have to
+    /// reconstruct (and which changes when a device is re-paired).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::haptic_route`].
+    pub fn haptic_route_for_key(&self, requested: Option<&str>) -> Result<DeviceRoute, WriteError> {
+        let device = match requested {
+            Some(key) => self.devices.iter().find(|device| device.config_key == key),
+            None => self.active_device(),
+        };
+        buzzable(device)
+    }
+
+    /// Every online device with a haptic engine, as `(key, label)` pairs for
+    /// the JSON API's device listing.
+    #[must_use]
+    pub fn haptic_devices(&self) -> Vec<(String, String)> {
+        self.devices
+            .iter()
+            .filter(|device| {
+                device.online
+                    && device.route.is_some()
+                    && device
+                        .capabilities
+                        .is_some_and(|capabilities| capabilities.haptic_feedback)
+            })
+            .map(|device| {
+                let label = device
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| device.model_key.clone());
+                (device.config_key.clone(), label)
+            })
+            .collect()
+    }
+
     fn active_device(&self) -> Option<&AgentDevice> {
         let key = self.current_key()?;
         self.devices.iter().find(|device| device.config_key == key)
@@ -879,6 +921,7 @@ fn build_devices(
             devices.push(AgentDevice {
                 config_key: config_key.into_string(),
                 model_key: model.config_key(),
+                name: paired.codename.clone(),
                 route,
                 slot: paired.slot,
                 serial: model.serial_number.clone(),
@@ -910,6 +953,7 @@ fn build_devices(
         devices.push(AgentDevice {
             config_key: config_key.into_string(),
             model_key: device.display_name.clone(),
+            name: Some(device.display_name.clone()),
             route: Some(route),
             slot: DIRECT_DEVICE_INDEX,
             serial: device.serial_number.clone(),

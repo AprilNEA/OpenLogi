@@ -8,6 +8,8 @@ check_for_updates = false
 auto_install_updates = false
 show_in_menu_bar = true
 capture_mouse_events = true
+# Off by default. See docs/HAPTIC-API.md.
+haptic_api = false
 auto_download_assets = true
 asset_source = "automatic"
 language = "en"
