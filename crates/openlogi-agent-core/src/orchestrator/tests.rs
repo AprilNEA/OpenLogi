@@ -18,6 +18,7 @@ use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_core::hid::Dpi;
 use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::observable::ObservableState;
 
@@ -903,28 +904,36 @@ fn app_switch_republishes_capture_plans() {
     assert_eq!(published_back_binding(&orch), Some(Action::Undo));
 }
 
-#[test]
-fn macos_side_gesture_capture_follows_mouse_hook_availability() {
+#[tokio::test]
+async fn macos_side_gesture_capture_follows_mouse_hook_availability() {
     let mut config = Config::default();
     config.set_gesture_mode("a", ButtonId::Forward, true);
     let mut orch = orchestrator(config);
     orch.devices = vec![dev("a", 1, true)];
     orch.rebuild();
+    let capture_plan_changed = Arc::clone(&orch.shared.capture_plan_changed);
+    tokio::time::timeout(Duration::from_millis(100), capture_plan_changed.notified())
+        .await
+        .expect("initial capture-plan notification should be pending");
 
-    let side_gesture_is_published = |orch: &Orchestrator| {
+    let side_gesture_is_armed = |orch: &Orchestrator| {
         orch.shared
             .capture_plans
             .read()
             .expect("capture plans should not be poisoned")[0]
-            .side_gesture_bindings
-            .contains_key(&ButtonId::Forward)
+            .divert_gesture_buttons
+            .iter()
+            .any(|&(_, button)| button == ButtonId::Forward)
     };
     assert!(
-        !side_gesture_is_published(&orch),
+        !side_gesture_is_armed(&orch),
         "HID++ diversion must wait for the movement hook"
     );
 
     orch.set_os_mouse_hook_available(true);
+    tokio::time::timeout(Duration::from_millis(100), capture_plan_changed.notified())
+        .await
+        .expect("hook installation should wake capture reconciliation");
     if cfg!(target_os = "macos") {
         let hook_maps = orch
             .shared
@@ -933,7 +942,7 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
             .expect("hook maps should not be poisoned");
         assert!(!hook_maps.bindings.contains_key(&ButtonId::Forward));
         assert!(!hook_maps.gestures.contains_key(&ButtonId::Forward));
-        assert!(side_gesture_is_published(&orch));
+        assert!(side_gesture_is_armed(&orch));
     } else {
         let hook_maps = orch
             .shared
@@ -941,12 +950,16 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
             .read()
             .expect("hook maps should not be poisoned");
         assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
-        assert!(!side_gesture_is_published(&orch));
+        assert!(!side_gesture_is_armed(&orch));
     }
 
+    let revoked = capture_plan_changed.notified();
     orch.set_os_mouse_hook_available(false);
+    tokio::time::timeout(Duration::from_millis(100), revoked)
+        .await
+        .expect("hook revocation should wake capture reconciliation");
     assert!(
-        !side_gesture_is_published(&orch),
+        !side_gesture_is_armed(&orch),
         "revoking the movement hook must restore native HID++ controls"
     );
 }
