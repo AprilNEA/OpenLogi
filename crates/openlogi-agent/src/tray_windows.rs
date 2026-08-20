@@ -176,7 +176,7 @@ unsafe extern "system" fn wnd_proc(
 /// `NIM_ADD` fails silently and the existing icon stays).
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "`cbSize` is a u32 field and NOTIFYICONDATAW is a few hundred bytes"
+    reason = "NOTIFYICONDATAW is a few hundred bytes"
 )]
 unsafe fn add_tray_icon(hwnd: HWND) {
     // SAFETY: `nid` is fully initialized below; the tip buffer is bounded.
@@ -408,7 +408,7 @@ fn spawn_gui() {
 /// are immediate).
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "`cbSize` is a u32 field and NOTIFYICONDATAW is a few hundred bytes"
+    reason = "NOTIFYICONDATAW is a few hundred bytes"
 )]
 fn quit(hwnd: HWND) {
     use sysinfo::{Pid, ProcessesToUpdate, System};

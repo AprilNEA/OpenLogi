@@ -498,7 +498,7 @@ pub(crate) fn cursor_position() -> Option<CursorPosition> {
 
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "the path buffer is a fixed 32768 u16s, so its length fits a u32 by construction"
+    reason = "the path buffer is a fixed 32768 u16s"
 )]
 pub(crate) fn frontmost_process_path() -> Option<String> {
     // SAFETY: GetForegroundWindow takes no arguments and returns a window handle

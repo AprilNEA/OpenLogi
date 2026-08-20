@@ -23,7 +23,7 @@
 )]
 #![expect(
     clippy::expect_used,
-    reason = "the fixture helpers below sit outside any `#[test]` fn, which is the one test shape `allow-expect-in-tests` cannot see"
+    reason = "the fixture helpers sit outside any `#[test]` fn, where `allow-expect-in-tests` cannot see them"
 )]
 
 use std::collections::BTreeMap;

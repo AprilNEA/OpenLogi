@@ -15,13 +15,11 @@
     clippy::too_many_arguments,
     reason = "GPUI builders take owned Copy palette values and slot tables"
 )]
-// Not `expect`: the only float_cmp sites are `assert_eq!` on layout px in the
-// tests below, and rustc does not credit an expectation with a lint raised
-// inside a macro expansion — it would suppress the warning and then report
-// itself unfulfilled, which `-D warnings` turns into an unfixable error.
+// Not `expect`: these fire inside `assert_eq!`, and rustc does not credit an
+// expectation with a lint raised in a macro expansion.
 #![allow(
     clippy::float_cmp,
-    reason = "callout layout px are computed by the same code path in test and product, so equality is exact"
+    reason = "test and product compute the callout px through the same path"
 )]
 
 use std::rc::Rc;

@@ -18,7 +18,7 @@ use openlogi_permissions as permissions;
     not(any(target_os = "macos", target_os = "linux")),
     allow(
         unused_variables,
-        reason = "`has_camera` only gates a macOS/Linux permission row; every other platform builds an empty page"
+        reason = "`has_camera` only gates a macOS/Linux row; elsewhere the page is empty"
     )
 )]
 pub(super) fn permissions_page(pal: Palette, has_camera: bool) -> SettingPage {

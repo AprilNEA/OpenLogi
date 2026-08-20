@@ -981,23 +981,19 @@ fn control_label(control: CameraControl) -> SharedString {
     }
 }
 
-/// UVC control values are integers; the GPUI slider works in `f32`. Both
-/// conversions are exact for the ranges a camera reports (a few hundred at
-/// most), and routing every cast through this pair keeps the justification in
-/// one place instead of a file-wide blanket.
+/// A UVC control value as the GPUI slider wants it.
 #[expect(
     clippy::cast_precision_loss,
-    reason = "a UVC control range is orders of magnitude below f32's 24-bit exact integer range"
+    reason = "a UVC control range is far below f32's exact integer range"
 )]
 fn to_slider(value: i32) -> f32 {
     value as f32
 }
 
-/// Inverse of [`to_slider`]. The slider is stepped by 1 over the reported
-/// range, so its value is already a whole number inside that range.
+/// Inverse of [`to_slider`].
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "rounded first, and the slider is bounded by the control's own i32 range"
+    reason = "the slider steps by 1 over the control's own i32 range"
 )]
 fn from_slider(value: f32) -> i32 {
     value.round() as i32
