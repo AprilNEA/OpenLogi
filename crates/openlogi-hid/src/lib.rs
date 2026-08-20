@@ -47,7 +47,8 @@ pub use channel_pool::ChannelPool;
 pub use channel_registry::ChannelRegistry;
 pub use gesture::{
     CaptureChannel, CaptureStop, CapturedInput, GestureError, run_capture_session,
-    run_capture_session_with_registry, run_capture_session_with_stop_reason,
+    run_capture_session_with_registry, run_capture_session_with_spec_updates,
+    run_capture_session_with_stop_reason,
 };
 pub use hires_wheel::{
     ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode,

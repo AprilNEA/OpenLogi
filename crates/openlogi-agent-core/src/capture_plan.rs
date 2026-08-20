@@ -32,9 +32,9 @@ pub struct DeviceCapturePlan {
     /// keyed by the button its captured swipes dispatch as; empty when none
     /// gestures.
     pub gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    /// Standard buttons whose device or per-app binding leaves the default —
-    /// divert over `0x1b04`. A button that stays at its default everywhere
-    /// keeps its native HID behavior, so no re-synthesis is ever needed.
+    /// Standard buttons whose binding leaves the default — divert over
+    /// `0x1b04`. A button at its default keeps its native HID behavior, so no
+    /// re-synthesis is ever needed.
     pub divert_buttons: Vec<(u16, ButtonId)>,
     /// Whether any thumbwheel binding leaves its default. Combined with the
     /// sensitivity to decide thumb-wheel diversion.
@@ -50,18 +50,6 @@ pub struct DeviceCapturePlan {
 /// Shared plan list, rewritten by the orchestrator and read by the watcher.
 pub type SharedCapturePlans = Arc<RwLock<Vec<DeviceCapturePlan>>>;
 
-/// Whether a single-mode HID++ control must be diverted for `action`.
-fn action_requires_diversion(button: ButtonId, action: &Action) -> bool {
-    // The panel has no useful native click to preserve: None alone means leave
-    // its firmware haptics untouched. Other controls stay native at their
-    // canonical default and need capture only for a real override.
-    if button == ButtonId::HapticPanel {
-        *action != Action::None
-    } else {
-        *action != default_binding(button)
-    }
-}
-
 /// Build one device's plan from the config (per-app effective for `app`).
 #[must_use]
 pub fn plan_for_device(
@@ -72,7 +60,9 @@ pub fn plan_for_device(
     rearm_generation: u64,
 ) -> DeviceCapturePlan {
     let bindings = bindings_for(config, Some(config_key), app);
-    let global_bindings = bindings_for(config, Some(config_key), None);
+    // A gesture-mode OS-hook button must stay native: the hook needs to see
+    // its press to run hold+swipe detection, and diverting it would starve the
+    // hook of events.
     let oshook = oshook_gestures_for(config, Some(config_key), app);
     // One direction map per HID++ source in gesture mode — several may
     // gesture at once, each armed with its own raw-XY divert (the watcher
@@ -85,42 +75,22 @@ pub fn plan_for_device(
     let plain_sources = GESTURE_SOURCE_BUTTONS
         .into_iter()
         .filter(|(_, button)| !gesture_bindings.contains_key(button));
-    // Capture ownership is device-scoped, not foreground-app-scoped. If any
-    // app needs a single-mode control diverted, keep it diverted continuously
-    // and resolve each press through the current effective `bindings` map.
-    // Otherwise entering/leaving that app restarts the whole device session,
-    // briefly restoring unrelated gesture controls to their firmware actions.
-    let requires_stable_diversion = |button: ButtonId| {
-        if config.is_gesture_mode(config_key, button) {
-            // Preserve the existing app-specific handoff: the OS hook needs
-            // native events while the button gestures, while a per-app single
-            // override may need HID++ diversion on devices without that path.
-            return !oshook.contains_key(&button)
-                && bindings
-                    .get(&button)
-                    .is_some_and(|action| action_requires_diversion(button, action));
-        }
-        global_bindings
-            .get(&button)
-            .is_some_and(|action| action_requires_diversion(button, action))
-            || config.devices.get(config_key).is_some_and(|device| {
-                device.per_app_bindings.values().any(|app_bindings| {
-                    app_bindings
-                        .get(&button)
-                        .is_some_and(|action| action_requires_diversion(button, action))
-                })
-            })
-    };
     let divert_buttons: Vec<(u16, ButtonId)> = DIVERTABLE_STANDARD_BUTTONS
         .into_iter()
-        .filter(|(_, button)| requires_stable_diversion(*button))
-        // Gesture-source single bindings retain their existing current-app
-        // semantics, especially HapticPanel=None meaning native haptics.
-        .chain(plain_sources.filter(|(_, button)| {
-            bindings
-                .get(button)
-                .is_some_and(|action| action_requires_diversion(*button, action))
-        }))
+        .chain(plain_sources)
+        .filter(|(_, button)| !oshook.contains_key(button))
+        .filter(|(_, button)| {
+            bindings.get(button).is_some_and(|action| {
+                // The panel's default is ShowActionsRing, which must be
+                // diverted to open the ring. Action::None means "leave native
+                // firmware haptics alone", so treat None as the only non-divert.
+                if *button == ButtonId::HapticPanel {
+                    *action != Action::None
+                } else {
+                    *action != default_binding(*button)
+                }
+            })
+        })
         .collect();
     let thumbwheel_bindings_nondefault = [
         ButtonId::Thumbwheel,
@@ -324,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn per_app_single_button_override_does_not_change_the_divert_set() {
+    fn per_app_single_button_override_changes_only_that_apps_divert_set() {
         let mut cfg = Config::default();
         cfg.set_per_app_binding(
             "2b042",
@@ -336,42 +306,19 @@ mod tests {
         let global = plan_for_device(&cfg, "2b042", route(), None, 0);
         let editor = plan_for_device(&cfg, "2b042", route(), Some("com.example.Editor"), 0);
 
-        assert_eq!(
-            global.divert_buttons, editor.divert_buttons,
-            "foreground-app changes must not restart capture for a single-mode button"
-        );
         assert!(
-            global
+            !global
                 .divert_buttons
                 .iter()
                 .any(|&(_, button)| button == ButtonId::Back),
-            "the per-app override still needs a continuously diverted Back button"
+            "the global default keeps Back on its original path"
         );
-        assert_ne!(
-            global.bindings.get(&ButtonId::Back),
-            editor.bindings.get(&ButtonId::Back),
-            "dispatch must still use the foreground app's effective action"
-        );
-    }
-
-    #[test]
-    fn per_app_none_keeps_haptic_panel_native_in_that_app() {
-        let mut cfg = Config::default();
-        cfg.set_per_app_binding(
-            "2b042",
-            "com.example.Editor",
-            ButtonId::HapticPanel,
-            Some(Action::None),
-        );
-
-        let editor = plan_for_device(&cfg, "2b042", route(), Some("com.example.Editor"), 0);
-
         assert!(
-            !editor
+            editor
                 .divert_buttons
                 .iter()
-                .any(|&(_, button)| button == ButtonId::HapticPanel),
-            "HapticPanel=None means leave firmware haptics native"
+                .any(|&(_, button)| button == ButtonId::Back),
+            "the app override diverts Back only in that app"
         );
     }
 }

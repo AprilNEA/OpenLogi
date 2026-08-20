@@ -1,9 +1,9 @@
 //! Background HID++ control-capture watcher, one session per online device.
 //!
 //! Runs [`openlogi_hid::run_capture_session`] concurrently for every device in
-//! the shared capture-plan list (not just the GUI's selection), restarts a
-//! session when its device's plan — route, diverted controls, thumb-wheel
-//! arming — changes, and dispatches each captured input against the binding
+//! the shared capture-plan list (not just the GUI's selection), reloads its
+//! control capture when a plan changes, and dispatches each captured input
+//! against the binding
 //! maps of the device it arrived on:
 //!
 //! - a gesture swipe through the gesture binding map,
@@ -27,8 +27,10 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{Action, ButtonId, default_binding};
 use openlogi_core::config::DEFAULT_THUMBWHEEL_SENSITIVITY;
 use openlogi_hid::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
-use tokio::sync::{mpsc, oneshot};
+use openlogi_hid::{
+    CaptureChannel, CapturedInput, DeviceRoute, run_capture_session_with_spec_updates,
+};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, warn};
 
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
@@ -126,7 +128,39 @@ struct RunningSession {
     /// the session is draining — deliberately stopped, but its task (and the
     /// control-restore writes in its teardown) may still be in flight.
     stop: Option<oneshot::Sender<()>>,
+    /// Latest complete capture spec for the live session. Plan changes use this
+    /// path instead of cycling the HID++ channel and listener.
+    spec_updates: watch::Sender<CaptureSpec>,
     epoch: u64,
+}
+
+type WantedSessions = HashMap<String, (DeviceRoute, CaptureSpec, u64)>;
+
+/// Reload plans on the live channel, and stop only sessions whose route or
+/// reconnect generation changed or whose device disappeared.
+fn reconcile_running_sessions(
+    sessions: &mut HashMap<String, RunningSession>,
+    want: &WantedSessions,
+) {
+    for (key, session) in sessions {
+        let keep = want.get(key).is_some_and(|(route, spec, rearm)| {
+            if *route != session.route || *rearm != session.rearm_generation {
+                return false;
+            }
+            if session.spec == *spec {
+                return true;
+            }
+            if session.spec_updates.send(spec.clone()).is_err() {
+                false
+            } else {
+                session.spec.clone_from(spec);
+                true
+            }
+        });
+        if !keep && let Some(stop) = session.stop.take() {
+            let _ = stop.send(());
+        }
+    }
 }
 
 /// What the manager should do with one session-completion report.
@@ -162,9 +196,9 @@ fn on_done(done_epoch: u64, live: Option<&RunningSession>) -> DoneAction {
     }
 }
 
-/// Keep one capture session alive per online device, restarting a session when
-/// its device's plan changes, and dispatch incoming inputs against the plan of
-/// the device they arrived on. Runs for the lifetime of the process.
+/// Keep one capture session alive per online device, reloading its capture spec
+/// when the plan changes, and dispatch incoming inputs against the plan of the
+/// device they arrived on. Runs for the lifetime of the process.
 async fn manage(
     capture_plans: SharedCapturePlans,
     capture_channel: CaptureChannel,
@@ -204,7 +238,7 @@ async fn manage(
                 // While pairing is waiting or active, release every capture
                 // session so run_pairing can own the receiver's HID node (one
                 // process can't read it through two channels).
-                let want: HashMap<String, (DeviceRoute, CaptureSpec, u64)> =
+                let want: WantedSessions =
                     if receiver_access.exclusive_requested() {
                         HashMap::new()
                     } else {
@@ -227,8 +261,9 @@ async fn manage(
                             })
                             .unwrap_or_default()
                     };
-                // Stop sessions whose device disappeared or whose plan changed.
-                // Sending on the oneshot lets the session restore its controls.
+                // Reload capture changes on the existing channel. Stop only
+                // when the route/generation changes or the device disappears.
+                // Sending on the oneshot lets a stopped session restore its controls.
                 // A stopped session stays tracked — stop sender taken — until
                 // its task reports completion below, and a tracked key is never
                 // re-armed: arming the replacement while the old task may still
@@ -236,16 +271,7 @@ async fn manage(
                 // restore writes on the same device, leaving a control
                 // un-diverted while the new session believes it owns it,
                 // however many ticks the restore takes.
-                for (key, session) in &mut sessions {
-                    let keep = want.get(key).is_some_and(|(route, spec, rearm)| {
-                        *route == session.route
-                            && *spec == session.spec
-                            && *rearm == session.rearm_generation
-                    });
-                    if !keep && let Some(stop) = session.stop.take() {
-                        let _ = stop.send(());
-                    }
-                }
+                reconcile_running_sessions(&mut sessions, &want);
                 accumulators.retain(|key, _| want.contains_key(key));
                 for (key, (route, spec, rearm_generation)) in want {
                     if sessions.contains_key(&key) {
@@ -315,6 +341,7 @@ fn spawn_session(
     capture_channel: &CaptureChannel,
 ) -> RunningSession {
     let (stop_tx, stop_rx) = oneshot::channel();
+    let (spec_update_tx, spec_update_rx) = watch::channel(spec.clone());
     // Tag this session's inputs with its device key so dispatch resolves them
     // against the right plan.
     let (session_tx, mut session_rx) = mpsc::unbounded_channel::<CapturedInput>();
@@ -327,12 +354,17 @@ fn spawn_session(
     });
     let done = done.clone();
     let session_route = route.clone();
-    let session_spec = spec.clone();
     let slot = Arc::clone(capture_channel);
     tokio::spawn(async move {
         let _lease = lease;
-        if let Err(e) =
-            run_capture_session(session_route, session_spec, session_tx, stop_rx, slot).await
+        if let Err(e) = run_capture_session_with_spec_updates(
+            session_route,
+            session_tx,
+            spec_update_rx,
+            stop_rx,
+            slot,
+        )
+        .await
         {
             debug!(error = %e, "capture session ended");
         }
@@ -345,6 +377,7 @@ fn spawn_session(
         spec,
         rearm_generation,
         stop: Some(stop_tx),
+        spec_updates: spec_update_tx,
         epoch,
     }
 }
@@ -655,6 +688,7 @@ mod tests {
 
     /// A session whose stop sender is already gone (taken by a deliberate stop).
     fn stopped_session_with_epoch(epoch: u64) -> RunningSession {
+        let (spec_updates, _updates) = watch::channel(CaptureSpec::default());
         RunningSession {
             route: DeviceRoute::Direct {
                 vendor_id: 0x046d,
@@ -663,6 +697,7 @@ mod tests {
             spec: CaptureSpec::default(),
             rearm_generation: 0,
             stop: None,
+            spec_updates,
             epoch,
         }
     }
@@ -712,5 +747,97 @@ mod tests {
             on_done(7, Some(&stopped_session_with_epoch(7))),
             DoneAction::Remove { unexpected: false }
         );
+    }
+
+    #[test]
+    fn every_spec_change_keeps_the_session_and_publishes_the_complete_spec() {
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+        };
+        let changed_specs = [
+            CaptureSpec {
+                divert_buttons: vec![(0x0053, ButtonId::Back)],
+                ..CaptureSpec::default()
+            },
+            CaptureSpec {
+                divert_gesture_sources: vec![0x00c3],
+                ..CaptureSpec::default()
+            },
+            CaptureSpec {
+                capture_thumbwheel: true,
+                ..CaptureSpec::default()
+            },
+        ];
+
+        for wanted in changed_specs {
+            let (stop, _stopped) = oneshot::channel();
+            let (spec_updates, mut updates) = watch::channel(CaptureSpec::default());
+            let mut sessions = HashMap::from([(
+                "mouse".to_owned(),
+                RunningSession {
+                    route: route.clone(),
+                    spec: CaptureSpec::default(),
+                    rearm_generation: 0,
+                    stop: Some(stop),
+                    spec_updates,
+                    epoch: 1,
+                },
+            )]);
+            let want = HashMap::from([("mouse".to_owned(), (route.clone(), wanted.clone(), 0))]);
+
+            reconcile_running_sessions(&mut sessions, &want);
+
+            let session = &sessions["mouse"];
+            assert!(
+                session.stop.is_some(),
+                "a capture-spec change must not stop the capture session"
+            );
+            assert_eq!(session.spec, wanted);
+            assert!(updates.has_changed().unwrap_or(false));
+            assert_eq!(*updates.borrow_and_update(), wanted);
+        }
+    }
+
+    #[test]
+    fn route_or_rearm_change_stops_the_session() {
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+        };
+        let changed_targets = [
+            (
+                DeviceRoute::Direct {
+                    vendor_id: 0x046d,
+                    product_id: 0xb023,
+                },
+                0,
+            ),
+            (route.clone(), 1),
+        ];
+
+        for (wanted_route, wanted_generation) in changed_targets {
+            let (stop, _stopped) = oneshot::channel();
+            let (spec_updates, _updates) = watch::channel(CaptureSpec::default());
+            let mut sessions = HashMap::from([(
+                "mouse".to_owned(),
+                RunningSession {
+                    route: route.clone(),
+                    spec: CaptureSpec::default(),
+                    rearm_generation: 0,
+                    stop: Some(stop),
+                    spec_updates,
+                    epoch: 1,
+                },
+            )]);
+            let want = HashMap::from([(
+                "mouse".to_owned(),
+                (wanted_route, CaptureSpec::default(), wanted_generation),
+            )]);
+
+            reconcile_running_sessions(&mut sessions, &want);
+
+            assert!(sessions["mouse"].stop.is_none());
+        }
     }
 }
