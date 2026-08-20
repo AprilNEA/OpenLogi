@@ -16,9 +16,12 @@ and every crate inherits it with `[lints] workspace = true` — never a private 
 the next lint added to the workspace silently skips that crate. A crate needing a
 different level opts out **in source** (the `openlogi-hook` platform modules carry
 `#![allow(unsafe_code, reason = "…")]`), because Cargo rejects mixing `workspace = true`
-with local overrides. `openlogi-hidpp` currently stays out of the table — it is a **hard
-fork**, so the "third-party code" rationale for that opt-out no longer holds; whether it
-should now inherit is an open question, costed in `crates/openlogi-hidpp/AGENTS.md`.
+with local overrides. `openlogi-hidpp` inherits the table like everything else, hard
+fork or not.
+
+Workspace-wide clippy *configuration* lives in `clippy.toml` at the root. It currently
+carries `allow-unwrap-in-tests` / `allow-expect-in-tests`, so test code never needs to
+restate that exemption by hand.
 
 The table: `unsafe_code = "deny"` (opt out per item with `#[expect(unsafe_code,
 reason = "…")]` plus a `// SAFETY:` comment), `clippy::pedantic` at warn,
@@ -31,18 +34,54 @@ a `reason`. What that changes day to day:
 - Every `unsafe` block needs a `// SAFETY:` comment saying why it is sound.
 - `assert!(r.is_ok())` / `assert!(r.is_err())` are rejected — unwrap the `Result` (in a
   test module that already allows it) or give the assertion a message.
-- A test module that wants `expect`/`unwrap` says so:
-  `#[allow(clippy::expect_used, reason = "expect/unwrap are idiomatic in tests")]` on the
-  module (or on its `mod tests;` declaration). Never route around the lint with
-  `unwrap_or_else(|e| panic!("…: {e}"))` — that is the same panic with the check switched
-  off. The one honest use of that form is a *dynamic* panic message, where `expect` would
-  need a `format!` that allocates on the happy path (`expect_fun_call`).
+- Tests use `expect`/`unwrap` freely: `clippy.toml` exempts `#[cfg(test)]` modules and
+  `#[test]` functions, so **do not** add a suppression for it. The one shape clippy
+  cannot see is a free helper in a `tests/` integration file, outside any `#[test]` fn —
+  that file needs a `#![expect(clippy::expect_used, reason = "…")]`. Never route around
+  the lint with `unwrap_or_else(|e| panic!("…: {e}"))` — that is the same panic with the
+  check switched off. The one honest use of that form is a *dynamic* panic message,
+  where `expect` would need a `format!` that allocates on the happy path
+  (`expect_fun_call`).
 - A test module gated on more than `test` needs stacked attributes (`#[cfg(test)]` then
   `#[cfg(unix)]`), not `#[cfg(all(test, unix))]`, which clippy reads as a test outside a
   test module. Integration tests under `tests/` carry a file-level
   `#![expect(clippy::tests_outside_test_module, reason = "…")]`.
 - `std::process::exit` needs `#[expect(clippy::exit, reason = "…")]` naming why that call
   site cannot hand an `ExitCode` back to `main` instead.
+
+### `expect` by default, `allow` only when `expect` would break
+
+`#[allow]` goes quiet the day it stops suppressing anything, so suppressions rot in
+place — an audit in 2026-08 found 20 dead ones, including three module-wide `dead_code`
+blankets that had been inert since their modules went `pub`. `#[expect]` reports itself
+unfulfilled instead, which `-D warnings` turns into a failure. **Default to `expect`.**
+
+Three cases where `expect` is wrong and `allow` is correct — each needs a comment saying
+which one applies, or the next reader will "fix" it back:
+
+- **The lint fires only under some `cfg`.** `platform::os_version` returns `Some(…)` on
+  macOS (so `unnecessary_wraps` fires) and `None` elsewhere (so it does not). An
+  `expect` there is green on macOS and red on the other two lanes.
+- **Fulfilment differs between a crate's targets.** A `dead_code` suppression on a
+  helper that only the tests call is fulfilled in the `--lib` build and unfulfilled in
+  the `--test` build; `--all-targets` compiles both, so one of them always warns. These
+  are usually `cfg_attr`-wrapped already.
+- **The lint is raised inside a macro expansion.** rustc does not credit an expectation
+  with such a lint: it suppresses the warning *and* reports itself unfulfilled. A
+  `float_cmp` on floats compared inside `assert_eq!` is the case in this tree.
+
+Scope a suppression to the item that needs it. A file-level `#![expect(cast_…)]` also
+covers every cast added to that file later, which is how a bounded-by-construction
+argument silently becomes a blanket one. Prefer removing the need instead: `cast_signed`
+/ `cast_unsigned` for bit-reinterpreting casts, `&raw const` / `&raw mut` for raw-pointer
+coercions, `to_le_bytes` for byte splitting, or one shared conversion helper carrying the
+single suppression when a file converts the same pair of types over and over.
+
+Sweeping for rot is mechanical: rewrite every non-`cfg_attr` `allow(` to `expect(`, run
+clippy, and each "this lint expectation is unfulfilled" is a suppression to delete.
+Do it on all three lanes — `cargo clippy`, `--target x86_64-pc-windows-gnu`, and
+`--target aarch64-unknown-linux-musl` — because CI has no macOS clippy job and a
+platform-gated suppression is only ever evaluated on its own platform.
 
 Encode invariants in the type system instead of checking them at runtime:
 
