@@ -902,3 +902,35 @@ fn app_switch_republishes_capture_plans() {
     orch.set_current_app(Some(ForegroundApp::unnamed("com.example.editor".into())));
     assert_eq!(published_back_binding(&orch), Some(Action::Undo));
 }
+
+#[test]
+fn macos_side_gesture_has_only_the_device_owned_dispatch_path() {
+    let mut config = Config::default();
+    config.set_gesture_mode("a", ButtonId::Forward, true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+
+    let hook_maps = orch
+        .shared
+        .hook_maps
+        .read()
+        .expect("hook maps should not be poisoned");
+    let plans = orch
+        .shared
+        .capture_plans
+        .read()
+        .expect("capture plans should not be poisoned");
+    if cfg!(target_os = "macos") {
+        assert!(!hook_maps.bindings.contains_key(&ButtonId::Forward));
+        assert!(!hook_maps.gestures.contains_key(&ButtonId::Forward));
+        assert!(
+            plans[0]
+                .side_gesture_bindings
+                .contains_key(&ButtonId::Forward)
+        );
+    } else {
+        assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
+        assert!(plans[0].side_gesture_bindings.is_empty());
+    }
+}
