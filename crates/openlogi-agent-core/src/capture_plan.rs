@@ -292,4 +292,33 @@ mod tests {
             "an unbound gesture button must not be captured"
         );
     }
+
+    #[test]
+    fn per_app_single_button_override_changes_only_that_apps_divert_set() {
+        let mut cfg = Config::default();
+        cfg.set_per_app_binding(
+            "2b042",
+            "com.example.Editor",
+            ButtonId::Back,
+            Some(Action::Undo),
+        );
+
+        let global = plan_for_device(&cfg, "2b042", route(), None, 0);
+        let editor = plan_for_device(&cfg, "2b042", route(), Some("com.example.Editor"), 0);
+
+        assert!(
+            !global
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Back),
+            "the global default keeps Back on its original path"
+        );
+        assert!(
+            editor
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Back),
+            "the app override diverts Back only in that app"
+        );
+    }
 }

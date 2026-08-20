@@ -23,6 +23,71 @@ fn reporting(
     }
 }
 
+#[test]
+fn requested_mode_is_native_when_a_control_is_absent() {
+    assert_eq!(
+        requested_reprog_mode(&CaptureSpec::default(), reprog_controls::GESTURE_BUTTON_CID),
+        ReprogMode::Native
+    );
+}
+
+#[test]
+fn requested_mode_is_plain_for_a_diverted_button() {
+    let spec = CaptureSpec {
+        divert_buttons: vec![(reprog_controls::GESTURE_BUTTON_CID, ButtonId::GestureButton)],
+        ..CaptureSpec::default()
+    };
+
+    assert_eq!(
+        requested_reprog_mode(&spec, reprog_controls::GESTURE_BUTTON_CID),
+        ReprogMode::Plain(ButtonId::GestureButton)
+    );
+}
+
+#[test]
+fn raw_xy_takes_precedence_over_a_duplicate_plain_divert() {
+    let spec = CaptureSpec {
+        divert_gesture_sources: vec![reprog_controls::GESTURE_BUTTON_CID],
+        divert_buttons: vec![(reprog_controls::GESTURE_BUTTON_CID, ButtonId::GestureButton)],
+        ..CaptureSpec::default()
+    };
+
+    assert_eq!(
+        requested_reprog_mode(&spec, reprog_controls::GESTURE_BUTTON_CID),
+        ReprogMode::RawXy
+    );
+}
+
+#[tokio::test]
+async fn removing_a_gesture_source_resets_its_in_progress_hold() {
+    let mut armed = ArmedControls {
+        gesture_cids: GESTURE.to_vec(),
+        ..ArmedControls::default()
+    };
+    let runtime = Mutex::new(CaptureRuntimeState {
+        gesture_cids: GESTURE.to_vec(),
+        accum: CaptureAccum {
+            gesture_source: Some((reprog_controls::GESTURE_BUTTON_CID, ButtonId::GestureButton)),
+            overlap: true,
+            gestures_down: GESTURE.to_vec(),
+            skip_first_raw_xy: true,
+            ..CaptureAccum::default()
+        },
+        ..CaptureRuntimeState::default()
+    });
+
+    let Ok(()) = apply_spec_update(&mut armed, &CaptureSpec::default(), &runtime, 1).await else {
+        panic!("a hardware-free update should succeed");
+    };
+
+    let runtime = runtime.lock().unwrap_or_else(PoisonError::into_inner);
+    assert!(runtime.gesture_cids.is_empty());
+    assert!(runtime.accum.gesture_source.is_none());
+    assert!(!runtime.accum.overlap);
+    assert!(runtime.accum.gestures_down.is_empty());
+    assert!(!runtime.accum.skip_first_raw_xy);
+}
+
 /// A control that was *already* diverted when the session armed it — an agent
 /// killed mid-session, or another Logitech app — must not be handed that state
 /// back. Replaying it leaves the button diverted with no listener: no OS event
