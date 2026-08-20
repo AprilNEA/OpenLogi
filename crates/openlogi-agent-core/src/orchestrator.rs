@@ -36,7 +36,7 @@ use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
-use crate::{DpiCycleState, DpiCycles};
+use crate::{DpiCycleState, DpiCycles, ThumbwheelDirs};
 
 /// The minimal per-device facts the agent needs: the config key (binding /
 /// preset lookup), the HID++ route (DPI/SmartShift writes + capture target), and
@@ -245,6 +245,28 @@ impl Orchestrator {
         HookMaps {
             bindings: bindings_for(&self.config, key, app),
             gestures: oshook_gestures_for(&self.config, key, app),
+            // Selection travels with the binding maps it belongs to; the
+            // learned per-device entries are filled in at publish time.
+            thumbwheel_dirs: ThumbwheelDirs {
+                selected: key.map(str::to_owned),
+                ..ThumbwheelDirs::default()
+            },
+        }
+    }
+
+    /// Publish freshly built hook maps, carrying the learned thumb-wheel
+    /// polarity entries forward — they come from capture-session probes (see
+    /// [`ThumbwheelDirs`]), not from config, so a rebuild must not erase
+    /// them. One write under the one lock the hook callback reads, so a wheel
+    /// tick can never pair the new selection's bindings with the old
+    /// selection's polarity (or vice versa).
+    fn publish_hook_maps(&self, mut maps: HookMaps) {
+        match self.shared.hook_maps.write() {
+            Ok(mut guard) => {
+                maps.thumbwheel_dirs.by_key = std::mem::take(&mut guard.thumbwheel_dirs.by_key);
+                *guard = maps;
+            }
+            Err(e) => warn!(error = %e, lock = "hook_maps", "lock poisoned — keeping stale value"),
         }
     }
 
@@ -293,11 +315,7 @@ impl Orchestrator {
         let key = self.current_key();
         // One write publishes both hook maps atomically, so a button press during
         // an owner switch can't observe a half-updated state.
-        write_value(
-            &self.shared.hook_maps,
-            self.hook_maps_for(key, self.current_app.as_deref()),
-            "hook_maps",
-        );
+        self.publish_hook_maps(self.hook_maps_for(key, self.current_app.as_deref()));
         self.publish_device_runtime();
     }
 
@@ -708,11 +726,7 @@ impl Orchestrator {
             return;
         }
         self.current_app = bundle;
-        write_value(
-            &self.shared.hook_maps,
-            self.hook_maps_for(self.current_key(), self.current_app.as_deref()),
-            "hook_maps",
-        );
+        self.publish_hook_maps(self.hook_maps_for(self.current_key(), self.current_app.as_deref()));
         // Capture plans are app-scoped (per-app binding overlays); republish
         // them with the keyboard's effective bindings.
         self.publish_device_runtime();

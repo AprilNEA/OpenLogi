@@ -25,7 +25,7 @@ use tracing::{info, warn};
 use crate::event_monitor::SharedEventMonitor;
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::receiver_access::ReceiverAccess;
-use crate::{DpiCycleState, DpiCycles};
+use crate::{DpiCycleState, DpiCycles, ThumbwheelDirs};
 
 /// Runtime dependencies shared by every action source: the OS hook, HID++
 /// controls, keyboard capture, and Actions Ring slot activation.
@@ -93,6 +93,14 @@ pub struct HookMaps {
     /// HID++ gesture button (0x00c3) uses the gesture watcher's separate map
     /// instead — it never reaches the OS hook.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// Native thumb-wheel polarity state ([`ThumbwheelDirs`]): the learned
+    /// per-device map plus the selection to resolve it against. Kept inside
+    /// this same lock so the Windows native-scroll path reads a delta's sign
+    /// interpretation and the bindings it fires as ONE snapshot — under split
+    /// locks, a wheel tick landing between a selection switch's two writes
+    /// could pair the new device's bindings with the old device's polarity
+    /// and fire one tick's action inverted.
+    pub thumbwheel_dirs: ThumbwheelDirs,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -475,17 +483,33 @@ pub fn start(
 
 /// Resolve a native horizontal-wheel tick to a rebound thumb-wheel action.
 /// The built-in horizontal-scroll defaults intentionally return `None` so the
-/// physical wheel stays native unless the user changed that direction. On
-/// Windows/MX Master 2S, positive `WM_MOUSEHWHEEL` delta is the physical
-/// backward/down direction, so it maps to `ThumbwheelScrollDown`.
+/// physical wheel stays native unless the user changed that direction.
+///
+/// Which physical direction a positive `WM_MOUSEHWHEEL` delta means is
+/// per-device: the wheel's `0x2150` `default_dir`, resolved through
+/// `maps.thumbwheel_dirs` — the same locked snapshot the bindings come from,
+/// so a selection switch can never pair one device's bindings with another's
+/// polarity. Unknown polarity (no selection, no `0x2150` to probe, or HID++
+/// unreachable) falls back to positive = physical backward, mapping to
+/// `ThumbwheelScrollDown` — the MX Master 2S convention this path was
+/// calibrated on; MX Master 3-family wheels report the opposite (#457).
 #[cfg(any(target_os = "windows", test))]
 fn rebound_thumbwheel_action(maps: &HookMaps, delta_x: f32) -> Option<(ButtonId, Action)> {
-    let button = if delta_x > 0.0 {
-        ButtonId::ThumbwheelScrollDown
+    let positive_is_forward = maps
+        .thumbwheel_dirs
+        .selected_positive_is_forward()
+        .unwrap_or(false);
+    let forward = if delta_x > 0.0 {
+        positive_is_forward
     } else if delta_x < 0.0 {
-        ButtonId::ThumbwheelScrollUp
+        !positive_is_forward
     } else {
         return None;
+    };
+    let button = if forward {
+        ButtonId::ThumbwheelScrollUp
+    } else {
+        ButtonId::ThumbwheelScrollDown
     };
     let action = maps.bindings.get(&button)?.clone();
     (action != default_binding(button)).then_some((button, action))
@@ -787,30 +811,69 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
-        let maps = HookMaps {
+    /// Maps with the wheel rebound to next/prev tab and the given learned
+    /// polarity for the selected device (`None` = never probed).
+    fn rebound_thumbwheel_maps(positive_is_forward: Option<bool>) -> HookMaps {
+        let mut thumbwheel_dirs = ThumbwheelDirs {
+            selected: Some("mx".to_owned()),
+            ..ThumbwheelDirs::default()
+        };
+        if let Some(polarity) = positive_is_forward {
+            thumbwheel_dirs.by_key.insert("mx".to_owned(), polarity);
+        }
+        HookMaps {
             bindings: BTreeMap::from([
                 (ButtonId::ThumbwheelScrollUp, Action::NextTab),
                 (ButtonId::ThumbwheelScrollDown, Action::PrevTab),
             ]),
             gestures: BTreeMap::new(),
-        };
+            thumbwheel_dirs,
+        }
+    }
+
+    #[test]
+    fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
+        // Polarity never learned, and (same fallback) explicitly backward-
+        // positive: the MX Master 2S convention, where a positive delta is the
+        // physical backward direction.
+        for maps in [
+            rebound_thumbwheel_maps(None),
+            rebound_thumbwheel_maps(Some(false)),
+        ] {
+            assert_eq!(
+                rebound_thumbwheel_action(&maps, 1.0),
+                Some((ButtonId::ThumbwheelScrollDown, Action::PrevTab))
+            );
+            assert_eq!(
+                rebound_thumbwheel_action(&maps, -1.0),
+                Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
+            );
+            assert_eq!(rebound_thumbwheel_action(&maps, 0.0), None);
+        }
+    }
+
+    #[test]
+    fn rebound_horizontal_wheel_respects_a_forward_positive_wheel() {
+        // A wheel whose 0x2150 default_dir reports positive-toward-front
+        // (MX Master 3-family, #457) must map the same deltas the other way
+        // round — without this, next/prev tab fire swapped.
+        let maps = rebound_thumbwheel_maps(Some(true));
         assert_eq!(
             rebound_thumbwheel_action(&maps, 1.0),
-            Some((ButtonId::ThumbwheelScrollDown, Action::PrevTab))
+            Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
         );
         assert_eq!(
             rebound_thumbwheel_action(&maps, -1.0),
-            Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
+            Some((ButtonId::ThumbwheelScrollDown, Action::PrevTab))
         );
         assert_eq!(rebound_thumbwheel_action(&maps, 0.0), None);
     }
 
     #[test]
     fn native_thumbwheel_scroll_stays_os_native() {
-        let maps = HookMaps {
-            bindings: BTreeMap::from([
+        for polarity in [None, Some(false), Some(true)] {
+            let mut maps = rebound_thumbwheel_maps(polarity);
+            maps.bindings = BTreeMap::from([
                 (
                     ButtonId::ThumbwheelScrollUp,
                     default_binding(ButtonId::ThumbwheelScrollUp),
@@ -819,11 +882,10 @@ mod tests {
                     ButtonId::ThumbwheelScrollDown,
                     default_binding(ButtonId::ThumbwheelScrollDown),
                 ),
-            ]),
-            gestures: BTreeMap::new(),
-        };
-        assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
-        assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
+            ]);
+            assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
+            assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
+        }
     }
 
     #[test]

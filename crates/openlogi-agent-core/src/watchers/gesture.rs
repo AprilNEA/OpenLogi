@@ -32,7 +32,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
-use crate::hook_runtime::ActionDispatcher;
+use crate::hook_runtime::{ActionDispatcher, SharedHookMaps};
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
 
 /// How often to re-read the active device target + thumb-wheel arming so a
@@ -56,6 +56,7 @@ pub fn spawn(
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
     dispatcher: ActionDispatcher,
+    hook_maps: SharedHookMaps,
 ) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -73,6 +74,7 @@ pub fn spawn(
             capture_channel,
             receiver_access,
             dispatcher,
+            hook_maps,
         ));
     });
 }
@@ -154,6 +156,7 @@ async fn manage(
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
     dispatcher: ActionDispatcher,
+    hook_maps: SharedHookMaps,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<(String, CapturedInput)>();
     let mut sessions: HashMap<String, RunningSession> = HashMap::new();
@@ -182,6 +185,7 @@ async fn manage(
                     &mut accumulators,
                     &capture_plans,
                     &dispatcher,
+                    &hook_maps,
                 );
             }
             _ = ticker.tick() => {
@@ -374,7 +378,27 @@ fn dispatch(
     accumulators: &mut HashMap<String, WheelAccumulators>,
     capture_plans: &SharedCapturePlans,
     dispatcher: &ActionDispatcher,
+    hook_maps: &SharedHookMaps,
 ) {
+    // Not an input: the session's one-time wheel-polarity report, recorded for
+    // the OS hook's native horizontal-scroll fallback. It lives inside the
+    // hook maps' own lock so the hook reads polarity and bindings as one
+    // snapshot. Independent of the plan list, so it is kept even while the
+    // plans are mid-rebuild.
+    if let CapturedInput::ThumbwheelDirection {
+        positive_is_forward,
+    } = input
+    {
+        match hook_maps.write() {
+            Ok(mut maps) => {
+                maps.thumbwheel_dirs
+                    .by_key
+                    .insert(key.to_owned(), positive_is_forward);
+            }
+            Err(e) => warn!(error = %e, "hook_maps lock poisoned — polarity dropped"),
+        }
+        return;
+    }
     let Ok(plans) = capture_plans.read() else {
         return;
     };
@@ -404,7 +428,9 @@ fn dispatch(
             }
         }
         CapturedInput::Scroll(rotation) => {
-            // Positive rotation is "up"; each direction has its own binding.
+            // Positive rotation is physically forward, i.e. "up" — the session
+            // normalises the wheel's per-model polarity at divert time — and
+            // each direction has its own binding.
             let up = rotation >= 0;
             let button = if up {
                 ButtonId::ThumbwheelScrollUp
@@ -431,6 +457,8 @@ fn dispatch(
                 }
             }
         }
+        // Handled (with an early return) before the plan lookup above.
+        CapturedInput::ThumbwheelDirection { .. } => {}
     }
 }
 
@@ -640,6 +668,59 @@ mod tests {
             ),
             WheelOutput::Idle
         );
+    }
+
+    #[test]
+    fn a_polarity_report_is_recorded_for_the_os_hook() {
+        use std::sync::RwLock;
+
+        use crate::hook_runtime::HookMaps;
+
+        let dispatcher = ActionDispatcher::new(
+            Arc::new(RwLock::new(crate::DpiCycles::default())),
+            Arc::new(RwLock::new(None)),
+            openlogi_hid::ChannelRegistry::default(),
+            ReceiverAccess::default(),
+            tokio::sync::mpsc::unbounded_channel().0,
+        );
+        let plans: SharedCapturePlans = Arc::new(RwLock::new(Vec::new()));
+        let hook_maps: SharedHookMaps = Arc::new(RwLock::new(HookMaps::default()));
+        let mut accumulators = HashMap::new();
+
+        // Recorded even with no capture plan for the key: the report is
+        // plan-independent, so a mid-rebuild plan list cannot drop it.
+        dispatch(
+            "2b042",
+            CapturedInput::ThumbwheelDirection {
+                positive_is_forward: true,
+            },
+            &mut accumulators,
+            &plans,
+            &dispatcher,
+            &hook_maps,
+        );
+        let recorded = hook_maps
+            .read()
+            .ok()
+            .and_then(|maps| maps.thumbwheel_dirs.by_key.get("2b042").copied());
+        assert_eq!(recorded, Some(true));
+
+        // A later session (e.g. after a firmware-visible replug) overwrites.
+        dispatch(
+            "2b042",
+            CapturedInput::ThumbwheelDirection {
+                positive_is_forward: false,
+            },
+            &mut accumulators,
+            &plans,
+            &dispatcher,
+            &hook_maps,
+        );
+        let recorded = hook_maps
+            .read()
+            .ok()
+            .and_then(|maps| maps.thumbwheel_dirs.by_key.get("2b042").copied());
+        assert_eq!(recorded, Some(false));
     }
 
     /// A session whose stop sender is already gone (taken by a deliberate stop).

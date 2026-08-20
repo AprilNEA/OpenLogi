@@ -19,6 +19,8 @@ pub mod hook_runtime;
 pub mod observable;
 pub mod orchestrator;
 pub mod receiver_access;
+mod thumbwheel;
 pub mod watchers;
 
 pub use dpi::{DpiCycleState, DpiCycles};
+pub use thumbwheel::ThumbwheelDirs;
