@@ -221,14 +221,19 @@ thread_local! {
 /// trackpad can never be swallowed. Linux/Windows often lack attribution
 /// (`device: None`); those platforms already restrict which devices the hook
 /// attaches to, so unknown sources stay remappable.
-fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
+fn button_source_may_remap(id: ButtonId, device: Option<&EventDevice>) -> bool {
     match device {
         Some(d) => source_is_remappable(Some(d)),
         None => {
             // Attribution missing: safe on Linux/Windows (device selection is
-            // upstream of the callback). On macOS fail closed — an unattributed
-            // event is more likely a trackpad/system source than a Logi mouse.
-            !cfg!(target_os = "macos")
+            // upstream of the callback). On macOS this used to mean a
+            // trackpad/system source and failed closed — but macOS 26 delivers
+            // aux-button (other-mouse) events with no backing IOHIDEvent at
+            // all (`CGEventCopyIOHIDEvent` returns null), which disabled
+            // remapping of Middle/Back/Forward entirely. Built-in trackpads
+            // never emit those buttons, so an unattributed aux button is safe
+            // to remap; anything else keeps failing closed.
+            !cfg!(target_os = "macos") || id.is_os_hook_button()
         }
     }
 }
@@ -266,7 +271,7 @@ fn handle_button(
     action_tx: &mpsc::SyncSender<Action>,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
-    if !id.is_os_hook_button() || !button_source_may_remap(device) {
+    if !id.is_os_hook_button() || !button_source_may_remap(id, device) {
         return EventDisposition::PassThrough;
     }
 
