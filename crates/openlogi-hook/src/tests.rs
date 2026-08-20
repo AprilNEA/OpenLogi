@@ -52,6 +52,15 @@ fn event_disposition_equality() {
     assert_eq!(EventDisposition::PassThrough, EventDisposition::PassThrough);
     assert_eq!(EventDisposition::Suppress, EventDisposition::Suppress);
     assert_ne!(EventDisposition::PassThrough, EventDisposition::Suppress);
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        EventDisposition::AdjustHorizontalScroll {
+            scale_percent: -300
+        },
+        EventDisposition::AdjustHorizontalScroll {
+            scale_percent: -300
+        }
+    );
 }
 
 /// Remap policy is fail-closed: only known Logitech non-trackpad sources.

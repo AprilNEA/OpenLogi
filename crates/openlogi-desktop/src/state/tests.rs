@@ -7,7 +7,8 @@
 
 use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::config::{
-    Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution, ThumbwheelSensitivity,
+    Config, DeviceIdentity, HorizontalScrollSensitivity, LightSettings, Lighting, ScrollResolution,
+    ThumbwheelSensitivity,
 };
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -23,7 +24,10 @@ use crate::services::assets::AssetResolver;
 
 use super::bindings::apply_thumbwheel_pair;
 use super::devices::build_device_list;
-use super::scroll::set_scroll_resolution_if_supported;
+use super::scroll::{
+    set_horizontal_scroll_sensitivity_if_supported, set_invert_horizontal_scroll_if_supported,
+    set_scroll_resolution_if_supported,
+};
 use super::smartshift::{smartshift_read_is_current, smartshift_write_outcome};
 use super::{AppState, ConfigPersistence, LightCommandStatus, Load, SmartShiftWriteStatus};
 
@@ -540,6 +544,48 @@ fn gui_state_ignores_unsupported_wheel_resolution() {
         Some(ScrollResolution::High),
     ));
     assert_eq!(config.scroll_resolution("mouse"), None);
+}
+
+#[test]
+fn gui_state_saves_supported_horizontal_speed_and_direction() {
+    let mut config = Config::ephemeral();
+    let sensitivity = HorizontalScrollSensitivity::try_new(60).expect("valid 3× setting");
+    assert!(set_horizontal_scroll_sensitivity_if_supported(
+        &mut config,
+        "mouse",
+        true,
+        sensitivity,
+    ));
+    assert!(set_invert_horizontal_scroll_if_supported(
+        &mut config,
+        "mouse",
+        true,
+        true,
+    ));
+    assert_eq!(config.horizontal_scroll_sensitivity("mouse"), sensitivity);
+    assert!(config.invert_horizontal_scroll("mouse"));
+}
+
+#[test]
+fn gui_state_ignores_unattributable_horizontal_scroll_device() {
+    let mut config = Config::ephemeral();
+    assert!(!set_horizontal_scroll_sensitivity_if_supported(
+        &mut config,
+        "receiver-mouse",
+        false,
+        HorizontalScrollSensitivity::MAX,
+    ));
+    assert!(!set_invert_horizontal_scroll_if_supported(
+        &mut config,
+        "receiver-mouse",
+        false,
+        true,
+    ));
+    assert_eq!(
+        config.horizontal_scroll_sensitivity("receiver-mouse"),
+        HorizontalScrollSensitivity::DEFAULT
+    );
+    assert!(!config.invert_horizontal_scroll("receiver-mouse"));
 }
 
 fn camera_controls(brightness: i32) -> openlogi_core::config::CameraControls {

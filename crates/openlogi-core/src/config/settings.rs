@@ -1,6 +1,7 @@
 //! App-wide and per-device *value* settings: [`AppSettings`], [`Appearance`],
-//! [`Lighting`], [`ScrollResolution`], [`WheelMode`] / [`SmartShift`], and
-//! the legacy [`GestureOwner`], plus their serde helpers.
+//! [`HorizontalScrollSensitivity`], [`Lighting`], [`ScrollResolution`],
+//! [`WheelMode`] / [`SmartShift`], and the legacy [`GestureOwner`], plus their
+//! serde helpers.
 
 use std::collections::BTreeMap;
 
@@ -237,6 +238,89 @@ impl From<ThumbwheelSensitivity> for f32 {
 
 impl From<ThumbwheelSensitivity> for i32 {
     fn from(sensitivity: ThumbwheelSensitivity) -> Self {
+        Self::from(sensitivity.into_inner())
+    }
+}
+
+/// Native horizontal-scroll responsiveness on OpenLogi's `20..=100` scale.
+///
+/// `20` preserves the operating system's incoming magnitude (1×), while `100`
+/// produces 5×. Values below 20 are deliberately excluded: coarse macOS line
+/// deltas cannot express a reliable fractional tick without stateful event
+/// accumulation.
+#[nutype(
+    const_fn,
+    validate(greater_or_equal = 20, less_or_equal = 100),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct HorizontalScrollSensitivity(u8);
+
+impl HorizontalScrollSensitivity {
+    /// Lowest selectable sensitivity (1× native speed).
+    pub const MIN: Self = match Self::try_new(20) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum horizontal-scroll sensitivity"),
+    };
+    /// Highest selectable sensitivity (5× native speed).
+    pub const MAX: Self = match Self::try_new(100) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum horizontal-scroll sensitivity"),
+    };
+    /// Out-of-the-box sensitivity: preserve the native event magnitude.
+    pub const DEFAULT: Self = Self::MIN;
+
+    /// Round and clamp a floating-point slider value into the valid range.
+    #[must_use]
+    pub fn from_rounded(value: f32) -> Self {
+        let value = if value.is_nan() {
+            f32::from(Self::MIN)
+        } else {
+            value
+        };
+        let raw = value
+            .clamp(f32::from(Self::MIN), f32::from(Self::MAX))
+            .round()
+            .saturating_as::<u8>();
+        let Ok(value) = Self::try_new(raw) else {
+            unreachable!("clamped horizontal-scroll sensitivity is always valid");
+        };
+        value
+    }
+
+    /// Integer percentage applied to each native horizontal-scroll delta.
+    #[must_use]
+    pub fn scale_percent(self) -> i16 {
+        i16::from(self.into_inner()) * 5
+    }
+
+    /// `skip_serializing_if` helper for the native 1× default.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::DEFAULT
+    }
+}
+
+impl Default for HorizontalScrollSensitivity {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<HorizontalScrollSensitivity> for f32 {
+    fn from(sensitivity: HorizontalScrollSensitivity) -> Self {
         Self::from(sensitivity.into_inner())
     }
 }
@@ -596,6 +680,25 @@ mod tests {
         assert_eq!(
             ThumbwheelSensitivity::from_rounded(f32::INFINITY),
             ThumbwheelSensitivity::MAX
+        );
+    }
+
+    #[test]
+    fn horizontal_scroll_sensitivity_has_documented_scale_and_slider_bounds() {
+        assert_eq!(HorizontalScrollSensitivity::DEFAULT.scale_percent(), 100);
+        assert_eq!(
+            HorizontalScrollSensitivity::try_new(60)
+                .expect("60 is the documented 3× setting")
+                .scale_percent(),
+            300
+        );
+        assert_eq!(
+            HorizontalScrollSensitivity::from_rounded(0.0),
+            HorizontalScrollSensitivity::MIN
+        );
+        assert_eq!(
+            HorizontalScrollSensitivity::from_rounded(f32::INFINITY),
+            HorizontalScrollSensitivity::MAX
         );
     }
 }

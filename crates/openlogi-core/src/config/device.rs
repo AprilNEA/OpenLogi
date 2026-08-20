@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::settings::{
-    CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity, deserialize_gesture_owner,
+    CameraControls, GestureOwner, HorizontalScrollSensitivity, LightSettings, Lighting,
+    ScrollResolution, SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
@@ -181,6 +181,19 @@ pub struct DeviceConfig {
     /// (default) is the native direction, and is omitted from `config.toml`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub invert_scroll: bool,
+    /// Host-side speed adjustment for native horizontal-scroll events. `20`
+    /// preserves the device's magnitude (1×); `100` is 5×. This is distinct
+    /// from [`Self::thumbwheel_sensitivity`], which applies only to HID++
+    /// feature `0x2150` thumb wheels.
+    #[serde(
+        default,
+        skip_serializing_if = "HorizontalScrollSensitivity::is_default"
+    )]
+    pub horizontal_scroll_sensitivity: HorizontalScrollSensitivity,
+    /// Reverse native horizontal-scroll events from this device while leaving
+    /// vertical scrolling and trackpads unchanged. `false` is omitted.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub invert_horizontal_scroll: bool,
     /// Persisted HID++ `0x2121` wheel resolution. `None` leaves the device's
     /// current resolution unmanaged and omits the field from `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,6 +234,8 @@ impl Default for DeviceConfig {
             camera_profile: None,
             thumbwheel_sensitivity: None,
             invert_scroll: false,
+            horizontal_scroll_sensitivity: HorizontalScrollSensitivity::DEFAULT,
+            invert_horizontal_scroll: false,
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
@@ -336,6 +351,10 @@ struct RawDeviceConfig {
     #[serde(default)]
     invert_scroll: bool,
     #[serde(default)]
+    horizontal_scroll_sensitivity: HorizontalScrollSensitivity,
+    #[serde(default)]
+    invert_horizontal_scroll: bool,
+    #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
     #[serde(default)]
     host_switch_targets: Vec<String>,
@@ -394,6 +413,8 @@ impl From<RawDeviceConfig> for DeviceConfig {
             camera_profile: raw.camera_profile,
             thumbwheel_sensitivity: raw.thumbwheel_sensitivity,
             invert_scroll: raw.invert_scroll,
+            horizontal_scroll_sensitivity: raw.horizontal_scroll_sensitivity,
+            invert_horizontal_scroll: raw.invert_horizontal_scroll,
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,

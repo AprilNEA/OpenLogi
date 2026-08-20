@@ -397,3 +397,8 @@ _version: 1
 "Shortcut, e.g. Cmd+Shift+P": "Atalho, por exemplo, Cmd+Shift+P"
 "Application, folder path, or URL": "Aplicação, caminho de pasta ou URL"
 "Open application or folder": "Abrir aplicação ou pasta"
+"Horizontal scroll speed": "Horizontal scroll speed"
+"Adjusts native horizontal scrolling from this directly connected mouse.": "Adjusts native horizontal scrolling from this directly connected mouse."
+"Requires a directly connected mouse; receiver events do not identify the paired device.": "Requires a directly connected mouse; receiver events do not identify the paired device."
+"Invert horizontal scrolling": "Invert horizontal scrolling"
+"Reverse horizontal scrolling without changing the vertical wheel.": "Reverse horizontal scrolling without changing the vertical wheel."
