@@ -51,6 +51,17 @@ fn restore_returns_the_remap_target_and_touches_nothing_else() {
     assert_eq!(change.raw_wheel, None);
 }
 
+#[test]
+fn wake_rearm_restores_diversion_mode_and_remap_target() {
+    let remap = reprog_controls::ControlId(0x0053);
+
+    let change = rearm_change(reporting(false, Some(remap)), true);
+
+    assert_eq!(change.diverted, Some(true));
+    assert_eq!(change.raw_xy, Some(true));
+    assert_eq!(change.remap, Some(remap));
+}
+
 fn press() -> RawControlEvent {
     RawControlEvent::DivertedButtons([reprog_controls::GESTURE_BUTTON_CID, 0, 0, 0])
 }
@@ -552,6 +563,77 @@ fn plain_button_snapshots_emit_each_edge_once_and_keep_buttons_independent() {
         Ok(CapturedInput::ButtonUp(ButtonId::Forward))
     );
     assert!(rx.try_recv().is_err(), "unchanged snapshots emit no edges");
+}
+
+#[test]
+fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let cid = 0x0056;
+    let buttons = [(cid, ButtonId::Forward)];
+    let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
+
+    handle_reprog_with_gesture_buttons(&mut acc, down, &[], &[], &buttons, &[], &tx);
+    acc.backdate_hold_for_test();
+    handle_reprog_with_gesture_buttons(
+        &mut acc,
+        RawControlEvent::RawXy { dx: -120, dy: 5 },
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
+    handle_reprog_with_gesture_buttons(&mut acc, release(), &[], &[], &buttons, &[], &tx);
+
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonDown(ButtonId::Forward))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(
+            ButtonId::Forward,
+            GestureDirection::Left
+        ))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonUp(ButtonId::Forward))
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "a committed side-button swipe must not also click on release"
+    );
+}
+
+#[test]
+fn a_side_gesture_button_tap_is_a_click() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let cid = 0x0056;
+    let buttons = [(cid, ButtonId::Forward)];
+    let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
+
+    handle_reprog_with_gesture_buttons(&mut acc, down, &[], &[], &buttons, &[], &tx);
+    handle_reprog_with_gesture_buttons(&mut acc, release(), &[], &[], &buttons, &[], &tx);
+
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonDown(ButtonId::Forward))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(
+            ButtonId::Forward,
+            GestureDirection::Click
+        ))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonUp(ButtonId::Forward))
+    );
+    assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
 }
 
 #[test]

@@ -147,6 +147,7 @@ impl InputDispatcher {
                 if let Some(action) = plan
                     .gesture_bindings
                     .get(&button)
+                    .or_else(|| plan.side_gesture_bindings.get(&button))
                     .and_then(|map| map.get(&direction))
                 {
                     debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
@@ -165,7 +166,8 @@ impl InputDispatcher {
                 // A raw-XY gesture source owns its click/swipe map; its physical
                 // lifecycle is still tracked, but it must not also fire the
                 // single-action projection on down.
-                let is_gesture = plan.gesture_bindings.contains_key(&button);
+                let is_gesture = plan.gesture_bindings.contains_key(&button)
+                    || plan.side_gesture_bindings.contains_key(&button);
                 let binding = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
                 if let Some(binding) = binding {
                     debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");

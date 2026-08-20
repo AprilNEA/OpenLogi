@@ -311,7 +311,7 @@ impl Armed {
                 self.orchestrator.lock().await.set_camera_active(active);
             }
             WatcherEvent::App(app) => self.apply_foreground(app).await,
-            WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted),
+            WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
             WatcherEvent::InputMonitoring(granted) => {
                 self.observable.set_input_monitoring_granted(granted);
             }
@@ -392,13 +392,17 @@ impl Armed {
     /// permission and the hook state it produced as one generation — no
     /// observation can claim the hook is installed without the permission it
     /// requires.
-    fn apply_accessibility(&mut self, granted: bool) {
+    async fn apply_accessibility(&mut self, granted: bool) {
         if !granted {
             self.stop_hook();
         }
         if granted && self.hook.is_none() {
             self.hook = self.start_hook();
         }
+        self.orchestrator
+            .lock()
+            .await
+            .set_os_mouse_hook_available(self.hook.is_some());
         self.observable
             .set_accessibility_and_hook(granted, self.hook.is_some());
     }

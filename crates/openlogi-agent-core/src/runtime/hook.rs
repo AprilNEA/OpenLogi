@@ -183,19 +183,17 @@ thread_local! {
 
 /// Whether a button event's physical source may be remapped/suppressed.
 ///
-/// On macOS, attributed events fail closed: only known Logitech non-trackpad
-/// devices are remappable. Bluetooth side-button CGEvents can arrive without
-/// an IOKit sender, though, so senderless Back/Forward events remain eligible.
-/// Senderless MiddleClick stays blocked because a trackpad may synthesize it.
-/// Linux/Windows already restrict which devices the hook attaches to, so all
-/// unknown sources remain remappable.
-fn button_source_may_remap(id: ButtonId, device: Option<&EventDevice>) -> bool {
+/// macOS fails closed because its hook is global: only a known Logitech,
+/// non-trackpad source may be suppressed. Bluetooth-direct Back/Forward
+/// gestures are captured through their device-specific HID++ session instead
+/// of weakening this policy. Linux/Windows restrict hook attachment upstream,
+/// so an unavailable source remains eligible there.
+fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
     match device {
         Some(d) => source_is_remappable(Some(d)),
-        None if cfg!(target_os = "macos") => {
-            matches!(id, ButtonId::Back | ButtonId::Forward)
-        }
-        None => true,
+        // Linux/Windows restrict which devices the hook attaches to upstream.
+        // macOS uses one global tap, so an unattributed event must fail closed.
+        None => !cfg!(target_os = "macos"),
     }
 }
 
@@ -206,11 +204,7 @@ fn button_source_may_remap(id: ButtonId, device: Option<&EventDevice>) -> bool {
 /// selection before this callback and therefore admit their unattributed
 /// wheel events through the same policy as button remapping.
 fn scroll_source_may_intercept(from_trackpad: bool, device: Option<&EventDevice>) -> bool {
-    !from_trackpad
-        && match device {
-            Some(d) => source_is_remappable(Some(d)),
-            None => !cfg!(target_os = "macos"),
-        }
+    !from_trackpad && button_source_may_remap(device)
 }
 
 /// Off-thread worker for bound actions so the tap callback never injects input.
@@ -246,7 +240,7 @@ fn handle_button(
     dispatcher: &ActionDispatcher,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
-    if !id.is_os_hook_button() || !button_source_may_remap(id, device) {
+    if !id.is_os_hook_button() || !button_source_may_remap(device) {
         return EventDisposition::PassThrough;
     }
 

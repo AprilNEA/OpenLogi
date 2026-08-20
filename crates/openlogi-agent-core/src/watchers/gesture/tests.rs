@@ -19,6 +19,7 @@ fn stopped_session_with_epoch(epoch: u64) -> RunningSession {
         route(),
         None,
         0,
+        true,
     );
     RunningSession {
         id: session_id(epoch),
@@ -101,6 +102,7 @@ fn rejects_input_after_the_published_capture_plan_changes() {
         session.target.route.clone(),
         None,
         0,
+        true,
     );
     assert!(session_matches_plan(&session, &plan));
 
@@ -119,7 +121,7 @@ fn wheel_configuration_changes_invalidate_the_capture_epoch() {
         ButtonId::ThumbwheelScrollUp,
         Binding::Single(Action::NextTab),
     );
-    let first = crate::capture_plan::plan_for_device(&config, "mouse-a", route(), None, 0);
+    let first = crate::capture_plan::plan_for_device(&config, "mouse-a", route(), None, 0, true);
     let mut session = live_session_with_epoch(7);
     session.target = SessionTarget::for_plan(&first);
 
@@ -128,7 +130,7 @@ fn wheel_configuration_changes_invalidate_the_capture_epoch() {
         ButtonId::ThumbwheelScrollUp,
         Binding::Single(Action::VolumeUp),
     );
-    let rebound = crate::capture_plan::plan_for_device(&config, "mouse-a", route(), None, 0);
+    let rebound = crate::capture_plan::plan_for_device(&config, "mouse-a", route(), None, 0, true);
     assert_eq!(
         spec_for(&first),
         spec_for(&rebound),
@@ -141,7 +143,7 @@ fn wheel_configuration_changes_invalidate_the_capture_epoch() {
 
     session.target = SessionTarget::for_plan(&rebound);
     config.set_device_thumbwheel_sensitivity("mouse-a", Some(ThumbwheelSensitivity::MIN));
-    let rescaled = crate::capture_plan::plan_for_device(&config, "mouse-a", route(), None, 0);
+    let rescaled = crate::capture_plan::plan_for_device(&config, "mouse-a", route(), None, 0, true);
     assert_eq!(spec_for(&rebound), spec_for(&rescaled));
     assert!(
         !session_matches_plan(&session, &rescaled),

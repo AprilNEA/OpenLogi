@@ -8,17 +8,8 @@ fn token(id: u64, button: ButtonId) -> PressToken {
 }
 
 #[test]
-fn senderless_side_buttons_remain_remappable() {
-    assert!(button_source_may_remap(ButtonId::Back, None));
-    assert!(button_source_may_remap(ButtonId::Forward, None));
-}
-
-#[test]
-fn senderless_middle_click_keeps_the_macos_trackpad_safeguard() {
-    assert_eq!(
-        button_source_may_remap(ButtonId::MiddleClick, None),
-        !cfg!(target_os = "macos")
-    );
+fn senderless_buttons_follow_the_platform_source_policy() {
+    assert_eq!(button_source_may_remap(None), !cfg!(target_os = "macos"));
 }
 
 #[test]
@@ -32,14 +23,8 @@ fn attributed_sources_still_follow_the_device_policy() {
         ..EventDevice::default()
     };
 
-    assert!(!button_source_may_remap(
-        ButtonId::Forward,
-        Some(&trackpad)
-    ));
-    assert!(button_source_may_remap(
-        ButtonId::Forward,
-        Some(&logitech_mouse)
-    ));
+    assert!(!button_source_may_remap(Some(&trackpad)));
+    assert!(button_source_may_remap(Some(&logitech_mouse)));
 }
 
 // The mid-swipe gate itself is unit-tested on `SwipeAccumulator` in

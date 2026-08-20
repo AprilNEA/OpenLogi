@@ -171,8 +171,10 @@ impl InputServices {
 pub(crate) fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputServices) {
     watchers::gesture::spawn(
         shared.capture_plans.clone(),
+        Arc::clone(&shared.capture_plan_changed),
         shared.capture_channel.clone(),
         shared.receiver_access.clone(),
+        shared.channel_registry.clone(),
         GestureOutputs::new(inputs.dispatcher.clone(), inputs.scroll_input.clone()),
     );
     watchers::host_switch::spawn(

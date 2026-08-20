@@ -19,15 +19,24 @@
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
-use hidpp::{channel::HidppChannel, device::Device, protocol::v20};
+use hidpp::{
+    channel::HidppChannel,
+    device::Device,
+    feature::{
+        CreatableFeature, EmittingFeature,
+        root::RootFeature,
+        wireless_device_status::{WirelessDeviceStatusEvent, WirelessDeviceStatusFeature},
+    },
+    protocol::v20,
+};
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::SharedChannel;
 use crate::backend::{BackendError, HidBackend};
 use crate::channel::route::{DeviceRoute, open_route_channel};
+use crate::{ChannelRegistry, SharedChannel};
 
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::thumbwheel::{self, Thumbwheel, WheelDirection, WheelResolution};
@@ -40,6 +49,10 @@ const LIVENESS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_se
 /// dead. Two, so one ping lost to transient receiver congestion (which does
 /// happen under pointer load) doesn't churn the session.
 const LIVENESS_PING_STRIKES: u8 = 2;
+
+/// How quickly a registry-backed session notices that inventory replaced its
+/// underlying connection without changing the device's stable route.
+const REGISTRY_CURRENT_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Shared slot holding the active capture session's open channel, so DPI /
 /// SmartShift writes can reuse it instead of opening a fresh one. `None`
@@ -171,10 +184,14 @@ impl CaptureAccum {
 /// as divertable — the same mechanism Options+ uses to rebind a tilt. Arming
 /// only ever diverts what a device's own `getCtrlIdInfo` reports, so listing
 /// them here is inert on a mouse whose wheel does not tilt.
-pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 5] = [
+pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 9] = [
     (0x0052, ButtonId::MiddleClick),
     (0x0053, ButtonId::Back),
+    (0x00BD, ButtonId::Back),
+    (0x00CE, ButtonId::Back),
+    (0x00DB, ButtonId::Back),
     (0x0056, ButtonId::Forward),
+    (0x00CF, ButtonId::Forward),
     (0x005b, ButtonId::WheelTiltLeft),
     (0x005d, ButtonId::WheelTiltRight),
 ];
@@ -199,6 +216,9 @@ pub struct CaptureSpec {
     /// with raw-XY — one per source in gesture mode; empty when no HID++
     /// control gestures.
     pub divert_gesture_sources: Vec<u16>,
+    /// Standard-button CIDs requested as raw-XY gesture sources. A control is
+    /// armed only when its HID++ capability flags advertise raw-XY support.
+    pub divert_gesture_buttons: Vec<(u16, ButtonId)>,
     /// Buttons to divert as plain presses (no raw-XY): the
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
@@ -230,18 +250,60 @@ pub async fn run_capture_session(
     let chan = open_route_channel(backend, &route)
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
+    let shared = SharedChannel::new(chan, route.clone());
+    run_capture_session_on(route, shared, spec, sink, shutdown, channel_slot, None).await
+}
+
+/// Capture through the inventory-owned channel currently published for
+/// `route`. Sharing that connection avoids splitting HID++ replies and input
+/// reports across two readers; a registry miss is retried by the caller after
+/// a later inventory publication.
+pub async fn run_capture_session_with_registry_spec(
+    route: DeviceRoute,
+    spec: CaptureSpec,
+    sink: mpsc::UnboundedSender<CapturedInput>,
+    shutdown: oneshot::Receiver<()>,
+    channel_slot: CaptureChannel,
+    registry: &ChannelRegistry,
+) -> Result<(), GestureError> {
+    let shared = registry
+        .lookup(&route)
+        .ok_or(GestureError::DeviceNotFound)?;
+    run_capture_session_on(
+        route,
+        shared,
+        spec,
+        sink,
+        shutdown,
+        channel_slot,
+        Some(registry),
+    )
+    .await
+}
+
+async fn run_capture_session_on(
+    route: DeviceRoute,
+    shared: SharedChannel,
+    spec: CaptureSpec,
+    sink: mpsc::UnboundedSender<CapturedInput>,
+    shutdown: oneshot::Receiver<()>,
+    channel_slot: CaptureChannel,
+    registry: Option<&ChannelRegistry>,
+) -> Result<(), GestureError> {
+    let chan = Arc::clone(shared.channel());
     let device_index = route.device_index();
     let armed = arm_controls(&chan, device_index, &spec).await?;
 
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
     if let Ok(mut slot) = channel_slot.write() {
-        *slot = Some(SharedChannel::new(Arc::clone(&chan), route.clone()));
+        *slot = Some(shared.clone());
     }
 
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
     let reprog_index = armed.reprog.as_ref().map(|(_, idx)| *idx);
     let gesture_cids = armed.gesture_cids.clone();
+    let gesture_button_set = armed.gesture_button_cids.clone();
     let thumb_index = armed.thumb.as_ref().map(|(_, idx, _)| *idx);
     let thumb_resolution = armed
         .thumb
@@ -263,7 +325,15 @@ pub async fn run_capture_session(
                 // Recover the guard even if a prior holder panicked — the
                 // critical section is panic-free, so the data is consistent.
                 let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
-                handle_reprog(&mut acc, event, &gesture_cids, &dpi_set, &button_set, &sink);
+                handle_reprog_with_gesture_buttons(
+                    &mut acc,
+                    event,
+                    &gesture_cids,
+                    &dpi_set,
+                    &gesture_button_set,
+                    &button_set,
+                    &sink,
+                );
                 return;
             }
             if let Some(idx) = thumb_index
@@ -275,15 +345,6 @@ pub async fn run_capture_session(
         }
     });
 
-    info!(
-        index = device_index,
-        gesture_sources = armed.gesture_cids.len(),
-        dpi_buttons = armed.dpi_cids.len(),
-        buttons = armed.button_cids.len(),
-        thumbwheel = armed.thumb.is_some(),
-        "control capture active"
-    );
-
     // Liveness watchdog: this session's channel is the sole delivery path for
     // every diverted control, and a channel whose input-report delivery dies
     // (observed on macOS with concurrent opens of one node: writes accepted,
@@ -293,38 +354,27 @@ pub async fn run_capture_session(
     // — is gone (a sleeping/unreachable device still gets us an error *reply*,
     // which proves delivery and resets the count). Exiting lets the manager
     // re-arm on a fresh channel.
-    let root = <hidpp::feature::root::RootFeature as hidpp::feature::CreatableFeature>::new(
-        Arc::clone(&chan),
-        device_index,
-        0,
-    );
-    let mut shutdown = std::pin::pin!(shutdown);
-    let mut silent_pings = 0u8;
-    let channel_dead = loop {
-        tokio::select! {
-            _ = &mut shutdown => break false,
-            () = tokio::time::sleep(LIVENESS_PING_INTERVAL) => {
-                match root.ping(0x5a).await {
-                    Err(v20::Hidpp20Error::Channel(
-                        hidpp::channel::ChannelError::Timeout
-                        | hidpp::channel::ChannelError::NoResponse,
-                    )) => {
-                        silent_pings = silent_pings.saturating_add(1);
-                        if silent_pings >= LIVENESS_PING_STRIKES {
-                            warn!(
-                                index = device_index,
-                                "capture channel stopped delivering — restarting session on a fresh channel"
-                            );
-                            break true;
-                        }
-                    }
-                    // Any reply — pong, feature error, unreachable-device
-                    // error — proves the channel still delivers.
-                    _ => silent_pings = 0,
-                }
-            }
-        }
-    };
+    let root = RootFeature::new(Arc::clone(&chan), device_index, 0);
+    let wireless = root
+        .get_feature(WirelessDeviceStatusFeature::ID)
+        .await
+        .ok()
+        .flatten()
+        .map(|info| WirelessDeviceStatusFeature::new(Arc::clone(&chan), device_index, info.index));
+    log_capture_active(device_index, &armed, wireless.is_some());
+    let channel_unusable = monitor_capture(
+        CaptureMonitor {
+            root: &root,
+            armed: &armed,
+            accum: &accum,
+            device_index,
+            registry,
+            shared: &shared,
+        },
+        wireless,
+        shutdown,
+    )
+    .await;
 
     drop(listener);
     // The slot is one last-writer-wins cell shared by every session, so a
@@ -339,11 +389,14 @@ pub async fn run_capture_session(
     {
         *slot = None;
     }
-    if channel_dead {
-        // Disarm writes would each burn a timeout on a channel that no longer
-        // answers, and the replacement session re-arms the same diverts
-        // anyway; leave the device state for it.
-        debug!(index = device_index, "skipping disarm on a dead channel");
+    if channel_unusable {
+        // A dead channel would burn a timeout per write; a superseded channel
+        // must not restore controls underneath its replacement. Either way,
+        // the next session re-arms the requested diverts on the current path.
+        debug!(
+            index = device_index,
+            "skipping disarm on an unusable channel"
+        );
     } else {
         armed.disarm().await;
     }
@@ -391,6 +444,8 @@ struct ArmedControls {
     /// The gesture-source CIDs diverted with raw-XY reporting: the
     /// `spec.divert_gesture_sources` members the device exposes.
     gesture_cids: Vec<u16>,
+    /// Raw-XY-capable standard-button CIDs diverted as gesture sources.
+    gesture_button_cids: Vec<(u16, ButtonId)>,
     /// DPI/ModeShift CIDs diverted as plain buttons.
     dpi_cids: Vec<u16>,
     /// Standard-button CIDs diverted per the session's [`CaptureSpec`], with
@@ -421,6 +476,138 @@ impl ArmedControls {
             restore(tw.undivert().await, "thumb wheel");
         }
     }
+
+    /// Reapply volatile diversion after a wireless reconnect broadcast. The
+    /// broadcast can precede the device accepting feature writes, so allow a
+    /// short settling window like the keyboard capture path does.
+    async fn rearm(&self) {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        if let Some((rc, _)) = self.reprog.as_ref() {
+            for &reporting in &self.reporting {
+                let raw_xy = self.gesture_cids.contains(&reporting.cid)
+                    || self
+                        .gesture_button_cids
+                        .iter()
+                        .any(|&(cid, _)| cid == reporting.cid);
+                let change = rearm_change(reporting.original, raw_xy);
+                if let Err(error) = rc.set_cid_reporting_full(reporting.cid, change).await {
+                    warn!(
+                        cid = format_args!("{:#06x}", reporting.cid),
+                        ?error,
+                        "re-divert after wake failed"
+                    );
+                }
+            }
+        }
+        if let Some((thumbwheel, _, _)) = self.thumb.as_ref()
+            && let Err(error) = thumbwheel.divert(WheelDirection::Default).await
+        {
+            warn!(?error, "thumb-wheel re-divert after wake failed");
+        }
+    }
+}
+
+fn rearm_change(
+    reporting: reprog_controls::CidReporting,
+    raw_xy: bool,
+) -> reprog_controls::CidReportingChange {
+    reprog_controls::CidReportingChange {
+        diverted: Some(true),
+        raw_xy: Some(raw_xy),
+        remap: reporting.remap,
+        ..Default::default()
+    }
+}
+
+fn log_capture_active(device_index: u8, armed: &ArmedControls, wake_rearm: bool) {
+    info!(
+        index = device_index,
+        gesture_sources = armed.gesture_cids.len(),
+        gesture_buttons = armed.gesture_button_cids.len(),
+        dpi_buttons = armed.dpi_cids.len(),
+        buttons = armed.button_cids.len(),
+        thumbwheel = armed.thumb.is_some(),
+        wake_rearm,
+        "control capture active"
+    );
+}
+
+async fn wait_until_channel_superseded(registry: Option<&ChannelRegistry>, shared: &SharedChannel) {
+    let Some(registry) = registry else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    loop {
+        tokio::time::sleep(REGISTRY_CURRENT_POLL).await;
+        if !registry.is_current(shared) {
+            return;
+        }
+    }
+}
+
+/// Borrowed state used while monitoring one armed capture session.
+struct CaptureMonitor<'a> {
+    root: &'a RootFeature,
+    armed: &'a ArmedControls,
+    accum: &'a Arc<Mutex<CaptureAccum>>,
+    device_index: u8,
+    registry: Option<&'a ChannelRegistry>,
+    shared: &'a SharedChannel,
+}
+
+/// Keep a capture session alive and reapply its volatile diversions whenever
+/// the device announces a reconnect. Returns `true` when the underlying
+/// channel stopped delivering or inventory superseded it, so teardown must
+/// skip restore writes.
+async fn monitor_capture(
+    context: CaptureMonitor<'_>,
+    wireless: Option<WirelessDeviceStatusFeature>,
+    shutdown: oneshot::Receiver<()>,
+) -> bool {
+    let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
+    let mut shutdown = std::pin::pin!(shutdown);
+    let mut silent_pings = 0u8;
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return false,
+            () = wait_until_channel_superseded(context.registry, context.shared) => {
+                info!(index = context.device_index, "inventory replaced capture channel — restarting session");
+                return true;
+            }
+            event = async {
+                match wake_events.as_ref() {
+                    Some(events) => events.recv().await.ok(),
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(WirelessDeviceStatusEvent::StatusBroadcast(broadcast)) = event else {
+                    wake_events = None;
+                    continue;
+                };
+                info!(?broadcast, "device reconnected — re-arming control capture");
+                *context.accum.lock().unwrap_or_else(PoisonError::into_inner) =
+                    CaptureAccum::default();
+                context.armed.rearm().await;
+            }
+            () = tokio::time::sleep(LIVENESS_PING_INTERVAL) => {
+                match context.root.ping(0x5a).await {
+                    Err(v20::Hidpp20Error::Channel(
+                        hidpp::channel::ChannelError::Timeout
+                        | hidpp::channel::ChannelError::NoResponse,
+                    )) => {
+                        silent_pings = silent_pings.saturating_add(1);
+                        if silent_pings >= LIVENESS_PING_STRIKES {
+                            warn!(index = context.device_index, "capture channel stopped delivering — restarting session on a fresh channel");
+                            return true;
+                        }
+                    }
+                    // Any reply — pong, feature error, unreachable-device
+                    // error — proves the channel still delivers.
+                    _ => silent_pings = 0,
+                }
+            }
+        }
+    }
 }
 
 /// Resolve features off the device's root and divert the controls `spec`
@@ -447,6 +634,7 @@ async fn arm_controls(
         return Err(error);
     }
     if armed.gesture_cids.is_empty()
+        && armed.gesture_button_cids.is_empty()
         && armed.dpi_cids.is_empty()
         && armed.button_cids.is_empty()
         && armed.thumb.is_none()
@@ -487,6 +675,16 @@ async fn arm_controls_into(
                 armed.gesture_cids.push(cid);
             }
         }
+        for &(cid, button) in &spec.divert_gesture_buttons {
+            if let Some(control) = controls.iter().find(|c| c.cid == cid)
+                && control.is_divertable()
+                && control.supports_raw_xy()
+            {
+                let reporting = arm_reprog_control(&rc, cid, true).await?;
+                armed.reporting.push(reporting);
+                armed.gesture_button_cids.push((cid, button));
+            }
+        }
         for &cid in &reprog_controls::DPI_MODE_SHIFT_CIDS {
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
                 let reporting = arm_reprog_control(&rc, cid, false).await?;
@@ -498,7 +696,12 @@ async fn arm_controls_into(
             // The plan never lists a raw-XY-diverted gesture source, but
             // guard anyway: a plain (divert, no raw-XY) write here would strip
             // the raw-XY reporting armed above.
-            if armed.gesture_cids.contains(&cid) {
+            if armed.gesture_cids.contains(&cid)
+                || armed
+                    .gesture_button_cids
+                    .iter()
+                    .any(|&(gesture_cid, _)| gesture_cid == cid)
+            {
                 continue;
             }
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
@@ -614,6 +817,15 @@ fn gesture_source_button(cid: u16) -> Option<ButtonId> {
         .map(|(_, button)| button)
 }
 
+fn captured_gesture_button(cid: u16, gesture_button_cids: &[(u16, ButtonId)]) -> Option<ButtonId> {
+    gesture_source_button(cid).or_else(|| {
+        gesture_button_cids
+            .iter()
+            .find(|&&(candidate, _)| candidate == cid)
+            .map(|&(_, button)| button)
+    })
+}
+
 /// Log (don't propagate) a failure to hand a control back to the firmware.
 pub(crate) fn restore<E: std::fmt::Display>(result: Result<(), E>, what: &str) {
     if let Err(e) = result {
@@ -644,11 +856,12 @@ pub(crate) async fn enumerate_controls(
 /// Update `acc` and emit on a decoded `0x1b04` event: preserve physical button
 /// edges, and commit a gesture swipe the instant it crosses the threshold
 /// (mid-swipe, like Options+) rather than on release.
-fn handle_reprog(
+fn handle_reprog_with_gesture_buttons(
     acc: &mut CaptureAccum,
     event: RawControlEvent,
     gesture_cids: &[u16],
     dpi_cids: &[u16],
+    gesture_button_cids: &[(u16, ButtonId)],
     button_cids: &[(u16, ButtonId)],
     sink: &mpsc::UnboundedSender<CapturedInput>,
 ) {
@@ -662,6 +875,12 @@ fn handle_reprog(
                 .iter()
                 .filter(|cid| cids.contains(cid))
                 .filter_map(|&cid| gesture_source_button(cid).map(|b| (cid, b)))
+                .chain(
+                    gesture_button_cids
+                        .iter()
+                        .copied()
+                        .filter(|(cid, _)| cids.contains(cid)),
+                )
                 .collect();
             acc.hold = match std::mem::take(&mut acc.hold) {
                 // The holder is still down. While a second armed source is
@@ -714,7 +933,7 @@ fn handle_reprog(
             // shared button runtime.
             for &cid in &acc.gestures_down {
                 if !held.iter().any(|(held_cid, _)| *held_cid == cid)
-                    && let Some(button) = gesture_source_button(cid)
+                    && let Some(button) = captured_gesture_button(cid, gesture_button_cids)
                 {
                     let _ = sink.send(CapturedInput::ButtonUp(button));
                 }
@@ -747,39 +966,61 @@ fn handle_reprog(
             }
         }
         RawControlEvent::RawXy { dx, dy } => {
-            // Motion is attributed to the holding source; outside a hold the
-            // report is stray and dropped.
-            let HoldState::Holding {
-                button,
-                swipe,
-                overlap,
-                skip_first_raw_xy,
-                ..
-            } = &mut acc.hold
-            else {
-                return;
-            };
-            // While two armed sources are held the report could belong to
-            // either control — drop it rather than miscommit a swipe through
-            // the holder's map.
-            if *overlap {
-                return;
-            }
-            // The haptic panel's first sample after contact is a position
-            // jump; summing it would commit a bogus direction instantly.
-            if *skip_first_raw_xy {
-                *skip_first_raw_xy = false;
-                return;
-            }
-            // Commit the instant a clean direction emerges (mid-swipe, once per
-            // hold); the accumulator gates on hold duration internally and drops
-            // travel that arrives outside a hold.
-            if let Some(direction) = swipe.accumulate(i32::from(dx), i32::from(dy)) {
-                debug!(?direction, %button, "gesture committed");
-                let _ = sink.send(CapturedInput::Gesture(*button, direction));
-            }
+            handle_raw_xy(acc, dx, dy, sink);
         }
     }
+}
+
+fn handle_raw_xy(
+    acc: &mut CaptureAccum,
+    dx: i16,
+    dy: i16,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    // Motion is attributed to the holding source; outside a hold the report
+    // is stray and dropped.
+    let HoldState::Holding {
+        button,
+        swipe,
+        overlap,
+        skip_first_raw_xy,
+        ..
+    } = &mut acc.hold
+    else {
+        return;
+    };
+    // While two armed sources are held the report could belong to either
+    // control — drop it rather than miscommit a swipe through the holder's map.
+    if *overlap {
+        return;
+    }
+    // The haptic panel's first sample after contact is a position jump;
+    // summing it would commit a bogus direction instantly.
+    if *skip_first_raw_xy {
+        *skip_first_raw_xy = false;
+        return;
+    }
+    // Commit the instant a clean direction emerges (mid-swipe, once per hold);
+    // the accumulator gates on hold duration internally and drops travel that
+    // arrives outside a hold.
+    if let Some(direction) = swipe.accumulate(i32::from(dx), i32::from(dy)) {
+        debug!(?direction, %button, "gesture committed");
+        let _ = sink.send(CapturedInput::Gesture(*button, direction));
+    }
+}
+
+/// Test seam for the pre-existing raw-XY/plain-button cases, none of which
+/// carries a standard-button gesture hold.
+#[cfg(test)]
+fn handle_reprog(
+    acc: &mut CaptureAccum,
+    event: RawControlEvent,
+    gesture_cids: &[u16],
+    dpi_cids: &[u16],
+    button_cids: &[(u16, ButtonId)],
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    handle_reprog_with_gesture_buttons(acc, event, gesture_cids, dpi_cids, &[], button_cids, sink);
 }
 #[cfg(test)]
 mod tests;
