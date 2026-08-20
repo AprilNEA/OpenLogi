@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-20
+
+### Added
+
+- *(ipc)* identify each agent run behind a frozen handshake
+
+### Changed
+
+- *(gui)* stop scanning for cameras with no window open
+
+### Fixed
+
+- *(agent)* relaunch after granting Input Monitoring ([#713](https://github.com/AprilNEA/OpenLogi/pull/713))
+- *(overlay)* prevent GPUI from exiting on window close ([#700](https://github.com/AprilNEA/OpenLogi/pull/700))
+- *(gui)* give the auxiliary windows the app's real Wayland identity
+- *(gui)* use the GPUI executor timer, not tokio::time::interval, for camera scans ([#686](https://github.com/AprilNEA/OpenLogi/pull/686))
+- *(overlay)* use the workspace's Duration idioms for the give-up clock
+- *(agent)* ask the overlay to leave before quitting
+- *(overlay)* give up when no agent answers for a minute
+- *(core)* resolve the binding module's intra-doc links
+- *(core)* keep dev builds on the dev profile after the suffix rename
+- *(agent)* supervise the overlay role instead of launching into it
+- *(gui)* bind the Actions Ring overlay to one agent run
+- *(agent)* reapply volatile settings after Windows resume ([#639](https://github.com/AprilNEA/OpenLogi/pull/639))
+
 ## [0.7.1] - 2026-08-15
 
 ### Added
