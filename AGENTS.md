@@ -60,11 +60,30 @@ direnv exec . cargo clippy --workspace --all-targets -- -D warnings
 direnv exec . git commit …
 ```
 
-### Local gate (hard stop — do this before every push)
+### Local gate (scale it to the diff)
 
-**Never `git push` until the final tree has passed the full local gate.**
-`cargo check` alone is not enough. Conflict resolution + "it compiles on my
-Mac" is not enough. Run **all four** on the commit you are about to push:
+CI runs the full workspace on every push, so the local gate's job is to keep
+predictable reds off CI, not to duplicate the matrix. Match the tier to the
+blast radius of the diff:
+
+**Scoped diff — one or two crates, nothing workspace-level:**
+
+```sh
+cargo fmt --all -- --check
+cargo clippy -p <changed>… --all-targets -- -D warnings
+cargo test -p <changed>…
+```
+
+Green → push; CI sweeps dependents and the other platforms. Add the rustdoc
+step below whenever the diff touches the hid crates (`openlogi-hid`,
+`openlogi-hidpp`, `openlogi-hidpp-derive`).
+
+**Full gate — still a hard stop for the cases that have actually burned CI:**
+
+- after ANY rebase or conflict resolution (including adopting contributor PRs);
+- workspace-level changes: root `Cargo.toml` (lint table, profiles, dependency
+  versions), `Cargo.lock`, `rust-toolchain.toml`, CI workflows;
+- a diff spanning three or more crates.
 
 ```sh
 cargo fmt --all -- --check
@@ -75,8 +94,10 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p openlogi-hid -p openlogi-hidpp \
 # or: devenv tasks run openlogi:check
 ```
 
-Exit non-zero on any of those → fix, re-run the **whole** set, then push.
-Do not push "to see if CI likes it." CI is confirmation, not the first compile.
+Whichever tier applies: exit non-zero → fix, re-run, then push. Do not push a
+known-red tree "to see if CI likes it" — that burns a CI round and a review-bot
+pass, and on a shared branch cancels the sibling run. `cargo check` alone is
+not a tier.
 
 The rustdoc step mirrors CI's `rustdoc (hid crates)` job and catches what the
 other three cannot: a broken intra-doc link is neither a compile error nor a
@@ -288,7 +309,9 @@ including what was NOT verified.
 **Push checklist (agents):**
 
 1. Rebase/merge conflicts fully resolved — no `<<<<<<<` left, no half-ported APIs.
-2. Full local gate green on the **final** tree (fmt + clippy `-D warnings` + test).
+2. Local gate green on the **final** tree, at the tier the diff calls for —
+   full gate after any rebase or for workspace-level changes; scoped
+   fmt + clippy + test otherwise.
 3. If cfg-gated files changed: cross-lint or hand-audit against master (see above).
 4. If wire types changed: `wire_format` tests green + `PROTOCOL_VERSION` bumped.
 5. If locales changed: every `locales/*.yml` must have the same keys as
