@@ -46,6 +46,30 @@ pub fn dev_id(id: &str) -> String {
     format!("{id}{DEV_SUFFIX}")
 }
 
+/// Whether `id` names a dev build — the inverse of [`dev_id`].
+///
+/// The profile split keys off this: a dev bundle gets its own config directory
+/// and IPC socket, so a false negative points a dev build at the user's real
+/// config. That asymmetry is why the legacy `.dev` spelling is still accepted —
+/// a local bundle built before the rename must not silently claim production
+/// state just because nobody rebuilt it.
+#[must_use]
+pub fn is_dev_id(id: &str) -> bool {
+    [DEV_SUFFIX, LEGACY_DEV_SUFFIX]
+        .iter()
+        .any(|suffix| ends_with_ignore_ascii_case(id, suffix))
+}
+
+/// The dev suffix before it was hyphenated. Recognised, never produced.
+const LEGACY_DEV_SUFFIX: &str = ".dev";
+
+fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
+    haystack.len() > suffix.len()
+        && haystack
+            .get(haystack.len() - suffix.len()..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+}
+
 /// The release page for a specific version tag (e.g. the running build).
 #[must_use]
 pub fn release_tag_url(version: &str) -> String {
@@ -123,7 +147,7 @@ impl DeeplinkCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::DeeplinkCommand;
+    use super::{AGENT_ID, APP_ID, DeeplinkCommand, OVERLAY_ID, dev_id, is_dev_id};
 
     const ALL: [DeeplinkCommand; 5] = [
         DeeplinkCommand::Show,
@@ -157,5 +181,34 @@ mod tests {
         assert_eq!(DeeplinkCommand::parse_url("https://example.com/show"), None);
         assert_eq!(DeeplinkCommand::parse_url("openlogi://bogus"), None);
         assert_eq!(DeeplinkCommand::parse_url("openlogi://"), None);
+    }
+
+    #[test]
+    fn dev_ids_round_trip() {
+        for id in [APP_ID, AGENT_ID, OVERLAY_ID] {
+            assert!(is_dev_id(&dev_id(id)), "{id} suffixed must read as dev");
+            assert!(!is_dev_id(id), "{id} is production");
+        }
+    }
+
+    #[test]
+    fn the_legacy_dotted_suffix_still_reads_as_dev() {
+        // A stale `target/dev` bundle from before the rename must not fall
+        // through to the production config directory and IPC socket.
+        assert!(is_dev_id("org.openlogi.agent.dev"));
+        assert!(is_dev_id("org.openlogi.openlogi.dev"));
+    }
+
+    #[test]
+    fn a_bare_suffix_is_not_a_dev_id() {
+        assert!(!is_dev_id("-dev"));
+        assert!(!is_dev_id(".dev"));
+        assert!(!is_dev_id(""));
+    }
+
+    #[test]
+    fn matching_ignores_case_but_not_position() {
+        assert!(is_dev_id("org.openlogi.agent-DEV"));
+        assert!(!is_dev_id("org.openlogi.dev-agent"));
     }
 }

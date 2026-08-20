@@ -18,7 +18,7 @@
 //! shipped in Windows artifacts, because moving it afterwards would strand
 //! every existing user's `config.toml` and the agent's first-run state.
 
-//! Local packaged macOS builds stamped with `.dev` bundle identifiers use the
+//! Local packaged macOS builds stamped with dev-channel identifiers use the
 //! same layout under an `openlogi-dev` app directory.
 
 use std::path::PathBuf;
@@ -29,7 +29,7 @@ use thiserror::Error;
 
 /// Production subdirectory created under each XDG base directory.
 const APP_DIR: &str = "openlogi";
-/// Local macOS `.dev` bundles use a separate profile so development agents
+/// Local macOS dev builds use a separate profile so development agents
 /// cannot take over the installed app's socket, lock, config, or asset cache.
 const DEV_APP_DIR: &str = "openlogi-dev";
 
@@ -65,10 +65,7 @@ fn is_dev_profile() -> bool {
     #[cfg(target_os = "macos")]
     {
         if let Some(identifier) = current_bundle_identifier() {
-            // Reverse-DNS suffix (org.openlogi.*.dev), not a filesystem extension.
-            return identifier
-                .rsplit_once('.')
-                .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("dev"));
+            return crate::brand::is_dev_id(&identifier);
         }
     }
 
@@ -123,7 +120,7 @@ pub fn xdg_config_home() -> Result<PathBuf, PathsError> {
 /// Directory holding the user's `config.toml`.
 ///
 /// `$XDG_CONFIG_HOME/openlogi`, default `~/.config/openlogi`.
-/// Local macOS `.dev` bundles use `openlogi-dev` instead.
+/// Local macOS dev builds use `openlogi-dev` instead.
 pub fn config_dir() -> Result<PathBuf, PathsError> {
     Ok(xdg_config_home()?.join(app_dir()))
 }
@@ -137,7 +134,7 @@ pub fn config_path() -> Result<PathBuf, PathsError> {
 /// lives under `data_dir()/assets`.
 ///
 /// `$XDG_DATA_HOME/openlogi`, default `~/.local/share/openlogi`.
-/// Local macOS `.dev` bundles use `openlogi-dev` instead.
+/// Local macOS dev builds use `openlogi-dev` instead.
 pub fn data_dir() -> Result<PathBuf, PathsError> {
     Ok(xdg()?.data_dir().join(app_dir()))
 }
