@@ -11,10 +11,9 @@
 //! catalog the mouse picker uses, plus a Power User section.
 
 #![expect(
-    clippy::cast_precision_loss,
     clippy::needless_pass_by_value,
     clippy::too_many_arguments,
-    reason = "GPUI builders take owned Copy palette/slots; layout math uses small f32 counts"
+    reason = "GPUI builders take owned Copy palette values and slot tables"
 )]
 // Not `expect`: the only float_cmp sites are `assert_eq!` on layout px in the
 // tests below, and rustc does not credit an expectation with a lint raised
@@ -731,6 +730,10 @@ fn key_is_highlighted(idx: usize, selected: Option<usize>, hovered: Option<usize
 /// keys: a dense F-row (a G513 packs Esc-F12 into half the render width)
 /// would otherwise stack the bubbles into an overlapping wall. The leader
 /// lines fan from each bubble down to its true key position.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "idx/count index the function row — at most a couple of dozen keys"
+)]
 fn callout_center_x(idx: usize, count: usize, image_w: f32) -> f32 {
     let margin = KEY_CALLOUT_W / 2.0 + 4.0;
     if count <= 1 {
@@ -998,6 +1001,10 @@ fn legacy_pixel_key_points(asset: &ResolvedAsset) -> Option<Vec<KeyPoint>> {
     if img.origin.width != asset.png_width || img.origin.height != asset.png_height {
         return None;
     }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "depot image dimensions are a few thousand pixels at most"
+    )]
     let (w, h) = (img.origin.width as f32, img.origin.height as f32);
 
     let mut markers: Vec<KeyPoint> = img
@@ -1090,6 +1097,10 @@ fn synthesized_esc_x(first_function_key_x: f32) -> f32 {
     (first_function_key_x - 0.045).max(0.02)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "FUNCTION_KEYS is a fixed table of a dozen entries"
+)]
 fn fallback_key_x_fractions() -> Vec<f32> {
     let step = (EVEN_SPACING_END - EVEN_SPACING_START) / (FUNCTION_KEYS.len() - 1) as f32;
     (0..FUNCTION_KEYS.len())
@@ -1320,6 +1331,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "lane counts are bounded by FUNCTION_KEYS"
+    )]
     fn staggered_function_key_callout_rows_fit_the_keyboard_width() {
         let lower_count = FUNCTION_KEYS
             .iter()

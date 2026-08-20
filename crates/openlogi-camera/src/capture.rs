@@ -23,11 +23,6 @@
     unsafe_code,
     reason = "AVFoundation / CoreMedia / CoreVideo capture FFI"
 )]
-#![expect(
-    clippy::cast_possible_truncation,
-    reason = "pixel dimensions and FourCC constants are bounded and copied verbatim"
-)]
-
 use std::ffi::{CString, c_void};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -157,11 +152,16 @@ define_class!(
                         }
                     }
                     if let Ok(mut slot) = LATEST.lock() {
-                        *slot = Some(Arc::new(Frame {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            reason = "CoreVideo reports sensor-sized dimensions, divided down again by `step`"
+                        )]
+                        let frame = Frame {
                             width: out_w as u32,
                             height: out_h as u32,
                             bgra,
-                        }));
+                        };
+                        *slot = Some(Arc::new(frame));
                         FRAME_GEN.fetch_add(1, Ordering::Relaxed);
                     }
                 }

@@ -18,11 +18,6 @@
     unsafe_code,
     reason = "Media Foundation COM (device activation + IMFSourceReader sample loop)"
 )]
-#![expect(
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    reason = "pixel dimensions and strides are bounded and copied verbatim"
-)]
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -221,7 +216,7 @@ fn pump_frames(reader: &IMFSourceReader, shared: &Shared, stride_hint: StrideHin
             let (mut flags, mut sample) = (0u32, None);
             if reader
                 .ReadSample(
-                    MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+                    MF_SOURCE_READER_FIRST_VIDEO_STREAM.0.cast_unsigned(),
                     0,
                     None,
                     Some(&raw mut flags),
@@ -292,7 +287,7 @@ fn open_reader(
         // processor can convert to RGB32 count — a compressed 720p mode it
         // can't decode would fail below, while a convertible mode at another
         // 16:9 size still previews fine.
-        let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+        let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0.cast_unsigned();
         let mut best: Option<(u32, IMFMediaType)> = None;
         let mut index = 0u32;
         while let Ok(native) = reader.GetNativeMediaType(stream, index) {
@@ -346,7 +341,7 @@ fn open_reader(
         let height = (size & 0xFFFF_FFFF) as u32;
         let stride = current
             .GetUINT32(&MF_MT_DEFAULT_STRIDE)
-            .map_or(width as i32 * 4, |s| s as i32);
+            .map_or_else(|_| width.cast_signed() * 4, u32::cast_signed);
         Ok((
             reader,
             StrideHint {
@@ -488,7 +483,8 @@ fn setup_err(e: impl std::fmt::Display) -> CaptureError {
 /// Map an activation failure to AccessDenied when the system privacy toggle
 /// is the cause (E_ACCESSDENIED), Setup otherwise.
 fn access_or_setup(e: &windows::core::Error) -> CaptureError {
-    const E_ACCESSDENIED: windows::core::HRESULT = windows::core::HRESULT(0x8007_0005_u32 as i32);
+    const E_ACCESSDENIED: windows::core::HRESULT =
+        windows::core::HRESULT(0x8007_0005_u32.cast_signed());
     if e.code() == E_ACCESSDENIED {
         CaptureError::AccessDenied
     } else {
