@@ -32,10 +32,16 @@ pub struct DeviceCapturePlan {
     /// keyed by the button its captured swipes dispatch as; empty when none
     /// gestures.
     pub gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// macOS Back/Forward gesture maps whose button lifecycle is captured over
+    /// HID++ while the OS hook supplies pointer movement.
+    pub side_gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Standard buttons whose binding leaves the default — divert over
     /// `0x1b04`. A button at its default keeps its native HID behavior, so no
     /// re-synthesis is ever needed.
     pub divert_buttons: Vec<(u16, ButtonId)>,
+    /// Standard Back/Forward controls diverted with both edges for the
+    /// device-owned side-button gesture path.
+    pub divert_gesture_buttons: Vec<(u16, ButtonId)>,
     /// Whether any thumbwheel binding leaves its default. Combined with the
     /// sensitivity to decide thumb-wheel diversion.
     pub thumbwheel_bindings_nondefault: bool,
@@ -50,6 +56,23 @@ pub struct DeviceCapturePlan {
 /// Shared plan list, rewritten by the orchestrator and read by the watcher.
 pub type SharedCapturePlans = Arc<RwLock<Vec<DeviceCapturePlan>>>;
 
+/// Back/Forward gesture maps that macOS must own through device-specific HID++
+/// capture because Bluetooth-direct CGEvents may carry no sender identity.
+#[must_use]
+pub(crate) fn hidpp_side_gesture_maps_for(
+    config: &Config,
+    config_key: &str,
+    app: Option<&str>,
+) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
+    if !cfg!(target_os = "macos") {
+        return BTreeMap::new();
+    }
+    oshook_gestures_for(config, Some(config_key), app)
+        .into_iter()
+        .filter(|(button, _)| matches!(button, ButtonId::Back | ButtonId::Forward))
+        .collect()
+}
+
 /// Build one device's plan from the config (per-app effective for `app`).
 #[must_use]
 pub fn plan_for_device(
@@ -60,14 +83,19 @@ pub fn plan_for_device(
     rearm_generation: u64,
 ) -> DeviceCapturePlan {
     let bindings = bindings_for(config, Some(config_key), app);
-    // A gesture-mode OS-hook button must stay native: the hook needs to see
-    // its press to run hold+swipe detection, and diverting it would starve the
-    // hook of events.
+    // Gesture-mode OS-hook controls normally stay native so the hook sees the
+    // press. macOS Back/Forward are the exception below: HID++ owns their
+    // button edges because Bluetooth-direct CGEvents may be unattributed.
     let oshook = oshook_gestures_for(config, Some(config_key), app);
+    let side_gesture_bindings = hidpp_side_gesture_maps_for(config, config_key, app);
     // One direction map per HID++ source in gesture mode — several may
     // gesture at once, each armed with its own raw-XY divert (the watcher
     // derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
+    let divert_gesture_buttons = DIVERTABLE_STANDARD_BUTTONS
+        .into_iter()
+        .filter(|(_, button)| side_gesture_bindings.contains_key(button))
+        .collect::<Vec<_>>();
     // The HID++ gesture sources never reach the OS hook, so a non-default
     // single binding on one is deliverable only via a plain HID++ divert — but
     // only while the source is NOT in gesture mode (the raw-XY gesture divert
@@ -108,7 +136,9 @@ pub fn plan_for_device(
         route,
         bindings,
         gesture_bindings,
+        side_gesture_bindings,
         divert_buttons,
+        divert_gesture_buttons,
         thumbwheel_bindings_nondefault,
         thumbwheel_sensitivity: config.thumbwheel_sensitivity(config_key),
         rearm_generation,
@@ -291,5 +321,31 @@ mod tests {
                 .any(|&(cid, _)| cid == GESTURE_BUTTON_CID),
             "an unbound gesture button must not be captured"
         );
+    }
+
+    #[test]
+    fn macos_side_gesture_uses_verified_hidpp_button_edges() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        if cfg!(target_os = "macos") {
+            assert!(plan.side_gesture_bindings.contains_key(&ButtonId::Forward));
+            assert!(
+                plan.divert_gesture_buttons
+                    .contains(&(0x0056, ButtonId::Forward)),
+                "Forward must be diverted with down/up HID++ delivery"
+            );
+            assert!(
+                !plan
+                    .divert_buttons
+                    .iter()
+                    .any(|&(_, button)| button == ButtonId::Forward),
+                "a gesture hold must not also be a press-only divert"
+            );
+        } else {
+            assert!(plan.side_gesture_bindings.is_empty());
+            assert!(plan.divert_gesture_buttons.is_empty());
+        }
     }
 }

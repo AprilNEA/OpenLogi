@@ -27,13 +27,16 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{Action, ButtonId, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_hid::session::gesture::{CaptureSpec, GESTURE_SOURCE_BUTTONS};
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
+use openlogi_hid::{
+    CaptureChannel, CapturedInput, DeviceRoute, run_capture_session_with_registry_spec,
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
 use crate::hook_runtime::ActionDispatcher;
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
+use crate::side_gesture::{SharedSideGesture, SideGestureAction};
 
 /// How often to re-read the active device target + thumb-wheel arming so a
 /// carousel switch or a binding/sensitivity edit re-points / re-arms capture.
@@ -55,7 +58,9 @@ pub fn spawn(
     capture_plans: SharedCapturePlans,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
+    channel_registry: openlogi_hid::ChannelRegistry,
     dispatcher: ActionDispatcher,
+    side_gesture: SharedSideGesture,
 ) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -72,7 +77,9 @@ pub fn spawn(
             capture_plans,
             capture_channel,
             receiver_access,
+            channel_registry,
             dispatcher,
+            side_gesture,
         ));
     });
 }
@@ -97,6 +104,7 @@ fn spec_for(plan: &DeviceCapturePlan) -> CaptureSpec {
             .filter(|(_, button)| plan.gesture_bindings.contains_key(button))
             .map(|(cid, _)| cid)
             .collect(),
+        divert_gesture_buttons: plan.divert_gesture_buttons.clone(),
         divert_buttons: plan.divert_buttons.clone(),
     }
 }
@@ -153,7 +161,9 @@ async fn manage(
     capture_plans: SharedCapturePlans,
     capture_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
+    channel_registry: openlogi_hid::ChannelRegistry,
     dispatcher: ActionDispatcher,
+    side_gesture: SharedSideGesture,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<(String, CapturedInput)>();
     let mut sessions: HashMap<String, RunningSession> = HashMap::new();
@@ -182,6 +192,7 @@ async fn manage(
                     &mut accumulators,
                     &capture_plans,
                     &dispatcher,
+                    &side_gesture,
                 );
             }
             _ = ticker.tick() => {
@@ -227,6 +238,7 @@ async fn manage(
                             && *rearm == session.rearm_generation
                     });
                     if !keep && let Some(stop) = session.stop.take() {
+                        side_gesture.cancel_device(key);
                         let _ = stop.send(());
                     }
                 }
@@ -258,6 +270,7 @@ async fn manage(
                         &tx,
                         &done_tx,
                         &capture_channel,
+                        &channel_registry,
                     );
                     sessions.insert(key, session);
                 }
@@ -273,6 +286,7 @@ async fn manage(
                     if unexpected {
                         warn!(key, "capture session ended unexpectedly, re-arming");
                     }
+                    side_gesture.cancel_device(&key);
                     sessions.remove(&key);
                 }
             }
@@ -297,6 +311,7 @@ fn spawn_session(
     inputs: &mpsc::UnboundedSender<(String, CapturedInput)>,
     done: &mpsc::UnboundedSender<(String, u64)>,
     capture_channel: &CaptureChannel,
+    channel_registry: &openlogi_hid::ChannelRegistry,
 ) -> RunningSession {
     let (stop_tx, stop_rx) = oneshot::channel();
     // Tag this session's inputs with its device key so dispatch resolves them
@@ -313,10 +328,18 @@ fn spawn_session(
     let session_route = route.clone();
     let session_spec = spec.clone();
     let slot = Arc::clone(capture_channel);
+    let registry = channel_registry.clone();
     tokio::spawn(async move {
         let _lease = lease;
-        if let Err(e) =
-            run_capture_session(session_route, session_spec, session_tx, stop_rx, slot).await
+        if let Err(e) = run_capture_session_with_registry_spec(
+            session_route,
+            session_spec,
+            session_tx,
+            stop_rx,
+            slot,
+            &registry,
+        )
+        .await
         {
             debug!(error = %e, "capture session ended");
         }
@@ -374,7 +397,23 @@ fn dispatch(
     accumulators: &mut HashMap<String, WheelAccumulators>,
     capture_plans: &SharedCapturePlans,
     dispatcher: &ActionDispatcher,
+    side_gesture: &SharedSideGesture,
 ) {
+    if matches!(input, CapturedInput::CaptureReset) {
+        side_gesture.cancel_device(key);
+        return;
+    }
+    if let CapturedInput::ButtonState(button, pressed) = input {
+        dispatch_side_gesture_button(
+            key,
+            button,
+            pressed,
+            capture_plans,
+            dispatcher,
+            side_gesture,
+        );
+        return;
+    }
     let Ok(plans) = capture_plans.read() else {
         return;
     };
@@ -431,6 +470,45 @@ fn dispatch(
                 }
             }
         }
+        CapturedInput::ButtonState(_, _) | CapturedInput::CaptureReset => {}
+    }
+}
+
+/// Apply one verified HID++ Back/Forward edge to the shared hold. Presses
+/// snapshot this device's current per-app gesture map; releases resolve a
+/// click even if the plan changed while the button was held.
+fn dispatch_side_gesture_button(
+    key: &str,
+    button: ButtonId,
+    pressed: bool,
+    capture_plans: &SharedCapturePlans,
+    dispatcher: &ActionDispatcher,
+    side_gesture: &SharedSideGesture,
+) {
+    let output = if pressed {
+        let directions = capture_plans.read().ok().and_then(|plans| {
+            plans
+                .iter()
+                .find(|plan| plan.config_key == key)
+                .and_then(|plan| plan.side_gesture_bindings.get(&button))
+                .cloned()
+        });
+        let Some(directions) = directions else {
+            return;
+        };
+        side_gesture.begin(key.to_owned(), button, directions)
+    } else {
+        side_gesture.end(key, button)
+    };
+    if let Some(SideGestureAction {
+        device_key,
+        button,
+        direction,
+        action,
+    }) = output
+    {
+        debug!(key = device_key, %button, ?direction, action = %action.label(), "HID++ side gesture → action");
+        dispatcher.dispatch(&action, Some(&device_key));
     }
 }
 

@@ -29,7 +29,9 @@ use openlogi_ipc::InventoryHealth;
 use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
-use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans, plan_for_device};
+use crate::capture_plan::{
+    DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
+};
 use crate::hardware::DeviceOp;
 use crate::hook_runtime::{HookMaps, SharedHookMaps};
 use crate::observable::ObservableState;
@@ -242,10 +244,18 @@ impl Orchestrator {
         if key.is_some_and(|k| !self.config.device_enabled(k)) {
             return HookMaps::default();
         }
-        HookMaps {
-            bindings: bindings_for(&self.config, key, app),
-            gestures: oshook_gestures_for(&self.config, key, app),
+        let mut bindings = bindings_for(&self.config, key, app);
+        let mut gestures = oshook_gestures_for(&self.config, key, app);
+        if let Some(key) = key {
+            for button in hidpp_side_gesture_maps_for(&self.config, key, app).keys() {
+                // HID++ owns both edges for these controls. Keeping their
+                // projected click or gesture map in the global hook would
+                // reintroduce a second, unattributed dispatch path.
+                bindings.remove(button);
+                gestures.remove(button);
+            }
         }
+        HookMaps { bindings, gestures }
     }
 
     /// The keyboard key-capture spec for the first known keyboard, or `None`
@@ -1045,4 +1055,8 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "expect is idiomatic for test-only lock assertions"
+)]
 mod tests;

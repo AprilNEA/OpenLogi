@@ -19,6 +19,7 @@ pub mod hook_runtime;
 pub mod observable;
 pub mod orchestrator;
 pub mod receiver_access;
+pub mod side_gesture;
 pub mod watchers;
 
 pub use dpi::{DpiCycleState, DpiCycles};
