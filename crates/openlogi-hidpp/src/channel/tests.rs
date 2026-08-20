@@ -9,7 +9,7 @@ use std::{
     io,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -61,6 +61,87 @@ fn send_returns_response_before_timeout() {
 
         assert_eq!(actual, response);
         assert_eq!(handle.written_reports().len(), 1);
+        assert_pending_empty(&channel);
+    });
+}
+
+#[test]
+fn unknown_write_completion_can_be_confirmed_by_a_delayed_response() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        let response = short_msg(0x20);
+        handle.fail_next_write_with_unknown_completion();
+
+        let send = channel.send_with_timeout(
+            short_msg(0x10),
+            move |candidate| *candidate == response,
+            Duration::from_secs(1),
+        );
+        let respond = async {
+            futures_timer::Delay::new(Duration::from_millis(50)).await;
+            handle.send_incoming(response).await;
+        };
+
+        let (actual, ()) = futures::join!(send, respond);
+
+        assert_eq!(actual.unwrap(), response);
+        assert_pending_empty(&channel);
+    });
+}
+
+#[test]
+fn unknown_write_completion_without_response_reaches_request_timeout() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        handle.fail_next_write_with_unknown_completion();
+
+        let error = channel
+            .send_with_timeout(short_msg(0x10), |_| false, Duration::from_millis(25))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ChannelError::Timeout));
+        assert_pending_empty(&channel);
+    });
+}
+
+#[test]
+fn definitive_write_failure_returns_immediately() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+        handle.fail_next_write();
+
+        let started = Instant::now();
+        let error = channel
+            .send_with_timeout(short_msg(0x10), |_| false, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ChannelError::Implementation(_)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_pending_empty(&channel);
+    });
+}
+
+#[test]
+fn response_less_writes_surface_unknown_completion() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = HidppChannel::from_raw_channel(raw).await.unwrap();
+
+        handle.fail_next_write_with_unknown_completion();
+        let message_error = channel.send_and_forget(short_msg(0x10)).await.unwrap_err();
+        assert!(matches!(message_error, ChannelError::Implementation(_)));
+
+        handle.fail_next_write_with_unknown_completion();
+        let raw_error = channel
+            .write_raw_report(&[0x12; MAX_RAW_REPORT_LENGTH])
+            .await
+            .unwrap_err();
+        assert!(matches!(raw_error, ChannelError::Implementation(_)));
         assert_pending_empty(&channel);
     });
 }
@@ -491,6 +572,7 @@ pub(crate) struct MockRawHidHandle {
     written_reports: Arc<Mutex<Vec<Vec<u8>>>>,
     responses_on_write: Arc<Mutex<VecDeque<Vec<u8>>>>,
     park_writes: Arc<AtomicBool>,
+    next_write_error: Arc<AtomicU8>,
 }
 
 impl MockRawHidHandle {
@@ -512,6 +594,14 @@ impl MockRawHidHandle {
     fn park_writes(&self) {
         self.park_writes.store(true, Ordering::SeqCst);
     }
+
+    fn fail_next_write(&self) {
+        self.next_write_error.store(1, Ordering::SeqCst);
+    }
+
+    fn fail_next_write_with_unknown_completion(&self) {
+        self.next_write_error.store(2, Ordering::SeqCst);
+    }
 }
 
 pub(crate) struct MockRawHidChannel {
@@ -520,6 +610,7 @@ pub(crate) struct MockRawHidChannel {
     written_reports: Arc<Mutex<Vec<Vec<u8>>>>,
     responses_on_write: Arc<Mutex<VecDeque<Vec<u8>>>>,
     park_writes: Arc<AtomicBool>,
+    next_write_error: Arc<AtomicU8>,
 }
 
 impl MockRawHidChannel {
@@ -528,12 +619,14 @@ impl MockRawHidChannel {
         let written_reports = Arc::new(Mutex::new(Vec::new()));
         let responses_on_write = Arc::new(Mutex::new(VecDeque::new()));
         let park_writes = Arc::new(AtomicBool::new(false));
+        let next_write_error = Arc::new(AtomicU8::new(0));
 
         let handle = MockRawHidHandle {
             incoming_tx: incoming_tx.clone(),
             written_reports: Arc::clone(&written_reports),
             responses_on_write: Arc::clone(&responses_on_write),
             park_writes: Arc::clone(&park_writes),
+            next_write_error: Arc::clone(&next_write_error),
         };
 
         (
@@ -543,6 +636,7 @@ impl MockRawHidChannel {
                 written_reports,
                 responses_on_write,
                 park_writes,
+                next_write_error,
             },
             handle,
         )
@@ -559,10 +653,15 @@ impl RawHidChannel for MockRawHidChannel {
         0xc539
     }
 
-    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Sync + Send>> {
+    async fn write_report(&self, src: &[u8]) -> Result<usize, RawHidWriteError> {
         self.written_reports.lock().unwrap().push(src.to_vec());
         if self.park_writes.load(Ordering::SeqCst) {
             return std::future::pending().await;
+        }
+        match self.next_write_error.swap(0, Ordering::SeqCst) {
+            1 => return Err(RawHidWriteError::failed(mock_error())),
+            2 => return Err(RawHidWriteError::completion_unknown(mock_error())),
+            _ => {}
         }
         let response = self.responses_on_write.lock().unwrap().pop_front();
         if let Some(response) = response {

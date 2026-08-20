@@ -34,7 +34,7 @@ pub use error::ChannelError;
 pub use message::{
     HidppMessage, LONG_REPORT_ID, LONG_REPORT_LENGTH, SHORT_REPORT_ID, SHORT_REPORT_LENGTH,
 };
-pub use raw::RawHidChannel;
+pub use raw::{RawHidChannel, RawHidWriteError};
 
 use raw::supports_short_long_hidpp;
 
@@ -376,7 +376,19 @@ impl HidppChannel {
         // park `send` forever before the response wait even starts.
         let mut request = std::pin::pin!(
             async {
-                self.send_and_forget(msg).await?;
+                match self.write_message(msg).await {
+                    Ok(()) => {}
+                    Err(RawHidWriteError::CompletionUnknown(error)) => {
+                        trace!(
+                            dev,
+                            feat,
+                            func,
+                            error = %error,
+                            "HID write completion unknown; awaiting response"
+                        );
+                    }
+                    Err(error) => return Err(raw_write_channel_error(error)),
+                }
                 receiver.await.map_err(|_| ChannelError::NoResponse)
             }
             .fuse()
@@ -419,13 +431,15 @@ impl HidppChannel {
             return Err(ChannelError::MessageTypeNotSupported);
         }
 
+        self.write_message(msg)
+            .await
+            .map_err(raw_write_channel_error)
+    }
+
+    async fn write_message(&self, msg: HidppMessage) -> Result<(), RawHidWriteError> {
         let mut buf = [0u8; LONG_REPORT_LENGTH];
         let len = msg.write_raw(&mut buf);
-        self.raw_channel
-            .write_report(&buf[..len])
-            .await
-            .map(|_| ())
-            .map_err(ChannelError::Implementation)
+        self.raw_channel.write_report(&buf[..len]).await.map(|_| ())
     }
 
     /// Write one raw HID report through this channel's already-owned transport.
@@ -451,7 +465,7 @@ impl HidppChannel {
 
         let mut write = std::pin::pin!(self.raw_channel.write_report(report).fuse());
         select! {
-            result = write => result.map_err(ChannelError::Implementation),
+            result = write => result.map_err(raw_write_channel_error),
             () = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
         }
     }
@@ -495,6 +509,10 @@ impl HidppChannel {
     pub fn remove_msg_listener(&self, hdl: u32) -> bool {
         lock(&self.message_listeners).remove(&hdl).is_some()
     }
+}
+
+fn raw_write_channel_error(error: RawHidWriteError) -> ChannelError {
+    ChannelError::Implementation(Box::new(error))
 }
 
 /// Reads reports from `raw_channel` until `close` fires, resolving each one

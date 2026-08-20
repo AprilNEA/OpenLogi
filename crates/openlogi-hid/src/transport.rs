@@ -20,6 +20,8 @@ use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader};
 use async_hid::{DeviceInfo, DeviceWriter, HidBackend};
 use futures_lite::StreamExt as _;
 use hidpp::channel::HidppChannel;
+#[cfg(not(target_os = "windows"))]
+use hidpp::channel::RawHidWriteError;
 use hidpp::nibble::U4;
 #[cfg(not(target_os = "windows"))]
 use hidpp::{async_trait, channel::RawHidChannel};
@@ -76,6 +78,27 @@ const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 3] = [
     (0xff43, 0x0202, true),
     (0xff43, 0x0602, false),
 ];
+
+/// `async-hid 0.5.2` renders the macOS report-writer callback status as an
+/// unstructured message, so this adapter must match the one IOKit status whose
+/// semantics it can narrow. `0xE00002D6` is `kIOReturnTimeout`: the callback
+/// stopped waiting, but report delivery remains unknown.
+#[cfg(target_os = "macos")]
+const MACOS_WRITE_CALLBACK_TIMEOUT: &str = "report writer callback error: 0xE00002D6";
+
+#[cfg(not(target_os = "windows"))]
+fn classify_output_write_error(error: async_hid::HidError) -> RawHidWriteError {
+    #[cfg(target_os = "macos")]
+    if matches!(
+        &error,
+        async_hid::HidError::Message(message)
+            if message.as_ref() == MACOS_WRITE_CALLBACK_TIMEOUT
+    ) {
+        return RawHidWriteError::completion_unknown(error);
+    }
+
+    RawHidWriteError::failed(error)
+}
 
 /// Whether `(usage_page, usage_id)` is one of the HID++ long-report collections.
 fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
@@ -477,7 +500,7 @@ impl RawHidChannel for AsyncHidChannel {
         self.info.product_id
     }
 
-    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
+    async fn write_report(&self, src: &[u8]) -> Result<usize, RawHidWriteError> {
         let mut w = self.writer.lock().await;
         match w.write_output_report(src).await {
             Ok(()) => Ok(src.len()),
@@ -485,7 +508,7 @@ impl RawHidChannel for AsyncHidChannel {
                 if matches!(e, async_hid::HidError::Disconnected) {
                     self.mark_disconnected();
                 }
-                Err(e.into())
+                Err(classify_output_write_error(e))
             }
         }
     }

@@ -115,3 +115,34 @@ fn child_of_lightspeed_receiver_is_detected() {
 fn unrelated_device_is_not_a_child() {
     assert!(!is_receiver_child_sysfs_path(UNRELATED));
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_writer_callback_timeout_has_unknown_completion() {
+    let error = async_hid::HidError::message("report writer callback error: 0xE00002D6");
+
+    assert!(matches!(
+        classify_output_write_error(error),
+        RawHidWriteError::CompletionUnknown(_)
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn another_macos_writer_callback_error_is_definitive() {
+    let error = async_hid::HidError::message("report writer callback error: 0xE00002C0");
+
+    assert!(matches!(
+        classify_output_write_error(error),
+        RawHidWriteError::Failed(_)
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn disconnected_write_error_is_definitive() {
+    assert!(matches!(
+        classify_output_write_error(async_hid::HidError::Disconnected),
+        RawHidWriteError::Failed(_)
+    ));
+}

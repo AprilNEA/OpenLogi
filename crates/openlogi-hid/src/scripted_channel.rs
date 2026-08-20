@@ -10,7 +10,7 @@ use std::error::Error;
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use hidpp::channel::RawHidChannel;
+use hidpp::channel::{RawHidChannel, RawHidWriteError};
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
@@ -64,13 +64,15 @@ impl RawHidChannel for ScriptedRawHidChannel {
         0xb35b
     }
 
-    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
+    async fn write_report(&self, src: &[u8]) -> Result<usize, RawHidWriteError> {
         self.written
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(src.to_vec());
         if let Some(response) = (self.responder)(src) {
-            self.incoming_tx.send(response).map_err(|_| mock_error())?;
+            self.incoming_tx
+                .send(response)
+                .map_err(|_| RawHidWriteError::failed(mock_error()))?;
         }
         Ok(src.len())
     }
