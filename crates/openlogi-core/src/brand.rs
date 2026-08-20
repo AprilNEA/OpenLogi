@@ -16,7 +16,7 @@ pub const RELEASES_URL: &str = "https://github.com/AprilNEA/OpenLogi/releases/la
 
 /// The application identifier: the Wayland xdg-toplevel `app_id` (and X11
 /// `WM_CLASS`) the GUI advertises, the root of the macOS bundle-id family
-/// (`org.openlogi.agent`, `org.openlogi.openlogi.dev`), and the value the Linux
+/// (`org.openlogi.agent`, `org.openlogi.openlogi-dev`), and the value the Linux
 /// `.desktop` file pins as `StartupWMClass`. Defined once here so the window the
 /// compositor sees, the launcher that groups it, and the frontmost backend that
 /// self-identifies OpenLogi can never disagree. The `.desktop` file carries its
@@ -33,7 +33,7 @@ pub const OVERLAY_ID: &str = "org.openlogi.overlay";
 /// What a dev build appends to every identifier above, so a local build can
 /// never claim a shipped TCC grant and System Settings shows which of the two
 /// installed copies a row belongs to.
-const DEV_SUFFIX: &str = ".dev";
+const DEV_SUFFIX: &str = "-dev";
 
 /// `id`'s dev-channel counterpart.
 ///
