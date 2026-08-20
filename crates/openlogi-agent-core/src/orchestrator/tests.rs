@@ -771,33 +771,49 @@ fn app_switch_republishes_capture_plans() {
 }
 
 #[test]
-fn macos_side_gesture_has_only_the_device_owned_dispatch_path() {
+fn macos_side_gesture_capture_follows_mouse_hook_availability() {
     let mut config = Config::default();
     config.set_gesture_mode("a", ButtonId::Forward, true);
     let mut orch = orchestrator(config);
     orch.devices = vec![dev("a", 1, true)];
     orch.rebuild();
 
-    let hook_maps = orch
-        .shared
-        .hook_maps
-        .read()
-        .expect("hook maps should not be poisoned");
-    let plans = orch
-        .shared
-        .capture_plans
-        .read()
-        .expect("capture plans should not be poisoned");
+    let side_gesture_is_published = |orch: &Orchestrator| {
+        orch.shared
+            .capture_plans
+            .read()
+            .expect("capture plans should not be poisoned")[0]
+            .side_gesture_bindings
+            .contains_key(&ButtonId::Forward)
+    };
+    assert!(
+        !side_gesture_is_published(&orch),
+        "HID++ diversion must wait for the movement hook"
+    );
+
+    orch.set_os_mouse_hook_available(true);
     if cfg!(target_os = "macos") {
+        let hook_maps = orch
+            .shared
+            .hook_maps
+            .read()
+            .expect("hook maps should not be poisoned");
         assert!(!hook_maps.bindings.contains_key(&ButtonId::Forward));
         assert!(!hook_maps.gestures.contains_key(&ButtonId::Forward));
-        assert!(
-            plans[0]
-                .side_gesture_bindings
-                .contains_key(&ButtonId::Forward)
-        );
+        assert!(side_gesture_is_published(&orch));
     } else {
+        let hook_maps = orch
+            .shared
+            .hook_maps
+            .read()
+            .expect("hook maps should not be poisoned");
         assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
-        assert!(plans[0].side_gesture_bindings.is_empty());
+        assert!(!side_gesture_is_published(&orch));
     }
+
+    orch.set_os_mouse_hook_available(false);
+    assert!(
+        !side_gesture_is_published(&orch),
+        "revoking the movement hook must restore native HID++ controls"
+    );
 }

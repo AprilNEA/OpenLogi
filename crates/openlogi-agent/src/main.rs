@@ -216,6 +216,20 @@ fn start_hook(
     )
 }
 
+async fn set_hook_availability(
+    orchestrator: &Mutex<Orchestrator>,
+    side_gesture: &SharedSideGesture,
+    available: bool,
+) {
+    orchestrator
+        .lock()
+        .await
+        .set_os_mouse_hook_available(available);
+    if !available {
+        side_gesture.interrupt();
+    }
+}
+
 async fn begin_action_ring(
     orchestrator: &Mutex<Orchestrator>,
     action_ring: &ActionRingManager,
@@ -402,6 +416,8 @@ async fn run(
             Some(granted) = accessibility_rx.recv() => {
                 observable.set_accessibility_granted(granted);
                 if !granted {
+                    // Restore native controls before dropping their movement hook.
+                    set_hook_availability(&orchestrator, &side_gesture, false).await;
                     hook = None;
                 }
                 if granted && hook.is_none() {
@@ -412,6 +428,7 @@ async fn run(
                         &event_monitor,
                         &side_gesture,
                     );
+                    set_hook_availability(&orchestrator, &side_gesture, hook.is_some()).await;
                 }
                 // One publish for every path above: revoked, installed, kept,
                 // or never installed because capture is off.

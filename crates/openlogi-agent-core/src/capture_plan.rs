@@ -81,13 +81,18 @@ pub fn plan_for_device(
     route: DeviceRoute,
     app: Option<&str>,
     rearm_generation: u64,
+    os_mouse_hook_available: bool,
 ) -> DeviceCapturePlan {
     let bindings = bindings_for(config, Some(config_key), app);
     // Gesture-mode OS-hook controls normally stay native so the hook sees the
     // press. macOS Back/Forward are the exception below: HID++ owns their
     // button edges because Bluetooth-direct CGEvents may be unattributed.
     let oshook = oshook_gestures_for(config, Some(config_key), app);
-    let side_gesture_bindings = hidpp_side_gesture_maps_for(config, config_key, app);
+    let side_gesture_bindings = if os_mouse_hook_available {
+        hidpp_side_gesture_maps_for(config, config_key, app)
+    } else {
+        BTreeMap::new()
+    };
     // One direction map per HID++ source in gesture mode — several may
     // gesture at once, each armed with its own raw-XY divert (the watcher
     // derives the CIDs to divert from this map's keys).
@@ -106,6 +111,12 @@ pub fn plan_for_device(
     let divert_buttons: Vec<(u16, ButtonId)> = DIVERTABLE_STANDARD_BUTTONS
         .into_iter()
         .chain(plain_sources)
+        // These controls are owned by the OS-hook path. The capture opt-out
+        // must leave them native even when they carry a non-default single
+        // binding; HID++-only controls remain independently remappable.
+        .filter(|(_, button)| {
+            config.app_settings.capture_mouse_events || !button.is_os_hook_button()
+        })
         .filter(|(_, button)| !oshook.contains_key(button))
         .filter(|(_, button)| {
             bindings.get(button).is_some_and(|action| {
@@ -168,7 +179,7 @@ mod tests {
         cfg.set_gesture_mode("2b042", ButtonId::GestureButton, true);
         cfg.set_gesture_mode("2b042", ButtonId::HapticPanel, true);
 
-        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
             plan.gesture_bindings.contains_key(&ButtonId::GestureButton)
                 && plan.gesture_bindings.contains_key(&ButtonId::HapticPanel),
@@ -192,7 +203,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::HapticPanel, true);
 
-        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
             plan.gesture_bindings.contains_key(&ButtonId::HapticPanel),
             "a gesture-mode panel must arm the HID++ gesture divert"
@@ -218,7 +229,7 @@ mod tests {
             Binding::Single(Action::Copy),
         );
 
-        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
             plan.divert_buttons
                 .contains(&(HAPTIC_PANEL_CID, ButtonId::HapticPanel)),
@@ -230,7 +241,7 @@ mod tests {
     fn haptic_panel_default_is_diverted_for_actions_ring() {
         // Default binding is ShowActionsRing — the panel has no native OS path
         // and must be HID++-diverted so the ring can open.
-        let plan = plan_for_device(&Config::default(), "2b042", route(), None, 0);
+        let plan = plan_for_device(&Config::default(), "2b042", route(), None, 0, true);
 
         assert!(
             plan.divert_buttons
@@ -249,7 +260,7 @@ mod tests {
             Binding::Single(Action::None),
         );
 
-        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
             !plan
                 .divert_buttons
@@ -271,7 +282,7 @@ mod tests {
             Binding::Single(Action::CycleDpiPresets),
         );
 
-        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
             plan.gesture_bindings.is_empty(),
             "gestures are off — no raw-XY gesture divert"
@@ -292,7 +303,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::GestureButton, true);
 
-        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
             !plan.gesture_bindings.is_empty(),
             "the gesture button owns the gesture role"
@@ -313,7 +324,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::GestureButton, false);
 
-        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
             !plan
                 .divert_buttons
@@ -328,7 +339,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
 
-        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         if cfg!(target_os = "macos") {
             assert!(plan.side_gesture_bindings.contains_key(&ButtonId::Forward));
             assert!(
@@ -355,7 +366,7 @@ mod tests {
         cfg.app_settings.capture_mouse_events = false;
         cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
 
-        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(plan.side_gesture_bindings.is_empty());
         assert!(plan.divert_gesture_buttons.is_empty());
         assert!(
@@ -365,5 +376,48 @@ mod tests {
                 .any(|&(_, button)| button == ButtonId::Forward),
             "capture opt-out must leave Forward entirely native"
         );
+    }
+
+    #[test]
+    fn mouse_capture_opt_out_keeps_single_os_hook_buttons_native() {
+        let mut cfg = Config::default();
+        cfg.app_settings.capture_mouse_events = false;
+        cfg.set_binding("2b042", ButtonId::Forward, Binding::Single(Action::Copy));
+        cfg.set_binding(
+            "2b042",
+            ButtonId::MiddleClick,
+            Binding::Single(Action::Paste),
+        );
+        cfg.set_gesture_mode("2b042", ButtonId::GestureButton, false);
+        cfg.set_binding(
+            "2b042",
+            ButtonId::GestureButton,
+            Binding::Single(Action::Undo),
+        );
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert!(
+            !plan
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button.is_os_hook_button()),
+            "capture opt-out must leave all OS-hook buttons native"
+        );
+        assert!(
+            plan.divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::GestureButton),
+            "HID++-only controls must remain remappable without the OS hook"
+        );
+    }
+
+    #[test]
+    fn unavailable_mouse_hook_keeps_side_gesture_buttons_native() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, false);
+        assert!(plan.side_gesture_bindings.is_empty());
+        assert!(plan.divert_gesture_buttons.is_empty());
     }
 }
