@@ -387,13 +387,13 @@ summarize() {
 
 # --- main ---
 
-args=""
+args=()
 for arg in "$@"; do
   case "$arg" in
     -h|--help|help) usage; exit 0 ;;
     --list|list) LIST_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
-    *) args="$args $arg" ;;
+    *) args+=("$arg") ;;
   esac
 done
 
@@ -406,11 +406,10 @@ if [ "$DRY_RUN" -eq 0 ]; then
   need_cargo "$@"
 fi
 
-if [ -z "${args## }" ]; then
+if [ "${#args[@]}" -eq 0 ]; then
   run_default
 else
-  # shellcheck disable=SC2086
-  for job in $args; do
+  for job in "${args[@]}"; do
     run_named "$job"
   done
 fi
