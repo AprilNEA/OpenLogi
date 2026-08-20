@@ -110,6 +110,8 @@ _version: 1
 "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.": "Mantén el icono de OpenLogi en la barra de menús. Si se desactiva, permanece en el Dock."
 "Show in the notification area": "Mostrar en el área de notificación"
 "Keep OpenLogi's icon in the taskbar notification area. Takes effect the next time the background agent starts.": "Mantiene el icono de OpenLogi en el área de notificación de la barra de tareas. Surte efecto la próxima vez que se inicie el agente en segundo plano."
+"Haptics API for other apps": "API háptica para otras apps"
+"Let apps on this computer trigger your mouse's haptics over a local socket. Off by default; takes effect the next time the background agent starts.": "Permite que las apps de este equipo activen la respuesta háptica del ratón mediante un socket local. Desactivado de forma predeterminada; se aplica la próxima vez que se inicie el agente en segundo plano."
 "Assets": "Recursos"
 "Asset source": "Asset source"
 "Automatic (recommended)": "Automatic (recommended)"

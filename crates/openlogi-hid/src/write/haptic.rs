@@ -5,14 +5,31 @@ use hidpp::{
     device::Device,
     feature::{
         CreatableFeature as _,
-        haptic_feedback::{HapticFeedbackFeature, HapticIntensity, HapticWaveform},
+        haptic_feedback::{
+            HapticFeedbackFeature, HapticIntensity, HapticWaveform as FirmwareWaveform,
+        },
     },
 };
+
+use openlogi_core::hid::HapticWaveform;
 
 use crate::channel::route::DeviceRoute;
 use crate::{ChannelRegistry, SharedChannel};
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
+
+/// Map the wire-side waveform to the firmware `playWaveform` ID.
+///
+/// Kept as an explicit `match` rather than a discriminant cast: the two enums
+/// answer to different masters — this one is append-only because it rides the
+/// IPC wire, the firmware one is fixed by `0x19b0` — so they must be free to
+/// disagree on ordering without either side silently playing the wrong pulse.
+const fn firmware_waveform(waveform: HapticWaveform) -> FirmwareWaveform {
+    match waveform {
+        HapticWaveform::SubtleCollision => FirmwareWaveform::SubtleCollision,
+        HapticWaveform::DampStateChange => FirmwareWaveform::DampStateChange,
+    }
+}
 
 async fn feature_on_channel(
     channel: &Arc<HidppChannel>,
@@ -222,6 +239,7 @@ pub async fn play_haptic_on(
 ) -> Result<(), WriteError> {
     let channel = shared.channel();
     let index = shared.device_index();
+    let waveform = firmware_waveform(waveform);
     if let Some(feature) = cached_feature(channel, index) {
         if feature.play(waveform).await.is_ok() {
             return Ok(());
@@ -242,6 +260,7 @@ pub async fn play_haptic_on(
 /// Play a waveform immediately by route.
 pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Result<(), WriteError> {
     let index = route.device_index();
+    let waveform = firmware_waveform(waveform);
     with_route(route, move |channel| async move {
         let feature = feature_on_channel(&channel, index).await?;
         feature.play(waveform).await.map_err(|error| {

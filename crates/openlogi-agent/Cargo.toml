@@ -29,6 +29,10 @@ openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 tarpc = { workspace = true }
 interprocess = { workspace = true }
+serde = { workspace = true }
+# The JSON haptics API (`json_api.rs`) — the integration surface third-party
+# apps speak; the GUI-facing socket stays bincode.
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util"] }
 futures = "0.3"
 tracing = { workspace = true }

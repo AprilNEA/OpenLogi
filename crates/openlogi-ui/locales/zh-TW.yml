@@ -110,6 +110,8 @@ _version: 1
 "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.": "在選單列保留 OpenLogi 圖示；關閉後改為停留在 Dock 中。"
 "Show in the notification area": "在通知區域顯示"
 "Keep OpenLogi's icon in the taskbar notification area. Takes effect the next time the background agent starts.": "在工作列通知區域保留 OpenLogi 圖示。將於背景代理程式下次啟動時生效。"
+"Haptics API for other apps": "供其他應用程式使用的觸覺 API"
+"Let apps on this computer trigger your mouse's haptics over a local socket. Off by default; takes effect the next time the background agent starts.": "允許本機上的應用程式透過本機通訊端觸發滑鼠觸覺回饋。預設關閉；在背景代理下次啟動時生效。"
 "Assets": "資源"
 "Asset source": "資源來源"
 "Automatic (recommended)": "自動選擇（建議）"

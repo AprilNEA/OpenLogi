@@ -778,6 +778,21 @@ fn app_settings_launch_at_login_roundtrips() {
     assert!(parsed.app_settings.launch_at_login);
 }
 
+/// The integration API must stay off unless the file says otherwise — a
+/// default that opened a socket nobody asked for would be the wrong kind of
+/// surprise for a local-first app.
+#[test]
+fn haptic_api_is_off_by_default_and_roundtrips() {
+    assert!(
+        !Config::default().app_settings.haptic_api,
+        "the JSON haptics socket is opt-in"
+    );
+
+    let mut cfg = Config::default();
+    cfg.app_settings.haptic_api = true;
+    assert!(write_and_read(&cfg).app_settings.haptic_api);
+}
+
 #[test]
 fn asset_source_preference_roundtrips() {
     let mut cfg = Config::default();

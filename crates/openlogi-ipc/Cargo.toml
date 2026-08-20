@@ -26,3 +26,6 @@ workspace = true
 
 [dev-dependencies]
 bincode = "1.3"
+# The `haptic` example is a hand-run binary, so it needs a real runtime to
+# start; the library itself only ever borrows the caller's.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

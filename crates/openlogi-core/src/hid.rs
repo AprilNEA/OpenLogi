@@ -10,6 +10,7 @@
 
 pub mod dpi;
 pub mod error;
+pub mod haptic;
 pub mod light;
 pub mod pairing;
 pub mod route;
@@ -17,6 +18,7 @@ pub mod smartshift;
 
 pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
+pub use haptic::HapticWaveform;
 pub use light::{LightCommand, commands_for_light_settings};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 pub use route::{

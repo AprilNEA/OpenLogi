@@ -77,6 +77,29 @@ pub(super) fn general_page(sensitivity_slider: Entity<SliderState>) -> SettingPa
         }),
     );
 
+    // Unconditional: the JSON haptics socket is a Unix-domain socket on Unix
+    // and a named pipe on Windows, so every platform can serve it.
+    let group = group.item(
+        SettingItem::new(
+            tr!("Haptics API for other apps"),
+            SettingField::switch(
+                |cx| {
+                    cx.try_global::<AppState>()
+                        .is_some_and(|s| s.app_settings().haptic_api)
+                },
+                |enabled, cx| {
+                    cx.update_global::<AppState, _>(move |s, _| {
+                        s.set_haptic_api(enabled);
+                    });
+                    cx.refresh_windows();
+                },
+            ),
+        )
+        .description(tr!(
+            "Let apps on this computer trigger your mouse's haptics over a local socket. Off by default; takes effect the next time the background agent starts."
+        )),
+    );
+
     SettingPage::new(tr!("General"))
         .icon(IconName::Settings)
         .resettable(false)

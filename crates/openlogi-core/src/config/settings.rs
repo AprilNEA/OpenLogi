@@ -104,6 +104,15 @@ pub struct AppSettings {
     /// Takes effect on agent restart.
     #[serde(default = "default_true")]
     pub capture_mouse_events: bool,
+    /// Whether the agent serves the JSON haptics API on its own local socket
+    /// (`haptic.sock`), so third-party apps can trigger device haptics.
+    /// **Off by default** — it is an integration surface, and a local-first
+    /// app should not open one the user never asked for. Any process running
+    /// as the same user can use it once enabled; it plays waveforms and
+    /// nothing else, and reads no device state beyond which devices have a
+    /// haptic engine. Takes effect on agent restart.
+    #[serde(default)]
+    pub haptic_api: bool,
     /// Whether the GUI automatically downloads device images from
     /// `assets.openlogi.org` when a device appears. `true` (default) keeps
     /// the current behavior; `false` makes no asset network requests at all
@@ -259,6 +268,7 @@ impl Default for AppSettings {
             update_prompt_seen: false,
             show_in_menu_bar: true,
             capture_mouse_events: true,
+            haptic_api: false,
             auto_download_assets: true,
             asset_source: AssetSourcePreference::Automatic,
             language: None,

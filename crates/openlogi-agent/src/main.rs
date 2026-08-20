@@ -15,6 +15,7 @@
     windows_subsystem = "windows"
 )]
 
+mod json_api;
 mod launch_agent;
 mod overlay;
 mod pairing;
@@ -267,6 +268,10 @@ async fn run(
     // an agent restart, which the config docs state.
     let capture_mouse_events = config.app_settings.capture_mouse_events;
 
+    // Same startup-only rule for the JSON haptics API: it binds its own socket
+    // once, so enabling or disabling it takes an agent restart.
+    let haptic_api = config.app_settings.haptic_api;
+
     prompt_missing_permissions(capture_mouse_events);
 
     // The orchestrator is shared with the IPC server (which serves inventory /
@@ -319,6 +324,10 @@ async fn run(
         dispatcher.clone(),
     );
     let ring_haptics = server.ring_haptics.clone();
+    if haptic_api {
+        // The integration API for third-party apps — off unless asked for.
+        tokio::spawn(json_api::run(server.clone()));
+    }
     tokio::spawn(server::run(server));
 
     // The CGEventTap hook is installed once Accessibility is granted and dropped

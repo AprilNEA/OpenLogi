@@ -110,6 +110,8 @@ _version: 1
 "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead.": "OpenLogi 아이콘을 메뉴 막대에 유지합니다. 끄면 대신 Dock에 남습니다."
 "Show in the notification area": "알림 영역에 표시"
 "Keep OpenLogi's icon in the taskbar notification area. Takes effect the next time the background agent starts.": "작업 표시줄 알림 영역에 OpenLogi 아이콘을 유지합니다. 백그라운드 에이전트가 다음에 시작될 때 적용됩니다."
+"Haptics API for other apps": "다른 앱을 위한 햅틱 API"
+"Let apps on this computer trigger your mouse's haptics over a local socket. Off by default; takes effect the next time the background agent starts.": "이 컴퓨터의 앱이 로컬 소켓을 통해 마우스 햅틱을 실행할 수 있도록 허용합니다. 기본적으로 꺼져 있으며, 백그라운드 에이전트가 다음에 시작할 때 적용됩니다."
 "Assets": "리소스"
 "Asset source": "Asset source"
 "Automatic (recommended)": "Automatic (recommended)"
