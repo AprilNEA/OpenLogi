@@ -85,3 +85,10 @@ doc link does not count as a use, so that just trades the broken link for an
 `unused_imports` failure — write the trait method's full path instead. After any
 refactor that moves impls between hand-written and generated, grep for doc links
 naming that trait's methods.
+
+## Reproducing CI
+
+`openlogi:check` is the host-OS gate, not the pipeline. To run a `ci.yml` job
+locally: `.github/scripts/ci-local.sh --list` and `.claude/rules/ci.md`. Host
+clippy on macOS does not compile linux cfg; MSRV needs `RUSTUP_TOOLCHAIN`;
+cargo-deny is its own job.

@@ -1,5 +1,9 @@
 name: CI
 
+# Reproduce every job locally: `.github/scripts/ci-local.sh`
+# Job → command map: `.claude/rules/ci.md`
+# Changing a `run:` here without updating those two is a bug.
+
 on:
   push:
     branches: [main, master]

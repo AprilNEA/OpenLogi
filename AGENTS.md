@@ -97,6 +97,7 @@ This section applies to the final pre-push tree, not normal edit iterations.
 Mac" is not enough. Run **all four** on the commit you are about to push:
 
 ```sh
+export RUSTFLAGS="-D warnings"   # CI sets this globally; clippy `-D warnings` is not the same
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -104,6 +105,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
   --document-private-items --exclude openlogi-ui --exclude openlogi-desktop \
   --exclude openlogi-overlay --exclude openlogi-agent
 # or: devenv tasks run openlogi:check
+# every CI job this host can reproduce: .github/scripts/ci-local.sh
 ```
 
 Exit non-zero on any of those → fix, re-run the **whole** set, then push.
@@ -117,6 +119,25 @@ a new crate is documented by default. The classic silent breakage — handing a 
 impl to a derive macro kills every `Type::trait_method` doc link — is explained in
 `.claude/rules/rust.md`.
 
+### Reproduce every CI job locally
+
+The local gate is the host-OS subset. The pipeline is `.github/workflows/ci.yml`
+(Linux clippy, macOS+Linux MSRV, rustdoc, Linux tests excluding desktop, macOS
+`--all-targets` tests, cargo-deny, Windows clippy). macOS-green is not that
+matrix. To run every job this machine can reproduce:
+
+```sh
+.github/scripts/ci-local.sh
+.github/scripts/ci-local.sh --list          # job → command table
+.github/scripts/ci-local.sh rustfmt clippy  # one job, names match CI
+# or: devenv tasks run openlogi:ci
+```
+
+The script sets `RUSTFLAGS=-D warnings` the way CI does. A skipped job (wrong
+OS, missing `cargo-deny`, no MSRV toolchain) is **not** a pass — name it as not
+run in the PR Testing section. Full map, including "if you changed X, run Y":
+[`.claude/rules/ci.md`](.claude/rules/ci.md).
+
 prek hooks (`prek.toml`): `cargo fmt` at commit; full-workspace clippy **and
 rustdoc** at push (rust-scoped, so non-Rust pushes skip it). Hooks are a backstop,
 not a substitute for running the gate yourself after a rebase.
@@ -125,16 +146,19 @@ not a substitute for running the gate yourself after a rebase.
 
 1. Rebase/merge conflicts fully resolved — no `<<<<<<<` left, no half-ported APIs.
 2. Full local gate green on the **final** tree (fmt + Clippy + tests + rustdoc).
-3. If cfg-gated files changed (any `#[cfg(target_os = …)]` block, in any crate):
+3. Pipeline jobs this host can reproduce for the diff: `.github/scripts/ci-local.sh`
+   (or named jobs from `--list`). Skipped jobs stay named as not run — never
+   claimed green. Mapping: `.claude/rules/ci.md`.
+4. If cfg-gated files changed (any `#[cfg(target_os = …)]` block, in any crate):
    cross-lint or hand-audit against master — macOS-green proves nothing there; see
    `.claude/rules/cross-platform.md`.
-4. If wire types changed: `PROTOCOL_VERSION` bumped and
+5. If wire types changed: `PROTOCOL_VERSION` bumped and
    `cargo test -p openlogi-ipc --test wire_format` green — see
    `.claude/rules/ipc-protocol.md`.
-5. If locales changed: every `crates/openlogi-ui/locales/*.yml` carries the same keys
+6. If locales changed: every `crates/openlogi-ui/locales/*.yml` carries the same keys
    as `en.yml` (new keys at the same position); run
    `cargo test -p openlogi-desktop i18n` — see `.claude/rules/i18n.md`.
-6. Only then `git push` / force-push to the PR branch.
+7. Only then `git push` / force-push to the PR branch.
 
 ### Running the app
 
@@ -227,6 +251,7 @@ before editing that area.
 
 | Area | Rule file |
 |---|---|
+| reproducing CI jobs locally (every `ci.yml` job → command) | `.claude/rules/ci.md` |
 | any `*.rs` / `Cargo.toml` (workspace Rust standards) | `.claude/rules/rust.md` |
 | `crates/openlogi-desktop/**`, `crates/openlogi-ui/**`, `crates/openlogi-overlay/**` (GPUI) | `.claude/rules/gui.md` |
 | `crates/openlogi-ui/locales/**`, `openlogi-ui/src/locale.rs`, `openlogi-desktop/src/services/i18n.rs` | `.claude/rules/i18n.md` |

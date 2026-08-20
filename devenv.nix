@@ -121,6 +121,14 @@ in
           --exclude openlogi-agent
       '';
     };
+    "openlogi:ci" = {
+      description = "Run every GitHub Actions CI job this host can reproduce.";
+      exec = ''
+        set -e
+        ${requireXcodeMetal}
+        bash .github/scripts/ci-local.sh
+      '';
+    };
     "openlogi:i18n-upload" = {
       description = "Upload en.yml sources and per-language translations to Crowdin.";
       exec = ''
@@ -167,6 +175,8 @@ in
       # shell's cargo. That silently lints with a different compiler — and
       # fails outright when rustup's toolchain has no windows-gnu std. Naming
       # the binary keeps the task on the toolchain devenv pins.
+      # Keep the -p list in lockstep with `.github/scripts/ci-local.sh`
+      # `job_clippy_windows`.
       exec = ''
         cargo-clippy clippy --target x86_64-pc-windows-gnu \
           -p openlogi-core -p openlogi-hidpp -p openlogi-hid -p openlogi-hook \

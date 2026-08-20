@@ -28,7 +28,8 @@ When the diff touches any of:
 you MUST either:
 
 1. Cross-check with devenv when available:
-   `devenv tasks run openlogi:check-windows`, or
+   `devenv tasks run openlogi:check-windows` (also
+   `.github/scripts/ci-local.sh clippy-windows`), or
 2. Manually re-read every changed cfg-gated file against **current master** for:
    - name collisions with existing `pub use` / `pub const` items
    - type mismatches (`u16` vs `u32`, `Option` arity, new enum fields)
