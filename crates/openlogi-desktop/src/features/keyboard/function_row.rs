@@ -800,7 +800,43 @@ fn config_panel(
         view_for_pick.update(cx, |_, vcx| vcx.notify());
     });
 
-    let rows = panel_action_rows(current.as_ref(), &on_pick, view, pal);
+    let mut rows = panel_action_rows(current.as_ref(), &on_pick, view, pal);
+
+    let is_default = current.is_none();
+    let view_for_reset = view.clone();
+    let trigger_for_reset = trigger.clone();
+    let reset_row = menu_row("panel-reset", *pal, is_default)
+        .role(gpui::Role::MenuItem)
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    svg()
+                        .path("action-icons/rotate-ccw.svg")
+                        .size_4()
+                        .flex_none()
+                        .text_color(pal.text_muted),
+                )
+                .child(div().child(rust_i18n::t!("Device default"))),
+        )
+        .when(is_default, |s| {
+            s.child(
+                gpui_component::Icon::new(gpui_component::IconName::Check)
+                    .size_3()
+                    .text_color(rgb(ACCENT_BLUE)),
+            )
+        })
+        .on_click(move |_event, _window, cx| {
+            cx.update_global::<AppState, _>(|state, _| {
+                state.commit_keyboard_binding(trigger_for_reset.clone(), None);
+            });
+            view_for_reset.update(cx, |_, vcx| vcx.notify());
+        })
+        .into_any_element();
+
+    rows.insert(0, divider(*pal).into_any_element());
+    rows.insert(0, reset_row);
 
     menu_card(*pal)
         .w(px(PANEL_W))
