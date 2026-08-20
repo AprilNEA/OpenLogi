@@ -465,8 +465,8 @@ fn main() -> Result<()> {
             // the merge without waiting for the agent to change something of
             // its own.
             let mut latest_snapshot: Option<openlogi_ipc::AgentSnapshot> = None;
-            let mut camera_scan = tokio::time::interval(CAMERA_SCAN_PERIOD);
-            camera_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut camera_scan_timer = cx.background_executor().timer(CAMERA_SCAN_PERIOD);
+
             // Cleared when the IPC update channel closes (the client thread
             // died), so the select stops polling a closed receiver.
             let mut ipc_open = true;
@@ -525,7 +525,8 @@ fn main() -> Result<()> {
                             cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
                         }
                     },
-                    _ = camera_scan.tick() => {
+                    _ = &mut camera_scan_timer => {
+                        camera_scan_timer = cx.background_executor().timer(CAMERA_SCAN_PERIOD);
                         // Nothing to show it to. The app runs from the menu bar
                         // with every window closed, and this scan is the only
                         // work left that is not driven by an agent change — so
