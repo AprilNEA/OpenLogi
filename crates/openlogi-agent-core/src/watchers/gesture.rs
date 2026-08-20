@@ -36,7 +36,6 @@ use tracing::{debug, warn};
 use crate::capture_plan::{DeviceCapturePlan, SharedCapturePlans};
 use crate::hook_runtime::ActionDispatcher;
 use crate::receiver_access::{ReceiverAccess, SessionReceiverLease};
-use crate::side_gesture::{SharedSideGesture, SideGestureAction};
 
 /// Fallback interval for reconciling a missed plan notification and pacing the
 /// respawn of a session that ended on its own (see `manage`).
@@ -60,7 +59,6 @@ pub fn spawn(
     receiver_access: ReceiverAccess,
     channel_registry: openlogi_hid::ChannelRegistry,
     dispatcher: ActionDispatcher,
-    side_gesture: SharedSideGesture,
 ) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -80,7 +78,6 @@ pub fn spawn(
             receiver_access,
             channel_registry,
             dispatcher,
-            side_gesture,
         ));
     });
 }
@@ -172,7 +169,6 @@ async fn manage(
     receiver_access: ReceiverAccess,
     channel_registry: openlogi_hid::ChannelRegistry,
     dispatcher: ActionDispatcher,
-    side_gesture: SharedSideGesture,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<(String, CapturedInput)>();
     let mut sessions: HashMap<String, RunningSession> = HashMap::new();
@@ -201,7 +197,6 @@ async fn manage(
                     &mut accumulators,
                     &capture_plans,
                     &dispatcher,
-                    &side_gesture,
                 );
             }
             () = wait_for_reconcile(&mut ticker, &capture_plan_changed) => {
@@ -296,7 +291,6 @@ async fn manage(
                     if unexpected {
                         warn!(key, "capture session ended unexpectedly, re-arming");
                     }
-                    side_gesture.cancel_device(&key);
                     sessions.remove(&key);
                 }
             }
@@ -407,23 +401,7 @@ fn dispatch(
     accumulators: &mut HashMap<String, WheelAccumulators>,
     capture_plans: &SharedCapturePlans,
     dispatcher: &ActionDispatcher,
-    side_gesture: &SharedSideGesture,
 ) {
-    if matches!(input, CapturedInput::CaptureReset) {
-        side_gesture.cancel_device(key);
-        return;
-    }
-    if let CapturedInput::ButtonState(button, pressed) = input {
-        dispatch_side_gesture_button(
-            key,
-            button,
-            pressed,
-            capture_plans,
-            dispatcher,
-            side_gesture,
-        );
-        return;
-    }
     let Ok(plans) = capture_plans.read() else {
         return;
     };
@@ -436,6 +414,7 @@ fn dispatch(
             if let Some(action) = plan
                 .gesture_bindings
                 .get(&button)
+                .or_else(|| plan.side_gesture_bindings.get(&button))
                 .and_then(|map| map.get(&direction))
             {
                 debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
@@ -480,45 +459,6 @@ fn dispatch(
                 }
             }
         }
-        CapturedInput::ButtonState(_, _) | CapturedInput::CaptureReset => {}
-    }
-}
-
-/// Apply one verified HID++ Back/Forward edge to the shared hold. Presses
-/// snapshot this device's current per-app gesture map; releases resolve a
-/// click even if the plan changed while the button was held.
-fn dispatch_side_gesture_button(
-    key: &str,
-    button: ButtonId,
-    pressed: bool,
-    capture_plans: &SharedCapturePlans,
-    dispatcher: &ActionDispatcher,
-    side_gesture: &SharedSideGesture,
-) {
-    let output = if pressed {
-        let directions = capture_plans.read().ok().and_then(|plans| {
-            plans
-                .iter()
-                .find(|plan| plan.config_key == key)
-                .and_then(|plan| plan.side_gesture_bindings.get(&button))
-                .cloned()
-        });
-        let Some(directions) = directions else {
-            return;
-        };
-        side_gesture.begin(key.to_owned(), button, directions)
-    } else {
-        side_gesture.end(key, button)
-    };
-    if let Some(SideGestureAction {
-        device_key,
-        button,
-        direction,
-        action,
-    }) = output
-    {
-        debug!(key = device_key, %button, ?direction, action = %action.label(), "HID++ side gesture → action");
-        dispatcher.dispatch(&action, Some(&device_key));
     }
 }
 

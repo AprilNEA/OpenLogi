@@ -82,14 +82,6 @@ pub enum CapturedInput {
     /// wheel's `diverted_res` increments. Emitted while the wheel is diverted
     /// (click bound, rotation rebound, or sensitivity changed).
     Scroll(i16),
-    /// A device-owned standard button changed state. Gesture-mode Back/Forward
-    /// controls use both edges so the agent can combine this verified HID++
-    /// hold with OS pointer-motion deltas without trusting an unattributed
-    /// global side-button event.
-    ButtonState(ButtonId, bool),
-    /// The device reconnected or its capture session reset. Consumers must
-    /// discard any in-progress host-side hold before new button edges arrive.
-    CaptureReset,
 }
 
 /// Why a capture session could not start (or had to stop).
@@ -176,9 +168,8 @@ pub struct CaptureSpec {
     /// with raw-XY — one per source in gesture mode; empty when no HID++
     /// control gestures.
     pub divert_gesture_sources: Vec<u16>,
-    /// Standard-button CIDs to divert as gesture holds. Unlike raw-XY gesture
-    /// sources, these controls supply only down/up over HID++; pointer travel
-    /// is accumulated by the agent's OS hook while the verified hold is live.
+    /// Standard-button CIDs requested as raw-XY gesture sources. A control is
+    /// armed only when its HID++ capability flags advertise raw-XY support.
     pub divert_gesture_buttons: Vec<(u16, ButtonId)>,
     /// Buttons to divert as plain presses (no raw-XY): the
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
@@ -327,7 +318,6 @@ async fn run_capture_session_on(
             root: &root,
             armed: &armed,
             accum: &accum,
-            sink: &sink,
             device_index,
             registry,
             shared: &shared,
@@ -429,7 +419,7 @@ struct ArmedControls {
     /// The gesture-source CIDs diverted with raw-XY reporting: the
     /// `spec.divert_gesture_sources` members the device exposes.
     gesture_cids: Vec<u16>,
-    /// Standard-button CIDs diverted for device-owned down/up gesture holds.
+    /// Raw-XY-capable standard-button CIDs diverted as gesture sources.
     gesture_button_cids: Vec<(u16, ButtonId)>,
     /// DPI/ModeShift CIDs diverted as plain buttons.
     dpi_cids: Vec<u16>,
@@ -477,7 +467,6 @@ struct CaptureMonitor<'a> {
     root: &'a RootFeature,
     armed: &'a ArmedControls,
     accum: &'a Arc<Mutex<CaptureAccum>>,
-    sink: &'a mpsc::UnboundedSender<CapturedInput>,
     device_index: u8,
     registry: Option<&'a crate::ChannelRegistry>,
     shared: &'a SharedChannel,
@@ -514,7 +503,6 @@ async fn monitor_capture(
                 };
                 info!(?broadcast, "device reconnected — re-arming control capture");
                 *context.accum.lock().unwrap_or_else(PoisonError::into_inner) = CaptureAccum::default();
-                let _ = context.sink.send(CapturedInput::CaptureReset);
                 context.armed.rearm().await;
             }
             () = tokio::time::sleep(LIVENESS_PING_INTERVAL) => {
@@ -564,7 +552,11 @@ impl ArmedControls {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         if let Some((rc, _)) = self.reprog.as_ref() {
             for &reporting in &self.reporting {
-                let raw_xy = self.gesture_cids.contains(&reporting.cid);
+                let raw_xy = self.gesture_cids.contains(&reporting.cid)
+                    || self
+                        .gesture_button_cids
+                        .iter()
+                        .any(|&(cid, _)| cid == reporting.cid);
                 let change = rearm_change(reporting.original, raw_xy);
                 if let Err(error) = rc.set_cid_reporting_full(reporting.cid, change).await {
                     warn!(
@@ -658,8 +650,11 @@ async fn arm_controls_into(
             }
         }
         for &(cid, button) in &spec.divert_gesture_buttons {
-            if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-                let reporting = arm_reprog_control(&rc, cid, false).await?;
+            if let Some(control) = controls.iter().find(|c| c.cid == cid)
+                && control.is_divertable()
+                && control.supports_raw_xy()
+            {
+                let reporting = arm_reprog_control(&rc, cid, true).await?;
                 armed.reporting.push(reporting);
                 armed.gesture_button_cids.push((cid, button));
             }
@@ -842,6 +837,12 @@ fn handle_reprog_with_gesture_buttons(
                 .iter()
                 .filter(|cid| cids.contains(cid))
                 .filter_map(|&cid| gesture_source_button(cid).map(|b| (cid, b)))
+                .chain(
+                    gesture_button_cids
+                        .iter()
+                        .copied()
+                        .filter(|(cid, _)| cids.contains(cid)),
+                )
                 .collect();
             match acc.gesture_source {
                 Some((cid, _)) if cids.contains(&cid) => {
@@ -883,19 +884,6 @@ fn handle_reprog_with_gesture_buttons(
                 let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::DpiToggle, None));
             }
             acc.dpi_down = dpi_down;
-
-            for &(cid, button) in gesture_button_cids {
-                let down = cids.contains(&cid);
-                let was_down = acc.buttons_down.contains(&cid);
-                if down != was_down {
-                    let _ = sink.send(CapturedInput::ButtonState(button, down));
-                    if down {
-                        acc.buttons_down.push(cid);
-                    } else {
-                        acc.buttons_down.retain(|&c| c != cid);
-                    }
-                }
-            }
 
             for &(cid, button) in button_cids {
                 let down = cids.contains(&cid);

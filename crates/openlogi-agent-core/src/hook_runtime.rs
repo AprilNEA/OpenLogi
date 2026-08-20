@@ -25,7 +25,6 @@ use tracing::{info, warn};
 use crate::event_monitor::SharedEventMonitor;
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::receiver_access::ReceiverAccess;
-use crate::side_gesture::{SharedSideGesture, SideGestureAction};
 use crate::{DpiCycleState, DpiCycles};
 
 /// Runtime dependencies shared by every action source: the OS hook, HID++
@@ -231,19 +230,14 @@ fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
     }
 }
 
-struct QueuedAction {
-    action: Action,
-    device_key: Option<String>,
-}
-
 /// Off-thread worker for bound actions so the tap callback never injects input.
-fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<QueuedAction> {
-    let (tx, rx) = mpsc::sync_channel::<QueuedAction>(64);
+fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<Action> {
+    let (tx, rx) = mpsc::sync_channel::<Action>(64);
     let _ = thread::Builder::new()
         .name("openlogi-action".into())
         .spawn(move || {
-            while let Ok(queued) = rx.recv() {
-                dispatcher.dispatch(&queued.action, queued.device_key.as_deref());
+            while let Ok(action) = rx.recv() {
+                dispatcher.dispatch(&action, None);
             }
         });
     tx
@@ -251,12 +245,8 @@ fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<QueuedA
 
 /// Queue a bound action without blocking the tap callback. Returns `false` if
 /// the queue is full (caller should fail open and pass the physical event).
-fn try_queue_action(
-    tx: &mpsc::SyncSender<QueuedAction>,
-    action: Action,
-    device_key: Option<String>,
-) -> bool {
-    if tx.try_send(QueuedAction { action, device_key }).is_err() {
+fn try_queue_action(tx: &mpsc::SyncSender<Action>, action: Action) -> bool {
+    if tx.try_send(action).is_err() {
         warn!("action queue full — dropping bound action to keep the input hook live");
         false
     } else {
@@ -270,7 +260,7 @@ fn handle_button(
     pressed: bool,
     device: Option<&EventDevice>,
     hooks: &SharedHookMaps,
-    action_tx: &mpsc::SyncSender<QueuedAction>,
+    action_tx: &mpsc::SyncSender<Action>,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
     if !id.is_os_hook_button() || !button_source_may_remap(device) {
@@ -298,7 +288,7 @@ fn handle_button(
                     .map(|m| resolve_gesture_click(&m.gestures, id));
                 if let Some(action) = action {
                     info!(button = %id, action = %action.label(), "gesture click → executing bound action");
-                    let _ = try_queue_action(action_tx, action, None);
+                    let _ = try_queue_action(action_tx, action);
                 }
             }
             return EventDisposition::Suppress;
@@ -317,7 +307,7 @@ fn handle_button(
     }
     if pressed {
         info!(button = %id, action = %action.label(), "button → executing bound action");
-        let queued = try_queue_action(action_tx, action, None);
+        let queued = try_queue_action(action_tx, action);
         return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s));
     }
     FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_release_disposition(id, s))
@@ -357,8 +347,7 @@ fn handle_moved(
     delta_x: i32,
     delta_y: i32,
     hooks: &SharedHookMaps,
-    side_gesture: &SharedSideGesture,
-    action_tx: &mpsc::SyncSender<QueuedAction>,
+    action_tx: &mpsc::SyncSender<Action>,
 ) -> EventDisposition {
     let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
     if let Some((button, dir)) = commit {
@@ -370,19 +359,8 @@ fn handle_moved(
         });
         if let Some(action) = action {
             info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
-            let _ = try_queue_action(action_tx, action, None);
+            let _ = try_queue_action(action_tx, action);
         }
-    }
-    let device_commit = side_gesture.try_accumulate(delta_x, delta_y);
-    if let Some(SideGestureAction {
-        device_key,
-        button,
-        direction,
-        action,
-    }) = device_commit
-    {
-        info!(key = device_key, %button, ?direction, action = %action.label(), "HID++ side gesture swipe → executing bound action");
-        let _ = try_queue_action(action_tx, action, Some(device_key));
     }
     EventDisposition::PassThrough
 }
@@ -392,7 +370,6 @@ fn handle_moved(
 pub fn start(
     hooks: SharedHookMaps,
     keyboard_bindings: SharedKeyboardBindings,
-    side_gesture: SharedSideGesture,
     dispatcher: ActionDispatcher,
     monitor: SharedEventMonitor,
 ) -> Option<Hook> {
@@ -419,11 +396,10 @@ pub fn start(
                     device,
                 } => handle_button(id, pressed, device.as_ref(), &hooks, &action_tx),
                 MouseEvent::Moved { delta_x, delta_y } => {
-                    handle_moved(delta_x, delta_y, &hooks, &side_gesture, &action_tx)
+                    handle_moved(delta_x, delta_y, &hooks, &action_tx)
                 }
                 MouseEvent::CaptureInterrupted => {
                     HOLD.with_borrow_mut(HoldState::cancel);
-                    side_gesture.interrupt();
                     EventDisposition::PassThrough
                 }
                 MouseEvent::Scroll {
@@ -439,7 +415,7 @@ pub fn start(
                             .and_then(|maps| rebound_thumbwheel_action(&maps, delta_x))
                     {
                         info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
-                        if try_queue_action(&action_tx, action, None) {
+                        if try_queue_action(&action_tx, action) {
                             return EventDisposition::Suppress;
                         }
                     }
@@ -471,7 +447,7 @@ pub fn start(
             {
                 Some(action) => {
                     info!(keycode, action = %action.label(), "key → executing bound action");
-                    if try_queue_action(&action_tx, action, None) {
+                    if try_queue_action(&action_tx, action) {
                         EventDisposition::Suppress
                     } else {
                         EventDisposition::PassThrough

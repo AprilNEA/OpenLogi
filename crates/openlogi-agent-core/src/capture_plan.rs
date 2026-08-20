@@ -32,15 +32,14 @@ pub struct DeviceCapturePlan {
     /// keyed by the button its captured swipes dispatch as; empty when none
     /// gestures.
     pub gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    /// macOS Back/Forward gesture maps used to resolve device-owned HID++
-    /// edges. These remain available while an old diversion is draining.
+    /// macOS Back/Forward gesture maps resolved from device-owned HID++ raw XY.
+    /// These remain available while an old diversion is draining.
     pub side_gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Standard buttons whose binding leaves the default — divert over
     /// `0x1b04`. A button at its default keeps its native HID behavior, so no
     /// re-synthesis is ever needed.
     pub divert_buttons: Vec<(u16, ButtonId)>,
-    /// Standard Back/Forward controls diverted with both edges for the
-    /// device-owned side-button gesture path.
+    /// Standard Back/Forward controls requested as HID++ raw-XY gesture sources.
     pub divert_gesture_buttons: Vec<(u16, ButtonId)>,
     /// Whether any thumbwheel binding leaves its default. Combined with the
     /// sensitivity to decide thumb-wheel diversion.
@@ -86,7 +85,8 @@ pub fn plan_for_device(
     let bindings = bindings_for(config, Some(config_key), app);
     // Gesture-mode OS-hook controls normally stay native so the hook sees the
     // press. macOS Back/Forward are the exception below: HID++ owns their
-    // button edges because Bluetooth-direct CGEvents may be unattributed.
+    // button and motion reports because Bluetooth-direct CGEvents may be
+    // unattributed.
     let oshook = oshook_gestures_for(config, Some(config_key), app);
     let side_gesture_bindings = hidpp_side_gesture_maps_for(config, config_key, app);
     // One direction map per HID++ source in gesture mode — several may
@@ -335,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn macos_side_gesture_uses_verified_hidpp_button_edges() {
+    fn macos_side_gesture_requests_hidpp_raw_xy_capture() {
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
 
@@ -345,7 +345,7 @@ mod tests {
             assert!(
                 plan.divert_gesture_buttons
                     .contains(&(0x0056, ButtonId::Forward)),
-                "Forward must be diverted with down/up HID++ delivery"
+                "Forward must be requested as a HID++ raw-XY gesture source"
             );
             assert!(
                 !plan

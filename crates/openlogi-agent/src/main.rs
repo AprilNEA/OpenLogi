@@ -42,7 +42,6 @@ use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::hook_runtime::ActionDispatcher;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
-use openlogi_agent_core::side_gesture::{SharedSideGesture, SideGestureRuntime};
 use openlogi_agent_core::{hook_runtime, watchers};
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
@@ -143,11 +142,7 @@ fn main() {
 }
 
 /// Start the HID++ background sessions that do not need Accessibility.
-fn spawn_hidpp_watchers(
-    shared: &SharedRuntime,
-    dispatcher: ActionDispatcher,
-    side_gesture: SharedSideGesture,
-) {
+fn spawn_hidpp_watchers(shared: &SharedRuntime, dispatcher: ActionDispatcher) {
     watchers::gesture::spawn(
         shared.capture_plans.clone(),
         Arc::clone(&shared.capture_plan_changed),
@@ -155,7 +150,6 @@ fn spawn_hidpp_watchers(
         shared.receiver_access.clone(),
         shared.channel_registry.clone(),
         dispatcher.clone(),
-        side_gesture,
     );
     watchers::host_switch::spawn(
         shared.host_switch_links.clone(),
@@ -198,7 +192,6 @@ fn start_hook(
     shared: &SharedRuntime,
     dispatcher: &ActionDispatcher,
     event_monitor: &Arc<EventMonitor>,
-    side_gesture: &SharedSideGesture,
 ) -> Option<Hook> {
     if !capture_mouse_events {
         info!(
@@ -211,7 +204,6 @@ fn start_hook(
     hook_runtime::start(
         shared.hook_maps.clone(),
         shared.keyboard_bindings.clone(),
-        Arc::clone(side_gesture),
         dispatcher.clone(),
         Arc::clone(event_monitor),
     )
@@ -311,8 +303,6 @@ async fn run(
     )));
     let shared = orchestrator.lock().await.shared();
     let (action_ring, mut action_ring_rx, dispatcher) = action_ring_runtime(&shared);
-    let side_gesture = Arc::new(SideGestureRuntime::default());
-
     // Live event monitor: shared between the hook callback (which mirrors events
     // into it) and the IPC server (which the GUI polls). The janitor turns it
     // back off once the GUI stops polling.
@@ -326,7 +316,7 @@ async fn run(
     ));
 
     // HID++ watchers need no Accessibility permission — start them up front.
-    spawn_hidpp_watchers(&shared, dispatcher.clone(), Arc::clone(&side_gesture));
+    spawn_hidpp_watchers(&shared, dispatcher.clone());
 
     let mut inventory_rx = watchers::inventory::spawn_with_registry(
         Duration::from_secs(2),
@@ -420,7 +410,6 @@ async fn run(
                         &shared,
                         &dispatcher,
                         &event_monitor,
-                        &side_gesture,
                     );
                     set_hook_availability(&orchestrator, hook.is_some()).await;
                 }

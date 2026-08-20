@@ -492,7 +492,7 @@ fn a_plain_diverted_haptic_panel_presses_as_its_own_button() {
 }
 
 #[test]
-fn a_side_gesture_button_emits_verified_down_and_up_edges() {
+fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
     let cid = 0x0056;
@@ -500,21 +500,50 @@ fn a_side_gesture_button_emits_verified_down_and_up_edges() {
     let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
 
     handle_reprog_with_gesture_buttons(&mut acc, down, &[], &[], &buttons, &[], &tx);
+    acc.swipe.backdate_hold_for_test();
+    handle_reprog_with_gesture_buttons(
+        &mut acc,
+        RawControlEvent::RawXy { dx: -120, dy: 5 },
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
+    handle_reprog_with_gesture_buttons(&mut acc, release(), &[], &[], &buttons, &[], &tx);
+
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(
+            ButtonId::Forward,
+            GestureDirection::Left
+        ))
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "a committed side-button swipe must not also click on release"
+    );
+}
+
+#[test]
+fn a_side_gesture_button_tap_is_a_click() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let cid = 0x0056;
+    let buttons = [(cid, ButtonId::Forward)];
+    let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
+
     handle_reprog_with_gesture_buttons(&mut acc, down, &[], &[], &buttons, &[], &tx);
     handle_reprog_with_gesture_buttons(&mut acc, release(), &[], &[], &buttons, &[], &tx);
 
     assert_eq!(
         rx.try_recv(),
-        Ok(CapturedInput::ButtonState(ButtonId::Forward, true))
+        Ok(CapturedInput::Gesture(
+            ButtonId::Forward,
+            GestureDirection::Click
+        ))
     );
-    assert_eq!(
-        rx.try_recv(),
-        Ok(CapturedInput::ButtonState(ButtonId::Forward, false))
-    );
-    assert!(
-        rx.try_recv().is_err(),
-        "a held side gesture button emits each edge once"
-    );
+    assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
 }
 
 #[test]
